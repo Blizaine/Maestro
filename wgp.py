@@ -5600,18 +5600,21 @@ def truncate_audio(generated_audio, trim_video_frames_beginning, trim_video_fram
 def concatenate_multi_clip_videos(clip_paths, output_path, audio_path=None):
     """Concatenate video clips into one video, optionally adding a full audio track."""
     import subprocess
-    list_file = output_path + ".concat.txt"
+    list_file = os.path.abspath(output_path) + ".concat.txt"
+    output_path = os.path.abspath(output_path)
     try:
         with open(list_file, 'w') as f:
             for path in clip_paths:
-                escaped = path.replace("\\", "/").replace("'", "'\\''")
-                f.write(f"file '{escaped}'\n")
+                abs_path = os.path.abspath(path).replace("\\", "/")
+                f.write(f"file '{abs_path}'\n")
+        print(f"[Multi-Clip] Concat list file: {list_file}")
         if audio_path:
+            abs_audio = os.path.abspath(audio_path)
             cmd = [
                 "ffmpeg", "-y",
                 "-f", "concat", "-safe", "0", "-i", list_file,
-                "-i", audio_path,
-                "-map", "0:v", "-map", "1:a",
+                "-i", abs_audio,
+                "-map", "0:v:0", "-map", "1:a:0",
                 "-c:v", "copy", "-c:a", "aac",
                 "-shortest",
                 output_path
@@ -5620,12 +5623,17 @@ def concatenate_multi_clip_videos(clip_paths, output_path, audio_path=None):
             cmd = [
                 "ffmpeg", "-y",
                 "-f", "concat", "-safe", "0", "-i", list_file,
-                "-c", "copy",
+                "-an",
+                "-c:v", "copy",
                 output_path
             ]
+        print(f"[Multi-Clip] Running: {' '.join(cmd)}")
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if result.returncode != 0:
-            print(f"[Multi-Clip] ffmpeg concat error: {result.stderr[:500]}")
+            # Print last 1500 chars of stderr (the actual error is usually at the end)
+            err = result.stderr
+            print(f"[Multi-Clip] ffmpeg concat failed (exit {result.returncode}):")
+            print(err[-1500:] if len(err) > 1500 else err)
             return False
         return True
     except Exception as e:
