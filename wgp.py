@@ -6263,6 +6263,7 @@ def generate_video(
             if multi_prompts_gen_type == 3 and image_start is not None and isinstance(image_start, list):
                 img_idx = min(window_no - 1, len(image_start) - 1)
                 current_image = image_start[img_idx]
+                print(f"[Multi-Clip] Window {window_no}: image_idx={img_idx}, prompt='{prompt[:60]}...', image_size={current_image.size if hasattr(current_image, 'size') else 'tensor'}")
                 image_start_tensor, new_height, new_width = calculate_dimensions_and_resize_image(current_image, height, width, sample_fit_canvas, fit_crop, block_size=block_size)
                 if fit_crop: refresh_preview["image_start"] = image_start_tensor
                 image_start_tensor = convert_image_to_tensor(image_start_tensor)
@@ -6316,6 +6317,9 @@ def generate_video(
                 if reset_control_aligment:
                     audio_start_frame += source_video_overlap_frames_count
                 input_waveform, input_waveform_sample_rate = slice_audio_window( audio_guide, audio_start_frame, current_video_length, fps, save_path, suffix=f"_win{window_no}", )
+                if multi_prompts_gen_type == 3:
+                    audio_energy = float(np.abs(input_waveform).mean()) if input_waveform is not None else 0
+                    print(f"[Multi-Clip] Window {window_no}: audio_start_frame={audio_start_frame}, frames={current_video_length}, sr={input_waveform_sample_rate}, audio_energy={audio_energy:.6f}, seed={seed + window_no - 1}")
             if fantasy and audio_guide is not None:
                 audio_proj_split , audio_context_lens = parse_audio(audio_guide, start_frame = aligned_window_start_frame, num_frames= current_video_length, fps= fps,  device= processing_device  )
             if multitalk:
@@ -6606,7 +6610,7 @@ def generate_video(
                     model_switch_phase = model_switch_phase,
                     embedded_guidance_scale=embedded_guidance_scale,
                     n_prompt=negative_prompt,
-                    seed=seed,
+                    seed=seed + (window_no - 1) if multi_prompts_gen_type == 3 else seed,
                     callback=callback,
                     enable_RIFLEx = enable_RIFLEx,
                     VAE_tile_size = VAE_tile_size,
