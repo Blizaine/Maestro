@@ -458,7 +458,22 @@ def process_prompt_and_add_tasks(state, current_gallery_tab, model_choice):
 
     multi_prompts_gen_type = inputs["multi_prompts_gen_type"]
 
-    if multi_prompts_gen_type in [0,2]:
+    if multi_prompts_gen_type == 3:
+        # Multi-clip mode: create independent tasks per clip with audio offset
+        sliding_window_size_val = inputs.get("sliding_window_size", inputs.get("video_length", 121))
+        group_id = f"mc_{int(time.time())}_{inputs.get('seed', 0)}"
+        for i, single_prompt in enumerate(prompts):
+            inputs.update({
+                "prompt": single_prompt,
+                "image_start": image_start[i],
+                "image_end": None,
+                "video_length": sliding_window_size_val,
+                "audio_frame_offset": i * sliding_window_size_val,
+                "multi_clip_info": {"group_id": group_id, "index": i, "total": len(prompts)},
+            })
+            add_video_task(**inputs)
+        new_prompts_count = len(prompts)
+    elif multi_prompts_gen_type in [0,2]:
         if image_start != None and len(image_start) > 0:
             if inputs["multi_images_gen_type"] == 0:
                 new_prompts = []
@@ -470,9 +485,9 @@ def process_prompt_and_add_tasks(state, current_gallery_tab, model_choice):
                     if image_end != None:
                         new_image_end.append(image_end[i // len(prompts)] )
                 prompts = new_prompts
-                image_start = new_image_start 
+                image_start = new_image_start
                 if image_end != None:
-                    image_end = new_image_end 
+                    image_end = new_image_end
             else:
                 if len(prompts) >= len(image_start):
                     if len(prompts) % len(image_start) != 0:
@@ -485,14 +500,14 @@ def process_prompt_and_add_tasks(state, current_gallery_tab, model_choice):
                         new_image_start.append(image_start[i//rep] )
                         if image_end != None:
                             new_image_end.append(image_end[i//rep] )
-                    image_start = new_image_start 
+                    image_start = new_image_start
                     if image_end != None:
-                        image_end = new_image_end 
-                else: 
+                        image_end = new_image_end
+                else:
                     if len(image_start) % len(prompts)  !=0:
                         gr.Info("If there are more input images than text prompts the number of images should be dividable by the number of text prompts")
                         return ret()
-                    rep = len(image_start) // len(prompts)  
+                    rep = len(image_start) // len(prompts)
                     new_prompts = []
                     for i, _ in enumerate(image_start):
                         new_prompts.append(  prompts[ i//rep] )
@@ -509,7 +524,7 @@ def process_prompt_and_add_tasks(state, current_gallery_tab, model_choice):
                 add_video_task(**inputs)
         else:
             for single_prompt in prompts :
-                inputs["prompt"] = single_prompt 
+                inputs["prompt"] = single_prompt
                 add_video_task(**inputs)
         new_prompts_count = len(prompts)
     else:
@@ -1049,7 +1064,7 @@ def validate_settings(state, model_type, single_prompt, inputs):
         #     return
 
     override_inputs = {
-        "image_start": image_start if multi_prompts_gen_type == 3 else (image_start[0] if image_start !=None and len(image_start) > 0 else None),
+        "image_start": image_start[0] if image_start !=None and len(image_start) > 0 else None,
         "image_end": image_end, #[0] if image_end !=None and len(image_end) > 0 else None,
         "image_refs": image_refs,
         "audio_guide": audio_guide,
@@ -5582,6 +5597,44 @@ def truncate_audio(generated_audio, trim_video_frames_beginning, trim_video_fram
     end = len(generated_audio) - int(trim_video_frames_end * samples_per_frame)
     return generated_audio[start:end if end > 0 else None]
 
+def concatenate_multi_clip_videos(clip_paths, output_path, audio_path=None):
+    """Concatenate video clips into one video, optionally adding a full audio track."""
+    import subprocess
+    list_file = output_path + ".concat.txt"
+    try:
+        with open(list_file, 'w') as f:
+            for path in clip_paths:
+                escaped = path.replace("\\", "/").replace("'", "'\\''")
+                f.write(f"file '{escaped}'\n")
+        if audio_path:
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "concat", "-safe", "0", "-i", list_file,
+                "-i", audio_path,
+                "-map", "0:v", "-map", "1:a",
+                "-c:v", "copy", "-c:a", "aac",
+                "-shortest",
+                output_path
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "concat", "-safe", "0", "-i", list_file,
+                "-c", "copy",
+                output_path
+            ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            print(f"[Multi-Clip] ffmpeg concat error: {result.stderr[:500]}")
+            return False
+        return True
+    except Exception as e:
+        print(f"[Multi-Clip] Concatenation failed: {e}")
+        return False
+    finally:
+        if os.path.exists(list_file):
+            os.remove(list_file)
+
 def slice_audio_window(audio_path, start_frame, num_frames, fps, output_dir, suffix=""):
     import soundfile as sf
     import numpy as np
@@ -5781,6 +5834,8 @@ def generate_video(
     model_type,
     mode,
     plugin_data=None,
+    audio_frame_offset=0,
+    multi_clip_info=None,
 ):
 
 
@@ -6033,8 +6088,8 @@ def generate_video(
     if test_any_sliding_window(model_type) :
         if video_source is not None:
             current_video_length +=  sliding_window_overlap - 1
-        sliding_window = current_video_length > sliding_window_size or multi_prompts_gen_type == 3
-        reuse_frames = 0 if multi_prompts_gen_type == 3 else min(sliding_window_size - latent_size, sliding_window_overlap)
+        sliding_window = current_video_length > sliding_window_size
+        reuse_frames = min(sliding_window_size - latent_size, sliding_window_overlap)
     else:
         sliding_window = False
         sliding_window_size = current_video_length
@@ -6172,12 +6227,7 @@ def generate_video(
     default_requested_frames_to_generate = current_video_length
     nb_frames_positions = 0
     if sliding_window:
-        if multi_prompts_gen_type == 3:
-            initial_total_windows = len(prompts)
-            discard_last_frames = 0
-            default_requested_frames_to_generate = len(prompts) * sliding_window_size
-        else:
-            initial_total_windows = compute_sliding_window_no(default_requested_frames_to_generate, sliding_window_size, discard_last_frames, reuse_frames)
+        initial_total_windows = compute_sliding_window_no(default_requested_frames_to_generate, sliding_window_size, discard_last_frames, reuse_frames)
         current_video_length = sliding_window_size
     else:
         initial_total_windows = 1
@@ -6259,24 +6309,7 @@ def generate_video(
             if hasattr(model_handler, "custom_prompt_preprocess"):
                 prompt = model_handler.custom_prompt_preprocess(**locals())
             image_start_tensor = image_end_tensor = None
-            # Mode 3: Multi-clip mode — each window gets its own start image
-            if multi_prompts_gen_type == 3 and image_start is not None and isinstance(image_start, list):
-                img_idx = min(window_no - 1, len(image_start) - 1)
-                current_image = image_start[img_idx]
-                print(f"[Multi-Clip] Window {window_no}: image_idx={img_idx}, prompt='{prompt[:60]}...', image_size={current_image.size if hasattr(current_image, 'size') else 'tensor'}")
-                image_start_tensor, new_height, new_width = calculate_dimensions_and_resize_image(current_image, height, width, sample_fit_canvas, fit_crop, block_size=block_size)
-                if fit_crop: refresh_preview["image_start"] = image_start_tensor
-                image_start_tensor = convert_image_to_tensor(image_start_tensor)
-                pre_video_guide = prefix_video = image_start_tensor.unsqueeze(1)
-                pre_video_frame = convert_tensor_to_image(prefix_video[:, -1])
-                if window_no == 1:
-                    source_video_overlap_frames_count = pre_video_guide.shape[1]
-                    source_video_frames_count = prefix_video.shape[1]
-                    if sample_fit_canvas is not None:
-                        image_size = pre_video_guide.shape[-2:]
-                        sample_fit_canvas = None
-                    guide_start_frame = prefix_video.shape[1]
-            elif window_no == 1 and (video_source is not None or image_start is not None):
+            if window_no == 1 and (video_source is not None or image_start is not None):
                 if image_start is not None:
                     image_start_tensor, new_height, new_width = calculate_dimensions_and_resize_image(image_start, height, width, sample_fit_canvas, fit_crop, block_size = block_size)
                     if fit_crop: refresh_preview["image_start"] = image_start_tensor
@@ -6316,10 +6349,12 @@ def generate_video(
                 audio_start_frame = aligned_window_start_frame
                 if reset_control_aligment:
                     audio_start_frame += source_video_overlap_frames_count
+                if audio_frame_offset > 0:
+                    audio_start_frame += audio_frame_offset
                 input_waveform, input_waveform_sample_rate = slice_audio_window( audio_guide, audio_start_frame, current_video_length, fps, save_path, suffix=f"_win{window_no}", )
-                if multi_prompts_gen_type == 3:
+                if audio_frame_offset > 0:
                     audio_energy = float(np.abs(input_waveform).mean()) if input_waveform is not None else 0
-                    print(f"[Multi-Clip] Window {window_no}: audio_start_frame={audio_start_frame}, frames={current_video_length}, sr={input_waveform_sample_rate}, audio_energy={audio_energy:.6f}, seed={seed + window_no - 1}")
+                    print(f"[Multi-Clip] clip audio_start_frame={audio_start_frame} (offset={audio_frame_offset}), frames={current_video_length}, audio_energy={audio_energy:.6f}")
             if fantasy and audio_guide is not None:
                 audio_proj_split , audio_context_lens = parse_audio(audio_guide, start_frame = aligned_window_start_frame, num_frames= current_video_length, fps= fps,  device= processing_device  )
             if multitalk:
@@ -6570,7 +6605,7 @@ def generate_video(
 
             try:
                 input_video_for_model = pre_video_guide
-                prefix_frames_count = source_video_overlap_frames_count if (window_no <= 1 or multi_prompts_gen_type == 3) else reuse_frames
+                prefix_frames_count = source_video_overlap_frames_count if window_no <= 1 else reuse_frames
                 prefix_video_for_model = prefix_video
                 if prefix_video is not None and prefix_video.dtype == torch.uint8:
                     prefix_video_for_model = prefix_video.float().div_(127.5).sub_(1.0)
@@ -6610,7 +6645,7 @@ def generate_video(
                     model_switch_phase = model_switch_phase,
                     embedded_guidance_scale=embedded_guidance_scale,
                     n_prompt=negative_prompt,
-                    seed=seed + (window_no - 1) if multi_prompts_gen_type == 3 else seed,
+                    seed=seed,
                     callback=callback,
                     enable_RIFLEx = enable_RIFLEx,
                     VAE_tile_size = VAE_tile_size,
@@ -6977,12 +7012,38 @@ def generate_video(
                         gen["last_was_audio"] = audio_only
 
                 embedded_images = None
+
+                # Multi-clip concatenation: store clip path and concatenate when all clips are done
+                if multi_clip_info is not None and not is_image and not audio_only:
+                    clip_path = video_path[0] if isinstance(video_path, list) else video_path
+                    clip_store = gen.setdefault("multi_clip_paths", {})
+                    group_id = multi_clip_info["group_id"]
+                    group = clip_store.setdefault(group_id, {})
+                    group[multi_clip_info["index"]] = clip_path
+                    if len(group) == multi_clip_info["total"]:
+                        # All clips in this group are done — concatenate
+                        clip_paths = [group[i] for i in range(multi_clip_info["total"])]
+                        concat_audio = original_audio_guide or audio_source
+                        concat_ext = os.path.splitext(clip_path)[1]
+                        concat_name = f"{time_flag}_seed{seed}_multiclip{concat_ext}"
+                        concat_path = os.path.join(save_path, concat_name)
+                        print(f"[Multi-Clip] Concatenating {len(clip_paths)} clips into {concat_path}")
+                        if concatenate_multi_clip_videos(clip_paths, concat_path, concat_audio):
+                            print(f"[Multi-Clip] Concatenated video saved: {concat_path}")
+                            with lock:
+                                file_list.append(concat_path)
+                                concat_configs = configs.copy()
+                                concat_configs["prompt"] = "Multi-clip concatenation"
+                                file_settings_list.append(concat_configs)
+                            send_cmd("output")
+                        del clip_store[group_id]
+
                 # Play notification sound for single video
                 try:
                     if server_config.get("notification_sound_enabled", 0):
                         volume = server_config.get("notification_sound_volume", 50)
                         notification_sound.notify_video_completion(
-                            video_path=video_path, 
+                            video_path=video_path,
                             volume=volume
                         )
                 except Exception as e:
