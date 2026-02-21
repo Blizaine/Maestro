@@ -981,8 +981,12 @@ def validate_settings(state, model_type, single_prompt, inputs):
             gr.Info("Start Image should be an Image") 
             return ret()
         if  multi_prompts_gen_type in [1] and len(image_start) > 1:
-            gr.Info("Only one Start Image is supported if the option 'Each Line Will be used for a new Sliding Window of the same Video Generation' is set") 
-            return ret()       
+            gr.Info("Only one Start Image is supported if the option 'Each Line Will be used for a new Sliding Window of the same Video Generation' is set")
+            return ret()
+        if multi_prompts_gen_type == 3:
+            if len(image_start) != len(prompts):
+                gr.Info(f"Multi-Clip mode requires the same number of Start Images ({len(image_start)}) and prompt lines ({len(prompts)})")
+                return ret()
     else:
         image_start = None
 
@@ -1045,7 +1049,7 @@ def validate_settings(state, model_type, single_prompt, inputs):
         #     return
 
     override_inputs = {
-        "image_start": image_start[0] if image_start !=None and len(image_start) > 0 else None,
+        "image_start": image_start if multi_prompts_gen_type == 3 else (image_start[0] if image_start !=None and len(image_start) > 0 else None),
         "image_end": image_end, #[0] if image_end !=None and len(image_end) > 0 else None,
         "image_refs": image_refs,
         "audio_guide": audio_guide,
@@ -6029,8 +6033,8 @@ def generate_video(
     if test_any_sliding_window(model_type) :
         if video_source is not None:
             current_video_length +=  sliding_window_overlap - 1
-        sliding_window = current_video_length > sliding_window_size
-        reuse_frames = min(sliding_window_size - latent_size, sliding_window_overlap) 
+        sliding_window = current_video_length > sliding_window_size or multi_prompts_gen_type == 3
+        reuse_frames = 0 if multi_prompts_gen_type == 3 else min(sliding_window_size - latent_size, sliding_window_overlap)
     else:
         sliding_window = False
         sliding_window_size = current_video_length
@@ -6168,7 +6172,12 @@ def generate_video(
     default_requested_frames_to_generate = current_video_length
     nb_frames_positions = 0
     if sliding_window:
-        initial_total_windows= compute_sliding_window_no(default_requested_frames_to_generate, sliding_window_size, discard_last_frames, reuse_frames) 
+        if multi_prompts_gen_type == 3:
+            initial_total_windows = len(prompts)
+            discard_last_frames = 0
+            default_requested_frames_to_generate = len(prompts) * sliding_window_size
+        else:
+            initial_total_windows = compute_sliding_window_no(default_requested_frames_to_generate, sliding_window_size, discard_last_frames, reuse_frames)
         current_video_length = sliding_window_size
     else:
         initial_total_windows = 1
@@ -6250,24 +6259,40 @@ def generate_video(
             if hasattr(model_handler, "custom_prompt_preprocess"):
                 prompt = model_handler.custom_prompt_preprocess(**locals())
             image_start_tensor = image_end_tensor = None
-            if window_no == 1 and (video_source is not None or image_start is not None):
+            # Mode 3: Multi-clip mode — each window gets its own start image
+            if multi_prompts_gen_type == 3 and image_start is not None and isinstance(image_start, list):
+                img_idx = min(window_no - 1, len(image_start) - 1)
+                current_image = image_start[img_idx]
+                image_start_tensor, new_height, new_width = calculate_dimensions_and_resize_image(current_image, height, width, sample_fit_canvas, fit_crop, block_size=block_size)
+                if fit_crop: refresh_preview["image_start"] = image_start_tensor
+                image_start_tensor = convert_image_to_tensor(image_start_tensor)
+                pre_video_guide = prefix_video = image_start_tensor.unsqueeze(1)
+                pre_video_frame = convert_tensor_to_image(prefix_video[:, -1])
+                if window_no == 1:
+                    source_video_overlap_frames_count = pre_video_guide.shape[1]
+                    source_video_frames_count = prefix_video.shape[1]
+                    if sample_fit_canvas is not None:
+                        image_size = pre_video_guide.shape[-2:]
+                        sample_fit_canvas = None
+                    guide_start_frame = prefix_video.shape[1]
+            elif window_no == 1 and (video_source is not None or image_start is not None):
                 if image_start is not None:
                     image_start_tensor, new_height, new_width = calculate_dimensions_and_resize_image(image_start, height, width, sample_fit_canvas, fit_crop, block_size = block_size)
-                    if fit_crop: refresh_preview["image_start"] = image_start_tensor 
+                    if fit_crop: refresh_preview["image_start"] = image_start_tensor
                     image_start_tensor = convert_image_to_tensor(image_start_tensor)
                     pre_video_guide =  prefix_video = image_start_tensor.unsqueeze(1)
                 else:
                     prefix_video  = preprocess_video(width=width, height=height,video_in=video_source, max_frames= parsed_keep_frames_video_source , start_frame = 0, fit_canvas= sample_fit_canvas, fit_crop = fit_crop, target_fps = fps, block_size = block_size )
                     prefix_video  = prefix_video.permute(3, 0, 1, 2)
 
-                    if fit_crop or "L" in image_prompt_type: refresh_preview["video_source"] = convert_tensor_to_image(prefix_video, 0) 
+                    if fit_crop or "L" in image_prompt_type: refresh_preview["video_source"] = convert_tensor_to_image(prefix_video, 0)
 
-                    new_height, new_width = prefix_video.shape[-2:]                    
-                    pre_video_guide =  prefix_video[:, -reuse_frames:].float().div_(127.5).sub_(1.) # c, f, h, w                    
+                    new_height, new_width = prefix_video.shape[-2:]
+                    pre_video_guide =  prefix_video[:, -reuse_frames:].float().div_(127.5).sub_(1.) # c, f, h, w
                 pre_video_frame = convert_tensor_to_image(prefix_video[:, -1])
                 source_video_overlap_frames_count = pre_video_guide.shape[1]
                 source_video_frames_count = prefix_video.shape[1]
-                if sample_fit_canvas != None: 
+                if sample_fit_canvas != None:
                     image_size  = pre_video_guide.shape[-2:]
                     sample_fit_canvas = None
                 guide_start_frame =  prefix_video.shape[1]
@@ -6541,7 +6566,7 @@ def generate_video(
 
             try:
                 input_video_for_model = pre_video_guide
-                prefix_frames_count = source_video_overlap_frames_count if window_no <= 1 else reuse_frames
+                prefix_frames_count = source_video_overlap_frames_count if (window_no <= 1 or multi_prompts_gen_type == 3) else reuse_frames
                 prefix_video_for_model = prefix_video
                 if prefix_video is not None and prefix_video.dtype == torch.uint8:
                     prefix_video_for_model = prefix_video.float().div_(127.5).sub_(1.0)
@@ -9176,7 +9201,9 @@ def get_prompt_labels(multi_prompts_gen_type, model_def, image_outputs = False, 
     prompt_description= model_def.get("prompt_description", None)
     if prompt_description is not None: return prompt_description, prompt_description
     if multi_prompts_gen_type == 1:
-        new_line_text = "each Line of Prompt will be used for a Sliding Window"  
+        new_line_text = "each Line of Prompt will be used for a Sliding Window"
+    elif multi_prompts_gen_type == 3:
+        new_line_text = "each Line of Prompt + Start Image = a Clip in a Multi-Clip Video"
     elif multi_prompts_gen_type == 0:
         new_line_text = "each Line of Prompt will generate " + ("a new Image" if image_outputs else ("a new Audio File" if audio_only else "a new Video"))
     else:
@@ -10300,6 +10327,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                             multi_prompts_gen_choices = [(f"Each New Line Will Add a new {medium} Request to the Generation Queue", 0)]
                             if sliding_window_enabled:
                                 multi_prompts_gen_choices += [("Each Line Will be used for a new Sliding Window of the same Video Generation", 1)]
+                                multi_prompts_gen_choices += [("Multi-Clip Video: Each Line and Start Image Creates a Separate Clip", 3)]
                             multi_prompts_gen_choices += [("All the Lines are Part of the Same Prompt", 2)]
 
                             multi_prompts_gen_type = gr.Dropdown(
