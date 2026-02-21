@@ -6191,6 +6191,20 @@ def generate_video(
 
             output_new_audio_filepath = original_audio_guide
 
+        # For multi-clip mode: trim audio to start at the clip's offset position
+        if audio_frame_offset > 0 and output_new_audio_filepath is not None:
+            import soundfile as sf
+            offset_sec = float(audio_frame_offset) / float(fps)
+            trimmed_audio_path = get_available_filename(save_path, output_new_audio_filepath, f"_clip_offset", ".wav")
+            with sf.SoundFile(output_new_audio_filepath) as audio_file:
+                sr = audio_file.samplerate
+                start_sample = int(round(offset_sec * sr))
+                audio_file.seek(min(start_sample, len(audio_file)))
+                data = audio_file.read(dtype="float32")
+            sf.write(trimmed_audio_path, data, sr)
+            output_new_audio_filepath = trimmed_audio_path
+            temp_filenames_list.append(trimmed_audio_path)
+
         current_video_length = min(int(fps * duration //latent_size) * latent_size + latent_size + 1, current_video_length)
         if fantasy:
             from models.wan.fantasytalking.infer import parse_audio
