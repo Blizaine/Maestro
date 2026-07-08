@@ -2043,7 +2043,11 @@ export const useStore = create<AppState>((set, get) => ({
 
     set(s => ({
       generationMode: mode,
-      recipesOpen: false,
+      // NOTE: do NOT close the overlay here. The RecipesOverlay closes
+      // itself on success, but keeps itself open when the recipe needs
+      // LoRAs you don't have — so it can show the download prompt. Closing
+      // here made that prompt dead code (recipe applied, LoRA missing, user
+      // generated → cryptic "Loras missing" failure with no guidance).
       params: {
         ...s.params,
         ...(recipe.params as Partial<GenerateParams>),

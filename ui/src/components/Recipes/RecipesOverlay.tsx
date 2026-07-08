@@ -18,6 +18,9 @@ export function RecipesOverlay() {
   const applyRecipe = useStore(s => s.applyRecipe)
   const deleteRecipe = useStore(s => s.deleteRecipe)
   const loadRecipes = useStore(s => s.loadRecipes)
+  const civitaiKeySet = useStore(s => s.servicesConfig?.civitai_api_key_set ?? false)
+  const setSettingsOpen = useStore(s => s.setSettingsOpen)
+  const setSettingsTab = useStore(s => s.setSettingsTab)
 
   const [applying, setApplying] = useState<string | null>(null)
   const [missing, setMissing] = useState<{ modelType: string; loras: RecipeLora[] } | null>(null)
@@ -30,17 +33,23 @@ export function RecipesOverlay() {
     try {
       const { missing: missingLoras } = await applyRecipe(card.id)
       if (missingLoras.length > 0) {
-        // Applied, but some LoRAs aren't installed — surface them.
+        // Applied, but some LoRAs aren't installed — keep the overlay open
+        // and surface them so the user can fetch them before generating
+        // (rather than hitting a cryptic "Loras missing" failure at gen time).
         setMissing({ modelType: card.model_type, loras: missingLoras })
+      } else {
+        setOpen(false)
       }
-      // Overlay closes via the store (recipesOpen:false) unless we kept it
-      // open to show the missing-LoRA notice.
-      if (missingLoras.length === 0) setOpen(false)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to apply recipe')
     } finally {
       setApplying(null)
     }
+  }
+
+  const openCivitaiKeySettings = () => {
+    setMissing(null); setOpen(false)
+    setSettingsTab('integrations'); setSettingsOpen(true)
   }
 
   const handleImport = () => {
@@ -92,8 +101,18 @@ export function RecipesOverlay() {
               </div>
               <div className="space-y-1">
                 {missing.loras.map(l => (
-                  <MissingLoraRow key={l.filename} lora={l} modelType={missing.modelType} />
+                  <MissingLoraRow key={l.filename} lora={l} modelType={missing.modelType} civitaiKeySet={civitaiKeySet} />
                 ))}
+              </div>
+              {!civitaiKeySet && missing.loras.some(l => l.source_url) && (
+                <div className="mt-1.5 text-[10px] text-amber-200/80 leading-snug">
+                  Auto-download needs a free CivitAI API key.{' '}
+                  <button onClick={openCivitaiKeySettings} className="underline hover:text-amber-100">Add one in Settings</button>
+                  {' '}— then click Download. Or use each “Open source” link to grab it manually.
+                </div>
+              )}
+              <div className="mt-1.5 text-[10px] text-amber-200/60">
+                The recipe is applied and ready — you just need the LoRA before you Generate.
               </div>
             </div>
             <button onClick={() => { setMissing(null); setOpen(false) }}
@@ -184,7 +203,7 @@ function RecipeGridCard({ card, applying, onApply, onDelete }: {
   )
 }
 
-function MissingLoraRow({ lora, modelType }: { lora: RecipeLora; modelType: string }) {
+function MissingLoraRow({ lora, modelType, civitaiKeySet }: { lora: RecipeLora; modelType: string; civitaiKeySet: boolean }) {
   const downloadRecipeLora = useStore(s => s.downloadRecipeLora)
   const [state, setState] = useState<'idle' | 'downloading' | 'done' | 'error'>('idle')
 
@@ -198,24 +217,35 @@ function MissingLoraRow({ lora, modelType }: { lora: RecipeLora; modelType: stri
     }
   }
 
+  // The "Open source" link — always a valid fallback (opens the CivitAI page/
+  // file directly, no key needed to view it).
+  const sourceLink = lora.source_url ? (
+    <a href={lora.source_url} target="_blank" rel="noreferrer"
+      className="flex items-center gap-0.5 text-accent-blue hover:text-accent-blue-hover shrink-0">
+      <ExternalLink size={10} /> Open source
+    </a>
+  ) : (
+    <span className="text-amber-200/50 shrink-0">install manually</span>
+  )
+
   return (
     <div className="flex items-center gap-2">
       <span className="font-mono text-amber-200/90 truncate">{lora.filename}</span>
       {lora.size_mb ? <span className="text-amber-200/50 shrink-0">~{Math.round(lora.size_mb)} MB</span> : null}
-      {lora.source_url && state === 'idle' && (
+      {/* In-app auto-download needs a CivitAI key. With a key → offer Download;
+          without → skip the button (it would just fail) and show the source
+          link so the user can grab it manually. */}
+      {lora.source_url && civitaiKeySet && state === 'idle' && (
         <button onClick={handleDownload}
           className="flex items-center gap-0.5 text-accent-blue hover:text-accent-blue-hover shrink-0">
           <Download size={10} /> Download
         </button>
       )}
+      {lora.source_url && !civitaiKeySet && state === 'idle' && sourceLink}
       {state === 'downloading' && <Loader2 size={10} className="animate-spin text-amber-200 shrink-0" />}
-      {state === 'done' && <span className="text-green-400 shrink-0">started ↓</span>}
-      {state === 'error' && lora.source_url && (
-        <a href={lora.source_url} target="_blank" rel="noreferrer"
-          className="flex items-center gap-0.5 text-accent-blue hover:text-accent-blue-hover shrink-0">
-          <ExternalLink size={10} /> Open source
-        </a>
-      )}
+      {state === 'done' && <span className="text-green-400 shrink-0">started ↓ (see download bar)</span>}
+      {state === 'error' && sourceLink}
+      {!lora.source_url && state === 'idle' && sourceLink}
     </div>
   )
 }
