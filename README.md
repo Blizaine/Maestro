@@ -4,19 +4,6 @@ A one-click AI **video, image, and audio studio** for creators. Maestro pairs a 
 
 ![Maestro UI](Maestro_UI_02.jpg)
 
-## One click to a look
-
-New here? **Recipes** are one-click presets — pick a look, tweak the prepopulated prompt, hit Generate. Nine ship in the box, and you can save your own from any output you like.
-
-| | | |
-|:--:|:--:|:--:|
-| ![Cinematic Film](app/recipes/cinematic-film.jpg) | ![Claymation](app/recipes/claymation.jpg) | ![90s Style Anime](app/recipes/90s-style-anime.jpg) |
-| **Cinematic Film** | **Claymation** | **90s Style Anime** |
-| ![Pixar Style](app/recipes/pixar-style.jpg) | ![Fight](app/recipes/fight.jpg) | ![Portrait](app/recipes/portrait-style-recipe.jpg) |
-| **Pixar Style** | **Fight** | **Portrait** |
-| ![70s Sci-Fi Movie](app/recipes/70s-sci-fi-movie.jpg) | ![80s Fantasy](app/recipes/80s-fantasy.jpg) | ![Product Shot](app/recipes/product-shot.jpg) |
-| **70s Sci-Fi Movie** | **80s Fantasy** | **Product Shot** |
-
 ## What it does
 
 ### 🎬 Director Mode — automatic music videos and short films
