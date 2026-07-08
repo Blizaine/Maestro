@@ -59,34 +59,32 @@ export function ModelSelector() {
 
   return (
     <div className="relative flex-1 min-w-0" ref={containerRef}>
-      <div className="flex items-stretch gap-1">
-        {/* Trigger button */}
-        <button
-          onClick={() => setOpen(!open)}
-          className="flex-1 min-w-0 flex items-center gap-1.5 bg-bg-tertiary border border-border rounded-lg px-2.5 py-2 text-left hover:border-border-light transition-colors"
-        >
-          <span className="flex-1 min-w-0 truncate text-xs text-text-primary">
-            {currentModel?.name ?? 'Select model'}
-          </span>
-          <ChevronDown size={14} className={`shrink-0 text-text-muted transition-transform ${open ? 'rotate-180' : ''}`} />
-        </button>
-        {/* "+N" hint → opens Settings → Enabled Models, expanded to this mode. */}
-        {disabledCount > 0 && (
-          <button
-            onClick={() => openModelVisibility(generationMode)}
-            title={`${disabledCount} more model${disabledCount > 1 ? 's' : ''} you can enable`}
-            aria-label={`Enable more models (${disabledCount} available)`}
-            className="shrink-0 flex items-center gap-0.5 px-1.5 rounded-lg bg-bg-tertiary border border-border text-text-muted hover:text-accent-blue hover:border-border-light transition-colors"
-          >
-            <Plus size={12} className="shrink-0" />
-            <span className="text-[10px] leading-none tabular-nums">{disabledCount}</span>
-          </button>
-        )}
-      </div>
+      {/* Trigger button */}
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center gap-1.5 bg-bg-tertiary border border-border rounded-lg px-2.5 py-2 text-left hover:border-border-light transition-colors"
+      >
+        <span className="flex-1 min-w-0 truncate text-xs text-text-primary">
+          {currentModel?.name ?? 'Select model'}
+        </span>
+        <ChevronDown size={14} className={`shrink-0 text-text-muted transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
 
       {/* Dropdown (opens upward) */}
       {open && (
         <div className="absolute bottom-full left-0 mb-1 w-[360px] max-w-[90vw] bg-bg-secondary border border-border rounded-lg shadow-xl overflow-hidden z-50">
+          {/* Enable-more entry — sits above the enabled model list; opens
+              Settings → Enabled Models expanded to this mode. */}
+          {disabledCount > 0 && (
+            <button
+              onClick={() => { openModelVisibility(generationMode); setOpen(false) }}
+              className="w-full flex items-center gap-2 px-3 py-2 text-left border-b border-border text-text-secondary hover:bg-bg-hover hover:text-accent-blue transition-colors"
+            >
+              <Plus size={13} className="shrink-0" />
+              <span className="flex-1 text-xs">Enable more models</span>
+              <span className="text-[10px] text-text-muted shrink-0">{disabledCount} available</span>
+            </button>
+          )}
           <div className="max-h-[360px] overflow-y-auto py-1">
             {groups.map(({ family, models: famModels }) => (
               <div key={family.id}>
