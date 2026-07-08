@@ -1,0 +1,762 @@
+import { useState, useCallback, useEffect } from 'react'
+import { ChevronDown, ChevronRight, RotateCcw, Check, Download, Trash2, Cpu, RefreshCw, Loader2 } from 'lucide-react'
+import { useStore, getFamiliesForMode, getModelsForFamily } from '../../stores/useStore'
+import * as api from '../../api/client'
+import type { GenerationMode } from '../../types'
+import { THEMES, type ThemeId } from '../../lib/theme'
+
+const profileLabels: Record<string, string> = {
+  '1': 'Profile 1: High RAM + High VRAM',
+  '2': 'Profile 2: High RAM + Low VRAM',
+  '3': 'Profile 3: Low RAM + High VRAM',
+  '3.5': 'Profile 3.5: Very Low RAM + High VRAM',
+  '4': 'Profile 4: Low RAM + Low VRAM',
+  '4.5': 'Profile 4.5: Low RAM + Low VRAM (saves ~1GB)',
+  '5': 'Profile 5: Very Low RAM + Low VRAM',
+}
+
+const quantizationOptions = [
+  { value: 'int8', label: 'INT8' },
+  { value: 'fp8', label: 'FP8' },
+  { value: 'bf16', label: 'BF16' },
+]
+
+const vaeOptions = [
+  { value: 0, label: 'Auto' },
+  { value: 1, label: 'Full (Fast, High VRAM)' },
+  { value: 2, label: 'Medium Tiling' },
+  { value: 3, label: 'Aggressive Tiling (Low VRAM)' },
+]
+
+const compileOptions = [
+  { value: '', label: 'None' },
+  { value: 'transformer', label: 'Transformer' },
+]
+
+const videoCodecOptions = [
+  { value: 'libx264_8', label: 'H.264 Quality 8' },
+  { value: 'libx264_10', label: 'H.264 Quality 10' },
+  { value: 'libx264_lossless', label: 'H.264 Lossless' },
+  { value: 'libx265_8', label: 'H.265 CRF 8' },
+  { value: 'libx265_28', label: 'H.265 CRF 28 (Fast)' },
+]
+
+const imageCodecOptions = [
+  { value: 'jpeg_95', label: 'JPEG 95%' },
+  { value: 'jpeg_85', label: 'JPEG 85%' },
+  { value: 'jpeg_70', label: 'JPEG 70%' },
+  { value: 'png', label: 'PNG (Lossless)' },
+  { value: 'webp_95', label: 'WebP 95%' },
+  { value: 'webp_85', label: 'WebP 85%' },
+  { value: 'webp_lossless', label: 'WebP Lossless' },
+]
+
+const MODE_LABELS: { mode: GenerationMode; label: string }[] = [
+  { mode: 'image', label: 'Image' },
+  { mode: 'video', label: 'Video' },
+  { mode: 'audio', label: 'Audio' },
+  { mode: 'avatar', label: 'Edit' },
+]
+
+function ModelVisibilitySection() {
+  const models = useStore(s => s.models)
+  const families = useStore(s => s.families)
+  const enabledModels = useStore(s => s.enabledModels)
+  const toggleModelEnabled = useStore(s => s.toggleModelEnabled)
+  const resetEnabledModels = useStore(s => s.resetEnabledModels)
+  const setAllModelsEnabled = useStore(s => s.setAllModelsEnabled)
+  const loadModels = useStore(s => s.loadModels)
+  // Mature Mode gate: nsfw_only models are hidden from this list when
+  // Mature Mode is off. When the user enables Mature Mode (via the
+  // Services panel), updateServicesConfig auto-adds them to
+  // enabledModels — they appear here pre-checked and ready to use.
+  const nsfwMode = useStore(s => s.servicesConfig?.nsfw_mode ?? false)
+  const [open, setOpen] = useState(false)
+  const [expandedModes, setExpandedModes] = useState<Set<GenerationMode>>(new Set(['video', 'image']))
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState<string | null>(null)
+
+  const toggleMode = (mode: GenerationMode) => {
+    setExpandedModes(prev => {
+      const next = new Set(prev)
+      if (next.has(mode)) next.delete(mode)
+      else next.add(mode)
+      return next
+    })
+  }
+
+  const handleDelete = useCallback(async (modelType: string) => {
+    if (confirmDelete !== modelType) {
+      setConfirmDelete(modelType)
+      setTimeout(() => setConfirmDelete(null), 3000)
+      return
+    }
+    setConfirmDelete(null)
+    setDeleting(modelType)
+    try {
+      await api.deleteModel(modelType)
+      // Refresh models to update download status
+      await loadModels()
+    } catch (e) {
+      console.error('Delete failed:', e)
+    } finally {
+      setDeleting(null)
+    }
+  }, [confirmDelete, loadModels])
+
+  // Group models by generation mode, hiding nsfw_only entries when
+  // Mature Mode is off (they reappear instantly when the toggle flips).
+  const visibleModels = models.filter(m => !m.nsfw_only || nsfwMode)
+  const modelsByMode = new Map<GenerationMode, { familyLabel: string; models: { model_type: string; name: string; is_downloaded?: boolean }[] }[]>()
+  for (const { mode } of MODE_LABELS) {
+    const modeFamilies = getFamiliesForMode(mode, families)
+    const groups: { familyLabel: string; models: { model_type: string; name: string; is_downloaded?: boolean }[] }[] = []
+    for (const fam of modeFamilies) {
+      const familyModels = getModelsForFamily(fam.id, visibleModels, mode)
+      if (familyModels.length > 0) {
+        groups.push({
+          familyLabel: fam.label,
+          models: familyModels.map(m => ({ model_type: m.model_type, name: m.name, is_downloaded: m.is_downloaded })),
+        })
+      }
+    }
+    modelsByMode.set(mode, groups)
+  }
+
+  const enabledCount = enabledModels.size
+  const totalCount = visibleModels.length
+  const downloadedCount = visibleModels.filter(m => m.is_downloaded).length
+
+  return (
+    <div>
+      <button
+        onClick={() => setOpen(!open)}
+        className="flex items-center gap-1.5 text-[11px] text-text-secondary uppercase tracking-wider font-medium hover:text-text-primary transition-colors w-full"
+      >
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        <span className="flex-1 text-left">Enabled Models</span>
+        <span className="text-[10px] text-text-muted font-normal normal-case flex items-center gap-1.5">
+          {enabledCount}/{totalCount}
+          <span className="text-text-muted/40">|</span>
+          <span className="flex items-center gap-0.5">
+            <Download size={9} />
+            {downloadedCount}
+          </span>
+        </span>
+      </button>
+
+      {open && (
+      <div className="mt-3 space-y-3">
+      <div className="flex gap-2">
+        <button
+          onClick={resetEnabledModels}
+          className="flex items-center gap-1 px-2 py-1 text-[10px] border border-border rounded text-text-secondary hover:text-text-primary hover:border-border-light transition-colors"
+        >
+          <RotateCcw size={10} />
+          Reset
+        </button>
+        <button
+          onClick={() => setAllModelsEnabled(true)}
+          className="px-2 py-1 text-[10px] border border-border rounded text-text-secondary hover:text-text-primary hover:border-border-light transition-colors"
+        >
+          All
+        </button>
+        <button
+          onClick={() => setAllModelsEnabled(false)}
+          className="px-2 py-1 text-[10px] border border-border rounded text-text-secondary hover:text-text-primary hover:border-border-light transition-colors"
+        >
+          None
+        </button>
+      </div>
+
+      {MODE_LABELS.map(({ mode, label }) => {
+        const groups = modelsByMode.get(mode) ?? []
+        const modeModels = groups.flatMap(g => g.models)
+        const modeEnabled = modeModels.filter(m => enabledModels.has(m.model_type)).length
+        const modeDownloaded = modeModels.filter(m => m.is_downloaded).length
+        const isExpanded = expandedModes.has(mode)
+
+        return (
+          <div key={mode}>
+            <button
+              onClick={() => toggleMode(mode)}
+              className="flex items-center gap-1.5 w-full text-left"
+            >
+              {isExpanded ? <ChevronDown size={11} className="text-text-muted shrink-0" /> : <ChevronRight size={11} className="text-text-muted shrink-0" />}
+              <span className="text-xs text-text-primary font-medium">{label}</span>
+              <span className="text-[10px] text-text-muted ml-auto">
+                {modeEnabled}/{modeModels.length}
+                {modeDownloaded > 0 && (
+                  <span className="ml-1 text-green-400/70">
+                    ({modeDownloaded} <Download size={8} className="inline -mt-0.5" />)
+                  </span>
+                )}
+              </span>
+            </button>
+
+            {isExpanded && (
+              <div className="mt-1.5 ml-4 space-y-0.5">
+                {groups.map(group => (
+                  <div key={group.familyLabel}>
+                    {groups.length > 1 && (
+                      <div className="text-[10px] text-text-muted uppercase tracking-wider mt-2 mb-1">{group.familyLabel}</div>
+                    )}
+                    {group.models.map(m => (
+                      <div
+                        key={m.model_type}
+                        className="flex items-center gap-2 py-0.5 group"
+                      >
+                        <label className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={enabledModels.has(m.model_type)}
+                            onChange={() => toggleModelEnabled(m.model_type)}
+                            className="w-3.5 h-3.5 rounded border-border bg-bg-tertiary accent-accent-blue shrink-0"
+                          />
+                          {/* Download status indicator */}
+                          {m.is_downloaded ? (
+                            <Check size={10} className="text-green-400 shrink-0" />
+                          ) : (
+                            <Download size={10} className="text-text-muted/30 shrink-0" />
+                          )}
+                          <span className={`text-xs truncate ${
+                            m.is_downloaded
+                              ? 'text-text-secondary group-hover:text-text-primary'
+                              : 'text-text-muted/60 group-hover:text-text-muted'
+                          }`}>
+                            {m.name}
+                          </span>
+                        </label>
+                        {/* Delete button — only for downloaded models */}
+                        {m.is_downloaded && (
+                          <button
+                            onClick={() => handleDelete(m.model_type)}
+                            disabled={deleting === m.model_type}
+                            className={`p-0.5 rounded transition-colors shrink-0 ${
+                              confirmDelete === m.model_type
+                                ? 'bg-red-500/20 text-red-400'
+                                : deleting === m.model_type
+                                  ? 'text-text-muted/30 cursor-wait'
+                                  : 'text-text-muted/30 opacity-0 group-hover:opacity-100 hover:text-red-400'
+                            }`}
+                            title={confirmDelete === m.model_type ? 'Click again to confirm delete' : 'Delete model files'}
+                          >
+                            <Trash2 size={11} />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
+      )}
+    </div>
+  )
+}
+
+function SelectField({ label, value, options, onChange }: {
+  label: string
+  value: string | number
+  options: { value: string | number; label: string }[]
+  onChange: (val: string) => void
+}) {
+  return (
+    <div>
+      <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">
+        {label}
+      </label>
+      <select
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
+      >
+        {options.map(opt => (
+          <option key={opt.value} value={opt.value}>{opt.label}</option>
+        ))}
+      </select>
+    </div>
+  )
+}
+
+function ThemeSection() {
+  const theme = useStore(s => s.theme)
+  const setTheme = useStore(s => s.setTheme)
+  const active = THEMES.find(t => t.id === theme) ?? THEMES[0]
+
+  return (
+    <div className="space-y-3">
+      <h3 className="text-[11px] text-text-secondary uppercase tracking-wider font-medium">Appearance</h3>
+      <div>
+        <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">
+          Theme
+        </label>
+        <div className="flex items-center gap-2">
+          {/* Active-theme swatch — three colors stacked horizontally for a
+              quick visual preview of the bg / surface / accent palette. */}
+          <div className="flex shrink-0 rounded-md overflow-hidden border border-border">
+            <div className="w-3 h-7" style={{ background: active.swatch.bg }} />
+            <div className="w-3 h-7" style={{ background: active.swatch.surface }} />
+            <div className="w-3 h-7" style={{ background: active.swatch.accent }} />
+          </div>
+          <select
+            value={theme}
+            onChange={e => setTheme(e.target.value as ThemeId)}
+            className="flex-1 bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
+          >
+            {THEMES.map(t => (
+              <option key={t.id} value={t.id}>{t.label}</option>
+            ))}
+          </select>
+        </div>
+        <p className="text-[10px] text-text-muted mt-1.5">
+          {active.description}
+        </p>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * AutoPerformanceCard — top of the Performance section.
+ *
+ * Shows the user's detected hardware + the recommended profile in
+ * plain English. The toggle controls whether the rest of the
+ * Performance + Profiles fields are hidden under "Show advanced
+ * settings" (auto on) or shown directly (auto off).
+ *
+ * State sources:
+ *   - servicesConfig.auto_performance — the toggle's value
+ *     (loaded once at app boot; updated optimistically on toggle)
+ *   - GET /api/v1/system-detect — fetched on mount and on Re-detect
+ *     click. Returns hardware + recommendation. Always succeeds; on
+ *     systems without CUDA it returns a "no GPU detected" payload.
+ *
+ * Side effects:
+ *   - Toggle ON  → POST /api/v1/system-detect/apply (writes recommended
+ *                  values to wgp_config.json + sets auto_performance=true)
+ *   - Toggle OFF → PUT  /api/v1/services-config { auto_performance: false }
+ *                  (preserves current settings; user is now in manual mode)
+ *   - Re-detect  → POST /api/v1/system-detect/apply (re-runs detection,
+ *                  applies fresh recommendation. Only enabled when auto is on)
+ */
+function AutoPerformanceCard() {
+  const servicesConfig = useStore(s => s.servicesConfig)
+  const updateServicesConfig = useStore(s => s.updateServicesConfig)
+  const loadServicesConfig = useStore(s => s.loadServicesConfig)
+  const loadSystemConfig = useStore(s => s.loadSystemConfig)
+  // Detect data lives in the store so the rest of the System panel
+  // can read it too (e.g. the VRAM coefficient subtext that shows
+  // "Max VRAM target: ~19 GB of 24 GB" using the actual VRAM size).
+  const detect = useStore(s => s.systemDetect)
+  const loadSystemDetect = useStore(s => s.loadSystemDetect)
+  const [loading, setLoading] = useState(!detect)
+  const [applying, setApplying] = useState(false)
+  const [toast, setToast] = useState<string | null>(null)
+
+  const autoOn = !!servicesConfig?.auto_performance
+
+  // Initial fetch on mount. We don't refetch when the toggle changes
+  // because the hardware detection itself doesn't change — only the
+  // applied config does, and that's reflected in systemConfig. If
+  // another mount of the panel already loaded detect into the store,
+  // skip the fetch.
+  useEffect(() => {
+    if (detect) {
+      setLoading(false)
+      return
+    }
+    let alive = true
+    loadSystemDetect().finally(() => { if (alive) setLoading(false) })
+    return () => { alive = false }
+  }, [detect, loadSystemDetect])
+
+  const showToast = (msg: string) => {
+    setToast(msg)
+    setTimeout(() => setToast(null), 4000)
+  }
+
+  // Toggle ON → call apply endpoint (writes recommendation + sets
+  // services.auto_performance=true server-side). Refresh both configs
+  // to pick up the new state.
+  const handleToggleOn = useCallback(async () => {
+    setApplying(true)
+    try {
+      const res = await api.applySystemDetect()
+      await Promise.all([loadServicesConfig(), loadSystemConfig()])
+      if (res.profile_changed) {
+        showToast('Auto-tune applied — profile changes take effect on next model load')
+      } else {
+        showToast('Auto-tune applied')
+      }
+    } catch (e) {
+      console.error('apply failed:', e)
+      showToast('Failed to apply auto-tune')
+    } finally {
+      setApplying(false)
+    }
+  }, [loadServicesConfig, loadSystemConfig])
+
+  // Toggle OFF → just flip the flag. Preserves current settings so
+  // the user has the same config they were just running, just no
+  // longer being auto-managed.
+  const handleToggleOff = useCallback(async () => {
+    setApplying(true)
+    try {
+      await updateServicesConfig({ auto_performance: false })
+      showToast('Auto-tune disabled — settings unchanged, you can edit them manually now')
+    } catch (e) {
+      console.error('toggle off failed:', e)
+    } finally {
+      setApplying(false)
+    }
+  }, [updateServicesConfig])
+
+  // Re-detect = same as toggle-on, just runs the apply again. Useful
+  // after a hardware change (new GPU, more RAM) or driver update.
+  const handleRedetect = useCallback(async () => {
+    setApplying(true)
+    try {
+      const res = await api.applySystemDetect()
+      // Refresh detect payload too via the store — hardware itself
+      // may have changed (e.g. user upgraded GPU). Also refresh
+      // services + system configs so the rest of the panel reflects
+      // the newly-applied recommendation.
+      await Promise.all([loadSystemDetect(), loadServicesConfig(), loadSystemConfig()])
+      if (res.profile_changed) {
+        showToast('Re-detected — profile changes take effect on next model load')
+      } else {
+        showToast('Re-detected — no settings changed')
+      }
+    } catch (e) {
+      console.error('re-detect failed:', e)
+      showToast('Failed to re-detect hardware')
+    } finally {
+      setApplying(false)
+    }
+  }, [loadServicesConfig, loadSystemConfig, loadSystemDetect])
+
+  if (loading) {
+    return (
+      <div className="space-y-3">
+        <h3 className="text-[11px] text-text-secondary uppercase tracking-wider font-medium">Performance</h3>
+        <div className="rounded-lg bg-bg-tertiary border border-border p-3 text-xs text-text-muted flex items-center gap-2">
+          <Loader2 size={12} className="animate-spin" /> Detecting hardware...
+        </div>
+      </div>
+    )
+  }
+
+  const hw = detect?.hardware
+  const rec = detect?.recommended
+  const cudaOK = !!hw?.cuda_available
+
+  return (
+    <div className="space-y-3">
+      <h3 className="text-[11px] text-text-secondary uppercase tracking-wider font-medium">Performance</h3>
+
+      <div className="rounded-lg bg-bg-tertiary border border-border p-3 space-y-2.5">
+        {/* Hardware readout — GPU name, VRAM, RAM */}
+        <div className="flex items-start gap-2">
+          <Cpu size={16} className="text-text-secondary shrink-0 mt-0.5" />
+          <div className="min-w-0 flex-1">
+            <div className="text-sm text-text-primary truncate" title={hw?.gpu_name || ''}>
+              {cudaOK ? hw!.gpu_name : 'No CUDA GPU detected'}
+            </div>
+            <div className="text-[11px] text-text-muted">
+              {cudaOK ? `${hw!.gpu_vram_gb} GB VRAM · ${hw!.ram_gb} GB RAM` : `${hw?.ram_gb ?? 0} GB RAM`}
+            </div>
+          </div>
+        </div>
+
+        {/* Profile readout — only meaningful when auto is on, but always
+            visible so users can see what auto WOULD pick before flipping
+            the toggle. */}
+        {rec && (
+          <div className="text-[11px] text-text-secondary leading-snug pl-6" title={rec._recommendation_reason}>
+            {autoOn ? '✨ ' : ''}{rec._recommendation_label}
+          </div>
+        )}
+
+        {/* Toggle + Re-detect button row */}
+        <div className="flex items-center justify-between gap-2 pt-1.5 border-t border-border/40">
+          <div className="flex items-center gap-2">
+            <button
+              onClick={autoOn ? handleToggleOff : handleToggleOn}
+              disabled={applying}
+              className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                autoOn ? 'bg-amber-500' : 'bg-bg-tertiary border border-border'
+              } ${applying ? 'opacity-50 cursor-wait' : ''}`}
+              title={autoOn ? 'Auto-tune is on — click to take manual control' : 'Auto-tune is off — click to enable'}
+            >
+              <span
+                className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                  autoOn ? 'translate-x-4' : 'translate-x-0.5'
+                }`}
+              />
+            </button>
+            <span className="text-xs text-text-secondary">
+              Auto-tune {autoOn ? 'on' : 'off'}
+            </span>
+          </div>
+          {/* Re-detect only relevant in auto mode. In manual mode, a
+              "Reset to auto-tune" affordance lives at the bottom of the
+              advanced section instead, so it's not duplicated. */}
+          {autoOn && cudaOK && (
+            <button
+              onClick={handleRedetect}
+              disabled={applying}
+              className="text-[11px] text-text-secondary hover:text-text-primary flex items-center gap-1 disabled:opacity-50"
+              title="Re-run hardware detection (use after a hardware change or driver update)"
+            >
+              <RefreshCw size={11} className={applying ? 'animate-spin' : ''} /> Re-detect
+            </button>
+          )}
+        </div>
+
+        {/* Toast — feedback after toggle / re-detect */}
+        {toast && (
+          <div className="text-[10px] text-amber-400 bg-amber-500/10 border border-amber-500/30 rounded px-2 py-1.5">
+            {toast}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+export function SystemSettingsPanel() {
+  const systemConfig = useStore(s => s.systemConfig)
+  const systemConfigLoading = useStore(s => s.systemConfigLoading)
+  const updateConfig = useStore(s => s.updateSystemConfig)
+  const servicesConfig = useStore(s => s.servicesConfig)
+  const updateServicesConfig = useStore(s => s.updateServicesConfig)
+  // Detected VRAM is used in the VRAM coefficient subtext (see below)
+  // so the "Max VRAM target: ~X GB of Y GB" line shows real numbers
+  // instead of a hardcoded 24 GB. AutoPerformanceCard populates this
+  // on mount; if it hasn't fired yet (e.g. user opened Settings →
+  // System extremely fast), we fall back to 24 GB.
+  const systemDetect = useStore(s => s.systemDetect)
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+
+  if (systemConfigLoading && !systemConfig) {
+    return <div className="text-xs text-text-muted py-4 text-center">Loading system settings...</div>
+  }
+
+  if (!systemConfig) {
+    return <div className="text-xs text-text-muted py-4 text-center">Failed to load system settings</div>
+  }
+
+  const attentionOptions = (systemConfig.attention_modes_available || ['auto', 'sdpa']).map(m => ({
+    value: m,
+    label: m === 'auto' ? 'Auto' : m === 'sdpa' ? 'SDPA' : m.charAt(0).toUpperCase() + m.slice(1),
+  }))
+
+  const profileOptions = Object.entries(profileLabels).map(([k, label]) => ({
+    value: k,
+    label,
+  }))
+
+  const autoOn = !!servicesConfig?.auto_performance
+
+  // Wraps updateConfig so that any change to a Performance / Profile
+  // field while auto is ON automatically flips auto OFF. Otherwise
+  // the user would think they're editing manually but the auto card
+  // would keep claiming "auto-tuned" — confusing and a lie.
+  // Auto stays on if the user is just toggling fields *while already
+  // in manual mode* (autoOn === false), which is the normal case.
+  const updateConfigWithAutoFlip = (partial: Partial<typeof systemConfig>) => {
+    updateConfig(partial)
+    if (autoOn) {
+      updateServicesConfig({ auto_performance: false })
+    }
+  }
+
+  // Render the Performance + Profiles fields. Used both inside the
+  // advanced expander (when auto is on) and inline (when auto is off).
+  const renderAdvancedFields = () => (
+    <>
+      {/* Performance */}
+      <div className="space-y-4">
+        {!autoOn && (
+          <h3 className="text-[11px] text-text-secondary uppercase tracking-wider font-medium">Performance</h3>
+        )}
+
+        <SelectField
+          label="Attention Mode"
+          value={systemConfig.attention_mode}
+          options={attentionOptions}
+          onChange={val => updateConfigWithAutoFlip({ attention_mode: val })}
+        />
+
+        <div>
+          <SelectField
+            label="Transformer Quantization"
+            value={systemConfig.transformer_quantization}
+            options={quantizationOptions}
+            onChange={val => updateConfigWithAutoFlip({ transformer_quantization: val })}
+          />
+          {/* FP8 footgun: many models ship only BF16 + INT8 files (no
+              FP8 variant). Picking FP8 here silently falls back to
+              INT8 for those models — UI says FP8 but you get INT8
+              precision. The model name itself is the only place
+              that tells you what's actually loaded — e.g. picking
+              "LTX-2.3 Distilled FP8 22B" in the model selector loads
+              FP8 regardless of this setting. Worth a hint so users
+              don't think "I selected FP8 but performance/quality
+              feels like INT8 — must be broken." */}
+          {systemConfig.transformer_quantization === 'fp8' && (
+            <p className="text-[10px] text-amber-400/80 mt-1">
+              ⚠ Many models ship only BF16 + INT8 files. FP8 silently falls back to INT8 for those.
+              For guaranteed FP8, pick a model with "FP8" in its name (e.g. "LTX-2.3 Distilled FP8 22B").
+            </p>
+          )}
+        </div>
+
+        <SelectField
+          label="VAE Tiling"
+          value={systemConfig.vae_config}
+          options={vaeOptions}
+          onChange={val => updateConfigWithAutoFlip({ vae_config: Number(val) })}
+        />
+
+        <SelectField
+          label="Compile"
+          value={systemConfig.compile}
+          options={compileOptions}
+          onChange={val => updateConfigWithAutoFlip({ compile: val })}
+        />
+      </div>
+
+      <hr className="border-border" />
+
+      {/* Profiles */}
+      <div className="space-y-4">
+        <h3 className="text-[11px] text-text-secondary uppercase tracking-wider font-medium">Profiles</h3>
+
+        <SelectField
+          label="Video Profile"
+          value={String(systemConfig.video_profile)}
+          options={profileOptions}
+          onChange={val => updateConfigWithAutoFlip({ video_profile: parseFloat(val) })}
+        />
+
+        <SelectField
+          label="Image Profile"
+          value={String(systemConfig.image_profile)}
+          options={profileOptions}
+          onChange={val => updateConfigWithAutoFlip({ image_profile: parseFloat(val) })}
+        />
+
+        <SelectField
+          label="Audio Profile"
+          value={String(systemConfig.audio_profile)}
+          options={profileOptions}
+          onChange={val => updateConfigWithAutoFlip({ audio_profile: parseFloat(val) })}
+        />
+
+        <p className="text-[10px] text-text-muted">
+          Profile changes take effect on next model load
+        </p>
+
+        {/* VRAM Safety Coefficient */}
+        <div>
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="text-[11px] text-text-muted uppercase tracking-wider">VRAM Safety Coefficient</label>
+            <span className="text-xs text-text-secondary">{(systemConfig.vram_safety_coefficient ?? 0.8).toFixed(2)}</span>
+          </div>
+          <input
+            type="range" min={0.5} max={0.95} step={0.05}
+            value={systemConfig.vram_safety_coefficient ?? 0.8}
+            onChange={e => updateConfigWithAutoFlip({ vram_safety_coefficient: parseFloat(e.target.value) })}
+            className="w-full"
+          />
+          <div className="flex justify-between text-[8px] text-text-muted mt-0.5 px-0.5">
+            <span>0.50 (conservative)</span>
+            <span>0.80 (default)</span>
+            <span>0.95 (aggressive)</span>
+          </div>
+          <p className="text-[10px] text-text-muted mt-1">
+            {(() => {
+              // Use detected VRAM when available so the math is honest.
+              // Falls back to 24 GB if detection hasn't completed yet
+              // — the auto card populates the store on mount.
+              const totalVram = systemDetect?.hardware?.gpu_vram_gb ?? 24
+              const coef = systemConfig.vram_safety_coefficient ?? 0.8
+              return `Max VRAM target: ~${(totalVram * coef).toFixed(1)} GB of ${totalVram} GB.`
+            })()} Lower = more headroom for spikes (long videos, VAE decode). Takes effect on next model load.
+          </p>
+        </div>
+      </div>
+    </>
+  )
+
+  return (
+    <div className="space-y-5">
+      <ThemeSection />
+
+      <hr className="border-border" />
+
+      {/* Model Visibility — moved to top */}
+      <ModelVisibilitySection />
+
+      <hr className="border-border" />
+
+      {/* Auto-tune card always visible. The fields below are
+          conditionally hidden based on autoOn. */}
+      <AutoPerformanceCard />
+
+      {/* Auto ON: collapse the advanced fields under an expander.
+          The expander defaults closed — power users who want to peek
+          at what auto picked can open it without leaving the page. */}
+      {autoOn ? (
+        <div>
+          <button
+            onClick={() => setAdvancedOpen(o => !o)}
+            className="flex items-center gap-1 text-[11px] text-text-muted hover:text-text-secondary transition-colors"
+          >
+            {advancedOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+            {advancedOpen ? 'Hide' : 'Show'} advanced settings
+          </button>
+          {advancedOpen && (
+            <div className="mt-4 space-y-5 pl-2 border-l-2 border-border/30">
+              {renderAdvancedFields()}
+            </div>
+          )}
+        </div>
+      ) : (
+        // Auto OFF: show fields directly + a "Reset to auto-tune"
+        // affordance below them. The Reset button just toggles auto
+        // back ON, which triggers the apply endpoint via the card.
+        <>
+          {renderAdvancedFields()}
+        </>
+      )}
+
+      <hr className="border-border" />
+
+      {/* Output Codecs */}
+      <div className="space-y-4">
+        <h3 className="text-[11px] text-text-secondary uppercase tracking-wider font-medium">Output Codecs</h3>
+
+        <SelectField
+          label="Video Codec"
+          value={systemConfig.video_output_codec}
+          options={videoCodecOptions}
+          onChange={val => updateConfig({ video_output_codec: val })}
+        />
+
+        <SelectField
+          label="Image Codec"
+          value={systemConfig.image_output_codec}
+          options={imageCodecOptions}
+          onChange={val => updateConfig({ image_output_codec: val })}
+        />
+      </div>
+    </div>
+  )
+}

@@ -1,0 +1,21 @@
+{
+  "recipe_version": 1,
+  "name": "Product Shot",
+  "description": "Recipe for a product shot of headphones",
+  "mode": "image",
+  "model_type": "flux2_klein_9b",
+  "loras": [],
+  "params": {
+    "resolution": "1024x1024",
+    "video_length": 1,
+    "num_inference_steps": 8,
+    "guidance_scale": 1,
+    "negative_prompt": "",
+    "flow_shift": 5,
+    "guidance_phases": 1,
+    "sliding_window_size": 96,
+    "sliding_window_overlap": 5
+  },
+  "prompt_example": "Studio product photograph of a matte black wireless headphone on a seamless light-grey backdrop, soft even lighting, subtle reflection, crisp detail, commercial photography",
+  "nsfw": false
+}

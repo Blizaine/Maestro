@@ -1,0 +1,28 @@
+{
+  "recipe_version": 1,
+  "name": "80s Fantasy",
+  "description": "80s Fantasy Recipe",
+  "mode": "image",
+  "model_type": "flux2_klein_9b",
+  "loras": [
+    {
+      "filename": "80sFantasyKlein9b_000002000H1000.safetensors",
+      "multiplier": "0.80",
+      "source_url": "https://civitai.com/api/download/models/2622285",
+      "size_mb": 79
+    }
+  ],
+  "params": {
+    "resolution": "1280x720",
+    "video_length": 1,
+    "num_inference_steps": 4,
+    "guidance_scale": 1,
+    "negative_prompt": "",
+    "flow_shift": 5,
+    "guidance_phases": 1,
+    "sliding_window_size": 96,
+    "sliding_window_overlap": 5
+  },
+  "prompt_example": "80s sci-fi fantasy movie of a frog wizard at night in front of a castle.  Photo-realistic. atmospheric.",
+  "nsfw": false
+}

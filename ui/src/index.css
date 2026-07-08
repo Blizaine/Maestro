@@ -1,0 +1,470 @@
+@import "tailwindcss";
+
+/* ─── Theme tokens ──────────────────────────────────────────────────────
+ * Tailwind v4 reads `@theme` once at compile time and emits utility
+ * classes that reference these CSS variables via `var(--color-...)` at
+ * runtime. That means a runtime override on `html[data-theme="..."]`
+ * cascades into every utility class without recompilation.
+ *
+ * The default values below are the original Maestro palette (cool
+ * charcoal). The Golden Hour theme overrides each variable to a warm
+ * cinematic palette. To add a new theme, add another `[data-theme="..."]`
+ * block below — no code changes elsewhere are required for elements
+ * that use semantic tokens.
+ *
+ * Special tokens (cta-gradient, accent-cool, shadow vars) exist so
+ * components can opt into theme-aware gradients and glow effects with
+ * a single utility class.
+ */
+@theme {
+  /* Backgrounds */
+  --color-bg-primary: #0a0a0f;
+  --color-bg-secondary: #12121a;
+  --color-bg-tertiary: #1a1a25;
+  --color-bg-hover: #22222e;
+  --color-bg-active: #2a2a38;
+
+  /* Borders */
+  --color-border: #2a2a35;
+  --color-border-light: #3a3a48;
+
+  /* Text */
+  --color-text-primary: #e8e8ef;
+  --color-text-secondary: #9898a8;
+  --color-text-muted: #5a5a6a;
+
+  /* Semantic accents — repointed per theme */
+  --color-accent-green: #22c55e;
+  --color-accent-green-hover: #16a34a;
+  --color-accent-blue: #3b82f6;
+  --color-accent-blue-hover: #2563eb;
+
+  /* Functional status indicators — NOT remapped per theme.
+   * These are universal "verified-good vs caution" semantic colors
+   * that need to stay visually distinct in every theme. Used for
+   * things like:
+   *   - LoRA selector: CivitAI-recommended (success/green) vs
+   *     fallback-default (warning/amber) weight ranges
+   *   - LoRA "guide available" indicator (success/green)
+   * Keeping these out of the per-theme remap means a user who learns
+   * "green dot = recommended" in one theme sees the same meaning in
+   * any other theme. Decorative greens/ambers (progress bars, active
+   * indicators, etc.) can still be remapped via accent-green and
+   * accent-warm without colliding with these status colors. */
+  --color-indicator-success: #22c55e;
+  --color-indicator-warning: #fbbf24;
+
+  /* Warm accent (selection rings, "TAKES" label, active highlights).
+     In default theme this is amber too — the cool palette uses
+     accent-blue for those affordances, so warm is mostly unused. */
+  --color-accent-warm: #f59e0b;
+  --color-accent-warm-hover: #fbbf24;
+
+  /* Cool accent — used for "AI" badges where we want a contrast
+     against the dominant warm/cool palette. In default theme this
+     equals accent-blue; in Golden Hour it's a violet that pops
+     against the warm sea. */
+  --color-accent-cool-from: #3b82f6;
+  --color-accent-cool-to: #6366f1;
+
+  /* CTA gradient — primary action buttons (e.g. Generate).
+     In default theme both stops equal accent-green so the gradient
+     renders as the original flat green (preserves the default look).
+     In Golden Hour both stops shift to red/orange for a sunset
+     gradient. Components using `bg-cta` adapt automatically. */
+  --color-gradient-cta-from: #22c55e;
+  --color-gradient-cta-to: #22c55e;
+
+  /* Toggle-active gradient — used for active states on mode toggles
+     (Director/Studio pill, similar). Default theme: both stops equal
+     accent-blue so the active button renders as the original flat
+     blue. Golden Hour: shifts to the warm red→orange gradient. Kept
+     separate from the CTA gradient so a future theme can choose
+     different colors for primary actions vs active toggles. */
+  --color-gradient-toggle-from: #3b82f6;
+  --color-gradient-toggle-to: #3b82f6;
+
+  /* Active-frame gradient — used as a 2px diagonal-gradient ring
+     around the currently-selected media asset in the gallery.
+     Default theme: both stops equal accent-blue, so the active frame
+     reads as a flat blue ring (matches the prior border-accent-blue
+     behaviour). Golden Hour: warm red→orange diagonal gradient that
+     reads like stage-light spill across the asset's edge. */
+  --color-gradient-active-frame-from: #3b82f6;
+  --color-gradient-active-frame-to: #3b82f6;
+
+  /* Theme-aware glow shadows. Empty in default theme (no glow);
+     set to a warm bloom in Golden Hour for active rings. */
+  --shadow-accent-glow: 0 0 0 transparent;
+  --shadow-active-ring: 0 0 0 2px var(--color-accent-blue);
+}
+
+/* ─── Golden Hour theme ─────────────────────────────────────────────────
+ * Warm cinematic palette. Inspired by late-afternoon sunlight: deep
+ * coffee-toned charcoals for surfaces, warm cream text, amber/gold for
+ * highlights and selections, red→orange gradient for primary actions,
+ * and a violet counterpoint for AI/intelligence affordances.
+ */
+[data-theme="golden-hour"] {
+  /* Deep neutral near-black backgrounds. Pure neutrals (no warm bias)
+     so the warm accents and warm borders carry the theme identity
+     without competing against the chrome. The ladder runs DEEPER
+     than v3 to match the reference render's near-pure-black
+     surfaces — the warm borders need a deep canvas to pop against. */
+  --color-bg-primary: #050505;
+  --color-bg-secondary: #0a0a0a;
+  --color-bg-tertiary: #121212;
+  --color-bg-hover: #1a1a1a;
+  --color-bg-active: #222222;
+
+  /* Warm-tinted borders. THIS is what makes Golden Hour feel "alive"
+     in the reference render: every control, section, dropdown, chip,
+     and slider gets a subtle warm dark outline. The borders carry the
+     theme identity even when the background is neutral and the
+     control is empty — without these, the chrome reads as a flat
+     neutral void with disconnected warm accents. With them, the
+     entire sidebar feels like a unified warm-cinematic space.
+
+     Calibrated to be visible but never loud — saturation roughly
+     matches a "mid-bg" surface, just shifted warm. */
+  --color-border: #3d2818;
+  --color-border-light: #5a3a22;
+
+  /* Text — neutral off-white with no temperature bias */
+  --color-text-primary: #eaeaea;
+  --color-text-secondary: #999999;
+  --color-text-muted: #555555;
+
+  /* Repoint semantic accents — both go warm in Golden Hour so the
+     theme reads cohesively, with deliberate hue separation between
+     them so they don't visually merge:
+       accent-blue  (action):           orange-500  punchy red-orange,
+                                                    used for primary
+                                                    affordances, focus
+                                                    rings, toggles.
+       accent-green (success/progress): amber-500   golden warm, used
+                                                    for progress bars,
+                                                    checkmarks, "done"
+                                                    states, LoRA active
+                                                    indicators.
+     A green progress bar against the warm theme felt out of place;
+     amber-500 (more golden than orange-500) keeps the "completion"
+     feel while sitting cleanly inside the warm palette. */
+  --color-accent-green: #f59e0b;
+  --color-accent-green-hover: #fbbf24;
+  --color-accent-blue: #f97316;
+  --color-accent-blue-hover: #fb923c;
+
+  --color-accent-warm: #f59e0b;
+  --color-accent-warm-hover: #fbbf24;
+
+  --color-accent-cool-from: #a855f7;
+  --color-accent-cool-to: #c084fc;
+
+  /* Sunset gradient for primary actions — punchy red→orange */
+  --color-gradient-cta-from: #dc2626;
+  --color-gradient-cta-to: #f97316;
+
+  /* Toggle-active gradient — same red→orange so the active mode
+     pill matches the reference render's vibrant CTA energy. */
+  --color-gradient-toggle-from: #dc2626;
+  --color-gradient-toggle-to: #f97316;
+
+  /* Active-frame gradient — diagonal deep-red→bright-gold around the
+     currently-selected asset. Wide hue gap (red-800 → amber-300) so
+     the transition reads clearly even on a 2px border. Combined with
+     shadow-active-ring's directional shadow biases, the active asset
+     looks like it's lit by a warm light source at top-left, with the
+     gradient on the bezel and the spillover glow integrating into
+     the surroundings. */
+  --color-gradient-active-frame-from: #991b1b;
+  --color-gradient-active-frame-to: #fbbf24;
+
+  /* Warm bloom for primary actions */
+  --shadow-accent-glow: 0 0 18px rgba(249, 115, 22, 0.45);
+
+  /* Active-ring shadow — minimal. The visual character of the active
+   * frame in Golden Hour now lives ON the bezel itself (see the
+   * .frame-active-gradient override below — conic gradient with
+   * spotlight stops). The shadow is a tiny outer wash so the bright
+   * stops on the bezel "leak" a hint of warmth without an obvious
+   * halo competing with the on-bezel effect. */
+  --shadow-active-ring: 0 0 6px rgba(249, 115, 22, 0.15);
+}
+
+/* Golden Hour active-frame bezel: conic-gradient "spotlight stops".
+ *
+ * The user wants the BORDER LINE itself to vary — bright orange in
+ * some sections like spotlights catching the edge, dimmer ember
+ * tones in other sections. Crucially, the dim sections should still
+ * be visible against the panel — never fading fully into the
+ * background. This is what a conic-gradient does naturally: it
+ * sweeps a colour list around a centre point, so each side of the
+ * border picks up a different stop.
+ *
+ * The stops below are deliberately asymmetric — three "hot zones"
+ * (orange, gold, ember-red) at 25-50°, 160-185°, and 285-315°,
+ * separated by deep burnt-orange "shadow" sections (#7c2d12,
+ * tailwind orange-900) that read as ember glow rather than negative
+ * space. Sharp transitions on the leading edge of each hot zone
+ * (shadow→bright over 25°) create the "spotlight just hits the
+ * edge here" feel; gentler transitions away.
+ *
+ * Earlier version used `var(--color-bg-primary)` for the valley
+ * stops which made the border literally invisible on those sides —
+ * fixed 2026-05-03 by swapping to orange-900 so the bezel stays
+ * coherent all the way around.
+ *
+ * `from 30deg` rotates the stops so the hot zones don't land on
+ * exact cardinal sides — keeps the effect organic rather than
+ * looking like a top/right/bottom decoration pattern. */
+[data-theme="golden-hour"] .frame-active-gradient {
+  background-image:
+    linear-gradient(var(--color-bg-secondary), var(--color-bg-secondary)),
+    conic-gradient(
+      from 30deg,
+      #7c2d12 0deg,
+      #ea580c 28deg,
+      #f97316 52deg,
+      #7c2d12 95deg,
+      #7c2d12 135deg,
+      #fbbf24 162deg,
+      #f97316 188deg,
+      #7c2d12 232deg,
+      #7c2d12 262deg,
+      #dc2626 287deg,
+      #ea580c 315deg,
+      #7c2d12 360deg
+    );
+  background-origin: border-box;
+  background-clip: padding-box, border-box;
+}
+
+/* ─── Onyx theme ─────────────────────────────────────────────────────────
+ * Minimalist monochrome palette. Pure-black canvas, neutral grey
+ * surfaces, white-toned accents. No color tint anywhere — affordances
+ * rely on brightness contrast and shape rather than hue. The
+ * functional indicator tokens (--color-indicator-success / -warning)
+ * stay at their universal green/amber values so semantic indicators
+ * (LoRA recommended-vs-default, etc.) remain meaningful even in this
+ * otherwise-grey palette.
+ */
+[data-theme="onyx"] {
+  /* Background ladder — pure black anchor, evenly-spaced greys
+     above. Even step sizes (~10 units) so the surface hierarchy
+     reads cleanly without any one tier dominating. */
+  --color-bg-primary: #000000;
+  --color-bg-secondary: #0d0d0d;
+  --color-bg-tertiary: #1a1a1a;
+  --color-bg-hover: #262626;
+  --color-bg-active: #333333;
+
+  /* Borders — neutral mid-grey. Visible against the dark
+     surfaces but not loud. */
+  --color-border: #2a2a2a;
+  --color-border-light: #3d3d3d;
+
+  /* Text — slightly off-white for the brightest tier (pure white
+     on pure black is harsh on the eyes during long sessions). */
+  --color-text-primary: #e8e8e8;
+  --color-text-secondary: #a0a0a0;
+  --color-text-muted: #5a5a5a;
+
+  /* Accents — neutral greys instead of color. Action affordances
+     (accent-blue) and decorative success indicators (accent-green)
+     both go through mid-greys; the ONLY hue in this theme comes
+     from the functional indicator tokens (success=green,
+     warning=amber) which stay at their universal values.
+     Calibration note: accent-blue and accent-green serve
+     dual-duty as both BACKGROUND for buttons (need white text to
+     read on top) and as TEXT/BORDER for affordances on dark
+     surfaces (need to be bright enough to read). The grey
+     sweet-spot for both is around #666 — white on it has ~5.7:1
+     contrast (passes AA body), and it has ~3.7:1 against bg-tertiary
+     #1a1a1a (just borderline for borders/focus rings, but fine for
+     a monochrome theme where button affordances matter more than
+     border intensity). Brighter greys break white-text legibility on
+     the many `bg-accent-blue text-white` buttons across the app
+     (Director CTAs, Generate, Retake, the active-count badge, etc).
+     Hover state ~2 steps brighter for clear hover feedback. */
+  --color-accent-blue: #666666;
+  --color-accent-blue-hover: #8a8a8a;
+  --color-accent-green: #666666;
+  --color-accent-green-hover: #8a8a8a;
+
+  --color-accent-warm: #a0a0a0;
+  --color-accent-warm-hover: #c0c0c0;
+
+  /* Cool accent (used for "AI" badges) — slightly bluer grey to
+     give that one specific surface a tiny bit of identity without
+     breaking the monochrome rule. So small it reads as nearly
+     neutral. */
+  --color-accent-cool-from: #9098a8;
+  --color-accent-cool-to: #b0b8c8;
+
+  /* CTA gradient (Generate button) — subtle light-grey gradient.
+     Bright enough to dominate as the primary action but stays in
+     the monochrome lane. */
+  --color-gradient-cta-from: #888888;
+  --color-gradient-cta-to: #b8b8b8;
+
+  /* Toggle-active gradient — mid-grey range. The toggle button
+     uses hardcoded white text + shadow-accent-glow halo, so the
+     background needs to be dark enough that white text reads
+     cleanly without competing with the glow. Range chosen to
+     roughly match Golden Hour's #dc2626→#f97316 luminance band
+     (~0.08→0.27) so both themes feel similarly "lit" against
+     their dark chrome without blowing out the foreground text. */
+  --color-gradient-toggle-from: #4d4d4d;
+  --color-gradient-toggle-to: #8c8c8c;
+
+  /* Active-frame gradient — flat mid-grey ring around the
+     selected asset. Both stops the same so it reads as a clean
+     solid border, not a gradient. */
+  --color-gradient-active-frame-from: #888888;
+  --color-gradient-active-frame-to: #888888;
+
+  /* Glow shadows — subtle white wash, much dimmer than Golden
+     Hour's warm bloom. Maintains the active-asset focus signal
+     without breaking the minimalist feel. */
+  --shadow-accent-glow: 0 0 12px rgba(255, 255, 255, 0.18);
+  --shadow-active-ring: 0 0 4px rgba(255, 255, 255, 0.12);
+}
+
+/* Custom utility classes that use the theme tokens. These let
+ * components opt into theme-aware gradient and glow effects. */
+@layer utilities {
+  .bg-cta {
+    background-image: linear-gradient(
+      to right,
+      var(--color-gradient-cta-from),
+      var(--color-gradient-cta-to)
+    );
+  }
+  .bg-toggle-active {
+    background-image: linear-gradient(
+      to right,
+      var(--color-gradient-toggle-from),
+      var(--color-gradient-toggle-to)
+    );
+  }
+  /* Gradient ring around active media frames. Uses the dual-background
+   * trick: layer 1 fills the interior (clipped to padding-box) with the
+   * card's surface colour, layer 2 fills the entire box (clipped to
+   * border-box) with a gradient. The 2px transparent border acts as a
+   * "window" through which the gradient layer is visible.
+   *
+   * Default theme: linear gradient with both stops the same colour
+   * (= flat solid bezel, preserves prior look).
+   *
+   * Golden Hour: see [data-theme="golden-hour"] block below — uses a
+   * conic-gradient for "spotlights along the edge" effect.
+   *
+   * Use with `border-2 border-transparent` and a wrapping element
+   * that needs `bg-bg-secondary`-equivalent interior. */
+  .frame-active-gradient {
+    background-image:
+      linear-gradient(var(--color-bg-secondary), var(--color-bg-secondary)),
+      linear-gradient(
+        135deg,
+        var(--color-gradient-active-frame-from),
+        var(--color-gradient-active-frame-to)
+      );
+    background-origin: border-box;
+    background-clip: padding-box, border-box;
+  }
+  .bg-cta-vertical {
+    background-image: linear-gradient(
+      to bottom,
+      var(--color-gradient-cta-from),
+      var(--color-gradient-cta-to)
+    );
+  }
+  .bg-accent-cool {
+    background-image: linear-gradient(
+      to right,
+      var(--color-accent-cool-from),
+      var(--color-accent-cool-to)
+    );
+  }
+  .shadow-accent-glow {
+    box-shadow: var(--shadow-accent-glow);
+  }
+  .shadow-active-ring {
+    box-shadow: var(--shadow-active-ring);
+  }
+  /* Smooth color transitions on theme switch — prevents a jarring
+   * instant repaint. 200ms is fast enough to feel responsive but
+   * slow enough to read as intentional, not a flash. */
+  .theme-transition,
+  .theme-transition * {
+    transition:
+      background-color 200ms ease-out,
+      border-color 200ms ease-out,
+      color 200ms ease-out,
+      box-shadow 200ms ease-out;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  overflow: hidden;
+}
+
+#root {
+  height: 100vh;
+  height: 100dvh;
+  width: 100vw;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-border-light); }
+
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  background: var(--color-border);
+  border-radius: 2px;
+  outline: none;
+  width: 100%;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-text-primary);
+  cursor: pointer;
+  border: 2px solid var(--color-bg-primary);
+}
+
+@media (max-width: 767px) {
+  /* Prevent iOS auto-zoom on input focus (triggers at font-size < 16px) */
+  input[type="text"],
+  input[type="password"],
+  input[type="number"],
+  input[type="search"],
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+
+  input[type="range"] {
+    height: 6px;
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    width: 20px;
+    height: 20px;
+  }
+}

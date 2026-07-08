@@ -1,0 +1,27 @@
+{
+  "recipe_version": 1,
+  "name": "Cinematic Film",
+  "description": "Cinematic film style recipe of a woman in a red coat walking through a city at night.",
+  "mode": "video",
+  "model_type": "ltx2_22B_distilled_1_1",
+  "loras": [],
+  "params": {
+    "resolution": "1280x720",
+    "video_length": 500,
+    "num_inference_steps": 8,
+    "guidance_scale": 1,
+    "negative_prompt": "",
+    "flow_shift": 5,
+    "guidance_phases": 2,
+    "sliding_window_size": 525,
+    "sliding_window_overlap": 9,
+    "self_refiner_setting": 0,
+    "stage2_steps": 3,
+    "cfg_rescale": 0.1,
+    "modality_scale": 1,
+    "keyframe_conditioning_mode": "additive",
+    "keyframe_inject_mode": "additive"
+  },
+  "prompt_example": "A strikingly beautiful woman with long, wavy auburn hair, clad in a vibrant crimson trench coat, walks deliberately and slowly down the rain-slicked asphalt of a densely packed city street at night. Her gait is measured, shoulders slightly slumped in the atmospheric drizzle, and the collar of her red coat is turned up around her neck. The environment is defined by towering, dark brick buildings flanking the street, their facades glistening under the perpetual sheen of moisture. Vivid neon reflections—electric blue, hot pink, and sickly yellow—streak across the wet pavement beneath her feet. The camera performs a slow, continuous dolly push-in, smoothly drawing the viewer closer to her silhouette, enhancing the shallow depth of field which blurs the chaotic background into impressionistic streaks. The lighting is dramatically low-key, dominated by artificial sodium vapor lamps casting deep orange pools contrasted against the cool blues of the neon signs, creating a moody and richly saturated cinematic color grade. The atmosphere is profoundly melancholic and romantic, suggesting a moment suspended in time before a sudden burst of emotion or decision.",
+  "nsfw": false
+}

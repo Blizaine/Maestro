@@ -1,0 +1,34 @@
+{
+  "recipe_version": 1,
+  "name": "Claymation",
+  "description": "Claymation-style recipe",
+  "mode": "video",
+  "model_type": "ltx2_22B_distilled_1_1",
+  "loras": [
+    {
+      "filename": "Claymation.safetensors",
+      "multiplier": "0.80;0.50",
+      "source_url": "https://civitai.com/api/download/models/2839415",
+      "size_mb": 336
+    }
+  ],
+  "params": {
+    "resolution": "960x544",
+    "video_length": 500,
+    "num_inference_steps": 8,
+    "guidance_scale": 3,
+    "negative_prompt": "",
+    "flow_shift": 5,
+    "guidance_phases": 2,
+    "sliding_window_size": 525,
+    "sliding_window_overlap": 9,
+    "self_refiner_setting": 0,
+    "stage2_steps": 3,
+    "cfg_rescale": 0.1,
+    "modality_scale": 1,
+    "keyframe_conditioning_mode": "additive",
+    "keyframe_inject_mode": "additive"
+  },
+  "prompt_example": "A handcrafted claymation cinematic diorama set in a warm afternoon forest clearing. The entire scene is constructed from vibrant, saturated sculpted clay materials, revealing visible fingerprints, hand-shaped forms, soft imperfections, layered clay details, subtle tool marks, and tactile stop-motion textures. In the midground, a young fox, its body meticulously sculpted from rich, burnt orange clay with a creamy white clay belly and glossy black clay tips on its ears and paws, takes center stage. Its shiny black bead-like eyes blink with alert curiosity from a gently rounded face with a small, sculpted black clay nose, and its slender clay tail, tipped in white, twitches softly. The clearing itself is a mosaic of emerald green and mossy brown clay grass, with individual hand-pressed blades swaying gently, giving way to clusters of vibrant red and yellow clay toadstools with rounded handmade caps. Towering clay trees with mottled trunks and dense canopies of individually pressed, layered clay leaves shimmer softly in the background. A small, shimmering blue and white swirled clay brook ripples gently through the back, all surfaces showing slight imperfections and rounded handmade shapes. The camera, positioned slightly above, slowly pushes forward and gently lowers, tracking alongside the fox as it takes a hesitant step forward onto the clay grass with its delicate, rounded paws. Its body, built from assembled clay pieces, wiggles slightly as it sniffs the air before lowering its head to nibble gently at a particularly vibrant cluster of crimson clay berries on a low-lying clay bush, its jaw moving with soft, audible clay-on-clay sounds. As it nibbles, its bead-like eyes, wide and playful, look up towards the viewer, a faint smile sculpted onto its face, and it murmurs in a warm, high-pitched voice, \"Mmm, sweet treats!\" Soft, warm afternoon sunlight, emanating from the upper right, casts gentle shadows beneath the clay toadstools and between the layered clay forms of the fox's body, creating a comforting golden glow. The air is filled with the gentle rustling of clay leaves, the soft gurgle of the clay brook, and the faint, sweet chirping of unseen clay birds. The entire scene feels handcrafted, tactile, soft, dimensional, and physically built like a miniature stop-motion set.",
+  "nsfw": false
+}

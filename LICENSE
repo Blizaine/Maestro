@@ -1,0 +1,57 @@
+Maestro License Notice
+======================
+
+Maestro is built on top of WanGP (https://github.com/deepbeepmeep/Wan2GP)
+and is distributed under the same terms: the **WanGP Non-Commercial
+Evaluation License 1.1**. The full text of that license is included with
+the upstream project at `app/LICENSE.txt` in this repository.
+
+Summary
+-------
+
+You MAY:
+  * Use, copy, modify, and redistribute Maestro for **non-commercial**
+    purposes (personal projects, research, education, evaluation).
+  * Use the **outputs** you generate (images, videos, audio) for any
+    purpose, including commercial sale, provided that:
+      - the outputs were generated with a properly licensed copy of the
+        software, and
+      - any commercial distribution of the outputs includes a clear
+        notice that they were produced, in whole or in part, using
+        WanGP, with a hyperlink to the WanGP repository or About tab.
+
+You MAY NOT:
+  * Sell, sublicense, rent, lease, or otherwise distribute Maestro or
+    any derivative of it for a fee or other consideration.
+  * Offer Maestro, or any derivative of it, as part of a paid product,
+    hosted service, API, headless deployment, or integration.
+  * Use Maestro to provide cloud-based, backend, embedded, automated,
+    or other end-user-accessible services where users access, invoke,
+    or pay for those services.
+
+Third-party components
+----------------------
+
+Maestro depends on numerous third-party models, weights, and libraries
+(LTX-Video, Wan 2.1/2.2, Flux, Qwen, Gemma, SAM, MMAudio, PyTorch,
+xformers, and others). Each of these has its own license. You are
+responsible for reviewing and complying with those licenses before
+redistributing Maestro or any output that incorporates them.
+
+Commercial licensing
+--------------------
+
+If you wish to use Maestro (or its underlying WanGP pipeline) for any
+commercial purpose, you must obtain a separate commercial license from
+the WanGP licensor. Contact deepbeepmeep@yahoo.com for terms.
+
+Disclaimer
+----------
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM, OUT OF, OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+For the full and authoritative license text, see app/LICENSE.txt.

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/maestro.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Maestro</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      // Apply theme BEFORE React mounts to avoid a flash of the wrong
+      // theme on load. Reads localStorage; if nothing stored, applies
+      // the project default (golden-hour). The Zustand store syncs on
+      // mount so the dropdown and DOM stay consistent.
+      //
+      // NOTE: keep this string in sync with DEFAULT_THEME in
+      // src/lib/theme.ts. Hardcoded here because this script runs
+      // before any module imports.
+      (function () {
+        try {
+          var t = localStorage.getItem('maestro-theme') || 'golden-hour';
+          if (t && t !== 'default') {
+            document.documentElement.setAttribute('data-theme', t);
+          }
+        } catch (e) {
+          // localStorage blocked (private mode etc) — apply the
+          // hardcoded default so the user still gets the intended look.
+          document.documentElement.setAttribute('data-theme', 'golden-hour');
+        }
+      })();
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

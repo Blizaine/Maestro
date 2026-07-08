@@ -1,0 +1,20 @@
+{
+    "model": {
+        "name": "Qwen Image Edit (2511) Lightning 8-Step FP8 20B",
+        "architecture": "qwen_image_edit_plus2_20B",
+        "description": "FP8 quantized Qwen Image Edit 2511 with Lightning 8-step distillation from LightX2V. Better quality than 4-step with ~50% memory reduction.",
+        "URLs": [
+            "https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning/resolve/main/qwen_image_edit_2511_fp8_e4m3fn_scaled_lightning_8steps_v1.0.safetensors"
+        ],
+        "profiles_dir": [""],
+        "preload_URLs": "qwen_image_edit_20B",
+        "attention": {
+            "<89": "sdpa"
+        }
+    },
+    "prompt": "add a hat",
+    "resolution": "1024x1024",
+    "num_inference_steps": 8,
+    "guidance_scale": 1,
+    "batch_size": 1
+}

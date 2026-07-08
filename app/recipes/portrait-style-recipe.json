@@ -1,0 +1,27 @@
+{
+  "recipe_version": 1,
+  "name": "Portrait Style Recipe",
+  "description": "Portrait style recipe of a young woman",
+  "mode": "image",
+  "model_type": "flux2_klein_9b",
+  "loras": [],
+  "params": {
+    "resolution": "832x1104",
+    "video_length": 1,
+    "num_inference_steps": 8,
+    "guidance_scale": 1,
+    "negative_prompt": "",
+    "flow_shift": 5,
+    "guidance_phases": 1,
+    "sliding_window_size": 336,
+    "sliding_window_overlap": 5,
+    "self_refiner_setting": 0,
+    "stage2_steps": 3,
+    "cfg_rescale": 0.1,
+    "modality_scale": 1,
+    "keyframe_conditioning_mode": "additive",
+    "keyframe_inject_mode": "additive"
+  },
+  "prompt_example": "Portrait of a young woman in a sunlit meadow at golden hour, soft glowing backlight, warm tones, gentle bokeh, film grain, dreamy and ethereal",
+  "nsfw": false
+}

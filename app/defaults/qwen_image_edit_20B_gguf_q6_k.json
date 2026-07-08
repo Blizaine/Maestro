@@ -1,0 +1,17 @@
+{
+    "model": {
+        "name": "Qwen Image Edit GGUF Q6_K 20B",
+        "architecture": "qwen_image_edit_plus2_20B",
+        "description": "Qwen Image Edit 2511 20B quantized to GGUF Q6_K (16.9 GB). Higher quality than Q4, lower VRAM than full model.",
+        "URLs": [
+            "https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF/resolve/main/qwen-image-edit-2511-Q6_K.gguf"
+        ],
+        "preload_URLs": "qwen_image_edit_20B",
+        "attention": {
+            "<89": "sdpa"
+        }
+    },
+    "prompt": "add a hat",
+    "resolution": "1280x720",
+    "batch_size": 1
+}

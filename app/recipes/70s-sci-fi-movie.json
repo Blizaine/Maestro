@@ -1,0 +1,28 @@
+{
+  "recipe_version": 1,
+  "name": "70s Sci-fi Movie",
+  "description": "Recipe with LoRA for 70s Sci-fi Movie",
+  "mode": "image",
+  "model_type": "flux2_klein_9b",
+  "loras": [
+    {
+      "filename": "70sSciFiKlein9b.safetensors",
+      "multiplier": "0.80",
+      "source_url": "https://civitai.com/api/download/models/2692094",
+      "size_mb": 79
+    }
+  ],
+  "params": {
+    "resolution": "1280x720",
+    "video_length": 1,
+    "num_inference_steps": 4,
+    "guidance_scale": 1,
+    "negative_prompt": "",
+    "flow_shift": 5,
+    "guidance_phases": 1,
+    "sliding_window_size": 96,
+    "sliding_window_overlap": 5
+  },
+  "prompt_example": "ArsMovieStill, movie still from a 1970s technicolor Sci-Fi movie.\nA highly realistic cinematic photograph of a confident woman with short platinum blonde hair styled in an asymmetric cut, wearing a sleek futuristic black and metallic uniform with gold and silver armor-like panels, a high collar, and a red cape draped over one shoulder. Her outfit combines sci-fi and military fashion with a white belt and gold accents, tailored to perfection. She stands in a commanding pose with one hand on her hip, gazing forward with a cool, determined expression. The scene takes place in a futuristic sci-fi environment   —  a sleek metallic command deck with holographic displays and soft blue ambient lighting. The atmosphere feels dramatic and high-tech, with shallow depth of field, cinematic lighting, and subtle lens flare for realism and mood.",
+  "nsfw": false
+}

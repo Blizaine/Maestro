@@ -1,0 +1,32 @@
+# SAM 3.1 microservice dependencies
+# Installed in a Python 3.12+ conda env by sam_install.js
+# Note: torch/torchvision installed separately from cu128 index
+
+# SAM 3 core deps
+timm>=1.0.17
+numpy>=2
+tqdm
+ftfy==6.1.1
+regex
+iopath>=0.1.10
+typing_extensions
+huggingface_hub
+psutil
+
+# SAM 3 runtime deps (listed as optional in pyproject.toml but imported at runtime)
+einops
+pycocotools
+decord
+opencv-python-headless
+
+# Triton (platform-specific)
+triton-windows; sys_platform == 'win32'
+triton; sys_platform == 'linux'
+xformers
+
+# Microservice framework
+fastapi>=0.115.0
+uvicorn>=0.34.0
+Pillow>=10.0
+scipy
+ninja

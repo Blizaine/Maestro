@@ -1,0 +1,74 @@
+name: Bug report
+description: Something isn't working — a crash, a broken generation, a hang, or wrong output.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Maestro runs entirely on your machine, so the
+        **logs and your hardware are what make a bug fixable** — please fill in
+        the log + system fields below, they're not optional busywork.
+  - type: checkboxes
+    id: latest
+    attributes:
+      label: I'm on the latest version
+      options:
+        - label: I ran **Update** in Pinokio and the problem still happens.
+          required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+      placeholder: I clicked Generate in Studio Video and…
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact clicks/settings that trigger it. A recipe name or model helps.
+      placeholder: |
+        1. Studio → Video → Frames
+        2. Model: LTX-2.3 Distilled 1.1
+        3. Prompt "…", clicked Generate
+        4. …
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Paste the tail of the relevant log, or drag the file into this box.
+        Logs live in the Pinokio app folder under **`logs/api/latest`** (launcher
+        script runs) or **`logs/shell/latest`**. The last ~50 lines around the
+        failure are usually enough. Redact anything personal.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU + VRAM
+      placeholder: RTX 4090, 24 GB
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - Linux
+        - Other (note in description)
+    validations:
+      required: true
+  - type: input
+    id: mode-model
+    attributes:
+      label: Mode + model
+      description: Which mode (Studio / Director / Edit / Tools) and which model were you using?
+      placeholder: Director → Music Video, video model LTX-2.3 Distilled 1.1
+    validations:
+      required: false

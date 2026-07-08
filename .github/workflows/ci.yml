@@ -1,0 +1,44 @@
+name: CI
+
+# Fast, dependency-light checks that must pass on every push + PR.
+# The clean-repo guard is the important one for a public repo: it fails
+# the build if mature/explicit prose or locally-generated model guides
+# ever leak into tracked source (see scripts/verify_clean_repo.py).
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  guard:
+    name: Clean-repo guard + Python syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Clean-repo boundary guard
+        run: python scripts/verify_clean_repo.py
+      - name: Python syntax check (our modules)
+        # compileall only compiles (never imports), so it needs no deps and
+        # skips heavy vendored model code. Covers the surface we edit.
+        run: python -m compileall -q app/services app/launch.py scripts
+
+  ui-build:
+    name: UI type-check + build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install UI deps
+        working-directory: ui
+        run: npm ci
+      - name: Type-check + build (tsc -b && vite build)
+        working-directory: ui
+        run: npm run build

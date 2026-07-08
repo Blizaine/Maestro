@@ -1,0 +1,34 @@
+{
+  "recipe_version": 1,
+  "name": "Pixar Style",
+  "description": "Recipe for creating Pixar Style videos",
+  "mode": "video",
+  "model_type": "ltx2_22B_distilled_1_1",
+  "loras": [
+    {
+      "filename": "Pixar_Toon.safetensors",
+      "multiplier": "0.80;0.50",
+      "source_url": "https://civitai.com/api/download/models/2850271",
+      "size_mb": 336
+    }
+  ],
+  "params": {
+    "resolution": "960x544",
+    "video_length": 500,
+    "num_inference_steps": 8,
+    "guidance_scale": 3,
+    "negative_prompt": "",
+    "flow_shift": 5,
+    "guidance_phases": 2,
+    "sliding_window_size": 525,
+    "sliding_window_overlap": 9,
+    "self_refiner_setting": 0,
+    "stage2_steps": 3,
+    "cfg_rescale": 0.1,
+    "modality_scale": 1,
+    "keyframe_conditioning_mode": "additive",
+    "keyframe_inject_mode": "additive"
+  },
+  "prompt_example": "P1x4r, A very high quality pixar toon cgi animated scene, a warm-hearted cook with a crisp striped apron and a soft kitchen towel draped over one shoulder deftly and urgently plates a vibrant, complex dish in a bustling restaurant kitchen, driven by a sudden rush of dinner orders. A gentle side tracking camera shot begins on a wide view of the organized chaos, then smoothly pushes closer, arcing around the focused cook as they lean over a gleaming stainless steel counter, their nimble hands meticulously arranging colorful garnishes onto a pristine white plate. Their expressive face, framed by a few escaping strands from a slightly askew chef's hat, shows intense concentration but with a hint of a warm, encouraging smile, eyes darting precisely between ingredients. Overhead, warm directional light from copper-hooded lamps casts soft shadows and highlights the continuous plumes of steam rising from simmering pots and the polished surfaces of hanging pans. In the foreground, a stack of gleaming clean plates and a scattered sprig of rosemary blur softly, while the midground focuses on the cook’s fluid, economical movements, apron and towel swaying slightly with each precise motion. The background features other blurred kitchen staff moving with quick purpose, shelves laden with stylized jars of spices, and glowing oven lights, all contributing to a rich, inhabited environment. As they carefully place a final element, the cook glances up quickly, \"Almost there, team! Just a few more seconds for the special!\" said with a focused but encouraging tone, their lips forming the words clearly. The air is filled with the rhythmic clatter of pans, the sizzle of food, the distant chatter of other cooks, and the soft scrape of a plating spoon on ceramic, enhancing the polished cinematic rendering and the story-driven animated motion of this premium animated feature moment, emphasizing believable stylized materials, character appeal, and strong visual storytelling.",
+  "nsfw": false
+}

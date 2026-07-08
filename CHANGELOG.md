@@ -1,0 +1,43 @@
+# Maestro Changelog
+
+All notable changes to Maestro are documented here. The upstream WanGP
+pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
+
+## [Unreleased] — first public release
+
+Initial public release of Maestro: a local AI video, image, and music studio
+built on the [Wan2GP](https://github.com/deepbeepmeep/Wan2GP) pipeline.
+
+### Highlights
+
+- **Studio mode** — manual generation across Video (Frames / Multi-Shot /
+  Extend / Blend sub-modes, each with its own isolated working set), Image,
+  and Audio. Unified media-driven Inputs panel: drop images/audio/video onto
+  tiles and the pipeline (start/end frame, injected keyframes, soundtrack,
+  control video, references) is selected automatically.
+- **Director mode** — describe a music video or short film and a local LLM
+  plans it end-to-end: writes the song (ACE-Step 1.5), analyzes the audio,
+  plans per-clip prompts, and renders the full video. Multi-pass planning
+  with JSON-grammar-constrained output for reliability on small local LLMs.
+- **Music mode** — ACE-Step v1.5 XL music generation with an LLM song-writer
+  (describe → Style + Lyrics, editable guide).
+- **Edit modes** — Retake (regenerate a time region), Inpaint (SAM 3.1
+  text-driven segmentation), Restyle, and Edit Anything (IC-LoRA).
+- **Tools** — FlashVSR DiT video upscaling (2x/3x/4x, chunked for long
+  videos) and SeedVC revoice with background preservation, usable on any
+  gallery or uploaded clip.
+- **Voice** — TTS voice cloning, per-speaker voice references, ID-LoRA voice
+  identity preservation (experimental), cross-clip voice consistency.
+- **Hardware auto-tune** — detects GPU/VRAM/RAM on first launch and picks a
+  performance profile; OOM recovery banner with one-click fix.
+- **LoRA management** — CivitAI browser with per-LoRA auto-generated prompt
+  guides, weight recommendations, and per-checkpoint enhance guides.
+- **100% local** — no telemetry, no accounts, no cloud dependency. Optional
+  external LLM APIs are opt-in and off by default.
+
+### Requirements
+
+NVIDIA GPU (6GB+ VRAM; 24GB recommended for the full experience), Windows or
+Linux, installed via [Pinokio](https://pinokio.computer). Models download on
+first use per model (the default set is ~30GB; the full collection exceeds
+300GB).

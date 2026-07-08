@@ -1,0 +1,40 @@
+{
+    "model": {
+        "name": "LTX-2.3 22B 10Eros (Mature)",
+        "architecture": "ltx2_22B",
+        "description": "Community fine-tune of LTX-2.3 22B (TenStrip/LTX2.3-10Eros) tuned for explicit content. Based on SulphurAI/Sulphur-2-base. Full BF16 checkpoint with FP8 mixed-precision fallback for lower-VRAM systems. Auto-bundles the cond_safe distilled LoRA the author's reference workflow depends on (without it the model produces noisy motion on movement). Available only when Mature Mode is enabled.",
+        "URLs": [
+            "https://huggingface.co/TenStrip/LTX2.3-10Eros/resolve/main/10Eros_v1_bf16.safetensors",
+            "https://huggingface.co/TenStrip/LTX2.3-10Eros/resolve/main/10Eros_v1-fp8mixed_learned.safetensors"
+        ],
+        "preload_URLs": "ltx2_22B",
+        "loras": [
+            "https://huggingface.co/TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments/resolve/main/ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors"
+        ],
+        "loras_multipliers": [1],
+        "nsfw_only": true,
+        "enhance_guide": "10eros_video_rules"
+    },
+    "prompt": "A warm sunny backyard. The camera starts in a tight cinematic close-up of a woman and a man in their 30s, facing each other with serious expressions. The woman, emotional and dramatic, says softly, \"That's it... Dad's lost it. And we've lost Dad.\"The man exhales, slightly annoyed: \"Stop being so dramatic, Jess.\"A beat. He glances aside, then mutters defensively, \"He's just having fun.\"The camera slowly pans right, revealing the grandfather in the garden wearing enormous butterfly wings, waving his arms in the air like he's trying to take off.He shouts, \"Wheeeew!\" as he flaps his wings with full commitment.The woman covers her face, on the verge of tears. The tone is deadpan, absurd, and quietly tragic.",
+    "num_inference_steps": 30,
+    "video_length": 241,
+    "resolution": "1280x720",
+    "guidance_scale": 1.5,
+    "audio_guidance_scale": 7.0,
+    "alt_guidance_scale": 3.0,
+    "alt_scale": 0.7,
+    "stg_scale": 1.0,
+    "stg_schedule": [2.0, 1.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+    "sample_solver": "euler_ancestral",
+    "text_attention_amplifier": {
+        "strength": 1.3,
+        "block_filter": "36-48",
+        "spatial_focus": 0.0
+    },
+    "perturbation_switch": 2,
+    "perturbation_layers": [28],
+    "perturbation_start_perc": 0,
+    "perturbation_end_perc": 100,
+    "apg_switch": 0,
+    "cfg_star_switch": 0
+}

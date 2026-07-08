@@ -1,0 +1,34 @@
+{
+  "recipe_version": 1,
+  "name": "Fight",
+  "description": "A recipe for fighting with LoRA and a prompt",
+  "mode": "video",
+  "model_type": "ltx2_22B_distilled_1_1",
+  "loras": [
+    {
+      "filename": "LTX-2.3-fightV3.0.safetensors",
+      "multiplier": "1.00;0.90",
+      "source_url": "https://civitai.com/api/download/models/2958295",
+      "size_mb": 408
+    }
+  ],
+  "params": {
+    "resolution": "960x544",
+    "video_length": 500,
+    "num_inference_steps": 8,
+    "guidance_scale": 3,
+    "negative_prompt": "",
+    "flow_shift": 5,
+    "guidance_phases": 2,
+    "sliding_window_size": 525,
+    "sliding_window_overlap": 9,
+    "self_refiner_setting": 0,
+    "stage2_steps": 3,
+    "cfg_rescale": 0.1,
+    "modality_scale": 1,
+    "keyframe_conditioning_mode": "additive",
+    "keyframe_inject_mode": "additive"
+  },
+  "prompt_example": "Super realistic movie level arena duet video, 16:9, large boxing arena at night, with the audience seats illuminated by blue and red dual color lights, and slight smoke and particles floating in the air. The character on the left is wearing a black combat suit with a huge \"LTX\" lettering printed on their chest. The black and gold color scheme has distinct muscle lines, and they lower their center of gravity to adopt an attacking posture; The character on the right is wearing a white combat suit, with \"SD 2.0\" printed on the back and gloves, in a white and black color scheme, in a defensive and counterattack posture. The two sides are facing each other in the center of the arena, creating a tense atmosphere as if a big battle is about to break out.\n\nCamera switching:\nClose up close-up of LTX character's gaze, furrowed brow;\nSwitch to SD 2.0 character profile close-up, with a slight provocative smile;\nQuickly switch between foot movement and shoulder shaking on both sides;\nThe camera suddenly advances with a sense of handheld movement, entering into battle.\n\nAction begins:\nLTX takes the lead in high-speed forward charging, testing with a low position straight punch;\nSD 2.0 retreat, dodge, and flank to counterattack with punches;\nThe camera follows the high-speed movement of the fist with dynamic blur;\nBoth sides exchange attacks continuously, and the collision of fists and feet produces a shockwave and sweat scattering effect;\nShooting with low angle lens, spinning and kicking in the air;\nThe high-speed camera displays the moment when the fist brushes past the face;\nThe ropes in the arena vibrate and the lights keep flashing.\n\ncamera movement\nMovie level follow-up, fast scrolling, alternating between slow and high-speed motion;\nAdd instant zoom and motion blur when punching out;\nThe camera rotates 360 degrees around the two people, highlighting the sense of power;\nSwitch to ultra slow motion instantly when hit, sweat flying away;\nSubsequently, the rapid editing and continuous attacks became increasingly fast-paced.\n\nClosing shot:\nBoth sides simultaneously retreat and distance themselves, putting on a fighting posture again;\nThe camera slowly pulls back, and the entire arena reappears in the frame;\nBlue and red lights confront each other, and the cheers of the audience continue;\nFinally frozen in the central confrontation scene of \"LTX VS SD 2.0\", movie like subtitles emerge, epic atmosphere, ultra-high details, real fabric physics effects, real light and shadow, smooth and natural movements.",
+  "nsfw": false
+}

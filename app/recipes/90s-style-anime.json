@@ -1,0 +1,34 @@
+{
+  "recipe_version": 1,
+  "name": "90s Style Anime",
+  "description": "90s-style anime recipe",
+  "mode": "video",
+  "model_type": "ltx2_22B_distilled_1_1",
+  "loras": [
+    {
+      "filename": "anime90s-step00053000.comfy.safetensors",
+      "multiplier": "0.80;0.50",
+      "source_url": "https://civitai.com/api/download/models/2898537",
+      "size_mb": 673
+    }
+  ],
+  "params": {
+    "resolution": "960x544",
+    "video_length": 500,
+    "num_inference_steps": 8,
+    "guidance_scale": 3,
+    "negative_prompt": "",
+    "flow_shift": 5,
+    "guidance_phases": 2,
+    "sliding_window_size": 525,
+    "sliding_window_overlap": 9,
+    "self_refiner_setting": 0,
+    "stage2_steps": 3,
+    "cfg_rescale": 0.1,
+    "modality_scale": 1,
+    "keyframe_conditioning_mode": "additive",
+    "keyframe_inject_mode": "additive"
+  },
+  "prompt_example": "ANIMSTY, A high school girl sits on the edge of a level steel beam in a ruined city overtaken by nature. She wears a navy uniform skirt and a white blouse that flutter in the wind. Dense ivy and wild vines envelop crumbling concrete structures around her while broken windows and moss-laced facades frame the background. A leaning skyscraper looms with a split top floor above as waterfalls drip from shattered balconies in the distance. Diffuse light beams filter through thick mist surrounding the scene. Her hair flutters gently as she clutches a glowing phone map in her hands. Soft wind sounds mix with the distant drip of water and the creak of metal throughout the environment. The camera performs a dramatic dolly-in from below and cuts to a close-up medium shot of her face. She speaks in a tired but soft voice , \"not a single soul to be found\" and then sighs as she closes her eyes in frustration.",
+  "nsfw": false
+}

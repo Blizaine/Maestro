@@ -1,0 +1,101 @@
+# Python virtual environment
+env/
+app/env/
+
+# Node.js dependencies
+ui/node_modules/
+
+# React build output
+ui/dist/
+
+# Pinokio runtime
+logs/
+cache/
+# Per-app Pinokio env vars — user-specific (e.g. PINOKIO_SHARE_LOCAL).
+# Pinokio creates this on install with sensible defaults; users edit
+# in place and we don't want to clobber their changes on update or
+# track per-machine differences in the repo.
+ENVIRONMENT
+
+# Internal release-readiness checklist — not for public consumption.
+# Kept locally for the maintainer's reference; not shipped via git.
+docs/release_todo.md
+
+# Uploaded files
+uploads/
+
+# User-saved / imported recipes (the bundled starter pack in app/recipes/
+# IS tracked; user recipes stay local).
+app/recipes_user/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Screenshots (local only)
+ss/
+
+# Claude Code per-user settings — may contain secrets in the permission
+# allowlist (HF_TOKEN=..., API keys in Bash argument patterns, etc.).
+# Despite the "local" in the name this file has been historically tracked;
+# ignore it going forward so per-user state stays out of git.
+.claude/settings.local.json
+
+# ============================================================================
+# app/ heavy files — model weights, media, runtime data
+# (app/.gitignore handles the fine-grained rules for binary extensions)
+# ============================================================================
+app/ckpts/
+# User-imported Civitai checkpoints register as finetune JSONs here; the dir
+# ships only a placeholder .txt, so ignore the generated *.json (keep the .txt).
+app/finetunes/*.json
+app/loras/
+app/loras_i2v/
+app/loras_metadata/
+app/outputs/
+app/outputs2/
+app/gradio_outputs/
+app/storage/
+app/samples/
+app/settings/
+app/icons/lora_previews/
+app/uploads/
+app/wgp_config.json
+app/plugins_local.json
+app/loras_url_cache.json
+app/presets.json
+
+# SAM service runtime
+app/services/sam/env/
+app/services/sam/sam3/
+app/services/sam/checkpoints/
+.masks/
+.temp_frames/
+
+# Retired optional content supplement pack — the download apparatus is
+# gone (nothing reads the pack anymore), but leftover local copies may
+# still exist on dev machines. Never tracked in git.
+app/services/_supplement_pack/
+
+# GPL-3.0 seed-vc voice-conversion component — cloned at install/update
+# time from github.com/Blizaine/maestro-seedvc so the GPL tree is
+# distributed separately under its own license. Never tracked here.
+app/postprocessing/seedvc/
+
+# Local archive of pre-sanitization mature guides (Phase 3 rollback). Never
+# pushed. Canonical archive lives in the parent checkout's archive/ dir.
+/archive/
+
+# Local build/archive outputs (formerly supplement-pack zips) — never tracked.
+dist/
+
+# Cloned dependency repos (re-clone on install)
+app/preprocessing/video_depth_anything/
+
+# Cloned upstream plugins (re-downloaded by WanGP plugin manager)
+app/plugins/wan2gp-gallery/
+app/plugins/wan2gp-lora-manager/
+app/plugins/wan2gp-lora-multipliers-ui/
+
+# Python bytecode (anywhere)
+__pycache__/
