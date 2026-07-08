@@ -792,6 +792,10 @@ interface AppState {
   toggleModelEnabled: (modelType: string) => void
   resetEnabledModels: () => void
   setAllModelsEnabled: (enabled: boolean) => void
+  // ModelSelector "+N more" hint → open Settings and expand Enabled Models.
+  modelVisibilityFocus: GenerationMode | null
+  openModelVisibility: (mode: GenerationMode) => void
+  clearModelVisibilityFocus: () => void
 
   // Resolution helpers
   resolutionPreset: ResolutionPreset
@@ -2246,6 +2250,15 @@ export const useStore = create<AppState>((set, get) => ({
       set({ enabledModels: empty })
     }
   },
+  // Open Settings → Performance and ask the Enabled Models section to
+  // expand + scroll to the given mode (fired by the ModelSelector hint).
+  modelVisibilityFocus: null,
+  openModelVisibility: (mode) => set({
+    settingsOpen: true,
+    settingsTab: 'performance',
+    modelVisibilityFocus: mode,
+  }),
+  clearModelVisibilityFocus: () => set({ modelVisibilityFocus: null }),
   loadModels: async () => {
     try {
       const data = await api.fetchModels()

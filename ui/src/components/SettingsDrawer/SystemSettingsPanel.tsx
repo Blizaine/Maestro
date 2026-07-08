@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { ChevronDown, ChevronRight, RotateCcw, Check, Download, Trash2, Cpu, RefreshCw, Loader2 } from 'lucide-react'
 import { useStore, getFamiliesForMode, getModelsForFamily } from '../../stores/useStore'
 import * as api from '../../api/client'
@@ -71,10 +71,23 @@ function ModelVisibilitySection() {
   // Services panel), updateServicesConfig auto-adds them to
   // enabledModels — they appear here pre-checked and ready to use.
   const nsfwMode = useStore(s => s.servicesConfig?.nsfw_mode ?? false)
+  const modelVisibilityFocus = useStore(s => s.modelVisibilityFocus)
+  const clearModelVisibilityFocus = useStore(s => s.clearModelVisibilityFocus)
   const [open, setOpen] = useState(false)
   const [expandedModes, setExpandedModes] = useState<Set<GenerationMode>>(new Set(['video', 'image']))
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<string | null>(null)
+  const sectionRef = useRef<HTMLDivElement>(null)
+
+  // When the ModelSelector "+N more" hint fires, open this section, expand
+  // the requested mode, and scroll it into view — then clear the request.
+  useEffect(() => {
+    if (!modelVisibilityFocus) return
+    setOpen(true)
+    setExpandedModes(prev => new Set(prev).add(modelVisibilityFocus))
+    requestAnimationFrame(() => sectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+    clearModelVisibilityFocus()
+  }, [modelVisibilityFocus, clearModelVisibilityFocus])
 
   const toggleMode = (mode: GenerationMode) => {
     setExpandedModes(prev => {
@@ -128,7 +141,7 @@ function ModelVisibilitySection() {
   const downloadedCount = visibleModels.filter(m => m.is_downloaded).length
 
   return (
-    <div>
+    <div ref={sectionRef} className="scroll-mt-2">
       <button
         onClick={() => setOpen(!open)}
         className="flex items-center gap-1.5 text-[11px] text-text-secondary uppercase tracking-wider font-medium hover:text-text-primary transition-colors w-full"

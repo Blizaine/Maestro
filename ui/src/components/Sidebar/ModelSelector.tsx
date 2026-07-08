@@ -1,4 +1,4 @@
-import { ChevronDown, Check } from 'lucide-react'
+import { ChevronDown, Check, Plus } from 'lucide-react'
 import { useState, useRef, useEffect } from 'react'
 import { useStore, getFamiliesForMode, getModelsForFamily } from '../../stores/useStore'
 
@@ -10,6 +10,7 @@ export function ModelSelector() {
   const editSubMode = useStore(s => s.editSubMode)
   const currentModelType = useStore(s => s.params.model_type)
   const selectModel = useStore(s => s.selectModel)
+  const openModelVisibility = useStore(s => s.openModelVisibility)
   // Mature Mode gate: models with nsfw_only flag are hidden from the
   // selector unless servicesConfig.nsfw_mode is enabled. Backend always
   // ships the entry (so the toggle can show/hide without a model reload)
@@ -48,18 +49,40 @@ export function ModelSelector() {
       .filter(m => !m.nsfw_only || nsfwMode),
   })).filter(g => g.models.length > 0)
 
+  // How many models are available for this mode but NOT enabled — powers the
+  // "+N" hint that nudges users toward Settings → Enabled Models.
+  const disabledCount = modeFamilies.reduce((n, family) => {
+    const avail = getModelsForFamily(family.id, models, generationMode, effectiveSubMode)
+      .filter(m => !m.nsfw_only || nsfwMode)
+    return n + avail.filter(m => !enabledModels.has(m.model_type)).length
+  }, 0)
+
   return (
     <div className="relative flex-1 min-w-0" ref={containerRef}>
-      {/* Trigger button */}
-      <button
-        onClick={() => setOpen(!open)}
-        className="w-full flex items-center gap-1.5 bg-bg-tertiary border border-border rounded-lg px-2.5 py-2 text-left hover:border-border-light transition-colors"
-      >
-        <span className="flex-1 min-w-0 truncate text-xs text-text-primary">
-          {currentModel?.name ?? 'Select model'}
-        </span>
-        <ChevronDown size={14} className={`shrink-0 text-text-muted transition-transform ${open ? 'rotate-180' : ''}`} />
-      </button>
+      <div className="flex items-stretch gap-1">
+        {/* Trigger button */}
+        <button
+          onClick={() => setOpen(!open)}
+          className="flex-1 min-w-0 flex items-center gap-1.5 bg-bg-tertiary border border-border rounded-lg px-2.5 py-2 text-left hover:border-border-light transition-colors"
+        >
+          <span className="flex-1 min-w-0 truncate text-xs text-text-primary">
+            {currentModel?.name ?? 'Select model'}
+          </span>
+          <ChevronDown size={14} className={`shrink-0 text-text-muted transition-transform ${open ? 'rotate-180' : ''}`} />
+        </button>
+        {/* "+N" hint → opens Settings → Enabled Models, expanded to this mode. */}
+        {disabledCount > 0 && (
+          <button
+            onClick={() => openModelVisibility(generationMode)}
+            title={`${disabledCount} more model${disabledCount > 1 ? 's' : ''} you can enable`}
+            aria-label={`Enable more models (${disabledCount} available)`}
+            className="shrink-0 flex items-center gap-0.5 px-1.5 rounded-lg bg-bg-tertiary border border-border text-text-muted hover:text-accent-blue hover:border-border-light transition-colors"
+          >
+            <Plus size={12} className="shrink-0" />
+            <span className="text-[10px] leading-none tabular-nums">{disabledCount}</span>
+          </button>
+        )}
+      </div>
 
       {/* Dropdown (opens upward) */}
       {open && (
