@@ -1,6 +1,6 @@
 const path = require('path')
 module.exports = {
-  version: "3.7",
+  version: "8.0",
   title: "Maestro",
   description: "An all-in-one, 100% local AI video, image & music studio. Its Director mode turns a single prompt into a full music video or short film — LLM-planned, shot by shot. Built on the WanGP pipeline (Wan 2.1/2.2, LTX-2.3, Qwen, Hunyuan Video, Flux). Requires an NVIDIA GPU (6GB+ VRAM).",
   icon: "maestro_simplified_icon_alpha.png",
