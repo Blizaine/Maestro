@@ -50,6 +50,30 @@ sys.argv = _wgp_argv
 print("[Maestro] Installing download stall protection...")
 from services import safe_download  # noqa: F401 (side-effect import)
 
+# HuggingFace token-path robustness (fixes the "Permission denied:
+# .../HF_AUTH/token" crash on machines that never logged into HF).
+# Pinokio points HF_TOKEN_PATH at its shared token store
+# (PINOKIO_HOME/cache/HF_AUTH/token). huggingface_hub's get_token() reads
+# that path but only catches FileNotFoundError — if the path exists in an
+# unreadable state (e.g. a directory placeholder before any login), the
+# read raises PermissionError and crashes the very first model download,
+# even though ALL of Maestro's default models live on PUBLIC repos that
+# need no auth. Neutralize a broken token path so downloads fall back to
+# anonymous; a real token (user ran Pinokio's hf.login) stays untouched,
+# so gated models + higher HF rate limits keep working.
+_hf_token_path = os.environ.get("HF_TOKEN_PATH")
+if _hf_token_path:
+    try:
+        with open(_hf_token_path, "r", encoding="utf-8"):
+            pass  # readable token file → keep it (real login)
+    except FileNotFoundError:
+        pass  # absent → huggingface_hub handles this gracefully (anonymous)
+    except OSError as _hf_err:
+        print(f"[Maestro] HF_TOKEN_PATH is set but unreadable "
+              f"({type(_hf_err).__name__}) — using anonymous HuggingFace "
+              "access for public models.")
+        os.environ.pop("HF_TOKEN_PATH", None)
+
 # Now safe to import wgp - all module-level code will run with patched argv
 print("[Maestro] Importing WanGP engine...")
 import wgp
