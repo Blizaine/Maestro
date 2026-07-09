@@ -318,6 +318,17 @@ class TI2VidTwoStagesPipeline:
                 print(f"[10S TextAmp] install failed (continuing without amplifier): {_amp_err}")
                 _amp_handles = []
         sigmas = LTX2Scheduler().execute(steps=num_inference_steps).to(dtype=torch.float32, device=self.device)
+        # Stage-2 refine schedule, precomputed here so the progress-bar total below
+        # reflects the real step count. The hardcoded 3-step STAGE_2_DISTILLED_SIGMA_VALUES
+        # makes a single ~0.42-sigma jump to 0 on its final step, which a natively distilled
+        # checkpoint can complete but a non-distilled "Dev" checkpoint + bolt-on distilled
+        # stage-2 LoRA cannot (it under-denoises -> residual-noise colour wash, worst in
+        # T2V). stage2_steps > 0 lengthens the refine into smaller, trackable steps.
+        if stage2_steps and stage2_steps > 0:
+            from .utils.constants import build_stage2_sigmas
+            _stage2_sigma_values = build_stage2_sigmas(int(stage2_steps))
+        else:
+            _stage2_sigma_values = list(STAGE_2_DISTILLED_SIGMA_VALUES)
         if loras_slists is not None:
             stage_1_steps = len(sigmas) - 1
             update_loras_slists(
@@ -330,9 +341,8 @@ class TI2VidTwoStagesPipeline:
 
         if callback is not None:
             # Pre-declare total across both stages so the progress bar doesn't
-            # fill to 100% at end of stage 1 and then jump back. Stage 2 uses
-            # the fixed STAGE_2_DISTILLED_SIGMA_VALUES schedule.
-            _pipeline_total_steps = (len(sigmas) - 1) + (len(STAGE_2_DISTILLED_SIGMA_VALUES) - 1)
+            # fill to 100% at end of stage 1 and then jump back.
+            _pipeline_total_steps = (len(sigmas) - 1) + (len(_stage2_sigma_values) - 1)
             callback(-1, None, True, override_num_inference_steps=len(sigmas) - 1,
                      pass_no=1, total_steps_hint=_pipeline_total_steps)
 
@@ -554,11 +564,7 @@ class TI2VidTwoStagesPipeline:
         # (worst in T2V, where there is no start-frame anchor to mask it). `stage2_steps`
         # swaps in build_stage2_sigmas() so the refine takes smaller, trackable steps —
         # the same lever the distilled pipeline already exposes (see distilled.py).
-        if stage2_steps and stage2_steps > 0:
-            from .utils.constants import build_stage2_sigmas
-            distilled_sigmas = torch.Tensor(build_stage2_sigmas(int(stage2_steps))).to(self.device)
-        else:
-            distilled_sigmas = torch.Tensor(STAGE_2_DISTILLED_SIGMA_VALUES).to(self.device)
+        distilled_sigmas = torch.Tensor(_stage2_sigma_values).to(self.device)
         if loras_slists is not None:
             stage_2_steps = len(distilled_sigmas) - 1
             update_loras_slists(
