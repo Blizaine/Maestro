@@ -73,6 +73,16 @@ if _hf_token_path:
               f"({type(_hf_err).__name__}) — using anonymous HuggingFace "
               "access for public models.")
         os.environ.pop("HF_TOKEN_PATH", None)
+        # This guard runs before wgp imports huggingface_hub, so the pop
+        # above is enough — the hub reads HF_TOKEN_PATH from the env at
+        # import. But the hub FREEZES it into constants.HF_TOKEN_PATH at
+        # import time, so if some earlier import already loaded it, redirect
+        # that cached path to a guaranteed-absent file (→ read gives
+        # FileNotFoundError, which the hub DOES catch → anonymous).
+        _hf_const = sys.modules.get("huggingface_hub.constants")
+        if _hf_const is not None:
+            import tempfile
+            _hf_const.HF_TOKEN_PATH = os.path.join(tempfile.gettempdir(), "maestro_no_hf_token")
 
 # Now safe to import wgp - all module-level code will run with patched argv
 print("[Maestro] Importing WanGP engine...")
