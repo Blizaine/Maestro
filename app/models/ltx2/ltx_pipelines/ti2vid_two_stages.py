@@ -181,6 +181,7 @@ class TI2VidTwoStagesPipeline:
         sample_solver: str = "euler",
         stg_schedule: list[float] | None = None,
         text_attention_amplifier: dict | None = None,
+        stage2_steps: int = 0,
     ) -> tuple[Iterator[torch.Tensor], torch.Tensor]:
         assert_resolution(height=height, width=width, is_two_stage=True)
 
@@ -545,7 +546,19 @@ class TI2VidTwoStagesPipeline:
                 print(f"[10S TextAmp] stage-2 install failed (continuing without): {_amp_err}")
                 _amp_handles = []
 
-        distilled_sigmas = torch.Tensor(STAGE_2_DISTILLED_SIGMA_VALUES).to(self.device)
+        # Stage-2 refine schedule. The hardcoded 3-step STAGE_2_DISTILLED_SIGMA_VALUES
+        # makes a single ~0.42-sigma jump to 0 on its final step — a *distilled-model*
+        # capability. A natively distilled checkpoint can complete it; a non-distilled
+        # "Dev" checkpoint + a bolt-on distilled stage-2 LoRA cannot, so it under-denoises
+        # and leaves residual noise the VAE decodes as a dominant-channel colour wash
+        # (worst in T2V, where there is no start-frame anchor to mask it). `stage2_steps`
+        # swaps in build_stage2_sigmas() so the refine takes smaller, trackable steps —
+        # the same lever the distilled pipeline already exposes (see distilled.py).
+        if stage2_steps and stage2_steps > 0:
+            from .utils.constants import build_stage2_sigmas
+            distilled_sigmas = torch.Tensor(build_stage2_sigmas(int(stage2_steps))).to(self.device)
+        else:
+            distilled_sigmas = torch.Tensor(STAGE_2_DISTILLED_SIGMA_VALUES).to(self.device)
         if loras_slists is not None:
             stage_2_steps = len(distilled_sigmas) - 1
             update_loras_slists(

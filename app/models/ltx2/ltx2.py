@@ -1929,6 +1929,14 @@ class LTX2:
 
         if isinstance(self.pipeline, TI2VidTwoStagesPipeline):
             negative_prompt = n_prompt if n_prompt else DEFAULT_NEGATIVE_PROMPT
+            # Dev (two-stage) pipeline: its stage-2 refine otherwise defaults to a
+            # hardcoded 3-step distilled schedule that non-distilled "Dev" checkpoints
+            # can't complete — under-denoised, colour-collapsed output, worst in T2V
+            # where there is no start-frame anchor. Give the refine more (smaller) steps
+            # so the bolt-on distilled stage-2 LoRA can track it. Tunable per model via
+            # the `ltx2_stage2_steps` model_def field; 0 keeps the legacy 3-step schedule.
+            _dev_stage2_steps = int(stage2_steps) if stage2_steps and int(stage2_steps) > 0 \
+                else int(self.model_def.get("ltx2_stage2_steps", 10))
             pipeline_output = self.pipeline(
                 prompt=input_prompt,
                 negative_prompt=negative_prompt,
@@ -1982,6 +1990,7 @@ class LTX2:
                 sample_solver=sample_solver,
                 stg_schedule=stg_schedule,
                 text_attention_amplifier=text_attention_amplifier,
+                stage2_steps=_dev_stage2_steps,
             )
         else:
             # Select pipeline: progressive 3-stage or standard distilled 2-stage
