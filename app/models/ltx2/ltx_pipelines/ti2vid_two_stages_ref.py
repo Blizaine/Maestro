@@ -131,6 +131,32 @@ REF_STG_SCHEDULE = [1.0, 1.0, 1.0, 0.7, 0.0, 0.0, 0.0, 0.0, 0.0]
 # used to live in Maestro's 10Eros defaults has no source in the reference.
 REF_STG_BLOCKS = [14, 19]
 
+from .utils.helpers import post_process_latent
+
+
+def _reanchor_state(state: LatentState) -> None:
+    """Restore conditioned-anchor content in the noisy latent, in place.
+
+    LTX-2 conditioning marks anchor tokens (start frames, keyframes) with a
+    per-token timestep of ~0 derived from denoise_mask — the model expects
+    CLEAN content there. Plain Euler preserves clean anchors as a fixed
+    point, but the ancestral renoise scales-and-noises every token, so the
+    anchors decay step by step and the model dissolves away from the start
+    image. This applies the same blend euler_denoising_loop applies to
+    predictions (post_process_latent: denoised*mask + clean*(1-mask)) to
+    the noisy LATENT itself before each model call — the per-step
+    re-imposition ComfyUI's inpaint wrapper performs. Identity where
+    mask == 1, so pure T2V behavior is unchanged.
+    """
+    if state is None:
+        return
+    mask = getattr(state, "denoise_mask", None)
+    clean = getattr(state, "clean_latent", None)
+    if mask is None or clean is None:
+        return
+    lat = state.latent
+    lat.copy_(post_process_latent(lat, mask, clean))
+
 
 class EulerAncestralRFDiffusionStep(DiffusionStepProtocol):
     """Euler ancestral for rectified-flow models — ComfyUI's math.
@@ -488,6 +514,16 @@ class TI2VidTwoStagesRefPipeline(TI2VidTwoStagesPipeline):
 
             def denoise_fn(video_state, audio_state, sigmas, step_index):  # noqa: F811 — deliberate rebind
                 _sched_guider.step_index = step_index
+                # Re-anchor conditioned tokens before every model call.
+                # Plain Euler preserves clean anchors as a fixed point
+                # (velocity is 0 where sample == denoised), but the ancestral
+                # renoise scales-and-noises EVERY token — the model then sees
+                # garbage at positions whose per-token timestep says "clean
+                # start frame" and immediately dissolves away from it.
+                # Mirrors ComfyUI's per-step inpaint blend; identity for
+                # unconditioned tokens (mask 1), so T2V is untouched.
+                _reanchor_state(video_state)
+                _reanchor_state(audio_state)
                 return _inner_denoise_fn(video_state, audio_state, sigmas, step_index)
 
             denoise_fn._prewarm = _inner_denoise_fn._prewarm
@@ -691,17 +727,31 @@ class TI2VidTwoStagesRefPipeline(TI2VidTwoStagesPipeline):
             preview_tools: VideoLatentTools | None = None,
             mask_context=None,
         ) -> tuple[LatentState, LatentState]:
+            _inner_stage2_fn = simple_denoising_func(
+                video_context=v_context_p,
+                audio_context=a_context_p,
+                transformer=transformer,  # noqa: F821
+                alt_guidance_scale=1.0,
+            )
+
+            def _stage2_denoise_fn(video_state, audio_state, sigmas, step_index):
+                # Same anchor restoration as stage 1 — the ancestral stepper
+                # runs here too, and stage-2 image conditioning (e.g. I2V
+                # start frames at reduced strength) needs its anchors intact.
+                _reanchor_state(video_state)
+                _reanchor_state(audio_state)
+                return _inner_stage2_fn(video_state, audio_state, sigmas, step_index)
+
+            for _attr in ("_prewarm", "_cleanup"):
+                if hasattr(_inner_stage2_fn, _attr):
+                    setattr(_stage2_denoise_fn, _attr, getattr(_inner_stage2_fn, _attr))
+
             return euler_denoising_loop(
                 sigmas=sigmas,
                 video_state=video_state,
                 audio_state=audio_state,
                 stepper=stepper,
-                denoise_fn=simple_denoising_func(
-                    video_context=v_context_p,
-                    audio_context=a_context_p,
-                    transformer=transformer,  # noqa: F821
-                    alt_guidance_scale=1.0,
-                ),
+                denoise_fn=_stage2_denoise_fn,
                 mask_context=mask_context,
                 interrupt_check=interrupt_check,
                 callback=callback,
