@@ -242,7 +242,7 @@ export function OutpaintControls() {
               onChange={e => setOutpaintSourcePreservation(parseFloat(e.target.value))}
               className="w-full"
             />
-            <p className="text-[9px] text-text-muted/60 mt-0.5">
+            <p className="text-[9px] text-text-muted mt-0.5">
               Higher = source area pinned tighter. Lower = model gets creative latitude across the boundary (more blending).
             </p>
           </div>
@@ -259,7 +259,7 @@ export function OutpaintControls() {
               onChange={e => setOutpaintLoraStrength(parseFloat(e.target.value))}
               className="w-full"
             />
-            <p className="text-[9px] text-text-muted/60 mt-0.5">
+            <p className="text-[9px] text-text-muted mt-0.5">
               1.0 is the trained default. Try 0.7–0.8 if the LoRA is over-modifying your source area.
             </p>
           </div>
@@ -273,7 +273,7 @@ export function OutpaintControls() {
             />
             <div className="flex-1">
               <span className="text-[10px] text-text-secondary">Preserve source audio</span>
-              <p className="text-[9px] text-text-muted/60 mt-0.5">
+              <p className="text-[9px] text-text-muted mt-0.5">
                 Re-mux the original soundtrack into the outpainted clip. The model would otherwise generate fresh audio that doesn't match the source.
               </p>
             </div>
@@ -288,7 +288,7 @@ export function OutpaintControls() {
             />
             <div className="flex-1">
               <span className="text-[10px] text-text-secondary">Lock source pixels</span>
-              <p className="text-[9px] text-text-muted/60 mt-0.5">
+              <p className="text-[9px] text-text-muted mt-0.5">
                 Composite the original frames back over the source area in post. Strongest preservation; pixel-perfect inside the original frame.
               </p>
             </div>
@@ -303,7 +303,7 @@ export function OutpaintControls() {
             />
             <div className="flex-1">
               <span className="text-[10px] text-text-secondary">Trim window smear</span>
-              <p className="text-[9px] text-text-muted/60 mt-0.5">
+              <p className="text-[9px] text-text-muted mt-0.5">
                 Trim the last few frames of each sliding-window segment where the model occasionally smears the boundary.
               </p>
             </div>

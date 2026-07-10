@@ -323,7 +323,7 @@ export function LoraSelector() {
             className="w-3 h-3 rounded border-border accent-amber-500 disabled:opacity-40"
           />
           <span className={`text-[10px] uppercase tracking-wider flex items-center gap-0.5 ${
-            updatableOnly ? 'text-amber-400' : updatableCount > 0 ? 'text-text-muted' : 'text-text-muted/40'
+            updatableOnly ? 'text-amber-400' : updatableCount > 0 ? 'text-text-muted' : 'text-text-muted'
           }`}>
             <ArrowUpCircle size={10} />
             Updates

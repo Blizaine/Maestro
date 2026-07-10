@@ -519,7 +519,7 @@ export function ServicesSettingsPanel() {
         <label className="flex items-center justify-between cursor-pointer group">
           <div className="flex-1 mr-3">
             <div className="text-sm text-text-primary group-hover:text-accent-blue transition-colors">
-              Director v2 Engine <span className="text-[10px] text-text-muted/70 font-normal">(default)</span>
+              Director v2 Engine <span className="text-[10px] text-text-muted font-normal">(default)</span>
             </div>
             <div className="text-[10px] text-text-muted mt-0.5">
               Layered architecture with structured shot planning, mode-specific renderers, and prompt validation.
@@ -780,7 +780,7 @@ export function ServicesSettingsPanel() {
               unstable, or require additional setup. Default off keeps the UI
               focused on features known to work well.
             </div>
-            <div className="text-[10px] text-text-muted/70 mt-1 leading-relaxed">
+            <div className="text-[10px] text-text-muted mt-1 leading-relaxed">
               Currently gates: Director v2 engine, Voice Reference, external
               LLM APIs (Google / OpenAI / Anthropic), Studio Prompt Enhancer
               config, Inpaint and Restyle edit modes.

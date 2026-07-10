@@ -72,7 +72,7 @@ export function AnchorReturnBanner() {
         </button>
       </div>
       {!hasLatestImage && (
-        <p className="text-[9px] text-text-muted/70 mt-1.5 italic">
+        <p className="text-[9px] text-text-muted mt-1.5 italic">
           Generate an image first, then click Apply.
         </p>
       )}

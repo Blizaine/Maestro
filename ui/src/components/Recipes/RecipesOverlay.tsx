@@ -164,7 +164,7 @@ function RecipeGridCard({ card, applying, onApply, onDelete }: {
         {card.thumbnail_url ? (
           <img src={card.thumbnail_url} alt={card.name} className="absolute inset-0 w-full h-full object-cover" />
         ) : (
-          <div className="absolute inset-0 flex items-center justify-center text-text-muted/40">
+          <div className="absolute inset-0 flex items-center justify-center text-text-muted">
             <BookMarked size={28} />
           </div>
         )}
@@ -184,7 +184,7 @@ function RecipeGridCard({ card, applying, onApply, onDelete }: {
           <div className="text-xs font-medium text-text-primary leading-tight">{card.name}</div>
           {onDelete && (
             <button onClick={onDelete} title="Delete recipe"
-              className="shrink-0 p-0.5 rounded text-text-muted/60 hover:text-red-400 transition-colors opacity-0 group-hover:opacity-100">
+              className="shrink-0 p-0.5 rounded text-text-muted hover:text-red-400 transition-colors opacity-0 group-hover:opacity-100">
               <Trash2 size={12} />
             </button>
           )}
@@ -192,7 +192,7 @@ function RecipeGridCard({ card, applying, onApply, onDelete }: {
         {card.description && (
           <div className="text-[10px] text-text-muted leading-snug line-clamp-2">{card.description}</div>
         )}
-        <div className="mt-auto pt-1 flex items-center gap-2 text-[9px] text-text-muted/70">
+        <div className="mt-auto pt-1 flex items-center gap-2 text-[9px] text-text-muted">
           <span className="capitalize">{card.mode}</span>
           {card.lora_count > 0 && (
             <span className="flex items-center gap-0.5"><Layers size={9} /> {card.lora_count}</span>

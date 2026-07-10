@@ -118,7 +118,7 @@ export function ContinueVideoSection() {
             onChange={e => setParam('input_video_strength', parseFloat(e.target.value))}
             className="w-full"
           />
-          <p className="text-[9px] text-text-muted/60 mt-0.5">
+          <p className="text-[9px] text-text-muted mt-0.5">
             1.0 = seamless continuation. Lower values give the model more creative freedom.
           </p>
         </div>

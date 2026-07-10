@@ -1388,7 +1388,7 @@ function ReferenceImageUpload({
             <input type="range" min={0} max={1} step={0.01} value={inputVideoStrength}
               onChange={e => setParam('input_video_strength', parseFloat(e.target.value))}
               className="w-full h-1 accent-accent-blue" />
-            <p className="text-[9px] text-text-muted/60">Lower values can increase motion</p>
+            <p className="text-[9px] text-text-muted">Lower values can increase motion</p>
           </div>
         )}
       </div>
@@ -1455,7 +1455,7 @@ function ReferenceImageUpload({
           <input type="range" min={0} max={1} step={0.01} value={inputVideoStrength}
             onChange={e => setParam('input_video_strength', parseFloat(e.target.value))}
             className="w-full h-1 accent-accent-blue" />
-          <p className="text-[9px] text-text-muted/60">Lower values can increase motion</p>
+          <p className="text-[9px] text-text-muted">Lower values can increase motion</p>
         </div>
       )}
     </div>
@@ -1502,7 +1502,7 @@ function DraggableRefRow({ file, label, index, onRemove, onLabelChange, onReorde
         value={label}
         onChange={e => onLabelChange(index, e.target.value)}
         placeholder={placeholder}
-        className="flex-1 min-w-0 bg-bg-secondary border border-border rounded px-1.5 py-0.5 text-[10px] text-text-primary placeholder:text-text-muted/40 focus:border-accent-blue outline-none"
+        className="flex-1 min-w-0 bg-bg-secondary border border-border rounded px-1.5 py-0.5 text-[10px] text-text-primary placeholder:text-text-muted focus:border-accent-blue outline-none"
       />
     </div>
   )
@@ -1568,7 +1568,7 @@ function AdditionalRefsSection() {
               </div>
             )}
             {charRefs.length === 0 && (
-              <p className="text-[9px] text-text-muted/50 italic">Individual character close-ups improve identity</p>
+              <p className="text-[9px] text-text-muted italic">Individual character close-ups improve identity</p>
             )}
           </div>
           {/* Location References */}
@@ -1591,7 +1591,7 @@ function AdditionalRefsSection() {
               </div>
             )}
             {locRefs.length === 0 && (
-              <p className="text-[9px] text-text-muted/50 italic">Scene/environment reference images</p>
+              <p className="text-[9px] text-text-muted italic">Scene/environment reference images</p>
             )}
           </div>
           {/* Voice Reference (ID-LoRA) — gated by Services toggle */}
@@ -1623,7 +1623,7 @@ function AdditionalRefsSection() {
                 </div>
               </div>
             ) : (
-              <p className="text-[9px] text-text-muted/50 italic">~5 sec voice sample for consistent voice across clips</p>
+              <p className="text-[9px] text-text-muted italic">~5 sec voice sample for consistent voice across clips</p>
             )}
           </div>}
         </div>

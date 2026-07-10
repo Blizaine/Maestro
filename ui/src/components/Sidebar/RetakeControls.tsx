@@ -81,7 +81,7 @@ export function RetakeControls() {
             onChange={e => useStore.setState({ editRegenerateAudio: e.target.checked })}
             className="w-3.5 h-3.5 rounded border-border accent-accent-blue" />
           <span className="text-[10px] text-text-secondary">Regenerate Audio</span>
-          <span className="text-[9px] text-text-muted/60 ml-auto">
+          <span className="text-[9px] text-text-muted ml-auto">
             {editRegenerateAudio ? 'New audio' : 'Keep source'}
           </span>
         </label>
@@ -116,7 +116,7 @@ export function RetakeControls() {
             Legacy
           </button>
         </div>
-        <p className="text-[9px] text-text-muted/60 mt-0.5">
+        <p className="text-[9px] text-text-muted mt-0.5">
           {editRetakeEngine === 'native'
             ? 'Lightricks denoise_mask — preserves source identity'
             : 'MaskInjection — strength-controlled blending'}

@@ -121,7 +121,7 @@ export function WindowSettings() {
               className={`p-0.5 rounded transition-colors ${
                 locked
                   ? 'text-accent-blue hover:text-accent-blue/70'
-                  : 'text-text-muted/30 hover:text-text-muted'
+                  : 'text-text-muted hover:text-text-secondary'
               }`}
               title={locked ? 'Window size locked — click to unlock (auto-track)' : 'Click to lock window size'}
             >

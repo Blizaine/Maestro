@@ -164,7 +164,7 @@ export function AudioModeSection() {
           )}
 
           {ttsVoiceCount === 0 && (
-            <p className="text-[9px] text-text-muted/60 text-center">
+            <p className="text-[9px] text-text-muted text-center">
               Text-only mode. Add voices to clone specific speakers.
             </p>
           )}
@@ -195,7 +195,7 @@ export function AudioModeSection() {
                     placeholder="Speaker name"
                     value={voice.name}
                     onChange={e => setTtsVoiceName(i, e.target.value)}
-                    className="w-full mt-1 bg-bg-tertiary border border-border rounded px-1.5 py-0.5 text-[9px] text-text-primary placeholder:text-text-muted/40 focus:outline-none focus:border-accent-blue"
+                    className="w-full mt-1 bg-bg-tertiary border border-border rounded px-1.5 py-0.5 text-[9px] text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue"
                   />
                 </div>
               ))}
@@ -206,7 +206,7 @@ export function AudioModeSection() {
           {ttsVoiceCount > 0 && (
             <div className="space-y-1.5 pt-1">
               {ttsVoiceCount >= 2 && (
-                <p className="text-[9px] text-text-muted/60">
+                <p className="text-[9px] text-text-muted">
                   Names auto-fill from prompt. Each name maps to the voice above it.
                 </p>
               )}

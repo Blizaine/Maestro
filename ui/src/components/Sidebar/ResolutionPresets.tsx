@@ -32,7 +32,7 @@ export function ResolutionPresets() {
         ))}
       </div>
       {resolutionPreset === 'auto' && (
-        <p className="text-[9px] text-text-muted/60 mt-0.5">
+        <p className="text-[9px] text-text-muted mt-0.5">
           {isEdit ? 'Uses source clip resolution' : isImage ? 'Matches reference image aspect ratio' : 'Auto resolution'}
         </p>
       )}

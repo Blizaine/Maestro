@@ -342,7 +342,7 @@ export function AdvancedSettings() {
                           value={params.tts_comp_threshold || -25}
                           onChange={e => setParam('tts_comp_threshold', parseInt(e.target.value))}
                           className="w-full" />
-                        <p className="text-[9px] text-text-muted/60">Volume level where boosting kicks in. Lower = catches quieter parts.</p>
+                        <p className="text-[9px] text-text-muted">Volume level where boosting kicks in. Lower = catches quieter parts.</p>
                       </div>
                       <div>
                         <div className="flex items-center justify-between mb-1">
@@ -353,7 +353,7 @@ export function AdvancedSettings() {
                           value={params.tts_comp_attack || 5}
                           onChange={e => setParam('tts_comp_attack', parseInt(e.target.value))}
                           className="w-full" />
-                        <p className="text-[9px] text-text-muted/60">How fast the compressor reacts. Low = catches brief dips at speaker transitions.</p>
+                        <p className="text-[9px] text-text-muted">How fast the compressor reacts. Low = catches brief dips at speaker transitions.</p>
                       </div>
                       <div>
                         <div className="flex items-center justify-between mb-1">
@@ -364,7 +364,7 @@ export function AdvancedSettings() {
                           value={params.tts_comp_release || 100}
                           onChange={e => setParam('tts_comp_release', parseInt(e.target.value))}
                           className="w-full" />
-                        <p className="text-[9px] text-text-muted/60">How fast it returns to normal after boosting. Higher = smoother.</p>
+                        <p className="text-[9px] text-text-muted">How fast it returns to normal after boosting. Higher = smoother.</p>
                       </div>
                       <div>
                         <div className="flex items-center justify-between mb-1">
@@ -375,7 +375,7 @@ export function AdvancedSettings() {
                           value={params.tts_comp_makeup || 4}
                           onChange={e => setParam('tts_comp_makeup', parseInt(e.target.value))}
                           className="w-full" />
-                        <p className="text-[9px] text-text-muted/60">How much to boost the quiet parts. Higher = louder transitions.</p>
+                        <p className="text-[9px] text-text-muted">How much to boost the quiet parts. Higher = louder transitions.</p>
                       </div>
                     </div>
                   )}
@@ -587,7 +587,7 @@ export function AdvancedSettings() {
                       Reference Pipeline (10Eros)
                     </span>
                   </label>
-                  <p className="text-[9px] text-text-muted/60">
+                  <p className="text-[9px] text-text-muted">
                     Runs the model author&apos;s ComfyUI workflow config: 9+3 steps on hand-tuned sigmas,
                     CFG only on the first 2 steps, STG on the first 4, ancestral sampling.
                     Steps / CFG / STG sliders below are ignored while this is on.
@@ -651,7 +651,7 @@ export function AdvancedSettings() {
                       value={params.stg_scale ?? 0}
                       onChange={e => setParam('stg_scale', parseFloat(e.target.value))}
                       className="w-full" />
-                    <p className="text-[9px] text-text-muted/60 mt-0.5">Spatio-temporal guidance. 0 = off. Sharpens structure &amp; motion via a third denoising pass (~50% slower). Try 1.0.</p>
+                    <p className="text-[9px] text-text-muted mt-0.5">Spatio-temporal guidance. 0 = off. Sharpens structure &amp; motion via a third denoising pass (~50% slower). Try 1.0.</p>
                   </div>
 
                   {/* CFG Rescale */}
@@ -664,7 +664,7 @@ export function AdvancedSettings() {
                       value={params.cfg_rescale ?? 0}
                       onChange={e => setParam('cfg_rescale', parseFloat(e.target.value))}
                       className="w-full" />
-                    <p className="text-[9px] text-text-muted/60 mt-0.5">Reduces over-saturation. 0.7 recommended.</p>
+                    <p className="text-[9px] text-text-muted mt-0.5">Reduces over-saturation. 0.7 recommended.</p>
                   </div>
 
                   {/* Gradient Estimation */}
@@ -709,7 +709,7 @@ export function AdvancedSettings() {
                     <option value="replace">Replace (Default)</option>
                     <option value="additive">Additive (Smooth)</option>
                   </select>
-                  <p className="text-[9px] text-text-muted/60 mt-0.5">Replace: exact adherence to source image. Additive: smoother blending.</p>
+                  <p className="text-[9px] text-text-muted mt-0.5">Replace: exact adherence to source image. Additive: smoother blending.</p>
                 </div>
               )}
 
@@ -725,7 +725,7 @@ export function AdvancedSettings() {
                     <option value="additive">Additive (Default)</option>
                     <option value="replace">Replace (Strict)</option>
                   </select>
-                  <p className="text-[9px] text-text-muted/60 mt-0.5">Additive: smooth transitions at injected frames. Replace: strict adherence.</p>
+                  <p className="text-[9px] text-text-muted mt-0.5">Additive: smooth transitions at injected frames. Replace: strict adherence.</p>
                 </div>
               )}
 
@@ -767,7 +767,7 @@ export function AdvancedSettings() {
                           value={(params.MMAudio_prompt) || ''}
                           onChange={e => setParam('MMAudio_prompt', e.target.value)}
                           placeholder="e.g. rain, thunder"
-                          className="w-full bg-bg-tertiary border border-border rounded px-2 py-1.5 text-xs text-text-primary placeholder:text-text-muted/40 focus:outline-none focus:border-accent-blue"
+                          className="w-full bg-bg-tertiary border border-border rounded px-2 py-1.5 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue"
                         />
                       </div>
                       <div>
@@ -777,7 +777,7 @@ export function AdvancedSettings() {
                           value={(params.MMAudio_neg_prompt) || ''}
                           onChange={e => setParam('MMAudio_neg_prompt', e.target.value)}
                           placeholder="e.g. talking, speech"
-                          className="w-full bg-bg-tertiary border border-border rounded px-2 py-1.5 text-xs text-text-primary placeholder:text-text-muted/40 focus:outline-none focus:border-accent-blue"
+                          className="w-full bg-bg-tertiary border border-border rounded px-2 py-1.5 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue"
                         />
                       </div>
                     </div>

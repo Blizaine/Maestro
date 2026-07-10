@@ -141,7 +141,7 @@ export function BlendControls() {
             Insert
           </button>
         </div>
-        <p className="text-[9px] text-text-muted/60 mt-1">
+        <p className="text-[9px] text-text-muted mt-1">
           {blendMode === 'insert'
             ? 'Adds new footage between clips. Total duration increases.'
             : 'Replaces the end of A and start of B with a generated transition. Total duration stays the same.'}
@@ -203,7 +203,7 @@ export function BlendControls() {
             onChange={e => setOverlapSec(parseInt(e.target.value))}
             className="w-full"
           />
-          <p className="text-[9px] text-text-muted/60 mt-0.5">
+          <p className="text-[9px] text-text-muted mt-0.5">
             Trims {overlapSec}s from the end of A and start of B, generates a {overlapSec}s replacement.
           </p>
         </div>
@@ -224,7 +224,7 @@ export function BlendControls() {
               onChange={e => setMotionPrefixSec(parseFloat(e.target.value))}
               className="w-full"
             />
-            <p className="text-[9px] text-text-muted/60 mt-0.5">
+            <p className="text-[9px] text-text-muted mt-0.5">
               {motionPrefixSec === 0
                 ? 'Pure start+end mode — no motion carried from Clip A'
                 : `First ${motionPrefixSec.toFixed(1)}s of blend replays Clip A's tail so rotation/pan carries through`}
@@ -242,7 +242,7 @@ export function BlendControls() {
               onChange={e => setMotionSuffixSec(parseFloat(e.target.value))}
               className="w-full"
             />
-            <p className="text-[9px] text-text-muted/60 mt-0.5">
+            <p className="text-[9px] text-text-muted mt-0.5">
               {motionSuffixSec === 0
                 ? 'Single end-frame anchor — model may slow-mo into the landing'
                 : `Last ${motionSuffixSec.toFixed(1)}s of blend previews Clip B's head so motion lands at real speed`}
@@ -260,7 +260,7 @@ export function BlendControls() {
               onChange={e => setAnchorStrength(parseFloat(e.target.value))}
               className="w-full"
             />
-            <p className="text-[9px] text-text-muted/60 mt-0.5">
+            <p className="text-[9px] text-text-muted mt-0.5">
               Higher = tighter lock to Clip A/B endpoints (may crossfade).
               Lower = AI invents more motion between them (may drift).
               Start at 0.7.

@@ -6,7 +6,7 @@ import type { GenerateParams } from '../../types'
 
 const TEXTAREA_BASE =
   'w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary ' +
-  'placeholder:text-text-muted/50 focus:outline-none focus:border-accent-blue resize-none overflow-hidden'
+  'placeholder:text-text-muted focus:outline-none focus:border-accent-blue resize-none overflow-hidden'
 
 // Textarea that grows to fit its content (no inner scrollbar — the sidebar
 // already scrolls). Re-measures on every value change, so it also expands

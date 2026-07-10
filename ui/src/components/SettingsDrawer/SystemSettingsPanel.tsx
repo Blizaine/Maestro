@@ -150,7 +150,7 @@ function ModelVisibilitySection() {
         <span className="flex-1 text-left">Enabled Models</span>
         <span className="text-[10px] text-text-muted font-normal normal-case flex items-center gap-1.5">
           {enabledCount}/{totalCount}
-          <span className="text-text-muted/40">|</span>
+          <span className="text-text-muted">|</span>
           <span className="flex items-center gap-0.5">
             <Download size={9} />
             {downloadedCount}
@@ -230,12 +230,12 @@ function ModelVisibilitySection() {
                           {m.is_downloaded ? (
                             <Check size={10} className="text-green-400 shrink-0" />
                           ) : (
-                            <Download size={10} className="text-text-muted/30 shrink-0" />
+                            <Download size={10} className="text-text-muted shrink-0" />
                           )}
                           <span className={`text-xs truncate ${
                             m.is_downloaded
                               ? 'text-text-secondary group-hover:text-text-primary'
-                              : 'text-text-muted/60 group-hover:text-text-muted'
+                              : 'text-text-muted group-hover:text-text-secondary'
                           }`}>
                             {m.name}
                           </span>
@@ -249,8 +249,8 @@ function ModelVisibilitySection() {
                               confirmDelete === m.model_type
                                 ? 'bg-red-500/20 text-red-400'
                                 : deleting === m.model_type
-                                  ? 'text-text-muted/30 cursor-wait'
-                                  : 'text-text-muted/30 opacity-0 group-hover:opacity-100 hover:text-red-400'
+                                  ? 'text-text-muted cursor-wait'
+                                  : 'text-text-muted opacity-0 group-hover:opacity-100 hover:text-red-400'
                             }`}
                             title={confirmDelete === m.model_type ? 'Click again to confirm delete' : 'Delete model files'}
                           >

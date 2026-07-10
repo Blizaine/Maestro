@@ -213,14 +213,14 @@ export function InpaintControls() {
       {/* SAM Target — what to segment */}
       <div>
         <label className="text-[10px] text-text-muted uppercase tracking-wider mb-1 block">
-          What to select <span className="normal-case text-text-muted/50">(for SAM segmentation)</span>
+          What to select <span className="normal-case text-text-muted">(for SAM segmentation)</span>
         </label>
         <input
           type="text"
           value={samTarget}
           onChange={e => setSamTarget(e.target.value)}
           placeholder='e.g. "the woman", "his hands", "the sky"'
-          className="w-full bg-bg-tertiary border border-border rounded px-2.5 py-1.5 text-xs text-text-primary placeholder:text-text-muted/40 focus:outline-none focus:border-accent-blue"
+          className="w-full bg-bg-tertiary border border-border rounded px-2.5 py-1.5 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue"
         />
         <label className="flex items-center gap-2 mt-1.5 cursor-pointer">
           <input type="checkbox"
@@ -228,7 +228,7 @@ export function InpaintControls() {
             onChange={e => useStore.setState({ editInvertMask: e.target.checked, editMasksPath: null, editMaskPreview: null })}
             className="w-3 h-3 rounded border-border accent-accent-blue" />
           <span className="text-[10px] text-text-secondary">Invert mask</span>
-          <span className="text-[9px] text-text-muted/50 ml-auto">Edit everything except selection</span>
+          <span className="text-[9px] text-text-muted ml-auto">Edit everything except selection</span>
         </label>
       </div>
 
@@ -267,7 +267,7 @@ export function InpaintControls() {
               onChange={e => setPromptStrength(parseFloat(e.target.value))}
               className="w-full"
             />
-            <p className="text-[9px] text-text-muted/60 mt-0.5">
+            <p className="text-[9px] text-text-muted mt-0.5">
               CFG — how hard the model follows your prompt inside the masked region.
               1.0 ≈ prompt ignored (output looks like original). 3–4 ≈ balanced. 5+ ≈ strong, may distort.
             </p>
@@ -284,7 +284,7 @@ export function InpaintControls() {
               onChange={e => setRetakeStrength(parseFloat(e.target.value))}
               className="w-full"
             />
-            <p className="text-[9px] text-text-muted/60 mt-0.5">
+            <p className="text-[9px] text-text-muted mt-0.5">
               How aggressively the masked region is re-generated. 0.1–0.4 = subtle tweak, keeps source look.
               0.7–0.9 = full replacement with prompt content.
             </p>
@@ -295,7 +295,7 @@ export function InpaintControls() {
       {/* Status */}
       {error && <div className="text-[10px] text-red-400 bg-red-500/10 border border-red-500/20 rounded px-2 py-1.5">{error}</div>}
 
-      <p className="text-[9px] text-text-muted/60 text-center">
+      <p className="text-[9px] text-text-muted text-center">
         Preview Mask checks targeting. Use the prompt below for what to generate, then click Generate.
       </p>
     </div>

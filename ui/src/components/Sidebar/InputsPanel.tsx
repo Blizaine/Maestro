@@ -600,7 +600,7 @@ export function InputsPanel() {
                     onClick={() => setFramePosition(selectedFrameTile, selectedFrameTile.window, preset.value)}
                     className={`flex-1 text-[10px] py-0.5 rounded transition-colors ${
                       active ? 'bg-accent-blue text-white'
-                        : disabled ? 'bg-bg-secondary text-text-muted/30 cursor-not-allowed'
+                        : disabled ? 'bg-bg-secondary text-text-muted cursor-not-allowed'
                         : 'bg-bg-secondary text-text-muted hover:text-text-primary hover:bg-bg-hover'
                     }`}>{preset.label}</button>
                 )
@@ -620,7 +620,7 @@ export function InputsPanel() {
                 onChange={e => setParam('input_video_strength', parseFloat(e.target.value))} className="w-full h-1 accent-accent-blue" />
             </>
           ) : null}
-          <p className="text-[9px] text-text-muted/60">{frameRoutingHint(selectedFrameTile)}</p>
+          <p className="text-[9px] text-text-muted">{frameRoutingHint(selectedFrameTile)}</p>
         </Strip>
       )}
 
@@ -630,7 +630,7 @@ export function InputsPanel() {
           <Row label="Source video strength" value={inputVideoStrength.toFixed(2)} />
           <input type="range" min={0} max={1} step={0.05} value={inputVideoStrength}
             onChange={e => setParam('input_video_strength', parseFloat(e.target.value))} className="w-full h-1 accent-accent-blue" />
-          <p className="text-[9px] text-text-muted/60">1.0 = seamless continuation; lower gives more creative freedom. New content is appended after the source.</p>
+          <p className="text-[9px] text-text-muted">1.0 = seamless continuation; lower gives more creative freedom. New content is appended after the source.</p>
         </Strip>
       )}
 
@@ -657,7 +657,7 @@ export function InputsPanel() {
           <Row label="Identity scale" value={String(identityScale)} />
           <input type="range" min={0} max={10} step={0.5} value={identityScale}
             onChange={e => setIdentityScale(parseFloat(e.target.value))} className="w-full h-1 accent-accent-blue" />
-          <p className="text-[9px] text-text-muted/60">~5s voice sample. With an active ID-LoRA, keeps the speaker's voice consistent across clips.</p>
+          <p className="text-[9px] text-text-muted">~5s voice sample. With an active ID-LoRA, keeps the speaker's voice consistent across clips.</p>
         </Strip>
       )}
 
@@ -673,7 +673,7 @@ export function InputsPanel() {
             </div>
           )}
           {hasLandscapeMode && imageRefType === 'KI' && (
-            <p className="text-[9px] text-text-muted/60">First image is the main subject/landscape; the rest are people/objects. Drag tiles to reorder.</p>
+            <p className="text-[9px] text-text-muted">First image is the main subject/landscape; the rest are people/objects. Drag tiles to reorder.</p>
           )}
           {refBgLabel && (
             <label className="flex items-start gap-2 cursor-pointer">

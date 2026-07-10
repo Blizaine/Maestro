@@ -65,7 +65,7 @@ export function ImageUpload() {
             onChange={e => setParam('input_video_strength', parseFloat(e.target.value))}
             className="w-full h-1 accent-accent-blue"
           />
-          <p className="text-[9px] text-text-muted/60">Lower values can increase motion</p>
+          <p className="text-[9px] text-text-muted">Lower values can increase motion</p>
         </div>
       )}
     </div>
@@ -111,7 +111,7 @@ function DropZone({ label, sublabel, file, onDrop, onSelect, onClear }: {
         <>
           <Upload size={16} className="text-text-muted" />
           <span className="text-[11px] text-text-muted text-center">{label}</span>
-          {sublabel && <span className="text-[9px] text-text-muted/60">{sublabel}</span>}
+          {sublabel && <span className="text-[9px] text-text-muted">{sublabel}</span>}
         </>
       )}
     </div>

@@ -116,7 +116,7 @@ export function MixerControls() {
       {/* Base Track */}
       <div>
         <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">
-          Base Track <span className="normal-case text-text-muted/50">(full duration)</span>
+          Base Track <span className="normal-case text-text-muted">(full duration)</span>
         </label>
         <FileUploadZone
           label="Drop base audio (.wav, .mp3)"
@@ -160,7 +160,7 @@ export function MixerControls() {
         </div>
 
         {overlays.length === 0 && (
-          <p className="text-[9px] text-text-muted/50 text-center py-2">
+          <p className="text-[9px] text-text-muted text-center py-2">
             Add overlay tracks (SFX, ambience) to layer on top of the base track.
           </p>
         )}

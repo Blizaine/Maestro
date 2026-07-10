@@ -118,7 +118,7 @@ export function RetakeDialog() {
               onChange={e => setPrompt(e.target.value)}
               placeholder="Describe the new content for the selected time range..."
               rows={2}
-              className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary placeholder:text-text-muted/40 focus:outline-none focus:border-accent-blue"
+              className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue"
               style={{ resize: 'vertical', minHeight: 48 }} />
           </div>
 
@@ -128,7 +128,7 @@ export function RetakeDialog() {
               onChange={e => setRegenerateAudio(e.target.checked)}
               className="w-3.5 h-3.5 rounded border-border accent-accent-blue" />
             <span className="text-xs text-text-secondary">Regenerate Audio</span>
-            <span className="text-[9px] text-text-muted/60 ml-auto">
+            <span className="text-[9px] text-text-muted ml-auto">
               {regenerateAudio ? 'New audio from prompt' : 'Keep source audio'}
             </span>
           </label>
@@ -145,7 +145,7 @@ export function RetakeDialog() {
                 <input type="text" value={negPrompt}
                   onChange={e => setNegPrompt(e.target.value)}
                   placeholder="What to avoid..."
-                  className="w-full bg-bg-tertiary border border-border rounded px-2.5 py-1.5 text-xs text-text-primary placeholder:text-text-muted/40 focus:outline-none focus:border-accent-blue" />
+                  className="w-full bg-bg-tertiary border border-border rounded px-2.5 py-1.5 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue" />
               </div>
               <div className="grid grid-cols-3 gap-2">
                 <div>
@@ -169,7 +169,7 @@ export function RetakeDialog() {
           )}
 
           {/* Model + LoRA info */}
-          <p className="text-[9px] text-text-muted/50">
+          <p className="text-[9px] text-text-muted">
             <span title={modelType}>Model: {modelLabel}</span> | Engine: Native
             {activatedLoras.length > 0 && ` | LoRAs: ${activatedLoras.length}`}
           </p>

@@ -81,7 +81,7 @@ export function VoiceRefSection() {
           </div>
         </div>
       ) : (
-        <p className="text-[10px] text-text-muted/70 italic">
+        <p className="text-[10px] text-text-muted italic">
           ~5-second voice sample. Combined with an active ID-LoRA, keeps the speaker's voice consistent across video clips.
         </p>
       )}

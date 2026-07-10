@@ -31,7 +31,7 @@
   /* Text */
   --color-text-primary: #e8e8ef;
   --color-text-secondary: #9898a8;
-  --color-text-muted: #5a5a6a;
+  --color-text-muted: #8c8ca0;  /* was #5a5a6a (2.9:1) — raised for WCAG-legible muted text, issue #7 */
 
   /* Semantic accents — repointed per theme */
   --color-accent-green: #22c55e;
@@ -133,7 +133,7 @@
   /* Text — neutral off-white with no temperature bias */
   --color-text-primary: #eaeaea;
   --color-text-secondary: #999999;
-  --color-text-muted: #555555;
+  --color-text-muted: #8a8a8a;  /* was #555555 (2.7:1) — raised for WCAG-legible muted text, issue #7 */
 
   /* Repoint semantic accents — both go warm in Golden Hour so the
      theme reads cohesively, with deliberate hue separation between
@@ -268,7 +268,7 @@
      on pure black is harsh on the eyes during long sessions). */
   --color-text-primary: #e8e8e8;
   --color-text-secondary: #a0a0a0;
-  --color-text-muted: #5a5a5a;
+  --color-text-muted: #8f8f8f;  /* was #5a5a5a (3.0:1) — raised for WCAG-legible muted text, issue #7 */
 
   /* Accents — neutral greys instead of color. Action affordances
      (accent-blue) and decorative success indicators (accent-green)

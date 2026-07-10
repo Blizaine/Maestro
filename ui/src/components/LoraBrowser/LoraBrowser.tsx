@@ -315,7 +315,7 @@ export function LoraBrowser() {
                 value={importUrl}
                 onChange={e => setImportUrl(e.target.value)}
                 placeholder="HuggingFace repo or CivitAI model URL"
-                className="flex-1 bg-bg-secondary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary placeholder:text-text-muted/40 focus:outline-none focus:border-accent-blue"
+                className="flex-1 bg-bg-secondary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue"
                 onKeyDown={e => {
                   if (e.key === 'Enter' && importUrl.trim() && !importing) {
                     e.preventDefault()
@@ -483,7 +483,7 @@ export function LoraBrowser() {
                 className="w-3.5 h-3.5 rounded accent-amber-500 disabled:opacity-40"
               />
               <span className={`flex items-center gap-0.5 ${
-                updatableOnly ? 'text-amber-400' : updatableCount > 0 ? 'text-text-secondary' : 'text-text-muted/50'
+                updatableOnly ? 'text-amber-400' : updatableCount > 0 ? 'text-text-secondary' : 'text-text-muted'
               }`}>
                 <ArrowUpCircle size={11} />
                 Updates

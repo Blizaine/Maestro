@@ -50,7 +50,7 @@ export function SfxControls() {
       {/* Video clip upload (optional) */}
       <div>
         <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">
-          Video Clip <span className="normal-case text-text-muted/50">(optional)</span>
+          Video Clip <span className="normal-case text-text-muted">(optional)</span>
         </label>
         <FileUploadZone
           label={uploading ? 'Uploading...' : 'Drop video to generate matching audio'}
@@ -62,7 +62,7 @@ export function SfxControls() {
             setVideoFilename(null)
           }}
         />
-        <p className="text-[9px] text-text-muted/60 mt-1">
+        <p className="text-[9px] text-text-muted mt-1">
           With video: generates matching sound effects. Without: generates from text prompt.
         </p>
       </div>
@@ -95,7 +95,7 @@ export function SfxControls() {
           onChange={e => setParam('MMAudio_prompt' as keyof typeof params, e.target.value)}
           placeholder="e.g. rain falling on roof, distant thunder, birds chirping"
           rows={2}
-          className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary placeholder:text-text-muted/40 focus:outline-none focus:border-accent-blue"
+          className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue"
           style={{ resize: 'vertical', minHeight: 48 }}
         />
       </div>
@@ -110,7 +110,7 @@ export function SfxControls() {
           value={sfxNegPrompt}
           onChange={e => setParam('MMAudio_neg_prompt' as keyof typeof params, e.target.value)}
           placeholder="e.g. music, speech, talking"
-          className="w-full bg-bg-tertiary border border-border rounded px-2.5 py-1.5 text-xs text-text-primary placeholder:text-text-muted/40 focus:outline-none focus:border-accent-blue"
+          className="w-full bg-bg-tertiary border border-border rounded px-2.5 py-1.5 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue"
         />
       </div>
 
@@ -130,7 +130,7 @@ export function SfxControls() {
           value={textWeight}
           onChange={e => setParam('sfx_text_weight' as keyof typeof params, parseFloat(e.target.value))}
         />
-        <p className="text-[9px] text-text-muted/60 mt-0.5">
+        <p className="text-[9px] text-text-muted mt-0.5">
           How strongly the text prompt influences the output vs the video content.
         </p>
       </div>

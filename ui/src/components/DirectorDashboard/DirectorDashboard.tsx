@@ -161,7 +161,7 @@ function LlmLogPanel({ pipeline }: { pipeline: SavedPipelineState }) {
       <div className="flex items-center gap-2 text-[10px] text-text-muted">
         <Brain size={12} className="text-purple-400" />
         <span>{log.provider}/{log.model_id || 'unknown'}</span>
-        <span className="ml-1 text-text-muted/50">({passes?.length || 1} pass{(passes?.length || 1) > 1 ? 'es' : ''})</span>
+        <span className="ml-1 text-text-muted">({passes?.length || 1} pass{(passes?.length || 1) > 1 ? 'es' : ''})</span>
         <span className="ml-auto">{formatTime(log.planning_time_sec)}</span>
       </div>
 
@@ -257,7 +257,7 @@ function ClipCard({ clip, pipeline: _pipeline, onTag, onRerunImage, onRerunVideo
               <img src={getFileUrl(clip.start_image_filename)} alt={`Shot ${clip.index + 1}`}
                 className="w-full h-full object-cover" loading="lazy" />
             ) : (
-              <div className="w-full h-full flex items-center justify-center text-text-muted/30">
+              <div className="w-full h-full flex items-center justify-center text-text-muted">
                 <ImageIcon size={16} />
               </div>
             )}
@@ -268,12 +268,12 @@ function ClipCard({ clip, pipeline: _pipeline, onTag, onRerunImage, onRerunVideo
               <span className="text-[9px] text-text-muted uppercase tracking-wider">Image Prompt</span>
               <div className="flex items-center gap-1">
                 <button onClick={() => { setEditingImage(!editingImage); setEditImagePrompt(clip.image_prompt || '') }}
-                  className={`p-0.5 rounded transition-colors ${editingImage ? 'text-accent-blue' : 'text-text-muted/40 hover:text-text-muted'}`}
+                  className={`p-0.5 rounded transition-colors ${editingImage ? 'text-accent-blue' : 'text-text-muted hover:text-text-secondary'}`}
                   title="Edit prompt">
                   <Pencil size={9} />
                 </button>
                 <button onClick={() => onRerunImage(clip.index, editingImage ? editImagePrompt : undefined)}
-                  className="p-0.5 rounded text-text-muted/40 hover:text-accent-blue transition-colors"
+                  className="p-0.5 rounded text-text-muted hover:text-accent-blue transition-colors"
                   title="Re-generate start image">
                   <Camera size={10} />
                 </button>
@@ -289,7 +289,7 @@ function ClipCard({ clip, pipeline: _pipeline, onTag, onRerunImage, onRerunVideo
             ) : (
               <p className={`text-[10px] text-text-secondary ${expandImage ? '' : 'line-clamp-3'} cursor-pointer`}
                 onClick={() => setExpandImage(!expandImage)}>
-                {clip.image_prompt || <span className="italic text-text-muted/50">No image prompt</span>}
+                {clip.image_prompt || <span className="italic text-text-muted">No image prompt</span>}
               </p>
             )}
           </div>
@@ -316,7 +316,7 @@ function ClipCard({ clip, pipeline: _pipeline, onTag, onRerunImage, onRerunVideo
               {/* Show prompts without images if more prompts than files */}
               {clip.keyframe_prompts?.slice(clip.keyframe_filenames?.length || 0).map((kp, ki) => (
                 <div key={`p${ki}`} className="shrink-0 w-14 h-14 rounded border border-dashed border-border flex items-center justify-center">
-                  <p className="text-[7px] text-text-muted/50 p-1 line-clamp-3">{safeStr(kp)}</p>
+                  <p className="text-[7px] text-text-muted p-1 line-clamp-3">{safeStr(kp)}</p>
                 </div>
               ))}
             </div>
@@ -335,7 +335,7 @@ function ClipCard({ clip, pipeline: _pipeline, onTag, onRerunImage, onRerunVideo
                 setEditVideoPrompt(clip.video_prompt || '')
                 setEditWindowPrompts(clip.window_prompts || [])
               }}
-                className={`p-0.5 rounded transition-colors ${editingVideo ? 'text-accent-blue' : 'text-text-muted/40 hover:text-text-muted'}`}
+                className={`p-0.5 rounded transition-colors ${editingVideo ? 'text-accent-blue' : 'text-text-muted hover:text-text-secondary'}`}
                 title="Edit prompt">
                 <Pencil size={9} />
               </button>
@@ -346,7 +346,7 @@ function ClipCard({ clip, pipeline: _pipeline, onTag, onRerunImage, onRerunVideo
                   onRerunVideo(clip.index, editingVideo ? editVideoPrompt : undefined)
                 }
               }}
-                className="p-0.5 rounded text-text-muted/40 hover:text-green-400 transition-colors"
+                className="p-0.5 rounded text-text-muted hover:text-green-400 transition-colors"
                 title="Re-generate video clip">
                 <Film size={10} />
               </button>
@@ -393,7 +393,7 @@ function ClipCard({ clip, pipeline: _pipeline, onTag, onRerunImage, onRerunVideo
             ) : (
               <p className={`text-[10px] text-text-secondary ${expandVideo ? '' : 'line-clamp-3'} cursor-pointer`}
                 onClick={() => setExpandVideo(!expandVideo)}>
-                {clip.video_prompt || <span className="italic text-text-muted/50">No video prompt</span>}
+                {clip.video_prompt || <span className="italic text-text-muted">No video prompt</span>}
               </p>
             )
           )}

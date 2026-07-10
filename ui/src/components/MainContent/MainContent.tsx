@@ -576,7 +576,7 @@ export function MainContent() {
                     <li><span className="text-accent-blue font-medium">2.</span> Type a prompt — e.g. <span className="text-text-secondary italic">“{example}”</span></li>
                     <li><span className="text-accent-blue font-medium">3.</span> Hit Generate.</li>
                   </ol>
-                  <p className="text-[11px] text-text-muted/70 leading-snug">
+                  <p className="text-[11px] text-text-muted leading-snug">
                     Heads up: the first time you use a model, its weights download
                     once (often tens of GB) before generation starts — later runs
                     are fast. Progress shows at the bottom-right.

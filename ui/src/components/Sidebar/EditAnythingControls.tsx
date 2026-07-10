@@ -119,7 +119,7 @@ export function EditAnythingControls() {
               onChange={e => useStore.setState({ editAnythingLoraStrength: parseFloat(e.target.value) })}
               className="w-full"
             />
-            <p className="text-[9px] text-text-muted/60 mt-0.5">
+            <p className="text-[9px] text-text-muted mt-0.5">
               Per the LoRA card: start at 1.0. Bump to 1.2 if the edit is too weak; drop below if it distorts unrelated content.
             </p>
           </div>
@@ -134,7 +134,7 @@ export function EditAnythingControls() {
               onChange={e => useStore.setState({ editRetakeStrength: parseFloat(e.target.value) })}
               className="w-full"
             />
-            <p className="text-[9px] text-text-muted/60 mt-0.5">
+            <p className="text-[9px] text-text-muted mt-0.5">
               How much of the source's structure is regenerated. Lower = more source preserved (subtle edit), higher = more aggressive.
             </p>
           </div>
