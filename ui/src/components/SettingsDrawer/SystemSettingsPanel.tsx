@@ -234,7 +234,7 @@ function ModelVisibilitySection() {
                           )}
                           <span className={`text-xs truncate ${
                             m.is_downloaded
-                              ? 'text-text-secondary group-hover:text-text-primary'
+                              ? 'text-text-primary'
                               : 'text-text-muted group-hover:text-text-secondary'
                           }`}>
                             {m.name}
