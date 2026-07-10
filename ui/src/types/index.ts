@@ -79,6 +79,10 @@ export interface GenerateParams {
   // index signature widens explicit fields to `unknown` in some contexts).
   progressive_pipeline?: boolean
   single_stage_pipeline?: boolean
+  // Runs the reference two-stage pipeline (baked-in TenStrip 10Eros V5
+  // workflow config) instead of the standard one. Only sent for models
+  // whose def declares reference_pipeline support.
+  reference_pipeline?: boolean
   progressive_stage1_image_weight?: number
   progressive_stage2_steps?: number
   progressive_stage2_sigma?: number
@@ -206,6 +210,7 @@ export interface ModelOptions {
   sliding_window_defaults: Record<string, number> | null
   // LTX-2 Dev pipeline capabilities (guidance controls in Advanced Settings)
   perturbation?: boolean
+  reference_pipeline?: boolean
   cfg_star?: boolean
   adaptive_projected_guidance?: boolean
   audio_guidance?: boolean

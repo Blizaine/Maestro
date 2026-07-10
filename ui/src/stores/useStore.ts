@@ -3250,6 +3250,11 @@ export const useStore = create<AppState>((set, get) => ({
       delete params.perturbation_start_perc
       delete params.perturbation_end_perc
     }
+    // Reference pipeline is a per-model capability — strip a stale toggle
+    // value if the user switched to a model that doesn't support it.
+    if (!(state.modelOptions as Record<string, unknown> | null)?.reference_pipeline) {
+      delete params.reference_pipeline
+    }
 
     // Tag avatar/edit-mode generations with their sub-mode so the gallery's
     // Edits filter and the loadSettingsFromOutput restore path can identify
@@ -6210,6 +6215,9 @@ export const useStore = create<AppState>((set, get) => ({
       (newParams as Record<string, unknown>).single_stage_pipeline = true;
       (newParams as Record<string, unknown>).progressive_pipeline = false;
     }
+    // Reference two-stage pipeline (10Eros) — restore so re-generating an
+    // STG-era sidecar reproduces the pipeline that made it.
+    (newParams as Record<string, unknown>).reference_pipeline = (p.reference_pipeline as boolean) ?? undefined;
 
     // Advanced pipeline settings
     (newParams as Record<string, unknown>).stage2_steps = (p.stage2_steps as number) ?? undefined;

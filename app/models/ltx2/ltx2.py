@@ -1057,6 +1057,7 @@ class LTX2:
         retake_masks_path: str | None = None,
         retake_engine: str = "native",
         regenerate_audio: bool = True,
+        reference_pipeline: bool = False,
         progressive_pipeline: bool = False,
         progressive_stage2_steps: int = 5,
         progressive_stage3_steps: int = 3,
@@ -1929,7 +1930,27 @@ class LTX2:
 
         if isinstance(self.pipeline, TI2VidTwoStagesPipeline):
             negative_prompt = n_prompt if n_prompt else DEFAULT_NEGATIVE_PROMPT
-            pipeline_output = self.pipeline(
+            # Reference-workflow variant (Advanced Settings toggle). A lazily
+            # created sibling pipeline that shares the standard pipeline's
+            # models, components, and text-encoder cache — the standard
+            # two-stage pipeline object is never mutated. Mirrors the
+            # progressive_pipeline lazy-swap below.
+            active_two_stage = self.pipeline
+            if reference_pipeline:
+                if not hasattr(self, '_reference_pipeline'):
+                    from .ltx_pipelines.ti2vid_two_stages_ref import TI2VidTwoStagesRefPipeline
+                    self._reference_pipeline = TI2VidTwoStagesRefPipeline(
+                        device=self.device,
+                        stage_1_models=self.pipeline.stage_1_models,
+                        stage_2_models=self.pipeline.stage_2_models,
+                    )
+                    # Share mutable state so ID-LoRA refs and cached text
+                    # embeddings behave identically on both paths.
+                    self._reference_pipeline.pipeline_components = self.pipeline.pipeline_components
+                    self._reference_pipeline.text_encoder_cache = self.pipeline.text_encoder_cache
+                    print("[LTX2] Reference two-stage pipeline initialized (lazy)")
+                active_two_stage = self._reference_pipeline
+            pipeline_output = active_two_stage(
                 prompt=input_prompt,
                 negative_prompt=negative_prompt,
                 seed=int(seed),

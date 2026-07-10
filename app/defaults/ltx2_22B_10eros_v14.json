@@ -1,17 +1,17 @@
 {
     "model": {
-        "name": "LTX-2.3 22B 10Eros (Mature)",
+        "name": "LTX-2.3 22B 10Eros v1.4 (Mature)",
         "architecture": "ltx2_22B",
-        "description": "Community fine-tune of LTX-2.3 22B (TenStrip/LTX2.3-10Eros) tuned for explicit content. Based on SulphurAI/Sulphur-2-base. Full BF16 checkpoint with FP8 mixed-precision fallback for lower-VRAM systems. Auto-bundles the cond_safe distilled LoRA the author's reference workflow depends on (without it the model produces noisy motion on movement). Available only when Mature Mode is enabled.",
+        "description": "10Eros v1.4 — the current line of TenStrip/LTX2.3-10Eros (v1.3 'full remix' plus restored explicit prompting and motion control; prioritizes avoiding anatomy confusion). Bundles the rank72_energy distilled LoRA at the reference workflow's per-stage strengths (0.68 stage 1 / 0.38 stage 2) instead of v1's condsafe-at-1.0 pairing. Pairs with the 'Reference pipeline' toggle in Advanced Settings for the closest match to the author's published ComfyUI workflow. Available only when Mature Mode is enabled.",
         "URLs": [
-            "https://huggingface.co/TenStrip/LTX2.3-10Eros/resolve/main/10Eros_v1_bf16.safetensors",
-            "https://huggingface.co/TenStrip/LTX2.3-10Eros/resolve/main/10Eros_v1-fp8mixed_learned.safetensors"
+            "https://huggingface.co/TenStrip/LTX2.3-10Eros/resolve/main/10Eros_v1.4_bf16.safetensors",
+            "https://huggingface.co/TenStrip/LTX2.3-10Eros/resolve/main/10Eros_v1.4_fp8mixed_learned.safetensors"
         ],
         "preload_URLs": "ltx2_22B",
         "loras": [
-            "https://huggingface.co/TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments/resolve/main/ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors"
+            "https://huggingface.co/TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments/resolve/main/ltx-2.3-22b-distilled-lora-1.1_rank72_energy.safetensors"
         ],
-        "loras_multipliers": [1],
+        "loras_multipliers": ["0.68;0.38"],
         "nsfw_only": true,
         "reference_pipeline": true,
         "enhance_guide": "10eros_video_rules"

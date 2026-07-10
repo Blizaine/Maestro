@@ -4063,6 +4063,7 @@ def get_model_options(model_type: str):
 
         # LTX-2 Dev pipeline capabilities (for guidance controls in Advanced Settings)
         "perturbation": md.get("perturbation", False),
+        "reference_pipeline": md.get("reference_pipeline", False),
         "cfg_star": md.get("cfg_star", False),
         "adaptive_projected_guidance": md.get("adaptive_projected_guidance", False),
         "audio_guidance": md.get("audio_guidance", False),
@@ -7558,6 +7559,11 @@ async def blend_endpoint(request: Request):
             "image_mode",
             # Blend is always a single generation; don't inherit Studio's repeat
             "repeat_generation",
+            # Reference pipeline is a per-model Advanced Settings toggle for
+            # plain generations; a blend inheriting it would silently switch
+            # the sampling pipeline (and its blend target model may not even
+            # support it). Never inherit.
+            "reference_pipeline",
             # These had their own top-level overrides below
             "prompt", "model_type", "seed", "activated_loras", "loras_multipliers",
         ):

@@ -99,7 +99,7 @@ CONFIG_FILENAME = "wgp_config.json"
 PROMPT_VARS_MAX = 10
 target_mmgp_version = "3.7.6"
 WanGP_version = "10.9875"
-settings_version = 2.56
+settings_version = 2.57
 max_source_video_frames = 15000  # raised to support frame injection in long sliding-window videos (e.g. 9 windows × 20s × 25fps = 4500 frames)
 prompt_enhancer_image_caption_model, prompt_enhancer_image_caption_processor, prompt_enhancer_llm_model, prompt_enhancer_llm_tokenizer = None, None, None, None
 image_names_list = ["image_start", "image_end", "image_refs"]
@@ -3023,6 +3023,17 @@ def fix_settings(model_type, ui_defaults, min_settings_version = 0):
             ui_defaults.setdefault("guidance_scale", 1)
         elif base_model_type == "hidream_o1_dev":
             ui_defaults.setdefault("guidance_scale", 1)
+
+    if settings_version < 2.57:
+        # 10Eros STG layers: the shipped default said block 28, which has no
+        # source in the author's reference workflow (the 10S STG guider
+        # documents blocks 14+19 as matching upstream Lightricks). Cached
+        # settings files keep the stale value forever, so migrate — but only
+        # the exact old default: fix_settings also runs on live generation
+        # params, and matching on [28] preserves a deliberate user choice of
+        # any other layer set.
+        if model_type == "ltx2_22B_10eros" and ui_defaults.get("perturbation_layers") == [28]:
+            ui_defaults["perturbation_layers"] = [14, 19]
 
     audio_prompt_type = ui_defaults.get("audio_prompt_type", None)
     if settings_version < 2.2: 
@@ -6542,6 +6553,12 @@ def generate_video(
     retake_masks_path=None,
     retake_engine="native",
     regenerate_audio=True,
+    # Reference-workflow two-stage pipeline (TenStrip 10Eros V5 config baked
+    # into ti2vid_two_stages_ref.py). Read by ltx2.py, which lazy-swaps to
+    # the sibling pipeline; the standard two-stage path is untouched when
+    # False. Only models whose def carries "reference_pipeline": true keep
+    # this key (see prepare_inputs_dict).
+    reference_pipeline=False,
     progressive_pipeline=False,
     progressive_stage2_steps=5,
     progressive_stage3_steps=3,
@@ -6884,7 +6901,14 @@ def generate_video(
     transformer_loras_filenames, transformer_loras_multipliers  = get_transformer_loras(model_type)
     if guidance_phases < 1: guidance_phases = 1
     if transformer_loras_filenames != None:
-        loras_list_mult_choices_nums, loras_slists, errors =  parse_loras_multipliers(transformer_loras_multipliers, len(transformer_loras_filenames), num_inference_steps, nb_phases = guidance_phases, model_switch_phase= model_switch_phase )
+        # Model-def bundled LoRA multipliers may use the ";" phase syntax
+        # (e.g. 10Eros v1.4 ships "0.68;0.38" = stage 1 / stage 2). Parse
+        # them against the MODEL's phase capability, not the request's
+        # guidance_phases — a minimal API request that omits guidance_phases
+        # inherits 1 from primary settings and would otherwise hard-fail
+        # with "at most 1 phases" on a def the author shipped as two-phase.
+        model_def_nb_phases = max(int(model_def.get("guidance_max_phases", guidance_phases) or 1), guidance_phases)
+        loras_list_mult_choices_nums, loras_slists, errors =  parse_loras_multipliers(transformer_loras_multipliers, len(transformer_loras_filenames), num_inference_steps, nb_phases = model_def_nb_phases, model_switch_phase= model_switch_phase )
         if len(errors) > 0: raise Exception(f"Error parsing Transformer Loras: {errors}")
         loras_selected = transformer_loras_filenames 
 
@@ -7910,6 +7934,7 @@ def generate_video(
                     retake_masks_path=retake_masks_path,
                     retake_engine=retake_engine,
                     regenerate_audio=regenerate_audio,
+                    reference_pipeline=reference_pipeline,
                     progressive_pipeline=progressive_pipeline,
                     single_stage_pipeline=single_stage_pipeline,
                     progressive_stage2_steps=progressive_stage2_steps,
@@ -9708,6 +9733,9 @@ def prepare_inputs_dict(target, inputs, model_type = None, model_filename = None
 
     if not model_def.get("perturbation", False):
         pop += ["perturbation_switch", "perturbation_layers", "perturbation_start_perc", "perturbation_end_perc", "stg_scale"]
+
+    if not model_def.get("reference_pipeline", False):
+        pop += ["reference_pipeline"]
 
     if not model_def.get("cfg_zero", False):
         pop += [ "cfg_zero_step"  ]

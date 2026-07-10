@@ -571,6 +571,30 @@ export function AdvancedSettings() {
                 </div>
               )}
 
+              {/* Reference Pipeline (10Eros — runs the author's published
+                  ComfyUI workflow config: 9+3 eased steps, per-step CFG
+                  2.0/1.5 then off, STG on blocks 14+19 for the first 4
+                  steps, RF euler_ancestral). Shown only for models whose
+                  def declares reference_pipeline support. */}
+              {(modelOptions as Record<string, unknown> | null)?.reference_pipeline && (
+                <div className="space-y-1">
+                  <label className="flex items-center gap-2 cursor-pointer group">
+                    <input type="checkbox"
+                      checked={!!params.reference_pipeline}
+                      onChange={e => setParam('reference_pipeline', e.target.checked ? true : undefined)}
+                      className="accent-accent-blue" />
+                    <span className="text-[11px] text-text-muted uppercase tracking-wider group-hover:text-text-secondary transition-colors">
+                      Reference Pipeline (10Eros)
+                    </span>
+                  </label>
+                  <p className="text-[9px] text-text-muted/60">
+                    Runs the model author&apos;s ComfyUI workflow config: 9+3 steps on hand-tuned sigmas,
+                    CFG only on the first 2 steps, STG on the first 4, ancestral sampling.
+                    Steps / CFG / STG sliders below are ignored while this is on.
+                  </p>
+                </div>
+              )}
+
               {/* Inference Steps (hidden for distilled/locked models and TTS) */}
               {!modelOptions?.lock_inference_steps && !isAudioOnly && (
                 <div>
