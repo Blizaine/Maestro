@@ -86,6 +86,13 @@ export interface GenerateParams {
   progressive_stage3_sigma?: number
   progressive_stage3_image_weight?: number
   stg_scale?: number
+  // STG only runs when the backend sees perturbation_switch === 2 with the
+  // model-correct perturbation_layers; startGeneration derives the switch
+  // from stg_scale and _applyModelDefaults supplies the layers/window.
+  perturbation_switch?: number
+  perturbation_layers?: number[]
+  perturbation_start_perc?: number
+  perturbation_end_perc?: number
   cfg_rescale?: number
   use_gradient_estimation?: boolean
   ge_gamma?: number
@@ -197,6 +204,11 @@ export interface ModelOptions {
   self_refiner: boolean
   self_refiner_max_plans: number
   sliding_window_defaults: Record<string, number> | null
+  // LTX-2 Dev pipeline capabilities (guidance controls in Advanced Settings)
+  perturbation?: boolean
+  cfg_star?: boolean
+  adaptive_projected_guidance?: boolean
+  audio_guidance?: boolean
   fps: number
   frames_minimum: number
   frames_steps: number

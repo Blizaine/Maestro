@@ -277,6 +277,18 @@ const _PRIMARY_MODEL_DEFAULT_FIELDS: ReadonlyArray<string> = [
   'sample_solver',
   'embedded_guidance_scale',
   'audio_guidance_scale',
+  // Perturbation config for the STG slider. These are inert unless
+  // perturbation_switch === 2, which startGeneration derives from the
+  // STG slider — the server-side fallback layers ([9]) are wrong for
+  // LTX-2 22B (needs [28] from the model's settings file), so the
+  // model-correct values must ride along with the request.
+  // Deliberately NOT copied: perturbation_switch and stg_scale — older
+  // generated settings files carry perturbation_switch: 2 / stg_scale: 1.0
+  // from the settings-file era, and copying them would silently re-enable
+  // STG on every generation.
+  'perturbation_layers',
+  'perturbation_start_perc',
+  'perturbation_end_perc',
 ]
 
 function _applyModelDefaults(
@@ -3219,6 +3231,25 @@ export const useStore = create<AppState>((set, get) => ({
     }
 
     const params: Record<string, unknown> = { ...state.params, generation_mode: state.generationMode, workspace: state.activeWorkspace }
+
+    // STG (Spatio-Temporal Guidance) wiring. The backend only runs STG when
+    // perturbation_switch === 2 (skip-self-attention) — stg_scale alone is
+    // inert. Derive the switch from the slider so an untouched slider keeps
+    // the exact request shape from before this feature existed, and strip
+    // all perturbation params for models without the capability so a stale
+    // value can't leak across a model switch.
+    if (state.modelOptions?.perturbation) {
+      const stg = params.stg_scale as number | undefined
+      if (stg !== undefined) {
+        params.perturbation_switch = stg > 0 ? 2 : 0
+      }
+    } else {
+      delete params.stg_scale
+      delete params.perturbation_switch
+      delete params.perturbation_layers
+      delete params.perturbation_start_perc
+      delete params.perturbation_end_perc
+    }
 
     // Tag avatar/edit-mode generations with their sub-mode so the gallery's
     // Edits filter and the loadSettingsFromOutput restore path can identify
@@ -6183,6 +6214,12 @@ export const useStore = create<AppState>((set, get) => ({
     // Advanced pipeline settings
     (newParams as Record<string, unknown>).stage2_steps = (p.stage2_steps as number) ?? undefined;
     (newParams as Record<string, unknown>).stg_scale = (p.stg_scale as number) ?? undefined;
+    // Perturbation config rides along with stg_scale so re-generating an STG
+    // run is faithful. Old sidecars (pre-STG-wiring) simply lack these keys.
+    (newParams as Record<string, unknown>).perturbation_switch = (p.perturbation_switch as number) ?? undefined;
+    (newParams as Record<string, unknown>).perturbation_layers = Array.isArray(p.perturbation_layers) ? (p.perturbation_layers as number[]) : undefined;
+    (newParams as Record<string, unknown>).perturbation_start_perc = (p.perturbation_start_perc as number) ?? undefined;
+    (newParams as Record<string, unknown>).perturbation_end_perc = (p.perturbation_end_perc as number) ?? undefined;
     (newParams as Record<string, unknown>).cfg_rescale = (p.cfg_rescale as number) ?? undefined;
     (newParams as Record<string, unknown>).modality_scale = (p.modality_scale as number) ?? undefined;
     (newParams as Record<string, unknown>).use_gradient_estimation = (p.use_gradient_estimation as boolean) ?? undefined;

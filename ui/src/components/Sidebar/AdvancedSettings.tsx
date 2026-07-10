@@ -621,13 +621,13 @@ export function AdvancedSettings() {
                   <div>
                     <div className="flex items-center justify-between mb-1.5">
                       <label className="text-[11px] text-text-muted uppercase tracking-wider">STG Scale</label>
-                      <span className="text-xs text-text-secondary">{(params.stg_scale ?? 1.0).toFixed(1)}</span>
+                      <span className="text-xs text-text-secondary">{(params.stg_scale ?? 0) > 0 ? (params.stg_scale as number).toFixed(1) : 'Off'}</span>
                     </div>
                     <input type="range" min={0} max={3} step={0.1}
-                      value={params.stg_scale ?? 1.0}
+                      value={params.stg_scale ?? 0}
                       onChange={e => setParam('stg_scale', parseFloat(e.target.value))}
                       className="w-full" />
-                    <p className="text-[9px] text-text-muted/60 mt-0.5">Spatio-temporal guidance strength. 0=off, 1.0=default</p>
+                    <p className="text-[9px] text-text-muted/60 mt-0.5">Spatio-temporal guidance. 0 = off. Sharpens structure &amp; motion via a third denoising pass (~50% slower). Try 1.0.</p>
                   </div>
 
                   {/* CFG Rescale */}
