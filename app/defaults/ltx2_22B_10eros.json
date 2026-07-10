@@ -11,7 +11,9 @@
         "loras": [
             "https://huggingface.co/TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments/resolve/main/ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors"
         ],
-        "loras_multipliers": [1],
+        "loras_multipliers": [
+            1
+        ],
         "nsfw_only": true,
         "reference_pipeline": true,
         "enhance_guide": "10eros_video_rules"
@@ -25,9 +27,13 @@
     "alt_guidance_scale": 1.0,
     "alt_scale": 0.0,
     "perturbation_switch": 0,
-    "perturbation_layers": [14, 19],
+    "perturbation_layers": [
+        14,
+        19
+    ],
     "perturbation_start_perc": 0,
     "perturbation_end_perc": 100,
     "apg_switch": 0,
-    "cfg_star_switch": 0
+    "cfg_star_switch": 0,
+    "reference_pipeline": true
 }

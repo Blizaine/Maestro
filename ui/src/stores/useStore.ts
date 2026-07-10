@@ -289,6 +289,12 @@ const _PRIMARY_MODEL_DEFAULT_FIELDS: ReadonlyArray<string> = [
   'perturbation_layers',
   'perturbation_start_perc',
   'perturbation_end_perc',
+  // Default state of the Reference Pipeline toggle (10Eros defs set it to
+  // true). Only copied when the model's settings carry the key, so models
+  // without it keep whatever the user last chose — and startGeneration
+  // strips it for models that lack the capability anyway. Unchecking the
+  // toggle holds until the model is re-selected, same as steps/guidance.
+  'reference_pipeline',
 ]
 
 // Monotonic sequence for loadModelOptions staleness detection — only the

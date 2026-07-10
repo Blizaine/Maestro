@@ -2,7 +2,7 @@
     "model": {
         "name": "LTX-2.3 22B 10Eros v1.4 (Mature)",
         "architecture": "ltx2_22B",
-        "description": "10Eros v1.4 — the current line of TenStrip/LTX2.3-10Eros (v1.3 'full remix' plus restored explicit prompting and motion control; prioritizes avoiding anatomy confusion). Bundles the rank72_energy distilled LoRA at the reference workflow's per-stage strengths (0.68 stage 1 / 0.38 stage 2) instead of v1's condsafe-at-1.0 pairing, and uses the author's abliterated Gemma-3 12B text encoder (~12.8 GB one-time download) as the reference workflows do — better prompt fidelity for explicit content than the standard QAT encoder. Pairs with the 'Reference pipeline' toggle in Advanced Settings for the closest match to the author's published ComfyUI workflow. Available only when Mature Mode is enabled.",
+        "description": "10Eros v1.4 \u2014 the current line of TenStrip/LTX2.3-10Eros (v1.3 'full remix' plus restored explicit prompting and motion control; prioritizes avoiding anatomy confusion). Bundles the rank72_energy distilled LoRA at the reference workflow's per-stage strengths (0.68 stage 1 / 0.38 stage 2) instead of v1's condsafe-at-1.0 pairing, and uses the author's abliterated Gemma-3 12B text encoder (~12.8 GB one-time download) as the reference workflows do \u2014 better prompt fidelity for explicit content than the standard QAT encoder. Pairs with the 'Reference pipeline' toggle in Advanced Settings for the closest match to the author's published ComfyUI workflow. Available only when Mature Mode is enabled.",
         "URLs": [
             "https://huggingface.co/TenStrip/LTX2.3-10Eros/resolve/main/10Eros_v1.4_bf16.safetensors",
             "https://huggingface.co/TenStrip/LTX2.3-10Eros/resolve/main/10Eros_v1.4_fp8mixed_learned.safetensors"
@@ -11,7 +11,9 @@
         "loras": [
             "https://huggingface.co/TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments/resolve/main/ltx-2.3-22b-distilled-lora-1.1_rank72_energy.safetensors"
         ],
-        "loras_multipliers": ["0.68;0.38"],
+        "loras_multipliers": [
+            "0.68;0.38"
+        ],
         "text_encoder_URLs": [
             "https://huggingface.co/TenStrip/LTX2.3-10Eros/resolve/main/text_encoders/gemma-3-12b-it-ablit-norms-biproj-fp8mixed.safetensors"
         ],
@@ -28,9 +30,13 @@
     "alt_guidance_scale": 1.0,
     "alt_scale": 0.0,
     "perturbation_switch": 0,
-    "perturbation_layers": [14, 19],
+    "perturbation_layers": [
+        14,
+        19
+    ],
     "perturbation_start_perc": 0,
     "perturbation_end_perc": 100,
     "apg_switch": 0,
-    "cfg_star_switch": 0
+    "cfg_star_switch": 0,
+    "reference_pipeline": true
 }
