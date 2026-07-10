@@ -291,6 +291,10 @@ const _PRIMARY_MODEL_DEFAULT_FIELDS: ReadonlyArray<string> = [
   'perturbation_end_perc',
 ]
 
+// Monotonic sequence for loadModelOptions staleness detection — only the
+// most recently requested model's options may touch the store.
+let _modelOptionsSeq = 0
+
 function _applyModelDefaults(
   storeGet: () => { selectedModelPerMode: Partial<Record<GenerationMode, string>>; generationMode: GenerationMode; params: GenerateParams },
   storeSet: (fn: (s: { params: GenerateParams }) => { params: GenerateParams }) => void,
@@ -4238,9 +4242,16 @@ export const useStore = create<AppState>((set, get) => ({
   modelOptionsLoading: false,
 
   loadModelOptions: async (modelType) => {
+    const seq = ++_modelOptionsSeq
     set({ modelOptionsLoading: true })
     try {
       const options = await api.fetchModelOptions(modelType)
+      // Staleness guard: a newer loadModelOptions call was issued while this
+      // fetch was in flight (rapid model switching, or a settings restore
+      // that jumped models). Applying a superseded response would clobber
+      // params (default steps/guidance) and modelOptions with the WRONG
+      // model's values — last requested wins.
+      if (seq !== _modelOptionsSeq) return
       const { durationSeconds, slidingWindowSeconds } = get()
       const fps = options.fps || 16
       // Set overlap from model defaults
@@ -4296,7 +4307,11 @@ export const useStore = create<AppState>((set, get) => ({
         },
       }))
     } catch {
-      set({ modelOptions: null, modelOptionsLoading: false })
+      // Same staleness rule as the success path — a superseded request's
+      // failure must not null out the newer request's options.
+      if (seq === _modelOptionsSeq) {
+        set({ modelOptions: null, modelOptionsLoading: false })
+      }
     }
   },
 
@@ -6153,6 +6168,18 @@ export const useStore = create<AppState>((set, get) => ({
       set({ generationMode: mode })
     }
 
+    // Load model capabilities BEFORE applying the restored params.
+    // loadModelOptions merges model-default steps/guidance into params when
+    // its fetch resolves; it used to be fired at the END of this restore,
+    // so the defaults landed after the sidecar values and silently reverted
+    // num_inference_steps / guidance_scale on every pencil click. Awaiting
+    // it here means defaults land first and the restored values win — and
+    // modelOptions matches the restored model before rerollGeneration
+    // submits (stale capabilities used to strip stg_scale/perturbation_*
+    // from the request, which then poisoned the next sidecar with zeros).
+    get().loadLoras(modelType)
+    await get().loadModelOptions(modelType)
+
     // Detect I2V: if image_start was used or image_prompt_type contains "S"
     const hadStartImage = !!(p.image_start || (p.image_prompt_type as string || '').includes('S'))
     const hadEndImage = !!(p.image_end || (p.image_prompt_type as string || '').includes('E'))
@@ -6457,10 +6484,6 @@ export const useStore = create<AppState>((set, get) => ({
         }
       }
     }
-
-    // Trigger model side effects
-    get().loadLoras(modelType)
-    get().loadModelOptions(modelType)
 
     // Restore start/end images from upload URLs as File objects. Prefer
     // upload_filenames.image_{start,end} (basename); fall back to deriving
