@@ -1,238 +1,536 @@
-"""Remote 3D model provider adapters.
+"""Native Hunyuan3D job manager.
 
-The first integration layer treats 3D generators as external services. This
-keeps Maestro lightweight and lets users connect Pinokio launchers or other
-servers that already host Hunyuan3D, InstantMesh, TripoSR, Trellis, etc.
+The Hunyuan runtime lives inside Maestro but uses an isolated Python
+environment.  Each job runs in a short-lived worker process, so CUDA state and
+VRAM are fully released when generation finishes.  This is deliberately
+separate from Maestro's audio/video environment: the official Hunyuan3D 2.0
+and 2.1 stacks require older diffusers/transformers builds.
 """
 
 from __future__ import annotations
 
-import base64
 import json
-import mimetypes
 import os
+import re
+import subprocess
+import threading
 import time
 import uuid
-from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
-
-import requests
 
 
-MODEL3D_EXTENSIONS = {".glb", ".gltf", ".obj", ".ply", ".stl", ".usdz", ".zip"}
+SERVICE_DIR = Path(__file__).resolve().parent / "hunyuan3d"
+ENV_DIR = SERVICE_DIR / "env"
+WORKER_PATH = SERVICE_DIR / "worker.py"
+VENDOR_DIR = SERVICE_DIR / "vendor"
+JOBS_DIR = Path(__file__).resolve().parents[1] / "ckpts" / "model3d" / "jobs"
+HF_CACHE_DIR = Path(__file__).resolve().parents[1] / "ckpts" / "model3d" / "huggingface"
+
+MODEL3D_EXTENSIONS = {"glb", "gltf", "obj", "ply", "stl"}
 
 
-@dataclass(frozen=True)
-class Model3DProvider:
-    id: str
-    label: str
-    default_endpoint: str
-    input_modes: tuple[str, ...]
-    notes: str
+MODELS: list[dict[str, Any]] = [
+    {
+        "id": "hunyuan3d-2mini-turbo",
+        "label": "Hunyuan3D 2 Mini Turbo",
+        "engine": "v2",
+        "repo": "tencent/Hunyuan3D-2mini",
+        "subfolder": "hunyuan3d-dit-v2-mini-turbo",
+        "parameters": "0.6B",
+        "multiview": False,
+        "turbo": True,
+        "supports_text": True,
+        "recommended_vram_gb": 6,
+        "description": "Fastest geometry model; best when sharing the GPU with other Maestro workloads.",
+    },
+    {
+        "id": "hunyuan3d-2mini-fast",
+        "label": "Hunyuan3D 2 Mini Fast",
+        "engine": "v2",
+        "repo": "tencent/Hunyuan3D-2mini",
+        "subfolder": "hunyuan3d-dit-v2-mini-fast",
+        "parameters": "0.6B",
+        "multiview": False,
+        "turbo": False,
+        "supports_text": True,
+        "recommended_vram_gb": 6,
+        "description": "Small guidance-distilled model with a quality/speed balance.",
+    },
+    {
+        "id": "hunyuan3d-2mini",
+        "label": "Hunyuan3D 2 Mini",
+        "engine": "v2",
+        "repo": "tencent/Hunyuan3D-2mini",
+        "subfolder": "hunyuan3d-dit-v2-mini",
+        "parameters": "0.6B",
+        "multiview": False,
+        "turbo": False,
+        "supports_text": True,
+        "recommended_vram_gb": 6,
+        "description": "Full-step compact model.",
+    },
+    {
+        "id": "hunyuan3d-2-turbo",
+        "label": "Hunyuan3D 2 Turbo",
+        "engine": "v2",
+        "repo": "tencent/Hunyuan3D-2",
+        "subfolder": "hunyuan3d-dit-v2-0-turbo",
+        "parameters": "1.1B",
+        "multiview": False,
+        "turbo": True,
+        "supports_text": True,
+        "recommended_vram_gb": 8,
+        "description": "Fast full-size Hunyuan3D 2.0 geometry model.",
+    },
+    {
+        "id": "hunyuan3d-2-fast",
+        "label": "Hunyuan3D 2 Fast",
+        "engine": "v2",
+        "repo": "tencent/Hunyuan3D-2",
+        "subfolder": "hunyuan3d-dit-v2-0-fast",
+        "parameters": "1.1B",
+        "multiview": False,
+        "turbo": False,
+        "supports_text": True,
+        "recommended_vram_gb": 8,
+        "description": "Guidance-distilled full-size model.",
+    },
+    {
+        "id": "hunyuan3d-2",
+        "label": "Hunyuan3D 2",
+        "engine": "v2",
+        "repo": "tencent/Hunyuan3D-2",
+        "subfolder": "hunyuan3d-dit-v2-0",
+        "parameters": "1.1B",
+        "multiview": False,
+        "turbo": False,
+        "supports_text": True,
+        "recommended_vram_gb": 8,
+        "description": "Original full-step Hunyuan3D 2.0 model.",
+    },
+    {
+        "id": "hunyuan3d-2mv-turbo",
+        "label": "Hunyuan3D 2 Multi-view Turbo",
+        "engine": "v2",
+        "repo": "tencent/Hunyuan3D-2mv",
+        "subfolder": "hunyuan3d-dit-v2-mv-turbo",
+        "parameters": "1.1B",
+        "multiview": True,
+        "turbo": True,
+        "supports_text": False,
+        "recommended_vram_gb": 8,
+        "description": "Fast front/left/right/back image-to-3D model.",
+    },
+    {
+        "id": "hunyuan3d-2mv-fast",
+        "label": "Hunyuan3D 2 Multi-view Fast",
+        "engine": "v2",
+        "repo": "tencent/Hunyuan3D-2mv",
+        "subfolder": "hunyuan3d-dit-v2-mv-fast",
+        "parameters": "1.1B",
+        "multiview": True,
+        "turbo": False,
+        "supports_text": False,
+        "recommended_vram_gb": 8,
+        "description": "Guidance-distilled multi-view geometry model.",
+    },
+    {
+        "id": "hunyuan3d-2mv",
+        "label": "Hunyuan3D 2 Multi-view",
+        "engine": "v2",
+        "repo": "tencent/Hunyuan3D-2mv",
+        "subfolder": "hunyuan3d-dit-v2-mv",
+        "parameters": "1.1B",
+        "multiview": True,
+        "turbo": False,
+        "supports_text": False,
+        "recommended_vram_gb": 8,
+        "description": "Highest-quality full-step multi-view model.",
+    },
+    {
+        "id": "hunyuan3d-2.1",
+        "label": "Hunyuan3D 2.1 + PBR",
+        "engine": "v21",
+        "repo": "tencent/Hunyuan3D-2.1",
+        "subfolder": "hunyuan3d-dit-v2-1",
+        "parameters": "3.3B",
+        "multiview": False,
+        "turbo": False,
+        "supports_text": True,
+        "recommended_vram_gb": 10,
+        "description": "Highest-fidelity geometry with optional production-ready PBR materials.",
+    },
+]
 
+MODEL_BY_ID = {model["id"]: model for model in MODELS}
 
-PROVIDERS: dict[str, Model3DProvider] = {
-    "hunyuan3d": Model3DProvider(
-        id="hunyuan3d",
-        label="Hunyuan3D",
-        default_endpoint="/generate",
-        input_modes=("text", "image"),
-        notes="Best for high quality text/image to GLB services.",
-    ),
-    "instantmesh": Model3DProvider(
-        id="instantmesh",
-        label="InstantMesh",
-        default_endpoint="/generate",
-        input_modes=("image",),
-        notes="Image to mesh provider. Requires a compatible remote API.",
-    ),
-    "triposr": Model3DProvider(
-        id="triposr",
-        label="TripoSR",
-        default_endpoint="/generate",
-        input_modes=("image",),
-        notes="Fast image to mesh provider. Requires a compatible remote API.",
-    ),
-    "trellis": Model3DProvider(
-        id="trellis",
-        label="Trellis",
-        default_endpoint="/generate",
-        input_modes=("text", "image"),
-        notes="Text/image to 3D provider. Requires a compatible remote API.",
-    ),
+PRESETS: dict[str, dict[str, Any]] = {
+    "eco": {
+        "label": "Low VRAM",
+        "description": "Mini Turbo, CPU offload, 128 octree, no texture.",
+        "model_id": "hunyuan3d-2mini-turbo",
+        "num_inference_steps": 5,
+        "guidance_scale": 5.0,
+        "octree_resolution": 128,
+        "num_chunks": 8000,
+        "texture_mode": "none",
+        "cpu_offload": True,
+        "flashvdm": True,
+    },
+    "balanced": {
+        "label": "Balanced",
+        "description": "Full-size Turbo geometry with standard texture support.",
+        "model_id": "hunyuan3d-2-turbo",
+        "num_inference_steps": 5,
+        "guidance_scale": 5.0,
+        "octree_resolution": 256,
+        "num_chunks": 12000,
+        "texture_mode": "v2-turbo",
+        "cpu_offload": True,
+        "flashvdm": True,
+    },
+    "quality": {
+        "label": "Quality / PBR",
+        "description": "Hunyuan3D 2.1, 384 octree and PBR materials.",
+        "model_id": "hunyuan3d-2.1",
+        "num_inference_steps": 30,
+        "guidance_scale": 5.0,
+        "octree_resolution": 384,
+        "num_chunks": 20000,
+        "texture_mode": "pbr",
+        "cpu_offload": True,
+        "flashvdm": False,
+    },
+    "multiview": {
+        "label": "Multi-view Fast",
+        "description": "Multi-view Turbo using up to four reference views.",
+        "model_id": "hunyuan3d-2mv-turbo",
+        "num_inference_steps": 5,
+        "guidance_scale": 5.0,
+        "octree_resolution": 256,
+        "num_chunks": 12000,
+        "texture_mode": "v2-turbo",
+        "cpu_offload": True,
+        "flashvdm": True,
+    },
 }
 
-
-def provider_list() -> list[dict[str, Any]]:
-    return [
-        {
-            "id": p.id,
-            "label": p.label,
-            "default_endpoint": p.default_endpoint,
-            "input_modes": list(p.input_modes),
-            "notes": p.notes,
-        }
-        for p in PROVIDERS.values()
-    ]
+_jobs: dict[str, dict[str, Any]] = {}
+_processes: dict[str, subprocess.Popen] = {}
+_lock = threading.RLock()
+_generation_slot = threading.Semaphore(1)
 
 
-def _normalize_url(base_url: str, endpoint: str) -> str:
-    base_url = (base_url or "").strip().rstrip("/")
-    endpoint = (endpoint or "").strip() or "/generate"
-    if not base_url:
-        raise ValueError("3D provider server URL is required")
-    if endpoint.startswith("http://") or endpoint.startswith("https://"):
-        return endpoint
-    return urljoin(base_url + "/", endpoint.lstrip("/"))
+def _python_path() -> Path | None:
+    candidates = [ENV_DIR / "python.exe", ENV_DIR / "bin" / "python"]
+    return next((path for path in candidates if path.is_file()), None)
 
 
-def _image_to_data_url(path: str) -> str:
-    mime = mimetypes.guess_type(path)[0] or "image/png"
-    with open(path, "rb") as f:
-        encoded = base64.b64encode(f.read()).decode("ascii")
-    return f"data:{mime};base64,{encoded}"
-
-
-def _build_payload(provider: str, body: dict[str, Any], image_path: str | None) -> dict[str, Any]:
-    prompt = (body.get("prompt") or body.get("text") or "").strip()
-    output_format = (body.get("output_format") or "glb").lower().lstrip(".")
-    payload: dict[str, Any] = {
-        "type": output_format,
-        "format": output_format,
-    }
-    if prompt:
-        payload["text"] = prompt
-        payload["prompt"] = prompt
-    if image_path:
-        image_data = _image_to_data_url(image_path)
-        payload["image"] = image_data
-        payload["image_url"] = image_data
-    for key in (
-        "texture",
-        "seed",
-        "num_inference_steps",
-        "guidance_scale",
-        "octree_resolution",
-        "num_chunks",
-        "remove_background",
-        "foreground_ratio",
-    ):
-        if key in body and body[key] is not None:
-            payload[key] = body[key]
-
-    # Hunyuan3D launchers commonly expect `text`/`image` plus llama.cpp-like
-    # generation knobs. The generic providers receive the same minimal shape;
-    # provider-specific refinements can be added here without changing callers.
-    if provider == "hunyuan3d":
-        payload.pop("prompt", None)
-    return payload
-
-
-def _guess_extension(content_type: str, output_format: str) -> str:
-    output_format = (output_format or "glb").lower().lstrip(".")
-    if output_format in {"glb", "gltf", "obj", "ply", "stl", "usdz", "zip"}:
-        return f".{output_format}"
-    if "model/gltf-binary" in content_type or "octet-stream" in content_type:
-        return ".glb"
-    if "zip" in content_type:
-        return ".zip"
-    return ".glb"
-
-
-def _write_bytes(output_dir: str, provider: str, content: bytes, ext: str) -> str:
-    os.makedirs(output_dir, exist_ok=True)
-    stamp = time.strftime("%Y-%m-%d-%Hh%Mm%Ss")
-    filename = f"{stamp}_{provider}_{uuid.uuid4().hex[:8]}{ext}"
-    path = os.path.join(output_dir, filename)
-    with open(path, "wb") as f:
-        f.write(content)
-    return path
-
-
-def _extract_json_asset(data: dict[str, Any], base_url: str) -> tuple[bytes, str] | None:
-    for key in ("file", "path"):
-        value = data.get(key)
-        if isinstance(value, str) and os.path.isfile(value):
-            with open(value, "rb") as f:
-                return f.read(), os.path.splitext(value)[1] or ".glb"
-    for key in ("url", "file_url", "output_url", "download_url"):
-        value = data.get(key)
-        if isinstance(value, str) and value:
-            url = value if value.startswith(("http://", "https://")) else urljoin(base_url + "/", value.lstrip("/"))
-            r = requests.get(url, timeout=(10, 600))
-            r.raise_for_status()
-            ext = os.path.splitext(url.split("?", 1)[0])[1] or _guess_extension(r.headers.get("content-type", ""), "glb")
-            return r.content, ext
-    for key in ("glb", "gltf", "obj", "ply", "stl", "usdz", "model", "output"):
-        value = data.get(key)
-        if isinstance(value, str) and value:
-            if value.startswith("data:"):
-                _, encoded = value.split(",", 1)
-                return base64.b64decode(encoded), f".{key if key != 'model' else 'glb'}"
-            try:
-                return base64.b64decode(value), f".{key if key != 'model' else 'glb'}"
-            except Exception:
-                pass
-    return None
-
-
-def generate_model3d(
-    *,
-    provider: str,
-    remote_url: str,
-    endpoint: str,
-    output_dir: str,
-    body: dict[str, Any],
-    image_path: str | None = None,
-) -> dict[str, Any]:
-    if provider not in PROVIDERS:
-        raise ValueError(f"Unsupported 3D provider: {provider}")
-    url = _normalize_url(remote_url, endpoint or PROVIDERS[provider].default_endpoint)
-    payload = _build_payload(provider, body, image_path)
-    timeout = int(body.get("timeout_seconds") or 1800)
-    response = requests.post(url, json=payload, timeout=(15, timeout))
-    response.raise_for_status()
-
-    output_format = (body.get("output_format") or "glb").lower().lstrip(".")
-    content_type = response.headers.get("content-type", "")
-    asset: tuple[bytes, str] | None = None
-    if "application/json" in content_type:
-        asset = _extract_json_asset(response.json(), remote_url.rstrip("/"))
-    else:
-        asset = (response.content, _guess_extension(content_type, output_format))
-    if asset is None:
-        raise RuntimeError("3D provider response did not contain a downloadable model asset")
-
-    content, ext = asset
-    if not content:
-        raise RuntimeError("3D provider returned an empty model asset")
-    if ext.lower() not in MODEL3D_EXTENSIONS:
-        ext = f".{output_format}" if f".{output_format}" in MODEL3D_EXTENSIONS else ".glb"
-    path = _write_bytes(output_dir, provider, content, ext)
-    filename = os.path.basename(path)
-    meta_path = os.path.splitext(path)[0] + ".meta.json"
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "generation_mode": "model3d",
-                "provider": provider,
-                "remote_url": remote_url,
-                "endpoint": endpoint or PROVIDERS[provider].default_endpoint,
-                "params": {
-                    "prompt": body.get("prompt") or body.get("text") or "",
-                    "image_path": image_path,
-                    "output_format": output_format,
-                    "provider": provider,
-                },
-            },
-            f,
-            indent=2,
-        )
+def installation_status() -> dict[str, Any]:
+    python_path = _python_path()
+    v2_source = VENDOR_DIR / "Hunyuan3D-2" / "hy3dgen"
+    v21_source = VENDOR_DIR / "Hunyuan3D-2.1" / "hy3dshape"
+    installed = bool(python_path and WORKER_PATH.is_file() and v2_source.is_dir() and v21_source.is_dir())
     return {
-        "filename": filename,
-        "path": path,
-        "url": f"/api/v1/file/{filename}",
-        "provider": provider,
-        "size": os.path.getsize(path),
+        "installed": installed,
+        "python": str(python_path) if python_path else None,
+        "v2_source": v2_source.is_dir(),
+        "v21_source": v21_source.is_dir(),
+        "isolated_runtime": True,
+        "releases_vram_after_job": True,
+        "install_hint": None if installed else "Run 'Install Hunyuan3D Support' from Maestro's Pinokio menu.",
     }
+
+
+def capabilities() -> dict[str, Any]:
+    with _lock:
+        active = sum(1 for job in _jobs.values() if job["status"] in {"queued", "running"})
+    return {
+        "runtime": installation_status(),
+        "models": MODELS,
+        "presets": [{"id": key, **value} for key, value in PRESETS.items()],
+        "texture_modes": [
+            {"id": "none", "label": "Geometry only", "recommended_vram_gb": 6},
+            {"id": "v2", "label": "Hunyuan3D Paint 2.0", "recommended_vram_gb": 16},
+            {"id": "v2-turbo", "label": "Hunyuan3D Paint 2.0 Turbo", "recommended_vram_gb": 16},
+            {"id": "pbr", "label": "Hunyuan3D Paint 2.1 PBR", "recommended_vram_gb": 21},
+        ],
+        "input_views": ["front", "left", "right", "back"],
+        "output_formats": sorted(MODEL3D_EXTENSIONS),
+        "active_jobs": active,
+    }
+
+
+def _bounded_int(value: Any, default: int, low: int, high: int) -> int:
+    try:
+        return max(low, min(high, int(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _bounded_float(value: Any, default: float, low: float, high: float) -> float:
+    try:
+        return max(low, min(high, float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _prepare_request(body: dict[str, Any], image_paths: dict[str, str]) -> dict[str, Any]:
+    preset_id = str(body.get("preset") or "balanced")
+    preset = dict(PRESETS.get(preset_id, PRESETS["balanced"]))
+    model_id = str(body.get("model_id") or preset["model_id"])
+    if model_id not in MODEL_BY_ID:
+        raise ValueError(f"Unknown Hunyuan3D model: {model_id}")
+    model = dict(MODEL_BY_ID[model_id])
+
+    prompt = str(body.get("prompt") or "").strip()
+    clean_images = {key: value for key, value in image_paths.items() if key in {"front", "left", "right", "back"} and value}
+    if model["multiview"]:
+        if "front" not in clean_images:
+            raise ValueError("Multi-view models require at least a front image")
+    elif not clean_images and not prompt:
+        raise ValueError("Provide an image or a text prompt")
+
+    output_format = str(body.get("output_format") or "glb").lower().lstrip(".")
+    if output_format not in MODEL3D_EXTENSIONS:
+        raise ValueError(f"Unsupported 3D output format: {output_format}")
+
+    texture_mode = str(body.get("texture_mode", preset["texture_mode"]))
+    if texture_mode not in {"none", "v2", "v2-turbo", "pbr"}:
+        raise ValueError(f"Unsupported texture mode: {texture_mode}")
+    if texture_mode == "pbr" and model["engine"] != "v21":
+        raise ValueError("PBR materials require the Hunyuan3D 2.1 model")
+
+    settings = {
+        "prompt": prompt,
+        "seed": _bounded_int(body.get("seed"), 1234, 0, 2**32 - 1),
+        "num_inference_steps": _bounded_int(body.get("num_inference_steps", preset["num_inference_steps"]), preset["num_inference_steps"], 1, 100),
+        "guidance_scale": _bounded_float(body.get("guidance_scale", preset["guidance_scale"]), preset["guidance_scale"], 0.0, 30.0),
+        "octree_resolution": _bounded_int(body.get("octree_resolution", preset["octree_resolution"]), preset["octree_resolution"], 64, 512),
+        "num_chunks": _bounded_int(body.get("num_chunks", preset["num_chunks"]), preset["num_chunks"], 1000, 500000),
+        "texture_mode": texture_mode,
+        "texture_resolution": _bounded_int(body.get("texture_resolution"), 512, 256, 1024),
+        "remove_background": bool(body.get("remove_background", True)),
+        "cpu_offload": bool(body.get("cpu_offload", preset["cpu_offload"])),
+        "flashvdm": bool(body.get("flashvdm", preset["flashvdm"])),
+        "compile": bool(body.get("compile", False)),
+        "mc_algo": str(body.get("mc_algo") or "dmc"),
+        "reduce_face": bool(body.get("reduce_face", False)),
+        "target_face_num": _bounded_int(body.get("target_face_num"), 40000, 100, 1_000_000),
+        "output_format": output_format,
+    }
+    if settings["mc_algo"] not in {"mc", "dmc"}:
+        settings["mc_algo"] = "dmc"
+
+    return {
+        "preset": preset_id,
+        "model": model,
+        "images": clean_images,
+        "settings": settings,
+    }
+
+
+def _public_job(job: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in job.items() if key not in {"request", "process"}}
+
+
+def start_job(*, body: dict[str, Any], image_paths: dict[str, str], output_dir: str) -> dict[str, Any]:
+    runtime = installation_status()
+    if not runtime["installed"]:
+        raise RuntimeError(runtime["install_hint"])
+
+    request_data = _prepare_request(body, image_paths)
+    job_id = uuid.uuid4().hex
+    job = {
+        "job_id": job_id,
+        "status": "queued",
+        "progress": 0.0,
+        "phase": "queued",
+        "message": "Queued Hunyuan3D generation",
+        "error": None,
+        "filename": None,
+        "url": None,
+        "model_id": request_data["model"]["id"],
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "request": request_data,
+    }
+    with _lock:
+        _jobs[job_id] = job
+    thread = threading.Thread(target=_run_job, args=(job_id, os.path.abspath(output_dir)), daemon=True)
+    thread.start()
+    return _public_job(job)
+
+
+def _update_job(job_id: str, **updates: Any) -> None:
+    with _lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return
+        job.update(updates)
+        job["updated_at"] = time.time()
+
+
+def _run_job(job_id: str, output_dir: str) -> None:
+    _generation_slot.acquire()
+    try:
+        with _lock:
+            if _jobs.get(job_id, {}).get("status") == "cancelled":
+                return
+        _run_job_serialized(job_id, output_dir)
+    finally:
+        _generation_slot.release()
+
+
+def _run_job_serialized(job_id: str, output_dir: str) -> None:
+    python_path = _python_path()
+    if not python_path:
+        _update_job(job_id, status="failed", phase="failed", error="Hunyuan3D runtime is not installed")
+        return
+
+    with _lock:
+        job = _jobs[job_id]
+        request_data = job["request"]
+    model_id = request_data["model"]["id"]
+    output_format = request_data["settings"]["output_format"]
+    safe_model = re.sub(r"[^a-zA-Z0-9._-]+", "-", model_id)
+    stamp = time.strftime("%Y-%m-%d-%Hh%Mm%Ss")
+    filename = f"{stamp}_{safe_model}_{job_id[:8]}.{output_format}"
+    output_path = Path(output_dir) / filename
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    HF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    request_path = JOBS_DIR / f"{job_id}.json"
+    request_path.write_text(json.dumps(request_data, indent=2), encoding="utf-8")
+
+    command = [str(python_path), str(WORKER_PATH), "--request", str(request_path), "--output", str(output_path)]
+    env = os.environ.copy()
+    env.update({
+        "PYTHONUNBUFFERED": "1",
+        "HF_HOME": str(HF_CACHE_DIR),
+        "HUGGINGFACE_HUB_CACHE": str(HF_CACHE_DIR / "hub"),
+        "TOKENIZERS_PARALLELISM": "false",
+    })
+    lines: list[str] = []
+    try:
+        _update_job(job_id, status="running", phase="starting", message="Starting isolated Hunyuan3D worker", progress=0.02)
+        process = subprocess.Popen(
+            command,
+            cwd=str(SERVICE_DIR),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        with _lock:
+            _processes[job_id] = process
+
+        assert process.stdout is not None
+        for raw_line in process.stdout:
+            line = raw_line.rstrip()
+            if not line:
+                continue
+            print(f"[Hunyuan3D] {line}")
+            lines.append(line)
+            lines = lines[-60:]
+            if line.startswith("MAESTRO_EVENT "):
+                try:
+                    event = json.loads(line[len("MAESTRO_EVENT "):])
+                    _update_job(
+                        job_id,
+                        phase=str(event.get("phase") or "running"),
+                        message=str(event.get("message") or "Generating 3D asset"),
+                        progress=max(0.0, min(0.99, float(event.get("progress", 0.0)))),
+                    )
+                except Exception:
+                    pass
+
+        exit_code = process.wait()
+        with _lock:
+            status = _jobs.get(job_id, {}).get("status")
+        if status == "cancelled":
+            return
+        if exit_code != 0 or not output_path.is_file():
+            detail = "\n".join(lines[-25:]) or f"Worker exited with code {exit_code}"
+            raise RuntimeError(detail[-4000:])
+
+        sidecar = output_path.with_suffix(".meta.json")
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "generation_mode": "model3d",
+                    "mode": "model3d",
+                    "job_id": job_id,
+                    "created_at": time.time(),
+                    "params": {
+                        **request_data["settings"],
+                        "model_id": model_id,
+                        "preset": request_data["preset"],
+                        "images": request_data["images"],
+                    },
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        _update_job(
+            job_id,
+            status="completed",
+            phase="completed",
+            message="3D asset generated; worker exited and VRAM was released",
+            progress=1.0,
+            filename=filename,
+            url=f"/api/v1/file/{filename}",
+            size=output_path.stat().st_size,
+        )
+    except Exception as exc:
+        with _lock:
+            cancelled = _jobs.get(job_id, {}).get("status") == "cancelled"
+        if not cancelled:
+            _update_job(job_id, status="failed", phase="failed", message="Hunyuan3D generation failed", error=str(exc))
+    finally:
+        with _lock:
+            _processes.pop(job_id, None)
+        try:
+            request_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def get_job(job_id: str) -> dict[str, Any] | None:
+    with _lock:
+        job = _jobs.get(job_id)
+        return _public_job(dict(job)) if job else None
+
+
+def cancel_job(job_id: str) -> dict[str, Any] | None:
+    with _lock:
+        job = _jobs.get(job_id)
+        process = _processes.get(job_id)
+        if not job:
+            return None
+        if job["status"] in {"completed", "failed", "cancelled"}:
+            return _public_job(dict(job))
+        job.update({
+            "status": "cancelled",
+            "phase": "cancelled",
+            "message": "3D generation cancelled",
+            "updated_at": time.time(),
+        })
+    if process and process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+    return get_job(job_id)
+
+
+def cancel_all_jobs() -> int:
+    with _lock:
+        active_ids = [job_id for job_id, job in _jobs.items() if job["status"] in {"queued", "running"}]
+    for job_id in active_ids:
+        cancel_job(job_id)
+    return len(active_ids)

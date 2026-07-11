@@ -4665,9 +4665,6 @@ def get_services_config():
         "llm_device": services.get("llm_device", _llm_default_device()),
         "llm_provider": provider,
         "llm_remote_url": services.get("llm_remote_url", ""),
-        "model3d_provider": services.get("model3d_provider", "hunyuan3d"),
-        "model3d_remote_url": services.get("model3d_remote_url", ""),
-        "model3d_endpoint": services.get("model3d_endpoint", "/generate"),
         "enhance_llm_model_id": services.get("enhance_llm_model_id", ""),
         "enhance_llm_device": services.get("enhance_llm_device", "cuda"),
         "google_api_key": _mask_key(services.get("google_api_key", "")),
@@ -4748,7 +4745,6 @@ async def update_services_config(request: Request):
 
     ALLOWED_KEYS = {
         "llm_model_id", "llm_device", "llm_provider", "llm_remote_url",
-        "model3d_provider", "model3d_remote_url", "model3d_endpoint",
         "enhance_llm_model_id", "enhance_llm_device",
         "google_api_key", "openai_api_key", "anthropic_api_key",
         "use_director_v2", "nsfw_mode", "nsfw_accepted_at", "director_prompt_polish",
@@ -4794,7 +4790,7 @@ async def update_services_config(request: Request):
 
 
 # ============================================================================
-# API Routes: 3D model providers
+# API Routes: native Hunyuan3D generation
 # ============================================================================
 
 def _resolve_model3d_input_path(value: str) -> str | None:
@@ -4821,47 +4817,67 @@ def _resolve_model3d_input_path(value: str) -> str | None:
     return _safe_join(_workspace_dir(), value)
 
 
-@api.get("/api/v1/model3d/providers")
-def list_model3d_providers():
+@api.get("/api/v1/model3d/capabilities")
+def model3d_capabilities():
     from services import model3d_service
-    services = wgp.server_config.get("services", {})
-    return {
-        "providers": model3d_service.provider_list(),
-        "current": {
-            "provider": services.get("model3d_provider", "hunyuan3d"),
-            "remote_url": services.get("model3d_remote_url", ""),
-            "endpoint": services.get("model3d_endpoint", "/generate"),
-        },
-    }
+    return model3d_service.capabilities()
 
 
 @api.post("/api/v1/model3d/generate")
 async def generate_model3d(request: Request):
     from services import model3d_service
     body = await request.json()
-    services = wgp.server_config.get("services", {})
-    provider = body.get("provider") or services.get("model3d_provider", "hunyuan3d")
-    remote_url = body.get("remote_url") or services.get("model3d_remote_url", "")
-    endpoint = body.get("endpoint") or services.get("model3d_endpoint", "")
-    image_path = _resolve_model3d_input_path(body.get("image_path", ""))
-    if body.get("image_path") and (not image_path or not os.path.isfile(image_path)):
-        raise HTTPException(status_code=400, detail="3D input image not found")
+    raw_images = body.get("images") or {}
+    if not isinstance(raw_images, dict):
+        raise HTTPException(status_code=400, detail="images must be an object keyed by front/left/right/back")
+    # Backward-compatible single-image input becomes the front view.
+    if body.get("image_path") and not raw_images.get("front"):
+        raw_images["front"] = body["image_path"]
+    image_paths = {}
+    for view, value in raw_images.items():
+        if view not in {"front", "left", "right", "back"} or not value:
+            continue
+        resolved = _resolve_model3d_input_path(str(value))
+        if not resolved or not os.path.isfile(resolved):
+            raise HTTPException(status_code=400, detail=f"3D {view} image not found")
+        image_paths[view] = resolved
     try:
-        result = model3d_service.generate_model3d(
-            provider=provider,
-            remote_url=remote_url,
-            endpoint=endpoint,
-            output_dir=_workspace_dir(),
+        return model3d_service.start_job(
             body=body,
-            image_path=image_path,
+            image_paths=image_paths,
+            output_dir=_workspace_dir(),
         )
-        return {"status": "ok", **result}
-    except requests.exceptions.HTTPError as e:
-        detail = (e.response.text or str(e)).strip() if e.response is not None else str(e)
-        raise HTTPException(status_code=502, detail=detail[:1000])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@api.get("/api/v1/model3d/status/{job_id}")
+def model3d_job_status(job_id: str):
+    from services import model3d_service
+    job = model3d_service.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="3D generation job not found")
+    return job
+
+
+@api.post("/api/v1/model3d/jobs/{job_id}/cancel")
+def cancel_model3d_job(job_id: str):
+    from services import model3d_service
+    job = model3d_service.cancel_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="3D generation job not found")
+    return job
+
+
+@api.post("/api/v1/model3d/unload")
+def unload_model3d():
+    """Stop active workers. Completed jobs already release all Hunyuan VRAM."""
+    from services import model3d_service
+    cancelled = model3d_service.cancel_all_jobs()
+    return {"status": "ok", "cancelled_jobs": cancelled, "model_loaded": False}
 
 
 # ============================================================================

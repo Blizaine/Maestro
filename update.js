@@ -126,5 +126,13 @@ module.exports = {
     params: {
       uri: "sam_install.js"
     }
+  },
+  // Keep the native Hunyuan3D runtime and official source checkouts aligned
+  // with Maestro. This is idempotent; model weights remain in the HF cache.
+  {
+    method: "script.start",
+    params: {
+      uri: "hunyuan3d_install.js"
+    }
   }]
 }

@@ -59,6 +59,15 @@ module.exports = {
         message: "python scripts/install_gguf_kernels.py"
       }
     },
+    // Hunyuan3D uses an isolated environment because its official dependency
+    // versions conflict with Maestro's current audio/video stack. We install
+    // the runtime here, while model weights remain lazy downloads on first use.
+    {
+      method: "script.start",
+      params: {
+        uri: "hunyuan3d_install.js"
+      }
+    },
     // Fetch the seed-vc voice-conversion component (GPL-3.0). It lives in
     // its own repository and is cloned into place at install time instead
     // of being tracked in this repo, so the GPL-licensed tree keeps its own

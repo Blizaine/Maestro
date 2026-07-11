@@ -2,7 +2,7 @@ const path = require('path')
 module.exports = {
   version: "8.0",
   title: "Maestro",
-  description: "An all-in-one, 100% local AI video, image & music studio. Its Director mode turns a single prompt into a full music video or short film — LLM-planned, shot by shot. Built on the WanGP pipeline (Wan 2.1/2.2, LTX-2.3, Qwen, Hunyuan Video, Flux). Requires an NVIDIA GPU (6GB+ VRAM).",
+  description: "An all-in-one, 100% local AI video, image, music & 3D studio. Its Director mode turns a single prompt into a full music video or short film — LLM-planned, shot by shot. Includes native Hunyuan3D generation alongside WanGP models. Requires an NVIDIA GPU (6GB+ VRAM).",
   icon: "maestro_simplified_icon_alpha.png",
   menu: async (kernel, info) => {
     if (kernel.gpu === "amd" || kernel.platform === "darwin") {
@@ -18,7 +18,8 @@ module.exports = {
       start: info.running("start.js"),
       start_classic: info.running("start_classic.js"),
       update: info.running("update.js"),
-      reset: info.running("reset.js")
+      reset: info.running("reset.js"),
+      hunyuan3d_install: info.running("hunyuan3d_install.js")
     }
     if (running.install) {
       return [{
@@ -86,6 +87,13 @@ module.exports = {
           text: "Resetting",
           href: "reset.js",
         }]
+      } else if (running.hunyuan3d_install) {
+        return [{
+          default: true,
+          icon: 'fa-solid fa-cube',
+          text: "Installing Hunyuan3D Support",
+          href: "hunyuan3d_install.js",
+        }]
       } else {
         return [{
           icon: "fa-solid fa-power-off",
@@ -144,6 +152,12 @@ module.exports = {
             ? "Update Inpaint Support (SAM 3.1)"
             : "Install Inpaint Support (SAM 3.1)",
           href: "sam_install.js",
+        }, {
+          icon: "fa-solid fa-cube",
+          text: info.exists("app/services/hunyuan3d/env")
+            ? "Update Hunyuan3D Support"
+            : "Install Hunyuan3D Support",
+          href: "hunyuan3d_install.js",
         }, {
           icon: "fa-regular fa-circle-xmark",
           text: "<div><strong>Reset</strong><div>Revert to pre-install state</div></div>",
