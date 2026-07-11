@@ -1648,7 +1648,6 @@ export const useStore = create<AppState>((set, get) => ({
       const s = get()
       const prev = s.generationMode
       if (prev === mode) { set({ generationMode: mode }); return }
-      if (prev === 'tools') { set({ generationMode: mode }); return }
       const { model_type: _mt, prompt: _p, activated_loras: _al, loras_multipliers: _lm, ...paramsSnapshot } = s.params
       const savedModels = { ...s.selectedModelPerMode, [prev]: s.params.model_type }
       const savedParams = {
