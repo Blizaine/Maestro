@@ -10531,16 +10531,20 @@ def list_outputs(limit: int = 0, offset: int = 0, favorites_only: bool = False, 
     audio_exts = {".wav", ".mp3"}
     model3d_exts = {".glb", ".gltf", ".obj", ".ply", ".stl", ".usdz", ".zip"}
 
-    def model3d_thumbnail_url(params: dict) -> str | None:
-        """Return the original front image as a cheap static 3D card preview.
+    def model3d_thumbnail_url(name: str, params: dict) -> str | None:
+        """Return a cheap static image preview for a 3D output card.
 
         The gallery must never instantiate a second ``model-viewer`` for its
         80px history cards: parsing many GLB files there is surprisingly
-        expensive.  Hunyuan3D already records its input views in the output
-        sidecar, so reuse the front image when it is still in Maestro's
-        uploads or outputs roots.  Text-only jobs intentionally return None
-        and the client renders a lightweight 3D icon instead.
+        expensive.  The Hunyuan3D worker saves the normalized front view as a
+        ``<output>.preview.png`` sibling (for text-only jobs that is the
+        generated conditioning image), so prefer it.  Older outputs fall back
+        to the input views recorded in the sidecar; when neither exists the
+        client renders a lightweight 3D icon instead.
         """
+        preview_name = os.path.splitext(name)[0] + ".preview.png"
+        if os.path.isfile(os.path.join(out_dir, preview_name)):
+            return f"/api/v1/file/{preview_name}"
         images = params.get("images")
         if not isinstance(images, dict):
             return None
@@ -10569,6 +10573,9 @@ def list_outputs(limit: int = 0, offset: int = 0, favorites_only: bool = False, 
     raw_entries = []
     for name in os.listdir(out_dir):
         if name.startswith(".trash_") or name.startswith("."):
+            continue
+        # 3D preview sidecars are served as card thumbnails, not gallery items.
+        if name.endswith(".preview.png"):
             continue
         filepath = os.path.join(out_dir, name)
         if not os.path.isfile(filepath):
@@ -10605,7 +10612,7 @@ def list_outputs(limit: int = 0, offset: int = 0, favorites_only: bool = False, 
             "mode": meta.get("generation_mode"),
             "edit_sub_mode": params.get("edit_sub_mode"),
             "multi_clip_info": params.get("multi_clip_info"),
-            "thumbnail_url": model3d_thumbnail_url(params) if ext in model3d_exts else None,
+            "thumbnail_url": model3d_thumbnail_url(name, params) if ext in model3d_exts else None,
         }
         mci = sidecar_cache[name]["multi_clip_info"]
         if mci and mci.get("group_id"):
@@ -10979,14 +10986,14 @@ async def move_output(name: str, request: Request):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to move file: {e}")
 
-    # Move sidecar metadata
-    meta_name = os.path.splitext(name)[0] + ".meta.json"
-    src_meta = os.path.join(src_dir, meta_name)
-    if os.path.isfile(src_meta):
-        try:
-            shutil.move(src_meta, os.path.join(dst_dir, meta_name))
-        except Exception:
-            pass
+    # Move sidecar metadata and the 3D card preview image, when present
+    for sidecar_name in (os.path.splitext(name)[0] + ".meta.json", os.path.splitext(name)[0] + ".preview.png"):
+        src_sidecar = os.path.join(src_dir, sidecar_name)
+        if os.path.isfile(src_sidecar):
+            try:
+                shutil.move(src_sidecar, os.path.join(dst_dir, sidecar_name))
+            except Exception:
+                pass
 
     # Update favorites
     favs = _load_favorites()
@@ -11035,6 +11042,14 @@ def delete_output(name: str):
     if os.path.isfile(meta_path):
         try:
             os.remove(meta_path)
+        except Exception:
+            pass
+
+    # Delete the 3D card preview image if one was saved alongside the model
+    preview_path = os.path.join(out_dir, os.path.splitext(name)[0] + ".preview.png")
+    if os.path.isfile(preview_path):
+        try:
+            os.remove(preview_path)
         except Exception:
             pass
 

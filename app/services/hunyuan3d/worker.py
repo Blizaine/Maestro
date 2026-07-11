@@ -306,6 +306,14 @@ def main() -> None:
             event("export", 0.94, f"Exporting {output_path.suffix.upper().lstrip('.')}")
             mesh.export(output_path)
 
+        # Persist the normalized front view as a static gallery preview. For
+        # text-only jobs this is the HunyuanDiT conditioning image — without it
+        # the gallery has no visual to show for the mesh.
+        try:
+            shutil.copyfile(source_image_path, output_path.with_suffix(".preview.png"))
+        except OSError as exc:
+            print(f"Preview image not saved: {exc}", flush=True)
+
     if not output_path.is_file() or output_path.stat().st_size == 0:
         raise RuntimeError("Hunyuan3D did not produce an output file")
     event("completed", 1.0, "3D asset saved; releasing VRAM")

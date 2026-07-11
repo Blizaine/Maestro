@@ -130,6 +130,13 @@ export function Hunyuan3DPanel() {
     if (selectedModel.engine === 'v21' && textureMode === 'v2-turbo') setTextureMode('pbr')
   }, [selectedModel, textureMode])
 
+  // The backend only accepts PBR when exporting GLB (all material maps must
+  // stay embedded), so coerce the format no matter how PBR was activated:
+  // preset click, model switch, or manual texture selection.
+  useEffect(() => {
+    if (textureMode === 'pbr' && outputFormat !== 'glb') setOutputFormat('glb')
+  }, [textureMode, outputFormat])
+
   const uploadView = async (view: ViewName, file: File) => {
     setUploadingView(view)
     setError(null)
@@ -288,7 +295,7 @@ export function Hunyuan3DPanel() {
                 </label>
                 <label className="text-[10px] text-text-muted">Output
                   <select value={outputFormat} onChange={event => setOutputFormat(event.target.value)} className="mt-1 w-full bg-bg-primary border border-border rounded px-2 py-1.5 text-[11px] text-text-primary">
-                    {capabilities.output_formats.map(format => <option key={format} value={format}>{format.toUpperCase()}</option>)}
+                    {capabilities.output_formats.map(format => <option key={format} value={format} disabled={textureMode === 'pbr' && format !== 'glb'}>{format.toUpperCase()}{textureMode === 'pbr' && format !== 'glb' ? ' (PBR requires GLB)' : ''}</option>)}
                   </select>
                 </label>
                 <label className="text-[10px] text-text-muted">Steps<input type="number" min={1} max={100} value={steps} onChange={event => setSteps(Number(event.target.value))} className="mt-1 w-full bg-bg-primary border border-border rounded px-2 py-1.5 text-[11px] text-text-primary" /></label>
