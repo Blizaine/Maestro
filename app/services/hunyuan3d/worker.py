@@ -53,10 +53,21 @@ def make_text_image(prompt: str, output_dir: Path, device: str) -> tuple[Any, st
     event("text_to_image", 0.08, "Loading HunyuanDiT text-to-image conditioner")
     from hy3dgen.text2image import HunyuanDiTPipeline
 
-    pipeline = HunyuanDiTPipeline(
-        "Tencent-Hunyuan/HunyuanDiT-v1.1-Diffusers-Distilled",
-        device=device,
-    )
+    pipeline = None
+    for attempt in range(1, 4):
+        try:
+            pipeline = HunyuanDiTPipeline(
+                "Tencent-Hunyuan/HunyuanDiT-v1.1-Diffusers-Distilled",
+                device=device,
+            )
+            break
+        except OSError:
+            if attempt == 3:
+                raise
+            delay = attempt * 5
+            event("text_to_image", 0.08, f"Hugging Face metadata unavailable; retrying in {delay}s ({attempt}/3)")
+            time.sleep(delay)
+    assert pipeline is not None
     image = pipeline(prompt)
     path = output_dir / "text_condition.png"
     image.save(path)

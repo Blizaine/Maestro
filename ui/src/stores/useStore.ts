@@ -378,10 +378,23 @@ const SFX_VIRTUAL_MODELS: ModelDef[] = [
   { model_type: 'mmaudio_nsfw', name: 'MMAudio NSFW', family: 'tts', architecture: 'mmaudio', is_i2v: false, is_t2v: false, guidance_max_phases: 1, fps: 0, is_downloaded: false },
 ]
 
+const HUNYUAN3D_MODEL_TYPES = [
+  'hunyuan3d-2mini-turbo',
+  'hunyuan3d-2mini-fast',
+  'hunyuan3d-2mini',
+  'hunyuan3d-2-turbo',
+  'hunyuan3d-2-fast',
+  'hunyuan3d-2',
+  'hunyuan3d-2mv-turbo',
+  'hunyuan3d-2mv-fast',
+  'hunyuan3d-2mv',
+  'hunyuan3d-2.1',
+] as const
+
 // Default enabled models (shown by default in selectors)
 const DEFAULT_ENABLED_MODELS = new Set([
   // 3D
-  'hunyuan3d-2-turbo',
+  ...HUNYUAN3D_MODEL_TYPES,
   // Image
   // Only Flux 2 Klein is enabled by default. Qwen Image Edit and
   // other image models stay available via Settings → System → Model
@@ -412,6 +425,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
 ])
 
 const ENABLED_MODELS_KEY = 'maestro_enabled_models'
+const HUNYUAN3D_VISIBILITY_MIGRATION_KEY = 'maestro_hunyuan3d_visibility_v1'
 
 function _saveEnabledModels(models: Set<string>) {
   try {
@@ -422,7 +436,15 @@ function _saveEnabledModels(models: Set<string>) {
 function _loadEnabledModels(): Set<string> | null {
   try {
     const raw = localStorage.getItem(ENABLED_MODELS_KEY)
-    if (raw) return new Set(JSON.parse(raw))
+    if (raw) {
+      const models = new Set<string>(JSON.parse(raw))
+      if (localStorage.getItem(HUNYUAN3D_VISIBILITY_MIGRATION_KEY) !== '1') {
+        HUNYUAN3D_MODEL_TYPES.forEach(modelType => models.add(modelType))
+        _saveEnabledModels(models)
+        localStorage.setItem(HUNYUAN3D_VISIBILITY_MIGRATION_KEY, '1')
+      }
+      return models
+    }
   } catch { /* ignore */ }
   return null
 }

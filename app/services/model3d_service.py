@@ -442,6 +442,8 @@ def _run_job_serialized(job_id: str, output_dir: str) -> None:
         "PYTHONUNBUFFERED": "1",
         "HF_HOME": str(HF_CACHE_DIR),
         "HUGGINGFACE_HUB_CACHE": str(HF_CACHE_DIR / "hub"),
+        "HF_HUB_ETAG_TIMEOUT": "30",
+        "HF_HUB_DOWNLOAD_TIMEOUT": "60",
         "TOKENIZERS_PARALLELISM": "false",
     })
     lines: list[str] = []
