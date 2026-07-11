@@ -55,6 +55,7 @@ const MODE_LABELS: { mode: GenerationMode; label: string }[] = [
   { mode: 'image', label: 'Image' },
   { mode: 'video', label: 'Video' },
   { mode: 'audio', label: 'Audio' },
+  { mode: 'model3d', label: '3D Models' },
   { mode: 'avatar', label: 'Edit' },
 ]
 

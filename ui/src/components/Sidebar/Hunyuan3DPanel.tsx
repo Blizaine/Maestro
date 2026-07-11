@@ -62,6 +62,8 @@ function ViewUpload({ view, value, busy, required, onUpload, onRemove }: {
 export function Hunyuan3DPanel() {
   const loadOutputs = useStore(state => state.loadOutputs)
   const setMediaFilter = useStore(state => state.setMediaFilter)
+  const enabledModels = useStore(state => state.enabledModels)
+  const toggleModelEnabled = useStore(state => state.toggleModelEnabled)
   const modelId = useStore(state => state.params.model_type)
   const prompt = useStore(state => state.params.prompt)
   const setParam = useStore(state => state.setParam)
@@ -173,7 +175,7 @@ export function Hunyuan3DPanel() {
     setError(null)
     try {
       const images = Object.fromEntries(Object.entries(views).filter(([, value]) => !!value).map(([name, value]) => [name, value!.path]))
-      setJob(await startHunyuan3DJob({
+      const nextJob = await startHunyuan3DJob({
         preset,
         model_id: modelId,
         prompt: prompt.trim(),
@@ -193,7 +195,12 @@ export function Hunyuan3DPanel() {
         reduce_face: reduceFace,
         target_face_num: targetFaces,
         mc_algo: mcAlgo,
-      }))
+      })
+      // A 3D model is enabled when the user actually starts using it. This
+      // also happens to be the point where the isolated runtime fetches its
+      // weights on first use.
+      if (modelId && !enabledModels.has(modelId)) toggleModelEnabled(modelId)
+      setJob(nextJob)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Hunyuan3D generation failed')
     }

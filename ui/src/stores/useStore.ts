@@ -391,10 +391,14 @@ const HUNYUAN3D_MODEL_TYPES = [
   'hunyuan3d-2.1',
 ] as const
 
+const HUNYUAN3D_FAMILY: ModelFamily = {
+  id: 'hunyuan3d',
+  label: 'Hunyuan3D',
+  order: 300,
+}
+
 // Default enabled models (shown by default in selectors)
 const DEFAULT_ENABLED_MODELS = new Set([
-  // 3D
-  ...HUNYUAN3D_MODEL_TYPES,
   // Image
   // Only Flux 2 Klein is enabled by default. Qwen Image Edit and
   // other image models stay available via Settings → System → Model
@@ -425,7 +429,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
 ])
 
 const ENABLED_MODELS_KEY = 'maestro_enabled_models'
-const HUNYUAN3D_VISIBILITY_MIGRATION_KEY = 'maestro_hunyuan3d_visibility_v1'
+const HUNYUAN3D_VISIBILITY_MIGRATION_KEY = 'maestro_hunyuan3d_visibility_v2'
 
 function _saveEnabledModels(models: Set<string>) {
   try {
@@ -439,7 +443,10 @@ function _loadEnabledModels(): Set<string> | null {
     if (raw) {
       const models = new Set<string>(JSON.parse(raw))
       if (localStorage.getItem(HUNYUAN3D_VISIBILITY_MIGRATION_KEY) !== '1') {
-        HUNYUAN3D_MODEL_TYPES.forEach(modelType => models.add(modelType))
+        // Hunyuan3D weights are downloaded on first use. Keep the optional
+        // models hidden until the user enables one, rather than presenting
+        // every variant as already chosen on an existing installation.
+        HUNYUAN3D_MODEL_TYPES.forEach(modelType => models.delete(modelType))
         _saveEnabledModels(models)
         localStorage.setItem(HUNYUAN3D_VISIBILITY_MIGRATION_KEY, '1')
       }
@@ -2290,8 +2297,28 @@ export const useStore = create<AppState>((set, get) => ({
   clearModelVisibilityFocus: () => set({ modelVisibilityFocus: null }),
   loadModels: async () => {
     try {
-      const data = await api.fetchModels()
-      const families = data.families
+      const [data, hunyuan3dCapabilities] = await Promise.all([
+        api.fetchModels(),
+        // Hunyuan3D owns its own model registry. Keep the regular model
+        // catalog usable if that optional endpoint is temporarily offline.
+        api.fetchHunyuan3DCapabilities().catch(() => null),
+      ])
+      const hunyuan3dModels: ModelDef[] = hunyuan3dCapabilities?.models.map(model => ({
+        model_type: model.id,
+        name: model.label,
+        family: HUNYUAN3D_FAMILY.id,
+        architecture: model.engine,
+        is_i2v: !model.supports_text,
+        is_t2v: model.supports_text,
+        guidance_max_phases: 1,
+        fps: 0,
+        // We cannot know whether an individual Hunyuan weight is cached
+        // without downloading it. Do not expose a misleading delete action.
+        is_downloaded: false,
+      })) ?? []
+      const families = data.families.some(family => family.id === HUNYUAN3D_FAMILY.id)
+        ? data.families
+        : [...data.families, HUNYUAN3D_FAMILY]
       const backendModels = data.models.map(m => ({
         model_type: m.model_type,
         name: m.name,
@@ -2304,8 +2331,8 @@ export const useStore = create<AppState>((set, get) => ({
         is_downloaded: m.is_downloaded ?? false,
         nsfw_only: m.nsfw_only ?? false,
       }))
-      // Inject virtual SFX (MMAudio) models alongside backend models
-      const models = [...backendModels, ...SFX_VIRTUAL_MODELS]
+      // Inject models maintained by Maestro services alongside backend models.
+      const models = [...backendModels, ...SFX_VIRTUAL_MODELS, ...hunyuan3dModels]
 
       // Hydrate persisted per-mode settings from localStorage
       const saved = _loadSettings()
