@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, type CSSProperties } from 'react'
-import { Play, Pencil, RefreshCw, Copy, Trash2, Check, Combine, Loader2, Heart, ArrowLeftToLine, Download, FolderInput, Scissors, FastForward, BookMarked } from 'lucide-react'
+import { Play, Pencil, RefreshCw, Copy, Trash2, Check, Combine, Loader2, Heart, ArrowLeftToLine, Download, FolderInput, Scissors, FastForward, BookMarked, Box } from 'lucide-react'
 import { SaveRecipeDialog } from '../Recipes/SaveRecipeDialog'
 import { useStore } from '../../stores/useStore'
 import { getUploadUrl, fetchOutputMetadata, getFileUrl, moveOutput, uploadImage } from '../../api/client'
@@ -173,12 +173,13 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
   const modelLabel = modelDisplayName(modelType, models)
   const isAudio = file.type === 'audio'
   const isModel3d = file.type === 'model3d'
+  const canPreviewModel3d = isModel3d && /\.(glb|gltf)$/i.test(file.name)
 
   // Keep the model-viewer runtime out of Maestro's main Image/Video/Audio
   // bundle. It is loaded only when a 3D gallery item is actually rendered.
   useEffect(() => {
-    if (isModel3d) void import('@google/model-viewer')
-  }, [isModel3d])
+    if (canPreviewModel3d) void import('@google/model-viewer')
+  }, [canPreviewModel3d])
 
   const resolution = isAudio ? '' : ((params?.resolution as string) || '')
   const seed = params?.seed as number | undefined
@@ -395,7 +396,14 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
           </div>
         ) : isModel3d ? (
           <div className="w-full h-full relative">
-            <model-viewer key={file.url} src={getFileUrl(file.name)} alt={file.name} camera-controls auto-rotate shadow-intensity="1" exposure="1" loading="lazy" className="w-full h-full" />
+            {canPreviewModel3d ? (
+              <model-viewer key={file.url} src={getFileUrl(file.name)} alt={file.name} camera-controls auto-rotate shadow-intensity="1" exposure="1" loading="lazy" className="w-full h-full" />
+            ) : (
+              <div className="w-full h-full flex flex-col items-center justify-center gap-3 text-center px-4">
+                <div className="w-16 h-16 rounded-2xl bg-bg-active flex items-center justify-center"><Box size={26} className="text-accent-blue" /></div>
+                <div><p className="text-sm text-text-secondary">3D model asset</p><p className="text-[11px] text-text-muted mt-1">Interactive preview is available for GLB exports.</p></div>
+              </div>
+            )}
             <a
               href={getFileUrl(file.name)}
               download={file.name}

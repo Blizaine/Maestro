@@ -9,6 +9,7 @@ and 2.1 stacks require older diffusers/transformers builds.
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import re
@@ -27,7 +28,7 @@ VENDOR_DIR = SERVICE_DIR / "vendor"
 JOBS_DIR = Path(__file__).resolve().parents[1] / "ckpts" / "model3d" / "jobs"
 HF_CACHE_DIR = Path(__file__).resolve().parents[1] / "ckpts" / "model3d" / "huggingface"
 
-MODEL3D_EXTENSIONS = {"glb", "gltf", "obj", "ply", "stl"}
+MODEL3D_EXTENSIONS = {"glb", "obj", "ply", "stl"}
 
 
 MODELS: list[dict[str, Any]] = [
@@ -301,6 +302,8 @@ def _prepare_request(body: dict[str, Any], image_paths: dict[str, str]) -> dict[
         raise ValueError(f"Unsupported texture mode: {texture_mode}")
     if texture_mode == "pbr" and model["engine"] != "v21":
         raise ValueError("PBR materials require the Hunyuan3D 2.1 model")
+    if texture_mode == "pbr" and output_format != "glb":
+        raise ValueError("PBR materials must be exported as GLB so all maps remain embedded")
 
     settings = {
         "prompt": prompt,
@@ -358,9 +361,10 @@ def start_job(*, body: dict[str, Any], image_paths: dict[str, str], output_dir: 
     }
     with _lock:
         _jobs[job_id] = job
+        initial_response = _public_job(dict(job))
     thread = threading.Thread(target=_run_job, args=(job_id, os.path.abspath(output_dir)), daemon=True)
     thread.start()
-    return _public_job(job)
+    return initial_response
 
 
 def _update_job(job_id: str, **updates: Any) -> None:
@@ -534,3 +538,6 @@ def cancel_all_jobs() -> int:
     for job_id in active_ids:
         cancel_job(job_id)
     return len(active_ids)
+
+
+atexit.register(cancel_all_jobs)

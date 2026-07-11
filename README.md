@@ -73,6 +73,8 @@ The advanced panel exposes inference steps, guidance, octree resolution, process
 
 Fresh Maestro installations include the runtime automatically. Existing installations can use **Pinokio → Maestro → Install Hunyuan3D Support**. Model weights are downloaded lazily from Tencent's official Hugging Face repositories the first time a variant is used.
 
+The cloned source code and downloaded weights remain subject to Tencent's Hunyuan license terms. Review the `LICENSE` files in the official checkouts before redistribution or commercial use.
+
 #### Hunyuan3D API
 
 Start a job with curl:
