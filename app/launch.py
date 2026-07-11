@@ -1029,6 +1029,8 @@ def list_all_installed_loras():
 @api.get("/api/v1/loras/{model_type}")
 def list_loras(model_type: str):
     """List available LoRA files for a model type."""
+    if model_type in model3d_service.MODEL_BY_ID:
+        return {"loras": [], "guidance_max_phases": 1}
     md = wgp.get_model_def(model_type)
     if md is None:
         raise HTTPException(status_code=404, detail=f"Unknown model: {model_type}")
@@ -1056,6 +1058,8 @@ def list_loras(model_type: str):
 @api.get("/api/v1/loras/{model_type}/details")
 def list_loras_details(model_type: str):
     """List LoRAs with metadata from .civitai.json sidecars."""
+    if model_type in model3d_service.MODEL_BY_ID:
+        return {"loras": [], "guidance_max_phases": 1}
     md = wgp.get_model_def(model_type)
     if md is None:
         raise HTTPException(status_code=404, detail=f"Unknown model: {model_type}")
@@ -4006,6 +4010,25 @@ async def scan_and_generate_guides(request: Request):
 @api.get("/api/v1/model-options/{model_type}")
 def get_model_options(model_type: str):
     """Return UI-relevant model options for dynamic rendering."""
+    if model_type in model3d_service.MODEL_BY_ID:
+        return {
+            "model_type": model_type,
+            "architecture": "hunyuan3d",
+            "guidance_max_phases": 1,
+            "lock_guidance_phases": False,
+            "sliding_window": False,
+            "motion_amplitude": False,
+            "flow_shift": False,
+            "tea_cache": False,
+            "returns_audio": False,
+            "any_audio_prompt": False,
+            "audio_scale_name": "",
+            "lock_inference_steps": False,
+            "lock_guidance_scale": False,
+            "no_negative_prompt": True,
+            "i2v_class": False,
+            "fps": 0,
+        }
     md = wgp.get_model_def(model_type)
     if md is None:
         raise HTTPException(status_code=404, detail=f"Unknown model: {model_type}")

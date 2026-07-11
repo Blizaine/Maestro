@@ -442,12 +442,20 @@ def _run_job_serialized(job_id: str, output_dir: str) -> None:
     # credentials: some Hub/proxy combinations omit X-Repo-Commit from
     # authenticated HEAD responses, which makes huggingface_hub incorrectly
     # report that model_index.json is missing.
-    for token_var in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HF_TOKEN_PATH"):
-        env.pop(token_var, None)
+    isolated_network_vars = (
+        "HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HF_TOKEN_PATH",
+        "HF_ENDPOINT", "HF_INFERENCE_ENDPOINT", "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE",
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+        "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+        "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSL_CERT_FILE",
+    )
+    for env_var in isolated_network_vars:
+        env.pop(env_var, None)
     env.update({
         "PYTHONUNBUFFERED": "1",
         "HF_HOME": str(HF_CACHE_DIR),
         "HUGGINGFACE_HUB_CACHE": str(HF_CACHE_DIR / "hub"),
+        "HF_ENDPOINT": "https://huggingface.co",
         "HF_HUB_ETAG_TIMEOUT": "30",
         "HF_HUB_DOWNLOAD_TIMEOUT": "60",
         "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",

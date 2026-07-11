@@ -2367,7 +2367,7 @@ export const useStore = create<AppState>((set, get) => ({
             availableLoras: savedLora.availableLoras || [],
           }))
         }
-        if (!sfxModelTypes.has(mt)) {
+        if (!sfxModelTypes.has(mt) && mode !== 'model3d') {
           get().loadLoras(mt)
           get().loadModelOptions(mt)
         }
