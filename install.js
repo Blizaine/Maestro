@@ -106,33 +106,42 @@ module.exports = {
       }
     },
     {
+      // Clean the nested environment created by the first native-3D migration,
+      // where conda.path was incorrectly resolved from this extension folder.
+      when: "{{exists('app/services/hunyuan3d/vendor/Hunyuan3D-2/hy3dgen/texgen/custom_rasterizer/app')}}",
+      method: "fs.rm",
+      params: {
+        path: "app/services/hunyuan3d/vendor/Hunyuan3D-2/hy3dgen/texgen/custom_rasterizer/app"
+      }
+    },
+    {
       method: "shell.run",
       params: {
-        conda: { path: "app/services/hunyuan3d/env", python: "3.10" },
+        conda: { path: "../../../../../env", python: "3.10" },
         path: "app/services/hunyuan3d/vendor/Hunyuan3D-2/hy3dgen/texgen/custom_rasterizer",
-        message: "uv pip install -e ."
+        message: "uv pip install --no-build-isolation -e ."
       }
     },
     {
       method: "shell.run",
       params: {
-        conda: { path: "app/services/hunyuan3d/env", python: "3.10" },
+        conda: { path: "../../../../../env", python: "3.10" },
         path: "app/services/hunyuan3d/vendor/Hunyuan3D-2/hy3dgen/texgen/differentiable_renderer",
-        message: "uv pip install -e ."
+        message: "uv pip install --no-build-isolation -e ."
       }
     },
     {
       method: "shell.run",
       params: {
-        conda: { path: "app/services/hunyuan3d/env", python: "3.10" },
+        conda: { path: "../../../../env", python: "3.10" },
         path: "app/services/hunyuan3d/vendor/Hunyuan3D-2.1/hy3dpaint/custom_rasterizer",
-        message: "uv pip install -e ."
+        message: "uv pip install --no-build-isolation -e ."
       }
     },
     {
       method: "shell.run",
       params: {
-        conda: { path: "app/services/hunyuan3d/env", python: "3.10" },
+        conda: { path: "../../../../env", python: "3.10" },
         shell: "{{which('bash')}}",
         path: "app/services/hunyuan3d/vendor/Hunyuan3D-2.1/hy3dpaint/DifferentiableRenderer",
         message: "bash compile_mesh_painter.sh"
@@ -144,6 +153,13 @@ module.exports = {
       params: {
         url: "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
         path: "app/services/hunyuan3d/vendor/Hunyuan3D-2.1/hy3dpaint/ckpt/RealESRGAN_x4plus.pth"
+      }
+    },
+    {
+      method: "fs.write",
+      params: {
+        path: "app/services/hunyuan3d/env/.maestro_hunyuan3d_v1.installed",
+        text: "ok"
       }
     },
     // Fetch the seed-vc voice-conversion component (GPL-3.0). It lives in

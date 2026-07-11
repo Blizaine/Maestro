@@ -21,7 +21,7 @@ module.exports = {
     // never a wrongly-skipped rebuild.
     method: "jump",
     params: {
-      id: "{{/already up[- ]to[- ]date/i.test(input.stdout) && exists('app/services/hunyuan3d/env') && exists('app/services/hunyuan3d/vendor/Hunyuan3D-2') && exists('app/services/hunyuan3d/vendor/Hunyuan3D-2.1') && exists('app/postprocessing/seedvc/__init__.py') ? 'uptodate' : 'build'}}"
+      id: "{{/already up[- ]to[- ]date/i.test(input.stdout) && exists('app/services/hunyuan3d/env/.maestro_hunyuan3d_v1.installed') && exists('app/services/hunyuan3d/vendor/Hunyuan3D-2') && exists('app/services/hunyuan3d/vendor/Hunyuan3D-2.1') && exists('app/postprocessing/seedvc/__init__.py') ? 'uptodate' : 'build'}}"
     }
   }, {
     id: "uptodate",
@@ -159,30 +159,38 @@ module.exports = {
       ]
     }
   }, {
+    // Remove the accidental nested conda environment produced by the initial
+    // native-3D migration before compiling into Maestro's real 3D runtime.
+    when: "{{exists('app/services/hunyuan3d/vendor/Hunyuan3D-2/hy3dgen/texgen/custom_rasterizer/app')}}",
+    method: "fs.rm",
+    params: {
+      path: "app/services/hunyuan3d/vendor/Hunyuan3D-2/hy3dgen/texgen/custom_rasterizer/app"
+    }
+  }, {
     method: "shell.run",
     params: {
-      conda: { path: "app/services/hunyuan3d/env", python: "3.10" },
+      conda: { path: "../../../../../env", python: "3.10" },
       path: "app/services/hunyuan3d/vendor/Hunyuan3D-2/hy3dgen/texgen/custom_rasterizer",
-      message: "uv pip install -e ."
+      message: "uv pip install --no-build-isolation -e ."
     }
   }, {
     method: "shell.run",
     params: {
-      conda: { path: "app/services/hunyuan3d/env", python: "3.10" },
+      conda: { path: "../../../../../env", python: "3.10" },
       path: "app/services/hunyuan3d/vendor/Hunyuan3D-2/hy3dgen/texgen/differentiable_renderer",
-      message: "uv pip install -e ."
+      message: "uv pip install --no-build-isolation -e ."
     }
   }, {
     method: "shell.run",
     params: {
-      conda: { path: "app/services/hunyuan3d/env", python: "3.10" },
+      conda: { path: "../../../../env", python: "3.10" },
       path: "app/services/hunyuan3d/vendor/Hunyuan3D-2.1/hy3dpaint/custom_rasterizer",
-      message: "uv pip install -e ."
+      message: "uv pip install --no-build-isolation -e ."
     }
   }, {
     method: "shell.run",
     params: {
-      conda: { path: "app/services/hunyuan3d/env", python: "3.10" },
+      conda: { path: "../../../../env", python: "3.10" },
       shell: "{{which('bash')}}",
       path: "app/services/hunyuan3d/vendor/Hunyuan3D-2.1/hy3dpaint/DifferentiableRenderer",
       message: "bash compile_mesh_painter.sh"
@@ -193,6 +201,12 @@ module.exports = {
     params: {
       url: "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
       path: "app/services/hunyuan3d/vendor/Hunyuan3D-2.1/hy3dpaint/ckpt/RealESRGAN_x4plus.pth"
+    }
+  }, {
+    method: "fs.write",
+    params: {
+      path: "app/services/hunyuan3d/env/.maestro_hunyuan3d_v1.installed",
+      text: "ok"
     }
   }]
 }

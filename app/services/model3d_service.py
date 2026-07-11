@@ -24,6 +24,7 @@ from typing import Any
 
 SERVICE_DIR = Path(__file__).resolve().parent / "hunyuan3d"
 ENV_DIR = SERVICE_DIR / "env"
+INSTALL_MARKER = ENV_DIR / ".maestro_hunyuan3d_v1.installed"
 WORKER_PATH = SERVICE_DIR / "worker.py"
 VENDOR_DIR = SERVICE_DIR / "vendor"
 JOBS_DIR = Path(__file__).resolve().parents[1] / "ckpts" / "model3d" / "jobs"
@@ -233,7 +234,7 @@ def installation_status() -> dict[str, Any]:
     python_path = _python_path()
     v2_source = VENDOR_DIR / "Hunyuan3D-2" / "hy3dgen"
     v21_source = VENDOR_DIR / "Hunyuan3D-2.1" / "hy3dshape"
-    installed = bool(python_path and WORKER_PATH.is_file() and v2_source.is_dir() and v21_source.is_dir())
+    installed = bool(python_path and INSTALL_MARKER.is_file() and WORKER_PATH.is_file() and v2_source.is_dir() and v21_source.is_dir())
     return {
         "installed": installed,
         "python": str(python_path) if python_path else None,
