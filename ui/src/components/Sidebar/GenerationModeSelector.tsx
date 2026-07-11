@@ -1,4 +1,4 @@
-import { Image, Video, AudioLines, Wand2, Wrench } from 'lucide-react'
+import { Image, Video, AudioLines, Wand2, Wrench, Box } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import type { GenerationMode } from '../../types'
 
@@ -6,6 +6,7 @@ const modes: { value: GenerationMode; label: string; icon: typeof Image }[] = [
   { value: 'image', label: 'Image', icon: Image },
   { value: 'video', label: 'Video', icon: Video },
   { value: 'audio', label: 'Audio', icon: AudioLines },
+  { value: 'model3d', label: '3D', icon: Box },
   { value: 'avatar', label: 'Edit', icon: Wand2 },
   { value: 'tools', label: 'Tools', icon: Wrench },
 ]

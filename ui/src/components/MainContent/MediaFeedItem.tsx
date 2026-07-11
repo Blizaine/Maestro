@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, type CSSProperties } from 'react'
-import { Play, Pencil, RefreshCw, Copy, Trash2, Check, Combine, Loader2, Heart, ArrowLeftToLine, Download, FolderInput, Scissors, FastForward, BookMarked, Box } from 'lucide-react'
+import { Play, Pencil, RefreshCw, Copy, Trash2, Check, Combine, Loader2, Heart, ArrowLeftToLine, Download, FolderInput, Scissors, FastForward, BookMarked } from 'lucide-react'
 import { SaveRecipeDialog } from '../Recipes/SaveRecipeDialog'
 import { useStore } from '../../stores/useStore'
 import { getUploadUrl, fetchOutputMetadata, getFileUrl, moveOutput, uploadImage } from '../../api/client'
@@ -173,6 +173,13 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
   const modelLabel = modelDisplayName(modelType, models)
   const isAudio = file.type === 'audio'
   const isModel3d = file.type === 'model3d'
+
+  // Keep the model-viewer runtime out of Maestro's main Image/Video/Audio
+  // bundle. It is loaded only when a 3D gallery item is actually rendered.
+  useEffect(() => {
+    if (isModel3d) void import('@google/model-viewer')
+  }, [isModel3d])
+
   const resolution = isAudio ? '' : ((params?.resolution as string) || '')
   const seed = params?.seed as number | undefined
   const generationTime = meta?.generation_time
@@ -387,20 +394,14 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
             <audio key={file.url} src={file.url} controls className="w-64" />
           </div>
         ) : isModel3d ? (
-          <div className="flex flex-col items-center gap-3 text-center px-4">
-            <div className="w-16 h-16 rounded-2xl bg-bg-active flex items-center justify-center">
-              <Box size={26} className="text-accent-blue" />
-            </div>
-            <div>
-              <p className="text-sm text-text-secondary">3D model asset</p>
-              <p className="text-[11px] text-text-muted mt-1 break-all">{file.name}</p>
-            </div>
+          <div className="w-full h-full relative">
+            <model-viewer key={file.url} src={getFileUrl(file.name)} alt={file.name} camera-controls auto-rotate shadow-intensity="1" exposure="1" loading="lazy" className="w-full h-full" />
             <a
               href={getFileUrl(file.name)}
               download={file.name}
-              className="px-3 py-1.5 text-xs bg-bg-active border border-border rounded-lg text-text-primary hover:border-accent-blue transition-colors"
+              className="absolute top-2 right-2 px-2.5 py-1.5 text-[10px] bg-black/60 border border-white/20 rounded-lg text-white hover:bg-black/80 transition-colors"
             >
-              Download model
+              Download
             </a>
           </div>
         ) : (

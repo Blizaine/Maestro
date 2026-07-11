@@ -1,7 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { RefreshCw, ShieldAlert, ShieldCheck, Lock } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
-import { fetchModel3DProviders, type Model3DProvider } from '../../api/client'
 
 function ApiKeyField({ label, maskedValue, isSet, onSave }: {
   label: string
@@ -266,14 +265,6 @@ export function ServicesSettingsPanel() {
   const llmModels = useStore(s => s.llmModels)
   const loadLlmModels = useStore(s => s.loadLlmModels)
   const [refreshing, setRefreshing] = useState(false)
-  const [model3dProviders, setModel3dProviders] = useState<Model3DProvider[]>([])
-
-  useEffect(() => {
-    fetchModel3DProviders()
-      .then(data => setModel3dProviders(data.providers))
-      .catch(() => setModel3dProviders([]))
-  }, [])
-
   if (servicesConfigLoading && !servicesConfig) {
     return <div className="text-xs text-text-muted py-4 text-center">Loading...</div>
   }
@@ -425,67 +416,6 @@ export function ServicesSettingsPanel() {
             </p>
           </div>
         )}
-      </div>
-
-      <hr className="border-border" />
-
-      <div className="space-y-4">
-        <h3 className="text-[11px] text-text-secondary uppercase tracking-wider font-medium">3D Model Providers</h3>
-
-        <div>
-          <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">
-            Provider
-          </label>
-          <select
-            value={servicesConfig.model3d_provider || 'hunyuan3d'}
-            onChange={e => {
-              const selected = model3dProviders.find(p => p.id === e.target.value)
-              updateConfig({
-                model3d_provider: e.target.value,
-                model3d_endpoint: selected?.default_endpoint || servicesConfig.model3d_endpoint || '/generate',
-              })
-            }}
-            className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
-          >
-            {(model3dProviders.length ? model3dProviders : [
-              { id: 'hunyuan3d', label: 'Hunyuan3D', default_endpoint: '/generate', input_modes: ['text', 'image'], notes: '' },
-              { id: 'instantmesh', label: 'InstantMesh', default_endpoint: '/generate', input_modes: ['image'], notes: '' },
-              { id: 'triposr', label: 'TripoSR', default_endpoint: '/generate', input_modes: ['image'], notes: '' },
-              { id: 'trellis', label: 'Trellis', default_endpoint: '/generate', input_modes: ['text', 'image'], notes: '' },
-            ]).map(p => (
-              <option key={p.id} value={p.id}>{p.label}</option>
-            ))}
-          </select>
-        </div>
-
-        <div>
-          <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">
-            Server URL
-          </label>
-          <input
-            type="text"
-            value={servicesConfig.model3d_remote_url || ''}
-            onChange={e => updateConfig({ model3d_remote_url: e.target.value })}
-            placeholder="http://127.0.0.1:42025"
-            className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
-          />
-        </div>
-
-        <div>
-          <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">
-            Generate Endpoint
-          </label>
-          <input
-            type="text"
-            value={servicesConfig.model3d_endpoint || '/generate'}
-            onChange={e => updateConfig({ model3d_endpoint: e.target.value })}
-            placeholder="/generate"
-            className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
-          />
-          <p className="text-[10px] text-text-muted mt-1">
-            Connects remote Hunyuan3D, InstantMesh, TripoSR, or Trellis launchers
-          </p>
-        </div>
       </div>
 
       {/* Studio Prompt Enhancer — experimental gate. Default UI uses

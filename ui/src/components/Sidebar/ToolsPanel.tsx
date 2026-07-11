@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { Wrench, Upload, X, Film, Mic, Play, Box } from 'lucide-react'
+import { Wrench, Upload, X, Film, Mic, Play } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
 
@@ -29,9 +29,6 @@ export function ToolsPanel() {
   const revoiceRefs = useStore(s => s.toolsRevoiceRefs)
   const setRevoiceRef = useStore(s => s.setToolsRevoiceRef)
   const runTool = useStore(s => s.runTool)
-  const servicesConfig = useStore(s => s.servicesConfig)
-  const loadOutputs = useStore(s => s.loadOutputs)
-
   const outputs = useStore(s => s.outputs)
   const selectedOutput = useStore(s => s.selectedOutput)
   const flashvsrMode = useStore(s => s.servicesConfig?.flashvsr_mode ?? 1)
@@ -39,15 +36,9 @@ export function ToolsPanel() {
   const currentIsVideo = !!current && current.type === 'video'
 
   const fileRef = useRef<HTMLInputElement>(null)
-  const model3dFileRef = useRef<HTMLInputElement>(null)
   const vcFileRefs = [useRef<HTMLInputElement>(null), useRef<HTMLInputElement>(null)]
   const [uploading, setUploading] = useState(false)
   const [vcUploading, setVcUploading] = useState<number | null>(null)
-  const [model3dPrompt, setModel3dPrompt] = useState('')
-  const [model3dImage, setModel3dImage] = useState<{ path: string; name: string; url: string } | null>(null)
-  const [model3dUploading, setModel3dUploading] = useState(false)
-  const [model3dRunning, setModel3dRunning] = useState(false)
-  const [model3dError, setModel3dError] = useState<string | null>(null)
 
   const handleSourceUpload = async (file: File) => {
     setUploading(true)
@@ -58,42 +49,6 @@ export function ToolsPanel() {
       console.error('Source upload failed:', e)
     } finally {
       setUploading(false)
-    }
-  }
-
-  const handleModel3dImageUpload = async (file: File) => {
-    setModel3dUploading(true)
-    setModel3dError(null)
-    try {
-      const r = await api.uploadImage(file)
-      setModel3dImage({ path: r.path, name: file.name, url: r.url })
-    } catch (e) {
-      setModel3dError(e instanceof Error ? e.message : 'Image upload failed')
-    } finally {
-      setModel3dUploading(false)
-    }
-  }
-
-  const runModel3d = async () => {
-    setModel3dRunning(true)
-    setModel3dError(null)
-    try {
-      await api.generateModel3D({
-        provider: servicesConfig?.model3d_provider || 'hunyuan3d',
-        remote_url: servicesConfig?.model3d_remote_url || '',
-        endpoint: servicesConfig?.model3d_endpoint || '/generate',
-        prompt: model3dPrompt,
-        image_path: model3dImage?.path,
-        output_format: 'glb',
-        texture: true,
-        num_inference_steps: 30,
-        guidance_scale: 5,
-      })
-      await loadOutputs()
-    } catch (e) {
-      setModel3dError(e instanceof Error ? e.message : '3D generation failed')
-    } finally {
-      setModel3dRunning(false)
     }
   }
 
@@ -122,60 +77,6 @@ export function ToolsPanel() {
       <div>
         <div className="flex items-center gap-1.5 text-[11px] text-text-muted uppercase tracking-wider mb-2">
           <Wrench size={12} /> Tools — post-process any clip
-        </div>
-        <div className="bg-bg-tertiary border border-border rounded-lg p-3 space-y-3 mb-4">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-1.5 text-[11px] text-text-muted uppercase tracking-wider">
-              <Box size={12} /> 3D Model
-            </div>
-            <span className="text-[10px] text-text-muted truncate">
-              {servicesConfig?.model3d_provider || 'hunyuan3d'}
-            </span>
-          </div>
-          <textarea
-            value={model3dPrompt}
-            onChange={e => setModel3dPrompt(e.target.value)}
-            placeholder="Text prompt for text-to-3D providers..."
-            rows={3}
-            className="w-full bg-bg-primary border border-border rounded-lg px-3 py-2 text-xs text-text-primary resize-none focus:outline-none focus:border-accent-blue"
-          />
-          {model3dImage ? (
-            <div className="flex items-center gap-2 bg-bg-primary border border-border rounded-lg px-2 py-1.5">
-              <img src={model3dImage.url} alt="" className="w-8 h-8 rounded object-cover border border-border" />
-              <span className="flex-1 min-w-0 truncate text-[11px] text-text-primary">{model3dImage.name}</span>
-              <button onClick={() => setModel3dImage(null)} className="p-0.5 text-text-muted hover:text-red-400 transition-colors" title="Remove">
-                <X size={12} />
-              </button>
-            </div>
-          ) : (
-            <div
-              onClick={() => model3dFileRef.current?.click()}
-              className={`border border-dashed border-border rounded-lg p-2 text-center cursor-pointer hover:border-accent-blue transition-colors ${model3dUploading ? 'opacity-50 pointer-events-none' : ''}`}
-            >
-              <Upload size={14} className="mx-auto mb-1 text-text-muted" />
-              <p className="text-[11px] text-text-secondary">{model3dUploading ? 'Uploading...' : 'Optional image reference'}</p>
-              <input
-                ref={model3dFileRef}
-                type="file"
-                accept="image/*"
-                className="hidden"
-                onChange={e => { const f = e.target.files?.[0]; if (f) handleModel3dImageUpload(f) }}
-              />
-            </div>
-          )}
-          {model3dError && <p className="text-[10px] text-red-400 leading-snug">{model3dError}</p>}
-          <button
-            onClick={runModel3d}
-            disabled={model3dRunning || (!model3dPrompt.trim() && !model3dImage) || !servicesConfig?.model3d_remote_url}
-            className={`w-full px-3 py-2 rounded-lg flex items-center justify-center gap-1.5 font-medium text-xs transition-all ${
-              model3dRunning || (!model3dPrompt.trim() && !model3dImage) || !servicesConfig?.model3d_remote_url
-                ? 'bg-bg-primary text-text-muted cursor-not-allowed border border-border'
-                : 'bg-cta hover:brightness-110 shadow-accent-glow text-white'
-            }`}
-          >
-            <Play size={13} fill="currentColor" />
-            {model3dRunning ? 'Generating 3D...' : 'Generate 3D Model'}
-          </button>
         </div>
         {/* Tool selector */}
         <div className="flex bg-bg-tertiary rounded-lg p-0.5 border border-border">

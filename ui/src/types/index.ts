@@ -152,10 +152,10 @@ export interface OutputFile {
   created_at: number
 }
 
-export type MediaFilter = 'all' | 'images' | 'videos' | 'audio' | 'avatars' | 'multiclip' | 'favorites'
+export type MediaFilter = 'all' | 'images' | 'videos' | 'audio' | 'model3d' | 'avatars' | 'multiclip' | 'favorites'
 export type AspectRatio = 'auto' | '16:9' | '9:16' | '1:1' | '4:3' | '3:4'
 export type ResolutionPreset = 'auto' | '480p' | '540p' | '720p' | '1080p'
-export type GenerationMode = 'image' | 'video' | 'audio' | 'avatar' | 'tools'
+export type GenerationMode = 'image' | 'video' | 'audio' | 'model3d' | 'avatar' | 'tools'
 export type EditSubMode = 'retake' | 'inpaint' | 'restyle' | 'outpaint' | 'edit_anything'
 export type AudioSubMode = 'speech' | 'music' | 'sfx' | 'mixer'
 
@@ -254,9 +254,6 @@ export interface ServicesConfig {
   llm_device: string
   llm_provider: string
   llm_remote_url: string
-  model3d_provider: string
-  model3d_remote_url: string
-  model3d_endpoint: string
   enhance_llm_model_id: string
   enhance_llm_device: string
   google_api_key: string

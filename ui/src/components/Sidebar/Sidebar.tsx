@@ -28,6 +28,7 @@ import { BlendControls } from './BlendControls'
 import { AnchorReturnBanner } from './AnchorReturnBanner'
 import { VoiceRefSection } from './VoiceRefSection'
 import { ToolsPanel } from './ToolsPanel'
+import { Hunyuan3DPanel } from './Hunyuan3DPanel'
 import { HardwareStatusBar } from './HardwareStatusBar'
 
 export function Sidebar() {
@@ -47,6 +48,7 @@ export function Sidebar() {
   const isVideo = generationMode === 'video'
   const isImage = generationMode === 'image'
   const isAudio = generationMode === 'audio'
+  const isModel3d = generationMode === 'model3d'
   const audioSubMode = useStore(s => s.audioSubMode)
   const isEdit = generationMode === 'avatar'
   const isTools = generationMode === 'tools'
@@ -145,7 +147,7 @@ export function Sidebar() {
 
         {/* Tools mode: standalone post-processing (upscale / revoice) on any
             existing clip. Renders in place of the generation controls. */}
-        {isTools ? <ToolsPanel /> : (
+        {isTools ? <ToolsPanel /> : isModel3d ? <Hunyuan3DPanel /> : (
         <>
         {/* Edit mode: sub-mode toggle + sub-controls */}
         {isEdit && <EditSubModeToggle />}
@@ -209,7 +211,7 @@ export function Sidebar() {
       {/* Bottom Bar: Advanced + LoRA Browser + Model + Generate.
           Hidden in Tools mode — ToolsPanel has its own Run button and
           owns no model. */}
-      {!isTools && (
+      {!isTools && !isModel3d && (
       <div className="px-3 py-2.5 border-t border-border">
         <div className="flex items-center gap-2">
           <AdvancedSettings />

@@ -558,8 +558,11 @@ export function MainContent() {
               its weights (tens of GB) before anything appears. */}
           {!outputsLoading && outputs.length === 0 && jobs.length === 0 && (() => {
             const noun = generationMode === 'image' ? 'images'
-              : generationMode === 'audio' ? 'audio' : 'videos'
-            const example = generationMode === 'image'
+              : generationMode === 'audio' ? 'audio'
+              : generationMode === 'model3d' ? '3D assets' : 'videos'
+            const example = generationMode === 'model3d'
+              ? 'Open the 3D section and generate a Hunyuan3D asset.'
+              : generationMode === 'image'
               ? 'a neon city street at night, cinematic'
               : generationMode === 'audio'
               ? 'a dreamy synthwave track about the ocean'

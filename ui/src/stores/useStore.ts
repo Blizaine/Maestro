@@ -429,6 +429,7 @@ const modeDefaultModel: Record<GenerationMode, string> = {
   image: 'flux2_klein_9b',
   video: 'ltx2_22B_distilled_1_1',
   audio: 'kugelaudio_0_open',
+  model3d: '',  // Native Hunyuan3D panel owns its model catalog
   avatar: '',  // will fallback to first available
   tools: '',   // Tools is non-generative post-processing — owns no model
 }
@@ -445,6 +446,7 @@ export function getModelMode(modelType: string, familyId: string): GenerationMod
 }
 
 export function getFamiliesForMode(mode: GenerationMode, allFamilies: ModelFamily[], _editSubMode?: string, audioSubMode?: string): ModelFamily[] {
+  if (mode === 'model3d' || mode === 'tools') return []
   if (mode === 'avatar') {
     // All edit sub-modes (retake, inpaint, restyle) use LTX models
     return allFamilies.filter(f => f.id === 'ltx2' || f.id === 'ltxv')
@@ -1329,6 +1331,8 @@ function computeFilteredOutputs(outputs: OutputFile[], mediaFilter: MediaFilter)
     _foCachedResult = outputs.filter(o => o.type === 'image')
   } else if (mediaFilter === 'audio') {
     _foCachedResult = outputs.filter(o => o.type === 'audio')
+  } else if (mediaFilter === 'model3d') {
+    _foCachedResult = outputs.filter(o => o.type === 'model3d')
   } else if (mediaFilter === 'avatars') {
     // "Edits" filter — show outputs from any of the Edit tab sub-modes.
     // Filter by `edit_sub_mode` (set by retake/inpaint/outpaint/restyle/
@@ -1637,10 +1641,11 @@ export const useStore = create<AppState>((set, get) => ({
     // so returning to it restores correctly, leave `params` untouched (no model
     // load, no defaults reset), and persist the *previous* real mode as the
     // landing mode so a reload doesn't drop into Tools with no model loaded.
-    if (mode === 'tools') {
+    if (mode === 'tools' || mode === 'model3d') {
       const s = get()
       const prev = s.generationMode
-      if (prev === 'tools') { set({ generationMode: 'tools' }); return }
+      if (prev === mode) { set({ generationMode: mode }); return }
+      if (prev === 'tools' || prev === 'model3d') { set({ generationMode: mode }); return }
       const { model_type: _mt, prompt: _p, activated_loras: _al, loras_multipliers: _lm, ...paramsSnapshot } = s.params
       const savedModels = { ...s.selectedModelPerMode, [prev]: s.params.model_type }
       const savedParams = {

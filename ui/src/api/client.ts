@@ -987,40 +987,86 @@ export async function updateServicesConfig(
   return res.json()
 }
 
-// --- 3D Model Providers ---
+// --- Native Hunyuan3D ---
 
-export interface Model3DProvider {
+export interface Hunyuan3DModel {
   id: string
   label: string
-  default_endpoint: string
-  input_modes: string[]
-  notes: string
+  engine: 'v2' | 'v21'
+  repo: string
+  subfolder: string
+  parameters: string
+  multiview: boolean
+  turbo: boolean
+  supports_text: boolean
+  recommended_vram_gb: number
+  description: string
 }
 
-export async function fetchModel3DProviders(): Promise<{
-  providers: Model3DProvider[]
-  current: { provider: string; remote_url: string; endpoint: string }
-}> {
-  const res = await fetch(`${BASE}/api/v1/model3d/providers`)
-  if (!res.ok) throw new Error('Failed to fetch 3D providers')
+export interface Hunyuan3DPreset {
+  id: string
+  label: string
+  description: string
+  model_id: string
+  num_inference_steps: number
+  guidance_scale: number
+  octree_resolution: number
+  num_chunks: number
+  texture_mode: string
+  cpu_offload: boolean
+  flashvdm: boolean
+}
+
+export interface Hunyuan3DCapabilities {
+  runtime: { installed: boolean; isolated_runtime: boolean; releases_vram_after_job: boolean; install_hint: string | null }
+  models: Hunyuan3DModel[]
+  presets: Hunyuan3DPreset[]
+  texture_modes: { id: string; label: string; recommended_vram_gb: number }[]
+  input_views: string[]
+  output_formats: string[]
+  active_jobs: number
+}
+
+export interface Hunyuan3DJob {
+  job_id: string
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+  progress: number
+  phase: string
+  message: string
+  error: string | null
+  filename: string | null
+  url: string | null
+  model_id: string
+  size?: number
+}
+
+export async function fetchHunyuan3DCapabilities(): Promise<Hunyuan3DCapabilities> {
+  const res = await fetch(`${BASE}/api/v1/model3d/capabilities`)
+  if (!res.ok) throw new Error('Failed to fetch Hunyuan3D capabilities')
   return res.json()
 }
 
-export async function generateModel3D(params: {
-  provider?: string
-  remote_url?: string
-  endpoint?: string
+export async function startHunyuan3DJob(params: {
+  preset?: string
+  model_id?: string
   prompt?: string
-  image_path?: string
+  images?: Partial<Record<'front' | 'left' | 'right' | 'back', string>>
   output_format?: string
-  texture?: boolean
+  texture_mode?: string
   seed?: number
   num_inference_steps?: number
   guidance_scale?: number
   octree_resolution?: number
   num_chunks?: number
-  timeout_seconds?: number
-}): Promise<{ status: string; filename: string; url: string; provider: string; size: number }> {
+  texture_resolution?: number
+  cpu_offload?: boolean
+  flashvdm?: boolean
+  remove_background?: boolean
+  compile?: boolean
+  reduce_face?: boolean
+  target_face_num?: number
+  mc_algo?: string
+}): Promise<Hunyuan3DJob> {
   const res = await fetch(`${BASE}/api/v1/model3d/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1030,6 +1076,18 @@ export async function generateModel3D(params: {
     const err = await res.json().catch(() => ({ detail: '3D generation failed' }))
     throw new Error(err.detail || '3D generation failed')
   }
+  return res.json()
+}
+
+export async function fetchHunyuan3DJob(jobId: string): Promise<Hunyuan3DJob> {
+  const res = await fetch(`${BASE}/api/v1/model3d/status/${encodeURIComponent(jobId)}`)
+  if (!res.ok) throw new Error('Failed to fetch Hunyuan3D job')
+  return res.json()
+}
+
+export async function cancelHunyuan3DJob(jobId: string): Promise<Hunyuan3DJob> {
+  const res = await fetch(`${BASE}/api/v1/model3d/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' })
+  if (!res.ok) throw new Error('Failed to cancel Hunyuan3D job')
   return res.json()
 }
 
