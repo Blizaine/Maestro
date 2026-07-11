@@ -10531,6 +10531,37 @@ def list_outputs(limit: int = 0, offset: int = 0, favorites_only: bool = False, 
     audio_exts = {".wav", ".mp3"}
     model3d_exts = {".glb", ".gltf", ".obj", ".ply", ".stl", ".usdz", ".zip"}
 
+    def model3d_thumbnail_url(params: dict) -> str | None:
+        """Return the original front image as a cheap static 3D card preview.
+
+        The gallery must never instantiate a second ``model-viewer`` for its
+        80px history cards: parsing many GLB files there is surprisingly
+        expensive.  Hunyuan3D already records its input views in the output
+        sidecar, so reuse the front image when it is still in Maestro's
+        uploads or outputs roots.  Text-only jobs intentionally return None
+        and the client renders a lightweight 3D icon instead.
+        """
+        images = params.get("images")
+        if not isinstance(images, dict):
+            return None
+        front = images.get("front")
+        if not isinstance(front, str) or not front:
+            return None
+        try:
+            source = os.path.realpath(front)
+            if not os.path.isfile(source):
+                return None
+            uploads_root = os.path.realpath(os.path.join(os.getcwd(), "uploads"))
+            outputs_root = os.path.realpath(wgp.server_config.get("save_path", "outputs"))
+            filename = os.path.basename(source)
+            if source.startswith(uploads_root + os.sep):
+                return f"/api/v1/uploads/{filename}"
+            if source.startswith(outputs_root + os.sep):
+                return f"/api/v1/file/{filename}"
+        except OSError:
+            pass
+        return None
+
     favs = _load_favorites()
 
     # Build a quick listing with mtime — avoid reading JSON for every file
@@ -10574,6 +10605,7 @@ def list_outputs(limit: int = 0, offset: int = 0, favorites_only: bool = False, 
             "mode": meta.get("generation_mode"),
             "edit_sub_mode": params.get("edit_sub_mode"),
             "multi_clip_info": params.get("multi_clip_info"),
+            "thumbnail_url": model3d_thumbnail_url(params) if ext in model3d_exts else None,
         }
         mci = sidecar_cache[name]["multi_clip_info"]
         if mci and mci.get("group_id"):
@@ -10622,6 +10654,7 @@ def list_outputs(limit: int = 0, offset: int = 0, favorites_only: bool = False, 
             "size": size,
             "created_at": mtime,
             "url": f"/api/v1/file/{name}",
+            "thumbnail_url": cached.get("thumbnail_url"),
         })
 
     # Special filters: return ALL matches, bypass pagination

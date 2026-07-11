@@ -35,6 +35,8 @@ export interface ApiOutput {
   size: number
   created_at: number
   url: string
+  /** Static source image for a 3D output's history-card preview. */
+  thumbnail_url?: string | null
   /** Edit-mode sub-classification (retake / inpaint / outpaint / restyle /
    *  edit_anything). Field added as a recovery stub after a git
    *  filter-repo reset wiped the original Stream C/D work that

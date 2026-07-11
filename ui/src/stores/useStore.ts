@@ -5993,6 +5993,7 @@ export const useStore = create<AppState>((set, get) => ({
         favorite: o.favorite || false,
         size: o.size,
         created_at: o.created_at,
+        thumbnail_url: o.thumbnail_url || null,
       }))
       set({ outputs, outputsTotal: total, selectedOutput: 0, outputsLoading: false })
       if (outputs.length > 0) {
@@ -6021,6 +6022,7 @@ export const useStore = create<AppState>((set, get) => ({
         favorite: o.favorite || false,
         size: o.size,
         created_at: o.created_at,
+        thumbnail_url: o.thumbnail_url || null,
       }))
       // Deduplicate (in case items shifted during generation)
       const existingNames = new Set(current.map(o => o.name))
@@ -6047,6 +6049,7 @@ export const useStore = create<AppState>((set, get) => ({
         favorite: o.favorite || false,
         size: o.size,
         created_at: o.created_at,
+        thumbnail_url: o.thumbnail_url || null,
       }))
       const current = get().outputs
       const currentNames = new Set(current.map(o => o.name))

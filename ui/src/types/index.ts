@@ -150,6 +150,8 @@ export interface OutputFile {
   favorite: boolean
   size: number
   created_at: number
+  /** Static preview for 3D output cards; never a live model viewer. */
+  thumbnail_url?: string | null
 }
 
 export type MediaFilter = 'all' | 'images' | 'videos' | 'audio' | 'model3d' | 'avatars' | 'multiclip' | 'favorites'

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
-import { Film, Music, PanelRightClose, PanelRightOpen, X } from 'lucide-react'
+import { Box, Film, Music, PanelRightClose, PanelRightOpen, X } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { requestThumbnail } from '../../lib/thumbnailCache'
 import { useIsMobile } from '../../lib/useIsMobile'
@@ -29,6 +29,23 @@ function VideoThumbnail({ src, name }: { src: string; name: string }) {
   return (
     <div className="w-full h-full bg-bg-active flex items-center justify-center">
       <Film size={14} className="text-text-muted animate-pulse" />
+    </div>
+  )
+}
+
+/** A history-card preview for 3D assets.
+ *
+ * This deliberately renders only the saved front-image thumbnail. Mounting a
+ * model-viewer for every virtualized card would repeatedly fetch and parse
+ * GLB assets while scrolling, which is costly for both memory and GPU.
+ */
+function Model3dThumbnail({ src, name }: { src: string | null | undefined; name: string }) {
+  if (src) {
+    return <img src={src} alt={name} className="w-full h-full object-cover" loading="lazy" />
+  }
+  return (
+    <div className="w-full h-full bg-bg-active flex items-center justify-center" title="3D model">
+      <Box size={15} className="text-text-muted" aria-label="3D model" />
     </div>
   )
 }
@@ -136,6 +153,8 @@ function VirtualizedThumbnailList({ activeIndex, onThumbnailClick, onMobileClick
                 <div className="w-full h-full bg-bg-active flex items-center justify-center">
                   <Music size={14} className="text-text-muted" />
                 </div>
+              ) : file.type === 'model3d' ? (
+                <Model3dThumbnail src={file.thumbnail_url} name={file.name} />
               ) : (
                 <img src={file.url} alt={file.name} className="w-full h-full object-cover" />
               )}
