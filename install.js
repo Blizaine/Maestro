@@ -118,6 +118,12 @@ module.exports = {
       method: "shell.run",
       params: {
         conda: { path: "../../../../../env", python: "3.10" },
+        env: {
+          CUDA_HOME: "{{path.resolve(path.dirname(which('nvcc')), '..')}}",
+          CPATH: "{{path.resolve(path.dirname(which('nvcc')), '../targets/x86_64-linux/include')}}",
+          LIBRARY_PATH: "{{path.resolve(path.dirname(which('nvcc')), '../targets/x86_64-linux/lib')}}",
+          LD_LIBRARY_PATH: "{{path.resolve(path.dirname(which('nvcc')), '../targets/x86_64-linux/lib')}}"
+        },
         path: "app/services/hunyuan3d/vendor/Hunyuan3D-2/hy3dgen/texgen/custom_rasterizer",
         message: "uv pip install --no-build-isolation -e ."
       }
@@ -134,6 +140,12 @@ module.exports = {
       method: "shell.run",
       params: {
         conda: { path: "../../../../env", python: "3.10" },
+        env: {
+          CUDA_HOME: "{{path.resolve(path.dirname(which('nvcc')), '..')}}",
+          CPATH: "{{path.resolve(path.dirname(which('nvcc')), '../targets/x86_64-linux/include')}}",
+          LIBRARY_PATH: "{{path.resolve(path.dirname(which('nvcc')), '../targets/x86_64-linux/lib')}}",
+          LD_LIBRARY_PATH: "{{path.resolve(path.dirname(which('nvcc')), '../targets/x86_64-linux/lib')}}"
+        },
         path: "app/services/hunyuan3d/vendor/Hunyuan3D-2.1/hy3dpaint/custom_rasterizer",
         message: "uv pip install --no-build-isolation -e ."
       }
