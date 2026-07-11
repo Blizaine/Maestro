@@ -59,24 +59,77 @@ Three themes, switchable in Settings → System:
 - **Outpaint** — extend a video's frame in any direction
 - **Edit Anything** — allows users to modify, add, or remove elements from existing videos using text prompts and In-Context LoRA (IC-LoRA) models
 
-### 🧊 Remote 3D model providers *(experimental)*
-Maestro can connect to external text/image-to-3D services and save generated assets into the active workspace. Supported provider profiles are **Hunyuan3D**, **InstantMesh**, **TripoSR**, and **Trellis**. Configure the provider in Settings → Services, then use Tools → 3D Model to generate a `.glb` asset.
+### 🧊 Native Hunyuan3D Studio
+Maestro includes an integrated **3D** section for text-to-3D, image-to-3D, and multi-image reconstruction. Hunyuan runs in an isolated environment inside Maestro, so its older Diffusers stack cannot conflict with the audio/video models. Each worker exits after export and releases its CUDA context and VRAM.
 
-The integration is remote-first: run the 3D generator in its own Pinokio launcher or server, then point Maestro at its base URL. This avoids duplicating large model installs inside Maestro.
+Included geometry variants:
 
-Programmatic example:
+- **Hunyuan3D 2 Mini**: Turbo, Fast, and full-step 0.6B variants
+- **Hunyuan3D 2**: Turbo, Fast, and full-step 1.1B variants
+- **Hunyuan3D 2 Multi-view**: Turbo, Fast, and full-step models using front/left/right/back references
+- **Hunyuan3D 2.1**: high-fidelity 3.3B geometry with optional PBR materials
+
+The advanced panel exposes inference steps, guidance, octree resolution, processing chunks, seed, texture model/resolution, CPU offload, FlashVDM, Torch compilation, DMC/Marching Cubes, mesh simplification, face target, and GLB/OBJ/PLY/STL export. Four presets provide sensible Low VRAM, Balanced, Quality/PBR, and Multi-view configurations.
+
+Fresh Maestro installations include the runtime automatically. Existing installations can use **Pinokio → Maestro → Install Hunyuan3D Support**. Model weights are downloaded lazily from Tencent's official Hugging Face repositories the first time a variant is used.
+
+#### Hunyuan3D API
+
+Start a job with curl:
 
 ```bash
-curl -X POST http://127.0.0.1:7860/api/v1/model3d/generate \
+curl -X POST "$MAESTRO_URL/api/v1/model3d/generate" \
   -H "Content-Type: application/json" \
   -d '{
-    "provider": "hunyuan3d",
-    "remote_url": "http://127.0.0.1:42025",
-    "endpoint": "/generate",
+    "preset": "balanced",
+    "model_id": "hunyuan3d-2-turbo",
     "prompt": "a stylized bronze robot figurine",
-    "output_format": "glb",
-    "texture": true
+    "texture_mode": "v2-turbo",
+    "output_format": "glb"
   }'
+```
+
+Multi-image requests use uploaded Maestro paths:
+
+```bash
+curl -X POST "$MAESTRO_URL/api/v1/model3d/generate" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "preset": "multiview",
+    "model_id": "hunyuan3d-2mv-turbo",
+    "images": {
+      "front": "front.png",
+      "left": "left.png",
+      "right": "right.png",
+      "back": "back.png"
+    }
+  }'
+```
+
+The response contains a `job_id`. Poll `GET /api/v1/model3d/status/{job_id}` or cancel with `POST /api/v1/model3d/jobs/{job_id}/cancel`. Discover models and defaults from `GET /api/v1/model3d/capabilities`.
+
+```javascript
+const base = 'http://127.0.0.1:7860';
+const job = await fetch(`${base}/api/v1/model3d/generate`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ preset: 'eco', prompt: 'a carved wooden owl', output_format: 'glb' }),
+}).then(r => r.json());
+
+const status = await fetch(`${base}/api/v1/model3d/status/${job.job_id}`).then(r => r.json());
+```
+
+```python
+import requests
+
+base = "http://127.0.0.1:7860"
+job = requests.post(f"{base}/api/v1/model3d/generate", json={
+    "model_id": "hunyuan3d-2.1",
+    "image_path": "reference.png",
+    "texture_mode": "pbr",
+    "cpu_offload": True,
+}).json()
+status = requests.get(f"{base}/api/v1/model3d/status/{job['job_id']}").json()
 ```
 
 ### 📂 Workspaces
