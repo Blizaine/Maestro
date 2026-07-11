@@ -36,12 +36,12 @@ def event(phase: str, progress: float, message: str) -> None:
 def supported_call(callable_obj, **kwargs):
     try:
         signature = inspect.signature(callable_obj)
-        if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()):
-            return callable_obj(**kwargs)
-        accepted = {key: value for key, value in kwargs.items() if key in signature.parameters}
-        return callable_obj(**accepted)
     except (TypeError, ValueError):
         return callable_obj(**kwargs)
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()):
+        return callable_obj(**kwargs)
+    accepted = {key: value for key, value in kwargs.items() if key in signature.parameters}
+    return callable_obj(**accepted)
 
 
 def load_pil(path: str):
@@ -169,6 +169,12 @@ def configure_pipeline(pipeline, settings: dict[str, Any]) -> None:
                 if hasattr(pipeline, name)
             }
         pipeline.enable_model_cpu_offload()
+        # The standalone Hunyuan pipeline stores `self.device` separately from
+        # Accelerate's execution hooks and leaves it as CPU after offloading.
+        # Its __call__ then uses self.device for latents, so restore the logical
+        # execution device without moving the parked modules back to VRAM.
+        import torch
+        pipeline.device = torch.device("cuda")
 
 
 def generate_mesh(request: dict[str, Any], images: dict[str, Any]):
