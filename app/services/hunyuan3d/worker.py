@@ -152,14 +152,23 @@ def configure_pipeline(pipeline, settings: dict[str, Any]) -> None:
             pipeline.enable_flashvdm(mc_algo=settings.get("mc_algo", "dmc"))
         except TypeError:
             pipeline.enable_flashvdm()
-    if settings.get("cpu_offload") and hasattr(pipeline, "enable_model_cpu_offload"):
-        pipeline.enable_model_cpu_offload()
     if settings.get("compile"):
         if hasattr(pipeline, "compile"):
             pipeline.compile()
         elif hasattr(pipeline, "model"):
             import torch
             pipeline.model = torch.compile(pipeline.model)
+    if settings.get("cpu_offload") and hasattr(pipeline, "enable_model_cpu_offload"):
+        # Hunyuan3D 2.0/2.1 copied Diffusers' offload implementation but their
+        # standalone pipeline never defines the `components` mapping it reads.
+        # Build it after FlashVDM/compile so Accelerate hooks the final modules.
+        if not isinstance(getattr(pipeline, "components", None), dict):
+            pipeline.components = {
+                name: getattr(pipeline, name)
+                for name in ("conditioner", "model", "vae", "scheduler", "image_processor")
+                if hasattr(pipeline, name)
+            }
+        pipeline.enable_model_cpu_offload()
 
 
 def generate_mesh(request: dict[str, Any], images: dict[str, Any]):
