@@ -71,7 +71,7 @@ Included geometry variants:
 
 The advanced panel exposes inference steps, guidance, octree resolution, processing chunks, seed, texture model/resolution, CPU offload, FlashVDM, Torch compilation, DMC/Marching Cubes, mesh simplification, face target, and GLB/OBJ/PLY/STL export. Four presets provide sensible Low VRAM, Balanced, Quality/PBR, and Multi-view configurations.
 
-Fresh Maestro installations include the runtime automatically. Existing installations can use **Pinokio → Maestro → Install Hunyuan3D Support**. Model weights are downloaded lazily from Tencent's official Hugging Face repositories the first time a variant is used.
+Hunyuan3D is part of Maestro's normal lifecycle: **Install** prepares its isolated runtime, **Update** keeps it current, and **Reset** removes it with the rest of Maestro. There is no separate 3D installer. Model weights are downloaded lazily from Tencent's official Hugging Face repositories the first time a variant is used.
 
 The cloned source code and downloaded weights remain subject to Tencent's Hunyuan license terms. Review the `LICENSE` files in the official checkouts before redistribution or commercial use.
 

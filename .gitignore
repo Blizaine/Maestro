@@ -72,6 +72,10 @@ app/services/sam/checkpoints/
 .masks/
 .temp_frames/
 
+# Native Hunyuan3D runtime and official source checkouts
+app/services/hunyuan3d/env/
+app/services/hunyuan3d/vendor/
+
 # Retired optional content supplement pack — the download apparatus is
 # gone (nothing reads the pack anymore), but leftover local copies may
 # still exist on dev machines. Never tracked in git.

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Box, ChevronDown, Cpu, Layers3, Loader2, Play, Square, Upload, X } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
+import { ModelSelector } from './ModelSelector'
 import {
   cancelHunyuan3DJob,
   fetchHunyuan3DCapabilities,
@@ -61,13 +62,15 @@ function ViewUpload({ view, value, busy, required, onUpload, onRemove }: {
 export function Hunyuan3DPanel() {
   const loadOutputs = useStore(state => state.loadOutputs)
   const setMediaFilter = useStore(state => state.setMediaFilter)
+  const modelId = useStore(state => state.params.model_type)
+  const prompt = useStore(state => state.params.prompt)
+  const setParam = useStore(state => state.setParam)
+  const selectMaestroModel = useStore(state => state.selectModel)
   const [capabilities, setCapabilities] = useState<Hunyuan3DCapabilities | null>(null)
   const [capabilityError, setCapabilityError] = useState<string | null>(null)
-  const [prompt, setPrompt] = useState('')
   const [views, setViews] = useState<Partial<Record<ViewName, UploadedView>>>({})
   const [uploadingView, setUploadingView] = useState<ViewName | null>(null)
   const [preset, setPreset] = useState('balanced')
-  const [modelId, setModelId] = useState('hunyuan3d-2-turbo')
   const [textureMode, setTextureMode] = useState('v2-turbo')
   const [steps, setSteps] = useState(5)
   const [guidance, setGuidance] = useState(5)
@@ -104,7 +107,7 @@ export function Hunyuan3DPanel() {
     const next = capabilities?.presets.find(item => item.id === presetId)
     if (!next) return
     setPreset(presetId)
-    setModelId(next.model_id)
+    selectMaestroModel(next.model_id)
     setSteps(next.num_inference_steps)
     setGuidance(next.guidance_scale)
     setOctree(next.octree_resolution)
@@ -114,12 +117,16 @@ export function Hunyuan3DPanel() {
     setFlashvdm(next.flashvdm)
   }
 
-  const selectModel = (nextId: string) => {
-    setModelId(nextId)
-    const next = capabilities?.models.find(model => model.id === nextId)
-    if (next?.engine !== 'v21' && textureMode === 'pbr') setTextureMode('v2-turbo')
-    if (next?.engine === 'v21' && textureMode === 'v2-turbo') setTextureMode('pbr')
-  }
+  useEffect(() => {
+    if (!capabilities || capabilities.models.some(model => model.id === modelId)) return
+    selectMaestroModel('hunyuan3d-2-turbo')
+  }, [capabilities, modelId, selectMaestroModel])
+
+  useEffect(() => {
+    if (!selectedModel) return
+    if (selectedModel.engine !== 'v21' && textureMode === 'pbr') setTextureMode('v2-turbo')
+    if (selectedModel.engine === 'v21' && textureMode === 'v2-turbo') setTextureMode('pbr')
+  }, [selectedModel, textureMode])
 
   const uploadView = async (view: ViewName, file: File) => {
     setUploadingView(view)
@@ -218,7 +225,7 @@ export function Hunyuan3DPanel() {
       ) : !installed ? (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
           <p className="text-xs font-medium text-amber-300">Hunyuan3D runtime is not installed</p>
-          <p className="text-[10px] text-text-muted mt-1 leading-relaxed">Stop Maestro, open its Pinokio menu, and run <strong>Install Hunyuan3D Support</strong>. The runtime stays inside Maestro; model weights download on first use.</p>
+          <p className="text-[10px] text-text-muted mt-1 leading-relaxed">Stop Maestro and run its standard <strong>Install</strong> or <strong>Update</strong> action. The runtime stays inside Maestro; model weights download on first use.</p>
         </div>
       ) : (
         <>
@@ -236,16 +243,14 @@ export function Hunyuan3DPanel() {
 
           <div>
             <label className="text-[10px] text-text-muted uppercase tracking-wider mb-1.5 block">Hunyuan model</label>
-            <select value={modelId} onChange={event => selectModel(event.target.value)} className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-xs text-text-primary focus:outline-none focus:border-accent-blue">
-              {capabilities.models.map(model => <option key={model.id} value={model.id}>{model.label} · {model.parameters}</option>)}
-            </select>
+            <ModelSelector />
             {selectedModel && <p className="text-[9px] text-text-muted mt-1">{selectedModel.description} Recommended: {selectedModel.recommended_vram_gb}GB+ VRAM.</p>}
           </div>
 
           {!isMultiview && (
             <div>
               <label className="text-[10px] text-text-muted uppercase tracking-wider mb-1.5 block">Prompt or reference image</label>
-              <textarea value={prompt} onChange={event => setPrompt(event.target.value)} rows={3} placeholder="Describe a single object, or upload a reference below..." className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-xs text-text-primary resize-none focus:outline-none focus:border-accent-blue" />
+              <textarea value={prompt} onChange={event => setParam('prompt', event.target.value)} rows={3} placeholder="Describe a single object, or upload a reference below..." className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-xs text-text-primary resize-none focus:outline-none focus:border-accent-blue" />
             </div>
           )}
 

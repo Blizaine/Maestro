@@ -13,6 +13,7 @@ import atexit
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -240,8 +241,34 @@ def installation_status() -> dict[str, Any]:
         "v21_source": v21_source.is_dir(),
         "isolated_runtime": True,
         "releases_vram_after_job": True,
-        "install_hint": None if installed else "Run 'Install Hunyuan3D Support' from Maestro's Pinokio menu.",
+        "install_hint": None if installed else "Run Maestro's standard Install or Update action.",
     }
+
+
+def is_model_downloaded(model_id: str) -> bool:
+    """Return whether the selected Hugging Face snapshot is cached locally."""
+    model = MODEL_BY_ID.get(model_id)
+    if model is None:
+        return False
+    repo_cache = HF_CACHE_DIR / "hub" / f"models--{model['repo'].replace('/', '--')}" / "snapshots"
+    if not repo_cache.is_dir():
+        return False
+    snapshots = [path for path in repo_cache.iterdir() if path.is_dir()]
+    if model["engine"] == "v21":
+        return bool(snapshots)
+    return any((snapshot / model["subfolder"]).is_dir() for snapshot in snapshots)
+
+
+def delete_model_cache(model_id: str) -> list[str]:
+    """Remove the upstream repository cache used by a Hunyuan3D variant."""
+    model = MODEL_BY_ID.get(model_id)
+    if model is None:
+        raise ValueError(f"Unknown Hunyuan3D model: {model_id}")
+    repo_cache = HF_CACHE_DIR / "hub" / f"models--{model['repo'].replace('/', '--')}"
+    if not repo_cache.exists():
+        return []
+    shutil.rmtree(repo_cache)
+    return [model["repo"]]
 
 
 def capabilities() -> dict[str, Any]:

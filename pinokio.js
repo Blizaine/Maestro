@@ -18,8 +18,7 @@ module.exports = {
       start: info.running("start.js"),
       start_classic: info.running("start_classic.js"),
       update: info.running("update.js"),
-      reset: info.running("reset.js"),
-      hunyuan3d_install: info.running("hunyuan3d_install.js")
+      reset: info.running("reset.js")
     }
     if (running.install) {
       return [{
@@ -87,13 +86,6 @@ module.exports = {
           text: "Resetting",
           href: "reset.js",
         }]
-      } else if (running.hunyuan3d_install) {
-        return [{
-          default: true,
-          icon: 'fa-solid fa-cube',
-          text: "Installing Hunyuan3D Support",
-          href: "hunyuan3d_install.js",
-        }]
       } else {
         return [{
           icon: "fa-solid fa-power-off",
@@ -152,12 +144,6 @@ module.exports = {
             ? "Update Inpaint Support (SAM 3.1)"
             : "Install Inpaint Support (SAM 3.1)",
           href: "sam_install.js",
-        }, {
-          icon: "fa-solid fa-cube",
-          text: info.exists("app/services/hunyuan3d/env")
-            ? "Update Hunyuan3D Support"
-            : "Install Hunyuan3D Support",
-          href: "hunyuan3d_install.js",
         }, {
           icon: "fa-regular fa-circle-xmark",
           text: "<div><strong>Reset</strong><div>Revert to pre-install state</div></div>",

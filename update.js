@@ -1,11 +1,9 @@
 module.exports = {
   run: [{
     // Pull the latest launcher + app code (single monorepo, so this one
-    // pull covers both `ui/` and `app/`). The NEXT step inspects this
-    // pull's output: if the repo was already current, there is nothing
-    // new to install or rebuild, so we skip straight to the end instead
-    // of spending several minutes on a redundant dependency install +
-    // UI build.
+    // pull covers both `ui/` and `app/`). The next step inspects this
+    // output: an unchanged Maestro skips its main dependency/UI rebuild,
+    // but still reaches the bundled-runtime maintenance section.
     method: "shell.run",
     params: {
       message: "git pull"
@@ -13,7 +11,7 @@ module.exports = {
   }, {
     // Branch on the git pull output (captured here as input.stdout — a
     // shell.run always returns its raw terminal content as stdout):
-    //   - already current  -> jump to "uptodate" (log a notice, then end)
+    //   - already current  -> jump to "runtime" (maintain bundled services)
     //   - new commits found -> jump to "build"   (run the full update)
     // Matches both the modern "Already up to date" and the older git
     // "Already up-to-date" spelling, case-insensitively. If detection
@@ -22,26 +20,8 @@ module.exports = {
     // never a wrongly-skipped rebuild.
     method: "jump",
     params: {
-      id: "{{/already up[- ]to[- ]date/i.test(input.stdout) ? 'uptodate' : 'build'}}"
+      id: "{{/already up[- ]to[- ]date/i.test(input.stdout) ? 'runtime' : 'build'}}"
     }
-  }, {
-    // Reached ONLY when the repo was already current (the "build" path
-    // jumps over this step). Before halting, self-heal the seed-vc
-    // component if it's missing (GPL-3.0, cloned from its own repo — see
-    // install.js): a failed earlier clone shouldn't leave voice features
-    // broken until the next code update.
-    id: "uptodate",
-    when: "{{!exists('app/postprocessing/seedvc/__init__.py')}}",
-    method: "shell.run",
-    params: {
-      message: "git clone --depth 1 --branch v1.0.0 https://github.com/Blizaine/maestro-seedvc app/postprocessing/seedvc"
-    }
-  }, {
-    method: "log",
-    params: {
-      raw: "Already up to date — no new commits pulled. Skipped dependency install and UI rebuild."
-    },
-    next: null
   }, {
     // Fetch the seed-vc component if missing (GPL-3.0, own repository —
     // see install.js). Runs at the top of the build path so the update
@@ -127,12 +107,86 @@ module.exports = {
       uri: "sam_install.js"
     }
   },
-  // Keep the native Hunyuan3D runtime and official source checkouts aligned
-  // with Maestro. This is idempotent; model weights remain in the HF cache.
+  // Even when Maestro itself is already current, Update reaches this point to
+  // self-heal the bundled components and keep the native Hunyuan3D runtime
+  // aligned. Model weights remain lazy downloads in Maestro's own cache.
   {
-    method: "script.start",
+    id: "runtime",
+    when: "{{!exists('app/postprocessing/seedvc/__init__.py')}}",
+    method: "shell.run",
     params: {
-      uri: "hunyuan3d_install.js"
+      message: "git clone --depth 1 --branch v1.0.0 https://github.com/Blizaine/maestro-seedvc app/postprocessing/seedvc"
+    }
+  }, {
+    when: "{{!exists('app/services/hunyuan3d/vendor/Hunyuan3D-2')}}",
+    method: "shell.run",
+    params: {
+      message: "git clone --depth 1 https://github.com/Tencent-Hunyuan/Hunyuan3D-2 app/services/hunyuan3d/vendor/Hunyuan3D-2"
+    }
+  }, {
+    when: "{{exists('app/services/hunyuan3d/vendor/Hunyuan3D-2/.git')}}",
+    method: "shell.run",
+    params: {
+      path: "app/services/hunyuan3d/vendor/Hunyuan3D-2",
+      message: "git pull --ff-only"
+    }
+  }, {
+    when: "{{!exists('app/services/hunyuan3d/vendor/Hunyuan3D-2.1')}}",
+    method: "shell.run",
+    params: {
+      message: "git clone --depth 1 https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1 app/services/hunyuan3d/vendor/Hunyuan3D-2.1"
+    }
+  }, {
+    when: "{{exists('app/services/hunyuan3d/vendor/Hunyuan3D-2.1/.git')}}",
+    method: "shell.run",
+    params: {
+      path: "app/services/hunyuan3d/vendor/Hunyuan3D-2.1",
+      message: "git pull --ff-only"
+    }
+  }, {
+    method: "shell.run",
+    params: {
+      conda: { path: "app/services/hunyuan3d/env", python: "3.10" },
+      message: [
+        "uv pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu128",
+        "uv pip install -r app/services/hunyuan3d/requirements.txt"
+      ]
+    }
+  }, {
+    method: "shell.run",
+    params: {
+      conda: { path: "app/services/hunyuan3d/env", python: "3.10" },
+      path: "app/services/hunyuan3d/vendor/Hunyuan3D-2/hy3dgen/texgen/custom_rasterizer",
+      message: "uv pip install -e ."
+    }
+  }, {
+    method: "shell.run",
+    params: {
+      conda: { path: "app/services/hunyuan3d/env", python: "3.10" },
+      path: "app/services/hunyuan3d/vendor/Hunyuan3D-2/hy3dgen/texgen/differentiable_renderer",
+      message: "uv pip install -e ."
+    }
+  }, {
+    method: "shell.run",
+    params: {
+      conda: { path: "app/services/hunyuan3d/env", python: "3.10" },
+      path: "app/services/hunyuan3d/vendor/Hunyuan3D-2.1/hy3dpaint/custom_rasterizer",
+      message: "uv pip install -e ."
+    }
+  }, {
+    method: "shell.run",
+    params: {
+      conda: { path: "app/services/hunyuan3d/env", python: "3.10" },
+      shell: "{{which('bash')}}",
+      path: "app/services/hunyuan3d/vendor/Hunyuan3D-2.1/hy3dpaint/DifferentiableRenderer",
+      message: "bash compile_mesh_painter.sh"
+    }
+  }, {
+    when: "{{!exists('app/services/hunyuan3d/vendor/Hunyuan3D-2.1/hy3dpaint/ckpt/RealESRGAN_x4plus.pth')}}",
+    method: "fs.download",
+    params: {
+      url: "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+      path: "app/services/hunyuan3d/vendor/Hunyuan3D-2.1/hy3dpaint/ckpt/RealESRGAN_x4plus.pth"
     }
   }]
 }

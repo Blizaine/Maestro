@@ -1,6 +1,5 @@
 // Wipes every install artifact so the next Install starts from scratch.
-// Mirrors the directories created by install.js, sam_install.js, and
-// hunyuan3d_install.js.
+// Mirrors the directories created by install.js and sam_install.js.
 module.exports = {
   run: [
     // Main Python venv

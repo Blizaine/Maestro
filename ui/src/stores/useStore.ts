@@ -319,6 +319,7 @@ const familyModeMap: Record<string, GenerationMode> = {
   kandinsky5: 'video',
   tts: 'audio',
   longcat: 'avatar',
+  hunyuan3d: 'model3d',
 }
 
 // Model types classified as Avatar even though their family is primarily Video
@@ -379,6 +380,8 @@ const SFX_VIRTUAL_MODELS: ModelDef[] = [
 
 // Default enabled models (shown by default in selectors)
 const DEFAULT_ENABLED_MODELS = new Set([
+  // 3D
+  'hunyuan3d-2-turbo',
   // Image
   // Only Flux 2 Klein is enabled by default. Qwen Image Edit and
   // other image models stay available via Settings → System → Model
@@ -429,7 +432,7 @@ const modeDefaultModel: Record<GenerationMode, string> = {
   image: 'flux2_klein_9b',
   video: 'ltx2_22B_distilled_1_1',
   audio: 'kugelaudio_0_open',
-  model3d: '',  // Native Hunyuan3D panel owns its model catalog
+  model3d: 'hunyuan3d-2-turbo',
   avatar: '',  // will fallback to first available
   tools: '',   // Tools is non-generative post-processing — owns no model
 }
@@ -446,7 +449,7 @@ export function getModelMode(modelType: string, familyId: string): GenerationMod
 }
 
 export function getFamiliesForMode(mode: GenerationMode, allFamilies: ModelFamily[], _editSubMode?: string, audioSubMode?: string): ModelFamily[] {
-  if (mode === 'model3d' || mode === 'tools') return []
+  if (mode === 'tools') return []
   if (mode === 'avatar') {
     // All edit sub-modes (retake, inpaint, restyle) use LTX models
     return allFamilies.filter(f => f.id === 'ltx2' || f.id === 'ltxv')
@@ -1641,11 +1644,11 @@ export const useStore = create<AppState>((set, get) => ({
     // so returning to it restores correctly, leave `params` untouched (no model
     // load, no defaults reset), and persist the *previous* real mode as the
     // landing mode so a reload doesn't drop into Tools with no model loaded.
-    if (mode === 'tools' || mode === 'model3d') {
+    if (mode === 'tools') {
       const s = get()
       const prev = s.generationMode
       if (prev === mode) { set({ generationMode: mode }); return }
-      if (prev === 'tools' || prev === 'model3d') { set({ generationMode: mode }); return }
+      if (prev === 'tools') { set({ generationMode: mode }); return }
       const { model_type: _mt, prompt: _p, activated_loras: _al, loras_multipliers: _lm, ...paramsSnapshot } = s.params
       const savedModels = { ...s.selectedModelPerMode, [prev]: s.params.model_type }
       const savedParams = {
@@ -1658,7 +1661,7 @@ export const useStore = create<AppState>((set, get) => ({
       }
       const savedPrompts = { ...s.savedPromptPerMode, [prev]: s.params.prompt }
       set({
-        generationMode: 'tools',
+        generationMode: mode,
         selectedModelPerMode: savedModels,
         savedParamsPerMode: savedParams,
         savedLoraPerMode: savedLoras,
@@ -1763,7 +1766,7 @@ export const useStore = create<AppState>((set, get) => ({
       loraWeights: sameModel ? restoredLora.loraWeights : {},
       availableLoras: sameModel ? restoredLora.availableLoras : [],
     }))
-    if (newModelType && !sfxModelTypes.has(newModelType)) {
+    if (newModelType && !sfxModelTypes.has(newModelType) && mode !== 'model3d') {
       if (!sameModel) {
         get().loadLoras(newModelType)
       }
@@ -5851,7 +5854,7 @@ export const useStore = create<AppState>((set, get) => ({
       availableLoras: [],
     }))
     // Virtual SFX models don't have backend model options or LoRAs
-    if (!sfxModelTypes.has(modelType)) {
+    if (!sfxModelTypes.has(modelType) && currentMode !== 'model3d') {
       get().loadLoras(modelType)
       get().loadModelOptions(modelType)
       _applyModelDefaults(get, set, modelType)

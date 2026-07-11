@@ -315,6 +315,7 @@ def list_models():
         if fid == "unknown":
             continue
         families.append({"id": fid, "label": label, "order": order})
+    families.append({"id": "hunyuan3d", "label": "Hunyuan3D", "order": 350})
     families.sort(key=lambda f: f["order"])
 
     # Models
@@ -345,12 +346,37 @@ def list_models():
             "nsfw_only": bool(md.get("nsfw_only", False)),
         })
 
+    for model in model3d_service.MODELS:
+        models.append({
+            "model_type": model["id"],
+            "name": model["label"],
+            "family": "hunyuan3d",
+            "architecture": "hunyuan3d",
+            "is_i2v": False,
+            "is_t2v": False,
+            "guidance_max_phases": 1,
+            "fps": 0,
+            "supports_end_frame": False,
+            "supports_audio": False,
+            "supports_ref_images": True,
+            "is_downloaded": model3d_service.is_model_downloaded(model["id"]),
+            "nsfw_only": False,
+        })
+
     return {"families": families, "models": models}
 
 
 @api.get("/api/v1/models/{model_type}/debug")
 def debug_model(model_type: str):
     """Debug: show raw model definition and download check."""
+    if model_type in model3d_service.MODEL_BY_ID:
+        model = model3d_service.MODEL_BY_ID[model_type]
+        return {
+            "model_type": model_type,
+            "keys": model,
+            "is_downloaded": model3d_service.is_model_downloaded(model_type),
+            "ckpts_dir": str(model3d_service.HF_CACHE_DIR),
+        }
     md = wgp.get_model_def(model_type)
     if not md:
         return {"error": "Model not found"}
@@ -376,6 +402,9 @@ def debug_model(model_type: str):
 @api.delete("/api/v1/models/{model_type}")
 def delete_model(model_type: str):
     """Delete a model's checkpoint files from disk."""
+    if model_type in model3d_service.MODEL_BY_ID:
+        deleted = model3d_service.delete_model_cache(model_type)
+        return {"deleted": deleted, "model_type": model_type}
     md = wgp.get_model_def(model_type)
     if not md:
         return JSONResponse({"error": "Model not found"}, status_code=404)
