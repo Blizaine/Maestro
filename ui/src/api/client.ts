@@ -29,7 +29,7 @@ export interface ApiResolution {
 
 export interface ApiOutput {
   name: string
-  type: 'video' | 'image' | 'audio'
+  type: 'video' | 'image' | 'audio' | 'model3d'
   mode: string | null
   favorite?: boolean
   size: number
@@ -983,6 +983,52 @@ export async function updateServicesConfig(
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Update failed' }))
     throw new Error(err.detail || 'Update failed')
+  }
+  return res.json()
+}
+
+// --- 3D Model Providers ---
+
+export interface Model3DProvider {
+  id: string
+  label: string
+  default_endpoint: string
+  input_modes: string[]
+  notes: string
+}
+
+export async function fetchModel3DProviders(): Promise<{
+  providers: Model3DProvider[]
+  current: { provider: string; remote_url: string; endpoint: string }
+}> {
+  const res = await fetch(`${BASE}/api/v1/model3d/providers`)
+  if (!res.ok) throw new Error('Failed to fetch 3D providers')
+  return res.json()
+}
+
+export async function generateModel3D(params: {
+  provider?: string
+  remote_url?: string
+  endpoint?: string
+  prompt?: string
+  image_path?: string
+  output_format?: string
+  texture?: boolean
+  seed?: number
+  num_inference_steps?: number
+  guidance_scale?: number
+  octree_resolution?: number
+  num_chunks?: number
+  timeout_seconds?: number
+}): Promise<{ status: string; filename: string; url: string; provider: string; size: number }> {
+  const res = await fetch(`${BASE}/api/v1/model3d/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: '3D generation failed' }))
+    throw new Error(err.detail || '3D generation failed')
   }
   return res.json()
 }

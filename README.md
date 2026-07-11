@@ -59,6 +59,26 @@ Three themes, switchable in Settings → System:
 - **Outpaint** — extend a video's frame in any direction
 - **Edit Anything** — allows users to modify, add, or remove elements from existing videos using text prompts and In-Context LoRA (IC-LoRA) models
 
+### 🧊 Remote 3D model providers *(experimental)*
+Maestro can connect to external text/image-to-3D services and save generated assets into the active workspace. Supported provider profiles are **Hunyuan3D**, **InstantMesh**, **TripoSR**, and **Trellis**. Configure the provider in Settings → Services, then use Tools → 3D Model to generate a `.glb` asset.
+
+The integration is remote-first: run the 3D generator in its own Pinokio launcher or server, then point Maestro at its base URL. This avoids duplicating large model installs inside Maestro.
+
+Programmatic example:
+
+```bash
+curl -X POST http://127.0.0.1:7860/api/v1/model3d/generate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider": "hunyuan3d",
+    "remote_url": "http://127.0.0.1:42025",
+    "endpoint": "/generate",
+    "prompt": "a stylized bronze robot figurine",
+    "output_format": "glb",
+    "texture": true
+  }'
+```
+
 ### 📂 Workspaces
 Multiple isolated output directories with a quick switcher in the sidebar. Useful for separating client projects, NSFW vs SFW, or experiments. Pinned and favorited outputs are tracked per workspace.
 

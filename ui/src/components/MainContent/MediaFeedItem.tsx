@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, type CSSProperties } from 'react'
-import { Play, Pencil, RefreshCw, Copy, Trash2, Check, Combine, Loader2, Heart, ArrowLeftToLine, Download, FolderInput, Scissors, FastForward, BookMarked } from 'lucide-react'
+import { Play, Pencil, RefreshCw, Copy, Trash2, Check, Combine, Loader2, Heart, ArrowLeftToLine, Download, FolderInput, Scissors, FastForward, BookMarked, Box } from 'lucide-react'
 import { SaveRecipeDialog } from '../Recipes/SaveRecipeDialog'
 import { useStore } from '../../stores/useStore'
 import { getUploadUrl, fetchOutputMetadata, getFileUrl, moveOutput, uploadImage } from '../../api/client'
@@ -172,6 +172,7 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
   const modelType = (params?.model_type as string) || ''
   const modelLabel = modelDisplayName(modelType, models)
   const isAudio = file.type === 'audio'
+  const isModel3d = file.type === 'model3d'
   const resolution = isAudio ? '' : ((params?.resolution as string) || '')
   const seed = params?.seed as number | undefined
   const generationTime = meta?.generation_time
@@ -384,6 +385,23 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
             </div>
             <p className="text-xs text-text-muted mb-2">{file.name}</p>
             <audio key={file.url} src={file.url} controls className="w-64" />
+          </div>
+        ) : isModel3d ? (
+          <div className="flex flex-col items-center gap-3 text-center px-4">
+            <div className="w-16 h-16 rounded-2xl bg-bg-active flex items-center justify-center">
+              <Box size={26} className="text-accent-blue" />
+            </div>
+            <div>
+              <p className="text-sm text-text-secondary">3D model asset</p>
+              <p className="text-[11px] text-text-muted mt-1 break-all">{file.name}</p>
+            </div>
+            <a
+              href={getFileUrl(file.name)}
+              download={file.name}
+              className="px-3 py-1.5 text-xs bg-bg-active border border-border rounded-lg text-text-primary hover:border-accent-blue transition-colors"
+            >
+              Download model
+            </a>
           </div>
         ) : (
           <RetryImage url={file.url} alt={file.name} />

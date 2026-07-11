@@ -4665,6 +4665,9 @@ def get_services_config():
         "llm_device": services.get("llm_device", _llm_default_device()),
         "llm_provider": provider,
         "llm_remote_url": services.get("llm_remote_url", ""),
+        "model3d_provider": services.get("model3d_provider", "hunyuan3d"),
+        "model3d_remote_url": services.get("model3d_remote_url", ""),
+        "model3d_endpoint": services.get("model3d_endpoint", "/generate"),
         "enhance_llm_model_id": services.get("enhance_llm_model_id", ""),
         "enhance_llm_device": services.get("enhance_llm_device", "cuda"),
         "google_api_key": _mask_key(services.get("google_api_key", "")),
@@ -4745,6 +4748,7 @@ async def update_services_config(request: Request):
 
     ALLOWED_KEYS = {
         "llm_model_id", "llm_device", "llm_provider", "llm_remote_url",
+        "model3d_provider", "model3d_remote_url", "model3d_endpoint",
         "enhance_llm_model_id", "enhance_llm_device",
         "google_api_key", "openai_api_key", "anthropic_api_key",
         "use_director_v2", "nsfw_mode", "nsfw_accepted_at", "director_prompt_polish",
@@ -4787,6 +4791,77 @@ async def update_services_config(request: Request):
         f.write(json.dumps(wgp.server_config, indent=4))
 
     return {"status": "ok", "updated": updated}
+
+
+# ============================================================================
+# API Routes: 3D model providers
+# ============================================================================
+
+def _resolve_model3d_input_path(value: str) -> str | None:
+    """Resolve a UI-provided upload/output path to a local file."""
+    if not value:
+        return None
+    value = value.strip()
+    if value.startswith("/api/v1/uploads/"):
+        value = value.rsplit("/", 1)[-1]
+        return _safe_join(os.path.join(os.getcwd(), "uploads"), value)
+    if value.startswith("/api/v1/file/"):
+        value = value.rsplit("/", 1)[-1]
+        return _safe_join(_workspace_dir(), value)
+    if os.path.isabs(value):
+        uploads_root = os.path.realpath(os.path.join(os.getcwd(), "uploads"))
+        outputs_root = os.path.realpath(wgp.server_config.get("save_path", "outputs"))
+        real = os.path.realpath(value)
+        if real.startswith(uploads_root + os.sep) or real.startswith(outputs_root + os.sep):
+            return real
+        return None
+    upload_candidate = _safe_join(os.path.join(os.getcwd(), "uploads"), value)
+    if upload_candidate and os.path.isfile(upload_candidate):
+        return upload_candidate
+    return _safe_join(_workspace_dir(), value)
+
+
+@api.get("/api/v1/model3d/providers")
+def list_model3d_providers():
+    from services import model3d_service
+    services = wgp.server_config.get("services", {})
+    return {
+        "providers": model3d_service.provider_list(),
+        "current": {
+            "provider": services.get("model3d_provider", "hunyuan3d"),
+            "remote_url": services.get("model3d_remote_url", ""),
+            "endpoint": services.get("model3d_endpoint", "/generate"),
+        },
+    }
+
+
+@api.post("/api/v1/model3d/generate")
+async def generate_model3d(request: Request):
+    from services import model3d_service
+    body = await request.json()
+    services = wgp.server_config.get("services", {})
+    provider = body.get("provider") or services.get("model3d_provider", "hunyuan3d")
+    remote_url = body.get("remote_url") or services.get("model3d_remote_url", "")
+    endpoint = body.get("endpoint") or services.get("model3d_endpoint", "")
+    image_path = _resolve_model3d_input_path(body.get("image_path", ""))
+    if body.get("image_path") and (not image_path or not os.path.isfile(image_path)):
+        raise HTTPException(status_code=400, detail="3D input image not found")
+    try:
+        result = model3d_service.generate_model3d(
+            provider=provider,
+            remote_url=remote_url,
+            endpoint=endpoint,
+            output_dir=_workspace_dir(),
+            body=body,
+            image_path=image_path,
+        )
+        return {"status": "ok", **result}
+    except requests.exceptions.HTTPError as e:
+        detail = (e.response.text or str(e)).strip() if e.response is not None else str(e)
+        raise HTTPException(status_code=502, detail=detail[:1000])
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============================================================================
@@ -10382,9 +10457,10 @@ def list_outputs(limit: int = 0, offset: int = 0, favorites_only: bool = False, 
     if not os.path.isdir(out_dir):
         return {"outputs": [], "total": 0}
 
-    media_exts = {".mp4", ".webm", ".gif", ".png", ".jpg", ".jpeg", ".webp", ".wav", ".mp3"}
+    media_exts = {".mp4", ".webm", ".gif", ".png", ".jpg", ".jpeg", ".webp", ".wav", ".mp3", ".glb", ".gltf", ".obj", ".ply", ".stl", ".usdz", ".zip"}
     video_exts = {".mp4", ".webm", ".gif"}
     audio_exts = {".wav", ".mp3"}
+    model3d_exts = {".glb", ".gltf", ".obj", ".ply", ".stl", ".usdz", ".zip"}
 
     favs = _load_favorites()
 
@@ -10444,7 +10520,7 @@ def list_outputs(limit: int = 0, offset: int = 0, favorites_only: bool = False, 
     # Second pass: build the file list using the cached sidecar data.
     files = []
     for name, filepath, ext, mtime in raw_entries:
-        ftype = "video" if ext in video_exts else ("audio" if ext in audio_exts else "image")
+        ftype = "video" if ext in video_exts else ("audio" if ext in audio_exts else ("model3d" if ext in model3d_exts else "image"))
         cached = sidecar_cache.get(name) or {}
         mode = cached.get("mode")
         edit_sub_mode = cached.get("edit_sub_mode")

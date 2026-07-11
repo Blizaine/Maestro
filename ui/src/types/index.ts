@@ -140,8 +140,8 @@ export interface GenerationJob {
 export interface OutputFile {
   name: string
   url: string
-  type: 'video' | 'image' | 'audio'
-  mode: GenerationMode | null
+  type: 'video' | 'image' | 'audio' | 'model3d'
+  mode: GenerationMode | 'model3d' | null
   /** Edit sub-mode tag from the .meta.json sidecar params (set by the
    *  retake/inpaint/outpaint/restyle/edit_anything endpoints). The gallery's
    *  Edits filter checks this to identify edit-mode outputs regardless of
@@ -254,6 +254,9 @@ export interface ServicesConfig {
   llm_device: string
   llm_provider: string
   llm_remote_url: string
+  model3d_provider: string
+  model3d_remote_url: string
+  model3d_endpoint: string
   enhance_llm_model_id: string
   enhance_llm_device: string
   google_api_key: string
