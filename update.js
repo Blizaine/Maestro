@@ -11,8 +11,9 @@ module.exports = {
   }, {
     // Branch on the git pull output (captured here as input.stdout — a
     // shell.run always returns its raw terminal content as stdout):
-    //   - already current  -> jump to "runtime" (maintain bundled services)
-    //   - new commits found -> jump to "build"   (run the full update)
+    //   - already current and complete -> jump to "uptodate" and stop
+    //   - old install missing native 3D -> jump to "build" for migration
+    //   - new commits found             -> jump to "build" for the full update
     // Matches both the modern "Already up to date" and the older git
     // "Already up-to-date" spelling, case-insensitively. If detection
     // ever fails (e.g. empty stdout), the regex simply won't match and
@@ -20,8 +21,15 @@ module.exports = {
     // never a wrongly-skipped rebuild.
     method: "jump",
     params: {
-      id: "{{/already up[- ]to[- ]date/i.test(input.stdout) ? 'runtime' : 'build'}}"
+      id: "{{/already up[- ]to[- ]date/i.test(input.stdout) && exists('app/services/hunyuan3d/env') && exists('app/services/hunyuan3d/vendor/Hunyuan3D-2') && exists('app/services/hunyuan3d/vendor/Hunyuan3D-2.1') && exists('app/postprocessing/seedvc/__init__.py') ? 'uptodate' : 'build'}}"
     }
+  }, {
+    id: "uptodate",
+    method: "log",
+    params: {
+      raw: "Already up to date. Maestro and its bundled runtimes are installed."
+    },
+    next: null
   }, {
     // Fetch the seed-vc component if missing (GPL-3.0, own repository —
     // see install.js). Runs at the top of the build path so the update
@@ -107,11 +115,9 @@ module.exports = {
       uri: "sam_install.js"
     }
   },
-  // Even when Maestro itself is already current, Update reaches this point to
-  // self-heal the bundled components and keep the native Hunyuan3D runtime
-  // aligned. Model weights remain lazy downloads in Maestro's own cache.
+  // Existing installations that predate native 3D reach this section through
+  // the normal full update path. Model weights remain lazy downloads.
   {
-    id: "runtime",
     when: "{{!exists('app/postprocessing/seedvc/__init__.py')}}",
     method: "shell.run",
     params: {
