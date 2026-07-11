@@ -438,12 +438,19 @@ def _run_job_serialized(job_id: str, output_dir: str) -> None:
 
     command = [str(python_path), str(WORKER_PATH), "--request", str(request_path), "--output", str(output_path)]
     env = os.environ.copy()
+    # Built-in Hunyuan3D models are public. Do not inherit Pinokio's global HF
+    # credentials: some Hub/proxy combinations omit X-Repo-Commit from
+    # authenticated HEAD responses, which makes huggingface_hub incorrectly
+    # report that model_index.json is missing.
+    for token_var in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HF_TOKEN_PATH"):
+        env.pop(token_var, None)
     env.update({
         "PYTHONUNBUFFERED": "1",
         "HF_HOME": str(HF_CACHE_DIR),
         "HUGGINGFACE_HUB_CACHE": str(HF_CACHE_DIR / "hub"),
         "HF_HUB_ETAG_TIMEOUT": "30",
         "HF_HUB_DOWNLOAD_TIMEOUT": "60",
+        "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",
         "TOKENIZERS_PARALLELISM": "false",
     })
     lines: list[str] = []

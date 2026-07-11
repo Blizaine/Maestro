@@ -51,13 +51,19 @@ def load_pil(path: str):
 
 def make_text_image(prompt: str, output_dir: Path, device: str) -> tuple[Any, str]:
     event("text_to_image", 0.08, "Loading HunyuanDiT text-to-image conditioner")
+    from huggingface_hub import hf_hub_download
     from hy3dgen.text2image import HunyuanDiTPipeline
 
+    repo_id = "Tencent-Hunyuan/HunyuanDiT-v1.1-Diffusers-Distilled"
     pipeline = None
     for attempt in range(1, 4):
         try:
+            # Resolve the public manifest before Diffusers loads the snapshot.
+            # This seeds the revision cache and avoids the misleading generic
+            # "model_index.json is missing" wrapper on metadata failures.
+            hf_hub_download(repo_id, "model_index.json", token=False)
             pipeline = HunyuanDiTPipeline(
-                "Tencent-Hunyuan/HunyuanDiT-v1.1-Diffusers-Distilled",
+                repo_id,
                 device=device,
             )
             break
