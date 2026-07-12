@@ -204,23 +204,33 @@ def recommend_settings(hw: dict) -> dict:
     gpu_name = hw.get("gpu_name", "GPU")
     vram_gb = hw.get("gpu_vram_gb", 0)
     ram_gb = hw.get("ram_gb", 0)
+    # Audio gets its own tiering. The shared profile table is calibrated
+    # for 20+ GB VIDEO models, but the whole ACE-Step 1.5 audio stack
+    # (XL transformer int8 ~5.3 GB + LM 4B int8 ~4.4 GB + codec) fits in
+    # VRAM on much smaller cards — and the fast LM decoders (vllm/cg)
+    # only engage when int(profile) is 1 or 3 (wgp.py gate: models
+    # resident in VRAM). Inheriting the video profile silently condemned
+    # every card under 24 GB to the legacy LM decoder at <1 token/sec,
+    # making LM songs take 10-15 minutes and look hung — exactly the
+    # hand-tuning Auto-Tune exists to prevent. On 12 GB+ cards pick
+    # profile 3 (LowRAM_HighVRAM) for audio; below 12 GB keep the
+    # conservative shared profile (the LM stack wouldn't fit anyway).
+    if (vram_gb or 0) >= 12 and int(profile) not in (1, 3):
+        audio_profile = 3
+    else:
+        audio_profile = profile
+
     reason = (
         f"{gpu_name} ({vram_gb} GB VRAM, {ram_gb} GB RAM): "
         f"VRAM tier={vram_tier}, RAM tier={ram_tier} → profile {profile:g}, "
+        f"audio profile {audio_profile:g}, "
         f"{quant.upper()}, VAE config {vae}, coefficient {coef}"
     )
 
     return {
         "video_profile": profile,
         "image_profile": profile,
-        # Audio uses the same profile as video/image — the hardware is
-        # the same hardware regardless of mode. Wan2GP's historical
-        # default of 3.5 (VeryLowRAM_HighVRAM) was a one-size-fits-all
-        # fallback that's actively wrong on machines with plenty of
-        # RAM: a user with 128 GB RAM + 24 GB VRAM should get Profile 1
-        # for audio too, not be artificially constrained to a "very low
-        # RAM" profile.
-        "audio_profile": profile,
+        "audio_profile": audio_profile,
         "transformer_quantization": quant,
         "vae_config": vae,
         "vram_safety_coefficient": coef,
