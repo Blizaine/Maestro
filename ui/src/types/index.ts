@@ -23,6 +23,9 @@ export interface ModelDef {
   // store auto-adds these models to enabledModels so they appear in
   // selectors without the user having to enable each one manually.
   nsfw_only?: boolean
+  // Hunyuan3D variants stored in one shared HF repo: deleting this
+  // model's cache also removes the weights of every listed sibling.
+  shared_cache_group?: string[]
 }
 
 export interface Resolution {

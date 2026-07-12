@@ -14,6 +14,9 @@ export interface ApiModel {
   // model block. The UI hides it from selectors and the visibility
   // settings unless servicesConfig.nsfw_mode is enabled.
   nsfw_only?: boolean
+  // Hunyuan3D variants stored in one shared HF repo: deleting this
+  // model's cache also removes the weights of every listed sibling.
+  shared_cache_group?: string[]
 }
 
 export interface ApiFamily {
@@ -76,7 +79,7 @@ export async function reloadModels(): Promise<{ status: string; model_count: num
   return res.json()
 }
 
-export async function deleteModel(modelType: string): Promise<{ deleted: string[]; model_type: string }> {
+export async function deleteModel(modelType: string): Promise<{ deleted: string[]; model_type: string; affected_models?: string[] }> {
   const res = await fetch(`${BASE}/api/v1/models/${encodeURIComponent(modelType)}`, { method: 'DELETE' })
   if (!res.ok) throw new Error('Failed to delete model')
   return res.json()
@@ -1083,7 +1086,13 @@ export async function startHunyuan3DJob(params: {
 
 export async function fetchHunyuan3DJob(jobId: string): Promise<Hunyuan3DJob> {
   const res = await fetch(`${BASE}/api/v1/model3d/status/${encodeURIComponent(jobId)}`)
-  if (!res.ok) throw new Error('Failed to fetch Hunyuan3D job')
+  if (!res.ok) {
+    // A 404 means the job registry no longer knows this id (the backend
+    // restarted mid-generation); callers use the status to stop polling.
+    const error = new Error(res.status === 404 ? 'Hunyuan3D job not found' : 'Failed to fetch Hunyuan3D job')
+    ;(error as Error & { status?: number }).status = res.status
+    throw error
+  }
   return res.json()
 }
 

@@ -353,8 +353,9 @@ def list_models():
             "name": model["label"],
             "family": "hunyuan3d",
             "architecture": "hunyuan3d",
-            "is_i2v": False,
-            "is_t2v": False,
+            # Multi-view variants are image-only; the rest accept a prompt.
+            "is_i2v": not model["supports_text"],
+            "is_t2v": model["supports_text"],
             "guidance_max_phases": 1,
             "fps": 0,
             "supports_end_frame": False,
@@ -362,6 +363,9 @@ def list_models():
             "supports_ref_images": True,
             "is_downloaded": model3d_service.is_model_downloaded(model["id"]),
             "nsfw_only": False,
+            # Variants sharing one HF repo lose their weights together when
+            # the cache is deleted; the UI warns using this list.
+            "shared_cache_group": [item["id"] for item in model3d_service.models_sharing_repo(model["id"])],
         })
 
     return {"families": families, "models": models}
@@ -404,8 +408,9 @@ def debug_model(model_type: str):
 def delete_model(model_type: str):
     """Delete a model's checkpoint files from disk."""
     if model_type in model3d_service.MODEL_BY_ID:
+        affected = [item["id"] for item in model3d_service.models_sharing_repo(model_type)]
         deleted = model3d_service.delete_model_cache(model_type)
-        return {"deleted": deleted, "model_type": model_type}
+        return {"deleted": deleted, "model_type": model_type, "affected_models": affected if deleted else []}
     md = wgp.get_model_def(model_type)
     if not md:
         return JSONResponse({"error": "Model not found"}, status_code=404)

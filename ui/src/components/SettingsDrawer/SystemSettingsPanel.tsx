@@ -121,21 +121,31 @@ function ModelVisibilitySection() {
   // Group models by generation mode, hiding nsfw_only entries when
   // Mature Mode is off (they reappear instantly when the toggle flips).
   const visibleModels = models.filter(m => !m.nsfw_only || nsfwMode)
-  const modelsByMode = new Map<GenerationMode, { familyLabel: string; models: { model_type: string; name: string; is_downloaded?: boolean }[] }[]>()
+  type ModelRow = { model_type: string; name: string; is_downloaded?: boolean; shared_cache_group?: string[] }
+  const modelsByMode = new Map<GenerationMode, { familyLabel: string; models: ModelRow[] }[]>()
   for (const { mode } of MODE_LABELS) {
     const modeFamilies = getFamiliesForMode(mode, families)
-    const groups: { familyLabel: string; models: { model_type: string; name: string; is_downloaded?: boolean }[] }[] = []
+    const groups: { familyLabel: string; models: ModelRow[] }[] = []
     for (const fam of modeFamilies) {
       const familyModels = getModelsForFamily(fam.id, visibleModels, mode)
       if (familyModels.length > 0) {
         groups.push({
           familyLabel: fam.label,
-          models: familyModels.map(m => ({ model_type: m.model_type, name: m.name, is_downloaded: m.is_downloaded })),
+          models: familyModels.map(m => ({ model_type: m.model_type, name: m.name, is_downloaded: m.is_downloaded, shared_cache_group: m.shared_cache_group })),
         })
       }
     }
     modelsByMode.set(mode, groups)
   }
+
+  // Hunyuan3D variants share HF repos, so deleting one removes the weights
+  // of its downloaded siblings too — name them before the user confirms.
+  const modelByType = new Map(models.map(m => [m.model_type, m]))
+  const sharedDeleteNames = (m: ModelRow): string[] =>
+    (m.shared_cache_group ?? [])
+      .map(id => modelByType.get(id))
+      .filter((sibling): sibling is NonNullable<typeof sibling> => !!sibling?.is_downloaded)
+      .map(sibling => sibling.name)
 
   const enabledCount = enabledModels.size
   const totalCount = visibleModels.length
@@ -215,9 +225,11 @@ function ModelVisibilitySection() {
                     {groups.length > 1 && (
                       <div className="text-[10px] text-text-muted uppercase tracking-wider mt-2 mb-1">{group.familyLabel}</div>
                     )}
-                    {group.models.map(m => (
+                    {group.models.map(m => {
+                      const alsoDeletes = confirmDelete === m.model_type ? sharedDeleteNames(m) : []
+                      return (
+                      <div key={m.model_type}>
                       <div
-                        key={m.model_type}
                         className="flex items-center gap-2 py-0.5 group"
                       >
                         <label className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer">
@@ -259,7 +271,14 @@ function ModelVisibilitySection() {
                           </button>
                         )}
                       </div>
-                    ))}
+                      {alsoDeletes.length > 0 && (
+                        <p className="ml-6 text-[10px] text-red-400/90 leading-snug">
+                          Shared weights — also deletes: {alsoDeletes.join(', ')}
+                        </p>
+                      )}
+                      </div>
+                      )
+                    })}
                   </div>
                 ))}
               </div>

@@ -391,12 +391,6 @@ const HUNYUAN3D_MODEL_TYPES = [
   'hunyuan3d-2.1',
 ] as const
 
-const HUNYUAN3D_FAMILY: ModelFamily = {
-  id: 'hunyuan3d',
-  label: 'Hunyuan3D',
-  order: 300,
-}
-
 // Default enabled models (shown by default in selectors)
 const DEFAULT_ENABLED_MODELS = new Set([
   // Image
@@ -2297,28 +2291,12 @@ export const useStore = create<AppState>((set, get) => ({
   clearModelVisibilityFocus: () => set({ modelVisibilityFocus: null }),
   loadModels: async () => {
     try {
-      const [data, hunyuan3dCapabilities] = await Promise.all([
-        api.fetchModels(),
-        // Hunyuan3D owns its own model registry. Keep the regular model
-        // catalog usable if that optional endpoint is temporarily offline.
-        api.fetchHunyuan3DCapabilities().catch(() => null),
-      ])
-      const hunyuan3dModels: ModelDef[] = hunyuan3dCapabilities?.models.map(model => ({
-        model_type: model.id,
-        name: model.label,
-        family: HUNYUAN3D_FAMILY.id,
-        architecture: model.engine,
-        is_i2v: !model.supports_text,
-        is_t2v: model.supports_text,
-        guidance_max_phases: 1,
-        fps: 0,
-        // We cannot know whether an individual Hunyuan weight is cached
-        // without downloading it. Do not expose a misleading delete action.
-        is_downloaded: false,
-      })) ?? []
-      const families = data.families.some(family => family.id === HUNYUAN3D_FAMILY.id)
-        ? data.families
-        : [...data.families, HUNYUAN3D_FAMILY]
+      // The backend catalog is the single source for Hunyuan3D models too:
+      // /api/v1/models already lists them (family included) with real
+      // download state, so re-adding them from the capabilities endpoint
+      // would duplicate every variant in the selectors.
+      const data = await api.fetchModels()
+      const families = data.families
       const backendModels = data.models.map(m => ({
         model_type: m.model_type,
         name: m.name,
@@ -2330,9 +2308,10 @@ export const useStore = create<AppState>((set, get) => ({
         fps: m.fps ?? 16,
         is_downloaded: m.is_downloaded ?? false,
         nsfw_only: m.nsfw_only ?? false,
+        shared_cache_group: m.shared_cache_group,
       }))
       // Inject models maintained by Maestro services alongside backend models.
-      const models = [...backendModels, ...SFX_VIRTUAL_MODELS, ...hunyuan3dModels]
+      const models = [...backendModels, ...SFX_VIRTUAL_MODELS]
 
       // Hydrate persisted per-mode settings from localStorage
       const saved = _loadSettings()
