@@ -4265,7 +4265,6 @@ def delete_preset(preset_id: str):
     return {"deleted": preset_id}
 
 
-@api.get("/api/v1/system-config")
 def _read_app_version() -> str:
     """Maestro release version from the repo-root VERSION file."""
     try:
@@ -4279,6 +4278,7 @@ def _read_app_version() -> str:
 _APP_VERSION = _read_app_version()
 
 
+@api.get("/api/v1/system-config")
 def get_system_config():
     """Return system-level settings for the UI System tab."""
     cfg = wgp.server_config
