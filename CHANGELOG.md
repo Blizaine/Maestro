@@ -3,6 +3,16 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [1.1.1] - 2026-07-12
+
+Fixes: Director clip reruns keep the music video's soundtrack (sliced to
+the clip's window); dashboard missing-count and Re-join repaired for
+multi-clip runs (existing pipeline files backfilled on load); ACE-Step LM
+runaway progress display corrected (generation was fine, the counter was
+not); Auto-Tune now assigns audio its own memory profile so 12 GB+ cards
+get the fast LM decoder instead of the legacy fallback. See the
+[README Updates section](README.md#updates).
+
 ## [1.1.0] - 2026-07-10
 
 See the [Updates section of the README](README.md#updates) for the

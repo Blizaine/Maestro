@@ -73,6 +73,14 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.1.1 (2026-07-12)
+
+**Fixed**
+- Director music videos: regenerating a clip from the Pipeline Dashboard now keeps the song. Reruns are conditioned on the exact segment of the soundtrack the clip covers, instead of the model inventing its own audio.
+- Director dashboard: complete multi-clip runs no longer show a bogus "Generate N missing" count, and the Re-join button works (and reports errors instead of silently doing nothing). Existing saved pipelines are repaired automatically on load.
+- ACE-Step 1.5 with the song LM appeared to hang forever with a runaway progress counter (for example 96761/97200 and climbing). The generation was actually progressing; the counter now reads honestly (token n of 600 for a 2 minute song).
+- Performance Auto-Tune assigned audio a memory profile meant for large video models, which silently locked the ACE-Step song LM to a slow fallback decoder on every card under 24 GB VRAM. Audio now gets its own profile: cards with 12 GB+ unlock the fast LM engine. Re-run Auto-Tune (Settings > System > Auto card) after updating to pick this up.
+
 ### v1.1.0 (2026-07-10)
 
 **Added**
