@@ -4274,12 +4274,26 @@ def build_callback(state, pipe, send_cmd, status, num_inference_steps, preview_m
                 _current_pass_steps[0] = override_num_inference_steps
                 if not _cumulative_total_locked[0]:
                     _cumulative_total[0] = override_num_inference_steps
-            else:
-                # Subsequent passes: accumulate previous pass's steps
+            elif step_idx < 0:
+                # New pass. Only pass-BOUNDARY calls accumulate: every
+                # multi-stage pipeline announces a pass with step_idx=-1
+                # (see ti2vid_two_stages / progressive).
                 _cumulative_offset[0] += _current_pass_steps[0]
                 _current_pass_steps[0] = override_num_inference_steps
                 if not _cumulative_total_locked[0]:
                     _cumulative_total[0] = _cumulative_offset[0] + override_num_inference_steps
+            else:
+                # Mid-pass re-send: the ACE-Step LM engines pass their token
+                # budget on EVERY per-token callback (step_idx >= 0).
+                # Treating those as new passes inflated the progress total
+                # by max_tokens per token — "[96761/97200] LM Compute Audio
+                # Codes" on what was really token ~161 of a 600-token song,
+                # which read as an infinite hang. Refresh the current pass
+                # size without accumulating.
+                if override_num_inference_steps != _current_pass_steps[0]:
+                    _current_pass_steps[0] = override_num_inference_steps
+                    if not _cumulative_total_locked[0]:
+                        _cumulative_total[0] = _cumulative_offset[0] + override_num_inference_steps
             gen["num_inference_steps"] = override_num_inference_steps
 
         num_inference_steps = gen.get("num_inference_steps", 0)
