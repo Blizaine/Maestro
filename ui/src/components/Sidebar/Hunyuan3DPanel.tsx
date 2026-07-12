@@ -153,12 +153,24 @@ export function Hunyuan3DPanel() {
   useEffect(() => {
     if (!job || (job.status !== 'queued' && job.status !== 'running')) return
     let disposed = false
+    let failures = 0
     const poll = async () => {
       try {
         const next = await fetchHunyuan3DJob(job.job_id)
+        failures = 0
         if (!disposed) setJob(next)
       } catch (err) {
-        if (!disposed) setError(err instanceof Error ? err.message : 'Could not read 3D job status')
+        if (disposed) return
+        failures += 1
+        const message = err instanceof Error ? err.message : 'Could not read 3D job status'
+        setError(message)
+        // A 404 (job registry lost — backend restart) or repeated failures
+        // will never recover; mark the job failed locally so the interval
+        // stops and the Generate button becomes usable again.
+        const lost = (err as Error & { status?: number }).status === 404
+        if (lost || failures >= 4) {
+          setJob(current => current && { ...current, status: 'failed', error: lost ? 'The 3D job was lost — the backend probably restarted.' : message })
+        }
       }
     }
     const timer = window.setInterval(poll, 1500)
