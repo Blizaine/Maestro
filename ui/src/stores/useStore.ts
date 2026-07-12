@@ -1991,6 +1991,9 @@ export const useStore = create<AppState>((set, get) => ({
       // Refresh the pipeline to get updated state
       const pipeline = await api.fetchSavedPipeline(pid)
       set({ dashboardSelectedPipeline: pipeline, dashboardLoading: false })
+      // New files (rerun clip / rejoin video) land in the outputs folder —
+      // refresh the gallery so they appear without a browser reload.
+      get().loadOutputs()
       return result
     } catch (e) {
       console.error('Re-run image failed:', e)
@@ -2004,6 +2007,9 @@ export const useStore = create<AppState>((set, get) => ({
       const result = await api.rerunClipVideo(pid, clipIndex, prompt)
       const pipeline = await api.fetchSavedPipeline(pid)
       set({ dashboardSelectedPipeline: pipeline, dashboardLoading: false })
+      // New files (rerun clip / rejoin video) land in the outputs folder —
+      // refresh the gallery so they appear without a browser reload.
+      get().loadOutputs()
       return result
     } catch (e) {
       console.error('Re-run video failed:', e)
@@ -2017,6 +2023,9 @@ export const useStore = create<AppState>((set, get) => ({
       const result = await api.rejoinPipeline(pid)
       const pipeline = await api.fetchSavedPipeline(pid)
       set({ dashboardSelectedPipeline: pipeline, dashboardLoading: false })
+      // New files (rerun clip / rejoin video) land in the outputs folder —
+      // refresh the gallery so they appear without a browser reload.
+      get().loadOutputs()
       return result
     } catch (e) {
       console.error('Rejoin failed:', e)
