@@ -2430,6 +2430,53 @@ def get_lora_dir(model_type):
         os.makedirs(lora_dir, exist_ok=True)
     return lora_dir
 
+
+def get_lora_search_dirs(model_type):
+    """Primary (writable) lora dir first, then read-only equivalents under
+    linked model folders.
+
+    A linked checkpoints folder <other-app>/app/ckpts implies a sibling
+    <other-app>/app/loras with the same per-family layout, since linked
+    installs are Wan2GP-family apps. Downloads, deletes, presets, and
+    sidecar metadata always target the primary dir; linked dirs only
+    contribute lora files for listing and load-time resolution.
+    """
+    primary = get_lora_dir(model_type)
+    dirs = [primary]
+    cli_lora_root = getattr(args, "loras", "")
+    if isinstance(cli_lora_root, str):
+        cli_lora_root = cli_lora_root.strip()
+    loras_root = cli_lora_root or server_config.get("loras_root", DEFAULT_LORA_ROOT) or DEFAULT_LORA_ROOT
+    try:
+        rel = os.path.relpath(primary, loras_root)
+    except ValueError:
+        return dirs
+    if rel.startswith(".."):
+        return dirs
+    # Skip index 0: the primary root is the write target (possibly a
+    # user-chosen absolute path), not a linked install.
+    for root in (server_config.get("checkpoints_paths") or [])[1:]:
+        if not isinstance(root, str) or not fl.is_external_root(root):
+            continue
+        linked_root = os.path.join(os.path.dirname(os.path.abspath(root)), "loras")
+        linked = os.path.normpath(linked_root if rel == "." else os.path.join(linked_root, rel))
+        if os.path.isdir(linked) and linked not in dirs:
+            dirs.append(linked)
+    return dirs
+
+
+def resolve_lora_path(model_type, lora_file):
+    """Resolve a lora filename across the primary dir and linked read-only
+    dirs; the primary copy wins on duplicates. Missing files resolve to the
+    primary path, which is also the download target."""
+    name = os.path.basename(lora_file)
+    dirs = get_lora_search_dirs(model_type)
+    for d in dirs:
+        p = os.path.join(d, name)
+        if os.path.isfile(p):
+            return p
+    return os.path.join(dirs[0], name)
+
 attention_modes_installed = get_attention_modes()
 attention_modes_supported = get_supported_attention_modes()
 args = _parse_args()
@@ -2677,9 +2724,10 @@ for path in  ["wan2.1_Vace_1.3B_preview_bf16.safetensors", "sky_reels2_diffusion
 "wan2.1_Vace_14B_mbf16.safetensors", "wan2.1_Vace_14B_quanto_mbf16_int8.safetensors", "wan2.1_FLF2V_720p_14B_quanto_int8.safetensors", "wan2.1_FLF2V_720p_14B_bf16.safetensors",  "wan2.1_FLF2V_720p_14B_fp16.safetensors", "wan2.1_Vace_1.3B_mbf16.safetensors", "wan2.1_text2video_1.3B_bf16.safetensors",
 "ltxv_0.9.7_13B_dev_bf16.safetensors", "ltx-2-19b-distilled-fp8.safetensors", "ltx-2-19b-dev-fp8.safetensors", "ltx-2-19b-distilled.safetensors", "ltx-2-19b-dev.safetensors"
 ]:
-    if fl.locate_file(path, error_if_none= False) is not None:
+    _old_model_path = fl.locate_file(path, error_if_none= False)
+    if _old_model_path is not None and not fl.is_protected_path(_old_model_path):
         print(f"Removing old version of model '{path}'. A new version of this model will be downloaded next time you use it.")
-        os.remove( fl.locate_file(path))
+        os.remove(_old_model_path)
 
 models_def = {}
 
@@ -3487,12 +3535,32 @@ def process_files_def(repoId = None, sourceFolderList = None, fileList = None, t
             if fl.locate_folder(sourceFolder if targetFolder is None else os.path.join(targetFolder, sourceFolder), error_if_none= False ) is None:
                 snapshot_download(repo_id=repoId,  allow_patterns=sourceFolder +"/*", local_dir= local_dir)
         else:
-            for onefile in files:     
-                if len(sourceFolder) > 0: 
-                    if fl.locate_file( (sourceFolder + "/" + onefile)  if targetFolder is None else os.path.join(targetFolder, sourceFolder, onefile), error_if_none= False) is None:   
-                        hf_hub_download(repo_id=repoId,  filename=onefile, local_dir = local_dir, subfolder=sourceFolder)
-                else:
-                    if fl.locate_file(onefile if targetFolder is None else os.path.join(targetFolder, onefile), error_if_none= False) is None:          
+            folder_parts = [p for p in (targetFolder, sourceFolder) if p]
+            if folder_parts:
+                # Folder-based file sets must stay self-contained within ONE
+                # root. A per-file check across all roots would download only
+                # the delta of a partially-matching linked (read-only) folder
+                # into a fresh internal folder — and that partial internal
+                # folder then shadows the complete linked one for every
+                # locate_folder consumer (gemma tokenizer, wav2vec, ...).
+                # Rule: if any single root already holds ALL files, reuse it;
+                # otherwise complete the writable target root.
+                rel_keys = [os.path.join(*folder_parts, onefile) for onefile in files]
+                complete_root = next(
+                    (root for root in fl.get_checkpoints_paths()
+                     if all(os.path.isfile(os.path.join(root, k)) for k in rel_keys)),
+                    None,
+                )
+                if complete_root is None:
+                    for onefile, rel_key in zip(files, rel_keys):
+                        if not os.path.isfile(os.path.join(targetRoot, rel_key)):
+                            if len(sourceFolder) > 0:
+                                hf_hub_download(repo_id=repoId,  filename=onefile, local_dir = local_dir, subfolder=sourceFolder)
+                            else:
+                                hf_hub_download(repo_id=repoId,  filename=onefile, local_dir = local_dir)
+            else:
+                for onefile in files:
+                    if fl.locate_file(onefile, error_if_none= False) is None:
                         hf_hub_download(repo_id=repoId,  filename=onefile, local_dir = local_dir)
 
 
@@ -3654,8 +3722,12 @@ def download_models(model_filename = None, model_type= None, file_type = 0, subm
 
     model_loras = get_model_recursive_prop(model_type, "loras", return_list= True)
     for url in model_loras:
-        filename = os.path.join(get_lora_dir(model_type), url.split("/")[-1])
-        if not os.path.isfile(filename ): 
+        # Existence check searches linked read-only dirs too (a bundled
+        # distilled/lightning lora may already live in a linked install);
+        # resolve_lora_path falls back to the primary path — the download
+        # target — when the file exists nowhere.
+        filename = resolve_lora_path(model_type, url.split("/")[-1])
+        if not os.path.isfile(filename ):
             if not url.startswith("http"):
                 raise Exception(f"Lora '{filename}' was not found in the Loras Folder and no URL was provided to download it. Please add an URL in the model definition file.")
             try:
@@ -3680,7 +3752,9 @@ def check_loras_exist(model_type, loras_choices_files, download = False, send_cm
     missing_local_loras = []
     missing_remote_loras = []
     for lora_file in loras_choices_files:
-        local_path = os.path.join(lora_dir, os.path.basename(lora_file))
+        # Searches linked read-only dirs too; resolves to the primary path
+        # (the download target) when the file exists nowhere.
+        local_path = resolve_lora_path(model_type, lora_file)
         if not os.path.isfile(local_path):
             url = loras_url_cache.get(local_path, None)         
             if url is not None:
@@ -3747,8 +3821,22 @@ def setup_loras(model_type, transformer,  lora_dir, lora_preselected_preset, spl
 
 
     if lora_dir != None:
-        dir_loras =  glob.glob( os.path.join(lora_dir , "*.sft") ) + glob.glob( os.path.join(lora_dir , "*.safetensors") ) 
-        dir_loras.sort()
+        # Merge lora files across the primary dir and linked read-only dirs
+        # (linked model folders' sibling loras/). Dedupe by filename with
+        # the primary copy winning; presets below stay primary-only since
+        # they are app-specific configuration.
+        seen_lora_names = set()
+        dir_loras = []
+        for search_dir in get_lora_search_dirs(model_type):
+            batch = glob.glob( os.path.join(search_dir , "*.sft") ) + glob.glob( os.path.join(search_dir , "*.safetensors") )
+            batch.sort()
+            for element in batch:
+                element_name = os.path.basename(element)
+                if element_name in seen_lora_names:
+                    continue
+                seen_lora_names.add(element_name)
+                dir_loras.append(element)
+        dir_loras.sort(key=lambda p: os.path.basename(p))
         loras += [element for element in dir_loras if element not in loras ]
 
         dir_presets_settings = glob.glob( os.path.join(lora_dir , "*.json") ) 
@@ -5797,8 +5885,7 @@ def get_overridden_attention(model_type):
 def get_transformer_loras(model_type):
     model_def = get_model_def(model_type)
     transformer_loras_filenames = get_model_recursive_prop(model_type, "loras", return_list=True)
-    lora_dir = get_lora_dir(model_type)
-    transformer_loras_filenames = [ os.path.join(lora_dir, os.path.basename(filename)) for filename in transformer_loras_filenames]
+    transformer_loras_filenames = [ resolve_lora_path(model_type, filename) for filename in transformer_loras_filenames]
     transformer_loras_multipliers = get_model_recursive_prop(model_type, "loras_multipliers", return_list=True) + [1.] * len(transformer_loras_filenames)
     transformer_loras_multipliers = transformer_loras_multipliers[:len(transformer_loras_filenames)]
     return transformer_loras_filenames, transformer_loras_multipliers
@@ -6922,10 +7009,9 @@ def generate_video(
         print(f"[LoRA] Loading {len(activated_loras)} LoRA(s): {[os.path.basename(l) for l in activated_loras]} | multipliers: {loras_multipliers!r}")
         loras_list_mult_choices_nums, loras_slists, errors =  parse_loras_multipliers(loras_multipliers, len(activated_loras), num_inference_steps, nb_phases = guidance_phases, merge_slist= loras_slists, model_switch_phase= model_switch_phase )
         if len(errors) > 0: raise Exception(f"Error parsing Loras: {errors}")
-        lora_dir = get_lora_dir(model_type)
         errors = check_loras_exist(model_type, activated_loras, True, send_cmd)
         if len(errors) > 0 : raise gr.Error(errors)
-        loras_selected += [ os.path.join(lora_dir, os.path.basename(lora)) for lora in activated_loras]
+        loras_selected += [ resolve_lora_path(model_type, lora) for lora in activated_loras]
     else:
         print(f"[LoRA] No LoRAs activated for this generation (model_type={model_type})")
 

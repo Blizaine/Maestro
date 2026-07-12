@@ -7,11 +7,61 @@ default_checkpoints_paths = ["ckpts", "."]
 
 _checkpoints_paths = default_checkpoints_paths
 
+# Snapshot the app directory at import time. is_external_root must not
+# depend on os.getcwd() at call time: some code paths os.chdir() during
+# generation (e.g. the YuE codec builder), which would misclassify roots
+# for the duration.
+_APP_DIR = os.path.abspath(os.getcwd())
+
 def set_checkpoints_paths(checkpoints_paths):
     global _checkpoints_paths
     _checkpoints_paths = [path.strip() for path in checkpoints_paths if len(path.strip()) > 0 ]
     if len(checkpoints_paths) == 0:
         _checkpoints_paths = default_checkpoints_paths
+
+def is_external_root(root):
+    """True for a checkpoints path that lives OUTSIDE the app's own directory
+    (e.g. another Pinokio app's ckpts folder, linked via the "model folders"
+    setting). External roots are searched for reads but are never chosen as
+    a write/delete target — Maestro must not modify another app's install.
+
+    Classification uses the RESOLVED path, so a hand-edited relative entry
+    like "../wan.git2/app/ckpts" counts as external, while "ckpts" and "."
+    stay internal. Comparison is case-normalized for Windows.
+    """
+    root_n = os.path.normcase(os.path.abspath(root))
+    app_n = os.path.normcase(_APP_DIR)
+    try:
+        return os.path.commonpath([root_n, app_n]) != app_n
+    except ValueError:
+        # Different drives on Windows — definitely external.
+        return True
+
+
+def get_checkpoints_paths():
+    """The current search roots, primary (write target) first."""
+    return list(_checkpoints_paths)
+
+
+def is_protected_path(path):
+    """True when path lives inside a LINKED install — under a non-primary
+    external root's parent app folder (covering its ckpts AND its sibling
+    loras). Anything protected must never be deleted or overwritten by
+    Maestro. The primary root (index 0) is exempt even when external: it is
+    the user-chosen, Maestro-managed download target."""
+    if not path:
+        return False
+    p = os.path.normcase(os.path.abspath(path))
+    for root in _checkpoints_paths[1:]:
+        if not is_external_root(root):
+            continue
+        app_of_root = os.path.normcase(os.path.dirname(os.path.abspath(root)))
+        try:
+            if os.path.commonpath([p, app_of_root]) == app_of_root:
+                return True
+        except ValueError:
+            continue
+    return False
 
 def _normalize_force_path(force_path):
     if force_path is not None and isinstance(force_path, list) and len(force_path):
@@ -45,6 +95,14 @@ def get_smart_download_root(force_path = None):
     if os.path.isabs(force_path):
         return force_path
     for folder in _checkpoints_paths:
+        # Never resume/extend a folder inside an external (linked) root:
+        # reads find its files fine, but new downloads must land in a
+        # writable root so linked installs stay read-only. The FIRST entry
+        # is exempt — it is the user-chosen download target even when it
+        # points outside the app (upstream supports absolute primaries
+        # like D:/models).
+        if folder != _checkpoints_paths[0] and is_external_root(folder):
+            continue
         candidate = os.path.join(folder, force_path)
         if os.path.isdir(candidate):
             return folder

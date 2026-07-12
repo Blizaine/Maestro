@@ -280,16 +280,16 @@ def _check_model_downloaded(model_type: str) -> bool:
         if not md:
             return False
 
-        # Get the ckpts directory (absolute)
-        app_dir = os.path.dirname(os.path.abspath(__file__))
-        ckpts_dir = os.path.join(app_dir, "ckpts")
-
         # Collect all URLs from the model definition
         urls = md.get("URLs", [])
         if not urls:
             return False
 
-        # Check if ANY URL's file exists (user may have full or quantized variant)
+        # Check if ANY URL's file exists (user may have full or quantized
+        # variant). Resolve through the files locator so checkpoints found
+        # in linked model folders (e.g. an existing Wan2GP install added
+        # via Settings -> System -> Linked Model Folders) light up too —
+        # a hardcoded ckpts_dir check misses every secondary root.
         for url_entry in urls:
             url_str = url_entry
             if isinstance(url_entry, dict):
@@ -298,7 +298,7 @@ def _check_model_downloaded(model_type: str) -> bool:
             if not isinstance(url_str, str) or not url_str:
                 continue
             filename = url_str.rstrip("/").split("/")[-1]
-            if os.path.isfile(os.path.join(ckpts_dir, filename)):
+            if wgp.fl.locate_file(filename, error_if_none=False) is not None:
                 return True
 
         return False
@@ -382,6 +382,7 @@ def delete_model(model_type: str):
 
     urls = md.get("URLs", [])
     deleted = []
+    skipped_linked = []
     errors = []
     for url_entry in urls:
         url = url_entry if isinstance(url_entry, str) else (url_entry.get("URLs", [""])[0] if isinstance(url_entry, dict) else "")
@@ -390,6 +391,13 @@ def delete_model(model_type: str):
         filename = url.rstrip("/").split("/")[-1]
         filepath = wgp.fl.locate_file(filename, error_if_none=False)
         if filepath and os.path.isfile(filepath):
+            # locate_file also finds checkpoints in linked (read-only) model
+            # folders — deleting those would break the OTHER install. Skip
+            # them and tell the UI why the model still shows as available.
+            if wgp.fl.is_protected_path(filepath):
+                skipped_linked.append(filename)
+                print(f"[Models] Skipped delete of linked checkpoint: {filepath}")
+                continue
             try:
                 os.remove(filepath)
                 deleted.append(filename)
@@ -397,8 +405,8 @@ def delete_model(model_type: str):
             except Exception as e:
                 errors.append(f"{filename}: {e}")
     if errors:
-        return JSONResponse({"deleted": deleted, "errors": errors}, status_code=207)
-    return {"deleted": deleted, "model_type": model_type}
+        return JSONResponse({"deleted": deleted, "skipped_linked": skipped_linked, "errors": errors}, status_code=207)
+    return {"deleted": deleted, "skipped_linked": skipped_linked, "model_type": model_type}
 
 
 @api.get("/api/v1/resolutions")
@@ -1011,11 +1019,15 @@ def list_loras(model_type: str):
     if lora_dir is None or not os.path.isdir(lora_dir):
         return {"loras": [], "guidance_max_phases": md.get("guidance_max_phases", 1)}
 
-    files = sorted(
-        glob.glob(os.path.join(lora_dir, "*.safetensors"))
-        + glob.glob(os.path.join(lora_dir, "*.sft"))
-    )
-    loras = [os.path.basename(f) for f in files]
+    # Merge the primary dir with linked read-only dirs (Linked Model
+    # Folders' sibling loras/), deduped by filename — so LoRAs from an
+    # existing Wan2GP install show up in the Studio selector without
+    # copying them.
+    names = set()
+    for search_dir in wgp.get_lora_search_dirs(model_type):
+        for f in glob.glob(os.path.join(search_dir, "*.safetensors")) + glob.glob(os.path.join(search_dir, "*.sft")):
+            names.add(os.path.basename(f))
+    loras = sorted(names)
 
     return {
         "loras": loras,
@@ -1036,10 +1048,21 @@ def list_loras_details(model_type: str):
     if lora_dir is None or not os.path.isdir(lora_dir):
         return {"loras": [], "guidance_max_phases": md.get("guidance_max_phases", 1)}
 
-    files = sorted(
-        glob.glob(os.path.join(lora_dir, "*.safetensors"))
-        + glob.glob(os.path.join(lora_dir, "*.sft"))
-    )
+    # Merge across the primary dir and linked read-only dirs (same set as
+    # the plain listing endpoint), primary copy wins per filename.
+    _seen_names = set()
+    files = []
+    for _search_dir in wgp.get_lora_search_dirs(model_type):
+        for f in sorted(
+            glob.glob(os.path.join(_search_dir, "*.safetensors"))
+            + glob.glob(os.path.join(_search_dir, "*.sft"))
+        ):
+            _b = os.path.basename(f)
+            if _b in _seen_names:
+                continue
+            _seen_names.add(_b)
+            files.append(f)
+    files.sort(key=lambda p: os.path.basename(p))
 
     # Read the cached update manifest once per request so each row can
     # surface its update_status without an extra round trip.
@@ -1064,9 +1087,17 @@ def list_loras_details(model_type: str):
             "nsfw": False,
             "lora_id": f"local:{basename}",  # overwritten below if sidecar has modelId
         }
-        # Check for .guide.md
-        guide_file = os.path.splitext(f)[0] + ".guide.md"
-        if os.path.isfile(guide_file):
+        # Guides and sidecars for LINKED loras are stored in Maestro's own
+        # lora dir keyed by the same basename — check there first, then
+        # fall back to a sidecar sitting next to the file itself (read-only,
+        # e.g. when the linked install is another Maestro/Wan2GP).
+        _primary_base = os.path.join(lora_dir, os.path.splitext(basename)[0])
+        _own_base = os.path.splitext(f)[0]
+        guide_file = next(
+            (p for p in (_primary_base + ".guide.md", _own_base + ".guide.md") if os.path.isfile(p)),
+            None,
+        )
+        if guide_file:
             info["has_guide"] = True
             try:
                 with open(guide_file, "r", encoding="utf-8") as gf:
@@ -1074,7 +1105,10 @@ def list_loras_details(model_type: str):
             except Exception:
                 info["guide"] = None
         # Check for .civitai.json sidecar
-        sidecar = os.path.splitext(f)[0] + ".civitai.json"
+        sidecar = next(
+            (p for p in (_primary_base + ".civitai.json", _own_base + ".civitai.json") if os.path.isfile(p)),
+            _primary_base + ".civitai.json",
+        )
         meta = None
         if os.path.isfile(sidecar):
             try:
@@ -3680,13 +3714,27 @@ async def generate_lora_guide(request: Request):
     except Exception:
         raise HTTPException(status_code=404, detail="Unknown model type")
 
-    lora_path = os.path.join(lora_dir, filename)
+    # The lora binary may live in a linked (read-only) folder; the guide and
+    # sidecar ALWAYS live in Maestro's own lora dir keyed by the basename,
+    # so linked installs are never written to.
+    lora_path = wgp.resolve_lora_path(model_type, filename)
     if not os.path.isfile(lora_path):
         raise HTTPException(status_code=404, detail="LoRA file not found")
+    primary_path = os.path.join(lora_dir, filename)
 
-    sidecar_path = os.path.splitext(lora_path)[0] + ".civitai.json"
+    sidecar_path = os.path.splitext(primary_path)[0] + ".civitai.json"
     if not os.path.isfile(sidecar_path):
-        raise HTTPException(status_code=404, detail="No CivitAI metadata found. Download this LoRA from the browser first.")
+        # A linked install may carry its own sidecar next to the file —
+        # adopt a copy into Maestro's dir so guide + weight updates have a
+        # writable home.
+        linked_sidecar = os.path.splitext(lora_path)[0] + ".civitai.json"
+        if os.path.isfile(linked_sidecar):
+            with open(linked_sidecar, "r", encoding="utf-8") as f:
+                _linked_meta = json.load(f)
+            with open(sidecar_path, "w", encoding="utf-8") as f:
+                json.dump(_linked_meta, f, indent=2)
+        else:
+            raise HTTPException(status_code=404, detail="No CivitAI metadata found. Download this LoRA from the browser first.")
 
     with open(sidecar_path, "r", encoding="utf-8") as f:
         meta = json.load(f)
@@ -3694,7 +3742,7 @@ async def generate_lora_guide(request: Request):
     _ensure_llm_loaded()
 
     try:
-        result = _generate_and_save_lora_guide(lora_path, meta, filename)
+        result = _generate_and_save_lora_guide(primary_path, meta, filename)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Guide generation failed: {e}")
 
@@ -3712,12 +3760,17 @@ def get_lora_guide(model_type: str, filename: str):
     except Exception:
         raise HTTPException(status_code=404, detail="Unknown model type")
 
-    guide_path = os.path.join(lora_dir, os.path.splitext(filename)[0] + ".guide.md")
-    if not os.path.isfile(guide_path):
-        return {"guide": None}
-
-    with open(guide_path, "r", encoding="utf-8") as f:
-        return {"guide": f.read()}
+    # Primary dir first (where guides for linked loras are stored), then a
+    # guide sitting next to a linked file (read-only).
+    stem = os.path.splitext(filename)[0]
+    candidates = [os.path.join(lora_dir, stem + ".guide.md")]
+    resolved = wgp.resolve_lora_path(model_type, filename)
+    candidates.append(os.path.splitext(resolved)[0] + ".guide.md")
+    for guide_path in candidates:
+        if os.path.isfile(guide_path):
+            with open(guide_path, "r", encoding="utf-8") as f:
+                return {"guide": f.read()}
+    return {"guide": None}
 
 
 @api.post("/api/v1/checkpoints/{model_type}/generate-guide")
@@ -3825,23 +3878,49 @@ async def scan_and_generate_guides(request: Request):
     if not lora_root:
         return {"status": "complete", "processed": 0, "total": 0, "message": "LoRA root not found"}
 
-    # Walk all subdirectories under loras/ to find .safetensors/.sft files
+    # Walk the primary loras root plus each linked install's loras root
+    # (derived from Linked Model Folders). For linked files, all writes
+    # (sidecars, guides) target the PRIMARY MIRROR path — same family
+    # subfolder and filename under Maestro's own loras root — so linked
+    # installs stay read-only while their LoRAs still get guides.
+    walk_roots = [(lora_root, lora_root)]
+    for _linked_ckpts in _get_linked_model_folders():
+        _linked_loras = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(_linked_ckpts)), "loras"))
+        if os.path.isdir(_linked_loras):
+            walk_roots.append((_linked_loras, lora_root))
+
     to_process: list[dict] = []
-    for dirpath, _dirnames, filenames in os.walk(lora_root):
-        for f in filenames:
-            if not f.endswith((".safetensors", ".sft")):
-                continue
-            full_path = os.path.join(dirpath, f)
-            base = os.path.splitext(full_path)[0]
-            has_sidecar = os.path.isfile(base + ".civitai.json")
-            has_guide = os.path.isfile(base + ".guide.md")
-            if not has_guide or force_regenerate:
-                to_process.append({
-                    "path": full_path,
-                    "filename": f,
-                    "dir": dirpath,
-                    "has_sidecar": has_sidecar,
-                })
+    _seen_keys = set()
+    for walk_root, mirror_root in walk_roots:
+        for dirpath, _dirnames, filenames in os.walk(walk_root):
+            rel_dir = os.path.relpath(dirpath, walk_root)
+            for f in filenames:
+                if not f.endswith((".safetensors", ".sft")):
+                    continue
+                key = os.path.normcase(os.path.normpath(os.path.join(rel_dir, f)))
+                if key in _seen_keys:
+                    continue
+                _seen_keys.add(key)
+                full_path = os.path.join(dirpath, f)
+                own_base = os.path.splitext(full_path)[0]
+                mirror_dir = os.path.normpath(os.path.join(mirror_root, rel_dir))
+                write_base = os.path.join(mirror_dir, os.path.splitext(f)[0])
+                # Guides live at the write target; sidecars may exist at the
+                # write target (Maestro's) or beside a linked file.
+                sidecar_read = next(
+                    (p for p in (write_base + ".civitai.json", own_base + ".civitai.json") if os.path.isfile(p)),
+                    None,
+                )
+                has_guide = os.path.isfile(write_base + ".guide.md")
+                if not has_guide or force_regenerate:
+                    to_process.append({
+                        "path": full_path,
+                        "filename": f,
+                        "dir": dirpath,
+                        "has_sidecar": sidecar_read is not None,
+                        "sidecar_read": sidecar_read,
+                        "write_base": write_base,
+                    })
 
     if not to_process:
         return {"status": "complete", "processed": 0, "total": 0, "message": "All LoRAs already have guides"}
@@ -3869,7 +3948,10 @@ async def scan_and_generate_guides(request: Request):
             scan_state["message"] = f"Processing {item['filename']}..."
             fname = item["filename"]
             full_path = item["path"]
-            base = os.path.splitext(full_path)[0]
+            # All writes go to the primary-mirror base; full_path (possibly
+            # in a linked read-only dir) is only ever read (hashing).
+            base = item["write_base"]
+            os.makedirs(os.path.dirname(base), exist_ok=True)
 
             # Step 1: Fetch metadata if missing
             if not item["has_sidecar"]:
@@ -3946,7 +4028,19 @@ async def scan_and_generate_guides(request: Request):
             # Step 2: Generate guide from metadata
             sidecar_path = base + ".civitai.json"
             if not os.path.isfile(sidecar_path):
-                continue
+                # Adopt a sidecar found beside a linked file into the
+                # writable mirror so guide + weight updates have a home.
+                _read_path = item.get("sidecar_read")
+                if _read_path and os.path.isfile(_read_path):
+                    try:
+                        with open(_read_path, "r", encoding="utf-8") as f:
+                            _linked_meta = json.load(f)
+                        with open(sidecar_path, "w", encoding="utf-8") as f:
+                            json.dump(_linked_meta, f, indent=2)
+                    except Exception:
+                        continue
+                else:
+                    continue
 
             try:
                 scan_state["message"] = f"Generating guide for {fname}..."
@@ -3954,7 +4048,10 @@ async def scan_and_generate_guides(request: Request):
                     meta = json.load(f)
 
                 _ensure_llm_loaded()
-                result = _generate_and_save_lora_guide(full_path, meta, fname)
+                # Pass the mirror-shaped path so .guide.md and sidecar
+                # updates are written next to the mirror, never the
+                # linked install.
+                result = _generate_and_save_lora_guide(base + os.path.splitext(fname)[1], meta, fname)
                 if result["guide"]:
                     scan_state["results"].append({"filename": fname, "guide": "generated"})
                 else:
@@ -4192,7 +4289,58 @@ def get_system_config():
         # consistent with all the other fields above and avoids depending
         # on startup ordering.
         "vram_safety_coefficient": cfg.get("vram_safety_coefficient", wgp.args.vram_safety_coefficient),
+        # Linked model folders: the external (absolute, outside-the-app)
+        # entries of checkpoints_paths. The app-owned entries ("ckpts", ".")
+        # are managed automatically and never shown to the user.
+        "model_folders": _get_linked_model_folders(),
     }
+
+
+def _get_linked_model_folders():
+    from shared.utils.files_locator import is_external_root
+    paths = wgp.server_config.get("checkpoints_paths") or []
+    # Index 0 is the primary download root — even when it is an absolute
+    # user-chosen path (upstream supports e.g. D:/models first), it is NOT
+    # a linked folder and must never be demoted to read-only.
+    return [p for p in paths[1:] if isinstance(p, str) and is_external_root(p)]
+
+
+def _apply_linked_model_folders(folders):
+    """Validate and apply a list of linked model folders.
+
+    Rebuilds checkpoints_paths as [primary] + [linked] + ["."], preserving
+    whatever primary download root the config already had (default
+    "ckpts"). Applies live via the files locator — no restart needed for
+    lookups. Raises (400) BEFORE any state is mutated.
+    """
+    from shared.utils.files_locator import is_external_root
+    if not isinstance(folders, list):
+        raise HTTPException(status_code=400, detail="model_folders must be a list of folder paths")
+    existing = wgp.server_config.get("checkpoints_paths") or []
+    primary = existing[0] if existing and isinstance(existing[0], str) and existing[0].strip() else "ckpts"
+    primary_n = os.path.normcase(os.path.normpath(os.path.abspath(primary)))
+    normalized = []
+    seen = set()
+    for p in folders:
+        if not isinstance(p, str) or not p.strip():
+            raise HTTPException(status_code=400, detail=f"Invalid folder entry: {p!r}")
+        # Tolerate Windows Explorer "Copy as path" quoting.
+        cleaned = p.strip().strip('"').strip("'").strip()
+        ap = os.path.normpath(os.path.abspath(cleaned))
+        if not os.path.isdir(ap):
+            raise HTTPException(status_code=400, detail=f"Folder does not exist: {ap}")
+        if not is_external_root(ap):
+            raise HTTPException(status_code=400, detail=f"Folder is inside the Maestro install (already searched): {ap}")
+        ap_n = os.path.normcase(ap)
+        if ap_n == primary_n:
+            raise HTTPException(status_code=400, detail=f"Folder is the primary download root: {ap}")
+        if ap_n not in seen:
+            seen.add(ap_n)
+            normalized.append(ap)
+    new_paths = [primary] + normalized + ["."]
+    wgp.server_config["checkpoints_paths"] = new_paths
+    wgp.fl.set_checkpoints_paths(new_paths)
+    return normalized
 
 
 @api.put("/api/v1/system-config")
@@ -4209,6 +4357,14 @@ async def update_system_config(request: Request):
     }
 
     updated = {}
+    # Linked model folders map onto checkpoints_paths (validated + applied
+    # live); the raw key is deliberately NOT in ALLOWED_KEYS so clients
+    # can't bypass the validation and write-pinning invariants. Processed
+    # FIRST because its validation raises 400 before mutating anything —
+    # a mixed body must not leave other keys half-applied.
+    if "model_folders" in body:
+        updated["model_folders"] = _apply_linked_model_folders(body["model_folders"])
+
     for key, value in body.items():
         if key in ALLOWED_KEYS:
             wgp.server_config[key] = value
@@ -4232,6 +4388,64 @@ async def update_system_config(request: Request):
         wgp.args.vram_safety_coefficient = float(updated["vram_safety_coefficient"])
 
     return {"status": "ok", "updated": updated}
+
+
+@api.get("/api/v1/model-folders/scan")
+def scan_model_folders():
+    """Discover sibling Pinokio apps with a Wan2GP-style ckpts folder.
+
+    Maestro lives at <pinokio>/api/<name>/app, so sibling installs (e.g. an
+    existing Wan2GP) are <pinokio>/api/*/app/ckpts. Returns lightweight
+    candidates for the Settings -> Linked Model Folders UI; size stats are
+    top-level-files-only so scanning stays instant on multi-hundred-GB
+    folders.
+    """
+    from shared.utils.files_locator import is_external_root
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+    own_ckpts = os.path.normpath(os.path.join(app_dir, "ckpts"))
+    api_root = os.path.dirname(os.path.dirname(app_dir))
+    linked = {os.path.normcase(os.path.normpath(p)) for p in _get_linked_model_folders()}
+
+    candidates = []
+    try:
+        entries = list(os.scandir(api_root))
+    except OSError:
+        entries = []
+    for entry in entries:
+        if not entry.is_dir():
+            continue
+        ckpts = os.path.normpath(os.path.join(entry.path, "app", "ckpts"))
+        if ckpts == own_ckpts or not os.path.isdir(ckpts):
+            continue
+        if not is_external_root(ckpts):
+            continue
+        file_count = 0
+        dir_count = 0
+        size_bytes = 0
+        try:
+            for f in os.scandir(ckpts):
+                if f.is_file():
+                    file_count += 1
+                    try:
+                        size_bytes += f.stat().st_size
+                    except OSError:
+                        pass
+                elif f.is_dir():
+                    dir_count += 1
+        except OSError:
+            continue
+        if file_count == 0 and dir_count == 0:
+            continue
+        candidates.append({
+            "app": entry.name,
+            "path": ckpts,
+            "files": file_count,
+            "folders": dir_count,
+            "size_gb": round(size_bytes / 1e9, 1),
+            "linked": os.path.normcase(ckpts) in linked,
+        })
+    candidates.sort(key=lambda c: c["size_gb"], reverse=True)
+    return {"candidates": candidates}
 
 
 # ============================================================================

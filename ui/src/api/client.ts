@@ -913,6 +913,12 @@ export async function fetchSystemConfig(): Promise<import('../types').SystemConf
   return res.json()
 }
 
+export async function scanModelFolders(): Promise<{ candidates: import('../types').ModelFolderCandidate[] }> {
+  const res = await fetch(`${BASE}/api/v1/model-folders/scan`)
+  if (!res.ok) throw new Error('Failed to scan for model folders')
+  return res.json()
+}
+
 export async function updateSystemConfig(
   partial: Partial<import('../types').SystemConfig>
 ): Promise<{ status: string; updated: Record<string, unknown> }> {

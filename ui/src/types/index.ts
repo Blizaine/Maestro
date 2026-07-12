@@ -244,6 +244,20 @@ export interface SystemConfig {
   prompt_enhancer_quantization: string
   attention_modes_available: string[]
   vram_safety_coefficient: number
+  // Linked model folders (absolute paths outside the Maestro install,
+  // e.g. an existing Wan2GP install's ckpts). Searched read-only for
+  // already-downloaded checkpoints; new downloads always go to Maestro's
+  // own ckpts folder.
+  model_folders: string[]
+}
+
+export interface ModelFolderCandidate {
+  app: string
+  path: string
+  files: number
+  folders: number
+  size_gb: number
+  linked: boolean
 }
 
 export interface OutputMetadata {

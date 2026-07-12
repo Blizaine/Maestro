@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { ChevronDown, ChevronRight, RotateCcw, Check, Download, Trash2, Cpu, RefreshCw, Loader2 } from 'lucide-react'
+import { ChevronDown, ChevronRight, RotateCcw, Check, Download, Trash2, Cpu, RefreshCw, Loader2, FolderOpen, Plus } from 'lucide-react'
+import type { ModelFolderCandidate } from '../../types'
 import { useStore, getFamiliesForMode, getModelsForFamily } from '../../stores/useStore'
 import * as api from '../../api/client'
 import type { GenerationMode } from '../../types'
@@ -267,6 +268,161 @@ function ModelVisibilitySection() {
         )
       })}
     </div>
+      )}
+    </div>
+  )
+}
+
+function LinkedModelFoldersSection() {
+  const systemConfig = useStore(s => s.systemConfig)
+  const loadSystemConfig = useStore(s => s.loadSystemConfig)
+  const loadModels = useStore(s => s.loadModels)
+  const [open, setOpen] = useState(false)
+  const [candidates, setCandidates] = useState<ModelFolderCandidate[] | null>(null)
+  const [scanning, setScanning] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [manualPath, setManualPath] = useState('')
+  const [error, setError] = useState<string | null>(null)
+
+  const folders = systemConfig?.model_folders ?? []
+
+  // Direct API call (not the store action) so backend validation errors
+  // ("Folder does not exist: ...") surface here instead of being swallowed.
+  // Returns success so callers can decide what to reset.
+  const save = async (next: string[]): Promise<boolean> => {
+    if (saving) return false
+    setSaving(true)
+    setError(null)
+    try {
+      await api.updateSystemConfig({ model_folders: next })
+      await loadSystemConfig()
+      // Applied live server-side — refresh so downloaded badges light up.
+      await loadModels()
+      return true
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save folders')
+      return false
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const scan = async () => {
+    setScanning(true)
+    setError(null)
+    try {
+      const res = await api.scanModelFolders()
+      setCandidates(res.candidates)
+      if (res.candidates.length === 0) setError('No other Pinokio apps with a ckpts folder found')
+    } catch {
+      setError('Scan failed')
+    } finally {
+      setScanning(false)
+    }
+  }
+
+  const addFolder = async (path: string) => {
+    if (saving) return
+    // Tolerate Windows Explorer "Copy as path" quoting.
+    const p = path.trim().replace(/^["']+|["']+$/g, '').trim()
+    if (!p || folders.includes(p)) return
+    const ok = await save([...folders, p])
+    // Keep the typed path visible on failure so the user can correct it.
+    if (ok) setManualPath('')
+  }
+
+  return (
+    <div>
+      <button
+        onClick={() => setOpen(!open)}
+        className="flex items-center gap-1.5 text-[11px] text-text-secondary uppercase tracking-wider font-medium hover:text-text-primary transition-colors w-full"
+      >
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        <span className="flex-1 text-left">Linked Model Folders</span>
+        <span className="text-[10px] text-text-muted font-normal normal-case">{folders.length} linked</span>
+      </button>
+
+      {open && (
+        <div className="mt-3 space-y-3">
+          <p className="text-[10px] text-text-muted leading-relaxed">
+            Search other apps&apos; model folders for checkpoints you already have — e.g. an existing
+            Wan2GP install — instead of re-downloading them. Linked folders are read-only:
+            new downloads always go to Maestro&apos;s own ckpts folder.
+          </p>
+
+          {folders.length > 0 && (
+            <div className="space-y-1">
+              {folders.map(f => (
+                <div key={f} className="flex items-center gap-2 group">
+                  <FolderOpen size={11} className="text-text-secondary shrink-0" />
+                  <span className="flex-1 text-[11px] text-text-primary truncate" title={f}>{f}</span>
+                  <button
+                    onClick={() => save(folders.filter(x => x !== f))}
+                    disabled={saving}
+                    className="p-1 rounded text-text-muted opacity-0 group-hover:opacity-100 hover:text-red-400 transition-colors shrink-0"
+                    title="Unlink folder (files are not deleted)"
+                  >
+                    <Trash2 size={11} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="flex gap-2">
+            <button
+              onClick={scan}
+              disabled={scanning || saving}
+              className="flex items-center gap-1 px-2 py-1 text-[10px] border border-border rounded text-text-secondary hover:text-text-primary hover:border-border-light transition-colors disabled:opacity-50"
+            >
+              {scanning ? <Loader2 size={10} className="animate-spin" /> : <RefreshCw size={10} />}
+              Scan Pinokio apps
+            </button>
+          </div>
+
+          {candidates && candidates.filter(c => !c.linked && !folders.includes(c.path)).length > 0 && (
+            <div className="space-y-1">
+              {candidates.filter(c => !c.linked && !folders.includes(c.path)).map(c => (
+                <div key={c.path} className="flex items-center gap-2">
+                  <button
+                    onClick={() => addFolder(c.path)}
+                    disabled={saving}
+                    className="p-1 rounded text-accent-blue hover:text-accent-blue-hover shrink-0 disabled:opacity-50"
+                    title={`Link ${c.path}`}
+                  >
+                    <Plus size={12} />
+                  </button>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[11px] text-text-primary truncate">{c.app}</div>
+                    <div className="text-[10px] text-text-muted truncate" title={c.path}>
+                      {c.files} files, {c.folders} folders{c.size_gb > 0 ? `, ~${c.size_gb} GB` : ''}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="flex gap-1.5">
+            <input
+              type="text"
+              value={manualPath}
+              onChange={e => setManualPath(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && addFolder(manualPath)}
+              placeholder="Or paste a folder path..."
+              className="flex-1 bg-bg-tertiary border border-border rounded px-2 py-1 text-[11px] text-text-primary focus:outline-none focus:border-accent-blue"
+            />
+            <button
+              onClick={() => addFolder(manualPath)}
+              disabled={saving || !manualPath.trim()}
+              className="px-2 py-1 text-[10px] border border-border rounded text-text-secondary hover:text-text-primary hover:border-border-light transition-colors disabled:opacity-50"
+            >
+              Add
+            </button>
+          </div>
+
+          {error && <p className="text-[10px] text-red-400">{error}</p>}
+        </div>
       )}
     </div>
   )
@@ -716,6 +872,11 @@ export function SystemSettingsPanel() {
 
       {/* Model Visibility — moved to top */}
       <ModelVisibilitySection />
+
+      <hr className="border-border" />
+
+      {/* Linked model folders — reuse checkpoints from other installs */}
+      <LinkedModelFoldersSection />
 
       <hr className="border-border" />
 

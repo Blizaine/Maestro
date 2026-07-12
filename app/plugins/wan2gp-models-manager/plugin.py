@@ -670,9 +670,15 @@ class modelsManagerPlugin(WAN2GPPlugin):
             target_files = node.get("files", set())
         else:
             target_files = node.get("unique_files", set())
+        from shared.utils.files_locator import is_protected_path
         for path in sorted(target_files):
             if not os.path.isfile(path):
                 missing.append(path)
+                continue
+            # Files resolved out of linked (read-only) model folders must
+            # never be deleted — they belong to another install.
+            if is_protected_path(path):
+                errors.append((path, "linked read-only folder, not deleted"))
                 continue
             try:
                 os.remove(path)
