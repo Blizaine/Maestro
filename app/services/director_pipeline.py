@@ -477,14 +477,29 @@ def rejoin_clips(out_dir: str, pid: str) -> dict:
     if len(video_files) < 2:
         raise ValueError(f"Need at least 2 video clips to rejoin, found {len(video_files)}")
 
-    # Use wgp's concatenation
+    # Lay the pristine source song over the rejoined video, exactly like the
+    # original pipeline's multiclip join does — per-clip embedded audio is a
+    # windowed generation, the full track is the real soundtrack. Story-mode
+    # pipelines (no song) concat with the clips' own audio.
+    snapshot = state.get("_params_snapshot") or {}
+    audio_path = snapshot.get("audio_path") or None
+    if audio_path and not os.path.isfile(audio_path):
+        audio_path = None
+
     import time as _time
     timestamp = _time.strftime("%Y-%m-%d-%Hh%Mm%Ss")
     output_name = f"{timestamp}_rejoin_multiclip.mp4"
     output_path = os.path.join(clip_out_dir, output_name)
 
     try:
-        _wgp.concatenate_videos(video_files, output_path)
+        # concatenate_multi_clip_videos is the join the original pipeline
+        # uses (ffmpeg concat FILTER, re-encodes to a uniform format). The
+        # previously-called wgp.concatenate_videos never existed — this path
+        # was unreachable until the video_filename backfill fix, so the
+        # AttributeError only surfaced now.
+        ok = _wgp.concatenate_multi_clip_videos(video_files, output_path, audio_path)
+        if not ok or not os.path.isfile(output_path):
+            raise RuntimeError("ffmpeg concatenation failed (see server log for the clip that broke it)")
         print(f"[Pipeline] Rejoined {len(video_files)} clips → {output_name}")
 
         # Update pipeline state
