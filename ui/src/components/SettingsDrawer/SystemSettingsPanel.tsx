@@ -74,8 +74,10 @@ function ModelVisibilitySection() {
   const nsfwMode = useStore(s => s.servicesConfig?.nsfw_mode ?? false)
   const modelVisibilityFocus = useStore(s => s.modelVisibilityFocus)
   const clearModelVisibilityFocus = useStore(s => s.clearModelVisibilityFocus)
-  const [open, setOpen] = useState(false)
-  const [expandedModes, setExpandedModes] = useState<Set<GenerationMode>>(new Set(['video', 'image']))
+  // Root open by default so the section is discoverable; mode groups
+  // (Image/Video/Audio/Edit) start collapsed to keep the list scannable.
+  const [open, setOpen] = useState(true)
+  const [expandedModes, setExpandedModes] = useState<Set<GenerationMode>>(new Set())
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<string | null>(null)
   const sectionRef = useRef<HTMLDivElement>(null)

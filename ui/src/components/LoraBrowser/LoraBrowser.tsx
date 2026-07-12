@@ -56,7 +56,15 @@ export function LoraBrowser() {
   // LoRA (adapter) vs Checkpoint (full model) browse mode. Checkpoint mode
   // searches CivitAI Checkpoints and imports them as finetune model variants.
   const [browseKind, setBrowseKind] = useState<'lora' | 'checkpoint'>('lora')
-  const [nsfw, setNsfw] = useState(false)
+  // Sticky across sessions (localStorage) — the master nsfw_mode gate below
+  // still applies, so a persisted "on" is inert until Mature Mode is enabled.
+  const [nsfw, setNsfw] = useState(() => {
+    try { return localStorage.getItem('maestro_civitai_nsfw') === '1' } catch { return false }
+  })
+  const setNsfwSticky = (v: boolean) => {
+    setNsfw(v)
+    try { localStorage.setItem('maestro_civitai_nsfw', v ? '1' : '0') } catch { /* private mode */ }
+  }
   // Master gate from Settings → Services. NSFW filter UI + data flow
   // is only honored when the user has enabled NSFW mode (which itself
   // requires the disclaimer acknowledgement). Without this gate, the
@@ -457,7 +465,7 @@ export function LoraBrowser() {
             <input
               type="checkbox"
               checked={nsfw}
-              onChange={e => setNsfw(e.target.checked)}
+              onChange={e => setNsfwSticky(e.target.checked)}
               className="w-3.5 h-3.5 rounded accent-red-500"
             />
             NSFW

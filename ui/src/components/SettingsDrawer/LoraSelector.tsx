@@ -58,7 +58,15 @@ export function LoraSelector() {
   const openBrowser = useStore(s => s.setLoraBrowserOpen)
 
   const [search, setSearch] = useState('')
-  const [showNsfw, setShowNsfw] = useState(false)
+  // Sticky across sessions (localStorage) — gated by nsfw_mode below, so a
+  // persisted "on" is inert until Mature Mode is enabled.
+  const [showNsfw, setShowNsfw] = useState(() => {
+    try { return localStorage.getItem('maestro_loras_show_nsfw') === '1' } catch { return false }
+  })
+  const setShowNsfwSticky = (v: boolean) => {
+    setShowNsfw(v)
+    try { localStorage.setItem('maestro_loras_show_nsfw', v ? '1' : '0') } catch { /* private mode */ }
+  }
   // Master gate: only honor "show NSFW LoRAs" when the user has
   // enabled NSFW mode in Settings → Services (which requires the
   // disclaimer acknowledgement). Without this gate, the NSFW filter
@@ -346,7 +354,7 @@ export function LoraSelector() {
           <input
             type="checkbox"
             checked={showNsfw}
-            onChange={e => setShowNsfw(e.target.checked)}
+            onChange={e => setShowNsfwSticky(e.target.checked)}
             className="w-3 h-3 rounded border-border accent-red-500"
           />
           <span className={`text-[10px] uppercase tracking-wider ${showNsfw ? 'text-red-400' : 'text-text-muted'}`}>
