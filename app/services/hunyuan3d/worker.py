@@ -264,9 +264,9 @@ def texture_v21(mesh, source_image_path: str, settings: dict[str, Any], temp_dir
     textured_obj = Path(textured_obj or obj_path)
     glb_path = output_path if output_path.suffix.lower() == ".glb" else temp_dir / "pbr_textured.glb"
     textures = {
-        "albedo": str(textured_obj).replace(".obj", ".jpg"),
-        "metallic": str(textured_obj).replace(".obj", "_metallic.jpg"),
-        "roughness": str(textured_obj).replace(".obj", "_roughness.jpg"),
+        "albedo": str(textured_obj.with_suffix(".jpg")),
+        "metallic": str(textured_obj.with_name(textured_obj.stem + "_metallic.jpg")),
+        "roughness": str(textured_obj.with_name(textured_obj.stem + "_roughness.jpg")),
     }
     create_glb_with_pbr_materials(str(textured_obj), textures, str(glb_path))
     del paint
@@ -306,16 +306,18 @@ def main() -> None:
             event("export", 0.94, f"Exporting {output_path.suffix.upper().lstrip('.')}")
             mesh.export(output_path)
 
-        # Persist the normalized front view as a static gallery preview. For
-        # text-only jobs this is the HunyuanDiT conditioning image — without it
-        # the gallery has no visual to show for the mesh.
+        if not output_path.is_file() or output_path.stat().st_size == 0:
+            raise RuntimeError("Hunyuan3D did not produce an output file")
+
+        # Persist the normalized front view as a static gallery preview, only
+        # once the export has been validated so failed runs leave no orphan
+        # preview behind. For text-only jobs this is the HunyuanDiT
+        # conditioning image — without it the gallery has no visual to show.
         try:
             shutil.copyfile(source_image_path, output_path.with_suffix(".preview.png"))
         except OSError as exc:
             print(f"Preview image not saved: {exc}", flush=True)
 
-    if not output_path.is_file() or output_path.stat().st_size == 0:
-        raise RuntimeError("Hunyuan3D did not produce an output file")
     event("completed", 1.0, "3D asset saved; releasing VRAM")
 
 
