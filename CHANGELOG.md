@@ -3,6 +3,16 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [1.1.2] - 2026-07-12
+
+Director dashboard repair arc: Re-join uses the real concat API with the
+source song overlaid; clip reruns generate as a single window at full
+planned length (a legacy 129-frame sliding-window default fragmented them
+and kept only the first ~5s, breaking rejoin alignment and lip sync);
+reruns record the final cumulative save; gallery refreshes after
+dashboard actions. Verified end to end on a real 10-clip music video
+(rejoined output sample-exact at 150.00s against the 150.00s song).
+
 ## [1.1.1] - 2026-07-12
 
 Fixes: Director clip reruns keep the music video's soundtrack (sliced to

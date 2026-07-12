@@ -73,6 +73,13 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.1.2 (2026-07-12)
+
+**Fixed**
+- Director dashboard Re-join now actually works end to end: it uses the real clip concatenation (previously it called a function that didn't exist) and lays the original song over the rejoined video, the same way the pipeline's final output does.
+- Regenerated clips come back at their full planned length. Reruns were silently split into multiple sliding windows by a legacy default and only the first ~5 seconds was kept, which shifted every later clip in the rejoin and broke lip sync. Reruns now always generate the clip as a single window and record the completed file.
+- The media gallery refreshes when a rerun clip or rejoined video is saved, no browser reload needed.
+
 ### v1.1.1 (2026-07-12)
 
 **Fixed**
