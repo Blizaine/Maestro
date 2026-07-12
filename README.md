@@ -69,6 +69,35 @@ Multiple isolated output directories with a quick switcher in the sidebar. Usefu
 ### 📊 Director Pipeline Dashboard
 View all past Director runs with their full state — clip plans, generated images, generated clips, polish diffs. Re-run any clip without re-running the whole pipeline.
 
+## Updates
+
+The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
+
+### v1.1.0 (2026-07-10)
+
+**Added**
+- **Linked Model Folders** (Settings > System): reuse checkpoints and LoRAs from other installs such as Wan2GP, with one-click scanning of your Pinokio apps. Linked folders are strictly read-only; new downloads always go to Maestro's own folder. AI LoRA guides work for linked LoRAs too and are stored in Maestro's directory.
+- **Krea 2 image models** (Raw and Turbo), ported from upstream Wan2GP.
+- **10Eros v1.4** model entry with the author's abliterated Gemma text encoder and the reference workflow's per-stage LoRA strengths.
+- **Reference Pipeline toggle** for 10Eros models (on by default): runs the model author's published ComfyUI workflow config (9+3 steps on hand-tuned sigmas, per-step CFG and STG, rectified-flow ancestral sampling).
+- Version number in the UI header and this Updates section.
+
+**Fixed**
+- LTX-2 Dev and 10Eros models producing blurry, over-saturated output (a leaked `euler_ancestral` sampler setting; the root cause of the "Dev models look bad" reports).
+- Reference pipeline dissolving the start image on image-to-video runs.
+- The Load Settings pencil losing inference steps, guidance, STG scale, and CFG rescale values.
+- Near-unreadable muted text across all three themes ([#7](https://github.com/Blizaine/Maestro/issues/7)).
+- The STG slider was a no-op; it now engages STG on the correct transformer blocks.
+
+**Improved**
+- Downloaded models always show bright in the Enabled Models list; mode groups start collapsed.
+- NSFW filter toggles in the CivitAI browser and LoRA selector are remembered across sessions.
+- Deleting models can never touch files inside linked installs.
+
+### v1.0.0 (2026-07-08)
+
+Initial public release. See [CHANGELOG.md](CHANGELOG.md) for the full feature rundown.
+
 ## Requirements
 
 | | Minimum | Recommended |

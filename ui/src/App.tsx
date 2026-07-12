@@ -26,6 +26,7 @@ function App() {
   const toggleSidebar = useStore(s => s.toggleSidebar)
   const setSidebarOpen = useStore(s => s.setSidebarOpen)
   const toggleSettings = useStore(s => s.toggleSettings)
+  const appVersion = useStore(s => s.systemConfig?.app_version)
   const isMobile = useIsMobile()
 
   useEffect(() => {
@@ -61,6 +62,7 @@ function App() {
               M
             </div>
             <span className="font-semibold text-sm">Maestro</span>
+            {appVersion && <span className="text-[10px] text-text-muted font-normal mt-0.5">v{appVersion}</span>}
           </div>
           <button
             onClick={() => { setSidebarOpen(false); toggleSettings() }}

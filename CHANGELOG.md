@@ -3,7 +3,17 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
-## [Unreleased] — first public release
+## [1.1.0] - 2026-07-10
+
+See the [Updates section of the README](README.md#updates) for the
+user-facing summary. Highlights: Linked Model Folders (reuse checkpoints
+and LoRAs from other installs, read-only), Krea 2 models (Raw + Turbo),
+10Eros v1.4 + Reference Pipeline toggle, the LTX-2 Dev quality fix
+(leaked euler_ancestral sampler), working STG slider, Load Settings
+pencil fix, theme contrast fix (#7), sticky NSFW toggles, and the UI
+version badge backed by the repo-root VERSION file.
+
+## [1.0.0] - 2026-07-08 - first public release
 
 Initial public release of Maestro: a local AI video, image, and music studio
 built on the [Wan2GP](https://github.com/deepbeepmeep/Wan2GP) pipeline.

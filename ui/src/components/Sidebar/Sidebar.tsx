@@ -36,6 +36,7 @@ export function Sidebar() {
   const imageMode = useStore(s => s.params.image_mode)
   const modelOptions = useStore(s => s.modelOptions)
   const sidebarOpen = useStore(s => s.sidebarOpen)
+  const appVersion = useStore(s => s.systemConfig?.app_version)
   const setSidebarOpen = useStore(s => s.setSidebarOpen)
   const sidebarMode = useStore(s => s.sidebarMode)
   const setSidebarMode = useStore(s => s.setSidebarMode)
@@ -259,6 +260,7 @@ export function Sidebar() {
                 M
               </div>
               <span className="font-semibold text-sm">Maestro</span>
+              {appVersion && <span className="text-[10px] text-text-muted font-normal mt-0.5">v{appVersion}</span>}
             </div>
             <div className="flex items-center gap-1.5">
               {modeToggle('sm')}
@@ -287,6 +289,7 @@ export function Sidebar() {
             M
           </div>
           <span className="font-semibold text-sm">Maestro</span>
+              {appVersion && <span className="text-[10px] text-text-muted font-normal mt-0.5">v{appVersion}</span>}
         </div>
         <div className="flex items-center gap-2">
           {modeToggle('md')}

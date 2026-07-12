@@ -4266,10 +4266,24 @@ def delete_preset(preset_id: str):
 
 
 @api.get("/api/v1/system-config")
+def _read_app_version() -> str:
+    """Maestro release version from the repo-root VERSION file."""
+    try:
+        vpath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "VERSION")
+        with open(vpath, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+_APP_VERSION = _read_app_version()
+
+
 def get_system_config():
     """Return system-level settings for the UI System tab."""
     cfg = wgp.server_config
     return {
+        "app_version": _APP_VERSION,
         "attention_mode": cfg.get("attention_mode", "auto"),
         "transformer_quantization": cfg.get("transformer_quantization", "int8"),
         "vae_config": cfg.get("vae_config", 0),

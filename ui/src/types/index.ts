@@ -231,6 +231,9 @@ export interface ModelOptions {
 }
 
 export interface SystemConfig {
+  // Maestro release version (repo-root VERSION file), shown next to the
+  // app title. Optional: older backends don't send it.
+  app_version?: string
   attention_mode: string
   transformer_quantization: string
   vae_config: number
