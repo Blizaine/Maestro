@@ -307,6 +307,25 @@ def rerun_clip_image(out_dir: str, pid: str, clip_index: int, prompt_override: s
     return {"filename": new_filename, "clip_index": clip_index}
 
 
+def _slice_audio_segment(src_path: str, start_sec: float, duration_sec: float, dst_path: str) -> None:
+    """Cut [start, start+duration] out of the source audio with ffmpeg.
+
+    Mirrors shared/utils/audio_video.py's plain-subprocess ffmpeg usage.
+    Output is normalized wav so the generation's audio loader never has to
+    care what container the song came in.
+    """
+    import subprocess
+    cmd = [
+        "ffmpeg", "-y", "-v", "error",
+        "-ss", f"{max(0.0, float(start_sec)):.3f}",
+        "-t", f"{max(0.1, float(duration_sec)):.3f}",
+        "-i", src_path,
+        "-c:a", "pcm_s16le", "-ar", "44100", "-ac", "2",
+        dst_path,
+    ]
+    subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+
 def rerun_clip_video(out_dir: str, pid: str, clip_index: int, prompt_override: str = None) -> dict:
     """Re-generate the video for a single clip. Returns {job_id, filename} or raises."""
     state = load_pipeline_state(out_dir, pid)
@@ -364,6 +383,31 @@ def rerun_clip_video(out_dir: str, pid: str, clip_index: int, prompt_override: s
     }
     if has_start:
         gen_params["image_start"] = start_path
+
+    # Soundtrack conditioning. The original pipeline run passes the FULL
+    # song as audio_guide (audio_prompt_type "A") and wgp slices it across
+    # clips internally — a single-clip rerun gets none of that context, so
+    # without this block the model invents its own audio and the
+    # regenerated clip no longer matches the music video's soundtrack.
+    # Slice the song to this clip's window and condition on it, mirroring
+    # the segment the clip was originally generated against.
+    snapshot = state.get("_params_snapshot") or {}
+    pipeline_type = state.get("pipeline_type") or snapshot.get("pipeline_type") or "music_video"
+    audio_path = snapshot.get("audio_path") or ""
+    clip_start = planned.get("start")
+    if pipeline_type != "short_film_story" and audio_path and os.path.isfile(audio_path) and clip_start is not None:
+        slice_path = os.path.join(clip_out_dir, f"_rerun_audio_c{clip_index}.wav")
+        try:
+            _slice_audio_segment(audio_path, clip_start, duration_sec, slice_path)
+            gen_params["audio_prompt_type"] = "A"
+            gen_params["audio_guide"] = slice_path
+            if snapshot.get("audio_scale") is not None:
+                gen_params["audio_scale"] = snapshot["audio_scale"]
+            print(f"[Pipeline {pid}] Clip {clip_index} rerun conditioned on song segment "
+                  f"{float(clip_start):.1f}s-{float(clip_start) + float(duration_sec):.1f}s")
+        except Exception as e:
+            print(f"[Pipeline {pid}] Clip {clip_index} audio slice failed; "
+                  f"regenerating without soundtrack conditioning: {e}")
 
     output_files = _submit_and_wait(gen_params, timeout_s=3600, out_dir=clip_out_dir)
     new_filename = output_files[0] if output_files else ""
