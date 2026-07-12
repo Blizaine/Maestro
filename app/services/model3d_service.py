@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -224,6 +225,21 @@ _processes: dict[str, subprocess.Popen] = {}
 _lock = threading.RLock()
 _generation_slot = threading.Semaphore(1)
 
+_TERMINAL_STATES = {"completed", "failed", "cancelled"}
+# Job-registry hygiene: keep a short history of finished jobs for status
+# polling, but never let the in-memory dict grow with server uptime.
+_MAX_FINISHED_JOBS = 20
+_FINISHED_JOB_TTL_SECONDS = 3600
+# Backpressure: the semaphore serializes GPU work, so anything beyond a
+# handful of waiting jobs means something is stuck — reject early instead of
+# accumulating blocked threads.
+_MAX_ACTIVE_JOBS = 4
+# Watchdog limits for a single worker: silence usually means a stalled
+# download or a wedged CUDA context; the absolute cap covers slow-but-alive
+# pathological runs.
+_WORKER_INACTIVITY_LIMIT_SECONDS = 15 * 60
+_WORKER_TIME_LIMIT_SECONDS = 2 * 3600
+
 
 def _python_path() -> Path | None:
     candidates = [ENV_DIR / "python.exe", ENV_DIR / "bin" / "python"]
@@ -260,8 +276,26 @@ def is_model_downloaded(model_id: str) -> bool:
     return any((snapshot / model["subfolder"]).is_dir() for snapshot in snapshots)
 
 
+def models_sharing_repo(model_id: str) -> list[dict[str, Any]]:
+    """Return sibling catalog entries whose weights live in the same HF repo.
+
+    Several variants (mini/fast/turbo families) are subfolders of one shared
+    Hugging Face repository, and the cache can only be removed per-repo:
+    snapshot files are deduplicated blobs, so deleting a single subfolder
+    could silently corrupt the remaining variants.
+    """
+    model = MODEL_BY_ID.get(model_id)
+    if model is None:
+        return []
+    return [item for item in MODELS if item["repo"] == model["repo"] and item["id"] != model_id]
+
+
 def delete_model_cache(model_id: str) -> list[str]:
-    """Remove the upstream repository cache used by a Hunyuan3D variant."""
+    """Remove the upstream repository cache used by a Hunyuan3D variant.
+
+    Deletion is repo-granular (see models_sharing_repo), so callers must
+    surface the affected sibling variants to the user before invoking this.
+    """
     model = MODEL_BY_ID.get(model_id)
     if model is None:
         raise ValueError(f"Unknown Hunyuan3D model: {model_id}")
@@ -366,10 +400,29 @@ def _public_job(job: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in job.items() if key not in {"request", "process"}}
 
 
+def _prune_finished_jobs_locked() -> None:
+    """Drop old terminal jobs; callers must hold _lock."""
+    now = time.time()
+    finished = sorted(
+        (item for item in _jobs.items() if item[1]["status"] in _TERMINAL_STATES),
+        key=lambda item: item[1].get("updated_at", 0.0),
+        reverse=True,
+    )
+    for index, (job_id, job) in enumerate(finished):
+        if index >= _MAX_FINISHED_JOBS or now - job.get("updated_at", 0.0) > _FINISHED_JOB_TTL_SECONDS:
+            _jobs.pop(job_id, None)
+
+
 def start_job(*, body: dict[str, Any], image_paths: dict[str, str], output_dir: str) -> dict[str, Any]:
     runtime = installation_status()
     if not runtime["installed"]:
         raise RuntimeError(runtime["install_hint"])
+
+    with _lock:
+        _prune_finished_jobs_locked()
+        active = sum(1 for job in _jobs.values() if job["status"] in {"queued", "running"})
+    if active >= _MAX_ACTIVE_JOBS:
+        raise ValueError("Too many queued 3D jobs; wait for the current ones to finish or cancel them")
 
     request_data = _prepare_request(body, image_paths)
     job_id = uuid.uuid4().hex
@@ -402,6 +455,10 @@ def _update_job(job_id: str, **updates: Any) -> None:
             return
         job.update(updates)
         job["updated_at"] = time.time()
+        # The request payload (settings + image paths) is only needed while
+        # the job runs; keeping it on finished jobs just bloats the registry.
+        if job["status"] in _TERMINAL_STATES:
+            job.pop("request", None)
 
 
 def _run_job(job_id: str, output_dir: str) -> None:
@@ -415,6 +472,15 @@ def _run_job(job_id: str, output_dir: str) -> None:
         _generation_slot.release()
 
 
+def _cleanup_partial_output(output_path: Path) -> None:
+    """Remove a failed/cancelled job's half-written export and its preview."""
+    for stale in (output_path, output_path.with_suffix(".preview.png")):
+        try:
+            stale.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _run_job_serialized(job_id: str, output_dir: str) -> None:
     python_path = _python_path()
     if not python_path:
@@ -422,8 +488,11 @@ def _run_job_serialized(job_id: str, output_dir: str) -> None:
         return
 
     with _lock:
-        job = _jobs[job_id]
-        request_data = job["request"]
+        job = _jobs.get(job_id)
+        request_data = job.get("request") if job else None
+    if not request_data:
+        # Cancelled (and possibly pruned) before the slot was acquired.
+        return
     model_id = request_data["model"]["id"]
     output_format = request_data["settings"]["output_format"]
     safe_model = re.sub(r"[^a-zA-Z0-9._-]+", "-", model_id)
@@ -435,6 +504,7 @@ def _run_job_serialized(job_id: str, output_dir: str) -> None:
     HF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     request_path = JOBS_DIR / f"{job_id}.json"
     request_path.write_text(json.dumps(request_data, indent=2), encoding="utf-8")
+    pid_path = JOBS_DIR / f"{job_id}.pid"
 
     command = [str(python_path), str(WORKER_PATH), "--request", str(request_path), "--output", str(output_path)]
     env = os.environ.copy()
@@ -475,9 +545,40 @@ def _run_job_serialized(job_id: str, output_dir: str) -> None:
         )
         with _lock:
             _processes[job_id] = process
+        # Record the worker PID on disk so a hard-killed Maestro (SIGKILL,
+        # OOM, reload) can reap the orphan on the next startup instead of
+        # leaving it holding VRAM forever.
+        try:
+            pid_path.write_text(str(process.pid), encoding="utf-8")
+        except OSError:
+            pass
+
+        activity = {"at": time.monotonic()}
+        deadline = time.monotonic() + _WORKER_TIME_LIMIT_SECONDS
+        timeout_reason: dict[str, str] = {}
+
+        def _watchdog() -> None:
+            while process.poll() is None:
+                time.sleep(15)
+                now = time.monotonic()
+                if now - activity["at"] > _WORKER_INACTIVITY_LIMIT_SECONDS:
+                    timeout_reason["error"] = (
+                        f"3D worker produced no output for {_WORKER_INACTIVITY_LIMIT_SECONDS // 60} minutes"
+                    )
+                elif now > deadline:
+                    timeout_reason["error"] = (
+                        f"3D generation exceeded the {_WORKER_TIME_LIMIT_SECONDS // 3600}h limit"
+                    )
+                else:
+                    continue
+                process.kill()
+                return
+
+        threading.Thread(target=_watchdog, daemon=True).start()
 
         assert process.stdout is not None
         for raw_line in process.stdout:
+            activity["at"] = time.monotonic()
             line = raw_line.rstrip()
             if not line:
                 continue
@@ -500,7 +601,10 @@ def _run_job_serialized(job_id: str, output_dir: str) -> None:
         with _lock:
             status = _jobs.get(job_id, {}).get("status")
         if status == "cancelled":
+            _cleanup_partial_output(output_path)
             return
+        if timeout_reason:
+            raise RuntimeError(timeout_reason["error"])
         if exit_code != 0 or not output_path.is_file():
             detail = "\n".join(lines[-25:]) or f"Worker exited with code {exit_code}"
             raise RuntimeError(detail[-4000:])
@@ -539,13 +643,15 @@ def _run_job_serialized(job_id: str, output_dir: str) -> None:
             cancelled = _jobs.get(job_id, {}).get("status") == "cancelled"
         if not cancelled:
             _update_job(job_id, status="failed", phase="failed", message="Hunyuan3D generation failed", error=str(exc))
+        _cleanup_partial_output(output_path)
     finally:
         with _lock:
             _processes.pop(job_id, None)
-        try:
-            request_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        for stale_path in (request_path, pid_path):
+            try:
+                stale_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def get_job(job_id: str) -> dict[str, Any] | None:
@@ -568,6 +674,7 @@ def cancel_job(job_id: str) -> dict[str, Any] | None:
             "message": "3D generation cancelled",
             "updated_at": time.time(),
         })
+        job.pop("request", None)
     if process and process.poll() is None:
         process.terminate()
         try:
@@ -585,4 +692,61 @@ def cancel_all_jobs() -> int:
     return len(active_ids)
 
 
+def _is_hunyuan_worker(pid: int) -> bool:
+    """Best-effort check that a PID belongs to one of our worker processes."""
+    proc_cmdline = Path("/proc") / str(pid) / "cmdline"
+    try:
+        if proc_cmdline.is_file():
+            cmdline = proc_cmdline.read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace")
+            return WORKER_PATH.name in cmdline and "hunyuan3d" in cmdline
+    except OSError:
+        return False
+    try:
+        # Non-Linux platforms: only act when psutil can positively identify
+        # the process; PIDs get recycled, so never kill blindly.
+        import psutil
+
+        cmdline = " ".join(psutil.Process(pid).cmdline())
+        return WORKER_PATH.name in cmdline and "hunyuan3d" in cmdline
+    except Exception:
+        return False
+
+
+def _reap_stale_jobs() -> None:
+    """Clean up after a previous Maestro process that died mid-generation.
+
+    Job state is in-memory and the atexit hook does not run on SIGKILL/OOM,
+    so an interrupted run can leave an orphan worker holding VRAM plus stale
+    request/pid files in JOBS_DIR. Everything found here predates this
+    process and is stale by definition.
+    """
+    if not JOBS_DIR.is_dir():
+        return
+    for pid_path in JOBS_DIR.glob("*.pid"):
+        try:
+            pid = int(pid_path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            pid = 0
+        if pid > 0 and _is_hunyuan_worker(pid):
+            print(f"[Hunyuan3D] Terminating orphaned worker from a previous run (pid {pid})")
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+        try:
+            pid_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    for request_path in JOBS_DIR.glob("*.json"):
+        try:
+            request_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 atexit.register(cancel_all_jobs)
+
+try:
+    _reap_stale_jobs()
+except Exception as exc:  # Never block Maestro startup on cleanup.
+    print(f"[Hunyuan3D] Stale job cleanup skipped: {exc}")
