@@ -404,6 +404,15 @@ def rerun_clip_video(out_dir: str, pid: str, clip_index: int, prompt_override: s
         "guidance_scale": video_params.get("guidance_scale", 1),
         "resolution": video_params.get("resolution", "1280x720"),
         "video_length": video_length,
+        # One clip = ONE window — same convention as the original pipeline
+        # (see the sliding_window_frames comment there): the window must be
+        # STRICTLY greater than the clip's frame count after wgp's latent
+        # quantization, or wgp splits the clip into multiple windows saved
+        # as SEPARATE files and this rerun records only the first one (a
+        # 13s clip came back as its first 5s, shifting every later clip in
+        # the rejoined video and breaking lip sync). Without this key the
+        # primary-settings default (129 frames) applied.
+        "sliding_window_size": video_length + 8 + 1,
         "seed": -1,
         "settings_version": 2.52,
         "generation_mode": "video",
