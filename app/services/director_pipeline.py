@@ -453,7 +453,12 @@ def rerun_clip_video(out_dir: str, pid: str, clip_index: int, prompt_override: s
                   f"regenerating without soundtrack conditioning: {e}")
 
     output_files = _submit_and_wait(gen_params, timeout_s=3600, out_dir=clip_out_dir)
-    new_filename = output_files[0] if output_files else ""
+    # Sliding-window generations save CUMULATIVE progress files (each save
+    # is the video so far) — the LAST file is the complete clip. With the
+    # single-window sizing above there is normally exactly one file, but
+    # taking the last is correct in every case; taking the first recorded
+    # a 5s preview of a 13s clip.
+    new_filename = output_files[-1] if output_files else ""
 
     if new_filename:
         def _update(s):
