@@ -49,6 +49,17 @@ def _save_pipeline_state(pid: str):
     pre_polish = p.get("_clip_plans_pre_polish", [])
     clip_timings = p.get("_clip_timings", {})
 
+    # Per-clip video filenames. _clip_video_files was never populated by the
+    # multi-clip runtime (the generation is one job whose outputs land in
+    # output_files: one video per clip, in order, plus the *_multiclip.mp4
+    # join), so derive positionally when the count matches. Seamless runs
+    # produce a single combined file and never match.
+    clip_videos = p.get("_clip_video_files") or []
+    if not clip_videos:
+        _outs = [f for f in (p.get("output_files") or []) if not f.endswith("_multiclip.mp4")]
+        if len(_outs) == len(clip_plans):
+            clip_videos = _outs
+
     clips = []
     for i, plan in enumerate(clip_plans):
         clip_state = {
@@ -73,7 +84,7 @@ def _save_pipeline_state(pid: str):
             "keyframe_prompts_pre_polish": pre_polish[i].get("keyframe_prompts", []) if i < len(pre_polish) else None,
             "start_image_filename": clip_images[i] if i < len(clip_images) else None,
             "keyframe_filenames": (p.get("_clip_keyframes", []) or [])[i] if i < len(p.get("_clip_keyframes", [])) else [],
-            "video_filename": (p.get("_clip_video_files", []) or [])[i] if i < len(p.get("_clip_video_files", [])) else None,
+            "video_filename": clip_videos[i] if i < len(clip_videos) else None,
             "tag": (p.get("_clip_tags", []) or [])[i] if i < len(p.get("_clip_tags", [])) else None,
             "image_gen_time_sec": clip_timings.get(f"image_{i}"),
             "video_gen_time_sec": clip_timings.get(f"video_{i}"),
@@ -169,6 +180,29 @@ def list_pipeline_states(out_dir: str) -> list[dict]:
     return results
 
 
+def _backfill_clip_video_filenames(state: dict, state_dir: str) -> dict:
+    """Derive per-clip video filenames from output_files when absent.
+
+    Multi-clip (non-seamless) runs produce one video per clip, in clip
+    order, plus a trailing *_multiclip.mp4 join — but the runtime never
+    recorded them per clip (_clip_video_files was a dead key), leaving
+    every clip's video_filename null. That made the Dashboard count all
+    clips as "missing" and broke Rejoin (needs >= 2 per-clip files).
+    Fill only null entries (a rerun clip's filename must survive), only
+    when the per-clip count matches exactly, and only for files that
+    still exist next to the pipeline file. Seamless runs (one combined
+    output) never match the count and are left untouched.
+    """
+    clips = state.get("clips") or []
+    outputs = [f for f in (state.get("output_files") or []) if not f.endswith("_multiclip.mp4")]
+    if not clips or len(outputs) != len(clips):
+        return state
+    for i, clip in enumerate(clips):
+        if not clip.get("video_filename") and os.path.isfile(os.path.join(state_dir, outputs[i])):
+            clip["video_filename"] = outputs[i]
+    return state
+
+
 def load_pipeline_state(out_dir: str, pid: str) -> Optional[dict]:
     """Load a saved pipeline state by ID. Searches out_dir and subdirectories."""
     target = f"{_PIPELINE_FILE_PREFIX}{pid}.json"
@@ -176,14 +210,14 @@ def load_pipeline_state(out_dir: str, pid: str) -> Optional[dict]:
     filepath = os.path.join(out_dir, target)
     if os.path.isfile(filepath):
         with open(filepath, "r", encoding="utf-8") as f:
-            return json.load(f)
+            return _backfill_clip_video_filenames(json.load(f), out_dir)
     # Search subdirectories (workspaces)
     if os.path.isdir(out_dir):
         for name in os.listdir(out_dir):
             sub = os.path.join(out_dir, name, target)
             if os.path.isfile(sub):
                 with open(sub, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    return _backfill_clip_video_filenames(json.load(f), os.path.join(out_dir, name))
     return None
 
 

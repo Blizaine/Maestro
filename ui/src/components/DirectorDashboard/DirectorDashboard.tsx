@@ -600,7 +600,14 @@ function DirectorDashboardInner() {
               </button>
             )}
             <button
-              onClick={() => selectedPipeline && rejoinClips(selectedPipeline.pipeline_id)}
+              onClick={() => {
+                if (!selectedPipeline) return
+                setRegenError(null)
+                // Surface failures in the existing error slot — a bare
+                // rejected promise here looked like the button doing nothing.
+                rejoinClips(selectedPipeline.pipeline_id).catch(e =>
+                  setRegenError(e instanceof Error ? e.message : 'Rejoin failed'))
+              }}
               disabled={loading || totalClips < 2}
               className="flex items-center gap-1 px-2 py-1 text-[10px] bg-accent-blue/10 border border-accent-blue/30 rounded text-accent-blue hover:bg-accent-blue/20 disabled:opacity-40 transition-colors"
               title="Re-join all clips into a new video"
