@@ -11182,13 +11182,19 @@ async def upload_image(request: Request, file: UploadFile = File(...)):
 
 @api.get("/api/v1/uploads/{filename}")
 def serve_upload(filename: str):
-    """Serve an uploaded image."""
+    """Serve an uploaded image.
+
+    Falls back to output-workspace resolution: Director-mode start frames are
+    keyframe images that live in the pipeline's outputs workspace, never in
+    uploads/, yet sidecars record only their basename — so gallery thumbnails,
+    the info bar, and pencil-restore all ask this endpoint for them.
+    """
     from services.win_safe_files import share_delete_file_response
     base = os.path.join(os.getcwd(), "uploads")
     filepath = _safe_join(base, filename)
-    if filepath is None or not os.path.isfile(filepath):
-        raise HTTPException(status_code=404, detail="File not found")
-    return share_delete_file_response(filepath)
+    if filepath is not None and os.path.isfile(filepath):
+        return share_delete_file_response(filepath)
+    return serve_file(filename)
 
 
 # ============================================================================
