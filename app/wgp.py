@@ -7001,27 +7001,28 @@ def generate_video(
     parsed_keep_frames_video_source= max_source_video_frames if len(keep_frames_video_source) ==0 else int(keep_frames_video_source) 
     transformer_loras_filenames, transformer_loras_multipliers  = get_transformer_loras(model_type)
     if guidance_phases < 1: guidance_phases = 1
+    # LoRA multipliers may use the ";" phase syntax (e.g. "0.75;0.50" =
+    # stage 1 / stage 2 on LTX-2 two-stage models). Parse them against the
+    # MODEL's phase capability, not the request's guidance_phases: LTX-2
+    # requests carry guidance_phases 1 even though the pipeline applies
+    # phase 2 in its distilled refine stage via update_loras_slists, so
+    # gating on the request value hard-failed every two-phase multiplier.
+    # Phases beyond what the run actually uses simply never fire.
+    model_def_nb_phases = max(int(model_def.get("guidance_max_phases", guidance_phases) or 1), guidance_phases)
     if transformer_loras_filenames != None:
-        # Model-def bundled LoRA multipliers may use the ";" phase syntax
-        # (e.g. 10Eros v1.4 ships "0.68;0.38" = stage 1 / stage 2). Parse
-        # them against the MODEL's phase capability, not the request's
-        # guidance_phases — a minimal API request that omits guidance_phases
-        # inherits 1 from primary settings and would otherwise hard-fail
-        # with "at most 1 phases" on a def the author shipped as two-phase.
-        model_def_nb_phases = max(int(model_def.get("guidance_max_phases", guidance_phases) or 1), guidance_phases)
         loras_list_mult_choices_nums, loras_slists, errors =  parse_loras_multipliers(transformer_loras_multipliers, len(transformer_loras_filenames), num_inference_steps, nb_phases = model_def_nb_phases, model_switch_phase= model_switch_phase )
         if len(errors) > 0: raise Exception(f"Error parsing Transformer Loras: {errors}")
-        loras_selected = transformer_loras_filenames 
+        loras_selected = transformer_loras_filenames
 
     if hasattr(wan_model, "get_loras_transformer"):
         extra_loras_transformers, extra_loras_multipliers = wan_model.get_loras_transformer(get_model_recursive_prop, **locals())
-        loras_list_mult_choices_nums, loras_slists, errors =  parse_loras_multipliers(extra_loras_multipliers, len(extra_loras_transformers), num_inference_steps, nb_phases = guidance_phases, merge_slist= loras_slists, model_switch_phase= model_switch_phase )
+        loras_list_mult_choices_nums, loras_slists, errors =  parse_loras_multipliers(extra_loras_multipliers, len(extra_loras_transformers), num_inference_steps, nb_phases = model_def_nb_phases, merge_slist= loras_slists, model_switch_phase= model_switch_phase )
         if len(errors) > 0: raise Exception(f"Error parsing Extra Transformer Loras: {errors}")
-        loras_selected += extra_loras_transformers 
+        loras_selected += extra_loras_transformers
 
     if len(activated_loras) > 0:
         print(f"[LoRA] Loading {len(activated_loras)} LoRA(s): {[os.path.basename(l) for l in activated_loras]} | multipliers: {loras_multipliers!r}")
-        loras_list_mult_choices_nums, loras_slists, errors =  parse_loras_multipliers(loras_multipliers, len(activated_loras), num_inference_steps, nb_phases = guidance_phases, merge_slist= loras_slists, model_switch_phase= model_switch_phase )
+        loras_list_mult_choices_nums, loras_slists, errors =  parse_loras_multipliers(loras_multipliers, len(activated_loras), num_inference_steps, nb_phases = model_def_nb_phases, merge_slist= loras_slists, model_switch_phase= model_switch_phase )
         if len(errors) > 0: raise Exception(f"Error parsing Loras: {errors}")
         errors = check_loras_exist(model_type, activated_loras, True, send_cmd)
         if len(errors) > 0 : raise gr.Error(errors)
