@@ -319,8 +319,12 @@ export function DirectorLoraSelector({ mode, modelType }: {
               )}
               {loraWeightRecs[filename] && (
                 <span
+                  // Functional indicator tokens, not accent-green: Golden
+                  // Hour remaps accent-green to amber, which made every
+                  // CivitAI dot (and weight zone) look like the fallback
+                  // orange. Mirrors LoraSelector.
                   className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                    loraWeightRecs[filename].source === 'civitai' ? 'bg-accent-green' : 'bg-amber-400'
+                    loraWeightRecs[filename].source === 'civitai' ? 'bg-indicator-success' : 'bg-indicator-warning'
                   }`}
                   title={loraWeightRecs[filename].source === 'civitai' ? 'CivitAI recommended settings' : 'Default settings'}
                 />
@@ -357,7 +361,7 @@ export function DirectorLoraSelector({ mode, modelType }: {
                   </span>
                   <div className="flex items-center gap-0.5 shrink-0">
                     {guideStatus[filename] === 'exists' || guideStatus[filename] === 'done' ? (
-                      <span className="p-0.5 text-accent-green" title="LoRA guide available">
+                      <span className="p-0.5 text-indicator-success" title="LoRA guide available">
                         <BookOpen size={11} />
                       </span>
                     ) : guideStatus[filename] === 'generating' ? (
@@ -393,10 +397,10 @@ export function DirectorLoraSelector({ mode, modelType }: {
                   const zoneWidth = ((recMax - recMin) / sliderMax) * 100
                   const inZone = w >= recMin && w <= recMax
                   const zoneColor = isCivitai
-                    ? 'bg-accent-green/20 border-accent-green/30'
-                    : 'bg-amber-400/15 border-amber-400/25'
+                    ? 'bg-indicator-success/20 border-indicator-success/30'
+                    : 'bg-indicator-warning/15 border-indicator-warning/25'
                   const valueColor = inZone
-                    ? (isCivitai ? 'text-accent-green' : 'text-amber-400')
+                    ? (isCivitai ? 'text-indicator-success' : 'text-indicator-warning')
                     : 'text-text-muted'
 
                   return (
