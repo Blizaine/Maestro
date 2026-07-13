@@ -3,6 +3,16 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [1.1.3] - 2026-07-12
+
+Fixes: Director-mode start-image thumbnails no longer broken (uploads
+endpoint falls back to output-workspace resolution, repairing existing
+sidecars too); two-phase "a;b" LoRA multipliers accepted for
+user-selected LoRAs on LTX-2 two-stage models (validation now uses the
+model's phase capability instead of the request's guidance_phases);
+Director LoRA selector uses theme-stable indicator colors so CivitAI
+recommendations read green instead of amber on Golden Hour.
+
 ## [1.1.2] - 2026-07-12
 
 Director dashboard repair arc: Re-join uses the real concat API with the

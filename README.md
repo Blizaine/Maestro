@@ -73,6 +73,13 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.1.3 (2026-07-12)
+
+**Fixed**
+- Director-mode clips no longer show a broken start-image icon in the gallery, the info bar, or the sidebar after a Load Settings pencil restore. Director keyframes live in the output workspace rather than the uploads folder; the thumbnail lookup now finds them there. Existing clips are fixed retroactively.
+- Two-phase LoRA weights (for example 0.75 for stage 1 and 0.50 for the refine stage on LTX-2 models) no longer fail generation with "there should be at most 1 phases". The weights were always supported by the pipeline; only the validation rejected them.
+- Director mode's LoRA selector now shows the correct green dot and safe-zone color for CivitAI-recommended weights on all themes. Golden Hour remapped its green to amber, making every LoRA look like it had guessed defaults.
+
 ### v1.1.2 (2026-07-12)
 
 **Fixed**
