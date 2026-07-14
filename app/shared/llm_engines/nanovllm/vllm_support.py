@@ -20,6 +20,16 @@ def _check_triton_runtime_smoke():
         import triton
         import triton.language as tl
 
+        # Triton resolves the kernel's `tl.constexpr` annotation against
+        # the MODULE globals, not this function's locals — with the lazy
+        # local imports above, triton 3.3.x (e.g. triton-windows) fails
+        # the compile with "NameError: tl" and the probe reported triton
+        # as broken on machines where it works fine (sageattention et al),
+        # silently locking the LM decoder to the slow legacy engine.
+        # Inject the names before defining the kernel; imports stay lazy.
+        globals().setdefault("triton", triton)
+        globals().setdefault("tl", tl)
+
         if not torch.cuda.is_available():
             _TRITON_SMOKE_CACHE = (False, "CUDA is not available")
             return _TRITON_SMOKE_CACHE
