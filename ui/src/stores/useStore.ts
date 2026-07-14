@@ -295,6 +295,16 @@ const _PRIMARY_MODEL_DEFAULT_FIELDS: ReadonlyArray<string> = [
   // strips it for models that lack the capability anyway. Unchecking the
   // toggle holds until the model is re-selected, same as steps/guidance.
   'reference_pipeline',
+  // LM sampling knobs for the ACE-Step 1.5 family (and other LM-staged
+  // audio models). Their handlers seed tuned values (temperature 0.85,
+  // top_p 0.9, top_k off, LM CFG 2.5); without hydration the UI showed
+  // and SENT its generic temperature 1.0. Only models whose defaults
+  // carry these keys are affected — video model settings don't include
+  // them, so nothing changes there.
+  'temperature',
+  'top_p',
+  'top_k',
+  'alt_guidance_scale',
 ]
 
 // Monotonic sequence for loadModelOptions staleness detection — only the
