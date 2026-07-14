@@ -73,6 +73,11 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.2.1 (2026-07-14)
+
+**Fixed**
+- Existing installs updating to v1.2.0 did not see the new ACE-Step XL SFT models enabled, and the music default stayed on Turbo. The curated default-model list is now versioned: entries added to it are merged into existing installs once (your own enable/disable choices are never overridden afterward), and installs still using the previous music default are moved to ACE-Step v1.5 XL SFT LM_4B with its recommended settings. Fresh installs were unaffected.
+
 ### v1.2.0 (2026-07-14)
 
 **Added**

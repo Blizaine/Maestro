@@ -487,6 +487,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
   'ace_step_v1_5_turbo_lm_4b',
   'ace_step_v1_5_xl',
   'ace_step_v1_5_xl_turbo_lm_4b',
+  'ace_step_v1_5_xl_sft',
   'ace_step_v1_5_xl_sft_lm_4b',
   // Audio — SFX
   'mmaudio_v2',
@@ -494,6 +495,30 @@ const DEFAULT_ENABLED_MODELS = new Set([
   // Avatar
   'animate',
 ])
+
+/* Version of the curated defaults list above. enabledModels is a stored
+ * whitelist, so existing installs never re-read DEFAULT_ENABLED_MODELS —
+ * without this, entries added to the curated list in an update stay
+ * invisible for everyone who ever opened the app before. Bump the
+ * version when adding entries and list them under that version below:
+ * they get merged into existing installs' whitelists exactly ONCE, so
+ * a user who then disables them stays disabled forever. (This is
+ * deliberately narrower than auto-enabling every unknown model — only
+ * the curated list's own additions are pushed.) */
+const DEFAULTS_VERSION = 2
+const DEFAULTS_ADDED_IN: Record<number, string[]> = {
+  // v1.2.0: the ACE-Step XL SFT pair; LM_4B becomes the music default.
+  2: ['ace_step_v1_5_xl_sft', 'ace_step_v1_5_xl_sft_lm_4b'],
+}
+const DEFAULTS_VERSION_KEY = 'maestro_defaults_version'
+
+/* The music default changed in v1.2.0 (Turbo LM_4B -> SFT LM_4B).
+ * A saved selection equal to the OLD default means the user was riding
+ * the default rather than expressing a preference — follow them to the
+ * new one, once, at the same version transition. Users who picked any
+ * other model keep their choice. */
+const OLD_MUSIC_DEFAULT = 'ace_step_v1_5_xl_turbo_lm_4b'
+const NEW_MUSIC_DEFAULT = 'ace_step_v1_5_xl_sft_lm_4b'
 
 const ENABLED_MODELS_KEY = 'maestro_enabled_models'
 
@@ -2395,8 +2420,42 @@ export const useStore = create<AppState>((set, get) => ({
       // Inject virtual SFX (MMAudio) models alongside backend models
       const models = [...backendModels, ...SFX_VIRTUAL_MODELS]
 
+      // One-time curated-defaults upgrade for existing installs (see
+      // DEFAULTS_VERSION). Fresh installs already start from the full
+      // DEFAULT_ENABLED_MODELS list; for them this only stamps the
+      // version key.
+      let migrateMusicDefault = false
+      try {
+        const storedVer = parseInt(localStorage.getItem(DEFAULTS_VERSION_KEY) || '1', 10) || 1
+        if (storedVer < DEFAULTS_VERSION) {
+          const additions: string[] = []
+          for (let v = storedVer + 1; v <= DEFAULTS_VERSION; v++) {
+            additions.push(...(DEFAULTS_ADDED_IN[v] || []))
+          }
+          const present = additions.filter(id => models.some(m => m.model_type === id))
+          if (present.length > 0) {
+            set(s => {
+              const next = new Set(s.enabledModels)
+              present.forEach(id => next.add(id))
+              _saveEnabledModels(next)
+              return { enabledModels: next }
+            })
+          }
+          migrateMusicDefault = storedVer < 2
+          localStorage.setItem(DEFAULTS_VERSION_KEY, String(DEFAULTS_VERSION))
+        }
+      } catch { /* localStorage blocked — defaults only apply this session */ }
+
       // Hydrate persisted per-mode settings from localStorage
       const saved = _loadSettings()
+      // v2 migration: users whose saved audio model IS the old music
+      // default follow it to the new default (see NEW_MUSIC_DEFAULT).
+      let musicSelectionMigrated = false
+      if (migrateMusicDefault && saved?.selectedModelPerMode?.audio === OLD_MUSIC_DEFAULT
+          && models.some(m => m.model_type === NEW_MUSIC_DEFAULT)) {
+        saved.selectedModelPerMode = { ...saved.selectedModelPerMode, audio: NEW_MUSIC_DEFAULT }
+        musicSelectionMigrated = true
+      }
       let mode = get().generationMode
       let initialModelType: string
 
@@ -2462,6 +2521,15 @@ export const useStore = create<AppState>((set, get) => ({
         if (!sfxModelTypes.has(mt)) {
           get().loadLoras(mt)
           get().loadModelOptions(mt)
+        }
+        // If the music-default migration just swapped the boot model, the
+        // restored params still carry the OLD model's tuned values (e.g.
+        // Turbo's 8 steps / guidance 1.0). Pull the new model's defaults
+        // so the migrated selection starts with its recommended settings.
+        // (Boot normally keeps saved params on purpose — this only fires
+        // on the one-time migration.)
+        if (musicSelectionMigrated && mode === 'audio' && mt === NEW_MUSIC_DEFAULT) {
+          _applyModelDefaults(get, set, mt)
         }
       }
       // Refresh the lora_id ↔ filename map from /installed and reconcile

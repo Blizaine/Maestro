@@ -3,6 +3,16 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [1.2.1] - 2026-07-14
+
+Fix for existing installs updating to v1.2.0: the enabled-models
+whitelist stored in the browser never re-read the shipped defaults, so
+the new ACE-Step XL SFT entries stayed hidden and the music default
+stayed on Turbo. The curated defaults list is now versioned - new
+entries merge into existing installs exactly once - and installs still
+on the old music default follow it to XL SFT LM_4B with the model's
+recommended settings applied.
+
 ## [1.2.0] - 2026-07-14
 
 Two features: light themes (Ivory / Daylight / Pearl as daylight
