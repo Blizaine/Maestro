@@ -5339,7 +5339,7 @@ async def director_generate_music(request: Request):
     style = (body.get("style") or "").strip()
     lyrics = (body.get("lyrics") or "").strip()
     instrumental = bool(body.get("instrumental"))
-    model_type = body.get("model_type") or "ace_step_v1_5_xl_turbo_lm_4b"
+    model_type = body.get("model_type") or "ace_step_v1_5_xl_sft_lm_4b"
     duration_seconds = body.get("duration_seconds")
     seed = body.get("seed")
     workspace = body.get("workspace") or _get_active_workspace()

@@ -487,6 +487,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
   'ace_step_v1_5_turbo_lm_4b',
   'ace_step_v1_5_xl',
   'ace_step_v1_5_xl_turbo_lm_4b',
+  'ace_step_v1_5_xl_sft_lm_4b',
   // Audio — SFX
   'mmaudio_v2',
   'mmaudio_nsfw',
@@ -1701,7 +1702,9 @@ export const useStore = create<AppState>((set, get) => ({
     // Determine model for target sub-mode
     const audioSubModeDefaults: Record<import('../types').AudioSubMode, string> = {
       speech: 'kugelaudio_0_open',
-      music: 'ace_step_v1_5_xl_turbo_lm_4b',
+      // XL SFT LM_4B: the premium CFG variant + strongest LM — the
+      // quality default. Turbo variants remain enabled for speed.
+      music: 'ace_step_v1_5_xl_sft_lm_4b',
       sfx: 'mmaudio_v2',
       mixer: '',  // Mixer doesn't use a model — it's an ffmpeg-based tool
     }
