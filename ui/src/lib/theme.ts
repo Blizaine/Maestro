@@ -13,7 +13,7 @@
  * shows up in the Settings/System dropdown automatically.
  */
 
-export type ThemeId = 'default' | 'golden-hour' | 'onyx'
+export type ThemeId = 'default' | 'golden-hour' | 'onyx' | 'ivory'
 
 export interface ThemeDescriptor {
   id: ThemeId
@@ -49,6 +49,13 @@ export const THEMES: ThemeDescriptor[] = [
       'Minimalist monochrome — pure black backgrounds, neutral grey surfaces, white-toned accents. No color tint.',
     swatch: { bg: '#000000', surface: '#1a1a1a', accent: '#aaaaaa' },
   },
+  {
+    id: 'ivory',
+    label: 'Ivory',
+    description:
+      'Light theme — warm paper surfaces, coffee-toned text, burnt-orange accents. Golden Hour in daylight.',
+    swatch: { bg: '#f2ede2', surface: '#f9f6ee', accent: '#c2410c' },
+  },
 ]
 
 const STORAGE_KEY = 'maestro-theme'
@@ -79,6 +86,12 @@ export function applyTheme(id: ThemeId): void {
   } else {
     html.setAttribute('data-theme', id)
   }
+  // Keep mobile browser chrome (address bar tint) in sync with the
+  // page background. The pre-mount script in index.html does the same
+  // for cold loads.
+  const meta = document.querySelector('meta[name="theme-color"]')
+  const swatch = THEMES.find(t => t.id === id)?.swatch
+  if (meta && swatch) meta.setAttribute('content', swatch.bg)
   // Briefly enable transitions so the swap is animated. Remove the
   // class after the transition finishes so theme tokens elsewhere
   // (e.g. progress-bar fills, range-slider thumbs) don't pay the

@@ -164,7 +164,7 @@ export function Sidebar() {
         {isVideo && !isMultiClip && !isBlend && (
           <div>
             {isI2vOnly && !isContinue && (
-              <div className="text-[10px] text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-1.5 mb-2">
+              <div className="text-[10px] text-indicator-warning bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-1.5 mb-2">
                 This model requires a start image to generate video.
               </div>
             )}

@@ -40,8 +40,8 @@ export function TabFilter() {
             onClick={() => setMediaFilter(tab.value)}
             className={`px-2 md:px-3 py-1 md:py-1.5 rounded-md text-[10px] md:text-xs font-medium transition-all flex items-center gap-1 whitespace-nowrap shrink-0 ${
               mediaFilter === tab.value
-                ? tab.value === 'favorites' ? 'bg-red-500/20 text-red-400'
-                : tab.value === 'multiclip' ? 'bg-purple-500/20 text-purple-400'
+                ? tab.value === 'favorites' ? 'bg-red-500/20 text-chip-red'
+                : tab.value === 'multiclip' ? 'bg-purple-500/20 text-chip-purple'
                 : 'bg-bg-active text-text-primary'
                 : 'text-text-muted hover:text-text-secondary'
             }`}

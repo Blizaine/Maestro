@@ -7,15 +7,15 @@ import { useStore } from '../../stores/useStore'
 // the at-a-glance OOM-risk read that matters most in this app.
 function fullnessColor(pct: number): string {
   if (pct >= 90) return 'bg-red-500'
-  if (pct >= 75) return 'bg-amber-400'
+  if (pct >= 75) return 'bg-indicator-warning'
   return 'bg-emerald-500'
 }
 
 // Same thresholds, applied to TEXT (used by the collapsed chips, which
 // have no bars). Low load stays neutral so only pressure stands out.
 function fullnessText(pct: number): string {
-  if (pct >= 90) return 'text-red-400'
-  if (pct >= 75) return 'text-amber-400'
+  if (pct >= 90) return 'text-chip-red'
+  if (pct >= 75) return 'text-indicator-warning'
   return 'text-text-secondary'
 }
 

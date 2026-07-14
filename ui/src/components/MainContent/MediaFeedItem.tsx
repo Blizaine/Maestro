@@ -365,8 +365,8 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
       }`}
       onClick={handleSelect}
     >
-      {/* Media player */}
-      <div className="w-full aspect-video flex items-center justify-center bg-bg-tertiary relative">
+      {/* Media player — bg-media-canvas keeps the letterbox dark even on light themes */}
+      <div className="w-full aspect-video flex items-center justify-center bg-media-canvas relative">
         {file.type === 'video' ? (
           <video
             ref={videoRef}
@@ -463,7 +463,7 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
                 <>
                   <button
                     onClick={() => openRetakeDialog(file.name)}
-                    className="p-1.5 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-amber-400 transition-colors"
+                    className="p-1.5 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-indicator-warning transition-colors"
                     title="Retake — regenerate a time region"
                   >
                     <Scissors size={13} />

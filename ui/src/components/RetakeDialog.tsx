@@ -176,7 +176,7 @@ export function RetakeDialog() {
 
           {/* Error/Success */}
           {error && <div className="text-[10px] text-red-400 bg-red-500/10 border border-red-500/20 rounded px-2 py-1.5">{error}</div>}
-          {success && <div className="text-[10px] text-green-400 bg-green-500/10 border border-green-500/20 rounded px-2 py-1.5">{success}</div>}
+          {success && <div className="text-[10px] text-indicator-success bg-green-500/10 border border-green-500/20 rounded px-2 py-1.5">{success}</div>}
 
           {/* Submit */}
           <button onClick={handleSubmit} disabled={submitting || !prompt}

@@ -51,7 +51,7 @@ export function InstalledCheckpoints({ onSelectModel }: Props) {
         <span className="text-xs text-text-muted">
           {items.length} imported checkpoint{items.length === 1 ? '' : 's'}
           {updatableCount > 0 && (
-            <span className="ml-2 text-amber-400">{updatableCount} update{updatableCount === 1 ? '' : 's'} available</span>
+            <span className="ml-2 text-indicator-warning">{updatableCount} update{updatableCount === 1 ? '' : 's'} available</span>
           )}
         </span>
         {lastCheck && (

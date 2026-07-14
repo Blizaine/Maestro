@@ -150,7 +150,7 @@ export function ToolsPanel() {
             {upscaleMethods.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
           {flashvsrOff && (
-            <p className="text-[10px] text-amber-400 mt-1.5 leading-snug">
+            <p className="text-[10px] text-indicator-warning mt-1.5 leading-snug">
               FlashVSR is disabled in Settings → Services. Enable it, or pick a Lanczos method.
             </p>
           )}

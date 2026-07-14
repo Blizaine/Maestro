@@ -72,7 +72,7 @@ function PipelineProgressBar({ pipeline }: { pipeline: SavedPipelineState }) {
           </span>
         ))}
         <span className="flex items-center gap-1">
-          {isComplete ? <Check size={9} className="text-green-400" /> : <Clock size={9} />}
+          {isComplete ? <Check size={9} className="text-indicator-success" /> : <Clock size={9} />}
           Total: {formatTime(pipeline.total_time_sec)}
         </span>
       </div>
@@ -124,12 +124,12 @@ function LlmPassView({ pass: p, index }: { pass: { pass: string; system_prompt: 
       {p.thinking_text && (
         <>
           <button onClick={() => setShowThinking(!showThinking)}
-            className="flex items-center gap-1 text-[9px] text-amber-400/80 hover:text-amber-300 w-full text-left">
+            className="flex items-center gap-1 text-[9px] text-indicator-warning hover:text-indicator-warning/80 w-full text-left">
             {showThinking ? <ChevronDown size={9} /> : <ChevronRight size={9} />}
             <Sparkles size={8} /> Thinking ({p.thinking_text.length} chars)
           </button>
           {showThinking && (
-            <pre className="text-[8px] text-amber-400/50 bg-bg-tertiary rounded p-2 max-h-48 overflow-auto whitespace-pre-wrap font-mono">
+            <pre className="text-[8px] text-text-muted bg-bg-tertiary rounded p-2 max-h-48 overflow-auto whitespace-pre-wrap font-mono">
               {p.thinking_text}
             </pre>
           )}
@@ -159,7 +159,7 @@ function LlmLogPanel({ pipeline }: { pipeline: SavedPipelineState }) {
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-2 text-[10px] text-text-muted">
-        <Brain size={12} className="text-purple-400" />
+        <Brain size={12} className="text-chip-purple" />
         <span>{log.provider}/{log.model_id || 'unknown'}</span>
         <span className="ml-1 text-text-muted">({passes?.length || 1} pass{(passes?.length || 1) > 1 ? 'es' : ''})</span>
         <span className="ml-auto">{formatTime(log.planning_time_sec)}</span>
@@ -224,7 +224,7 @@ function ClipCard({ clip, pipeline: _pipeline, onTag, onRerunImage, onRerunVideo
             <span className="text-text-muted font-normal ml-1">({Math.round((clip.planned_clip as unknown as Record<string, unknown>).duration_sec as number)}s)</span>
           ) : null}
           {clip.window_count > 1 && (
-            <span className="text-purple-400 font-normal ml-1 text-[9px]">{clip.window_count}W</span>
+            <span className="text-chip-purple font-normal ml-1 text-[9px]">{clip.window_count}W</span>
           )}
         </span>
         <div className="flex items-center gap-1">
@@ -236,12 +236,12 @@ function ClipCard({ clip, pipeline: _pipeline, onTag, onRerunImage, onRerunVideo
           )}
           {/* Tag buttons */}
           <button onClick={() => onTag(clip.tag === 'good' ? null : 'good')}
-            className={`ml-2 p-0.5 rounded ${clip.tag === 'good' ? 'bg-green-500 text-white' : 'text-text-muted hover:text-green-400'}`}
+            className={`ml-2 p-0.5 rounded ${clip.tag === 'good' ? 'bg-green-500 text-white' : 'text-text-muted hover:text-indicator-success'}`}
             title="Mark as good">
             <Check size={12} />
           </button>
           <button onClick={() => onTag(clip.tag === 'needs_work' ? null : 'needs_work')}
-            className={`p-0.5 rounded ${clip.tag === 'needs_work' ? 'bg-amber-500 text-white' : 'text-text-muted hover:text-amber-400'}`}
+            className={`p-0.5 rounded ${clip.tag === 'needs_work' ? 'bg-amber-500 text-white' : 'text-text-muted hover:text-indicator-warning'}`}
             title="Needs work">
             <AlertTriangle size={12} />
           </button>
@@ -346,7 +346,7 @@ function ClipCard({ clip, pipeline: _pipeline, onTag, onRerunImage, onRerunVideo
                   onRerunVideo(clip.index, editingVideo ? editVideoPrompt : undefined)
                 }
               }}
-                className="p-0.5 rounded text-text-muted hover:text-green-400 transition-colors"
+                className="p-0.5 rounded text-text-muted hover:text-indicator-success transition-colors"
                 title="Re-generate video clip">
                 <Film size={10} />
               </button>
@@ -431,7 +431,7 @@ function ClipCard({ clip, pipeline: _pipeline, onTag, onRerunImage, onRerunVideo
                       <div className="text-[8px] text-text-muted uppercase">Image — Before Polish</div>
                       <p className="text-[9px] text-red-400/70 line-through">{clip.image_prompt_pre_polish}</p>
                       <div className="text-[8px] text-text-muted uppercase mt-0.5">After</div>
-                      <p className="text-[9px] text-green-400/70">{clip.image_prompt}</p>
+                      <p className="text-[9px] text-indicator-success/80">{clip.image_prompt}</p>
                     </div>
                   )}
                   {videoChanged && (
@@ -439,7 +439,7 @@ function ClipCard({ clip, pipeline: _pipeline, onTag, onRerunImage, onRerunVideo
                       <div className="text-[8px] text-text-muted uppercase">Video — Before Polish</div>
                       <p className="text-[9px] text-red-400/70 line-through">{clip.video_prompt_pre_polish}</p>
                       <div className="text-[8px] text-text-muted uppercase mt-0.5">After</div>
-                      <p className="text-[9px] text-green-400/70">{clip.video_prompt}</p>
+                      <p className="text-[9px] text-indicator-success/80">{clip.video_prompt}</p>
                     </div>
                   )}
                   {windowDiffs.map(({ pre, post, i }) => (
@@ -447,7 +447,7 @@ function ClipCard({ clip, pipeline: _pipeline, onTag, onRerunImage, onRerunVideo
                       <div className="text-[8px] text-text-muted uppercase">Window {i + 1} — Before Polish</div>
                       <p className="text-[9px] text-red-400/70 line-through">{pre}</p>
                       <div className="text-[8px] text-text-muted uppercase mt-0.5">After</div>
-                      <p className="text-[9px] text-green-400/70">{post}</p>
+                      <p className="text-[9px] text-indicator-success/80">{post}</p>
                     </div>
                   ))}
                   {keyframeDiffs.map(({ pre, post, i }) => (
@@ -455,7 +455,7 @@ function ClipCard({ clip, pipeline: _pipeline, onTag, onRerunImage, onRerunVideo
                       <div className="text-[8px] text-text-muted uppercase">Keyframe {i + 1} — Before Polish</div>
                       <p className="text-[9px] text-red-400/70 line-through">{pre}</p>
                       <div className="text-[8px] text-text-muted uppercase mt-0.5">After</div>
-                      <p className="text-[9px] text-green-400/70">{post}</p>
+                      <p className="text-[9px] text-indicator-success/80">{post}</p>
                     </div>
                   ))}
                   {!anyChange && (
@@ -558,10 +558,10 @@ function DirectorDashboardInner() {
         {/* Summary badges */}
         {selectedPipeline && (
           <div className="flex items-center gap-2 text-[10px] shrink-0">
-            <span className="flex items-center gap-0.5 text-green-400">
+            <span className="flex items-center gap-0.5 text-indicator-success">
               <Check size={10} /> {goodCount}
             </span>
-            <span className="flex items-center gap-0.5 text-amber-400">
+            <span className="flex items-center gap-0.5 text-indicator-warning">
               <AlertTriangle size={10} /> {needsWorkCount}
             </span>
             <span className="text-text-muted">
@@ -581,7 +581,7 @@ function DirectorDashboardInner() {
                   }
                 }}
                 disabled={resuming || loading}
-                className="flex items-center gap-1 px-2 py-1 text-[10px] bg-green-500/10 border border-green-500/30 rounded text-green-400 hover:bg-green-500/20 disabled:opacity-40 transition-colors"
+                className="flex items-center gap-1 px-2 py-1 text-[10px] bg-green-500/10 border border-green-500/30 rounded text-indicator-success hover:bg-green-500/20 disabled:opacity-40 transition-colors"
                 title="Re-run this pipeline from where it crashed — reuses the planning and start images that already completed"
               >
                 <Play size={10} />
@@ -592,7 +592,7 @@ function DirectorDashboardInner() {
               <button
                 onClick={generateMissing}
                 disabled={loading}
-                className="flex items-center gap-1 px-2 py-1 text-[10px] bg-orange-500/10 border border-orange-500/30 rounded text-orange-400 hover:bg-orange-500/20 disabled:opacity-40 transition-colors"
+                className="flex items-center gap-1 px-2 py-1 text-[10px] bg-orange-500/10 border border-orange-500/30 rounded text-chip-orange hover:bg-orange-500/20 disabled:opacity-40 transition-colors"
                 title={`Generate ${missingImages} missing images + ${missingVideos} missing videos`}
               >
                 <Play size={10} />
@@ -651,9 +651,9 @@ function DirectorDashboardInner() {
             <div className="bg-bg-secondary rounded-lg border border-border p-3 space-y-2">
               <div className="flex items-center gap-2 text-xs">
                 <span className={`px-2 py-0.5 rounded text-[10px] font-medium ${
-                  selectedPipeline.status === 'completed' ? 'bg-green-500/20 text-green-400' :
-                  selectedPipeline.status === 'failed' || selectedPipeline.status === 'crashed' ? 'bg-red-500/20 text-red-400' :
-                  'bg-blue-500/20 text-blue-400'
+                  selectedPipeline.status === 'completed' ? 'bg-green-500/20 text-indicator-success' :
+                  selectedPipeline.status === 'failed' || selectedPipeline.status === 'crashed' ? 'bg-red-500/20 text-chip-red' :
+                  'bg-blue-500/20 text-chip-blue'
                 }`}>
                   {selectedPipeline.status === 'crashed' ? 'crashed (process died)' : selectedPipeline.status}
                 </span>

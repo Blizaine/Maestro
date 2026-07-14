@@ -203,7 +203,7 @@ function ModelVisibilitySection() {
               <span className="text-[10px] text-text-muted ml-auto">
                 {modeEnabled}/{modeModels.length}
                 {modeDownloaded > 0 && (
-                  <span className="ml-1 text-green-400/70">
+                  <span className="ml-1 text-indicator-success">
                     ({modeDownloaded} <Download size={8} className="inline -mt-0.5" />)
                   </span>
                 )}
@@ -231,7 +231,7 @@ function ModelVisibilitySection() {
                           />
                           {/* Download status indicator */}
                           {m.is_downloaded ? (
-                            <Check size={10} className="text-green-400 shrink-0" />
+                            <Check size={10} className="text-indicator-success shrink-0" />
                           ) : (
                             <Download size={10} className="text-text-muted shrink-0" />
                           )}
@@ -665,7 +665,7 @@ function AutoPerformanceCard() {
               title={autoOn ? 'Auto-tune is on — click to take manual control' : 'Auto-tune is off — click to enable'}
             >
               <span
-                className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white border border-border transition-transform ${
                   autoOn ? 'translate-x-4' : 'translate-x-0.5'
                 }`}
               />
@@ -691,7 +691,7 @@ function AutoPerformanceCard() {
 
         {/* Toast — feedback after toggle / re-detect */}
         {toast && (
-          <div className="text-[10px] text-amber-400 bg-amber-500/10 border border-amber-500/30 rounded px-2 py-1.5">
+          <div className="text-[10px] text-indicator-warning bg-amber-500/10 border border-amber-500/30 rounded px-2 py-1.5">
             {toast}
           </div>
         )}
@@ -781,7 +781,7 @@ export function SystemSettingsPanel() {
               don't think "I selected FP8 but performance/quality
               feels like INT8 — must be broken." */}
           {systemConfig.transformer_quantization === 'fp8' && (
-            <p className="text-[10px] text-amber-400/80 mt-1">
+            <p className="text-[10px] text-indicator-warning mt-1">
               ⚠ Many models ship only BF16 + INT8 files. FP8 silently falls back to INT8 for those.
               For guaranteed FP8, pick a model with "FP8" in its name (e.g. "LTX-2.3 Distilled FP8 22B").
             </p>

@@ -11,12 +11,12 @@ function formatTime(s: number): string {
 }
 
 const sectionColors: Record<string, string> = {
-  intro: 'bg-blue-500/20 text-blue-400',
-  verse: 'bg-green-500/20 text-green-400',
-  chorus: 'bg-purple-500/20 text-purple-400',
-  bridge: 'bg-yellow-500/20 text-yellow-400',
-  outro: 'bg-gray-500/20 text-gray-400',
-  instrumental: 'bg-cyan-500/20 text-cyan-400',
+  intro: 'bg-blue-500/20 text-chip-blue',
+  verse: 'bg-green-500/20 text-chip-green',
+  chorus: 'bg-purple-500/20 text-chip-purple',
+  bridge: 'bg-yellow-500/20 text-chip-yellow',
+  outro: 'bg-gray-500/20 text-chip-gray',
+  instrumental: 'bg-cyan-500/20 text-chip-cyan',
 }
 
 const sectionBarColors: Record<string, string> = {
@@ -37,7 +37,7 @@ function SectionBadge({ label }: { label: string }) {
 }
 
 function EnergyDot({ energy }: { energy: number }) {
-  const color = energy > 0.6 ? 'bg-red-400' : energy < 0.3 ? 'bg-blue-400' : 'bg-yellow-400'
+  const color = energy > 0.6 ? 'bg-chip-red' : energy < 0.3 ? 'bg-chip-blue' : 'bg-chip-yellow'
   return <span className={`inline-block w-2 h-2 rounded-full ${color}`} title={`Energy: ${(energy * 100).toFixed(0)}%`} />
 }
 

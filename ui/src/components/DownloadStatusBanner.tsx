@@ -81,7 +81,7 @@ export function DownloadStatusBanner() {
         {incomplete && (
           <div className="px-4 py-2 bg-red-500/15 border-b border-red-500/30 flex items-center gap-2">
             <AlertTriangle size={14} className="text-red-400 shrink-0" />
-            <div className="text-xs font-medium text-red-100">
+            <div className="text-xs font-medium text-text-primary">
               A download was interrupted — re-run to finish it
             </div>
           </div>
@@ -90,8 +90,8 @@ export function DownloadStatusBanner() {
             tint over the solid backdrop, same pattern as OomRecoveryBanner. */}
         {stalled && !incomplete && (
           <div className="px-4 py-2 bg-amber-500/15 border-b border-amber-500/30 flex items-center gap-2">
-            <AlertTriangle size={14} className="text-amber-400 shrink-0" />
-            <div className="text-xs font-medium text-amber-100">
+            <AlertTriangle size={14} className="text-indicator-warning shrink-0" />
+            <div className="text-xs font-medium text-text-primary">
               Download is slow — waiting for retry
             </div>
           </div>
@@ -162,7 +162,7 @@ function DownloadProgressBar({
       <div className="h-1 rounded-full bg-bg-tertiary overflow-hidden">
         <div
           className={`h-full transition-all duration-500 ${
-            stalled ? 'bg-amber-400/60' : 'bg-accent-blue'
+            stalled ? 'bg-indicator-warning' : 'bg-accent-blue'
           }`}
           style={{ width: pct !== null ? `${pct}%` : '15%' }}
         />
@@ -176,7 +176,7 @@ function DownloadProgressBar({
         </span>
         {pct !== null && (
           <span className={`text-[10px] tabular-nums ${
-            stalled ? 'text-amber-300' : 'text-text-secondary'
+            stalled ? 'text-indicator-warning' : 'text-text-secondary'
           }`}>
             {pct}%
           </span>

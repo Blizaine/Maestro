@@ -156,7 +156,7 @@ export function PostProcessing() {
                     voiceCloneEnabled ? 'bg-accent-blue' : 'bg-bg-tertiary border border-border'
                   }`}
                 >
-                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
+                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white border border-border transition-transform ${
                     voiceCloneEnabled ? 'translate-x-4' : ''
                   }`} />
                 </button>

@@ -128,11 +128,11 @@ export function InpaintControls() {
           which Pinokio menu item to click. Inpaint won't work at all
           without SAM so this needs to be unmissable. */}
       {samStatus === 'not_installed' && (
-        <div className="flex items-start gap-2 text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/40 rounded-lg px-3 py-2.5">
+        <div className="flex items-start gap-2 text-[11px] text-text-primary bg-amber-500/10 border border-amber-500/40 rounded-lg px-3 py-2.5">
           <Download size={14} className="shrink-0 mt-0.5" />
           <div className="space-y-1">
-            <p className="font-medium text-amber-200">Inpaint requires SAM 3.1 (not installed)</p>
-            <p className="text-amber-300/80">
+            <p className="font-medium text-text-primary">Inpaint requires SAM 3.1 (not installed)</p>
+            <p className="text-text-secondary">
               {samStatusError || "Open the Pinokio menu and click 'Install Inpaint Support (SAM 3.1)' to enable inpainting. ~5 min one-time setup."}
             </p>
           </div>
@@ -143,11 +143,11 @@ export function InpaintControls() {
           than the not-installed case because the on-demand startup
           might still recover. */}
       {samStatus === 'unavailable' && editVideoPath && !editMasksPath && (
-        <div className="flex items-start gap-2 text-[10px] text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
+        <div className="flex items-start gap-2 text-[10px] text-indicator-warning bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
           <AlertTriangle size={14} className="shrink-0 mt-0.5" />
           <div>
             <p className="font-medium">SAM service not available</p>
-            <p className="text-amber-400/70 mt-0.5">Check SAM installation or run Preview Mask to start it on demand.</p>
+            <p className="text-text-secondary mt-0.5">Check SAM installation or run Preview Mask to start it on demand.</p>
           </div>
         </div>
       )}
@@ -241,8 +241,8 @@ export function InpaintControls() {
           {previewing ? 'Segmenting...' : 'Preview Mask'}
         </button>
         {editMasksPath && (
-          <div className="flex items-center gap-1 text-[9px] text-green-400 shrink-0">
-            <div className="w-1.5 h-1.5 rounded-full bg-green-400" />
+          <div className="flex items-center gap-1 text-[9px] text-indicator-success shrink-0">
+            <div className="w-1.5 h-1.5 rounded-full bg-indicator-success" />
             Cached
           </div>
         )}

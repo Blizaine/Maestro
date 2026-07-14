@@ -39,20 +39,48 @@
   --color-accent-blue: #3b82f6;
   --color-accent-blue-hover: #2563eb;
 
-  /* Functional status indicators — NOT remapped per theme.
+  /* Functional status indicators — HUE-stable across themes.
    * These are universal "verified-good vs caution" semantic colors
    * that need to stay visually distinct in every theme. Used for
    * things like:
    *   - LoRA selector: CivitAI-recommended (success/green) vs
    *     fallback-default (warning/amber) weight ranges
    *   - LoRA "guide available" indicator (success/green)
-   * Keeping these out of the per-theme remap means a user who learns
-   * "green dot = recommended" in one theme sees the same meaning in
-   * any other theme. Decorative greens/ambers (progress bars, active
+   *   - warning/success status text across banners and callouts
+   * The HUES never change (a user who learns "green dot =
+   * recommended" sees the same meaning in any theme), but LIGHTNESS
+   * may adapt: light themes darken both (amber #fbbf24 is invisible
+   * on paper). Decorative greens/ambers (progress bars, active
    * indicators, etc.) can still be remapped via accent-green and
    * accent-warm without colliding with these status colors. */
   --color-indicator-success: #22c55e;
   --color-indicator-warning: #fbbf24;
+
+  /* Categorical chip palette — hue-per-category colors for small
+   * decorative UI (Director song-section chips, tab pills, energy
+   * dots, count badges). On the dark themes these are the tailwind
+   * -400 shades the components historically hardcoded (so nothing
+   * changes visually); light themes swap each hue to its -600/-700
+   * stop so chips stay legible on paper. Components must use these
+   * instead of literal text-{hue}-400 classes. */
+  --color-chip-yellow: #facc15;
+  --color-chip-green: #4ade80;
+  --color-chip-cyan: #22d3ee;
+  --color-chip-blue: #60a5fa;
+  --color-chip-purple: #c084fc;
+  --color-chip-pink: #f472b6;
+  --color-chip-teal: #2dd4bf;
+  --color-chip-orange: #fb923c;
+  --color-chip-gray: #9ca3af;
+  --color-chip-red: #f87171;
+
+  /* Media canvas — the letterbox surface directly behind <video>/
+   * <img> in the feed. Dark themes alias their bg-tertiary (no
+   * visual change); light themes keep it DARK: bright letterbox
+   * bars around footage cause glare and washed-out perceived
+   * contrast (same reason YouTube's light mode keeps the player
+   * area dark). */
+  --color-media-canvas: #1a1a25;
 
   /* Warm accent (selection rings, "TAKES" label, active highlights).
      In default theme this is amber too — the cool palette uses
@@ -97,6 +125,14 @@
      set to a warm bloom in Golden Hour for active rings. */
   --shadow-accent-glow: 0 0 0 transparent;
   --shadow-active-ring: 0 0 0 2px var(--color-accent-blue);
+}
+
+/* Native UI (select popups, checkboxes, Firefox scrollbars, form
+ * autofill) follows the declared color scheme, not the app tokens.
+ * The app chrome is dark by default; Ivory overrides to light in
+ * its own block (attribute selector, later in the file, wins). */
+:root {
+  color-scheme: dark;
 }
 
 /* ─── Golden Hour theme ─────────────────────────────────────────────────
@@ -180,6 +216,9 @@
   --color-gradient-active-frame-from: #991b1b;
   --color-gradient-active-frame-to: #fbbf24;
 
+  /* Media canvas follows this theme's bg-tertiary (unchanged look) */
+  --color-media-canvas: #121212;
+
   /* Warm bloom for primary actions */
   --shadow-accent-glow: 0 0 18px rgba(249, 115, 22, 0.45);
 
@@ -238,6 +277,93 @@
     );
   background-origin: border-box;
   background-clip: padding-box, border-box;
+}
+
+/* ─── Ivory theme ────────────────────────────────────────────────────────
+ * Light theme — Golden Hour in daylight. Warm paper surfaces, coffee-
+ * toned text, burnt-orange accents. The elevation ladder is inverted
+ * relative to the dark themes: the page canvas is the deepest cream,
+ * panels are lighter, and inputs sit near-white — matching how light
+ * UIs read elevation — while hover/active states DARKEN.
+ *
+ * Contrast notes (all vs bg-secondary #f9f6ee unless stated):
+ *   text-muted #746b5b        4.9:1  (issue #7 rule: muted stays legible)
+ *   text-secondary #675e4e    6.0:1
+ *   accent-blue #c2410c       4.8:1 as text; white text on it 5.2:1
+ *   CTA stops #c2410c→#b45309 white text 5.2:1 / 5.0:1
+ */
+[data-theme="ivory"] {
+  /* Native form controls (selects, checkboxes, scrollbars the UA
+     draws) must render light — without this they stay dark because
+     the app's default themes never declare a scheme. */
+  color-scheme: light;
+
+  --color-bg-primary: #f2ede2;
+  --color-bg-secondary: #f9f6ee;
+  --color-bg-tertiary: #fffdf7;
+  --color-bg-hover: #ebe4d3;
+  --color-bg-active: #e2d8c2;
+
+  /* Warm sand borders — same "warm outlines carry the identity" idea
+     as Golden Hour, flipped for a light canvas. */
+  --color-border: #d8cdb6;
+  --color-border-light: #c4b696;
+
+  --color-text-primary: #2d271f;
+  --color-text-secondary: #675e4e;
+  --color-text-muted: #746b5b;
+
+  /* Repointed accents — burnt orange for actions (dark enough that
+     the app-wide hardcoded white button text passes AA), deep amber
+     for success/progress. Hover DARKENS (light-theme convention). */
+  --color-accent-blue: #c2410c;
+  --color-accent-blue-hover: #9a3412;
+  --color-accent-green: #b45309;
+  --color-accent-green-hover: #92400e;
+
+  --color-accent-warm: #b45309;
+  --color-accent-warm-hover: #92400e;
+
+  /* Violet counterpoint for AI badges — darker stops than Golden
+     Hour's so white badge text stays readable. */
+  --color-accent-cool-from: #7c3aed;
+  --color-accent-cool-to: #8b5cf6;
+
+  /* Functional indicators — HUES stay green/amber (so learned
+     meaning carries across themes) but both darken, because #22c55e
+     and especially #fbbf24 are near-invisible on paper. */
+  --color-indicator-success: #15803d;
+  --color-indicator-warning: #b45309;
+
+  /* Categorical chips — same hues as the dark themes, dropped to
+     their -600/-700 stops for legibility on paper. */
+  --color-chip-yellow: #a16207;
+  --color-chip-green: #15803d;
+  --color-chip-cyan: #0e7490;
+  --color-chip-blue: #1d4ed8;
+  --color-chip-purple: #7e22ce;
+  --color-chip-pink: #be185d;
+  --color-chip-teal: #0f766e;
+  --color-chip-orange: #c2410c;
+  --color-chip-gray: #4b5563;
+  --color-chip-red: #b91c1c;
+
+  /* Media canvas stays DARK on the light theme — a deep warm
+     near-black so video letterboxing doesn't glare against paper. */
+  --color-media-canvas: #1c1712;
+
+  /* Daylight sunset gradient — burnt orange → deep amber. Kept dark
+     enough for the white CTA label at both stops. */
+  --color-gradient-cta-from: #c2410c;
+  --color-gradient-cta-to: #b45309;
+  --color-gradient-toggle-from: #c2410c;
+  --color-gradient-toggle-to: #b45309;
+  --color-gradient-active-frame-from: #c2410c;
+  --color-gradient-active-frame-to: #f59e0b;
+
+  /* Light themes signal elevation with soft drop shadows, not glow */
+  --shadow-accent-glow: 0 2px 12px rgba(154, 82, 18, 0.28);
+  --shadow-active-ring: 0 0 0 2px rgba(194, 65, 12, 0.35);
 }
 
 /* ─── Onyx theme ─────────────────────────────────────────────────────────
@@ -317,6 +443,9 @@
      their dark chrome without blowing out the foreground text. */
   --color-gradient-toggle-from: #4d4d4d;
   --color-gradient-toggle-to: #8c8c8c;
+
+  /* Media canvas follows this theme's bg-tertiary (unchanged look) */
+  --color-media-canvas: #1a1a1a;
 
   /* Active-frame gradient — flat mid-grey ring around the
      selected asset. Both stops the same so it reads as a clean

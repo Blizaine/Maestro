@@ -129,7 +129,7 @@ export function PromptInput() {
             </>
           ) : enhanceStatus.phase === 'thinking' ? (
             <>
-              <Brain size={10} className="text-purple-400 animate-pulse" />
+              <Brain size={10} className="text-chip-purple animate-pulse" />
               <span>Thinking...</span>
             </>
           ) : (

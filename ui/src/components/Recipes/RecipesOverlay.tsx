@@ -93,8 +93,8 @@ export function RecipesOverlay() {
       {missing && (
         <div className="px-4 py-2.5 bg-amber-500/10 border-b border-amber-500/30">
           <div className="flex items-start gap-2">
-            <AlertTriangle size={14} className="text-amber-400 shrink-0 mt-0.5" />
-            <div className="flex-1 text-[11px] text-amber-100">
+            <AlertTriangle size={14} className="text-indicator-warning shrink-0 mt-0.5" />
+            <div className="flex-1 text-[11px] text-text-primary">
               <div className="font-medium mb-1">
                 Applied — but this recipe uses {missing.loras.length} LoRA
                 {missing.loras.length > 1 ? 's' : ''} you don't have installed:
@@ -105,23 +105,23 @@ export function RecipesOverlay() {
                 ))}
               </div>
               {!civitaiKeySet && missing.loras.some(l => l.source_url) && (
-                <div className="mt-1.5 text-[10px] text-amber-200/80 leading-snug">
+                <div className="mt-1.5 text-[10px] text-text-secondary leading-snug">
                   Auto-download needs a free CivitAI API key.{' '}
-                  <button onClick={openCivitaiKeySettings} className="underline hover:text-amber-100">Add one in Settings</button>
+                  <button onClick={openCivitaiKeySettings} className="underline hover:text-text-primary">Add one in Settings</button>
                   {' '}— then click Download. Or use each “Open source” link to grab it manually.
                 </div>
               )}
-              <div className="mt-1.5 text-[10px] text-amber-200/60">
+              <div className="mt-1.5 text-[10px] text-text-secondary">
                 The recipe is applied and ready — you just need the LoRA before you Generate.
               </div>
             </div>
             <button onClick={() => { setMissing(null); setOpen(false) }}
-              className="text-[10px] text-amber-200/80 hover:text-amber-100 shrink-0">Dismiss</button>
+              className="text-[10px] text-text-secondary hover:text-text-primary shrink-0">Dismiss</button>
           </div>
         </div>
       )}
       {error && (
-        <div className="px-4 py-2 bg-red-500/10 border-b border-red-500/30 text-[11px] text-red-300">{error}</div>
+        <div className="px-4 py-2 bg-red-500/10 border-b border-red-500/30 text-[11px] text-chip-red">{error}</div>
       )}
 
       {/* Grid */}
@@ -225,13 +225,13 @@ function MissingLoraRow({ lora, modelType, civitaiKeySet }: { lora: RecipeLora; 
       <ExternalLink size={10} /> Open source
     </a>
   ) : (
-    <span className="text-amber-200/50 shrink-0">install manually</span>
+    <span className="text-text-secondary shrink-0">install manually</span>
   )
 
   return (
     <div className="flex items-center gap-2">
-      <span className="font-mono text-amber-200/90 truncate">{lora.filename}</span>
-      {lora.size_mb ? <span className="text-amber-200/50 shrink-0">~{Math.round(lora.size_mb)} MB</span> : null}
+      <span className="font-mono text-text-secondary truncate">{lora.filename}</span>
+      {lora.size_mb ? <span className="text-text-secondary shrink-0">~{Math.round(lora.size_mb)} MB</span> : null}
       {/* In-app auto-download needs a CivitAI key. With a key → offer Download;
           without → skip the button (it would just fail) and show the source
           link so the user can grab it manually. */}
@@ -242,8 +242,8 @@ function MissingLoraRow({ lora, modelType, civitaiKeySet }: { lora: RecipeLora; 
         </button>
       )}
       {lora.source_url && !civitaiKeySet && state === 'idle' && sourceLink}
-      {state === 'downloading' && <Loader2 size={10} className="animate-spin text-amber-200 shrink-0" />}
-      {state === 'done' && <span className="text-green-400 shrink-0">started ↓ (see download bar)</span>}
+      {state === 'downloading' && <Loader2 size={10} className="animate-spin text-indicator-warning shrink-0" />}
+      {state === 'done' && <span className="text-indicator-success shrink-0">started ↓ (see download bar)</span>}
       {state === 'error' && sourceLink}
       {!lora.source_url && state === 'idle' && sourceLink}
     </div>

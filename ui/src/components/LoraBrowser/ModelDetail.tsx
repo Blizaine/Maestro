@@ -48,8 +48,9 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
 
   const images = version?.images || []
   // CivitAI descriptions are user-supplied HTML — sanitize before rendering.
+  // FORBID_ATTR strips inline styles/colors: CivitAI authors style text for a dark site and their inline colors break on light themes.
   const sanitizedDescription = useMemo(
-    () => (model.description ? DOMPurify.sanitize(model.description, { USE_PROFILES: { html: true } }) : ''),
+    () => (model.description ? DOMPurify.sanitize(model.description, { USE_PROFILES: { html: true }, FORBID_ATTR: ['style', 'color', 'bgcolor', 'background'] }) : ''),
     [model.description]
   )
   const trainedWords = version?.trainedWords || []
@@ -247,7 +248,7 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
               </span>
             )}
             {!isCheckpoint && !localArch && version && (
-              <span className="text-[10px] px-2 py-1 rounded bg-amber-500/10 text-amber-400">
+              <span className="text-[10px] px-2 py-1 rounded bg-amber-500/10 text-indicator-warning">
                 Unknown architecture
               </span>
             )}
@@ -385,7 +386,7 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
                 {activeDownload.status === 'completed' && activeDownload.warnings && activeDownload.warnings.length > 0 && (
                   <div className="space-y-1 mt-1">
                     {activeDownload.warnings.map((w, i) => (
-                      <div key={i} className="text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded px-2 py-1.5 leading-snug">
+                      <div key={i} className="text-[11px] text-indicator-warning bg-amber-500/10 border border-amber-500/30 rounded px-2 py-1.5 leading-snug">
                         {w}
                       </div>
                     ))}
@@ -402,8 +403,8 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
                     crisp error if the response turns out to be bogus,
                     so the user has a complete loop. */}
                 {!civitaiKeySet && (
-                  <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-100 leading-snug">
-                    <KeyRound size={12} className="text-amber-400 shrink-0 mt-0.5" />
+                  <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-text-primary leading-snug">
+                    <KeyRound size={12} className="text-indicator-warning shrink-0 mt-0.5" />
                     <div className="flex-1 min-w-0">
                       No CivitAI API key set. Most NSFW or restricted LoRAs
                       will fail to download.{' '}
@@ -411,14 +412,14 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
                         href="https://civitai.com/user/account"
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="underline decoration-amber-400/40 hover:decoration-amber-300 hover:text-amber-300"
+                        className="text-indicator-warning underline decoration-indicator-warning/40 hover:decoration-indicator-warning hover:text-indicator-warning/80"
                       >
                         Get a key
                       </a>
                       {' '}then{' '}
                       <button
                         onClick={goToCivitaiKeySettings}
-                        className="underline decoration-amber-400/40 hover:decoration-amber-300 hover:text-amber-300"
+                        className="text-indicator-warning underline decoration-indicator-warning/40 hover:decoration-indicator-warning hover:text-indicator-warning/80"
                       >
                         paste it in Settings
                       </button>.

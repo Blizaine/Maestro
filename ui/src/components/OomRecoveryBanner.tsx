@@ -112,7 +112,7 @@ export function OomRecoveryBanner() {
       <div className="bg-bg-secondary border border-amber-500/40 rounded-lg shadow-2xl overflow-hidden">
         {/* Header strip */}
         <div className="flex items-start gap-2.5 px-4 py-3 bg-amber-500/10">
-          <AlertTriangle size={18} className="text-amber-400 shrink-0 mt-0.5" />
+          <AlertTriangle size={18} className="text-indicator-warning shrink-0 mt-0.5" />
           <div className="flex-1 min-w-0">
             <div className="text-sm font-medium text-text-primary">Out of VRAM</div>
             <div className="text-[12px] text-text-secondary mt-0.5">
@@ -134,7 +134,7 @@ export function OomRecoveryBanner() {
             <>
               <div className="text-[12px] text-text-secondary leading-snug">
                 Lower VRAM headroom from <span className="font-mono text-text-primary">{oom.current_coefficient.toFixed(2)}</span> to{' '}
-                <span className="font-mono text-amber-400">{oom.suggested_coefficient!.toFixed(2)}</span> to reserve more memory for generation spikes
+                <span className="font-mono text-indicator-warning">{oom.suggested_coefficient!.toFixed(2)}</span> to reserve more memory for generation spikes
                 (long videos, VAE decode). About ~5% slower per generation.
               </div>
               <div className="flex items-center gap-2">

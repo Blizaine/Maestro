@@ -38,13 +38,11 @@ export function PreflightBanner() {
     }`}>
       <AlertTriangle
         size={15}
-        className={`shrink-0 mt-0.5 ${hasError ? 'text-red-400' : 'text-amber-400'}`}
+        className={`shrink-0 mt-0.5 ${hasError ? 'text-chip-red' : 'text-indicator-warning'}`}
       />
       <div className="flex-1 min-w-0 space-y-0.5">
         {checks.map(c => (
-          <div key={c.id} className={`text-[11px] leading-snug ${
-            c.level === 'error' ? 'text-red-100' : 'text-amber-100'
-          }`}>
+          <div key={c.id} className="text-[11px] leading-snug text-text-primary">
             {c.message}
           </div>
         ))}

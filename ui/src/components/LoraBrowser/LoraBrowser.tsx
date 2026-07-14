@@ -289,7 +289,7 @@ export function LoraBrowser() {
                   setTimeout(() => { setScanning(false); setScanProgress('') }, 5000)
                 }
               }}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs bg-bg-tertiary border border-border rounded-lg hover:border-amber-400 text-text-secondary hover:text-amber-400 transition-colors shrink-0"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs bg-bg-tertiary border border-border rounded-lg hover:border-indicator-warning text-text-secondary hover:text-indicator-warning transition-colors shrink-0"
               title="Regenerate ALL guides (overwrites existing)"
             >
               <span className="hidden sm:inline">Regenerate All</span>
@@ -386,8 +386,8 @@ export function LoraBrowser() {
           a failed download. */}
       {!civitaiKeySet && !apiKeyBannerDismissed && (
         <div className="px-4 py-2.5 bg-amber-500/10 border-b border-amber-500/30 flex items-start gap-2.5 shrink-0">
-          <KeyRound size={14} className="text-amber-400 shrink-0 mt-0.5" />
-          <div className="flex-1 min-w-0 text-xs text-amber-100 leading-relaxed">
+          <KeyRound size={14} className="text-indicator-warning shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0 text-xs text-text-primary leading-relaxed">
             <span className="font-semibold">No CivitAI API key configured.</span>{' '}
             Most NSFW, restricted, and early-access LoRAs require a key to
             download — without one, those downloads will fail with an error.
@@ -396,16 +396,16 @@ export function LoraBrowser() {
                 href="https://civitai.com/user/account"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 underline decoration-amber-400/40 hover:decoration-amber-300 hover:text-amber-300 transition-colors"
+                className="inline-flex items-center gap-1 text-indicator-warning underline decoration-indicator-warning/40 hover:decoration-indicator-warning hover:text-indicator-warning/80 transition-colors"
                 title="Opens CivitAI's account page in a new tab — scroll to 'API Keys'"
               >
                 <ExternalLink size={10} />
                 Get a key from civitai.com
               </a>
-              <span className="text-amber-200/60">→</span>
+              <span className="text-text-secondary">→</span>
               <button
                 onClick={goToCivitaiKeySettings}
-                className="inline-flex items-center gap-1 underline decoration-amber-400/40 hover:decoration-amber-300 hover:text-amber-300 transition-colors"
+                className="inline-flex items-center gap-1 text-indicator-warning underline decoration-indicator-warning/40 hover:decoration-indicator-warning hover:text-indicator-warning/80 transition-colors"
                 title="Opens Settings → Services where you can paste your key"
               >
                 <KeyRound size={10} />
@@ -415,7 +415,7 @@ export function LoraBrowser() {
           </div>
           <button
             onClick={() => setApiKeyBannerDismissed(true)}
-            className="p-1 rounded hover:bg-amber-500/20 text-amber-300 hover:text-amber-100 shrink-0 transition-colors"
+            className="p-1 rounded hover:bg-amber-500/20 text-indicator-warning hover:text-indicator-warning/80 shrink-0 transition-colors"
             title="Dismiss for this session"
             aria-label="Dismiss"
           >
@@ -491,7 +491,7 @@ export function LoraBrowser() {
                 className="w-3.5 h-3.5 rounded accent-amber-500 disabled:opacity-40"
               />
               <span className={`flex items-center gap-0.5 ${
-                updatableOnly ? 'text-amber-400' : updatableCount > 0 ? 'text-text-secondary' : 'text-text-muted'
+                updatableOnly ? 'text-indicator-warning' : updatableCount > 0 ? 'text-text-secondary' : 'text-text-muted'
               }`}>
                 <ArrowUpCircle size={11} />
                 Updates
@@ -519,7 +519,7 @@ export function LoraBrowser() {
                 : <RefreshCw size={11} />}
               Check
               {updatableCount > 0 && !checkingUpdates && (
-                <span className="ml-0.5 px-1 rounded bg-amber-500/20 text-amber-400 text-[10px] font-medium">
+                <span className="ml-0.5 px-1 rounded bg-amber-500/20 text-indicator-warning text-[10px] font-medium">
                   {updatableCount}
                 </span>
               )}
@@ -548,7 +548,7 @@ export function LoraBrowser() {
                   the CivitAI search view too, so the user knows there
                   are updates worth investigating without clicking through. */}
               {updatableCount > 0 && (
-                <span className="ml-0.5 px-1 rounded bg-amber-500/20 text-amber-400 text-[10px] font-medium">
+                <span className="ml-0.5 px-1 rounded bg-amber-500/20 text-indicator-warning text-[10px] font-medium">
                   {updatableCount}
                 </span>
               )}
@@ -719,9 +719,9 @@ export function LoraBrowser() {
 
             {!loading && results.length === 0 && searchError && (
               <div className="flex flex-col items-center justify-center py-16 text-text-muted">
-                <div className="max-w-md w-full px-4 py-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-100 text-sm leading-relaxed">
+                <div className="max-w-md w-full px-4 py-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-text-primary text-sm leading-relaxed">
                   <div className="font-semibold mb-1">CivitAI is unavailable</div>
-                  <div className="text-[12px] text-amber-200/80">{searchError}</div>
+                  <div className="text-[12px] text-text-secondary">{searchError}</div>
                 </div>
               </div>
             )}

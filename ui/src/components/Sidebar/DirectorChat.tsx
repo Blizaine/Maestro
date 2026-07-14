@@ -48,18 +48,18 @@ function formatTime(s: number): string {
 }
 
 const sectionColors: Record<string, string> = {
-  intro: 'bg-blue-500/20 text-blue-400',
-  verse: 'bg-green-500/20 text-green-400',
-  chorus: 'bg-purple-500/20 text-purple-400',
-  bridge: 'bg-yellow-500/20 text-yellow-400',
-  outro: 'bg-gray-500/20 text-gray-400',
-  instrumental: 'bg-cyan-500/20 text-cyan-400',
+  intro: 'bg-blue-500/20 text-chip-blue',
+  verse: 'bg-green-500/20 text-chip-green',
+  chorus: 'bg-purple-500/20 text-chip-purple',
+  bridge: 'bg-yellow-500/20 text-chip-yellow',
+  outro: 'bg-gray-500/20 text-chip-gray',
+  instrumental: 'bg-cyan-500/20 text-chip-cyan',
   // Short film scene types
-  dialogue: 'bg-green-500/20 text-green-400',
-  action: 'bg-orange-500/20 text-orange-400',
-  opening: 'bg-blue-500/20 text-blue-400',
-  closing: 'bg-gray-500/20 text-gray-400',
-  scene: 'bg-teal-500/20 text-teal-400',
+  dialogue: 'bg-green-500/20 text-chip-green',
+  action: 'bg-orange-500/20 text-chip-orange',
+  opening: 'bg-blue-500/20 text-chip-blue',
+  closing: 'bg-gray-500/20 text-chip-gray',
+  scene: 'bg-teal-500/20 text-chip-teal',
 }
 
 const sectionBarColors: Record<string, string> = {
@@ -126,7 +126,7 @@ function SectionBadge({ label }: { label: string }) {
 }
 
 function EnergyDot({ energy }: { energy: number }) {
-  const color = energy > 0.6 ? 'bg-red-400' : energy < 0.3 ? 'bg-blue-400' : 'bg-yellow-400'
+  const color = energy > 0.6 ? 'bg-chip-red' : energy < 0.3 ? 'bg-chip-blue' : 'bg-chip-yellow'
   return <span className={`inline-block w-2 h-2 rounded-full ${color}`} title={`Energy: ${(energy * 100).toFixed(0)}%`} />
 }
 
@@ -797,7 +797,7 @@ export function DirectorChat() {
             {pastStep('structure') && (
               <UserBubble>
                 <div className="flex items-center gap-1.5 text-xs text-text-primary">
-                  <Check size={12} className="text-green-400" />
+                  <Check size={12} className="text-indicator-success" />
                   <span>{plannedClips.length} {isShortFilm ? 'scenes' : 'clips'} confirmed</span>
                   <span className="text-text-muted">({formatTime(totalClipDuration)})</span>
                 </div>
@@ -2384,7 +2384,7 @@ function ImageGenView({
       {loraWarnings.length > 0 && (
         <div className="space-y-1.5">
           {loraWarnings.map((w, i) => (
-            <div key={i} className="px-2.5 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-100 leading-snug whitespace-pre-line">
+            <div key={i} className="px-2.5 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-text-primary leading-snug whitespace-pre-line">
               {w}
             </div>
           ))}

@@ -151,7 +151,7 @@ export function LoraSelector() {
           Check
           {updatableCount > 0 && (
             <span
-              className="ml-0.5 px-1 rounded bg-amber-500/20 text-amber-400 text-[9px] font-medium"
+              className="ml-0.5 px-1 rounded bg-amber-500/20 text-indicator-warning text-[9px] font-medium"
               title={`${updatableCount} update${updatableCount === 1 ? '' : 's'} available`}
             >
               {updatableCount}
@@ -331,7 +331,7 @@ export function LoraSelector() {
             className="w-3 h-3 rounded border-border accent-amber-500 disabled:opacity-40"
           />
           <span className={`text-[10px] uppercase tracking-wider flex items-center gap-0.5 ${
-            updatableOnly ? 'text-amber-400' : updatableCount > 0 ? 'text-text-muted' : 'text-text-muted'
+            updatableOnly ? 'text-indicator-warning' : updatableCount > 0 ? 'text-text-muted' : 'text-text-muted'
           }`}>
             <ArrowUpCircle size={10} />
             Updates
@@ -410,7 +410,7 @@ export function LoraSelector() {
               {updateStatuses[filename] === 'available' && (
                 <ArrowUpCircle
                   size={11}
-                  className="text-amber-400 shrink-0"
+                  className="text-indicator-warning shrink-0"
                   aria-label="Update available"
                 />
               )}
@@ -453,7 +453,7 @@ export function LoraSelector() {
                     {updateStatuses[filename] === 'available' && (
                       <ArrowUpCircle
                         size={11}
-                        className="text-amber-400 shrink-0"
+                        className="text-indicator-warning shrink-0"
                         aria-label="Update available"
                       />
                     )}

@@ -33,7 +33,7 @@ export function GenerateButton() {
     return (
       <button
         disabled
-        className="px-4 py-2 rounded-lg flex items-center gap-1.5 bg-amber-500/20 text-amber-400 cursor-not-allowed text-xs font-medium whitespace-nowrap"
+        className="px-4 py-2 rounded-lg flex items-center gap-1.5 bg-amber-500/20 text-indicator-warning cursor-not-allowed text-xs font-medium whitespace-nowrap"
       >
         <AlertTriangle size={13} />
         Need image

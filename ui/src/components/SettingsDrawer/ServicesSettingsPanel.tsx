@@ -217,7 +217,7 @@ function NsfwToggleSection() {
               {nsfwEnabled ? (
                 <ShieldAlert size={14} className="text-red-400 shrink-0" />
               ) : (
-                <ShieldCheck size={14} className="text-green-400 shrink-0" />
+                <ShieldCheck size={14} className="text-indicator-success shrink-0" />
               )}
               NSFW Mode
               {isPublicProvider && <Lock size={11} className="text-text-muted" />}
@@ -238,7 +238,7 @@ function NsfwToggleSection() {
                 : nsfwEnabled ? 'bg-red-500' : 'bg-bg-tertiary border border-border'
             }`}
           >
-            <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
+            <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white border border-border shadow transition-transform ${
               nsfwEnabled && !isPublicProvider ? 'translate-x-4' : 'translate-x-0.5'
             }`} />
           </div>
@@ -312,7 +312,7 @@ export function ServicesSettingsPanel() {
                 : 'Auto-loads when needed'}
             </div>
           </div>
-          <div className={`w-2 h-2 rounded-full shrink-0 ${llmStatus?.loaded ? 'bg-green-400' : 'bg-text-muted/30'}`} />
+          <div className={`w-2 h-2 rounded-full shrink-0 ${llmStatus?.loaded ? 'bg-indicator-success' : 'bg-text-muted/30'}`} />
         </div>
 
         {/* Provider selector */}
@@ -532,7 +532,7 @@ export function ServicesSettingsPanel() {
               servicesConfig.use_director_v2 ? 'bg-accent-blue' : 'bg-bg-tertiary border border-border'
             }`}
           >
-            <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
+            <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white border border-border shadow transition-transform ${
               servicesConfig.use_director_v2 ? 'translate-x-4' : 'translate-x-0.5'
             }`} />
           </div>
@@ -592,7 +592,7 @@ export function ServicesSettingsPanel() {
               servicesConfig.director_multishot_lora_mode ? 'bg-accent-blue' : 'bg-bg-tertiary border border-border'
             }`}
           >
-            <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
+            <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white border border-border shadow transition-transform ${
               servicesConfig.director_multishot_lora_mode ? 'translate-x-4' : 'translate-x-0.5'
             }`} />
           </div>
@@ -611,7 +611,7 @@ export function ServicesSettingsPanel() {
           <div className="flex-1 mr-3">
             <div className="text-sm text-text-primary group-hover:text-accent-blue transition-colors flex items-center gap-2">
               Voice Reference (ID-LoRA)
-              <span className="text-[9px] uppercase tracking-wider text-amber-400 bg-amber-400/10 border border-amber-400/30 rounded px-1.5 py-px">
+              <span className="text-[9px] uppercase tracking-wider text-indicator-warning bg-amber-400/10 border border-indicator-warning/30 rounded px-1.5 py-px">
                 Experimental
               </span>
             </div>
@@ -627,7 +627,7 @@ export function ServicesSettingsPanel() {
               servicesConfig.voice_reference_enabled ? 'bg-accent-blue' : 'bg-bg-tertiary border border-border'
             }`}
           >
-            <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
+            <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white border border-border shadow transition-transform ${
               servicesConfig.voice_reference_enabled ? 'translate-x-4' : 'translate-x-0.5'
             }`} />
           </div>
@@ -792,7 +792,7 @@ export function ServicesSettingsPanel() {
               servicesConfig.show_experimental ? 'bg-accent-blue' : 'bg-bg-tertiary border border-border'
             }`}
           >
-            <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
+            <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white border border-border shadow transition-transform ${
               servicesConfig.show_experimental ? 'translate-x-4' : 'translate-x-0.5'
             }`} />
           </div>

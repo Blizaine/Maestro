@@ -4,6 +4,13 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/maestro.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <!-- Hint the UA before CSS loads so native controls don't flash the
+         wrong scheme; the effective scheme comes from index.css
+         (:root dark, [data-theme="ivory"] light). theme-color tints
+         mobile browser chrome and is synced per theme by the inline
+         script below and by applyTheme() on switch. -->
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#0a0a0a" />
     <title>Maestro</title>
   </head>
   <body>
@@ -18,16 +25,21 @@
       // src/lib/theme.ts. Hardcoded here because this script runs
       // before any module imports.
       (function () {
+        // Page-background hex per theme, for the browser-chrome tint.
+        // Keep in sync with the THEMES swatches in src/lib/theme.ts.
+        var bg = { 'golden-hour': '#0a0a0a', 'default': '#0a0a0f', 'onyx': '#000000', 'ivory': '#f2ede2' };
+        var t = 'golden-hour';
         try {
-          var t = localStorage.getItem('maestro-theme') || 'golden-hour';
-          if (t && t !== 'default') {
-            document.documentElement.setAttribute('data-theme', t);
-          }
+          t = localStorage.getItem('maestro-theme') || 'golden-hour';
         } catch (e) {
-          // localStorage blocked (private mode etc) — apply the
-          // hardcoded default so the user still gets the intended look.
-          document.documentElement.setAttribute('data-theme', 'golden-hour');
+          // localStorage blocked (private mode etc) — fall through with
+          // the hardcoded default so the user still gets the intended look.
         }
+        if (t && t !== 'default') {
+          document.documentElement.setAttribute('data-theme', t);
+        }
+        var meta = document.querySelector('meta[name="theme-color"]');
+        if (meta && bg[t]) meta.setAttribute('content', bg[t]);
       })();
     </script>
     <script type="module" src="/src/main.tsx"></script>

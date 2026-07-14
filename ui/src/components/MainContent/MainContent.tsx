@@ -136,7 +136,7 @@ function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop
         {isFailed && (
           <button
             onClick={onDismiss}
-            className="absolute top-2 right-2 p-1.5 rounded-full bg-black/40 text-white/80 hover:bg-red-600 hover:text-white transition-colors z-10"
+            className="absolute top-2 right-2 p-1.5 rounded-full bg-bg-active text-text-secondary hover:bg-red-600 hover:text-white transition-colors z-10"
             title="Dismiss"
           >
             <X size={14} />

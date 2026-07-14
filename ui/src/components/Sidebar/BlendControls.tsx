@@ -279,7 +279,7 @@ export function BlendControls() {
       )}
 
       {!bothLoaded && (blendClipA || blendClipB) && (
-        <p className="text-[10px] text-yellow-400 text-center">Add both clips to enable blending</p>
+        <p className="text-[10px] text-indicator-warning text-center">Add both clips to enable blending</p>
       )}
     </div>
   )
