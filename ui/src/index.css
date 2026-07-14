@@ -366,6 +366,139 @@
   --shadow-active-ring: 0 0 0 2px rgba(194, 65, 12, 0.35);
 }
 
+/* ─── Daylight theme ─────────────────────────────────────────────────────
+ * Light theme — Classic in daylight. Cool gray-white paper, blue
+ * accents, flat green CTA. The conventional "light mode" for users
+ * coming from bright rooms. Same inverted elevation ladder as Ivory.
+ */
+[data-theme="daylight"] {
+  color-scheme: light;
+
+  --color-bg-primary: #f4f5f7;
+  --color-bg-secondary: #fafbfc;
+  --color-bg-tertiary: #ffffff;
+  --color-bg-hover: #e9ebef;
+  --color-bg-active: #dde0e6;
+
+  --color-border: #d5d9e0;
+  --color-border-light: #c3c8d2;
+
+  --color-text-primary: #1d2129;
+  --color-text-secondary: #57606e;
+  --color-text-muted: #68707f;
+
+  /* blue-600 action accent — dark enough for the app-wide hardcoded
+     white button text; hover darkens (light-theme convention). */
+  --color-accent-blue: #2563eb;
+  --color-accent-blue-hover: #1d4ed8;
+  /* green-700 success/progress — white text passes AA on it. */
+  --color-accent-green: #15803d;
+  --color-accent-green-hover: #166534;
+
+  --color-accent-warm: #b45309;
+  --color-accent-warm-hover: #92400e;
+
+  --color-accent-cool-from: #4f46e5;
+  --color-accent-cool-to: #4338ca;
+
+  --color-indicator-success: #15803d;
+  --color-indicator-warning: #b45309;
+
+  /* Same light chip stops as Ivory — they're hue-per-category and
+     theme-agnostic on paper. */
+  --color-chip-yellow: #a16207;
+  --color-chip-green: #15803d;
+  --color-chip-cyan: #0e7490;
+  --color-chip-blue: #1d4ed8;
+  --color-chip-purple: #7e22ce;
+  --color-chip-pink: #be185d;
+  --color-chip-teal: #0f766e;
+  --color-chip-orange: #c2410c;
+  --color-chip-gray: #4b5563;
+  --color-chip-red: #b91c1c;
+
+  /* Flat green CTA (Classic's identity) and flat blue toggles/frames */
+  --color-gradient-cta-from: #15803d;
+  --color-gradient-cta-to: #15803d;
+  --color-gradient-toggle-from: #2563eb;
+  --color-gradient-toggle-to: #2563eb;
+  --color-gradient-active-frame-from: #2563eb;
+  --color-gradient-active-frame-to: #2563eb;
+
+  /* Media letterbox stays dark — cool near-black to match the palette */
+  --color-media-canvas: #14161a;
+
+  --shadow-accent-glow: 0 2px 12px rgba(37, 99, 235, 0.22);
+  --shadow-active-ring: 0 0 0 2px rgba(37, 99, 235, 0.35);
+}
+
+/* ─── Pearl theme ────────────────────────────────────────────────────────
+ * Light theme — Onyx in daylight. Monochrome: white and grey paper,
+ * charcoal text and accents. Like Onyx, the only hue comes from the
+ * functional indicator and chip tokens.
+ */
+[data-theme="pearl"] {
+  color-scheme: light;
+
+  --color-bg-primary: #f2f2f2;
+  --color-bg-secondary: #f9f9f9;
+  --color-bg-tertiary: #ffffff;
+  --color-bg-hover: #e8e8e8;
+  --color-bg-active: #dedede;
+
+  --color-border: #d4d4d4;
+  --color-border-light: #bfbfbf;
+
+  --color-text-primary: #171717;
+  --color-text-secondary: #525252;
+  --color-text-muted: #646464;
+
+  /* Charcoal accents — same dual-duty calibration as Onyx (button
+     background under white text AND text/border on light surfaces),
+     inverted: #525252 carries white text at 7.4:1 and reads clearly
+     as text on the paper surfaces. Hover darkens. */
+  --color-accent-blue: #525252;
+  --color-accent-blue-hover: #404040;
+  --color-accent-green: #525252;
+  --color-accent-green-hover: #404040;
+
+  --color-accent-warm: #737373;
+  --color-accent-warm-hover: #525252;
+
+  /* Slightly blue-grey for AI badges — nearly neutral, mirrors Onyx */
+  --color-accent-cool-from: #64748b;
+  --color-accent-cool-to: #475569;
+
+  --color-indicator-success: #15803d;
+  --color-indicator-warning: #b45309;
+
+  --color-chip-yellow: #a16207;
+  --color-chip-green: #15803d;
+  --color-chip-cyan: #0e7490;
+  --color-chip-blue: #1d4ed8;
+  --color-chip-purple: #7e22ce;
+  --color-chip-pink: #be185d;
+  --color-chip-teal: #0f766e;
+  --color-chip-orange: #c2410c;
+  --color-chip-gray: #4b5563;
+  --color-chip-red: #b91c1c;
+
+  /* Dark charcoal gradient for the CTA — Onyx's light-grey gradient
+     inverted; white label reads at 10:1+. */
+  --color-gradient-cta-from: #404040;
+  --color-gradient-cta-to: #171717;
+  --color-gradient-toggle-from: #404040;
+  --color-gradient-toggle-to: #6b6b6b;
+  --color-gradient-active-frame-from: #737373;
+  --color-gradient-active-frame-to: #737373;
+
+  /* Neutral near-black media letterbox */
+  --color-media-canvas: #191919;
+
+  --shadow-accent-glow: 0 2px 10px rgba(0, 0, 0, 0.18);
+  --shadow-active-ring: 0 0 0 2px rgba(82, 82, 82, 0.4);
+}
+
 /* ─── Onyx theme ─────────────────────────────────────────────────────────
  * Minimalist monochrome palette. Pure-black canvas, neutral grey
  * surfaces, white-toned accents. No color tint anywhere — affordances

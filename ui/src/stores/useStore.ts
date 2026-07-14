@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, GenerationJob, ModelFamily, ModelDef, GenerationMode, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, SavedPipelineState, SystemDetectResponse, SystemStats } from '../types'
 import * as api from '../api/client'
-import { applyTheme, getStoredTheme, type ThemeId } from '../lib/theme'
+import { applyThemePrefs, getStoredPrefs, type ThemeId, type ThemeMode, type ThemePrefs } from '../lib/theme'
 
 // --- LocalStorage persistence for per-mode settings ---
 const STORAGE_KEY = 'maestro_mode_settings'
@@ -748,11 +748,13 @@ interface AppState {
   toggleSidebar: () => void
   setSidebarOpen: (open: boolean) => void
 
-  // Theme — see lib/theme.ts. Persisted to localStorage; an inline
-  // script in index.html applies the persisted theme to <html>
+  // Theme — see lib/theme.ts. Two-dimensional: a dark/light/auto mode
+  // plus one theme choice per variant. Persisted to localStorage; an
+  // inline script in index.html applies the resolved theme to <html>
   // BEFORE React mounts to avoid a flash of the default theme.
-  theme: ThemeId
-  setTheme: (theme: ThemeId) => void
+  themePrefs: ThemePrefs
+  setThemeMode: (mode: ThemeMode) => void
+  setThemeForVariant: (variant: 'dark' | 'light', id: ThemeId) => void
 
   // Retake Dialog
   retakeDialogOpen: boolean
@@ -1926,13 +1928,21 @@ export const useStore = create<AppState>((set, get) => ({
   toggleSidebar: () => set(s => ({ sidebarOpen: !s.sidebarOpen })),
   setSidebarOpen: (open) => set({ sidebarOpen: open }),
 
-  // Theme — initial value reads from localStorage so it matches what
-  // the inline script in index.html applied to <html>. setTheme writes
-  // both to the DOM and localStorage via applyTheme.
-  theme: getStoredTheme() as ThemeId,
-  setTheme: (theme) => {
-    applyTheme(theme)
-    set({ theme })
+  // Theme — initial value reads from localStorage (with legacy
+  // single-theme migration) so it matches what the inline script in
+  // index.html applied to <html>. The setters write to the DOM and
+  // localStorage via applyThemePrefs, which also installs the OS
+  // scheme listener that makes 'auto' live-switch.
+  themePrefs: getStoredPrefs(),
+  setThemeMode: (mode) => {
+    const prefs = { ...get().themePrefs, mode }
+    applyThemePrefs(prefs)
+    set({ themePrefs: prefs })
+  },
+  setThemeForVariant: (variant, id) => {
+    const prefs = { ...get().themePrefs, [variant]: id }
+    applyThemePrefs(prefs)
+    set({ themePrefs: prefs })
   },
 
   // CivitAI LoRA Browser
