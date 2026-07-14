@@ -17,40 +17,40 @@
     <div id="root"></div>
     <script>
       // Apply theme BEFORE React mounts to avoid a flash of the wrong
-      // theme on load. Resolves the two-dimensional preference
-      // (mode: dark/light/auto + one theme per variant) exactly like
-      // src/lib/theme.ts, including migrating the legacy single-theme
-      // key. Hardcoded here because this script runs before any
-      // module imports — keep the maps in sync with THEMES/COUNTERPART
-      // in src/lib/theme.ts.
+      // theme on load. Resolves the preference (mode: dark/light/auto
+      // + theme family) exactly like src/lib/theme.ts, including
+      // migrating the legacy keys. Hardcoded here because this script
+      // runs before any module imports — keep the maps in sync with
+      // FAMILIES in src/lib/theme.ts.
       (function () {
-        var LIGHT = { ivory: 1, daylight: 1, pearl: 1 };
-        // Dark <-> light siblings; doubles as the valid-id set.
-        var PAIR = { 'golden-hour': 'ivory', 'ivory': 'golden-hour', 'default': 'daylight',
-                     'daylight': 'default', 'onyx': 'pearl', 'pearl': 'onyx' };
+        // Family -> its light-variant CSS id. Keys double as the
+        // valid family-id set.
+        var LIGHT_OF = { 'golden-hour': 'ivory', 'default': 'daylight', 'onyx': 'pearl' };
+        // Any theme id (either variant) -> its family.
+        var FAMILY_OF = { 'golden-hour': 'golden-hour', 'ivory': 'golden-hour',
+                          'default': 'default', 'daylight': 'default',
+                          'onyx': 'onyx', 'pearl': 'onyx' };
         // Page-background hex per theme, for the browser-chrome tint.
         var bg = { 'golden-hour': '#0a0a0a', 'default': '#0a0a0f', 'onyx': '#000000',
                    'ivory': '#f2ede2', 'daylight': '#f4f5f7', 'pearl': '#f2f2f2' };
-        var mode = 'dark', dark = 'golden-hour', light = 'ivory';
+        var mode = 'dark', family = 'golden-hour';
         try {
           var legacy = localStorage.getItem('maestro-theme');
-          if (legacy && !PAIR[legacy]) legacy = null;
+          if (legacy && !FAMILY_OF[legacy]) legacy = null;
           var m = localStorage.getItem('maestro-theme-mode');
           mode = (m === 'dark' || m === 'light' || m === 'auto') ? m
-               : (legacy && LIGHT[legacy]) ? 'light' : 'dark';
-          var d = localStorage.getItem('maestro-theme-dark');
-          dark = (d && PAIR[d] && !LIGHT[d]) ? d
-               : legacy ? (LIGHT[legacy] ? PAIR[legacy] : legacy) : 'golden-hour';
-          var l = localStorage.getItem('maestro-theme-light');
-          light = (l && LIGHT[l]) ? l
-                : legacy ? (LIGHT[legacy] ? legacy : PAIR[legacy]) : 'ivory';
+               : (legacy && FAMILY_OF[legacy] !== legacy) ? 'light' : 'dark';
+          var f = localStorage.getItem('maestro-theme-family');
+          var d = localStorage.getItem('maestro-theme-dark'); // interim two-picker build
+          family = LIGHT_OF[f] ? f : LIGHT_OF[d] ? d
+                 : legacy ? FAMILY_OF[legacy] : 'golden-hour';
         } catch (e) {
           // localStorage blocked (private mode etc) — fall through with
           // the hardcoded defaults so the user still gets the intended look.
         }
         var wantLight = mode === 'light' || (mode === 'auto' && window.matchMedia &&
           window.matchMedia('(prefers-color-scheme: light)').matches);
-        var t = wantLight ? light : dark;
+        var t = wantLight ? LIGHT_OF[family] : family;
         if (t && t !== 'default') {
           document.documentElement.setAttribute('data-theme', t);
         }

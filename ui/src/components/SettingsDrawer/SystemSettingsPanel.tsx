@@ -4,7 +4,7 @@ import type { ModelFolderCandidate } from '../../types'
 import { useStore, getFamiliesForMode, getModelsForFamily } from '../../stores/useStore'
 import * as api from '../../api/client'
 import type { GenerationMode } from '../../types'
-import { THEMES, DARK_THEMES, LIGHT_THEMES, resolveTheme, onOsThemeChange, type ThemeId, type ThemeMode } from '../../lib/theme'
+import { FAMILIES, resolveVariant, onOsThemeChange, type FamilyId, type ThemeMode } from '../../lib/theme'
 
 const profileLabels: Record<string, string> = {
   '1': 'Profile 1: High RAM + High VRAM',
@@ -454,56 +454,20 @@ function SelectField({ label, value, options, onChange }: {
   )
 }
 
-function ThemePicker({ variant, value, isActive, onChange }: {
-  variant: 'dark' | 'light'
-  value: ThemeId
-  isActive: boolean
-  onChange: (id: ThemeId) => void
-}) {
-  const options = variant === 'dark' ? DARK_THEMES : LIGHT_THEMES
-  const selected = options.find(t => t.id === value) ?? options[0]
-  return (
-    <div>
-      <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 flex items-center gap-1.5">
-        {variant} theme
-        {isActive && (
-          <span className="px-1 rounded bg-accent-blue/15 text-accent-blue normal-case tracking-normal text-[9px]">
-            active
-          </span>
-        )}
-      </label>
-      <div className="flex items-center gap-2">
-        {/* Theme swatch — three colors stacked horizontally for a quick
-            visual preview of the bg / surface / accent palette. */}
-        <div className="flex shrink-0 rounded-md overflow-hidden border border-border">
-          <div className="w-3 h-7" style={{ background: selected.swatch.bg }} />
-          <div className="w-3 h-7" style={{ background: selected.swatch.surface }} />
-          <div className="w-3 h-7" style={{ background: selected.swatch.accent }} />
-        </div>
-        <select
-          value={selected.id}
-          onChange={e => onChange(e.target.value as ThemeId)}
-          className="flex-1 bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
-        >
-          {options.map(t => (
-            <option key={t.id} value={t.id}>{t.label}</option>
-          ))}
-        </select>
-      </div>
-    </div>
-  )
-}
-
 function ThemeSection() {
   const prefs = useStore(s => s.themePrefs)
   const setThemeMode = useStore(s => s.setThemeMode)
-  const setThemeForVariant = useStore(s => s.setThemeForVariant)
+  const setThemeFamily = useStore(s => s.setThemeFamily)
   // Re-render when the OS flips its scheme while in auto mode so the
-  // "active" badge and description track the effective theme.
+  // swatch and hint track the effective variant.
   const [, setOsTick] = useState(0)
   useEffect(() => onOsThemeChange(() => setOsTick(n => n + 1)), [])
 
-  const effective = THEMES.find(t => t.id === resolveTheme(prefs)) ?? THEMES[0]
+  const family = FAMILIES.find(f => f.id === prefs.family) ?? FAMILIES[0]
+  const variant = resolveVariant(prefs)
+  // Swatch previews the variant the mode currently resolves to, so
+  // toggling Dark/Light/Auto updates the preview immediately.
+  const swatch = family[variant].swatch
   const modes: { value: ThemeMode; label: string }[] = [
     { value: 'dark', label: 'Dark' },
     { value: 'light', label: 'Light' },
@@ -534,25 +498,37 @@ function ThemeSection() {
         </div>
         {prefs.mode === 'auto' && (
           <p className="text-[10px] text-text-muted mt-1.5">
-            Follows your system's appearance — currently {effective.variant}.
+            Follows your system's appearance — currently {variant}.
           </p>
         )}
       </div>
-      <ThemePicker
-        variant="dark"
-        value={prefs.dark}
-        isActive={effective.variant === 'dark'}
-        onChange={id => setThemeForVariant('dark', id)}
-      />
-      <ThemePicker
-        variant="light"
-        value={prefs.light}
-        isActive={effective.variant === 'light'}
-        onChange={id => setThemeForVariant('light', id)}
-      />
-      <p className="text-[10px] text-text-muted">
-        {effective.description}
-      </p>
+      <div>
+        <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">
+          Theme
+        </label>
+        <div className="flex items-center gap-2">
+          {/* Swatch — three colors stacked horizontally for a quick
+              preview of the bg / surface / accent palette of the
+              variant currently in effect. */}
+          <div className="flex shrink-0 rounded-md overflow-hidden border border-border">
+            <div className="w-3 h-7" style={{ background: swatch.bg }} />
+            <div className="w-3 h-7" style={{ background: swatch.surface }} />
+            <div className="w-3 h-7" style={{ background: swatch.accent }} />
+          </div>
+          <select
+            value={family.id}
+            onChange={e => setThemeFamily(e.target.value as FamilyId)}
+            className="flex-1 bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
+          >
+            {FAMILIES.map(f => (
+              <option key={f.id} value={f.id}>{f.label}</option>
+            ))}
+          </select>
+        </div>
+        <p className="text-[10px] text-text-muted mt-1.5">
+          {family.description}
+        </p>
+      </div>
     </div>
   )
 }

@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, GenerationJob, ModelFamily, ModelDef, GenerationMode, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, SavedPipelineState, SystemDetectResponse, SystemStats } from '../types'
 import * as api from '../api/client'
-import { applyThemePrefs, getStoredPrefs, type ThemeId, type ThemeMode, type ThemePrefs } from '../lib/theme'
+import { applyThemePrefs, getStoredPrefs, type FamilyId, type ThemeMode, type ThemePrefs } from '../lib/theme'
 
 // --- LocalStorage persistence for per-mode settings ---
 const STORAGE_KEY = 'maestro_mode_settings'
@@ -749,12 +749,13 @@ interface AppState {
   setSidebarOpen: (open: boolean) => void
 
   // Theme — see lib/theme.ts. Two-dimensional: a dark/light/auto mode
-  // plus one theme choice per variant. Persisted to localStorage; an
-  // inline script in index.html applies the resolved theme to <html>
-  // BEFORE React mounts to avoid a flash of the default theme.
+  // plus a theme family (each family has a dark and a light variant).
+  // Persisted to localStorage; an inline script in index.html applies
+  // the resolved theme to <html> BEFORE React mounts to avoid a flash
+  // of the default theme.
   themePrefs: ThemePrefs
   setThemeMode: (mode: ThemeMode) => void
-  setThemeForVariant: (variant: 'dark' | 'light', id: ThemeId) => void
+  setThemeFamily: (family: FamilyId) => void
 
   // Retake Dialog
   retakeDialogOpen: boolean
@@ -1939,8 +1940,8 @@ export const useStore = create<AppState>((set, get) => ({
     applyThemePrefs(prefs)
     set({ themePrefs: prefs })
   },
-  setThemeForVariant: (variant, id) => {
-    const prefs = { ...get().themePrefs, [variant]: id }
+  setThemeFamily: (family) => {
+    const prefs = { ...get().themePrefs, family }
     applyThemePrefs(prefs)
     set({ themePrefs: prefs })
   },
