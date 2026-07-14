@@ -3,6 +3,25 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [1.2.0] - 2026-07-14
+
+Two features: light themes (Ivory / Daylight / Pearl as daylight
+variants of the three theme families) behind a Dark / Light / Auto
+appearance mode that follows the OS, with a large legibility pass so
+every status color works on paper; and ACE-Step v1.5 XL SFT, the
+premium CFG music model, first shipped anywhere - consolidated weights
+hosted at Blizaine/Maestro-Models, a new APG classifier-free guidance
+sampling path, and set as the default music model.
+
+Fixes: the vllm LM engine was silently disabled on Windows by a faulty
+triton probe (song planning now dramatically faster); LM sampling
+defaults now hydrate into the UI (temperature was stuck at 1.0);
+Director planning crash on same-sized reference images + false OOM
+popup; truncated song durations in the gallery (atomic audio writes);
+edits persist as you type and the lyrics prompt survives refresh; new
+ACE-Step models classify under Music. See the
+[README Updates section](README.md#updates).
+
 ## [1.1.3] - 2026-07-12
 
 Fixes: Director-mode start-image thumbnails no longer broken (uploads

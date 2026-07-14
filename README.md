@@ -73,6 +73,20 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.2.0 (2026-07-14)
+
+**Added**
+- **Light themes with a Dark / Light / Auto appearance mode.** Every theme family now has a daylight variant: Golden Hour pairs with warm paper and burnt orange, Classic with cool paper and blue, Onyx with light monochrome. Pick your style in Settings > System, then choose Dark, Light, or Auto; Auto follows your system's appearance and switches live when it changes. Warning banners, chips, gauges, and indicators were re-tuned to stay legible on light backgrounds, and video letterboxing stays dark on light themes to avoid glare.
+- **ACE-Step v1.5 XL SFT, the premium music model.** The quality-focused CFG variant of the XL 4B DiT, now the default music model in Studio and Director (available with the 1.7B or 4B LM). Maestro implements the classifier-free guidance sampling path with Adaptive Projected Guidance this model requires, and unlocks the Steps and Guidance controls for it (defaults: 30 steps, guidance 7.0; raise steps toward 50 for maximum quality). Weights download on first use (about 10 GB).
+
+**Fixed**
+- The fast ACE-Step LM decoder (vllm engine) was silently disabled on every Windows install by a faulty runtime check, forcing song planning onto a slow fallback decoder. Planning is dramatically faster after this fix.
+- ACE-Step's tuned LM sampling defaults (temperature 0.85, top-p 0.9, LM guidance 2.5) never reached the UI, so generations ran at temperature 1.0. Advanced Settings now loads the recommended values when you select a model.
+- Director music-video planning crashed with a connection error when two reference images had the same dimensions (a llama-server bug in batched image encoding), sometimes with a false "lower VRAM headroom?" popup on a nearly empty GPU. Both fixed, and the LLM server's output is now saved to logs/llm for future diagnosis.
+- Songs sometimes showed only 30-40 seconds in the gallery until a manual browser refresh. Audio files are now written atomically so a partially written file can never be picked up or cached.
+- Field edits persist as you type: a page refresh restores exactly what you last had in every field, including the lyrics prompt (which previously always reset) and cleared fields (which previously came back).
+- New ACE-Step models were filed under Text to Speech instead of Music in the model lists.
+
 ### v1.1.3 (2026-07-12)
 
 **Fixed**
