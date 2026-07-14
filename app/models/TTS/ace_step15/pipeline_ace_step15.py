@@ -18,6 +18,7 @@ from transformers import AutoTokenizer, Qwen3ForCausalLM as HfQwen3ForCausalLM, 
 from mmgp import offload
 from shared.utils.text_encoder_cache import TextEncoderCache
 
+from .apg_guidance import MomentumBuffer, apg_forward
 from .models.autoencoder_oobleck import AutoencoderOobleck
 from .models.ace_step15_hf import AceStepConditionGenerationModel
 from .qwen3_audio_codes import generate_audio_codes_with_engine_sampling
@@ -114,12 +115,21 @@ class ACEStep15Pipeline:
         enable_lm: bool = True,
         ignore_lm_cache_seed: bool = False,
         lm_decoder_engine: str = "legacy",
+        dit_variant: str = "turbo",
         device=None,
         dtype=torch.bfloat16,
     ):
         if device is None:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.device = device
+
+        # Transformer variant (turbo / xl_turbo / sft / xl_sft / base...).
+        # Turbo variants are guidance-distilled: fixed few-step schedule,
+        # no CFG. Base/SFT variants run an arbitrary step count with
+        # classifier-free guidance against the model's learned
+        # null_condition_emb (see _sample_latents).
+        self.dit_variant = str(dit_variant or "turbo").lower()
+        self.dit_is_turbo = "turbo" in self.dit_variant
 
         if isinstance(dtype, str):
             dtype = getattr(torch, dtype, torch.bfloat16)
@@ -1535,7 +1545,27 @@ class ACEStep15Pipeline:
                     output[..., start_sample:end_sample] = chunk_audio
         return output
 
-    def _build_t_schedule(self, shift, timesteps):
+    def _build_t_schedule(self, shift, timesteps, num_steps=None):
+        # Base/SFT variants (CFG models) run a free step count on the
+        # standard flow-matching schedule: linspace(1 -> 0) with the
+        # timestep shift transform, matching upstream generate_audio().
+        # The trailing 0 is dropped because the vendored sampling loop
+        # integrates the final step to 0 explicitly.
+        if not self.dit_is_turbo:
+            if timesteps is not None:
+                t_list = timesteps.tolist() if isinstance(timesteps, torch.Tensor) else list(timesteps)
+                while len(t_list) > 0 and t_list[-1] == 0:
+                    t_list.pop()
+                if t_list:
+                    return t_list
+            steps = int(num_steps) if num_steps else 30
+            steps = max(1, min(steps, 200))
+            t = torch.linspace(1.0, 0.0, steps + 1)
+            shift = float(shift or 1.0)
+            if shift != 1.0:
+                t = shift * t / (1 + (shift - 1) * t)
+            return t[:-1].tolist()
+
         valid_shifts = [1.0, 2.0, 3.0]
         valid_timesteps = [
             1.0, 0.9545454545454546, 0.9333333333333333, 0.9, 0.875,
@@ -1580,9 +1610,13 @@ class ACEStep15Pipeline:
         shift,
         timesteps,
         infer_method,
+        num_inference_steps=None,
+        cfg_scale=1.0,
+        cfg_interval_start=0.0,
+        cfg_interval_end=1.0,
         callback=None,
     ):
-        t_schedule_list = self._build_t_schedule(shift, timesteps)
+        t_schedule_list = self._build_t_schedule(shift, timesteps, num_inference_steps)
         t_schedule = torch.tensor(t_schedule_list, device=self.device, dtype=noise.dtype)
         num_steps = len(t_schedule)
 
@@ -1664,6 +1698,31 @@ class ACEStep15Pipeline:
 
         cover_steps = int(num_steps * audio_cover_strength)
 
+        # Classifier-free guidance for base/SFT variants: batch-double the
+        # conditioning with the model's learned null_condition_emb and
+        # combine cond/uncond velocities with Adaptive Projected Guidance
+        # (shared momentum buffer, dims=[1]) — matching the reference
+        # generate_audio() in the upstream ACE-Step-1.5 modeling code.
+        # Turbo variants are guidance-distilled and never take this path.
+        do_cfg = (not self.dit_is_turbo) and cfg_scale is not None and float(cfg_scale) > 1.0
+        momentum_buffer = None
+        latent_attention_mask_fwd = latent_attention_mask
+        if do_cfg:
+            momentum_buffer = MomentumBuffer()
+            null_emb = self.ace_step_transformer.null_condition_emb
+            encoder_hidden_states = torch.cat(
+                [encoder_hidden_states, null_emb.expand_as(encoder_hidden_states)], dim=0)
+            encoder_attention_mask = torch.cat([encoder_attention_mask, encoder_attention_mask], dim=0)
+            context_latents = torch.cat([context_latents, context_latents], dim=0)
+            latent_attention_mask_fwd = torch.cat([latent_attention_mask, latent_attention_mask], dim=0)
+            if encoder_hidden_states_non_cover is not None:
+                encoder_hidden_states_non_cover = torch.cat(
+                    [encoder_hidden_states_non_cover, null_emb.expand_as(encoder_hidden_states_non_cover)], dim=0)
+                encoder_attention_mask_non_cover = torch.cat(
+                    [encoder_attention_mask_non_cover, encoder_attention_mask_non_cover], dim=0)
+                context_latents_non_cover = torch.cat(
+                    [context_latents_non_cover, context_latents_non_cover], dim=0)
+
         xt = noise
         with tqdm(enumerate(t_schedule), total=num_steps) as pbar:
             for i, t in pbar:
@@ -1674,16 +1733,30 @@ class ACEStep15Pipeline:
                     encoder_hidden_states = encoder_hidden_states_non_cover
                     encoder_attention_mask = encoder_attention_mask_non_cover
                     context_latents = context_latents_non_cover
+                x_in = torch.cat([xt, xt], dim=0) if do_cfg else xt
+                t_fwd = t_tensor.repeat(2) if do_cfg else t_tensor
                 with torch.no_grad():
                     vt = self.ace_step_transformer.decoder(
-                        hidden_states=xt,
-                        timestep=t_tensor,
-                        timestep_r=t_tensor,
-                        attention_mask=latent_attention_mask,
+                        hidden_states=x_in,
+                        timestep=t_fwd,
+                        timestep_r=t_fwd,
+                        attention_mask=latent_attention_mask_fwd,
                         encoder_hidden_states=encoder_hidden_states,
                         encoder_attention_mask=encoder_attention_mask,
                         context_latents=context_latents,
                     )[0]
+                if do_cfg:
+                    vt_cond, vt_uncond = vt.chunk(2)
+                    if cfg_interval_start <= float(t) <= cfg_interval_end:
+                        vt = apg_forward(
+                            pred_cond=vt_cond,
+                            pred_uncond=vt_uncond,
+                            guidance_scale=float(cfg_scale),
+                            momentum_buffer=momentum_buffer,
+                            dims=[1],
+                        )
+                    else:
+                        vt = vt_cond
 
                 if i == num_steps - 1:
                     xt = xt - vt * t_tensor.view(-1, 1, 1)
@@ -2129,6 +2202,10 @@ class ACEStep15Pipeline:
             shift=shift,
             timesteps=timesteps,
             infer_method=infer_method,
+            # Consumed only by base/SFT (CFG) variants; turbo variants keep
+            # their fixed distilled schedule and ignore both.
+            num_inference_steps=num_inference_steps,
+            cfg_scale=guidance_scale,
             callback=callback,
         )
 

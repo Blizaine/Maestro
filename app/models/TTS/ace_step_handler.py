@@ -44,9 +44,24 @@ ACE_STEP15_TRANSFORMER_VARIANTS = {
     "turbo_shift3": "ace_step_v1_5_transformer_config_turbo_shift3.json",
     "turbo_continuous": "ace_step_v1_5_transformer_config_turbo_continuous.json",
     "xl_turbo": "ace_step_v1_5_xl_transformer_config_turbo.json",
+    "xl_sft": "ace_step_v1_5_xl_transformer_config_sft.json",
 }
 ACE_STEP15_XL_TRANSFORMER_VARIANT = "xl_turbo"
 ACE_STEP15_FAMILY_TYPES = {"ace_step_v1_5", "ace_step_v1_5_xl"}
+
+
+def _ace_step15_variant_name(base_model_type, model_def) -> str:
+    """The transformer variant a model def resolves to (config lookup key)."""
+    variant = _get_model_path(model_def, "ace_step15_transformer_variant", "")
+    if not variant and _is_ace_step15_xl(base_model_type):
+        variant = ACE_STEP15_XL_TRANSFORMER_VARIANT
+    return str(variant or "turbo").lower()
+
+
+def _ace_step15_is_turbo_variant(base_model_type, model_def) -> bool:
+    """Turbo variants are guidance-distilled: fixed few-step schedule, no CFG.
+    Base/SFT variants run a free step count with classifier-free guidance."""
+    return "turbo" in _ace_step15_variant_name(base_model_type, model_def)
 
 def _ace_step15_lm_weights_name(lm_folder):
     folder_name = os.path.basename(os.path.normpath(str(lm_folder)))
@@ -246,10 +261,7 @@ def _ace_step15_lora_dir_name(base_model_type):
 
 
 def _ace_step15_resolve_transformer_config(base_model_type, model_def):
-    transformer_variant = _get_model_path(model_def, "ace_step15_transformer_variant", "")
-    if not transformer_variant and _is_ace_step15_xl(base_model_type):
-        transformer_variant = ACE_STEP15_XL_TRANSFORMER_VARIANT
-    transformer_variant = str(transformer_variant or "turbo").lower()
+    transformer_variant = _ace_step15_variant_name(base_model_type, model_def)
 
     transformer_config = _get_model_path(model_def, "ace_step15_transformer_config", None)
     if transformer_config:
@@ -321,12 +333,17 @@ class family_handler:
     @staticmethod
     def query_model_def(base_model_type, model_def):
         if _is_ace_step15(base_model_type):
+            # Turbo variants are guidance-distilled: steps are locked to the
+            # fixed schedule and the DiT guidance slider is hidden. Base/SFT
+            # variants (e.g. XL SFT) run true classifier-free guidance, so
+            # they expose both Steps and Guidance.
+            _is_turbo = _ace_step15_is_turbo_variant(base_model_type, model_def)
             extra_model_def = {
                 "audio_only": True,
                 "image_outputs": False,
                 "sliding_window": False,
-                "guidance_max_phases": 0,
-                "lock_inference_steps": True,
+                "guidance_max_phases": 0 if _is_turbo else 1,
+                "lock_inference_steps": _is_turbo,
                 "no_negative_prompt": True,
                 "image_prompt_types_allowed": "",
                 "profiles_dir": [_ace_step15_profiles_dir(base_model_type)],
@@ -509,7 +526,7 @@ class family_handler:
             from .ace_step15.models.ace_step15_hf import AceStepConditionGenerationModel as AceStep15Transformer
             from .ace_step15.models.ace_step15_xl_hf import AceStepConditionGenerationModel as AceStep15XLTransformer
 
-            transformer_config, _ = _ace_step15_resolve_transformer_config(base_model_type, model_def)
+            transformer_config, transformer_variant = _ace_step15_resolve_transformer_config(base_model_type, model_def)
             vae_weights = _get_model_path(model_def, "ace_step15_vae_weights", _ace_step15_ckpt_file(ACE_STEP15_VAE_WEIGHTS_NAME))
             vae_config = _get_model_path(model_def, "ace_step15_vae_config", _ace_step15_config_path(ACE_STEP15_VAE_CONFIG_NAME))
 
@@ -546,6 +563,7 @@ class family_handler:
                 enable_lm=enable_lm,
                 ignore_lm_cache_seed=ignore_lm_cache_seed,
                 lm_decoder_engine=lm_decoder_engine,
+                dit_variant=transformer_variant,
                 dtype=dtype or torch.bfloat16,
             )
 

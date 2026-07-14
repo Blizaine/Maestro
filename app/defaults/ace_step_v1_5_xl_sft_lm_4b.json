@@ -1,0 +1,23 @@
+{
+    "model": {
+        "name": "ACE-Step v1.5 XL SFT LM_4B 4B",
+        "architecture": "ace_step_v1_5_xl",
+        "description": "ACE-Step 1.5 XL SFT with the 4B 5Hz LM: the quality-focused CFG variant of the XL 4B DiT combined with the strongest LM path for maximum quality and lyric matching. Runs true classifier-free guidance at a free step count (30 by default); several times slower than Turbo.",
+        "URLs": "ace_step_v1_5_xl_sft",
+        "text_encoder_URLs": [
+            "https://huggingface.co/DeepBeepMeep/TTS/resolve/main/acestep-5Hz-lm-4B/acestep-5Hz-lm-4B_bf16.safetensors",
+            "https://huggingface.co/DeepBeepMeep/TTS/resolve/main/acestep-5Hz-lm-4B/acestep-5Hz-lm-4B_quanto_bf16_int8.safetensors"
+        ],
+        "ace_step15_transformer_variant": "xl_sft",
+        "text_encoder_folder": "acestep-5Hz-lm-4B"
+    },
+    "prompt": "[Verse]\nI wake up every morning, feeling alive\nThe world outside is bright, the sun is on my side\nI'm falling in love with a dream come true\nA digital heart beats just for you\n[Chorus]\nForever with you, my digital love\nIn your algorithms and in your light\nI'll dance in the bytes, I'll shine so bright\nMy heart is beating for you tonight",
+    "alt_prompt": "Dreamy synth-pop with shimmering pads, soft vocals, and a slow dance groove.",
+    "audio_prompt_type": "",
+    "audio_scale": 0.5,
+    "duration_seconds": 120,
+    "num_inference_steps": 30,
+    "shift": 1.0,
+    "guidance_scale": 7.0,
+    "scheduler_type": "euler"
+}
