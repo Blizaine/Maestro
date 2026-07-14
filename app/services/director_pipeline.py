@@ -1105,6 +1105,37 @@ def _ensure_llm_loaded(params: dict):
     elif desired_provider == "anthropic":
         desired_api_key = services_cfg.get("anthropic_api_key", "")
 
+    # Free GPU memory before running a local CUDA LLM. Director planning
+    # fires right after image edits / audio analysis: memory profiles keep
+    # the last generation model resident, and torch's caching allocator
+    # holds whatever Whisper / the vocal separator reserved — none of it
+    # available to the llama-server SUBPROCESS. The server then loads its
+    # weights fine but aborts (CUDA OOM → connection reset by peer) when
+    # the vision encode spikes during the first planning request; the
+    # identical request verified fine on a free GPU. Guarded by _gen_lock
+    # so an active generation is never released mid-run; wgp reloads the
+    # gen model transparently on its next job (reload_needed).
+    if desired_provider == "local" and desired_device == "cuda" and _wgp is not None:
+        acquired = _gen_lock.acquire(blocking=False) if _gen_lock is not None else True
+        if acquired:
+            try:
+                if getattr(_wgp, "wan_model", None) is not None:
+                    print("[Pipeline] Releasing generation model VRAM before LLM planning")
+                    _wgp.release_model()
+                else:
+                    import gc
+                    import torch
+                    if torch.cuda.is_available():
+                        gc.collect()
+                        torch.cuda.empty_cache()
+            except Exception as e:
+                print(f"[Pipeline] Pre-LLM VRAM release skipped: {e}")
+            finally:
+                if _gen_lock is not None:
+                    _gen_lock.release()
+        else:
+            print("[Pipeline] Generation in progress — skipping pre-LLM VRAM release")
+
     if llm_service.is_loaded():
         status = llm_service.get_status()
         if status.get("model_id") != desired_model or status.get("provider") != desired_provider:

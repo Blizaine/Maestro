@@ -1328,16 +1328,47 @@ def _start_log_reader(proc: subprocess.Popen) -> None:
 
     Prevents the OS pipe from filling (which deadlocks the server) and
     keeps a rolling tail for crash diagnosis. The thread ends on its own
-    when the pipe closes (i.e. the process exits)."""
+    when the pipe closes (i.e. the process exits).
+
+    Also mirrors every line to logs/llm/llama-server.log (fresh file per
+    server launch) — the in-memory tail dies with the process, and a
+    server crash mid-request is exactly the moment a postmortem needs
+    the full output."""
     global _log_reader
     _server_log.clear()
+    log_path = None
+    try:
+        log_dir = os.path.join(_BASE_DIR, "..", "..", "logs", "llm")
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, "llama-server.log")
+    except Exception:
+        pass
 
     def _drain():
+        log_file = None
+        if log_path:
+            try:
+                log_file = open(log_path, "w", encoding="utf-8", errors="replace")
+            except Exception:
+                log_file = None
         try:
             for raw in iter(proc.stdout.readline, b""):
-                _server_log.append(raw.decode(errors="replace").rstrip("\n"))
+                line = raw.decode(errors="replace").rstrip("\n")
+                _server_log.append(line)
+                if log_file:
+                    try:
+                        log_file.write(line + "\n")
+                        log_file.flush()
+                    except Exception:
+                        log_file = None
         except Exception:
             pass
+        finally:
+            if log_file:
+                try:
+                    log_file.close()
+                except Exception:
+                    pass
 
     _log_reader = threading.Thread(target=_drain, name="llama-log-reader", daemon=True)
     _log_reader.start()
@@ -1357,22 +1388,39 @@ def _diagnose_llm_request_failure(exc: Exception) -> "RuntimeError":
     the pipeline error the user sees names the real cause.
     """
     proc = _process
+    if _provider == "local" and proc is not None:
+        # A reset socket usually means the subprocess is mid-death; poll()
+        # can race the actual exit by a moment. Give it a beat to finish
+        # dying so a crash is reported as a crash (with the server's last
+        # words) instead of a generic connection error.
+        try:
+            proc.wait(timeout=3)
+        except Exception:
+            pass
     if _provider == "local" and proc is not None and proc.poll() is not None:
         code = proc.returncode
-        tail = _server_log_tail()
+        tail = _server_log_tail(40)
         _unload_inner()  # reset singleton so the next call relaunches cleanly
         return RuntimeError(
-            f"The local LLM server (llama-server) exited unexpectedly "
-            f"(code {code}) while generating. This usually means the model "
-            f"ran out of VRAM/RAM at load, or the GGUF is incompatible with "
-            f"the installed llama-server build. Last server output:\n{tail}"
+            f"The local LLM server (llama-server) crashed while generating "
+            f"(exit code {code}). On CUDA this usually means the GPU ran out "
+            f"of memory mid-request (e.g. a video/image model was still "
+            f"resident). Full log: logs/llm/llama-server.log. "
+            f"Last server output:\n{tail}"
         )
     if _provider == "local" and proc is None:
         return RuntimeError(
             "The local LLM server is not running. It may have been unloaded "
             "or failed to start — retry, or check the Services settings."
         )
-    # Server still alive (or a remote provider) — a real network/timeout issue.
+    if _provider == "local":
+        # Server still alive — include its recent output anyway; CUDA errors
+        # can surface as dropped requests without killing the process.
+        tail = _server_log_tail(15)
+        return RuntimeError(
+            f"LLM request failed: {exc}\nRecent llama-server output:\n{tail}"
+        )
+    # Remote provider — a real network/timeout issue.
     return RuntimeError(f"LLM request failed: {exc}")
 
 
