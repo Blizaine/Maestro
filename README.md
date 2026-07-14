@@ -49,10 +49,12 @@ Maestro auto-downloads `llama-server` (~600 MB one-time) and your chosen GGUF mo
 - **Multi-LoRA pack auto-extraction** for archives that bundle several LoRAs
 
 ### 🎭 Themes
-Three themes, switchable in Settings → System:
-- **Golden Hour** (default) — warm cinematic palette with sunset-gradient CTAs and spotlight bezels
-- **Classic** — the original cool charcoal palette with blue accents
-- **Onyx** — minimalist monochrome, pure black with neutral grey surfaces
+Three theme families, each with a dark and a light variant, switchable in Settings → System:
+- **Golden Hour** (default) — warm cinematic palette with sunset-gradient CTAs and spotlight bezels; warm paper with burnt orange in daylight
+- **Classic** — the original cool charcoal palette with blue accents; cool paper in daylight
+- **Onyx** — minimalist monochrome, pure black with neutral grey surfaces; white and grey in daylight
+
+Appearance mode is **Dark / Light / Auto** — Auto follows your system's appearance and switches live when it changes.
 
 ### 🛠️ Edit Mode *(experimental)*
 - **Retake** — re-roll a section of an existing video with a new prompt
