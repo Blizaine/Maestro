@@ -1212,6 +1212,18 @@ def load_model(
 
         if mmproj_path:
             cmd += ["--mmproj", mmproj_path]
+            # Force ONE image per encode batch. llama-server's
+            # clip_image_batch_encode sizes its output buffer for a single
+            # image, but the mtmd batcher groups same-processed-shape images
+            # from one request into one batch — two identically-sized images
+            # (e.g. Director's start-frame references, both 432x768) then
+            # abort the server ("Output buffer size mismatch", build 9632)
+            # and the client sees a bare connection reset. A cap of 1 token
+            # per batch means every image always exceeds it and is encoded
+            # alone (the batcher always admits at least one image).
+            # Verified against the exact crashing request.
+            if "--mtmd-batch-max-tokens" not in extra_flags:
+                cmd += ["--mtmd-batch-max-tokens", "1"]
 
         if device == "cuda":
             # Use -ngl from extra_flags if present, otherwise default to all layers
@@ -1401,11 +1413,20 @@ def _diagnose_llm_request_failure(exc: Exception) -> "RuntimeError":
         code = proc.returncode
         tail = _server_log_tail(40)
         _unload_inner()  # reset singleton so the next call relaunches cleanly
+        # Only use OOM wording when the server log actually shows an OOM —
+        # services/oom_detect.py substring-matches "out of memory" on error
+        # text, so speculative OOM wording here made every server crash pop
+        # the "lower VRAM headroom?" recovery banner even when the GPU was
+        # nearly empty (e.g. the clip.cpp image-batch abort).
+        tail_l = tail.lower()
+        if any(s in tail_l for s in ("out of memory", "cudamalloc", "erralloc", "alloc failed")):
+            cause = "The GPU ran out of memory mid-request (e.g. a video/image model was still resident)."
+        else:
+            cause = "This is an internal llama-server failure; see its last output below."
         return RuntimeError(
             f"The local LLM server (llama-server) crashed while generating "
-            f"(exit code {code}). On CUDA this usually means the GPU ran out "
-            f"of memory mid-request (e.g. a video/image model was still "
-            f"resident). Full log: logs/llm/llama-server.log. "
+            f"(exit code {code}). {cause} "
+            f"Full log: logs/llm/llama-server.log. "
             f"Last server output:\n{tail}"
         )
     if _provider == "local" and proc is None:
