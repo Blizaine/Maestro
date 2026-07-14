@@ -43,6 +43,10 @@ interface PersistedModeSettings {
   /** Runtime shape (filename-keyed). The on-disk shape is lora_id-keyed
    *  starting with v1; the persistence layer translates transparently. */
   savedLoraPerMode: Partial<Record<GenerationMode, LoraModeBlob>>
+  /** Per-mode main prompt (lyrics in audio mode). Tracked separately from
+   *  the params snapshot in memory; persisted here so the prompt survives
+   *  a refresh like every other field (it silently didn't, historically). */
+  savedPromptPerMode?: Partial<Record<GenerationMode, string>>
   /** Snapshot of lora_id → filename captured at last save. Returned by
    *  `_loadSettings` for use in mid-session reconciliation when the fresh
    *  lora map arrives, so we can rewrite filenames that changed since save. */
@@ -201,6 +205,7 @@ function _saveSettings(
         selectedModelPerMode: state.selectedModelPerMode,
         savedParamsPerMode: sanitizedParamsPerMode,
         savedLoraPerMode: translatedPerMode,
+        savedPromptPerMode: state.savedPromptPerMode,
       }
       localStorage.setItem(STORAGE_KEY, JSON.stringify(payload))
     } else {
@@ -238,6 +243,7 @@ function _loadSettings(): PersistedModeSettings | null {
         // ghost references.
         savedParamsPerMode: _stripEphemeralParams(parsed.savedParamsPerMode || {}),
         savedLoraPerMode: translated,
+        savedPromptPerMode: parsed.savedPromptPerMode || {},
         _loraFilenameSnapshot: snapshot,
       }
     }
@@ -249,6 +255,51 @@ function _loadSettings(): PersistedModeSettings | null {
       savedParamsPerMode: _stripEphemeralParams(legacy.savedParamsPerMode || {}),
     }
   } catch { return null }
+}
+
+/* Debounced persist-on-edit. setParam/setParams fire on every keystroke
+ * and slider tick, so writes are coalesced (800ms). Captures the CURRENT
+ * mode's full working state the same way a mode switch does, so a page
+ * refresh restores exactly what the user last had — including cleared
+ * fields. Historically settings were only saved on mode/model switches
+ * and at generation start, so edits after those moments were silently
+ * reverted by a refresh (and the main prompt was never persisted at
+ * all, which made the Music Caption field look inconsistently
+ * "sticky" next to the always-resetting lyrics field). */
+let _persistEditTimer: ReturnType<typeof setTimeout> | null = null
+function _schedulePersistCurrent(get: () => AppState) {
+  if (_persistEditTimer) clearTimeout(_persistEditTimer)
+  _persistEditTimer = setTimeout(() => {
+    _persistEditTimer = null
+    try {
+      const s = get()
+      const mode = s.generationMode
+      const { model_type: _mt, prompt: _p, activated_loras: _al, loras_multipliers: _lm, ...paramsSnapshot } = s.params
+      _saveSettings({
+        generationMode: mode,
+        selectedModelPerMode: { ...s.selectedModelPerMode, [mode]: s.params.model_type },
+        savedParamsPerMode: {
+          ...s.savedParamsPerMode,
+          [mode]: {
+            ...paramsSnapshot,
+            filmGrainIntensity: s.filmGrainIntensity,
+            filmGrainSaturation: s.filmGrainSaturation,
+            durationSeconds: s.durationSeconds,
+          },
+        },
+        savedLoraPerMode: {
+          ...s.savedLoraPerMode,
+          [mode]: {
+            activated_loras: s.params.activated_loras || [],
+            loras_multipliers: s.params.loras_multipliers || '',
+            loraWeights: s.loraWeights,
+            availableLoras: s.availableLoras,
+          },
+        },
+        savedPromptPerMode: { ...s.savedPromptPerMode, [mode]: (s.params.prompt as string) ?? '' },
+      }, s.loraIdByFilename)
+    } catch { /* persistence must never break editing */ }
+  }, 800)
 }
 
 /** Fetch a model's defaults from the backend and merge primary fields
@@ -1697,7 +1748,7 @@ export const useStore = create<AppState>((set, get) => ({
         savedLoraPerMode: savedLoras,
         savedPromptPerMode: savedPrompts,
       })
-      _saveSettings({ generationMode: prev, selectedModelPerMode: savedModels, savedParamsPerMode: savedParams, savedLoraPerMode: savedLoras }, s.loraIdByFilename)
+      _saveSettings({ generationMode: prev, selectedModelPerMode: savedModels, savedParamsPerMode: savedParams, savedLoraPerMode: savedLoras, savedPromptPerMode: savedPrompts }, s.loraIdByFilename)
       return
     }
     const { families, models, generationMode: prevMode, params, selectedModelPerMode, savedLoraPerMode, savedParamsPerMode, loraWeights, availableLoras, savedPromptPerMode } = get()
@@ -1814,6 +1865,7 @@ export const useStore = create<AppState>((set, get) => ({
       selectedModelPerMode: savedModels,
       savedParamsPerMode: savedParams,
       savedLoraPerMode: savedLoras,
+      savedPromptPerMode: savedPrompts,
     }, get().loraIdByFilename)
   },
 
@@ -1929,10 +1981,17 @@ export const useStore = create<AppState>((set, get) => ({
         selectedModelPerMode: s.selectedModelPerMode,
         savedParamsPerMode: updatedSavedParams,
         savedLoraPerMode: s.savedLoraPerMode,
+        savedPromptPerMode: s.savedPromptPerMode,
       }, s.loraIdByFilename)
     }
+    // Any param edit (keystroke, slider, toggle) schedules a debounced
+    // full-state persist so a refresh restores the latest edits.
+    _schedulePersistCurrent(get)
   },
-  setParams: (partial) => set(s => ({ params: { ...s.params, ...partial } })),
+  setParams: (partial) => {
+    set(s => ({ params: { ...s.params, ...partial } }))
+    _schedulePersistCurrent(get)
+  },
 
   settingsOpen: false,
   toggleSettings: () => set(s => ({ settingsOpen: !s.settingsOpen })),
@@ -2357,6 +2416,7 @@ export const useStore = create<AppState>((set, get) => ({
           selectedModelPerMode: saved.selectedModelPerMode || {},
           savedParamsPerMode: saved.savedParamsPerMode || {},
           savedLoraPerMode: saved.savedLoraPerMode || {},
+          savedPromptPerMode: saved.savedPromptPerMode || {},
           // Stash the lora_id → filename snapshot from disk so the upcoming
           // refreshLoraIdMap() call can reconcile filename renames since save.
           _loraFilenameSnapshotAtLoad: saved._loraFilenameSnapshot || {},
@@ -2364,6 +2424,9 @@ export const useStore = create<AppState>((set, get) => ({
             ...s.params,
             model_type: initialModelType || s.params.model_type,
             ...(savedParams || {}),
+            // The main prompt lives in savedPromptPerMode, not the params
+            // snapshot — restore it explicitly or it resets every refresh.
+            prompt: saved.savedPromptPerMode?.[mode] ?? s.params.prompt,
           },
         }))
       } else {
@@ -4012,6 +4075,7 @@ export const useStore = create<AppState>((set, get) => ({
           selectedModelPerMode: ns.selectedModelPerMode,
           savedParamsPerMode: ns.savedParamsPerMode,
           savedLoraPerMode: ns.savedLoraPerMode,
+          savedPromptPerMode: ns.savedPromptPerMode,
         }, byFilename)
       } else {
         set({ loraIdByFilename: byFilename, filenameByLoraId: byLoraId })
@@ -4079,7 +4143,7 @@ export const useStore = create<AppState>((set, get) => ({
       [mode]: { activated_loras: current, loras_multipliers: multipliers, loraWeights: newWeights, availableLoras: s.availableLoras },
     }
     set({ savedLoraPerMode: updatedLoraPerMode })
-    _saveSettings({ generationMode: mode, selectedModelPerMode: s.selectedModelPerMode, savedParamsPerMode: s.savedParamsPerMode, savedLoraPerMode: updatedLoraPerMode }, s.loraIdByFilename)
+    _saveSettings({ generationMode: mode, selectedModelPerMode: s.selectedModelPerMode, savedParamsPerMode: s.savedParamsPerMode, savedLoraPerMode: updatedLoraPerMode, savedPromptPerMode: s.savedPromptPerMode }, s.loraIdByFilename)
   },
 
   ensureTransitionLoraForBlend: async () => {
@@ -4208,7 +4272,7 @@ export const useStore = create<AppState>((set, get) => ({
       [mode]: { activated_loras: s.params.activated_loras, loras_multipliers: multipliers, loraWeights: newWeights, availableLoras: s.availableLoras },
     }
     set({ savedLoraPerMode: updatedLoraPerMode })
-    _saveSettings({ generationMode: mode, selectedModelPerMode: s.selectedModelPerMode, savedParamsPerMode: s.savedParamsPerMode, savedLoraPerMode: updatedLoraPerMode }, s.loraIdByFilename)
+    _saveSettings({ generationMode: mode, selectedModelPerMode: s.selectedModelPerMode, savedParamsPerMode: s.savedParamsPerMode, savedLoraPerMode: updatedLoraPerMode, savedPromptPerMode: s.savedPromptPerMode }, s.loraIdByFilename)
   },
 
   // Presets
@@ -4684,6 +4748,7 @@ export const useStore = create<AppState>((set, get) => ({
       selectedModelPerMode: s.selectedModelPerMode,
       savedParamsPerMode: s.savedParamsPerMode,
       savedLoraPerMode: s.savedLoraPerMode,
+      savedPromptPerMode: s.savedPromptPerMode,
     }, s.loraIdByFilename)
   },
 
