@@ -36,7 +36,19 @@ def _prepare_audio_array(audio_data):
 
 def write_wav_file(path, audio_data, sample_rate):
     audio_array = _prepare_audio_array(audio_data)
-    sf.write(path, audio_array, int(sample_rate))
+    # Write-then-rename: libsndfile writes the WAV header with a zero
+    # frame count and only patches it on close, so a reader that hits
+    # the file mid-write (the gallery polls the outputs folder and the
+    # browser caches media responses) sees a "complete" file with a
+    # fraction of the duration. The final filename must only ever
+    # exist fully written. ".tmp" extension keeps the partial out of
+    # the outputs listing's media-extension filter.
+    tmp_path = str(path) + ".tmp"
+    # soundfile infers the container from the extension; the .tmp suffix
+    # hides it, so derive the format from the FINAL path instead.
+    fmt = (os.path.splitext(str(path))[1][1:] or "wav").upper()
+    sf.write(tmp_path, audio_array, int(sample_rate), format=fmt)
+    os.replace(tmp_path, path)
     return path
 
 
