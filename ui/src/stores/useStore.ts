@@ -375,18 +375,20 @@ const audioSubFamilies: ModelFamily[] = [
   { id: 'tts_sfx', label: 'Sound Effects', order: 202 },
 ]
 
-// Model types that belong to the Music sub-family (everything else in tts → Speech)
-const musicModelTypes = new Set([
-  'ace_step_v1',
-  'ace_step_v1_5',
-  'ace_step_v1_5_turbo_lm_0_6b',
-  'ace_step_v1_5_turbo_lm_1_7b',
-  'ace_step_v1_5_turbo_lm_4b',
-  'ace_step_v1_5_xl',
-  'ace_step_v1_5_xl_turbo_lm_4b',
-  'heartmula_oss_3b',
-  'heartmula_rl_oss_3b_20260123',
-])
+// Model types that belong to the Music sub-family (everything else in
+// tts → Speech). Membership is prefix-based for the known music model
+// lines so newly added variants (e.g. new ACE-Step checkpoints)
+// classify correctly without touching this file — the XL SFT models
+// were invisible in the Music group because an id list here missed
+// them. Keep the explicit set for one-off ids that don't share a
+// prefix with their line.
+const musicModelTypes = new Set<string>([])
+const musicModelPrefixes = ['ace_step', 'heartmula']
+
+function isMusicModelType(modelType: string): boolean {
+  if (musicModelTypes.has(modelType)) return true
+  return musicModelPrefixes.some(p => modelType.startsWith(p))
+}
 
 // Model types that belong to the SFX sub-family (MMAudio variants)
 const sfxModelTypes = new Set([
@@ -486,10 +488,10 @@ export function getFamiliesForMode(mode: GenerationMode, allFamilies: ModelFamil
 /** Get models for a family ID, optionally filtered by generation mode */
 export function getModelsForFamily(familyId: string, allModels: ModelDef[], mode?: GenerationMode, _editSubMode?: string): ModelDef[] {
   if (familyId === 'tts_speech') {
-    return allModels.filter(m => m.family === 'tts' && !musicModelTypes.has(m.model_type) && !sfxModelTypes.has(m.model_type))
+    return allModels.filter(m => m.family === 'tts' && !isMusicModelType(m.model_type) && !sfxModelTypes.has(m.model_type))
   }
   if (familyId === 'tts_music') {
-    return allModels.filter(m => m.family === 'tts' && musicModelTypes.has(m.model_type))
+    return allModels.filter(m => m.family === 'tts' && isMusicModelType(m.model_type))
   }
   if (familyId === 'tts_sfx') {
     return allModels.filter(m => m.family === 'tts' && sfxModelTypes.has(m.model_type))
@@ -511,7 +513,7 @@ export function getModelsForFamily(familyId: string, allModels: ModelDef[], mode
 export function getDisplayFamily(model: ModelDef): string {
   if (model.family === 'tts') {
     if (sfxModelTypes.has(model.model_type)) return 'tts_sfx'
-    if (musicModelTypes.has(model.model_type)) return 'tts_music'
+    if (isMusicModelType(model.model_type)) return 'tts_music'
     return 'tts_speech'
   }
   return model.family
