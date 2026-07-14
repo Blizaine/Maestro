@@ -432,7 +432,6 @@ const DEFAULT_ENABLED_MODELS = new Set([
 ])
 
 const ENABLED_MODELS_KEY = 'maestro_enabled_models'
-const SEEN_MODELS_KEY = 'maestro_seen_models'
 
 function _saveEnabledModels(models: Set<string>) {
   try {
@@ -443,25 +442,6 @@ function _saveEnabledModels(models: Set<string>) {
 function _loadEnabledModels(): Set<string> | null {
   try {
     const raw = localStorage.getItem(ENABLED_MODELS_KEY)
-    if (raw) return new Set(JSON.parse(raw))
-  } catch { /* ignore */ }
-  return null
-}
-
-/* Every model id this client has ever observed in the catalog.
- * enabledModels is a stored whitelist, so without this every model a
- * Maestro update adds would be silently hidden until the user
- * rediscovered the Enabled Models panel. Ids missing from the seen-set
- * are new releases (not user choices) and get auto-enabled once. */
-function _saveSeenModels(models: Set<string>) {
-  try {
-    localStorage.setItem(SEEN_MODELS_KEY, JSON.stringify([...models]))
-  } catch { /* quota exceeded */ }
-}
-
-function _loadSeenModels(): Set<string> | null {
-  try {
-    const raw = localStorage.getItem(SEEN_MODELS_KEY)
     if (raw) return new Set(JSON.parse(raw))
   } catch { /* ignore */ }
   return null
@@ -2340,30 +2320,6 @@ export const useStore = create<AppState>((set, get) => ({
       }))
       // Inject virtual SFX (MMAudio) models alongside backend models
       const models = [...backendModels, ...SFX_VIRTUAL_MODELS]
-
-      // Auto-enable models this client has never seen (new releases).
-      // Bootstrap: with no seen-set stored yet, seed it from the default
-      // catalog + the user's current enables rather than the full
-      // catalog — so models added since the defaults list (like a
-      // release's new models) surface immediately on first upgrade.
-      // Trade-off: a non-default model the user explicitly disabled can
-      // resurface once at bootstrap; explicit disables of known models
-      // are respected forever after.
-      {
-        const allIds = models.map(m => m.model_type)
-        const seen = _loadSeenModels()
-          ?? new Set([...DEFAULT_ENABLED_MODELS, ...get().enabledModels])
-        const fresh = allIds.filter(id => !seen.has(id))
-        if (fresh.length > 0) {
-          set(s => {
-            const next = new Set(s.enabledModels)
-            fresh.forEach(id => next.add(id))
-            _saveEnabledModels(next)
-            return { enabledModels: next }
-          })
-        }
-        _saveSeenModels(new Set([...seen, ...allIds]))
-      }
 
       // Hydrate persisted per-mode settings from localStorage
       const saved = _loadSettings()
