@@ -954,6 +954,19 @@ export async function fetchSystemStats(): Promise<import('../types').SystemStats
   return res.json()
 }
 
+/** Manually unload the resident generation model (and LLM) to free
+ *  VRAM/RAM. Models stay loaded between generations by design; this is
+ *  the explicit opt-out. 409s when a generation or Director run is
+ *  active. Returns which models were released. */
+export async function releaseModels(): Promise<{ released: string[] }> {
+  const res = await fetch(`${BASE}/api/v1/system/release-model`, { method: 'POST' })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Unload failed' }))
+    throw new Error(err.detail || 'Unload failed')
+  }
+  return res.json()
+}
+
 /** Apply the recommended settings to wgp_config.json. Used by both
  *  the "Re-detect" button (refreshes after hardware change) and the
  *  auto-tune toggle going from off → on. Server-side this is a single

@@ -22,6 +22,7 @@ _jobs: dict = None          # reference to launch._jobs
 _run_generation = None      # reference to launch._run_generation
 _wgp = None                 # reference to wgp module
 _gen_lock = None            # reference to launch._gen_lock
+_active_gen_states = None   # reference to launch._active_gen_states (abort signaling)
 
 _pipelines: dict = {}
 _pipeline_lock = threading.Lock()
@@ -527,13 +528,14 @@ def rejoin_clips(out_dir: str, pid: str) -> dict:
         raise RuntimeError(f"Rejoin failed: {e}")
 
 
-def init(jobs_dict, run_gen_fn, wgp_module, gen_lock=None):
+def init(jobs_dict, run_gen_fn, wgp_module, gen_lock=None, active_gen_states=None):
     """Called by launch.py to wire up shared references."""
-    global _jobs, _run_generation, _wgp, _gen_lock
+    global _jobs, _run_generation, _wgp, _gen_lock, _active_gen_states
     _jobs = jobs_dict
     _run_generation = run_gen_fn
     _wgp = wgp_module
     _gen_lock = gen_lock
+    _active_gen_states = active_gen_states
 
 
 def _submit_and_wait(params: dict, timeout_s: float = 600, workspace: str = None, out_dir: str = None) -> list[str]:
@@ -567,16 +569,32 @@ def _submit_and_wait(params: dict, timeout_s: float = 600, workspace: str = None
     # Wait for completion, mirroring job progress to pipeline status
     deadline = time.time() + timeout_s
     _dir_pid = params.get("_director_pipeline_id")
+    _abort_signalled = False
     while time.time() < deadline:
         j = _jobs.get(job_id)
         if not j:
             raise RuntimeError("Job disappeared")
         if j["status"] == "completed":
             return j.get("output_files", [])
+        if j["status"] == "cancelled":
+            # Keep whatever clips finished before the abort (multi-clip
+            # jobs accrue output_files per clip) — callers tolerate a
+            # partial or empty list and check the pipeline status.
+            print(f"[Pipeline] Job {job_id} cancelled")
+            return j.get("output_files", [])
         if j["status"] == "failed":
             err = j.get("error") or "Generation failed"
             print(f"[Pipeline] Job {job_id} failed: {err}")
             raise RuntimeError(err)
+        # Backstop for stop_pipeline's abort: if the pipeline was cancelled
+        # while this job runs (e.g. the job was submitted in the window
+        # after the stop endpoint scanned _jobs), signal abort from here.
+        if _dir_pid and not _abort_signalled:
+            with _pipeline_lock:
+                _cancelled = _pipelines.get(_dir_pid, {}).get("status") == "cancelled"
+            if _cancelled:
+                _abort_pipeline_jobs(_dir_pid)
+                _abort_signalled = True
         # Mirror denoising step progress to pipeline status
         # Only update step/total_steps and message — preserve current/total for pipeline-level counts
         if _dir_pid and (j.get("step", 0) > 0 or j.get("total_steps", 0) > 0):
@@ -756,11 +774,41 @@ def resume_pipeline(pid: str, out_dir: str) -> tuple[bool, str]:
     return True, "resumed"
 
 
+def _abort_pipeline_jobs(pid: str):
+    """Signal wgp abort for this pipeline's queued/running generation jobs.
+
+    Mirrors the Studio cancel endpoint (launch.cancel_job): flip the job's
+    gen-state abort flag and the model's _interrupt so the denoise loop
+    stops within a step. Without this, Stop only takes effect at the next
+    phase/clip boundary — the in-flight clip runs to completion, 10+
+    minutes of GPU work after the user pressed Stop on slower cards.
+    """
+    if not _jobs:
+        return
+    for job_id, job in list(_jobs.items()):
+        params = job.get("params") or {}
+        if params.get("_director_pipeline_id") != pid:
+            continue
+        status = job.get("status")
+        if status == "queued":
+            job["status"] = "cancelled"
+            job["message"] = "Cancelled"
+        elif status == "running":
+            gen = (_active_gen_states or {}).get(job_id)
+            if gen is not None:
+                gen["abort"] = True
+            model = getattr(_wgp, "wan_model", None) if _wgp is not None else None
+            if model is not None and hasattr(model, "_interrupt"):
+                model._interrupt = True
+            print(f"[Pipeline {pid}] Abort signalled for in-flight job {job_id}")
+
+
 def stop_pipeline(pid: str):
     with _pipeline_lock:
         p = _pipelines.get(pid)
         if p:
             p["status"] = "cancelled"
+    _abort_pipeline_jobs(pid)
 
 
 def _run_pipeline(pid: str, resume: bool = False):
@@ -992,6 +1040,15 @@ def _run_pipeline(pid: str, resume: bool = False):
                          progress={"current": 0, "total": 1, "message": "Generating video...", "step": 0, "total_steps": 0})
 
         output_files = _run_video_generation(pid, params, clip_plans, planned_clips, clip_images, clip_keyframes, out_dir=pipeline_out_dir, workspace=pipeline_workspace)
+
+        # A Stop during the video phase lands here after the abort. Record
+        # whatever clips finished (the Dashboard can rerun/rejoin them),
+        # but don't overwrite the cancelled status with "completed".
+        if _pipelines[pid]["status"] == "cancelled":
+            print(f"[Pipeline {pid}] Cancelled during video generation — keeping {len(output_files or [])} finished clip(s)")
+            _update_pipeline(pid, output_files=output_files or [])
+            _save_pipeline_state(pid)
+            return
 
         _update_pipeline(pid,
                          status="completed",

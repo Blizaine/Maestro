@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
-import { ChevronUp, ChevronDown, Cpu, MemoryStick, Zap } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { ChevronUp, ChevronDown, Cpu, MemoryStick, Power, Zap } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
+import { releaseModels } from '../../api/client'
 
 // Color a "fullness" bar (VRAM / RAM) by how close to full it is —
 // green well below, amber as it tightens, red near the ceiling. This is
@@ -72,6 +73,32 @@ export function HardwareStatusBar() {
     try { localStorage.setItem(COLLAPSE_KEY, next ? '1' : '0') } catch { /* ignore */ }
     return next
   })
+
+  // Manual model unload (issue #12). Models stay resident between
+  // generations by design (instant retry with the same model); this is
+  // the explicit opt-out for users who want their VRAM/RAM back now.
+  // Two-step: the Power button arms an inline "are you sure" confirm.
+  const [confirmUnload, setConfirmUnload] = useState(false)
+  const [unloading, setUnloading] = useState(false)
+  const [unloadNote, setUnloadNote] = useState<string | null>(null)
+  const noteTimer = useRef<number | undefined>(undefined)
+  useEffect(() => () => window.clearTimeout(noteTimer.current), [])
+
+  const doUnload = async () => {
+    setConfirmUnload(false)
+    setUnloading(true)
+    try {
+      const r = await releaseModels()
+      setUnloadNote(r.released.length ? 'Unloaded — memory freed' : 'Nothing to unload')
+      loadSystemStats()
+    } catch (e) {
+      setUnloadNote(e instanceof Error ? e.message : 'Unload failed')
+    } finally {
+      setUnloading(false)
+      window.clearTimeout(noteTimer.current)
+      noteTimer.current = window.setTimeout(() => setUnloadNote(null), 5000)
+    }
+  }
 
   useEffect(() => {
     const tick = () => {
@@ -182,6 +209,15 @@ export function HardwareStatusBar() {
           <span className="text-[11px] text-text-secondary truncate">
             {modelLoaded ? (model?.name || 'Unknown model') : 'No model loaded'}
           </span>
+          {(modelLoaded || llmStatus?.loaded) && !confirmUnload && !unloading && (
+            <button
+              onClick={() => setConfirmUnload(true)}
+              title="Unload model — frees VRAM/RAM now; the next generation reloads it"
+              className="ml-auto p-0.5 rounded shrink-0 text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors"
+            >
+              <Power size={11} />
+            </button>
+          )}
         </div>
         {llmStatus?.loaded && llmStatus.model_id && (
           <div className="flex items-center gap-1.5 min-w-0" title="LLM (Director / prompt enhancer)">
@@ -189,6 +225,25 @@ export function HardwareStatusBar() {
             <span className="text-[10px] text-text-muted truncate">LLM · {llmStatus.model_id}</span>
           </div>
         )}
+        {confirmUnload && (
+          <div className="flex items-center gap-1.5 text-[10px]">
+            <span className="text-text-secondary">Unload and free memory?</span>
+            <button
+              onClick={doUnload}
+              className="px-1.5 py-0.5 rounded bg-red-500/15 text-chip-red hover:bg-red-500/25 transition-colors"
+            >
+              Unload
+            </button>
+            <button
+              onClick={() => setConfirmUnload(false)}
+              className="px-1.5 py-0.5 rounded text-text-muted hover:bg-bg-hover transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        )}
+        {unloading && <div className="text-[10px] text-text-muted">Unloading…</div>}
+        {unloadNote && !unloading && <div className="text-[10px] text-text-muted">{unloadNote}</div>}
       </div>
     </div>
   )

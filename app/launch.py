@@ -261,7 +261,7 @@ def _init_pipeline():
     global _pipeline_initialized
     if not _pipeline_initialized:
         from services.director_pipeline import init as pipeline_init
-        pipeline_init(_jobs, _run_generation, wgp, _gen_lock)
+        pipeline_init(_jobs, _run_generation, wgp, _gen_lock, _active_gen_states)
         _pipeline_initialized = True
 
 
@@ -4621,6 +4621,49 @@ def get_system_stats_live():
         "loaded": model_loaded,
     }
     return stats
+
+
+@api.post("/api/v1/system/release-model")
+def system_release_model():
+    """Manually unload resident models to free VRAM/RAM (issue #12).
+
+    Models deliberately stay loaded between generations so a retry with
+    the same model skips the load. This endpoint is the explicit opt-out
+    for users who want the memory back now — wgp reloads transparently
+    on the next job. Refuses while anything is generating.
+    """
+    for j in _jobs.values():
+        if j.get("status") in ("queued", "running"):
+            raise HTTPException(status_code=409, detail="A generation is in progress — stop it or wait for it to finish first.")
+    try:
+        from services.director_pipeline import _pipelines
+        if any(p.get("status") == "running" for p in _pipelines.values()):
+            raise HTTPException(status_code=409, detail="A Director run is in progress — stop it first.")
+    except ImportError:
+        pass
+    if not _gen_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="A generation is in progress — stop it or wait for it to finish first.")
+    try:
+        released = []
+        if getattr(wgp, "wan_model", None) is not None or getattr(wgp, "offloadobj", None) is not None:
+            print("[ReleaseModel] Unloading generation model (user request)")
+            wgp.release_model()
+            released.append("generation model")
+        try:
+            from services import llm_service
+            if llm_service.is_loaded():
+                print("[ReleaseModel] Unloading LLM (user request)")
+                llm_service.unload_model()
+                released.append("LLM")
+        except Exception as e:
+            print(f"[ReleaseModel] LLM unload skipped: {e}")
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return {"released": released}
+    finally:
+        _gen_lock.release()
 
 
 # ============================================================================
