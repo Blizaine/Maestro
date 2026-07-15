@@ -1489,7 +1489,10 @@ def _image_to_data_url(image_path: str, max_size: int = 768) -> Optional[str]:
         if max(w, h) > max_size:
             scale = max_size / max(w, h)
             img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-            print(f"[LLM] Resized image for LLM: {w}x{h} → {img.size[0]}x{img.size[1]}")
+            # ASCII arrow on purpose: a cp1252 console (plain cmd, some CI
+            # shells) can't encode U+2192 and the print would crash the
+            # whole vision request mid-flight.
+            print(f"[LLM] Resized image for LLM: {w}x{h} -> {img.size[0]}x{img.size[1]}")
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=85)
         data = base64.b64encode(buf.getvalue()).decode("ascii")

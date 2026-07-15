@@ -27,6 +27,60 @@ _active_gen_states = None   # reference to launch._active_gen_states (abort sign
 _pipelines: dict = {}
 _pipeline_lock = threading.Lock()
 
+
+# ── Reference art-style lock ────────────────────────────────────────────
+# Flux Klein only honors a reference's art style when the MEDIUM IS NAMED
+# AT THE START of the prompt ("Maintain the same black and white hand
+# drawn art style. ..."). A trailing referential anchor ("...preserve the
+# art style of the reference image") demonstrably does NOT hold it — the
+# output comes back photorealistic. So the pipeline asks the vision LLM
+# once per run to NAME the reference's medium concretely, and the phrase
+# is prepended to every image prompt deterministically at generation time
+# (instead of trusting the 4B planner to follow a guide rule, which it
+# provably doesn't do reliably).
+
+_STYLE_DESCRIBE_PROMPT = (
+    "Name the visual medium and art style of this image in one short phrase "
+    "of 3 to 8 words. Examples: 'black and white hand-drawn pencil sketch', "
+    "'watercolor illustration', 'flat-color anime', 'oil painting', "
+    "'photorealistic photograph'. Reply with ONLY the phrase, nothing else."
+)
+
+
+def _normalize_style_phrase(raw: str) -> str:
+    """Reduce the vision LLM's style answer to a clean, prefix-able phrase.
+
+    Returns "" for photographic references (photorealism is the image
+    model's default — a prefix would add nothing) and for answers that
+    don't look like a short phrase (refusals, prose, thinking spill).
+    """
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    s = s.splitlines()[0].strip()
+    s = s.strip('"').strip("'").lstrip("-*# ").rstrip(".").strip()
+    if not s or len(s) > 80:
+        return ""
+    low = s.lower()
+    if "photo" in low or "realistic" in low:
+        return ""
+    # Avoid "...style art style" when composing the prefix sentence.
+    for suffix in (" art style", " style"):
+        if low.endswith(suffix):
+            s = s[: -len(suffix)].strip()
+            break
+    # Mid-sentence position: "Maintain the same simple black line..." —
+    # the vision model tends to capitalize its answer.
+    if s and s[0].isupper() and (len(s) < 2 or not s[1].isupper()):
+        s = s[0].lower() + s[1:]
+    return s
+
+
+def _style_prefix_for(style: str) -> str:
+    """The exact lead sentence validated to hold Klein to a medium."""
+    style = (style or "").strip()
+    return f"Maintain the same {style} art style. " if style else ""
+
 # ── Pipeline State Persistence ─────────────────────────────────────────────
 
 PIPELINE_STATE_VERSION = 1
@@ -283,6 +337,13 @@ def rerun_clip_image(out_dir: str, pid: str, clip_index: int, prompt_override: s
     prompt = prompt_override or clip.get("image_prompt", "")
     if not prompt:
         raise ValueError("No image prompt for this clip")
+
+    # Reference art-style lock: reruns re-apply the detected style prefix
+    # (the pipeline prepends it at generation time, so the saved
+    # image_prompt does not carry it).
+    _style_prefix = _style_prefix_for((state.get("_params_snapshot") or {}).get("_reference_style") or "")
+    if _style_prefix and not prompt.lower().startswith("maintain the same"):
+        prompt = _style_prefix + prompt
 
     # Get image gen params from the saved pipeline state
     image_model = state.get("image_model") or "flux2_klein_9b"
@@ -997,8 +1058,34 @@ def _run_pipeline(pid: str, resume: bool = False):
         _update_pipeline(pid, phase="generating_images",
                          progress={"current": 0, "total": len(clip_plans), "message": "Generating start images...", "step": 0, "total_steps": 0})
 
-        # Unload LLM to free VRAM
+        # ── Detect the reference's art style while the LLM is still up ──
+        # One vision call naming the medium concretely; the phrase gets
+        # prepended to every image prompt in _run_image_generation (see
+        # the module-level "Reference art-style lock" note). Skipped when
+        # already detected (resume) or the reference is photographic.
         from services import llm_service
+        _style_ref = params.get("reference_image_path") or ""
+        if ("_reference_style" not in params and _style_ref and os.path.isfile(_style_ref)):
+            _style_phrase = ""
+            try:
+                if llm_service.is_loaded() and getattr(llm_service, "_vision_available", False):
+                    _style_raw = llm_service.generate(
+                        _STYLE_DESCRIBE_PROMPT,
+                        max_new_tokens=48,
+                        temperature=0.1,
+                        image_paths=[_style_ref],
+                        enable_thinking=False,
+                    )
+                    _style_phrase = _normalize_style_phrase(_style_raw)
+                    print(f"[Pipeline {pid}] Reference art style: {_style_phrase!r} (raw: {str(_style_raw)[:80]!r})")
+            except Exception as e:
+                print(f"[Pipeline {pid}] Style detection skipped (non-fatal): {e}")
+            # Record even when empty ("" = photographic / undetected) so
+            # resume doesn't re-run the detection.
+            params["_reference_style"] = _style_phrase
+            _update_pipeline(pid, _reference_style=_style_phrase)
+
+        # Unload LLM to free VRAM
         try:
             if llm_service.is_loaded():
                 llm_service.unload_model()
@@ -1619,9 +1706,17 @@ def _run_image_generation(pid: str, params: dict, clip_plans: list[dict], out_di
     clip_keyframes: list[list[str]] = []
     image_count = 0
 
+    # Reference art-style lock: the exact lead sentence validated to hold
+    # Klein to a stylized medium. Applied to EVERY image prompt (start
+    # images, keyframes, anchor) at generation time — after polish, and
+    # regardless of whether the planner remembered to name the medium.
+    _style_prefix = _style_prefix_for(params.get("_reference_style") or "")
+
     def _gen_image(prompt: str, source_ref: str, include_extra_refs: bool = True) -> str:
         """Generate a single image using source_ref + optional extra refs."""
         nonlocal image_count
+        if _style_prefix and not (prompt or "").lower().startswith("maintain the same"):
+            prompt = _style_prefix + (prompt or "")
         all_refs = [r for r in ([source_ref] + (extra_refs if include_extra_refs else [])) if r]
         print(f"[Pipeline {pid}] _gen_image: {len(all_refs)} refs: {[os.path.basename(r) for r in all_refs]}")
         gen_params: dict = {
