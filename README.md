@@ -75,6 +75,24 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.2.3 (2026-07-15)
+
+**Added**
+- **Uploads view in the workspace switcher.** Browse every image and video you've uploaded (start frames, reference photos) and send them straight back into the pipeline with the "use as input" arrow. Browse-only: generations keep saving to your real workspace.
+- **Manual model unload.** A small power button in the System panel (bottom left, expanded view) unloads the resident generation model and LLM to free VRAM and RAM, with an inline confirm. Models still stay loaded between generations by default so retries start instantly.
+- **Collapsible model families.** In Settings > Enabled Models, each family (Wan 2.1, Hunyuan, Flux 1, ...) can be collapsed — and stays collapsed across sessions — with a checkbox to enable or disable the whole family at once.
+
+**Fixed**
+- Director Stop now aborts the clip being generated within seconds. It used to only take effect between clips, so the current clip kept rendering (10+ minutes of GPU work on slower cards) and a stopped run could even be marked "completed". Finished clips are kept for the Dashboard.
+- The Director text entry box grows upward as you type (up to ~11 lines) instead of staying two lines tall, and its scrollbar is actually visible.
+- Director mode keeps the art style of your reference images. Hand-drawn, anime, watercolor and other stylized references now carry their medium into every image prompt instead of coming out photorealistic.
+- Director no longer sneaks subjects from its internal instruction examples into your video (the recurring dragon), and a location you specify in your description is now binding — shot variety comes from camera angles, not invented places.
+- Speaker identification during song analysis now actually runs. It was silently skipped on every install (the model never downloaded without a HuggingFace token); the checkpoints (~30 MB) now download automatically from an ungated mirror on first use. Its clustering is also tuned for singing now: a solo vocalist reads as one speaker and duets as two, instead of one singer splitting into six.
+- The Load Settings pencil on songs restores everything: the Style / Music Caption (works retroactively on existing songs), the "Describe your song" text and Instrumental toggle (new songs), and it switches to the right Audio sub-tab — Speech, Music, or SFX — instead of leaving whichever was last open.
+
+**Changed**
+- A page refresh now starts clean: prompt fields empty, seed back to random, no LoRAs selected, and Advanced settings at the model's recommended defaults. Your mode, model selections, enabled models, and theme still persist, and switching between modes within a session still carries your work back and forth. (This reverses v1.2.0's restore-on-refresh behavior — stale text and seeds reappearing after a reload felt wrong.)
+
 ### v1.2.2 (2026-07-14)
 
 **Fixed**

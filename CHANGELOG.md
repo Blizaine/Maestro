@@ -3,6 +3,23 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [1.2.3] - 2026-07-15
+
+Community-driven round. Added: an Uploads view in the workspace
+switcher (browse + reuse uploaded media), a manual model-unload button
+in the System panel, and collapsible model families with whole-family
+toggles (#14). Fixed: Director Stop aborts the in-flight clip instead
+of letting it finish (#12); the Director composer auto-grows upward
+(#11); stylized reference images keep their art style; instruction-
+example content no longer bleeds into prompts (the dragon) and
+user-specified locations are binding; speaker identification actually
+runs now (checkpoints auto-download ungated) with music-tuned
+clustering; the music Load Settings pencil restores caption, song
+description, and the correct audio sub-tab. Changed: a page refresh
+starts clean instead of restoring every edit (reverses v1.2.0
+save-as-you-type restore; in-session mode-switch persistence stays).
+See the [README Updates section](README.md#updates).
+
 ## [1.2.2] - 2026-07-14
 
 Director "Analyzing" hang fix for smaller GPUs: the generation model's
