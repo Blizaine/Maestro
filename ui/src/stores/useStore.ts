@@ -863,6 +863,8 @@ interface AppState {
   toggleModelEnabled: (modelType: string) => void
   resetEnabledModels: () => void
   setAllModelsEnabled: (enabled: boolean) => void
+  /** Bulk-toggle a list of models (family-level enable/disable, issue #14). */
+  setModelsEnabled: (modelTypes: string[], enabled: boolean) => void
   // ModelSelector "+N more" hint → open Settings and expand Enabled Models.
   modelVisibilityFocus: GenerationMode | null
   openModelVisibility: (mode: GenerationMode) => void
@@ -2338,6 +2340,17 @@ export const useStore = create<AppState>((set, get) => ({
       _saveEnabledModels(empty)
       set({ enabledModels: empty })
     }
+  },
+  setModelsEnabled: (modelTypes, enabled) => {
+    set(s => {
+      const next = new Set(s.enabledModels)
+      for (const mt of modelTypes) {
+        if (enabled) next.add(mt)
+        else next.delete(mt)
+      }
+      _saveEnabledModels(next)
+      return { enabledModels: next }
+    })
   },
   // Open Settings → Performance and ask the Enabled Models section to
   // expand + scroll to the given mode (fired by the ModelSelector hint).

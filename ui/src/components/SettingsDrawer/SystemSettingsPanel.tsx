@@ -59,6 +59,11 @@ const MODE_LABELS: { mode: GenerationMode; label: string }[] = [
   { mode: 'avatar', label: 'Edit' },
 ]
 
+// Family collapse state persists so "collapse the families I never use"
+// (issue #14) sticks across sessions — unlike the mode groups, which are
+// navigational and reset each visit.
+const COLLAPSED_FAMILIES_KEY = 'maestro-collapsed-model-families'
+
 function ModelVisibilitySection() {
   const models = useStore(s => s.models)
   const families = useStore(s => s.families)
@@ -66,6 +71,7 @@ function ModelVisibilitySection() {
   const toggleModelEnabled = useStore(s => s.toggleModelEnabled)
   const resetEnabledModels = useStore(s => s.resetEnabledModels)
   const setAllModelsEnabled = useStore(s => s.setAllModelsEnabled)
+  const setModelsEnabled = useStore(s => s.setModelsEnabled)
   const loadModels = useStore(s => s.loadModels)
   // Mature Mode gate: nsfw_only models are hidden from this list when
   // Mature Mode is off. When the user enables Mature Mode (via the
@@ -101,6 +107,23 @@ function ModelVisibilitySection() {
     })
   }
 
+  // Collapsed family groups, keyed "mode:familyId", persisted (issue #14).
+  const [collapsedFamilies, setCollapsedFamilies] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem(COLLAPSED_FAMILIES_KEY)
+      return raw ? new Set(JSON.parse(raw) as string[]) : new Set()
+    } catch { return new Set() }
+  })
+  const toggleFamily = (key: string) => {
+    setCollapsedFamilies(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      try { localStorage.setItem(COLLAPSED_FAMILIES_KEY, JSON.stringify([...next])) } catch { /* ignore */ }
+      return next
+    })
+  }
+
   const handleDelete = useCallback(async (modelType: string) => {
     if (confirmDelete !== modelType) {
       setConfirmDelete(modelType)
@@ -123,14 +146,15 @@ function ModelVisibilitySection() {
   // Group models by generation mode, hiding nsfw_only entries when
   // Mature Mode is off (they reappear instantly when the toggle flips).
   const visibleModels = models.filter(m => !m.nsfw_only || nsfwMode)
-  const modelsByMode = new Map<GenerationMode, { familyLabel: string; models: { model_type: string; name: string; is_downloaded?: boolean }[] }[]>()
+  const modelsByMode = new Map<GenerationMode, { familyId: string; familyLabel: string; models: { model_type: string; name: string; is_downloaded?: boolean }[] }[]>()
   for (const { mode } of MODE_LABELS) {
     const modeFamilies = getFamiliesForMode(mode, families)
-    const groups: { familyLabel: string; models: { model_type: string; name: string; is_downloaded?: boolean }[] }[] = []
+    const groups: { familyId: string; familyLabel: string; models: { model_type: string; name: string; is_downloaded?: boolean }[] }[] = []
     for (const fam of modeFamilies) {
       const familyModels = getModelsForFamily(fam.id, visibleModels, mode)
       if (familyModels.length > 0) {
         groups.push({
+          familyId: fam.id,
           familyLabel: fam.label,
           models: familyModels.map(m => ({ model_type: m.model_type, name: m.name, is_downloaded: m.is_downloaded })),
         })
@@ -212,12 +236,41 @@ function ModelVisibilitySection() {
 
             {isExpanded && (
               <div className="mt-1.5 ml-4 space-y-0.5">
-                {groups.map(group => (
-                  <div key={group.familyLabel}>
-                    {groups.length > 1 && (
-                      <div className="text-[10px] text-text-muted uppercase tracking-wider mt-2 mb-1">{group.familyLabel}</div>
+                {groups.map(group => {
+                  const famKey = `${mode}:${group.familyId}`
+                  const famCollapsed = collapsedFamilies.has(famKey)
+                  const famEnabled = group.models.filter(m => enabledModels.has(m.model_type)).length
+                  const famAllEnabled = famEnabled === group.models.length && group.models.length > 0
+                  // Single-family modes render flat — a header would be noise.
+                  const showFamilyHeader = groups.length > 1
+                  return (
+                  <div key={group.familyId}>
+                    {showFamilyHeader && (
+                      <div className="flex items-center gap-1.5 mt-2 mb-1">
+                        {/* Tri-state family toggle: checked = all enabled,
+                            indeterminate = some. Click enables the rest,
+                            or disables the whole family when all are on. */}
+                        <input
+                          type="checkbox"
+                          checked={famAllEnabled}
+                          ref={el => { if (el) el.indeterminate = famEnabled > 0 && !famAllEnabled }}
+                          onChange={() => setModelsEnabled(group.models.map(m => m.model_type), !famAllEnabled)}
+                          className="w-3 h-3 rounded border-border bg-bg-tertiary accent-accent-blue shrink-0"
+                          title={famAllEnabled ? `Disable all ${group.familyLabel} models` : `Enable all ${group.familyLabel} models`}
+                        />
+                        <button
+                          onClick={() => toggleFamily(famKey)}
+                          className="flex items-center gap-1 flex-1 min-w-0 text-left"
+                        >
+                          {famCollapsed
+                            ? <ChevronRight size={10} className="text-text-muted shrink-0" />
+                            : <ChevronDown size={10} className="text-text-muted shrink-0" />}
+                          <span className="text-[10px] text-text-muted uppercase tracking-wider truncate">{group.familyLabel}</span>
+                          <span className="text-[9px] text-text-muted ml-auto shrink-0 tabular-nums">{famEnabled}/{group.models.length}</span>
+                        </button>
+                      </div>
                     )}
-                    {group.models.map(m => (
+                    {(!showFamilyHeader || !famCollapsed) && group.models.map(m => (
                       <div
                         key={m.model_type}
                         className="flex items-center gap-2 py-0.5 group"
@@ -263,7 +316,8 @@ function ModelVisibilitySection() {
                       </div>
                     ))}
                   </div>
-                ))}
+                  )
+                })}
               </div>
             )}
           </div>
