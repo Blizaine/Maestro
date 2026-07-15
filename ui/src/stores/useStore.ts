@@ -44,8 +44,9 @@ interface PersistedModeSettings {
    *  starting with v1; the persistence layer translates transparently. */
   savedLoraPerMode: Partial<Record<GenerationMode, LoraModeBlob>>
   /** Per-mode main prompt (lyrics in audio mode). Tracked separately from
-   *  the params snapshot in memory; persisted here so the prompt survives
-   *  a refresh like every other field (it silently didn't, historically). */
+   *  the params snapshot in memory. Still written for shape stability but
+   *  NO LONGER rehydrated on boot — a refresh starts with a clean prompt
+   *  (see the partial-hydration note in loadModels). */
   savedPromptPerMode?: Partial<Record<GenerationMode, string>>
   /** Snapshot of lora_id → filename captured at last save. Returned by
    *  `_loadSettings` for use in mid-session reconciliation when the fresh
@@ -255,51 +256,6 @@ function _loadSettings(): PersistedModeSettings | null {
       savedParamsPerMode: _stripEphemeralParams(legacy.savedParamsPerMode || {}),
     }
   } catch { return null }
-}
-
-/* Debounced persist-on-edit. setParam/setParams fire on every keystroke
- * and slider tick, so writes are coalesced (800ms). Captures the CURRENT
- * mode's full working state the same way a mode switch does, so a page
- * refresh restores exactly what the user last had — including cleared
- * fields. Historically settings were only saved on mode/model switches
- * and at generation start, so edits after those moments were silently
- * reverted by a refresh (and the main prompt was never persisted at
- * all, which made the Music Caption field look inconsistently
- * "sticky" next to the always-resetting lyrics field). */
-let _persistEditTimer: ReturnType<typeof setTimeout> | null = null
-function _schedulePersistCurrent(get: () => AppState) {
-  if (_persistEditTimer) clearTimeout(_persistEditTimer)
-  _persistEditTimer = setTimeout(() => {
-    _persistEditTimer = null
-    try {
-      const s = get()
-      const mode = s.generationMode
-      const { model_type: _mt, prompt: _p, activated_loras: _al, loras_multipliers: _lm, ...paramsSnapshot } = s.params
-      _saveSettings({
-        generationMode: mode,
-        selectedModelPerMode: { ...s.selectedModelPerMode, [mode]: s.params.model_type },
-        savedParamsPerMode: {
-          ...s.savedParamsPerMode,
-          [mode]: {
-            ...paramsSnapshot,
-            filmGrainIntensity: s.filmGrainIntensity,
-            filmGrainSaturation: s.filmGrainSaturation,
-            durationSeconds: s.durationSeconds,
-          },
-        },
-        savedLoraPerMode: {
-          ...s.savedLoraPerMode,
-          [mode]: {
-            activated_loras: s.params.activated_loras || [],
-            loras_multipliers: s.params.loras_multipliers || '',
-            loraWeights: s.loraWeights,
-            availableLoras: s.availableLoras,
-          },
-        },
-        savedPromptPerMode: { ...s.savedPromptPerMode, [mode]: (s.params.prompt as string) ?? '' },
-      }, s.loraIdByFilename)
-    } catch { /* persistence must never break editing */ }
-  }, 800)
 }
 
 /** Fetch a model's defaults from the backend and merge primary fields
@@ -1979,18 +1935,20 @@ export const useStore = create<AppState>((set, get) => ({
         set({ clips: [], singlePromptMode: false })
       }
     }
-    // Persist the changed param to the current mode's snapshot so
-    // it survives a mode switch + return AND is restored across page
-    // reloads. Skip keys that are tracked in their own per-mode
-    // structures (model_type, prompt, LoRA fields) to avoid double-
-    // bookkeeping. Everything else — repeat_generation, negative_prompt,
+    // Snapshot the changed param into the current mode's IN-MEMORY
+    // record so it survives a mode switch + return within this session.
+    // Skip keys that are tracked in their own per-mode structures
+    // (model_type, prompt, LoRA fields) to avoid double-bookkeeping.
+    // Everything else — repeat_generation, negative_prompt,
     // num_inference_steps, video_prompt_type, video_guide, image_refs,
     // frames_positions, MMAudio_*, etc. — gets snapshotted here.
     //
-    // The previous version only persisted 4 specific keys, which meant
-    // settings like repeat_generation leaked between modes (set 10 in
-    // image, switch to video, video also tries to make 10) AND were
-    // lost across reloads. This generic version eliminates both bugs.
+    // Deliberately NOT written to localStorage: a page refresh starts
+    // the working state (prompt, seed, LoRA selection, Advanced values)
+    // from the model's defaults. v1.2.0 persisted every edit across
+    // refreshes and users found the stale text/seeds surprising —
+    // in-session mode-switch persistence is the wanted behavior,
+    // refresh is a clean slate (see loadModels).
     if (key !== 'model_type' && key !== 'prompt' && key !== 'activated_loras' && key !== 'loras_multipliers') {
       const s = get()
       const mode = s.generationMode
@@ -2004,21 +1962,10 @@ export const useStore = create<AppState>((set, get) => ({
         },
       }
       set({ savedParamsPerMode: updatedSavedParams })
-      _saveSettings({
-        generationMode: s.generationMode,
-        selectedModelPerMode: s.selectedModelPerMode,
-        savedParamsPerMode: updatedSavedParams,
-        savedLoraPerMode: s.savedLoraPerMode,
-        savedPromptPerMode: s.savedPromptPerMode,
-      }, s.loraIdByFilename)
     }
-    // Any param edit (keystroke, slider, toggle) schedules a debounced
-    // full-state persist so a refresh restores the latest edits.
-    _schedulePersistCurrent(get)
   },
   setParams: (partial) => {
     set(s => ({ params: { ...s.params, ...partial } }))
-    _schedulePersistCurrent(get)
   },
 
   settingsOpen: false,
@@ -2446,15 +2393,26 @@ export const useStore = create<AppState>((set, get) => ({
         }
       } catch { /* localStorage blocked — defaults only apply this session */ }
 
-      // Hydrate persisted per-mode settings from localStorage
+      // Hydrate persisted per-mode settings from localStorage.
+      //
+      // Deliberately PARTIAL: only the last generation mode and the
+      // per-mode model selections survive a page refresh. The working
+      // state — prompt text and Advanced settings (seed, steps, LoRA
+      // selection, …) — starts fresh from the model's defaults on every
+      // load. The per-mode snapshots (savedParamsPerMode /
+      // savedLoraPerMode / savedPromptPerMode) still carry edits across
+      // MODE SWITCHES within a session, in-memory only. v1.2.0 restored
+      // them here on refresh; stale text/seeds/LoRAs re-appearing after
+      // a reload felt wrong, so a refresh is a clean slate again.
       const saved = _loadSettings()
       // v2 migration: users whose saved audio model IS the old music
       // default follow it to the new default (see NEW_MUSIC_DEFAULT).
-      let musicSelectionMigrated = false
+      // (The old-model-params concern the migration used to handle is
+      // gone: saved params no longer rehydrate, and the defaults
+      // hydration below runs on every boot.)
       if (migrateMusicDefault && saved?.selectedModelPerMode?.audio === OLD_MUSIC_DEFAULT
           && models.some(m => m.model_type === NEW_MUSIC_DEFAULT)) {
         saved.selectedModelPerMode = { ...saved.selectedModelPerMode, audio: NEW_MUSIC_DEFAULT }
-        musicSelectionMigrated = true
       }
       let mode = get().generationMode
       let initialModelType: string
@@ -2467,28 +2425,24 @@ export const useStore = create<AppState>((set, get) => ({
         initialModelType = savedModel && models.some(m => m.model_type === savedModel)
           ? savedModel
           : getDefaultModelForMode(mode, families, models)
-        // Restore saved params for this mode
-        const savedParams = saved.savedParamsPerMode?.[mode]
 
         set(s => ({
           families,
           models,
           modelsLoaded: true,
           generationMode: mode,
-          selectedModelPerMode: saved.selectedModelPerMode || {},
-          savedParamsPerMode: saved.savedParamsPerMode || {},
-          savedLoraPerMode: saved.savedLoraPerMode || {},
-          savedPromptPerMode: saved.savedPromptPerMode || {},
-          // Stash the lora_id → filename snapshot from disk so the upcoming
-          // refreshLoraIdMap() call can reconcile filename renames since save.
-          _loraFilenameSnapshotAtLoad: saved._loraFilenameSnapshot || {},
+          // Seed the VALIDATED boot model into the map (the saved entry
+          // may point at a removed model) — _applyModelDefaults' race
+          // guard compares against selectedModelPerMode[mode].
+          selectedModelPerMode: { ...(saved.selectedModelPerMode || {}), [mode]: initialModelType },
+          // Mode-shaping mirrored from setGenerationMode: booting into
+          // image mode needs image_mode 1 + Auto resolution. These used
+          // to arrive via the restored params snapshot.
+          ...(mode === 'image' ? { resolutionPreset: 'auto' as ResolutionPreset, aspectRatio: 'auto' as AspectRatio } : {}),
           params: {
             ...s.params,
             model_type: initialModelType || s.params.model_type,
-            ...(savedParams || {}),
-            // The main prompt lives in savedPromptPerMode, not the params
-            // snapshot — restore it explicitly or it resets every refresh.
-            prompt: saved.savedPromptPerMode?.[mode] ?? s.params.prompt,
+            ...(mode === 'image' ? { image_mode: 1 } : {}),
           },
         }))
       } else {
@@ -2497,40 +2451,26 @@ export const useStore = create<AppState>((set, get) => ({
           families,
           models,
           modelsLoaded: true,
-          params: { ...s.params, model_type: initialModelType || s.params.model_type },
+          selectedModelPerMode: { [mode]: initialModelType },
+          ...(mode === 'image' ? { resolutionPreset: 'auto' as ResolutionPreset, aspectRatio: 'auto' as AspectRatio } : {}),
+          params: {
+            ...s.params,
+            model_type: initialModelType || s.params.model_type,
+            ...(mode === 'image' ? { image_mode: 1 } : {}),
+          },
         }))
       }
 
-      // Load LoRAs and model options for the initial model
+      // Load LoRAs, model options, and tuned defaults for the initial
+      // model. The defaults hydration (steps, guidance, LM sampling…)
+      // must run on every boot now that saved params don't rehydrate —
+      // without it the sliders would show INITIAL_PARAMS' generic values
+      // instead of the model's.
       const mt = initialModelType || get().params.model_type
-      if (mt) {
-        // Restore saved LoRA state for this mode if the model matches
-        const savedLora = saved?.savedLoraPerMode?.[mode]
-        const savedModelForMode = saved?.selectedModelPerMode?.[mode]
-        if (savedLora && savedModelForMode === mt) {
-          set(s => ({
-            params: {
-              ...s.params,
-              activated_loras: savedLora.activated_loras || [],
-              loras_multipliers: savedLora.loras_multipliers || '',
-            },
-            loraWeights: savedLora.loraWeights || {},
-            availableLoras: savedLora.availableLoras || [],
-          }))
-        }
-        if (!sfxModelTypes.has(mt)) {
-          get().loadLoras(mt)
-          get().loadModelOptions(mt)
-        }
-        // If the music-default migration just swapped the boot model, the
-        // restored params still carry the OLD model's tuned values (e.g.
-        // Turbo's 8 steps / guidance 1.0). Pull the new model's defaults
-        // so the migrated selection starts with its recommended settings.
-        // (Boot normally keeps saved params on purpose — this only fires
-        // on the one-time migration.)
-        if (musicSelectionMigrated && mode === 'audio' && mt === NEW_MUSIC_DEFAULT) {
-          _applyModelDefaults(get, set, mt)
-        }
+      if (mt && !sfxModelTypes.has(mt)) {
+        get().loadLoras(mt)
+        get().loadModelOptions(mt)
+        _applyModelDefaults(get, set, mt)
       }
       // Refresh the lora_id ↔ filename map from /installed and reconcile
       // any filename renames since save (LoRA version updates land here
