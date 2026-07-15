@@ -5927,6 +5927,32 @@ async def analyze_audio(request: Request):
     if not os.path.isfile(audio_path):
         raise HTTPException(status_code=404, detail=f"Audio file not found: {audio_path}")
 
+    # Free the generation model's VRAM before analysis. The Director flow
+    # runs analysis right after rendering the song, and as of v1.2.0 the
+    # default music model is much larger (XL SFT, 10GB bf16). On smaller
+    # cards the resident model + vocal separator + Whisper oversubscribe
+    # VRAM, and Windows' CUDA sysmem fallback turns that into a silent,
+    # near-endless crawl instead of a clean OOM ("analyzing never
+    # finishes"). The song is already saved; wgp reloads the model
+    # transparently on the next job. Guarded by _gen_lock so an active
+    # generation is never touched.
+    if _gen_lock.acquire(blocking=False):
+        try:
+            if getattr(wgp, "wan_model", None) is not None:
+                print("[AudioAnalysis] Releasing generation model VRAM before analysis")
+                wgp.release_model()
+            else:
+                import gc
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+        except Exception as e:
+            print(f"[AudioAnalysis] Pre-analysis VRAM release skipped: {e}")
+        finally:
+            _gen_lock.release()
+    else:
+        print("[AudioAnalysis] Generation in progress - skipping pre-analysis VRAM release")
+
     try:
         result = audio_analysis.analyze(
             audio_path=audio_path,
