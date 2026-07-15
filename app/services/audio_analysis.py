@@ -329,10 +329,15 @@ _diarizer_profile: Optional[str] = None  # profile the cached pipeline is instan
 # effects, backing vocals), so the speech-tuned profile shatters one
 # singer into many "speakers" (observed: 6 on a solo track). The music
 # profile requires sustained singing per cluster (pyannote's default 12
-# instead of the AI-dialogue-tuned 6) and merges more aggressively
-# (threshold 0.82 vs 0.7046 — validated on real ACE-Step outputs: solo
-# tracks collapse to 1 speaker while a genuinely distinct second voice
-# still separates well above this distance).
+# instead of the AI-dialogue-tuned 6) and merges more aggressively.
+#
+# Threshold 0.85 chosen from a grid sweep over 7 real ACE-Step outputs
+# (0.82 / 0.85 / 0.88 × min_cluster 12 / 18): at 0.82 a male-rapper +
+# female-singer duet read as 3 (her verse/chorus deliveries split); at
+# 0.85 every solo track reads 1 and every two-voice track reads 2; at
+# 0.88 the duet's rapper and singer MERGE to 1. 0.85 is the midpoint of
+# the safe window. min_cluster_size 12 vs 18 changed nothing — the
+# threshold is the only active lever on this content.
 _DIARIZER_PROFILES = {
     "speech": {
         "clustering": {
@@ -346,7 +351,7 @@ _DIARIZER_PROFILES = {
         "clustering": {
             "method": "centroid",
             "min_cluster_size": 12,
-            "threshold": 0.82,
+            "threshold": 0.85,
         },
         "segmentation": {"min_duration_off": 0.0},
     },
