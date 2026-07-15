@@ -1430,7 +1430,7 @@ def polish_prompts_third_pass(
             "The arrows below go ONE WAY ONLY. Replace the NAME with the "
             "DESCRIPTOR. Never the reverse.\n"
             "- DO replace 'Blaine' (the name) with the descriptor.\n"
-            "- DO NOT replace 'the strong man in black' (the descriptor) "
+            "- DO NOT replace 'the tall man in a red jacket' (the descriptor) "
             "with 'Blaine' or any other name.\n"
             "- DO NOT invent character names that are not in this list.\n"
             "- Apply ONLY in narrative prose OUTSIDE of quoted dialogue. "
@@ -1612,13 +1612,13 @@ def polish_prompts_third_pass(
         "tags). The words BETWEEN the quote marks are dialogue and stay "
         "untouched.\n\n"
         "BAD (polish broke the dialogue):\n"
-        "  Pass 2:  Ember says \"Variables are fun, Milo.\"\n"
-        "  Polish:  The dragon says \"Variables are fun, boy in scruffy clothes.\"\n"
-        "                                            ^^^^^^^^^^^^^^^^^^^^^^^^ WRONG: name was inside quotes\n\n"
+        "  Pass 2:  Maya says \"Variables are fun, Leo.\"\n"
+        "  Polish:  The woman in the green scarf says \"Variables are fun, boy in scruffy clothes.\"\n"
+        "                                                                    ^^^^^^^^^^^^^^^^^^^^^^^ WRONG: name was inside quotes\n\n"
         "GOOD (polish only touched narrative prose):\n"
-        "  Pass 2:  Ember says \"Variables are fun, Milo.\"\n"
-        "  Polish:  The orange dragon says \"Variables are fun, Milo.\"\n"
-        "           ^^^^^^^^^^^^^^^^^^^^ name in narrative replaced; dialogue preserved\n\n"
+        "  Pass 2:  Maya says \"Variables are fun, Leo.\"\n"
+        "  Polish:  The woman in the green scarf says \"Variables are fun, Leo.\"\n"
+        "           ^^^^^^^^^^^^^^^^^^^^^^^^^^^ name in narrative replaced; dialogue preserved\n\n"
     )
 
     # Base templates — character_reference_block is appended PER SHOT
@@ -1631,30 +1631,53 @@ def polish_prompts_third_pass(
     # suspenders: explicit DO-NOT-INVENT rules in the base system
     # prompt, plus the input-filtered ref_block plus the post-process
     # _strip_hallucinated_names safety net.
+    # NOTE: example descriptors here are deliberately mundane AND
+    # distinctive ("yellow raincoat") — a community report caught the
+    # OLD descriptors ("the strong man in black", "the woman in white")
+    # copied VERBATIM into generated prompts by the 4B polish model,
+    # alongside a dragon lifted from the old dialogue example. If these
+    # new ones ever show up in a user's output, it's the same bleed.
     _no_invent_rule = (
         "ABSOLUTE RULE — NEVER INVENT CHARACTER NAMES:\n"
-        "If a character is referred to in the input as 'the strong man "
-        "in black' or 'the woman in white', use that descriptor. Do NOT "
-        "invent a personal name for them (no 'Blaine', no 'Sarah', no "
-        "'Mark') — even if names exist elsewhere in your training data. "
-        "The only personal names allowed in the output are: (a) names "
-        "already present in the input prompt, or (b) names listed in "
-        "the CHARACTER NAME REPLACEMENT block below (which only appears "
-        "when the input already mentions those names).\n\n"
+        "If a character is referred to in the input as 'the tall man in "
+        "a red jacket' or 'the woman in a yellow raincoat', use that "
+        "descriptor. Do NOT invent a personal name for them (no 'Blaine', "
+        "no 'Sarah', no 'Mark') — even if names exist elsewhere in your "
+        "training data. The only personal names allowed in the output "
+        "are: (a) names already present in the input prompt, or (b) "
+        "names listed in the CHARACTER NAME REPLACEMENT block below "
+        "(which only appears when the input already mentions those "
+        "names).\n\n"
         "ABSOLUTE RULE — NEVER REPLACE PRONOUNS:\n"
         "Pronouns (he/she/they/his/her/their/him/her/them) MUST stay as "
-        "pronouns. Do NOT replace 'his logic' with 'the strong man in "
-        "black's logic' or 'Blaine's logic'. Pronouns are already correct.\n\n"
+        "pronouns. Do NOT replace 'his logic' with 'the tall man in a "
+        "red jacket's logic' or 'Blaine's logic'. Pronouns are already correct.\n\n"
         "ABSOLUTE RULE — NEVER REVERSE NAME REPLACEMENT:\n"
-        "If you see 'the strong man in black' in the input, leave it as "
-        "'the strong man in black'. Do NOT promote it to 'Blaine' or any "
-        "other name. The character mapping below — when present — runs "
-        "name → descriptor, NEVER descriptor → name.\n\n"
+        "If you see 'the tall man in a red jacket' in the input, leave it "
+        "as 'the tall man in a red jacket'. Do NOT promote it to 'Blaine' "
+        "or any other name. The character mapping below — when present — "
+        "runs name → descriptor, NEVER descriptor → name.\n\n"
+    )
+    # ── Anti-bleed rule ─────────────────────────────────────────────
+    # Small polish LLMs (Gemma 4 4B) copy CONTENT out of instruction
+    # examples into their output. Observed in the wild: a music video
+    # whose every clip gained an "immense iridescent dragon" plus
+    # characters renamed to this file's old example descriptors. The
+    # examples teach format/grammar only — say so explicitly, first,
+    # in both system prompts.
+    _format_only_rule = (
+        "ABSOLUTE RULE — EXAMPLES ARE FORMAT ONLY:\n"
+        "The examples in these instructions exist to show FORMAT and "
+        "grammar. NEVER copy their subjects, names, animals, creatures, "
+        "objects, clothing, or settings into your output. Everything in "
+        "your output must come from the INPUT prompt — if something is "
+        "not in the input, it does not appear in the output.\n\n"
     )
     _video_system_base = (
         "You are refining an already-detailed video prompt for the generation model. "
         "The prompt was written by a Director AI and is already complete.\n\n"
-        + _dialogue_protection_rule +
+        + _format_only_rule +
+        _dialogue_protection_rule +
         _no_invent_rule +
         "YOUR JOB:\n"
         "- Align the prompt structure to the model's expected format (present tense, flowing paragraph)\n"
@@ -1665,14 +1688,14 @@ def polish_prompts_third_pass(
         "- Modify any text inside single or double quotes — dialogue is preserved verbatim\n"
         "- Replace character names INSIDE quoted dialogue with descriptors\n"
         "- Invent character names that aren't in the input or in the mapping block\n"
-        "- Replace a descriptor like 'the strong man in black' with a name like 'Blaine' (the mapping arrow is one-way: name → descriptor, NEVER reverse)\n"
+        "- Replace a descriptor like 'the tall man in a red jacket' with a name like 'Blaine' (the mapping arrow is one-way: name → descriptor, NEVER reverse)\n"
         "- Replace pronouns (he/she/they/his/her/their/him/her/them) with names or descriptors — pronouns stay as pronouns\n"
         "- Add scene details (lighting, colors, atmosphere, clothing) that aren't in the original\n"
         "- Re-describe the setting — a start image already shows the scene to the video model\n"
         "- Make the prompt longer — keep it the same length or shorter\n"
         "- Invent actions, dialogue, or camera movements not in the original\n"
         "- Add style tags, emphasis phrases, or mood descriptions the original didn't have (no 'ultra-detailed', 'cinematic intensity', 'dramatic close-up', 'extreme realism')\n"
-        "- Replace a character name in narrative prose with a generic 'the woman' / 'the man' when the character mapping below provides a specific descriptor (e.g. Lumi → the white unicorn, NOT the woman)\n"
+        "- Replace a character name in narrative prose with a generic 'the woman' / 'the man' when the character mapping below provides a specific descriptor (e.g. Rex → the German Shepherd, NOT the man)\n"
         + (("" if video_lora_hints else _no_lora_line)) +
         "- Use markdown formatting of any kind. NO **bold**, NO *italics*, NO headers, NO code blocks. Plain text only.\n\n"
         "Output ONLY the refined prompt. No explanation, no labels."
@@ -1682,7 +1705,8 @@ def polish_prompts_third_pass(
         "You are refining an already-detailed image prompt for the generation model. "
         "The prompt was written by a Director AI and is already complete. "
         "The output is a SINGLE STILL FRAME — no audio, no time, no speech.\n\n"
-        + _dialogue_protection_rule +
+        + _format_only_rule +
+        _dialogue_protection_rule +
         _no_invent_rule +
         "YOUR JOB:\n"
         + _image_lora_line +

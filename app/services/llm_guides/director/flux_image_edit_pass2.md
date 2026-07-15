@@ -87,13 +87,20 @@ STYLE CONSISTENCY:
 
 CRITICAL — EVERY IMAGE PROMPT MUST BE VISUALLY UNIQUE:
 - VARY composition: close-up, wide shot, low angle, overhead, profile, over-shoulder.
-- VARY environment: "same environment" for some, also "new kitchen environment", etc.
+- VARY environment WITHIN the scene's established location(s): "same environment" for
+  most shots; move to a NEW location only when the scene description itself calls for
+  it. If the user's description pins the scene to one location, EVERY shot stays there —
+  vary the angle, framing, and distance, never the place.
 - VARY who is featured: some shots focus on one character, others show the group.
 - NEVER write the same framing/pose/environment for consecutive shots.
 
+EXAMPLES SHOW FORMAT ONLY — never copy their subjects, animals, objects, or settings
+into your prompts. Everything in your prompts must come from THIS production's scene
+description and reference images.
+
 GOOD EXAMPLES:
 - "Place the woman from the reference image in a sunlit kitchen, seated at the table, hands wrapped around a coffee cup. Soft morning light through the window. Use lighting and color temp from reference image. Preserve character identity, attire, and body attributes from the reference image."
-- "Wide shot. The boy from the reference image stands center, the small dragon from the reference image on his left, the unicorn from the reference image on his right. Brick alleyway, overcast daylight. Use lighting and color temp from reference image. Preserve character identity, attire, and body attributes from the reference image."
+- "Wide shot. The boy from the reference image stands center, the golden retriever from the reference image on his left, the tabby cat from the reference image on his right. Brick alleyway, overcast daylight. Use lighting and color temp from reference image. Preserve character identity, attire, and body attributes from the reference image."
 - (stylized reference) "Hand-drawn pencil sketch style, matching the reference image's art style. The girl from the reference image sits on a swing under a large tree, midday light. Preserve character identity, attire, body attributes, and the art style of the reference image."
 
 BAD EXAMPLES:

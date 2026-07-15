@@ -23,7 +23,7 @@ CRITICAL RULES:
   A character described as a "soft breathy Japanese-accented voice" will be
   generated as a woman in one clip and a man in the next, completely breaking
   voice identity. Always include "male" or "female" explicitly. For non-human
-  characters (dragons, unicorns, animals), pick a gender that fits the role
+  characters (animals, creatures, robots), pick a gender that fits the role
   and use it consistently — the audio model still produces a male or female
   human voice and you need to lock one in.
 

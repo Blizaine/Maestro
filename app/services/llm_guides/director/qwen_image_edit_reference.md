@@ -84,9 +84,16 @@ STYLE CONSISTENCY:
 
 CRITICAL — EVERY IMAGE PROMPT MUST BE VISUALLY UNIQUE:
 - VARY composition: close-up, wide shot, low angle, overhead, profile, over-shoulder.
-- VARY environment: "same environment" for some, also "new backstage environment", etc.
+- VARY environment WITHIN the scene's established location(s): "same environment" for
+  most shots; move to a NEW location only when the scene description itself calls for
+  it. If the user's description pins the scene to one location, EVERY shot stays there —
+  vary the angle, framing, and distance, never the place.
 - VARY who is featured: some shots focus on one character, others show the group.
 - NEVER write the same framing/pose/environment for consecutive shots.
+
+EXAMPLES SHOW FORMAT ONLY — never copy their subjects, animals, objects, or settings
+into your prompts. Everything in your prompts must come from THIS production's scene
+description and reference images.
 
 GOOD EXAMPLES:
 - "create new scene, same environment. Close-up of the woman from the reference image, relaxed expression. Use lighting and color temp from reference image. Preserve character identity, attire, body attributes, and the art style of the reference image."
