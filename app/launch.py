@@ -10674,14 +10674,23 @@ def toggle_favorite(name: str):
 
 
 @api.get("/api/v1/outputs")
-def list_outputs(limit: int = 0, offset: int = 0, favorites_only: bool = False, multiclip_only: bool = False, search: str = ""):
+def list_outputs(limit: int = 0, offset: int = 0, favorites_only: bool = False, multiclip_only: bool = False, search: str = "", workspace: str = ""):
     """List generated output files (newest first) from the active workspace.
 
     Supports pagination via limit/offset query params.
     Returns {outputs, total} where total is the full count before pagination.
     When limit=0 (default), returns all items (backwards compatible).
+
+    workspace="__uploads__" lists the uploads folder instead (the gallery's
+    virtual "Uploads" view) so user-supplied media can be previewed and
+    reused. Browse-only: the server-side active workspace is untouched and
+    generations never save here. Uploads have no sidecars, so the metadata
+    passes below fall through naturally.
     """
-    out_dir = _workspace_dir()
+    if workspace == "__uploads__":
+        out_dir = os.path.join(os.getcwd(), "uploads")
+    else:
+        out_dir = _workspace_dir()
     if not os.path.isdir(out_dir):
         return {"outputs": [], "total": 0}
 
@@ -10869,6 +10878,14 @@ def serve_file(filename: str):
             candidate = _safe_join(save_root, d, filename)
             if candidate and os.path.isfile(candidate):
                 return share_delete_file_response(candidate)
+    # 4. Uploads folder — the gallery's virtual "Uploads" view lists these
+    #    files with the same /api/v1/file/ URLs every other gallery flow
+    #    builds (thumbnails, playback, send-to-input). Upload names are
+    #    hash-uniquified at upload time, and outputs are checked first, so
+    #    an output name can never be shadowed by an upload.
+    filepath = _safe_join(os.path.join(os.getcwd(), "uploads"), filename)
+    if filepath and os.path.isfile(filepath):
+        return share_delete_file_response(filepath)
     raise HTTPException(status_code=404, detail="File not found")
 
 

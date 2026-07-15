@@ -87,6 +87,11 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
   const generationMode = useStore(s => s.generationMode)
   const workspaces = useStore(s => s.workspaces)
   const activeWorkspace = useStore(s => s.activeWorkspace)
+  // Virtual Uploads view: browse-only. Move/favorite/delete resolve
+  // against the active OUTPUT workspace server-side, so they can't act
+  // on upload files — hide them. Download + send-to-input still work
+  // (serve_file falls back to the uploads folder).
+  const browsingUploads = useStore(s => s.browsingUploads)
   // Used to translate the raw model_type slug (e.g.
   // "ltx2_22B_distilled_1_1") in the per-clip metadata bar into the
   // human-readable display name (e.g. "LTX-2.3 Distilled 1.1 22B")
@@ -525,6 +530,7 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
             <Download size={13} />
           </button>
           {/* Move to workspace */}
+          {!browsingUploads && (
           <div className="relative" ref={moveRef}>
             <button
               onClick={(e) => { e.stopPropagation(); setShowMoveMenu(!showMoveMenu) }}
@@ -558,6 +564,8 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
               </div>
             )}
           </div>
+          )}
+          {!browsingUploads && (
           <button
             onClick={(e) => { e.stopPropagation(); toggleFavorite(file.name) }}
             className={`p-1.5 rounded-lg transition-colors ${
@@ -569,6 +577,8 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
           >
             <Heart size={13} fill={file.favorite ? 'currentColor' : 'none'} />
           </button>
+          )}
+          {!browsingUploads && (
           <button
             onClick={handleDelete}
             className={`p-1.5 rounded-lg transition-colors flex items-center gap-1 ${
@@ -581,6 +591,7 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
             <Trash2 size={13} />
             {confirmDelete && <span className="text-[11px] font-medium">Delete?</span>}
           </button>
+          )}
         </div>
       </div>
       {showSaveRecipe && (

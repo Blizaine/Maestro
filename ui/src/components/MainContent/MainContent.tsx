@@ -1,5 +1,5 @@
 import { useRef, useCallback, useState, useEffect, useMemo, type JSX } from 'react'
-import { Film, Play, Square, FolderOpen, Plus, Check, Loader2, X, BookMarked } from 'lucide-react'
+import { Film, Play, Square, FolderOpen, Plus, Check, Loader2, X, BookMarked, Upload } from 'lucide-react'
 import { TabFilter } from './TabFilter'
 import { ThumbnailGallery } from './ThumbnailGallery'
 import { MediaFeedItem } from './MediaFeedItem'
@@ -9,6 +9,7 @@ import type { GenerationJob } from '../../types'
 function WorkspaceSelector() {
   const workspaces = useStore(s => s.workspaces)
   const activeWorkspace = useStore(s => s.activeWorkspace)
+  const browsingUploads = useStore(s => s.browsingUploads)
   const switchWorkspace = useStore(s => s.switchWorkspace)
   const createWorkspace = useStore(s => s.createWorkspace)
   const [open, setOpen] = useState(false)
@@ -50,7 +51,7 @@ function WorkspaceSelector() {
         title="Switch workspace"
       >
         <FolderOpen size={12} />
-        <span className="max-w-[120px] truncate">{activeWorkspace}</span>
+        <span className="max-w-[120px] truncate">{browsingUploads ? 'Uploads' : activeWorkspace}</span>
       </button>
 
       {open && (
@@ -64,13 +65,27 @@ function WorkspaceSelector() {
                 key={ws.name}
                 onClick={() => { switchWorkspace(ws.name); setOpen(false) }}
                 className={`w-full text-left px-3 py-2 text-xs flex items-center justify-between hover:bg-bg-hover transition-colors ${
-                  ws.name === activeWorkspace ? 'text-accent-blue' : 'text-text-secondary'
+                  ws.name === activeWorkspace && !browsingUploads ? 'text-accent-blue' : 'text-text-secondary'
                 }`}
               >
                 <span className="truncate">{ws.name}</span>
-                {ws.name === activeWorkspace && <Check size={12} />}
+                {ws.name === activeWorkspace && !browsingUploads && <Check size={12} />}
               </button>
             ))}
+          </div>
+          {/* Virtual Uploads view — browse user-uploaded media (read-only;
+              generations keep saving to the real active workspace). */}
+          <div className="border-t border-border">
+            <button
+              onClick={() => { switchWorkspace('__uploads__'); setOpen(false) }}
+              className={`w-full text-left px-3 py-2 text-xs flex items-center justify-between hover:bg-bg-hover transition-colors ${
+                browsingUploads ? 'text-accent-blue' : 'text-text-secondary'
+              }`}
+              title="Browse media you've uploaded — reuse as inputs"
+            >
+              <span className="flex items-center gap-1.5"><Upload size={12} /> Uploads</span>
+              {browsingUploads && <Check size={12} />}
+            </button>
           </div>
           <div className="border-t border-border p-2">
             {creating ? (

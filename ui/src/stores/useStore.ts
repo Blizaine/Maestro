@@ -1075,6 +1075,10 @@ interface AppState {
   // Workspaces
   workspaces: Array<{ name: string; path: string }>
   activeWorkspace: string
+  /** Gallery is showing the virtual "Uploads" view (browse-only — the
+   *  server-side active workspace, and where generations save, is
+   *  untouched). Entered via switchWorkspace('__uploads__'). */
+  browsingUploads: boolean
   loadWorkspaces: () => Promise<void>
   switchWorkspace: (name: string) => Promise<void>
   createWorkspace: (name: string) => Promise<void>
@@ -6056,6 +6060,7 @@ export const useStore = create<AppState>((set, get) => ({
   // Workspaces
   workspaces: [],
   activeWorkspace: 'default',
+  browsingUploads: false,
   loadWorkspaces: async () => {
     try {
       const data = await api.fetchWorkspaces()
@@ -6065,9 +6070,17 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
   switchWorkspace: async (name) => {
+    // Virtual "Uploads" view: browse the uploads folder WITHOUT touching
+    // the server-side active workspace — generations keep saving to the
+    // real workspace; uploads are read-only in the gallery.
+    if (name === '__uploads__') {
+      set({ browsingUploads: true, outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
+      get().loadOutputs()
+      return
+    }
     try {
       await api.setActiveWorkspace(name)
-      set({ activeWorkspace: name, outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
+      set({ browsingUploads: false, activeWorkspace: name, outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
       get().loadOutputs()
       get().loadWorkspaces()
     } catch (e) {
@@ -6078,7 +6091,7 @@ export const useStore = create<AppState>((set, get) => ({
     try {
       await api.createWorkspace(name)
       await api.setActiveWorkspace(name)
-      set({ activeWorkspace: name, outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
+      set({ browsingUploads: false, activeWorkspace: name, outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
       get().loadOutputs()
       get().loadWorkspaces()
     } catch (e) {
@@ -6136,8 +6149,9 @@ export const useStore = create<AppState>((set, get) => ({
   outputsLoading: false,
   loadOutputs: async () => {
     const PAGE_SIZE = 100
-    const { mediaFilter, outputSearchQuery } = get()
+    const { mediaFilter, outputSearchQuery, browsingUploads } = get()
     const isBackendFilter = mediaFilter === 'favorites' || mediaFilter === 'multiclip' || outputSearchQuery.trim()
+    const ws = browsingUploads ? '__uploads__' : undefined
     set({ outputsLoading: true })
     try {
       const { outputs: apiOutputs, total } = isBackendFilter
@@ -6145,8 +6159,9 @@ export const useStore = create<AppState>((set, get) => ({
             favoritesOnly: mediaFilter === 'favorites',
             multiclipOnly: mediaFilter === 'multiclip',
             search: outputSearchQuery.trim() || undefined,
+            workspace: ws,
           })
-        : await api.fetchOutputs(PAGE_SIZE, 0)
+        : await api.fetchOutputs(PAGE_SIZE, 0, { workspace: ws })
       const outputs: OutputFile[] = apiOutputs.map(o => ({
         name: o.name,
         url: o.url,
@@ -6174,7 +6189,9 @@ export const useStore = create<AppState>((set, get) => ({
     const total = get().outputsTotal
     if (current.length >= total) return // All loaded
     try {
-      const { outputs: apiOutputs, total: newTotal } = await api.fetchOutputs(PAGE_SIZE, current.length)
+      const { outputs: apiOutputs, total: newTotal } = await api.fetchOutputs(PAGE_SIZE, current.length, {
+        workspace: get().browsingUploads ? '__uploads__' : undefined,
+      })
       const more: OutputFile[] = apiOutputs.map(o => ({
         name: o.name,
         url: o.url,
