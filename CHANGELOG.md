@@ -3,6 +3,15 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [1.2.2] - 2026-07-14
+
+Director "Analyzing" hang fix for smaller GPUs: the generation model's
+VRAM is released before audio analysis loads the vocal separator and
+Whisper (Windows' CUDA sysmem fallback made the overflow look like a
+silent hang rather than an OOM). Also ships an int8 quanto variant of
+the ACE-Step XL SFT transformer (5.5 GB vs 10 GB) so int8-quantized
+installs download and load half the model.
+
 ## [1.2.1] - 2026-07-14
 
 Fix for existing installs updating to v1.2.0: the enabled-models

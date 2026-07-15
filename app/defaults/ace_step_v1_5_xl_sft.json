@@ -4,7 +4,8 @@
         "architecture": "ace_step_v1_5_xl",
         "description": "ACE-Step 1.5 XL SFT: the quality-focused CFG variant of the XL 4B DiT (acestep-v15-xl-sft). Runs true classifier-free guidance with Adaptive Projected Guidance at a free step count (30 by default) instead of the Turbo distilled 8-step schedule. Highest audio quality in the ACE-Step family; several times slower than Turbo.",
         "URLs": [
-            "https://huggingface.co/Blizaine/Maestro-Models/resolve/main/ace_step_v1_5_xl_sft_transformer_bf16.safetensors"
+            "https://huggingface.co/Blizaine/Maestro-Models/resolve/main/ace_step_v1_5_xl_sft_transformer_bf16.safetensors",
+            "https://huggingface.co/Blizaine/Maestro-Models/resolve/main/ace_step_v1_5_xl_sft_transformer_quanto_bf16_int8.safetensors"
         ],
         "ace_step15_transformer_variant": "xl_sft",
         "text_encoder_folder": "acestep-5Hz-lm-1.7B"

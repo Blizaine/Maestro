@@ -75,6 +75,12 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.2.2 (2026-07-14)
+
+**Fixed**
+- Director Mode could get stuck at "Analyzing" forever after v1.2.0 on cards with less VRAM. Analysis runs right after the song renders, and the new default music model is much larger than the old one; on smaller GPUs the leftover model plus the vocal separator and Whisper overflowed VRAM, which Windows silently turns into an extreme slowdown instead of an error. The song model's VRAM is now released before analysis starts.
+- Added an int8 version of the ACE-Step XL SFT transformer (5.5 GB instead of 10 GB). Cards using int8 quantization (what Auto-Tune selects below 24 GB) now download and load the smaller file automatically.
+
 ### v1.2.1 (2026-07-14)
 
 **Fixed**
