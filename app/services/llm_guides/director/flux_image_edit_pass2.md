@@ -74,8 +74,16 @@ IMAGE PROMPTS DESCRIBE A FROZEN FRAME:
 - Describe EXPRESSIONS as physical states: "mouth open, brow furrowed" not "looking angry".
 
 STYLE CONSISTENCY:
-- Match the visual style of the reference image. If the reference is photorealistic,
-  every prompt is photorealistic. Do NOT introduce cartoon, anime, or illustration styles.
+- Match the visual MEDIUM and ART STYLE of the reference image, whatever it is.
+  - Photorealistic reference → every prompt stays photorealistic. Do NOT introduce
+    cartoon, anime, or illustration styles.
+  - Stylized reference (hand-drawn, pencil sketch, watercolor, anime, cartoon, oil
+    painting, pixel art, etc.) → NAME that medium explicitly in EVERY image prompt
+    (e.g. "hand-drawn pencil sketch style" or "watercolor illustration") and do NOT
+    introduce photorealistic rendering. Without naming the medium, the image model
+    defaults to photorealism and destroys the style.
+- Never switch styles between shots; the reference image's medium is the medium of
+  the whole production.
 
 CRITICAL — EVERY IMAGE PROMPT MUST BE VISUALLY UNIQUE:
 - VARY composition: close-up, wide shot, low angle, overhead, profile, over-shoulder.
@@ -86,10 +94,12 @@ CRITICAL — EVERY IMAGE PROMPT MUST BE VISUALLY UNIQUE:
 GOOD EXAMPLES:
 - "Place the woman from the reference image in a sunlit kitchen, seated at the table, hands wrapped around a coffee cup. Soft morning light through the window. Use lighting and color temp from reference image. Preserve character identity, attire, and body attributes from the reference image."
 - "Wide shot. The boy from the reference image stands center, the small dragon from the reference image on his left, the unicorn from the reference image on his right. Brick alleyway, overcast daylight. Use lighting and color temp from reference image. Preserve character identity, attire, and body attributes from the reference image."
+- (stylized reference) "Hand-drawn pencil sketch style, matching the reference image's art style. The girl from the reference image sits on a swing under a large tree, midday light. Preserve character identity, attire, body attributes, and the art style of the reference image."
 
 BAD EXAMPLES:
 - "create new scene, same environment. Blonde man playing guitar." — no reference anchoring, no lighting.
 - "the woman in the red dress with curly hair" — names a garment.
-- "cartoon style illustration of..." — introduces a style not in the reference.
+- "cartoon style illustration of..." (for a PHOTOREALISTIC reference) — introduces a style not in the reference.
+- "photorealistic, 8k detailed photo of..." (for a HAND-DRAWN reference) — same mistake in the other direction.
 
-ALWAYS end every image_prompt with: "Preserve character identity, attire, and body attributes from the reference image."
+ALWAYS end every image_prompt with: "Preserve character identity, attire, body attributes, and the art style of the reference image."

@@ -89,15 +89,22 @@ CRITICAL — EVERY IMAGE PROMPT MUST BE VISUALLY UNIQUE:
 - NEVER write the same framing/pose/environment for consecutive shots.
 
 GOOD EXAMPLES:
-- "create new scene, same environment. Close-up of the woman from the reference image, relaxed expression. Use lighting and color temp from reference image. Preserve character identity, attire, and body attributes from the reference image."
-- "create new scene, new kitchen environment. The man from the reference image is now seated at the table. Use lighting and color temp from reference image. Preserve character identity, attire, and body attributes from the reference image."
-- Scene where woman removes dress → IMAGE shows: "create new scene, bedroom. The woman from the reference image is now standing by the bed. Use lighting and color temp from reference image. Preserve character identity, attire, and body attributes from the reference image." (NOT already undressed)
+- "create new scene, same environment. Close-up of the woman from the reference image, relaxed expression. Use lighting and color temp from reference image. Preserve character identity, attire, body attributes, and the art style of the reference image."
+- "create new scene, new kitchen environment. The man from the reference image is now seated at the table. Use lighting and color temp from reference image. Preserve character identity, attire, body attributes, and the art style of the reference image."
+- Scene where woman removes dress → IMAGE shows: "create new scene, bedroom. The woman from the reference image is now standing by the bed. Use lighting and color temp from reference image. Preserve character identity, attire, body attributes, and the art style of the reference image." (NOT already undressed)
 
 BAD EXAMPLES:
 - "create new scene, same environment. Blonde man playing guitar." — no reference anchoring.
 - Describing the END state: "the woman is now topless on the bed" when the scene is ABOUT her undressing.
 - "wearing her delicate lace bodice and updo" — describing clothing causes inconsistency.
-- "cartoon style illustration of..." — introducing a style not in the reference.
+- "cartoon style illustration of..." (for a PHOTOREALISTIC reference) — introducing a style not in the reference.
+- "photorealistic, 8k detailed photo of..." (for a HAND-DRAWN reference) — same mistake in the other direction.
+
+STYLE CONSISTENCY:
+- Match the visual MEDIUM and ART STYLE of the reference image, whatever it is.
+- Stylized reference (hand-drawn, sketch, watercolor, anime, cartoon, oil painting,
+  pixel art, etc.) → NAME that medium explicitly in EVERY image prompt. Without
+  naming the medium, the image model defaults to photorealism and destroys the style.
 
 IMAGE PROMPTS DESCRIBE A FROZEN FRAME:
 - Describe WHERE each person IS, not what they are DOING over time.
@@ -106,4 +113,4 @@ IMAGE PROMPTS DESCRIBE A FROZEN FRAME:
 - Describe EXPRESSIONS as physical states: "mouth open, brow furrowed" not "looking angry".
 - NEVER use character names — describe by appearance only.
 
-ALWAYS end every image_prompt with: "Preserve character identity, attire, and body attributes from the reference image."
+ALWAYS end every image_prompt with: "Preserve character identity, attire, body attributes, and the art style of the reference image."

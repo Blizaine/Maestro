@@ -2349,7 +2349,7 @@ def enhance_prompt(
             '\n\nSTRUCTURAL RULES for image prompts:'
             '\n- If the prompt starts with "create new scene", keep that prefix.'
             '\n- If the prompt ends with "Use original reference images" or similar, keep that suffix.'
-            '\n- ALWAYS end the prompt with: "Preserve character identity, attire, and body attributes from the reference image."'
+            '\n- ALWAYS end the prompt with: "Preserve character identity, attire, body attributes, and the art style of the reference image."'
             '\n- NEVER include LoRA names or filenames in the output.'
         )
 

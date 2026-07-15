@@ -69,7 +69,7 @@ BAD vs GOOD — INTERNALIZE THESE PATTERNS:
 BAD (too verbose, rewrites the scene, uses image_prompt ending):
 "close up shot of the reference image, the man entering through the doorway,
 his expression determined, the afternoon light catching his face dramatically.
-Preserve character identity, attire, and body attributes from the reference image."
+Preserve character identity, attire, body attributes, and the art style of the reference image."
 
 GOOD (concise, just the essential visual difference, no image_prompt ending):
 "same scene, the man is now standing just inside the doorway."

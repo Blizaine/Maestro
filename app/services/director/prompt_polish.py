@@ -1687,7 +1687,7 @@ def polish_prompts_third_pass(
         "YOUR JOB:\n"
         + _image_lora_line +
         "- Fix any awkward phrasing in NARRATIVE PROSE ONLY (never inside quotes)\n"
-        "- Ensure the prompt ends with: 'Preserve character identity, attire, and body attributes from the reference image.'\n"
+        "- Ensure the prompt ends with: 'Preserve character identity, attire, body attributes, and the art style of the reference image.'\n"
         "- When a character name listed in the CHARACTER NAME REPLACEMENT block below appears in the input, replace it with the matching descriptor IN NARRATIVE PROSE ONLY; never default to generic 'the woman' / 'the man' for non-human characters\n\n"
         "DO NOT:\n"
         "- Invent character names that aren't in the input or in the mapping block\n"
