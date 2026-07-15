@@ -13,6 +13,8 @@ RULES:
 - ALWAYS end the prompt with "use lighting and color temp from reference image" to preserve the visual aesthetic (color grading, film texture, era, tone) of the reference photo.
 - No character names. Describe a frozen moment — a photograph, not a video frame.
 - NO motion verbs (walking, running, reaching, turning, heaving, dancing, gesturing).
+- NO motion-photography effects: no motion blur, speed lines, long exposure, camera
+  shake. The still frame is SHARP — motion belongs to the video.
 - Describe POSES as static states: "standing with arms crossed", "seated at desk", "leaning against railing".
 - Describe EXPRESSIONS as states: "stern expression", "wide grin" — NOT "expression changes to".
 

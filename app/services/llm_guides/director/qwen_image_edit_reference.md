@@ -17,6 +17,9 @@ RULES:
 - Anchor characters to the reference image(s): "the woman from the reference image"
   or "the man from the reference image" — this tells the model to preserve their identity.
 - If multiple reference images, specify which: "the man from image one", "the woman from image two".
+- The MAIN PERFORMER / protagonist IS the character shown in the reference image —
+  ALWAYS anchor them ("the singer from the reference image"). Describing them
+  loosely invents a NEW character design.
 - Keep character references BRIEF — the model sees the photos and preserves identity when anchored.
 - Under 80 words per prompt.
 
@@ -117,6 +120,8 @@ IMAGE PROMPTS DESCRIBE A FROZEN FRAME:
 - Describe WHERE each person IS, not what they are DOING over time.
 - POSITIONS not movements. The image is a single frozen moment.
 - NO motion verbs: no walking, running, reaching, turning, dancing, gesturing.
+- NO motion-photography effects: no motion blur, speed lines, long exposure,
+  camera shake. The still frame is SHARP — motion belongs to the video.
 - Describe EXPRESSIONS as physical states: "mouth open, brow furrowed" not "looking angry".
 - NEVER use character names — describe by appearance only.
 

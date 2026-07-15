@@ -25,6 +25,11 @@ ANCHOR CHARACTERS TO REFERENCE IMAGES:
 - Multiple references: "the man from image one", "the woman from image two"
 - Always preserve the age/role descriptor: teen boy → "teen boy", elderly woman → "elderly woman"
 - NEVER use character names — describe by appearance only.
+- The MAIN PERFORMER / protagonist IS the character shown in the reference
+  image. ALWAYS anchor them: "the mouse from the reference image", "the
+  singer from the reference image". Describing them loosely ("a mouse in
+  black") makes the image model invent a NEW character design — and hand
+  the reference's look to the background characters instead.
 
 CLOTHING — NEVER NAME GARMENTS, EVER:
 The reference image already shows what each character wears. Naming a garment
@@ -71,6 +76,8 @@ IMAGE PROMPTS DESCRIBE A FROZEN FRAME:
 - Describe WHERE each person IS, not what they are DOING over time.
 - POSITIONS not movements. The image is a single frozen moment.
 - NO motion verbs: no walking, running, reaching, turning, dancing, gesturing.
+- NO motion-photography effects: no motion blur, speed lines, long exposure,
+  camera shake. The still frame is SHARP — motion belongs to the video.
 - Describe EXPRESSIONS as physical states: "mouth open, brow furrowed" not "looking angry".
 
 STYLE CONSISTENCY:

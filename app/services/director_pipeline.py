@@ -11,6 +11,7 @@ Controlled by feature flags in params or server config.
 """
 
 import os
+import re
 import time
 import json
 import uuid
@@ -80,6 +81,28 @@ def _style_prefix_for(style: str) -> str:
     """The exact lead sentence validated to hold Klein to a medium."""
     style = (style or "").strip()
     return f"Maintain the same {style} art style. " if style else ""
+
+
+# Motion-photography effects have no place in a START-FRAME prompt — the
+# frame must be sharp for the video model to animate from. The music-video
+# planner still writes them ("A strong motion blur effect is present on
+# the background...") because its energy-focused rules leak into image
+# prompts, and Klein complies with an image-wrecking smear. Deterministic
+# strip, same philosophy as the style prefix: don't trust the 4B.
+_MOTION_EFFECT_RE = re.compile(
+    r"motion[- ]?blur|speed[- ]?lines|long[- ]?exposure|camera shake|blur effect",
+    re.IGNORECASE,
+)
+
+
+def _strip_motion_effects(prompt: str) -> str:
+    """Drop sentences/clauses that request motion-photography effects."""
+    if not prompt or not _MOTION_EFFECT_RE.search(prompt):
+        return prompt
+    parts = re.split(r"(?<=[.;!?])\s+", prompt)
+    kept = [s for s in parts if not _MOTION_EFFECT_RE.search(s)]
+    cleaned = " ".join(kept).strip()
+    return cleaned if cleaned else prompt
 
 # ── Pipeline State Persistence ─────────────────────────────────────────────
 
@@ -340,7 +363,9 @@ def rerun_clip_image(out_dir: str, pid: str, clip_index: int, prompt_override: s
 
     # Reference art-style lock: reruns re-apply the detected style prefix
     # (the pipeline prepends it at generation time, so the saved
-    # image_prompt does not carry it).
+    # image_prompt does not carry it). Motion-effect strip mirrors
+    # _gen_image for the same reason.
+    prompt = _strip_motion_effects(prompt)
     _style_prefix = _style_prefix_for((state.get("_params_snapshot") or {}).get("_reference_style") or "")
     if _style_prefix and not prompt.lower().startswith("maintain the same"):
         prompt = _style_prefix + prompt
@@ -1715,8 +1740,12 @@ def _run_image_generation(pid: str, params: dict, clip_plans: list[dict], out_di
     def _gen_image(prompt: str, source_ref: str, include_extra_refs: bool = True) -> str:
         """Generate a single image using source_ref + optional extra refs."""
         nonlocal image_count
-        if _style_prefix and not (prompt or "").lower().startswith("maintain the same"):
-            prompt = _style_prefix + (prompt or "")
+        _pre_strip = prompt
+        prompt = _strip_motion_effects(prompt or "")
+        if prompt != _pre_strip:
+            print(f"[Pipeline {pid}] Stripped motion-effect language from image prompt")
+        if _style_prefix and not prompt.lower().startswith("maintain the same"):
+            prompt = _style_prefix + prompt
         all_refs = [r for r in ([source_ref] + (extra_refs if include_extra_refs else [])) if r]
         print(f"[Pipeline {pid}] _gen_image: {len(all_refs)} refs: {[os.path.basename(r) for r in all_refs]}")
         gen_params: dict = {
