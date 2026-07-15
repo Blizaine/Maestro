@@ -3454,6 +3454,16 @@ export const useStore = create<AppState>((set, get) => ({
 
     // Audio mode: branch by sub-mode (Speech/Music vs SFX)
     if (state.generationMode === 'audio') {
+      // Record the active sub-tab in the request so it lands in the
+      // .meta.json sidecar — Load Settings uses it to restore Speech /
+      // Music / SFX, not just the Audio tab. Underscore keys ride
+      // through generation untouched, same as _tts_*. Music also saves
+      // its song-writer inputs (UI-only, not consumed by generation).
+      params._audio_sub_mode = state.audioSubMode
+      if (state.audioSubMode === 'music') {
+        params._music_description = state.musicDescription || ''
+        params._music_instrumental = !!state.musicInstrumental
+      }
       if (state.audioSubMode === 'sfx') {
         // SFX mode: use MMAudio to generate sound effects
         // MMAudio runs as post-processing on a video model, so use a video model as carrier
@@ -3462,6 +3472,9 @@ export const useStore = create<AppState>((set, get) => ({
         if (isSfxVirtual) {
           // Swap virtual MMAudio model for a real video model; backend uses MMAudio params
           params.model_type = 'ltx2_22B_distilled_1_1'
+          // Keep the virtual id so Load Settings can restore the SFX tab's
+          // model selection (the sidecar otherwise records only the carrier).
+          params._sfx_virtual_model = sfxModel
         }
         params.MMAudio_setting = 1
         // Always set MMAudio variant explicitly so backend doesn't fall back to server config
@@ -6269,8 +6282,17 @@ export const useStore = create<AppState>((set, get) => ({
     const uploadFilenames = selectedOutputMeta.upload_filenames as Record<string, string> | undefined
     console.log('[LoadSettings] applying settings — model_type:', p.model_type, '| param keys:', Object.keys(p).length)
 
-    const modelType = (p.model_type as string) || ''
+    let modelType = (p.model_type as string) || ''
     if (!modelType) return
+
+    // SFX generations swap the virtual MMAudio model for a video carrier
+    // at submit, so the sidecar records the carrier. Restore the virtual
+    // id — resubmitting re-swaps it, and mode/sub-tab detection below
+    // classifies it as audio/sfx instead of video.
+    const sfxVirtual = p._sfx_virtual_model as string | undefined
+    if ((p._audio_sub_mode === 'sfx' || p.sfx_mode) && sfxVirtual && models.some(m => m.model_type === sfxVirtual)) {
+      modelType = sfxVirtual
+    }
 
     // Per-sub-mode isolation: pencil-load may jump the sidebar to another
     // video sub-mode (or clobber the current one) by writing params
@@ -6294,6 +6316,35 @@ export const useStore = create<AppState>((set, get) => ({
     if (model) {
       const mode = getModelMode(modelType, model.family)
       set({ generationMode: mode })
+      // Audio outputs restore the SUB-TAB too (Speech / Music / SFX) —
+      // previously the pencil landed on the Audio tab but left whatever
+      // sub-tab was last open. Newer sidecars record _audio_sub_mode;
+      // older ones fall back to classifying the model. Direct set, NOT
+      // setAudioSubMode — that would call selectModel and clobber the
+      // params restored below.
+      if (mode === 'audio') {
+        const recordedSub = p._audio_sub_mode as import('../types').AudioSubMode | undefined
+        const inferredSub: import('../types').AudioSubMode =
+          sfxModelTypes.has(modelType) || p.sfx_mode ? 'sfx'
+          : isMusicModelType(modelType) ? 'music'
+          : 'speech'
+        const subMode = (recordedSub === 'speech' || recordedSub === 'music' || recordedSub === 'sfx')
+          ? recordedSub : inferredSub
+        const restoredLyrics = (p._tts_original_prompt as string) || (p.prompt as string) || ''
+        set(s => ({
+          audioSubMode: subMode,
+          selectedModelPerAudioSubMode: { ...s.selectedModelPerAudioSubMode, [subMode]: modelType },
+          // Music: restore the song-writer inputs alongside the fields.
+          // Older sidecars lack _music_description — clear rather than
+          // leave a stale description that didn't produce this song
+          // (instrumental still infers from the lyrics sentinel).
+          ...(subMode === 'music' ? {
+            musicDescription: (p._music_description as string) || '',
+            musicInstrumental: !!p._music_instrumental
+              || restoredLyrics.trim().toLowerCase() === '[instrumental]',
+          } : {}),
+        }))
+      }
     }
 
     // Load model capabilities BEFORE applying the restored params.
@@ -6305,8 +6356,12 @@ export const useStore = create<AppState>((set, get) => ({
     // modelOptions matches the restored model before rerollGeneration
     // submits (stale capabilities used to strip stg_scale/perturbation_*
     // from the request, which then poisoned the next sidecar with zeros).
-    get().loadLoras(modelType)
-    await get().loadModelOptions(modelType)
+    // (Virtual SFX models have no LoRAs/options endpoints — same guard
+    // as boot.)
+    if (!sfxModelTypes.has(modelType)) {
+      get().loadLoras(modelType)
+      await get().loadModelOptions(modelType)
+    }
 
     // Detect I2V: if image_start was used or image_prompt_type contains "S"
     const hadStartImage = !!(p.image_start || (p.image_prompt_type as string || '').includes('S'))
@@ -6349,6 +6404,10 @@ export const useStore = create<AppState>((set, get) => ({
     newParams.self_refiner_setting = (p.self_refiner_setting as number) ?? undefined
     newParams.audio_guide = (p.audio_guide as string) || ''
     newParams.audio_guide2 = (p.audio_guide2 as string) || ''
+    // Style / Music Caption (ACE-Step). Was never copied here, so the
+    // pencil restored only the lyrics — clear when absent so a stale
+    // caption can't leak into an unrelated restore.
+    newParams.alt_prompt = (p.alt_prompt as string) || ''
     newParams.video_guide = (p.video_guide as string) || ''
     newParams.image_refs = Array.isArray(p.image_refs) ? (p.image_refs as string[]) : []
     newParams.frames_positions = (p.frames_positions as string) || ''
