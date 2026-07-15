@@ -322,9 +322,38 @@ def unload_whisper():
 # ---------------------------------------------------------------------------
 
 _diarizer_pipe = None
+_diarizer_profile: Optional[str] = None  # profile the cached pipeline is instantiated with
+
+# Clustering hyperparameters per content type. The embedding model was
+# trained on SPEECH — singing voice drifts far more (pitch, vibrato,
+# effects, backing vocals), so the speech-tuned profile shatters one
+# singer into many "speakers" (observed: 6 on a solo track). The music
+# profile requires sustained singing per cluster (pyannote's default 12
+# instead of the AI-dialogue-tuned 6) and merges more aggressively
+# (threshold 0.82 vs 0.7046 — validated on real ACE-Step outputs: solo
+# tracks collapse to 1 speaker while a genuinely distinct second voice
+# still separates well above this distance).
+_DIARIZER_PROFILES = {
+    "speech": {
+        "clustering": {
+            "method": "centroid",
+            "min_cluster_size": 6,
+            "threshold": 0.7045654963945799,
+        },
+        "segmentation": {"min_duration_off": 0.0},
+    },
+    "music": {
+        "clustering": {
+            "method": "centroid",
+            "min_cluster_size": 12,
+            "threshold": 0.82,
+        },
+        "segmentation": {"min_duration_off": 0.0},
+    },
+}
 
 
-def get_diarizer_pipeline():
+def get_diarizer_pipeline(profile: str = "speech"):
     """Load (or return cached) pyannote 3.1 diarization pipeline.
 
     Public so postprocessing modules (voice_clone.py) can reuse the
@@ -360,10 +389,19 @@ def get_diarizer_pipeline():
 
     Module-level cache via _diarizer_pipe means second+ calls in the
     same process are free, shared between audio_analysis._diarize
-    and voice_clone.
+    and voice_clone. `profile` selects the clustering hyperparameters
+    (see _DIARIZER_PROFILES) — a cached pipeline is re-instantiated in
+    place when a different profile is requested (cheap: instantiate()
+    only sets hyperparameters, no model reload).
     """
-    global _diarizer_pipe
+    global _diarizer_pipe, _diarizer_profile
     if _diarizer_pipe is not None:
+        if profile != _diarizer_profile:
+            try:
+                _diarizer_pipe.instantiate(_DIARIZER_PROFILES[profile])
+                _diarizer_profile = profile
+            except Exception as e:
+                print(f"[Diarization] Profile switch to '{profile}' failed (keeping '{_diarizer_profile}'): {e}")
         return _diarizer_pipe
 
     try:
@@ -442,30 +480,14 @@ def get_diarizer_pipeline():
                     embedding=embedding_model,
                     clustering="AgglomerativeClustering",
                 )
-                # Hyperparameters: start from pyannote 3.1's HF config.yaml
-                # values, with two adjustments tuned for AI-generated speech
-                # (LTX-2, Wan, Multitalk) which tends to have shorter
-                # utterances and slightly lower SNR than the pyannote test
-                # corpus:
-                #   - min_cluster_size: 12 → 6. Lets shorter speech bursts
-                #     (a single line of dialogue without sustained
-                #     conversation) form a valid cluster. Default 12 means
-                #     ~6+ seconds of speech-per-speaker required.
-                #   - clustering threshold: 0.7045 unchanged (default).
-                pipeline.instantiate({
-                    "clustering": {
-                        "method": "centroid",
-                        "min_cluster_size": 6,
-                        "threshold": 0.7045654963945799,
-                    },
-                    "segmentation": {
-                        "min_duration_off": 0.0,
-                    },
-                })
+                # Hyperparameters come from the requested profile — see
+                # _DIARIZER_PROFILES for the speech vs music rationale.
+                pipeline.instantiate(_DIARIZER_PROFILES[profile])
                 if device == "cuda":
                     pipeline.to(torch.device(device))
                 _diarizer_pipe = pipeline
-                print(f"[Diarization] Pipeline loaded from local .bin files on {device}")
+                _diarizer_profile = profile
+                print(f"[Diarization] Pipeline loaded from local .bin files on {device} (profile: {profile})")
                 return _diarizer_pipe
             except Exception as e:
                 print(f"[Diarization] Manual assembly failed, falling back: {e}")
@@ -481,14 +503,30 @@ def get_diarizer_pipeline():
         )
         local_config = os.path.join(local_model_dir, "config.yaml")
         hf_token = os.environ.get("HF_TOKEN", "")
+
+        # Apply the requested profile to a from_pretrained pipeline (it
+        # arrives instantiated with the HF config defaults). Guarded so an
+        # instantiate hiccup degrades to defaults instead of losing the
+        # loaded pipeline; _diarizer_profile stays None so the next call
+        # retries the switch.
+        def _apply_profile(pipe):
+            global _diarizer_profile
+            try:
+                pipe.instantiate(_DIARIZER_PROFILES[profile])
+                _diarizer_profile = profile
+            except Exception as e:
+                _diarizer_profile = None
+                print(f"[Diarization] Profile instantiate failed (using model defaults): {e}")
+            return pipe
+
         if os.path.isfile(local_config):
             hf_home = os.path.join(_project_root, "cache", "HF_HOME")
             os.environ.setdefault("HF_HOME", os.path.normpath(hf_home))
             try:
                 print(f"[Diarization] Loading from HF_HOME cache on {device}...")
-                _diarizer_pipe = PyannotePipeline.from_pretrained(
+                _diarizer_pipe = _apply_profile(PyannotePipeline.from_pretrained(
                     "pyannote/speaker-diarization-3.1",
-                ).to(torch.device(device))
+                ).to(torch.device(device)))
                 print("[Diarization] Pipeline loaded from HF_HOME cache")
                 return _diarizer_pipe
             except Exception as e:
@@ -498,10 +536,10 @@ def get_diarizer_pipeline():
         if hf_token:
             try:
                 print(f"[Diarization] Downloading from HuggingFace on {device}...")
-                _diarizer_pipe = PyannotePipeline.from_pretrained(
+                _diarizer_pipe = _apply_profile(PyannotePipeline.from_pretrained(
                     "pyannote/speaker-diarization-3.1",
                     use_auth_token=hf_token,
-                ).to(torch.device(device))
+                ).to(torch.device(device)))
                 print("[Diarization] Pipeline downloaded + loaded")
                 return _diarizer_pipe
             except Exception as e:
@@ -541,7 +579,10 @@ def _diarize(audio_path: str, lyrics: List[LyricSegment]) -> List[LyricSegment]:
         print(f"[Diarization] Skipped (missing dependency): {e}")
         return lyrics
 
-    pipe = get_diarizer_pipeline()
+    # Music profile: this function's only production caller is the song
+    # analysis flow. voice_clone loads the speech profile via the same
+    # shared loader (a cached pipeline switches profiles in place).
+    pipe = get_diarizer_pipeline(profile="music")
     if pipe is None:
         return lyrics  # loader already printed the reason
 
@@ -561,7 +602,10 @@ def _diarize(audio_path: str, lyrics: List[LyricSegment]) -> List[LyricSegment]:
         }
 
         print("[Diarization] Running speaker diarization...")
-        segments = pipe(audio_data)
+        # Hard cap as a backstop on top of the music profile's clustering:
+        # songs have 1-3 vocalists; anything beyond that is the embedding
+        # model mistaking a register/effect change for a new person.
+        segments = pipe(audio_data, min_speakers=1, max_speakers=3)
 
         # Build DataFrame of speaker segments
         diarize_df = pd.DataFrame(
@@ -603,10 +647,11 @@ def _diarize(audio_path: str, lyrics: List[LyricSegment]) -> List[LyricSegment]:
 
 def unload_diarizer():
     """Free the diarization pipeline and reclaim VRAM."""
-    global _diarizer_pipe
+    global _diarizer_pipe, _diarizer_profile
     if _diarizer_pipe is not None:
         del _diarizer_pipe
         _diarizer_pipe = None
+    _diarizer_profile = None
     try:
         import torch
         if torch.cuda.is_available():
