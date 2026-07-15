@@ -101,15 +101,29 @@ const sectionBarColors: Record<string, string> = {
  * scroll instead of bubbling up to the chat panel, so the user
  * can't scroll the chat when their cursor happens to be over a
  * prompt field.
+ *
+ * Optional `minHeight`/`maxHeight` (px) bound the growth — used by the
+ * chat composer (issue #11), which keeps its resting 2-row size when
+ * empty and stops growing at a cap. Past the cap the textarea scrolls
+ * itself, so overflow flips to `auto` there; that's fine for the
+ * composer because it sits OUTSIDE the scrollable chat panel — the
+ * wheel-capture concern above doesn't apply.
  */
-function AutoResizeTextarea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
+function AutoResizeTextarea({ minHeight, maxHeight, ...props }: React.TextareaHTMLAttributes<HTMLTextAreaElement> & {
+  minHeight?: number
+  maxHeight?: number
+}) {
   const ref = useRef<HTMLTextAreaElement>(null)
   useEffect(() => {
     const el = ref.current
     if (!el) return
     el.style.height = 'auto'
-    el.style.height = `${el.scrollHeight}px`
-  }, [props.value])
+    let h = el.scrollHeight
+    if (minHeight) h = Math.max(h, minHeight)
+    if (maxHeight) h = Math.min(h, maxHeight)
+    el.style.height = `${h}px`
+    if (maxHeight) el.style.overflowY = el.scrollHeight > maxHeight ? 'auto' : 'hidden'
+  }, [props.value, minHeight, maxHeight])
   // Merge any incoming style with our scrollbar-hiding override.
   // OUR override comes last so it wins — wheel-capture is the whole
   // point of the component, can't let a caller silently break it.
@@ -1028,7 +1042,13 @@ export function DirectorChat() {
           </div>
         )}
         <div className="flex items-end gap-2">
-          <textarea
+          {/* Auto-grows with content (issue #11). The composer bar is the
+              last child of the panel's flex column, so extra height is
+              taken from the messages area above — the box visually
+              expands UPWARD from its bottom-anchored position. Rests at
+              2 rows (min 56px), caps at 240px (~11 lines), scrolls with
+              a visible thumb past that. */}
+          <AutoResizeTextarea
             value={mvGenerateSetup ? songDescription : chatInput}
             onChange={e => {
               const v = e.target.value
@@ -1045,7 +1065,9 @@ export function DirectorChat() {
             placeholder={chatInputPlaceholder}
             disabled={!chatInputEnabled}
             rows={2}
-            className="flex-1 bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary placeholder:text-text-muted resize-none focus:outline-none focus:border-accent-blue transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            minHeight={56}
+            maxHeight={240}
+            className="flex-1 bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary placeholder:text-text-muted resize-none focus:outline-none focus:border-accent-blue transition-colors disabled:opacity-50 disabled:cursor-not-allowed scrollbar-visible"
           />
           <button
             onClick={handleChatSubmit}

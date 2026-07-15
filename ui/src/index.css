@@ -691,6 +691,14 @@ body {
 ::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--color-border-light); }
 
+/* Higher-contrast scrollbar for surfaces where the thumb must be
+   findable, not just decorative — e.g. the Director composer once it
+   hits its max height (issue #11: "the scroll bar has such low
+   contrast it's invisible"). text-muted is already WCAG-raised in
+   every theme (issue #7), so this stays theme-aware. */
+.scrollbar-visible::-webkit-scrollbar-thumb { background: var(--color-text-muted); }
+.scrollbar-visible { scrollbar-color: var(--color-text-muted) transparent; scrollbar-width: thin; }
+
 input[type="range"] {
   -webkit-appearance: none;
   appearance: none;
