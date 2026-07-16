@@ -1513,6 +1513,9 @@ export type LoraUpdateStatus = 'current' | 'available' | 'unknown' | 'local' | '
 export interface InstalledLora {
   filename: string
   directory: string
+  /** File lives in a linked install's loras folder (read-only), not
+   *  Maestro's own. Sidecars/guides for it live in Maestro's mirror. */
+  linked?: boolean
   trained_words: string[]
   preview_url: string | null
   civitai_model_id: number | null

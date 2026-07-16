@@ -660,6 +660,14 @@ export function LoraBrowser() {
                       <div className="text-xs font-medium text-white truncate">{lora.name || lora.filename.replace(/\.(safetensors|sft)$/i, '')}</div>
                       <div className="flex items-center gap-1.5 mt-0.5">
                         <span className="text-[9px] px-1.5 py-0.5 rounded bg-black/60 text-white/80">{lora.directory}</span>
+                        {lora.linked && (
+                          <span
+                            className="text-[9px] px-1.5 py-0.5 rounded bg-accent-blue/70 text-white"
+                            title="From a linked install's loras folder (read-only) — guides and metadata are stored in Maestro"
+                          >
+                            Linked
+                          </span>
+                        )}
                         {lora.has_guide && <BookOpen size={9} className="text-accent-green" />}
                         {lora.base_model && <span className="text-[9px] text-white/50">{lora.base_model}</span>}
                       </div>

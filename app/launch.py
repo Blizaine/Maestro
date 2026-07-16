@@ -869,7 +869,16 @@ def _build_lora_max_version_map(root: str) -> dict[str, int]:
 
 @api.get("/api/v1/loras/installed")
 def list_all_installed_loras():
-    """List ALL installed LoRAs across all directories with CivitAI metadata."""
+    """List ALL installed LoRAs across all directories with CivitAI metadata.
+
+    Walks the primary loras root PLUS each linked install's loras root
+    (issue #16: linked LoRAs never appeared in "My LoRAs" even though the
+    guide scan processed them). Same enumeration and mirror convention as
+    the scan: linked files are deduped against primary by relative key,
+    and their sidecars/guides are read from the PRIMARY MIRROR path first
+    (where the scan writes them, since linked installs stay read-only),
+    then from beside the file itself.
+    """
     lora_root = wgp.server_config.get("loras_root", "loras") if hasattr(wgp, 'server_config') else "loras"
     candidates = [lora_root]
     if not os.path.isabs(lora_root):
@@ -884,6 +893,12 @@ def list_all_installed_loras():
     if not lora_root:
         return {"loras": []}
 
+    walk_roots = [(lora_root, False)]
+    for _linked_ckpts in _get_linked_model_folders():
+        _linked_loras = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(_linked_ckpts)), "loras"))
+        if os.path.isdir(_linked_loras):
+            walk_roots.append((_linked_loras, True))
+
     # Read the cached update manifest once per request so each row can
     # surface its update_status without an extra round trip.
     _manifest = _load_lora_manifest()
@@ -894,26 +909,43 @@ def list_all_installed_loras():
     _lora_max_version = _build_lora_max_version_map(lora_root)
 
     loras = []
-    for dirpath, _dirnames, filenames in os.walk(lora_root):
+    _seen_keys = set()
+    for walk_root, is_linked in walk_roots:
+      for dirpath, _dirnames, filenames in os.walk(walk_root):
         for f in filenames:
             if not f.endswith((".safetensors", ".sft")):
                 continue
+            rel_dir = os.path.relpath(dirpath, walk_root)
+            # Dedupe primary vs linked by relative key — primary walks
+            # first, so its copy wins (same rule as the scan and the
+            # per-model listing endpoints).
+            _key = os.path.normcase(os.path.normpath(os.path.join(rel_dir, f)))
+            if _key in _seen_keys:
+                continue
+            _seen_keys.add(_key)
             full_path = os.path.join(dirpath, f)
-            base = os.path.splitext(full_path)[0]
-            rel_dir = os.path.relpath(dirpath, lora_root)
+            own_base = os.path.splitext(full_path)[0]
+            # Sidecars/guides for linked files live at the primary-mirror
+            # base (scan write target); check it first, then beside the file.
+            if is_linked:
+                _mirror_base = os.path.normpath(os.path.join(lora_root, rel_dir, os.path.splitext(f)[0]))
+                _bases = [_mirror_base, own_base]
+            else:
+                _bases = [own_base]
             info = {
                 "filename": f,
                 "directory": rel_dir,
+                "linked": is_linked,
                 "trained_words": [],
                 "preview_url": None,
                 "civitai_model_id": None,
-                "has_guide": os.path.isfile(base + ".guide.md"),
+                "has_guide": any(os.path.isfile(b + ".guide.md") for b in _bases),
                 "name": None,
                 "base_model": None,
                 "nsfw": False,
                 "lora_id": f"local:{f}",  # overwritten below if sidecar has modelId
             }
-            sidecar = base + ".civitai.json"
+            sidecar = next((b + ".civitai.json" for b in _bases if os.path.isfile(b + ".civitai.json")), _bases[0] + ".civitai.json")
             meta = None
             if os.path.isfile(sidecar):
                 try:
@@ -950,11 +982,14 @@ def list_all_installed_loras():
                     pass
             # Check for local preview files (downloaded from HF)
             if not info.get("preview_url"):
-                for ext in (".mp4", ".png", ".jpg", ".webp"):
-                    preview_file = base + f"_preview1{ext}"
-                    if os.path.isfile(preview_file):
-                        info["preview_url"] = f"/api/v1/loras/preview/{os.path.basename(preview_file)}"
-                        info["preview_type"] = "video" if ext == ".mp4" else "image"
+                for _b in _bases:
+                    for ext in (".mp4", ".png", ".jpg", ".webp"):
+                        preview_file = _b + f"_preview1{ext}"
+                        if os.path.isfile(preview_file):
+                            info["preview_url"] = f"/api/v1/loras/preview/{os.path.basename(preview_file)}"
+                            info["preview_type"] = "video" if ext == ".mp4" else "image"
+                            break
+                    if info.get("preview_url"):
                         break
             # Infer NSFW from filename + sidecar tags/description + guide
             # text — but only when no authoritative signal exists. Manual
@@ -965,9 +1000,9 @@ def list_all_installed_loras():
             sidecar_has_nsfw_field = isinstance(meta, dict) and "nsfw" in meta
             if not info["nsfw"] and not has_override and not sidecar_has_nsfw_field:
                 _meta = meta if os.path.isfile(sidecar) else None
-                guide_path = base + ".guide.md"
+                guide_path = next((b + ".guide.md" for b in _bases if os.path.isfile(b + ".guide.md")), None)
                 guide_text = None
-                if os.path.isfile(guide_path):
+                if guide_path:
                     try:
                         with open(guide_path, "r", encoding="utf-8") as gf:
                             guide_text = gf.read()
