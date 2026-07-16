@@ -11287,6 +11287,15 @@ def serve_upload(filename: str):
 # Mount Gradio classic UI at /classic
 # ============================================================================
 
+# Bare /classic 404s (the Gradio submount only answers under /classic/).
+# Registered BEFORE the mount so the exact path wins routing; everything
+# under /classic/ still reaches Gradio.
+@api.get("/classic", include_in_schema=False)
+def _classic_redirect():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/classic/")
+
+
 try:
     import gradio as gr
     from shared.utils.plugins import WAN2GPApplication
@@ -11306,6 +11315,20 @@ except Exception as e:
 # ============================================================================
 # Serve React build at /
 # ============================================================================
+
+# Force correct MIME types for the module bundle. Python's mimetypes
+# module reads the WINDOWS REGISTRY, and machines where an installer
+# hijacked `.js` to text/plain make StaticFiles serve the bundle with a
+# type the browser's strict ES-module MIME check refuses — assets return
+# 200 but never execute, and the UI is a silent black screen (community
+# report: assets 200/304 in the terminal, zero API calls after).
+# add_type() runs after mimetypes' lazy init, so these entries override
+# whatever the registry says, on every machine.
+import mimetypes as _mimetypes
+_mimetypes.add_type("text/javascript", ".js")
+_mimetypes.add_type("text/javascript", ".mjs")
+_mimetypes.add_type("text/css", ".css")
+_mimetypes.add_type("image/svg+xml", ".svg")
 
 _ui_dist = os.path.normpath(os.path.join(_app_dir, "..", "ui", "dist"))
 if os.path.isdir(_ui_dist):
@@ -11398,7 +11421,8 @@ if __name__ == "__main__":
 
     print(f"\n{'='*50}")
     print(f"  Maestro UI:    http://{display_host}:{port}/")
-    print(f"  Classic UI:    http://{display_host}:{port}/classic")
+    # Trailing slash required: the Gradio submount 404s the bare path.
+    print(f"  Classic UI:    http://{display_host}:{port}/classic/")
     print(f"  API docs:      http://{display_host}:{port}/docs")
     if host == "0.0.0.0":
         print(f"  (Bound to {host} — LAN-accessible via this machine's IP)")

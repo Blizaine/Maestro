@@ -58,6 +58,32 @@
         if (meta && bg[t]) meta.setAttribute('content', bg[t]);
       })();
     </script>
+    <script>
+      // Boot watchdog: if React hasn't mounted within 10s, replace the
+      // silent black screen with a diagnostic page. Inline scripts are
+      // exempt from the strict ES-module MIME check, so this runs even
+      // when the bundle itself was refused (e.g. Windows machines whose
+      // registry serves .js as text/plain — a real community report:
+      // assets returned 200 but never executed, and users saw nothing
+      // but the theme background with no clue why).
+      (function () {
+        setTimeout(function () {
+          var root = document.getElementById('root');
+          if (root && root.children.length > 0) return; // app mounted
+          document.body.innerHTML =
+            '<div style="max-width:640px;margin:15vh auto 0;padding:0 24px;' +
+            'font-family:system-ui,sans-serif;color:#e8e0d0;">' +
+            '<h1 style="font-size:20px;margin-bottom:12px;">Maestro UI failed to load</h1>' +
+            '<p style="line-height:1.6;font-size:14px;color:#b8b0a0;">The page was served but the app never started. In order, try:</p>' +
+            '<ol style="line-height:1.9;font-size:14px;color:#b8b0a0;padding-left:20px;">' +
+            '<li>Hard refresh: <b style="color:#e8e0d0">Ctrl+F5</b> (or Cmd+Shift+R)</li>' +
+            '<li>Press <b style="color:#e8e0d0">F12</b> &rarr; Console tab, and share the first red error on Discord/GitHub</li>' +
+            '<li>If the error mentions <b style="color:#e8e0d0">MIME type</b>: update Maestro (the fix shipped), or add an antivirus exclusion for the pinokio folder</li>' +
+            '<li>Re-run <b style="color:#e8e0d0">Update</b> in Pinokio to rebuild the UI</li>' +
+            '</ol></div>';
+        }, 10000);
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
