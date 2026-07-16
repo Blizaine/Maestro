@@ -3,6 +3,19 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [1.2.4] - 2026-07-15
+
+Director art-style lock: a vision pass names the reference's medium
+once per run and the validated lead sentence ("Maintain the same ...
+art style.") is prepended to every image prompt deterministically at
+generation time - trailing "preserve the art style" anchors provably
+did nothing. Photographic references skip the prefix. Also: motion-
+blur/speed-line language is stripped from start-frame prompts in code
+(planner energy language leaked into stills), and the performer is
+anchored to the reference image so the image model stops inventing a
+new design for the star. See the
+[README Updates section](README.md#updates).
+
 ## [1.2.3] - 2026-07-15
 
 Community-driven round. Added: an Uploads view in the workspace

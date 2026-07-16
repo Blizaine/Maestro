@@ -75,6 +75,13 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.2.4 (2026-07-15)
+
+**Fixed**
+- **Director now truly holds a stylized reference's art style.** Telling the image model to "preserve the art style" at the end of a prompt does nothing; what works is naming the medium at the very start. Director now looks at your reference once per run, names its style concretely ("black and white cartoon illustration"), and automatically leads every image prompt with "Maintain the same ... art style." Photographic references skip the prefix. Applies to start images, keyframes, the establishing shot, and per-clip reruns.
+- Motion-blur and speed-line requests are stripped from start-frame prompts. The planner's music-video energy language was leaking into still images and the image model obliged with smeared backgrounds; start frames are now always sharp and motion stays in the video prompt where it belongs.
+- The main performer is now anchored to the reference image in image prompts ("the singer from the reference image") instead of being described loosely, which made the image model invent a new character design for the star while giving the reference's look to background characters.
+
 ### v1.2.3 (2026-07-15)
 
 **Added**
