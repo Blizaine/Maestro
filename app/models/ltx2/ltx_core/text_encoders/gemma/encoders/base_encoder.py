@@ -327,7 +327,12 @@ def build_gemma_text_encoder(
     if not gemma_path or not os.path.isfile(gemma_path):
         raise FileNotFoundError(f"Gemma checkpoint not found: {gemma_root}")
     gemma_dir = os.path.dirname(gemma_path)
-    tokenizer_path = fl.locate_folder(os.path.join(_GEMMA_FOLDER))
+    # required_files: the folder must actually CONTAIN the tokenizer —
+    # a weight-only folder in the primary root would otherwise shadow the
+    # complete linked one and AutoTokenizer dies with sentencepiece's
+    # cryptic "not a string" (issue #17).
+    tokenizer_path = fl.locate_folder(os.path.join(_GEMMA_FOLDER),
+                                      required_files=["tokenizer_config.json", "tokenizer.model"])
     config_path = fl.locate_file(os.path.join(_GEMMA_FOLDER, "config_light.json"))
     from accelerate import init_empty_weights
     with init_empty_weights():
@@ -350,7 +355,9 @@ def build_gemma_text_encoder(
 def module_ops_from_gemma_root(gemma_root: str) -> tuple[ModuleOps, ...]:
     gemma_path = gemma_root
     gemma_root = os.path.dirname(gemma_root)
-    tokenizer_path =  fl.locate_folder(os.path.join(_GEMMA_FOLDER)) #, "tokenizer.model"
+    # Same sparse-folder guard as build_gemma_text_encoder (issue #17).
+    tokenizer_path =  fl.locate_folder(os.path.join(_GEMMA_FOLDER),
+                                       required_files=["tokenizer_config.json", "tokenizer.model"])
 
     def load_gemma(module: GemmaTextEncoderModelBase) -> GemmaTextEncoderModelBase:
         config_path = fl.locate_file(os.path.join(_GEMMA_FOLDER, "config.json"))

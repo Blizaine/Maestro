@@ -120,18 +120,36 @@ def get_smart_download_location(file_name = None, force_path = None):
     base_path = os.path.join(root, force_path)
     return base_path if file_name is None else os.path.join(base_path, file_name)
 
-def locate_folder(folder_name, error_if_none = True):
+def locate_folder(folder_name, error_if_none = True, required_files = None):
+    """Find folder_name across the search roots (primary first).
+
+    required_files: optional list of filenames that must exist INSIDE the
+    folder for a root to qualify. Guards against sparse-folder shadowing
+    (issue #17): a folder created in the primary root by one download
+    (e.g. just the text-encoder weight) would otherwise hide the complete
+    folder a linked root provides. When no root satisfies the requirement,
+    falls back to the first existing folder (the pre-parameter behavior)
+    so callers still get their historical best-effort answer.
+    """
     searched_locations = []
     if os.path.isabs(folder_name):
         if os.path.isdir(folder_name): return folder_name
         searched_locations.append(folder_name)
     else:
+        first_existing = None
         for folder in _checkpoints_paths:
             path = os.path.join(folder, folder_name)
             if os.path.isdir(path):
-                return path
+                if not required_files:
+                    return path
+                if all(os.path.isfile(os.path.join(path, f)) for f in required_files):
+                    return path
+                if first_existing is None:
+                    first_existing = path
             searched_locations.append(os.path.abspath(path))
-    if error_if_none: raise Exception(f"Unable to locate folder '{folder_name}', tried {searched_locations}")    
+        if first_existing is not None:
+            return first_existing
+    if error_if_none: raise Exception(f"Unable to locate folder '{folder_name}', tried {searched_locations}")
     return None
 
 

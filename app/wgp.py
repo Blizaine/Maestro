@@ -3551,7 +3551,19 @@ def process_files_def(repoId = None, sourceFolderList = None, fileList = None, t
                      if all(os.path.isfile(os.path.join(root, k)) for k in rel_keys)),
                     None,
                 )
-                if complete_root is None:
+                # Shadow guard (issue #17): when the TARGET root's folder
+                # already exists but is missing files — e.g. the separate
+                # text-encoder weight download created it with only the
+                # weight inside — locate_folder consumers find that sparse
+                # folder FIRST and never reach the complete linked root
+                # behind it. A complete root elsewhere doesn't count then:
+                # finish the target folder so the first hit is
+                # self-sufficient.
+                target_dir = os.path.join(targetRoot, *folder_parts)
+                target_partial = os.path.isdir(target_dir) and not all(
+                    os.path.isfile(os.path.join(targetRoot, k)) for k in rel_keys
+                )
+                if complete_root is None or target_partial:
                     for onefile, rel_key in zip(files, rel_keys):
                         if not os.path.isfile(os.path.join(targetRoot, rel_key)):
                             if len(sourceFolder) > 0:
