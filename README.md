@@ -75,6 +75,11 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.2.7 (2026-07-16)
+
+**Fixed**
+- **LTX generation crash ("TypeError: not a string") on Linked Model Folder installs** — the follow-up to v1.2.6's text-encoder fix. That fix created Maestro's own Gemma folder to hold the downloaded weight, but the folder then hid the linked install's complete folder that has the tokenizer files, and the tokenizer loader crashed. Maestro now completes its own folder with the missing tokenizer files automatically (about 40 MB, once), and folder lookups skip folders that don't actually contain what's being looked for. Affected installs heal themselves on the next generation.
+
 ### v1.2.6 (2026-07-16)
 
 **Fixed**

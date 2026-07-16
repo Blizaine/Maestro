@@ -3,6 +3,17 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [1.2.7] - 2026-07-16
+
+Fix #17, the second domino behind #15 on Linked Model Folder installs:
+the internal gemma folder v1.2.6 creates for the text-encoder weight
+shadowed the linked install's complete folder for locate_folder, so
+the tokenizer load crashed (sentencepiece 'not a string'). The
+downloader now completes a partial target folder even when a linked
+root holds the full set (self-healing, ~40MB once), and locate_folder
+gained required_files so the gemma tokenizer lookups skip folders
+without an actual tokenizer inside.
+
 ## [1.2.6] - 2026-07-16
 
 Fix #15: on Linked Model Folder installs, text encoders (Gemma 13GB,
