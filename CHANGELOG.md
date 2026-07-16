@@ -3,6 +3,19 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [1.2.6] - 2026-07-16
+
+Fix #15: on Linked Model Folder installs, text encoders (Gemma 13GB,
+Qwen 8B) re-downloaded on EVERY generation and then crashed the load.
+download_file moved the weight toward a folder that was never created
+(the linked install had satisfied the tokenizer download read-only),
+and shutil.move to a nonexistent directory renames the file to the
+folder's own name - invisible to the locator forever after. The folder
+is now created before the move, the misnamed leftover is cleaned up
+automatically (existing victims self-heal), and a missing text encoder
+raises a clear error instead of 'Loading Text Encoder None' plus a
+TypeError two layers deeper.
+
 ## [1.2.5] - 2026-07-16
 
 UI delivery hardening after a community black-screen report: MIME

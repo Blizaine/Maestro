@@ -75,6 +75,11 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.2.6 (2026-07-16)
+
+**Fixed**
+- **Endless re-downloading of text encoder models (Gemma, Qwen) on installs using Linked Model Folders.** When the text encoder's target folder didn't exist yet, the downloaded weight was silently renamed to the folder's own name instead of being placed inside it, so Maestro could never find it: every generation re-downloaded the full 13 GB and then crashed with "Loading Text Encoder 'None'". This only happened when a linked install (like an existing Wan2GP) already provided the folder's tokenizer files, which skipped the step that normally creates the folder. The fix also removes the misnamed leftover file automatically, so affected installs heal themselves on the next generation — just update and generate.
+
 ### v1.2.5 (2026-07-16)
 
 **Fixed**
