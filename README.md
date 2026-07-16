@@ -75,6 +75,12 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.2.5 (2026-07-16)
+
+**Fixed**
+- **Black screen on launch for some Windows machines.** The UI's JavaScript was being served with a wrong MIME type on machines where a registry entry was hijacked (Python reads MIME types from the Windows registry), and browsers silently refuse to run module scripts served that way. Maestro now forces the correct types server-side no matter what the registry says. If the UI ever fails to start for any other reason, the black screen is replaced after 10 seconds with a diagnostic page listing recovery steps instead of leaving you guessing.
+- The Classic UI link printed at startup was missing its trailing slash and returned a 404. Both the link and the bare /classic path work now.
+
 ### v1.2.4 (2026-07-15)
 
 **Fixed**

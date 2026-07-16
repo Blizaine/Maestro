@@ -3,6 +3,16 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [1.2.5] - 2026-07-16
+
+UI delivery hardening after a community black-screen report: MIME
+types for the module bundle are forced server-side (Python reads them
+from the Windows registry, which some machines have hijacked to
+text/plain - browsers silently refuse module scripts served that way);
+a boot watchdog replaces any silent load failure with a diagnostic
+page after 10 seconds; and the /classic link works with or without
+the trailing slash (the printed banner URL was a 404).
+
 ## [1.2.4] - 2026-07-15
 
 Director art-style lock: a vision pass names the reference's medium
