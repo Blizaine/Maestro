@@ -3,6 +3,14 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [1.2.8] - 2026-07-16
+
+Fix #16: the My LoRAs library view only walked Maestro's own loras
+folder while the guide scan and Studio selectors already enumerated
+Linked Model Folders. The installed-LoRAs endpoint now uses the scan's
+enumeration (primary + linked roots, deduped, mirror-joined sidecars/
+guides) and entries carry a Linked badge in the browser.
+
 ## [1.2.7] - 2026-07-16
 
 Fix #17, the second domino behind #15 on Linked Model Folder installs:

@@ -75,6 +75,11 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.2.8 (2026-07-16)
+
+**Fixed**
+- **Linked LoRAs now show up in My LoRAs.** The library view only listed Maestro's own loras folder, even though guide generation and the Studio selectors already saw LoRAs from Linked Model Folders. My LoRAs now lists them too — with their names, previews, and generated guides — and marks them with a "Linked" badge so you can tell which library each one comes from.
+
 ### v1.2.7 (2026-07-16)
 
 **Fixed**
