@@ -3629,7 +3629,21 @@ def download_file(url,filename):
             if not os.path.exists(target_path):
                 os.makedirs(target_path)
             hf_hub_download(repo_id=repoId,  filename=onefile, local_dir = temp_dir_path, subfolder=sourceFolder)
-            shutil.move(os.path.join( target_path, onefile), fl.get_download_location() if len(base_dir)==0 else base_dir)
+            final_dir = fl.get_download_location() if len(base_dir)==0 else base_dir
+            # shutil.move(file, missing_dir) RENAMES the file to the dir's
+            # path — a 13GB text encoder became a file literally named
+            # after its target folder, invisible to every locate_file
+            # consumer, so it re-downloaded on every generation and then
+            # crashed the load (issue #15). Only installs whose linked
+            # model folder satisfied the tokenizer/config download hit
+            # this: the internal folder was never created for the weight
+            # to move INTO. Create it, and remove the misnamed-file corpse
+            # a pre-fix run may have left so existing victims self-heal.
+            if os.path.isfile(final_dir):
+                print(f"[download] Removing misnamed file left by a previous failed download: {final_dir}")
+                os.remove(final_dir)
+            os.makedirs(final_dir, exist_ok=True)
+            shutil.move(os.path.join( target_path, onefile), final_dir)
             shutil.rmtree(temp_dir_path)
     else:
         from urllib.request import urlretrieve
@@ -4080,7 +4094,18 @@ def load_models(model_type, override_profile = -1, output_type="video", **model_
         text_encoder_folder = model_def.get("text_encoder_folder", None)
         if text_encoder_filename is not None:
             download_models(text_encoder_filename, file_model_type, 2, -1, force_path =text_encoder_folder)
+            _te_remote = text_encoder_filename
             text_encoder_filename =  get_local_model_filename(text_encoder_filename, extra_paths=text_encoder_folder)
+            # Fail loudly. A None here used to print "Loading Text Encoder
+            # 'None'" and crash deep inside the handler with an unrelated
+            # TypeError (issue #15) — the actual problem is always that the
+            # file isn't where the locator looks after the download step.
+            if text_encoder_filename is None:
+                raise Exception(
+                    f"Text encoder '{os.path.basename(_te_remote)}' could not be located after download "
+                    f"(searched folder '{text_encoder_folder}' across all model roots). The download may "
+                    f"have failed — check disk space and earlier terminal output for download errors."
+                )
             print(f"Loading Text Encoder '{text_encoder_filename}' ...")
 
 

@@ -452,7 +452,11 @@ class family_handler:
             dtype=dtype,
             VAE_dtype=VAE_dtype,
             text_encoder_filename=text_encoder_filename,
-            text_encoder_filepath = model_def.get("text_encoder_folder", os.path.dirname(text_encoder_filename)),
+            # dict.get evaluates its default EAGERLY — os.path.dirname(None)
+            # here crashed even when text_encoder_folder was present in the
+            # def (issue #15's secondary crash). Guard the fallback.
+            text_encoder_filepath = (model_def.get("text_encoder_folder")
+                or (os.path.dirname(text_encoder_filename) if text_encoder_filename else None)),
             checkpoint_paths=checkpoint_paths,
         )
 
