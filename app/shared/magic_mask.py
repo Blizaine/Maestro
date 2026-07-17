@@ -1,0 +1,229 @@
+import os
+import re
+import time
+from pathlib import Path
+from typing import Iterable
+
+import numpy as np
+import torch
+import imageio.v2 as imageio
+from PIL import Image, ImageOps
+
+from shared.utils.audio_video import _get_codec_params
+from shared.utils.utils import get_video_info, has_image_file_extension, rgb_bw_to_rgba_mask, sanitize_file_name
+
+# Ported from upstream WanGP (v12.x). Upstream reads media through its
+# virtual-media layer and get_resampled_video_transparent; Maestro has
+# neither, so videos are decoded with wgp.get_resampled_video instead
+# (masks never need an alpha channel).
+
+PROCESS_ID = "magic_mask"
+PROCESS_NAME = "Magic Mask"
+DOWNLOAD_REPO_ID = "DeepBeepMeep/Wan2.1"
+DOWNLOAD_FOLDER = "sam3"
+DOWNLOAD_FILES = ["sam3.1_multiplex_bf16.safetensors", "bpe_simple_vocab_16e6.txt.gz"]
+DEFAULT_FILL_HOLE_AREA = 2
+DEFAULT_POSTPROCESS_BATCH_SIZE = 1
+OUTPUT_DIR = "mask_outputs"
+
+
+def parse_keywords(keyword_text: "str | Iterable[str]") -> list:
+    if isinstance(keyword_text, str):
+        candidates = re.split(r"[\n,;]+", keyword_text)
+    else:
+        candidates = keyword_text
+    return [str(keyword).strip() for keyword in candidates if str(keyword).strip()]
+
+
+def query_download_def():
+    return {"repoId": DOWNLOAD_REPO_ID, "sourceFolderList": [DOWNLOAD_FOLDER], "fileList": [list(DOWNLOAD_FILES)]}
+
+
+def _fill_hole_area(no_hole):
+    return DEFAULT_FILL_HOLE_AREA if bool(no_hole) else 0
+
+
+def _open_image(image):
+    if isinstance(image, dict):
+        image = image.get("path") or image.get("name") or image.get("orig_name")
+    if isinstance(image, str):
+        image = Image.open(image)
+    if isinstance(image, np.ndarray):
+        image = Image.fromarray(image)
+    if not isinstance(image, Image.Image):
+        raise ValueError("Magic Mask needs a control image.")
+    return ImageOps.exif_transpose(image).convert("RGB")
+
+
+def _media_path(path):
+    if isinstance(path, dict):
+        path = path.get("path") or path.get("name") or path.get("orig_name")
+    return path
+
+
+def _video_to_numpy(video_path, max_time_seconds=None):
+    video_path = _media_path(video_path)
+    if not video_path:
+        raise ValueError("Magic Mask needs a control video.")
+    if isinstance(video_path, str) and has_image_file_extension(video_path):
+        image = _open_image(video_path)
+        width, height = image.size
+        return np.asarray(image, dtype=np.uint8)[None], 1, width, height
+    fps, width, height, frame_count = get_video_info(video_path)
+    fps = fps or 1
+    frame_count = int(frame_count or 1)
+    if max_time_seconds is not None:
+        frame_count = min(frame_count, max(1, int(round(float(fps) * float(max_time_seconds)))))
+    from wgp import get_resampled_video
+    frames = get_resampled_video(video_path, 0, frame_count, fps, bridge="torch")
+    if torch.is_tensor(frames):
+        frames = frames.detach().cpu().numpy()
+    elif hasattr(frames, "asnumpy"):
+        frames = frames.asnumpy()
+    else:
+        frames = np.asarray(frames)
+    if frames.ndim != 4 or frames.shape[0] == 0:
+        raise ValueError("Magic Mask could not read any control video frames.")
+    if frames.shape[-1] > 3:
+        frames = frames[..., :3]
+    if frames.shape[-1] == 1:
+        frames = np.repeat(frames, 3, axis=-1)
+    if width > 0 and height > 0 and frames.shape[1:3] != (height, width):
+        frames = np.stack([np.asarray(Image.fromarray(frame).resize((width, height), resample=Image.Resampling.LANCZOS)) for frame in frames], axis=0)
+    return frames.astype(np.uint8, copy=False), fps, width, height
+
+
+def _run_sam3(video: np.ndarray, keywords: list, batch_size, no_hole, progress_callback=None, colorize_objects=False, color_palette=None, max_colored_objects=None) -> np.ndarray:
+    from preprocessing.sam3.preprocessor import run_sam3_video
+
+    with torch.inference_mode():
+        return run_sam3_video(
+            video,
+            keywords,
+            batched_grounding_batch_size=batch_size,
+            postprocess_batch_size=DEFAULT_POSTPROCESS_BATCH_SIZE,
+            use_batched_grounding=True,
+            keep_video_frames_on_cuda=False,
+            fill_hole_area=_fill_hole_area(no_hole),
+            colorize_objects=colorize_objects,
+            color_palette=color_palette,
+            max_colored_objects=max_colored_objects,
+            progress_callback=progress_callback,
+        )
+
+
+def prepare_image_mask_input(image):
+    image = _open_image(image)
+    return image, np.asarray(image, dtype=np.uint8)[None]
+
+
+def prepare_video_mask_input(video_path, max_time_seconds=None):
+    video_path = _media_path(video_path)
+    if not video_path:
+        raise ValueError("Magic Mask needs a control video.")
+    video, fps, _, _ = _video_to_numpy(video_path, max_time_seconds=max_time_seconds)
+    return video_path, video, fps
+
+
+def generate_keyword_masks(video: np.ndarray, keyword_text, *, batch_size=None, no_hole=True, progress_callback=None, colorize_objects=False, color_palette=None, max_colored_objects=None) -> np.ndarray:
+    keywords = parse_keywords(keyword_text)
+    if len(keywords) == 0:
+        return np.zeros((*video.shape[:3], 3), dtype=np.uint8) if colorize_objects else np.zeros(video.shape[:3], dtype=np.bool_)
+    return _run_sam3(video, keywords, batch_size, no_hole, progress_callback=progress_callback, colorize_objects=colorize_objects, color_palette=color_palette, max_colored_objects=max_colored_objects)
+
+
+def merge_keyword_masks(current_mask, keyword_mask: np.ndarray) -> np.ndarray:
+    if keyword_mask.ndim == 4 and keyword_mask.shape[-1] == 3:
+        if current_mask is None:
+            return keyword_mask.copy()
+        merged = current_mask.copy()
+        selector = keyword_mask.any(axis=-1)
+        merged[selector] = keyword_mask[selector]
+        return merged
+    keyword_mask = keyword_mask.astype(bool, copy=False)
+    return keyword_mask.copy() if current_mask is None else (current_mask | keyword_mask)
+
+
+def finalize_masks(mask: np.ndarray, *, negative_mask=False) -> np.ndarray:
+    if mask.ndim >= 3 and mask.shape[-1] == 3:
+        if negative_mask:
+            return ~mask.any(axis=-1)
+        return mask.astype(np.uint8, copy=False)
+    if negative_mask:
+        mask = ~mask
+    return mask
+
+
+def mask_to_image(mask: np.ndarray) -> Image.Image:
+    if mask.ndim == 3 and mask.shape[-1] == 3:
+        return Image.fromarray(mask.astype(np.uint8, copy=False), mode="RGB")
+    return Image.fromarray(mask.astype(np.uint8) * 255, mode="L")
+
+
+def _magic_mask_video_codec_params():
+    params = dict(_get_codec_params("libx264_10", "mp4"))
+    params["macro_block_size"] = 1
+    if params.get("pixelformat") == "yuv420p":
+        params["pixelformat"] = "yuv444p"
+    return params
+
+
+def save_mask_video(video_path: str, masks: np.ndarray, fps: float, keywords: list, *, codec_type=None, output_dir=OUTPUT_DIR, abort_callback=None, background_color=None) -> str:
+    # codec_type is kept for compatibility; Magic Mask outputs are always MP4 libx264_10.
+    if masks.ndim == 4 and masks.shape[-1] == 3:
+        mask_frames = masks.astype(np.uint8, copy=True)
+        if background_color is not None:
+            mask_frames[~mask_frames.any(axis=-1)] = np.asarray(background_color, dtype=np.uint8)
+    else:
+        masks = masks.astype(np.uint8) * 255
+        mask_frames = np.repeat(masks[..., None], 3, axis=-1)
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    stem = Path(video_path).stem
+    keywords_suffix = truncate_keywords_for_path(keywords)
+    output_path = Path(output_dir) / f"{sanitize_file_name(stem)}_magic_mask_{keywords_suffix}_{time.strftime('%Y%m%d_%H%M%S')}.mp4"
+    output_path = os.fspath(output_path)
+    writer = imageio.get_writer(output_path, fps=fps, ffmpeg_log_level="error", **_magic_mask_video_codec_params())
+    try:
+        for frame in mask_frames:
+            if abort_callback is not None:
+                abort_callback()
+            writer.append_data(frame)
+    finally:
+        writer.close()
+    return output_path
+
+
+def generate_image_mask(image, keyword_text, *, batch_size=None, no_hole=True, negative_mask=False, colorize_objects=False, color_palette=None, max_colored_objects=None):
+    keywords = parse_keywords(keyword_text)
+    if len(keywords) == 0:
+        raise ValueError("Enter at least one keyword.")
+    image, video = prepare_image_mask_input(image)
+    mask = finalize_masks(_run_sam3(video, keywords, batch_size, no_hole, colorize_objects=colorize_objects, color_palette=color_palette, max_colored_objects=max_colored_objects)[0], negative_mask=negative_mask)
+    mask_image = mask_to_image(mask)
+    return image, mask_image, keywords
+
+
+def generate_video_mask(video_path, keyword_text, *, batch_size=None, no_hole=True, negative_mask=False, codec_type=None, output_dir=OUTPUT_DIR, colorize_objects=False, color_palette=None, max_colored_objects=None, background_color=None, max_time_seconds=None):
+    keywords = parse_keywords(keyword_text)
+    if len(keywords) == 0:
+        raise ValueError("Enter at least one keyword.")
+    video_path, video, fps = prepare_video_mask_input(video_path, max_time_seconds=max_time_seconds)
+    masks = finalize_masks(_run_sam3(video, keywords, batch_size, no_hole, colorize_objects=colorize_objects, color_palette=color_palette, max_colored_objects=max_colored_objects), negative_mask=negative_mask)
+    return save_mask_video(video_path, masks, fps, keywords, output_dir=output_dir, background_color=background_color), keywords
+
+
+def truncate_keywords_for_path(keywords: list) -> str:
+    suffix = sanitize_file_name("_".join(keywords), "_").strip("_")
+    return suffix[:40] or "mask"
+
+
+def mask_image_to_rgba_layer(mask_image: Image.Image):
+    if mask_image.mode == "RGB":
+        rgb = np.asarray(mask_image, dtype=np.uint8)
+        alpha = (rgb.any(axis=-1).astype(np.uint8) * 255)
+        return Image.fromarray(np.dstack([rgb, alpha]), mode="RGBA")
+    return rgb_bw_to_rgba_mask(mask_image)
+
+
+def build_image_editor_value(background: Image.Image, mask_image: Image.Image):
+    return {"background": background, "composite": None, "layers": [mask_image_to_rgba_layer(mask_image)]}

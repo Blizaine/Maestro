@@ -9,21 +9,31 @@ from PIL import Image
 from shared.utils.hf import build_hf_url
 from shared.utils import files_locator as fl
 from .kiwi.variant_config import get_kiwi_variant_model_def
+from .scail2 import (
+    SCAIL2_ANIMATE_PREPROCESSING_POSE,
+    SCAIL2_ANIMATE_PREPROCESSING_RAW,
+    SCAIL2_INFOS,
+    custom_image_ref_postprocessor_scail2,
+    custom_preprocess_scail2,
+    preprocess_all_scail2,
+    test_scail2,
+    test_scail2_replace,
+)
 
 def test_vace(base_model_type):
     return base_model_type in ["vace_14B", "vace_14B_2_2", "vace_1.3B", "vace_multitalk_14B", "vace_standin_14B", "vace_lynx_14B", "vace_ditto_14B"]     
 
 def test_class_i2v(base_model_type):
-    return base_model_type in ["i2v", "i2v_2_2", "fun_inp_1.3B", "fun_inp", "flf2v_720p",  "fantasy",  "multitalk", "infinitetalk", "i2v_2_2_multitalk", "animate", "chrono_edit", "steadydancer", "wanmove", "scail", "i2v_2_2_svi2pro" ]
+    return base_model_type in ["i2v", "i2v_2_2", "fun_inp_1.3B", "fun_inp", "flf2v_720p",  "fantasy",  "multitalk", "infinitetalk", "i2v_2_2_multitalk", "animate", "chrono_edit", "steadydancer", "wanmove", "scail", "scail2_14B", "scail2_1.3B", "i2v_2_2_svi2pro" ]
 
 def test_class_t2v(base_model_type):    
     return base_model_type in ["t2v", "t2v_2_2", "alpha", "alpha2", "lynx"]
 
 def test_oneframe_overlap(base_model_type):
-    return test_class_i2v(base_model_type) and not (test_multitalk(base_model_type) or base_model_type in ["animate", "scail"] or test_svi2pro(base_model_type))  or test_wan_5B(base_model_type)
+    return test_class_i2v(base_model_type) and not (test_multitalk(base_model_type) or base_model_type in ["animate", "scail"] or test_scail2(base_model_type) or test_svi2pro(base_model_type))  or test_wan_5B(base_model_type)
 
-def test_class_1_3B(base_model_type):    
-    return base_model_type in [ "vace_1.3B", "t2v_1.3B", "recam_1.3B","phantom_1.3B","fun_inp_1.3B"]
+def test_class_1_3B(base_model_type):
+    return base_model_type in [ "vace_1.3B", "t2v_1.3B", "recam_1.3B","phantom_1.3B","fun_inp_1.3B", "scail2_1.3B"]
 
 def test_multitalk(base_model_type):
     return base_model_type in ["multitalk", "vace_multitalk_14B", "i2v_2_2_multitalk", "infinitetalk"]
@@ -53,7 +63,7 @@ class family_handler():
         return ["multitalk", "infinitetalk", "fantasy", "vace_14B", "vace_14B_2_2", "vace_multitalk_14B", "vace_standin_14B", "vace_lynx_14B",
                     "t2v_1.3B", "standin", "lynx_lite", "lynx", "t2v", "t2v_2_2", "vace_1.3B", "vace_ditto_14B", "phantom_1.3B", "phantom_14B",
                     "recam_1.3B", "animate", "alpha", "alpha2", "alpha_lynx", "chrono_edit",
-                    "i2v", "i2v_2_2", "i2v_2_2_multitalk", "ti2v_2_2", "lucy_edit", "kiwi_edit", "flf2v_720p", "fun_inp_1.3B", "fun_inp", "mocha", "steadydancer", "wanmove", "scail", "i2v_2_2_svi2pro"]
+                    "i2v", "i2v_2_2", "i2v_2_2_multitalk", "ti2v_2_2", "lucy_edit", "kiwi_edit", "flf2v_720p", "fun_inp_1.3B", "fun_inp", "mocha", "steadydancer", "wanmove", "scail", "scail2_14B", "scail2_1.3B", "i2v_2_2_svi2pro"]
 
 
     @staticmethod
@@ -132,6 +142,8 @@ class family_handler():
         wan_1_3b_dir = getattr(args, "lora_dir_wan_1_3b", None) or os.path.join(lora_root, "wan_1.3B")
         wan_5b_dir = getattr(args, "lora_dir_wan_5b", None) or os.path.join(lora_root, "wan_5B")
 
+        if test_scail2(base_model_type):
+            return wan_i2v_dir
         if i2v:
             return wan_i2v_dir
         if "1.3B" in base_model_type:
@@ -209,6 +221,7 @@ class family_handler():
         extra_model_def["color_correction"] = True
         extra_model_def["svi2pro"] = svi2pro = test_svi2pro(base_model_type)
         extra_model_def["i2v_2_2"] = i2v_2_2 = test_i2v_2_2(base_model_type)
+        extra_model_def["scail2"] = scail2 = test_scail2(base_model_type)
         if base_model_type == "kiwi_edit":
             extra_model_def.update(get_kiwi_variant_model_def(model_def))
             text_encoder_folder = override_text_encoder_folder or extra_model_def["kiwi_text_encoder_folder"]
@@ -242,7 +255,7 @@ class family_handler():
         if base_model_type in ["t2v_2_2", "vace_14B_2_2"] or test_i2v_2_2(base_model_type):
             profiles_dir = "wan_2_2"
             group = "wan2_2"
-        elif i2v:
+        elif scail2 or i2v:
             profiles_dir = "wan_i2v"
             if base_model_type in ["chrono_edit"]:
                 profiles_dir = "wan_chrono_edit"
@@ -380,24 +393,37 @@ class family_handler():
             extra_model_def["no_mask_refresh"] = True
             extra_model_def["control_video_trim"] = True
 
-        if base_model_type in ["scail"]:
+        if base_model_type in ["scail"] or scail2:
             extra_model_def["guide_custom_choices"] = {
                 "choices": [
+                    ("Animate One Person", "V1"),
+                    ("Animate Two Persons", "V2"),
+                    ("Animate Three Persons", "V3"),
+                    ("Animate Four Persons", "V4"),
+                    ("Animate Five Persons", "V5"),
+                    ("Replace One Person", "V01"),
+                    ("Replace Two Persons", "V02"),
+                    ("Replace Three Persons", "V03"),
+                    ("Replace Four Persons", "V04"),
+                    ("Replace Five Persons", "V05"),
+                ] if scail2 else [
                     ("Animate One Person", "V#1#"),
                     ("Animate Two Persons", "V#2#"),
                     ("Animate Three Persons", "V#3#"),
                     ("Animate Four Persons", "V#4#"),
                     ("Animate Five Persons", "V#5#"),
                 ],
-                "default": "V#1#",
-                "letters_filter": "V#12345",
+                "default": "V1" if scail2 else "V#1#",
+                "letters_filter": "V012345" if scail2 else "V#12345",
                 "label": "Type of Process",
                 "scale": 3,
                 "show_label": True,
             }
-
-            extra_model_def["preprocess_all"] = True
-            extra_model_def["custom_preprocessor"] = "Extracting 3D Pose (NLFPose)"
+            if scail2:
+                extra_model_def["fake_start_image"] = True
+                extra_model_def["fit_into_canvas_image_refs"] = 0
+            extra_model_def["preprocess_all"] = preprocess_all_scail2 if scail2 else True
+            extra_model_def["custom_preprocessor"] = "Preparing Scail2 Inputs" if scail2 else "Extracting 3D Pose (NLFPose)"
             extra_model_def["forced_guide_mask_inputs"] = True
             extra_model_def["keep_frames_video_guide_not_supported"] = True
             extra_model_def["mask_preprocessing"] = {
@@ -409,14 +435,48 @@ class family_handler():
             extra_model_def["extract_guide_from_window_start"] = True
 
             extra_model_def["return_image_refs_tensor"] = True
-            # extra_model_def["image_ref_choices"] = {
-            #     "choices": [
-            #         ("No Reference Image", ""),
-            #         ("Reference Image of People", "I"),
-            #         ],
-            #     "visible": True,
-            #     "letters_filter":"I",
-            # }
+            if scail2:
+                extra_model_def["infos"] = model_def.get("infos", SCAIL2_INFOS)
+                extra_model_def["custom_image_ref_postprocessor"] = custom_image_ref_postprocessor_scail2
+                extra_model_def["custom_settings"] = list(model_def.get("custom_settings", [])) if isinstance(model_def.get("custom_settings", []), list) else []
+                extra_model_def["custom_settings"].append({
+                    "id": "scail2_animate_preprocessing",
+                    "name": "Animate preprocessing",
+                    "label": "Animate Preprocessing",
+                    "type": "dropdown",
+                    "default": SCAIL2_ANIMATE_PREPROCESSING_RAW,
+                    "choices": [
+                        ("Use Raw Control Video Content", SCAIL2_ANIMATE_PREPROCESSING_RAW),
+                        ("Extract 3D Pose information", SCAIL2_ANIMATE_PREPROCESSING_POSE),
+                    ],
+                    "video_prompt_type": "V",
+                    "video_prompt_type_not": "0",
+                })
+                extra_model_def["custom_settings"].append({
+                    "id": "image_ref_keyword_content",
+                    "name": "Image Ref Keyword content",
+                    "label": "Image Ref Keyword content",
+                    "type": "text",
+                    "default": "human character",
+                    "video_prompt_type": "I",
+                })
+                extra_model_def["image_ref_choices"] = {
+                    "choices": [
+                        ("None", ""),
+                        ("Reference Images", "I"),
+                    ],
+                    "default": "",
+                    "label": "Reference Images",
+                    "letters_filter": "KI",
+                    "visible": True,
+                }
+                extra_model_def["no_background_removal"] = True
+                extra_model_def["magic_mask_object_colors"] = [(0, 0, 255), (255, 0, 0), (0, 255, 0), (255, 0, 255), (0, 255, 255), (255, 255, 0)]
+                extra_model_def["video_mask_label"] = "Video Mask, each Colored Mask corresponds to a person to Animate"
+                extra_model_def["custom_preprocessor_raw_inputs"] = True
+                extra_model_def["video_mask_replace_background_color"] = [255, 255, 255]
+                extra_model_def["background_removal_color"] = [255, 255, 255]
+                extra_model_def["ref_matte_background_color"] = [0, 0, 0]
 
         if base_model_type in ["infinitetalk"]: 
             extra_model_def["no_background_removal"] = True
@@ -673,6 +733,8 @@ class family_handler():
             image_prompt_types_allowed = "TSVL"
         elif base_model_type in ["lucy_edit", "kiwi_edit"]:
             image_prompt_types_allowed = "TVL"
+        elif scail2:
+            image_prompt_types_allowed = "TSV"
         elif multitalk or base_model_type in ["fantasy", "steadydancer", "scail"]:
             image_prompt_types_allowed = "SVL"
         elif svi2pro:
@@ -713,7 +775,7 @@ class family_handler():
 
     @staticmethod
     def get_vae_block_size(base_model_type):
-        return 32 if test_wan_5B(base_model_type) or base_model_type in ["scail"] else 16
+        return 32 if test_wan_5B(base_model_type) or base_model_type in ["scail"] or test_scail2(base_model_type) else 16
 
     @staticmethod
     def get_rgb_factors(base_model_type ):
@@ -755,7 +817,7 @@ class family_handler():
                 "fileList" : [ [ "models_clip_open-clip-xlm-roberta-large-vit-huge-14-bf16.safetensors", "sentencepiece.bpe.model", "special_tokens_map.json", "tokenizer.json", "tokenizer_config.json"], wan_files ]   
             }]
 
-        if base_model_type == "scail":
+        if base_model_type == "scail" or test_scail2(base_model_type):
             download_def += [
                 {
                     "repoId": "DeepBeepMeep/Wan2.1",
@@ -763,12 +825,19 @@ class family_handler():
                     "fileList": [["nlf_l_multi_0.3.2.eager.safetensors", "nlf_l_multi_0.3.2.eager.meta.json"]],
                 }
             ]
+            if test_scail2(base_model_type):
+                from shared import magic_mask
+
+                download_def.append(magic_mask.query_download_def())
 
         return download_def
 
     @staticmethod
     def custom_preprocess(base_model_type, video_guide, video_mask, pre_video_guide=None,  max_workers = 1, expand_scale = 0, video_prompt_type = None, **kwargs):
         from shared.utils.utils import convert_tensor_to_image
+
+        if test_scail2(base_model_type):
+            return custom_preprocess_scail2(video_guide, video_mask, pre_video_guide=pre_video_guide, max_workers=max_workers, expand_scale=expand_scale, video_prompt_type=video_prompt_type, **kwargs)
 
         ref_image = convert_tensor_to_image(pre_video_guide[:, 0])
         frames = video_guide
@@ -1065,6 +1134,23 @@ class family_handler():
                 "sliding_window_overlap" : 1,
                 "sliding_window_size": 81,
             })
+        elif test_scail2(base_model_type):
+            ui_defaults.update({
+                "video_prompt_type": "V1",
+                "image_prompt_type": "S",
+                "audio_prompt_type": "R",
+                "force_fps": "control",
+                "sliding_window_overlap" : 5,
+                "sliding_window_size": 81,
+                "num_inference_steps": 40,
+                "flow_shift": 3,
+                "guidance_scale": 5.0,
+                "remove_background_images_ref": 0,
+                "custom_settings": {
+                    "scail2_animate_preprocessing": SCAIL2_ANIMATE_PREPROCESSING_RAW,
+                    "image_ref_keyword_content": "human character",
+                },
+            })
 
         if test_svi2pro(base_model_type):
             ui_defaults.update({
@@ -1095,7 +1181,22 @@ class family_handler():
     
     @staticmethod
     def validate_generative_settings(base_model_type, model_def, inputs):
-        if base_model_type in ["infinitetalk"]:
+        if test_scail2(base_model_type):
+            image_prompt_type = inputs.get("image_prompt_type", "") or ""
+            video_prompt_type = inputs.get("video_prompt_type", "") or ""
+            if test_scail2_replace(video_prompt_type):
+                if any(flag in image_prompt_type for flag in "SVL"):
+                    return "SCAIL-2 Replace mode uses the Control Video as the source; set Location to Text Prompt."
+                if inputs.get("image_refs", None) is None:
+                    return "SCAIL-2 Replace mode requires a Reference Image."
+                if "A" not in video_prompt_type or "N" in video_prompt_type:
+                    return "SCAIL-2 Replace mode requires Persons Locations set to Masked Area."
+                if inputs.get("video_mask", None) is None:
+                    return "SCAIL-2 Replace mode requires a Video Mask."
+            elif not any(flag in image_prompt_type for flag in "SV"):
+                return "SCAIL-2 Animate mode requires Location set to Start Image or Continue Video."
+
+        elif base_model_type in ["infinitetalk"]:
             video_source = inputs["video_source"]
             image_refs = inputs["image_refs"]
             video_prompt_type = inputs["video_prompt_type"]

@@ -4503,7 +4503,8 @@ def refresh_gallery(state): #, msg
         multi_prompts_gen_type = params["multi_prompts_gen_type"]
         base_model_type = get_base_model_type(model_type)
         model_def = get_model_def(model_type) 
-        onemorewindow_visible = test_any_sliding_window(base_model_type) and params.get("image_mode",0) == 0 and (not params.get("mode","").startswith("edit_")) and not model_def.get("preprocess_all", False)
+        preprocess_all = resolve_model_preprocess_all(model_def, base_model_type=base_model_type, video_prompt_type=params.get("video_prompt_type", ""), image_prompt_type=params.get("image_prompt_type", ""), audio_prompt_type=params.get("audio_prompt_type", ""), custom_settings=params.get("custom_settings", {}), params=params)
+        onemorewindow_visible = test_any_sliding_window(base_model_type) and params.get("image_mode",0) == 0 and (not params.get("mode","").startswith("edit_")) and not preprocess_all
         early_stop_visible = bool(model_def.get("supports_early_stop", False))
         enhanced = False
         if prompt.startswith("!enhanced!\n"):
@@ -6498,7 +6499,11 @@ def resolve_mux_audio_sampling_rate(default_rate, source_audio_metadata=None, au
     return max(sample_rates)
 
 
-def custom_preprocess_video_with_mask(model_handler, base_model_type, pre_video_guide, video_guide, video_mask, height, width, max_frames, start_frame, fit_canvas, fit_crop, target_fps,  block_size, expand_scale, video_prompt_type):
+def resolve_model_preprocess_all(model_def, **kwargs):
+    preprocess_all = model_def.get("preprocess_all", False)
+    return preprocess_all(**kwargs) if callable(preprocess_all) else preprocess_all
+
+def custom_preprocess_video_with_mask(model_handler, base_model_type, pre_video_guide, video_guide, video_mask, height, width, max_frames, start_frame, fit_canvas, fit_crop, target_fps,  block_size, expand_scale, video_prompt_type, model_def=None, custom_settings=None):
     pad_frames = 0
     if start_frame < 0:
         pad_frames= -start_frame
@@ -6509,15 +6514,19 @@ def custom_preprocess_video_with_mask(model_handler, base_model_type, pre_video_
 
     if not video_guide or max_frames <= 0:
         return None, None, None, None
-    video_guide = get_resampled_video(video_guide, start_frame, max_frames, target_fps).permute(-1, 0, 1, 2)
-    video_guide = video_guide / 127.5 - 1.
+    model_def = model_def or {}
+    raw_custom_preprocessor_inputs = model_def.get("custom_preprocessor_raw_inputs", False)
+    video_guide = get_resampled_video(video_guide, start_frame, max_frames, target_fps)
+    if not raw_custom_preprocessor_inputs:
+        video_guide = video_guide.permute(-1, 0, 1, 2) / 127.5 - 1.
     any_mask = video_mask is not None
     if video_mask is not None:
-        video_mask = get_resampled_video(video_mask, start_frame, max_frames, target_fps).permute(-1, 0, 1, 2)
-        video_mask = video_mask[:1] / 255.
+        video_mask = get_resampled_video(video_mask, start_frame, max_frames, target_fps)
+        if not raw_custom_preprocessor_inputs:
+            video_mask = video_mask.permute(-1, 0, 1, 2)[:1] / 255.
 
     # Mask filtering: resize, binarize, expand mask and keep only masked areas of video guide
-    if any_mask:
+    if any_mask and not raw_custom_preprocessor_inputs:
         invert_mask = "N" in video_prompt_type
         import concurrent.futures
         tgt_h, tgt_w = video_guide.shape[2], video_guide.shape[3]
@@ -6537,10 +6546,12 @@ def custom_preprocess_video_with_mask(model_handler, base_model_type, pre_video_
             video_mask = torch.stack([f.result() for f in [ex.submit(process_mask, i) for i in range(video_mask.shape[1])]]).unsqueeze(0)
         video_guide = video_guide * video_mask + (-1) * (1-video_mask)
 
-    if video_guide.shape[1] == 0 or any_mask and video_mask.shape[1] == 0:
+    guide_frame_count = video_guide.shape[0] if raw_custom_preprocessor_inputs else video_guide.shape[1]
+    mask_frame_count = video_mask.shape[0] if raw_custom_preprocessor_inputs and any_mask else video_mask.shape[1] if any_mask else 0
+    if guide_frame_count == 0 or any_mask and mask_frame_count == 0:
         return None, None, None, None
-    
-    video_guide_processed, video_guide_processed2, video_mask_processed, video_mask_processed2  = model_handler.custom_preprocess(base_model_type = base_model_type, pre_video_guide = pre_video_guide, video_guide = video_guide, video_mask = video_mask, height = height, width = width, fit_canvas = fit_canvas , fit_crop = fit_crop, target_fps = target_fps,  block_size = block_size, max_workers = max_workers, expand_scale = expand_scale, video_prompt_type=video_prompt_type)
+
+    video_guide_processed, video_guide_processed2, video_mask_processed, video_mask_processed2  = model_handler.custom_preprocess(base_model_type = base_model_type, pre_video_guide = pre_video_guide, video_guide = video_guide, video_mask = video_mask, height = height, width = width, fit_canvas = fit_canvas , fit_crop = fit_crop, target_fps = target_fps,  block_size = block_size, max_workers = max_workers, expand_scale = expand_scale, video_prompt_type=video_prompt_type, model_def=model_def, custom_settings=custom_settings)
 
     # if pad_frames > 0:
     #     masked_frames = masked_frames[0] * pad_frames + masked_frames
@@ -7126,6 +7137,7 @@ def generate_video(
     hunyuan_custom_edit =  hunyuan_custom and "edit" in model_filename
     fantasy = base_model_type in ["fantasy"]
     multitalk = model_def.get("multitalk_class", False)
+    fake_start_image = model_def.get("fake_start_image", False) and image_start is not None
 
     if "B" in audio_prompt_type or "X" in audio_prompt_type:
         from models.wan.multitalk.multitalk import parse_speakers_locations
@@ -7548,6 +7560,8 @@ def generate_video(
                     image_size  = pre_video_guide.shape[-2:]
                     sample_fit_canvas = None
                 guide_start_frame =  prefix_video.shape[1]
+                if fake_start_image:
+                    source_video_overlap_frames_count = source_video_frames_count = guide_start_frame = 0
             if image_end is not None:
                 image_end_list=  image_end if isinstance(image_end, list) else [image_end]
                 if len(image_end_list) >= window_no:
@@ -7701,7 +7715,7 @@ def generate_video(
                 keep_frames_parsed += keep_frames_parsed_full[max(0, guide_frames_extract_start): aligned_guide_end_frame ] 
                 guide_frames_extract_count = len(keep_frames_parsed)
 
-                process_all = model_def.get("preprocess_all", False)
+                process_all = resolve_model_preprocess_all(model_def, base_model_type=base_model_type, video_prompt_type=video_prompt_type, image_prompt_type=image_prompt_type, audio_prompt_type=audio_prompt_type, custom_settings=custom_settings)
                 if process_all:
                     guide_slice_to_extract  = guide_frames_extract_count
                     guide_frames_extract_count = (-guide_frames_extract_start if guide_frames_extract_start  <0 else 0) +  len( keep_frames_parsed_full[max(0, guide_frames_extract_start):] )
@@ -7731,7 +7745,7 @@ def generate_video(
                     if custom_preprocessor is not None:
                         status_info = custom_preprocessor
                         send_cmd("progress", [0, get_latest_status(state, status_info)])
-                        video_guide_processed, video_guide_processed2, video_mask_processed, video_mask_processed2 =  custom_preprocess_video_with_mask(model_handler, base_model_type, pre_video_guide, video_guide if sparse_video_image is None else sparse_video_image, video_mask, height=image_size[0], width = image_size[1], max_frames= guide_frames_extract_count, start_frame = guide_frames_extract_start, fit_canvas = sample_fit_canvas, fit_crop = fit_crop, target_fps = fps,  block_size = block_size, expand_scale = mask_expand, video_prompt_type= video_prompt_type)
+                        video_guide_processed, video_guide_processed2, video_mask_processed, video_mask_processed2 =  custom_preprocess_video_with_mask(model_handler, base_model_type, pre_video_guide, video_guide if sparse_video_image is None else sparse_video_image, video_mask, height=image_size[0], width = image_size[1], max_frames= guide_frames_extract_count, start_frame = guide_frames_extract_start, fit_canvas = sample_fit_canvas, fit_crop = fit_crop, target_fps = fps,  block_size = block_size, expand_scale = mask_expand, video_prompt_type= video_prompt_type, model_def=model_def, custom_settings=custom_settings)
                     else:
                         status_info = "Extracting " + processes_names[preprocess_type]
                         extra_process_list = ([] if preprocess_type2==None else [preprocess_type2]) + ([] if process_outside_mask==None or process_outside_mask == preprocess_type else [process_outside_mask])
@@ -7842,15 +7856,22 @@ def generate_video(
                                                                                         ignore_last_refs =model_def.get("no_processing_on_last_images_refs",0),
                                                                                         background_removal_color = model_def.get("background_removal_color", [255, 255, 255] ))
 
+            custom_postprocessor = model_def.get("custom_image_ref_postprocessor", None)
+            if window_no == 1 and repeat_no == 1 and custom_postprocessor is not None:
+                src_ref_images, src_ref_masks = custom_postprocessor(
+                    src_ref_images, src_ref_masks, image_size[1], image_size[0], image_start, image_prompt_type, image_end, video_prompt_type,
+                    send_cmd, model_def, custom_settings, image_start_tensor=image_start_tensor, pre_video_frame=pre_video_frame
+                )
+
             frames_to_inject_parsed = frames_to_inject[ window_start_frame if extract_guide_from_window_start else guide_start_frame: guide_end_frame]
             if video_guide is not None or len(frames_to_inject_parsed) > 0 or model_def.get("forced_guide_mask_inputs", False): 
                 any_mask = video_mask is not None or model_def.get("forced_guide_mask_inputs", False)
                 any_guide_padding = model_def.get("pad_guide_video", False)
                 dont_cat_preguide = extract_guide_from_window_start or model_def.get("dont_cat_preguide", False) or sparse_video_image is not None 
                 from shared.utils.utils import prepare_video_guide_and_mask
-                src_videos, src_masks = prepare_video_guide_and_mask(   [video_guide_processed] + ([] if video_guide_processed2 is None else [video_guide_processed2]), 
+                src_videos, src_masks = prepare_video_guide_and_mask(   [video_guide_processed] + ([] if video_guide_processed2 is None else [video_guide_processed2]),
                                                                         [video_mask_processed] + ([] if video_guide_processed2 is None else [video_mask_processed2]),
-                                                                        None if dont_cat_preguide else pre_video_guide, 
+                                                                        None if dont_cat_preguide or fake_start_image and window_no==1 else pre_video_guide,
                                                                         image_size, current_video_length, latent_size,
                                                                         any_mask, any_guide_padding, guide_inpaint_color, 
                                                                         keep_frames_parsed, frames_to_inject_parsed , outpainting_dims)
@@ -8038,6 +8059,7 @@ def generate_video(
                     outpainting_dims = outpainting_dims,
                     face_arc_embeds = face_arc_embeds,
                     custom_settings=custom_settings_for_model,
+                    save_masks=args.save_masks,
                     temperature=temperature,
                     window_start_frame_no = window_start_frame,
                     input_video_strength = input_video_strength,
