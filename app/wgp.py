@@ -3567,13 +3567,13 @@ def process_files_def(repoId = None, sourceFolderList = None, fileList = None, t
                     for onefile, rel_key in zip(files, rel_keys):
                         if not os.path.isfile(os.path.join(targetRoot, rel_key)):
                             if len(sourceFolder) > 0:
-                                hf_hub_download(repo_id=repoId,  filename=onefile, local_dir = local_dir, subfolder=sourceFolder)
+                                hf_download_with_public_fallback(repo_id=repoId,  filename=onefile, local_dir = local_dir, subfolder=sourceFolder)
                             else:
-                                hf_hub_download(repo_id=repoId,  filename=onefile, local_dir = local_dir)
+                                hf_download_with_public_fallback(repo_id=repoId,  filename=onefile, local_dir = local_dir)
             else:
                 for onefile in files:
                     if fl.locate_file(onefile, error_if_none= False) is None:
-                        hf_hub_download(repo_id=repoId,  filename=onefile, local_dir = local_dir)
+                        hf_download_with_public_fallback(repo_id=repoId,  filename=onefile, local_dir = local_dir)
 
 
 def download_mmaudio(variant_override=None):
@@ -3625,6 +3625,28 @@ def download_mmaudio(variant_override=None):
                 print(f"[MMAudio] NSFW model saved to {target_path}")
 
 
+def hf_download_with_public_fallback(**kwargs):
+    """hf_hub_download that survives a stale local Hugging Face token.
+
+    huggingface_hub attaches the machine's cached token to EVERY request.
+    An expired or corrupt token makes Hugging Face answer 401 ("OAuth
+    token signature verification failed") even for fully public files —
+    issue #20: SCAIL-2's public checkpoint reported as 'Repository Not
+    Found'. Retry anonymously on 401 so public downloads work regardless
+    of local token state; valid tokens (needed for gated repos) are still
+    used on the first attempt.
+    """
+    try:
+        return hf_hub_download(**kwargs)
+    except Exception as e:
+        msg = str(e)
+        if "401" in msg or "Invalid credentials" in msg or "signature verification failed" in msg:
+            print("[download] Hugging Face rejected this machine's saved token (401). "
+                  "Retrying anonymously — public files download fine without it. "
+                  "If you use gated models, refresh the token with 'huggingface-cli login'.")
+            return hf_hub_download(token=False, **kwargs)
+        raise
+
 def download_file(url,filename):
     if url.startswith("https://huggingface.co/") and "/resolve/main/" in url:
         base_dir = os.path.dirname(filename)
@@ -3634,13 +3656,13 @@ def download_file(url,filename):
         onefile = os.path.basename(url_parts[-1])
         sourceFolder = os.path.dirname(url_parts[-1])
         if len(sourceFolder) == 0:
-            hf_hub_download(repo_id=repoId,  filename=onefile, local_dir = fl.get_download_location() if len(base_dir)==0 else base_dir)
+            hf_download_with_public_fallback(repo_id=repoId,  filename=onefile, local_dir = fl.get_download_location() if len(base_dir)==0 else base_dir)
         else:
             temp_dir_path = os.path.join(fl.get_download_location(), "temp")
             target_path = os.path.join(temp_dir_path, sourceFolder)
             if not os.path.exists(target_path):
                 os.makedirs(target_path)
-            hf_hub_download(repo_id=repoId,  filename=onefile, local_dir = temp_dir_path, subfolder=sourceFolder)
+            hf_download_with_public_fallback(repo_id=repoId,  filename=onefile, local_dir = temp_dir_path, subfolder=sourceFolder)
             final_dir = fl.get_download_location() if len(base_dir)==0 else base_dir
             # shutil.move(file, missing_dir) RENAMES the file to the dir's
             # path — a 13GB text encoder became a file literally named
