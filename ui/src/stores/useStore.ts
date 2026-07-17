@@ -537,9 +537,13 @@ export function getModelMode(modelType: string, familyId: string): GenerationMod
   return getFamilyMode(familyId)
 }
 
-export function getFamiliesForMode(mode: GenerationMode, allFamilies: ModelFamily[], _editSubMode?: string, audioSubMode?: string): ModelFamily[] {
+export function getFamiliesForMode(mode: GenerationMode, allFamilies: ModelFamily[], editSubMode?: string, audioSubMode?: string): ModelFamily[] {
   if (mode === 'avatar') {
-    // All edit sub-modes (retake, inpaint, restyle) use LTX models
+    // Recast runs on SCAIL-2, which lives under the Wan 2.1 family —
+    // every other edit sub-mode uses LTX models.
+    if (editSubMode === 'recast') {
+      return allFamilies.filter(f => f.id === 'wan')
+    }
     return allFamilies.filter(f => f.id === 'ltx2' || f.id === 'ltxv')
   }
   if (mode === 'audio') {
@@ -554,7 +558,7 @@ export function getFamiliesForMode(mode: GenerationMode, allFamilies: ModelFamil
 }
 
 /** Get models for a family ID, optionally filtered by generation mode */
-export function getModelsForFamily(familyId: string, allModels: ModelDef[], mode?: GenerationMode, _editSubMode?: string): ModelDef[] {
+export function getModelsForFamily(familyId: string, allModels: ModelDef[], mode?: GenerationMode, editSubMode?: string): ModelDef[] {
   if (familyId === 'tts_speech') {
     return allModels.filter(m => m.family === 'tts' && !isMusicModelType(m.model_type) && !sfxModelTypes.has(m.model_type))
   }
@@ -567,7 +571,10 @@ export function getModelsForFamily(familyId: string, allModels: ModelDef[], mode
   const familyModels = allModels.filter(m => m.family === familyId)
   // When mode is specified and the family spans multiple modes, filter to matching models
   if (mode === 'avatar') {
-    // All edit sub-modes use LTX video models
+    // Recast → the SCAIL-2 pair only; every other sub-mode → LTX models.
+    if (editSubMode === 'recast') {
+      return familyModels.filter(m => m.architecture === 'scail2_14B')
+    }
     return familyModels.filter(m => !avatarModelTypes.has(m.model_type) && !videoEditModelTypes.has(m.model_type))
   }
   if (mode === 'video') {
@@ -586,6 +593,11 @@ export function getDisplayFamily(model: ModelDef): string {
   }
   return model.family
 }
+
+// Transient: the LTX model that was selected before entering Recast, so
+// leaving Recast puts the selector back where the user had it. Not
+// persisted — a refresh lands on the mode default anyway.
+let _preRecastAvatarModel = ''
 
 function getDefaultModelForMode(mode: GenerationMode, families: ModelFamily[], models: ModelDef[]): string {
   // Try the preferred default first
@@ -1468,7 +1480,31 @@ export const useStore = create<AppState>((set, get) => ({
   // Generation mode
   generationMode: 'video',
   editSubMode: 'retake' as import('../types').EditSubMode,
-  setEditSubMode: (mode: import('../types').EditSubMode) => set({ editSubMode: mode }),
+  setEditSubMode: (mode: import('../types').EditSubMode) => {
+    const s = get()
+    const prev = s.editSubMode
+    set({ editSubMode: mode })
+    if (mode === prev || s.generationMode !== 'avatar') return
+    // Recast runs on SCAIL-2 while every other edit sub-mode uses LTX
+    // models — swap the selector over on entry and restore on exit so
+    // the model shown is the model used.
+    const current = (s.params.model_type as string) || ''
+    const isScail2 = (mt: string) => s.models.find(m => m.model_type === mt)?.architecture === 'scail2_14B'
+    if (mode === 'recast') {
+      if (!isScail2(current)) {
+        _preRecastAvatarModel = current
+        const target = s.models.some(m => m.model_type === 'scail2_14B_fast')
+          ? 'scail2_14B_fast'
+          : s.models.find(m => m.architecture === 'scail2_14B')?.model_type
+        if (target) get().selectModel(target)
+      }
+    } else if (prev === 'recast' && isScail2(current)) {
+      const restore = _preRecastAvatarModel && s.models.some(m => m.model_type === _preRecastAvatarModel)
+        ? _preRecastAvatarModel
+        : getDefaultModelForMode('avatar', s.families, s.models)
+      if (restore) get().selectModel(restore)
+    }
+  },
   editVideoPath: '',
   editVideoUrl: '',
   editVideoFile: null,
@@ -3285,11 +3321,21 @@ export const useStore = create<AppState>((set, get) => ({
       set(s => ({ isGenerating: true, jobs: [newJob, ...s.jobs] }))
 
       try {
+        // Honor the selector's SCAIL-2 choice (Fast vs base). Guard on
+        // architecture so a stale LTX model_type can never reach the
+        // recast endpoint — the server then falls back to Fast.
+        const recastModel = (state.params.model_type as string) || ''
+        const recastIsScail2 = state.models.find(m => m.model_type === recastModel)?.architecture === 'scail2_14B'
         const result = await api.submitRecast({
           video_path: state.editVideoPath,
           ref_image_path: state.editRecastRefPath,
           target: state.editRecastTarget || 'person',
           ...(promptText ? { prompt: promptText } : {}),
+          ...(recastIsScail2 ? {
+            model_type: recastModel,
+            num_inference_steps: (state.params.num_inference_steps as number) ?? undefined,
+            guidance_scale: (state.params.guidance_scale as number) ?? undefined,
+          } : {}),
           start_time: state.editStartTime,
           end_time: state.editEndTime,
           seed: (state.params.seed as number) ?? -1,
