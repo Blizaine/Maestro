@@ -11325,11 +11325,27 @@ async def upload_image(request: Request, file: UploadFile = File(...)):
                         except OSError:
                             pass
 
-    return {
+    result = {
         "filename": unique_name,
         "path": filepath,
         "url": f"/api/v1/uploads/{unique_name}",
     }
+    # For video uploads, report the source frame rate so the client can
+    # compute frame counts for models that follow the control video's
+    # fps (force_fps="control" — the SCAIL-2 class). The UI otherwise
+    # converts seconds to frames at the model's nominal 16 fps and
+    # under-counts: a "10s" request against a 25fps guide covered only
+    # 6.4s of the performance.
+    if ext in (".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v"):
+        try:
+            from shared.utils.utils import get_video_info
+            _fps, _w, _h, _frame_count = get_video_info(filepath)
+            if _fps:
+                result["fps"] = float(_fps)
+                result["frame_count"] = int(_frame_count or 0)
+        except Exception:
+            pass
+    return result
 
 
 @api.get("/api/v1/uploads/{filename}")

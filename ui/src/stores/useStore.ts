@@ -321,6 +321,16 @@ const _PRIMARY_MODEL_DEFAULT_FIELDS: ReadonlyArray<string> = [
   // (~19s), so typical LTX generations stay single-window as before.
   'sliding_window_size',
   'sliding_window_overlap',
+  // Control-video coupling for the SCAIL-2 / Wan-Animate class:
+  // force_fps "control" makes the output follow the guide video's frame
+  // rate (user-reported: 25fps source came out 16fps without it), and
+  // audio_prompt_type "R" remuxes the guide's audio track into the
+  // output (user-reported: outputs were silent). Only the scail2 model
+  // settings carry force_fps; every other model's audio_prompt_type
+  // defaults to "" which matches the UI default, so nothing changes
+  // elsewhere.
+  'force_fps',
+  'audio_prompt_type',
 ]
 
 // Monotonic sequence for loadModelOptions staleness detection — only the
@@ -902,6 +912,13 @@ interface AppState {
   setSlidingWindowOverlap: (frames: number) => void
   slidingWindowLocked: boolean
   setSlidingWindowLocked: (locked: boolean) => void
+
+  // Real frame rate of the uploaded guide/control video (probed server-side
+  // at upload). Used by force_fps="control" models (SCAIL-2 class) to
+  // convert durationSeconds to frames at the rate the output will actually
+  // play at, instead of the model's nominal fps.
+  guideVideoFps: number | null
+  setGuideVideoFps: (fps: number | null) => void
 
   // Output count
   outputCount: number
@@ -2569,6 +2586,9 @@ export const useStore = create<AppState>((set, get) => ({
     get().syncClipCount()
   },
 
+  guideVideoFps: null,
+  setGuideVideoFps: (fps) => set({ guideVideoFps: fps }),
+
   slidingWindowSeconds: 5,
   setSlidingWindowSeconds: (s) => {
     const fps = get().modelOptions?.fps ?? 16
@@ -3424,6 +3444,22 @@ export const useStore = create<AppState>((set, get) => ({
       const mt = (params.model_type as string) || ''
       return mt.includes('distilled') ? 0.7 : 1.0
     })()
+
+    // force_fps="control" models (SCAIL-2 class) generate at the control
+    // video's frame rate, but durationSeconds→video_length math uses the
+    // model's nominal fps (16). Against a 25fps guide that under-counts
+    // frames by a third: a "10s" request would cover only 6.4s of the
+    // source performance. When the guide's real fps is known (probed at
+    // upload), recompute the frame count at the rate the output will
+    // actually play at.
+    if (
+      state.generationMode === 'video' &&
+      params.video_guide &&
+      params.force_fps === 'control' &&
+      state.guideVideoFps && state.guideVideoFps > 0
+    ) {
+      params.video_length = Math.max(5, Math.round(state.durationSeconds * state.guideVideoFps))
+    }
 
     // Smart multi-line prompt handling for video Frames mode:
     // When there's no sliding window (single window), send all lines as ONE prompt

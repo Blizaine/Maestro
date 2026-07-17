@@ -92,6 +92,7 @@ export function InputsPanel() {
   const audioGuideFilename = useStore(s => s.audioGuideFilename)
   const setAudioGuideFilename = useStore(s => s.setAudioGuideFilename)
   const setDurationSeconds = useStore(s => s.setDurationSeconds)
+  const setGuideVideoFps = useStore(s => s.setGuideVideoFps)
   const voiceRefEnabled = useStore(s => !!s.servicesConfig?.voice_reference_enabled)
   const directorVoiceRef = useStore(s => s.directorVoiceRef)
   const setDirectorVoiceRef = useStore(s => s.setDirectorVoiceRef)
@@ -483,6 +484,9 @@ export function InputsPanel() {
       // Advanced Settings would submit video_prompt_type '' and the model
       // would not receive the control video at all.
       if (!params.video_prompt_type && guideDefault) setParam('video_prompt_type', guideDefault)
+      // Real fps of the guide, probed server-side — startGeneration uses
+      // it for the seconds→frames conversion on force_fps="control" models.
+      setGuideVideoFps(result.fps && result.fps > 0 ? result.fps : null)
       const dur = await getMediaDuration(file)
       if (dur && dur > 0) setDurationSeconds(Math.round(dur * 10) / 10)
     } catch (e) {
@@ -492,6 +496,7 @@ export function InputsPanel() {
   const removeGuideVid = () => {
     setParam('video_guide', undefined)
     setVideoGuideFilename(null)
+    setGuideVideoFps(null)
     if (selected === 'guidevid') setSelected(null)
   }
   const toggleAudioFlag = (flag: 'N' | 'V') => {

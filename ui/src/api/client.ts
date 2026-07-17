@@ -896,7 +896,7 @@ export async function mixAudio(tracks: { path: string; start_time: number; volum
 
 // --- Upload ---
 
-export async function uploadImage(file: File): Promise<{ filename: string; path: string; url: string }> {
+export async function uploadImage(file: File): Promise<{ filename: string; path: string; url: string; fps?: number; frame_count?: number }> {
   const form = new FormData()
   form.append('file', file)
   const res = await fetch(`${BASE}/api/v1/upload`, {
