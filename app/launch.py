@@ -6649,6 +6649,61 @@ async def generate(request: Request):
     # falling back to T2V as Maestro's UX promises.
     _normalize_image_prompt_type(body)
 
+    # ── SCAIL-2 operating guards ────────────────────────────────────
+    # The React UI exposes no fps or audio controls for the SCAIL-2
+    # class, so these keys can only reach the request via defaults
+    # hydration — which Load Settings happily overwrites with values
+    # recorded in pre-v1.3 sidecars (user-reported: restored jobs came
+    # out 16fps/silent/6.4s even after the hydration fix). The server
+    # is the durable place to hold the model's operating contract:
+    #   1. Output follows the control video's fps (force_fps=control).
+    #   2. The control video's audio is remuxed in (audio_prompt_type
+    #      R) unless the request carries a real audio source (ABXK).
+    #   3. video_length is recomputed from the UI's _duration_seconds
+    #      at the guide's REAL fps, so "10s" means 10 seconds of the
+    #      source no matter which fps the client assumed.
+    #   4. sliding_window_size is clamped to the model's 81-frame
+    #      training window — larger windows add VRAM risk (the whole
+    #      driving window rides along as in-context tokens) without
+    #      adding quality, and stale restores carried inflated values.
+    try:
+        _scail2_bmt = wgp.get_base_model_type(body.get("model_type"))
+    except Exception:
+        _scail2_bmt = None
+    if _scail2_bmt in ("scail2_14B", "scail2_1.3B"):
+        if not body.get("force_fps"):
+            body["force_fps"] = "control"
+        _apt = body.get("audio_prompt_type") or ""
+        if not any(l in _apt for l in "ABXKR"):
+            body["audio_prompt_type"] = "R"
+        _guide = body.get("video_guide")
+        _dur = body.get("_duration_seconds")
+        if _guide and _dur and body.get("force_fps") == "control":
+            try:
+                if os.path.isfile(_guide):
+                    from shared.utils.utils import get_video_info
+                    _gfps, _, _, _gframes = get_video_info(_guide)
+                    if _gfps and float(_gfps) > 0:
+                        _want = int(round(float(_dur) * float(_gfps)))
+                        if _gframes:
+                            _want = min(_want, int(_gframes))
+                        if _want >= 5 and _want != int(body.get("video_length") or 0):
+                            print(
+                                f"[generate] SCAIL-2 duration: video_length "
+                                f"{body.get('video_length')} → {_want} "
+                                f"({_dur}s × {float(_gfps):.6g}fps guide)"
+                            )
+                            body["video_length"] = _want
+            except Exception as _sferr:
+                print(f"[generate] SCAIL-2 guide fps probe skipped: {_sferr}")
+        try:
+            _sw = int(body.get("sliding_window_size") or 0)
+        except (TypeError, ValueError):
+            _sw = 0
+        if _sw > 81:
+            print(f"[generate] SCAIL-2 window clamp: sliding_window_size {_sw} → 81")
+            body["sliding_window_size"] = 81
+
     # ── Sliding-window safety bump ──────────────────────────────────
     # User-reported bug: a 19.6s audio upload in Studio Mode caused
     # video_length and sliding_window_size to both be auto-set to

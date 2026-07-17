@@ -3460,6 +3460,15 @@ export const useStore = create<AppState>((set, get) => ({
     ) {
       params.video_length = Math.max(5, Math.round(state.durationSeconds * state.guideVideoFps))
     }
+    // Always tell the server what duration the user actually asked for.
+    // For control-fps models the server recomputes video_length from
+    // this at the guide's REAL frame rate — the durable fix for stale
+    // restores (Load Settings from old sidecars carries frame counts
+    // computed under the wrong fps) and for sessions where the guide's
+    // fps never got probed. Underscore keys ride through harmlessly.
+    if (state.generationMode === 'video' && params.video_guide) {
+      ;(params as Record<string, unknown>)._duration_seconds = state.durationSeconds
+    }
 
     // Smart multi-line prompt handling for video Frames mode:
     // When there's no sliding window (single window), send all lines as ONE prompt
