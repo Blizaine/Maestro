@@ -774,6 +774,54 @@ export async function submitEditAnything(params: {
   return res.json()
 }
 
+// --- Recast (SCAIL-2 Replace: swap a person for a reference character) ---
+
+export async function submitRecast(params: {
+  video_path: string;
+  ref_image_path: string;
+  /** Who to replace, as a SAM3 keyword ("woman", "man in red"). */
+  target?: string;
+  /** Optional scene/character description — a good one helps identity. */
+  prompt?: string;
+  start_time?: number;
+  end_time?: number;
+  model_type?: string;
+  negative_prompt?: string;
+  seed?: number;
+  num_inference_steps?: number;
+  guidance_scale?: number;
+  workspace?: string;
+}): Promise<{ job_id: string; status: string; frames?: number; target?: string }> {
+  const res = await fetch(`${BASE}/api/v1/recast`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Recast failed' }))
+    throw new Error(err.detail || 'Recast failed')
+  }
+  return res.json()
+}
+
+export async function recastPreview(params: {
+  video_path: string;
+  target?: string;
+  time?: number;
+  workspace?: string;
+}): Promise<{ found: boolean; frame_index: number; preview: string }> {
+  const res = await fetch(`${BASE}/api/v1/recast/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Preview failed' }))
+    throw new Error(err.detail || 'Preview failed')
+  }
+  return res.json()
+}
+
 // --- Outpaint ---
 
 export async function submitOutpaint(params: {

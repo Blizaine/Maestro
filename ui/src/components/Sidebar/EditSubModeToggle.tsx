@@ -8,6 +8,7 @@ const ALL_SUB_MODES: { value: EditSubMode; label: string; experimental?: boolean
   { value: 'outpaint', label: 'Outpaint' },
   { value: 'restyle', label: 'Restyle', experimental: true },
   { value: 'edit_anything', label: 'Edit Anything' },
+  { value: 'recast', label: 'Recast' },
 ]
 
 export function EditSubModeToggle() {

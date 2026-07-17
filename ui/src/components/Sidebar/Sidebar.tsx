@@ -24,6 +24,7 @@ import { InpaintControls } from './InpaintControls'
 import { OutpaintControls } from './OutpaintControls'
 import { RetakeControls } from './RetakeControls'
 import { EditAnythingControls } from './EditAnythingControls'
+import { RecastControls } from './RecastControls'
 import { BlendControls } from './BlendControls'
 import { AnchorReturnBanner } from './AnchorReturnBanner'
 import { VoiceRefSection } from './VoiceRefSection'
@@ -56,6 +57,7 @@ export function Sidebar() {
   const isInpaint = isEdit && editSubMode === 'inpaint'
   const isOutpaint = isEdit && editSubMode === 'outpaint'
   const isEditAnything = isEdit && editSubMode === 'edit_anything'
+  const isRecast = isEdit && editSubMode === 'recast'
   const isMultiClip = isVideo && imageMode === 2
   const isContinue = isVideo && imageMode === 3
   const isBlend = isVideo && imageMode === 4
@@ -124,6 +126,12 @@ export function Sidebar() {
       {isEditAnything && (
         <>
           <EditAnythingControls />
+          <PromptInput />
+        </>
+      )}
+      {isRecast && (
+        <>
+          <RecastControls />
           <PromptInput />
         </>
       )}

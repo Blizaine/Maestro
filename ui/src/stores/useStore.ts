@@ -635,6 +635,13 @@ interface AppState {
    *  man" effect). */
   editAnythingStartAnchor: string | null
   editAnythingEndAnchor: string | null
+  /** Recast (SCAIL-2 Replace): who to swap out, as a SAM3 keyword. */
+  editRecastTarget: string
+  /** Recast reference character image (uploaded path + preview URL). */
+  editRecastRefFile: File | null
+  editRecastRefPath: string
+  editRecastRefUrl: string
+  setEditRecastRef: (file: File | null, path: string, url: string) => void
   /** Round-trip marker for the "Edit Anchor in Image Mode" workflow.
    *  Populated when the user clicks "Edit Start" or "Edit End" on a
    *  boundary anchor slot. A banner at the top of the sidebar lets them
@@ -1474,6 +1481,11 @@ export const useStore = create<AppState>((set, get) => ({
   editAnythingLoraStrength: 1.0,
   editAnythingStartAnchor: null,
   editAnythingEndAnchor: null,
+  editRecastTarget: 'person',
+  editRecastRefFile: null,
+  editRecastRefPath: '',
+  editRecastRefUrl: '',
+  setEditRecastRef: (file, path, url) => set({ editRecastRefFile: file, editRecastRefPath: path, editRecastRefUrl: url }),
   editReturnTarget: null,
   setEditAnythingStartAnchor: (path: string | null) => set({ editAnythingStartAnchor: path }),
   setEditAnythingEndAnchor: (path: string | null) => set({ editAnythingEndAnchor: path }),
@@ -3254,6 +3266,79 @@ export const useStore = create<AppState>((set, get) => ({
           isGenerating: s.jobs.some(j => j !== newJob && (j.status === 'running' || j.status === 'queued')),
         }))
         console.error('Outpaint failed:', msg)
+      }
+      return
+    }
+
+    // ── Edit mode: Recast (SCAIL-2 Replace) ─────────────────────
+    // Standalone branch: the prompt is OPTIONAL here (the server has a
+    // sensible default), unlike the shared edit block below which
+    // hard-requires one.
+    if (state.generationMode === 'avatar' && state.editSubMode === 'recast') {
+      if (!state.editVideoPath || !state.editRecastRefPath) return
+      const promptText = ((state.params.prompt as string) || '').trim()
+
+      const newJob: GenerationJob = {
+        id: '', status: 'queued', progress: 0, step: 0, totalSteps: 0,
+        phase: '', message: 'Submitting recast...', outputFiles: [], error: null, oomInfo: null,
+      }
+      set(s => ({ isGenerating: true, jobs: [newJob, ...s.jobs] }))
+
+      try {
+        const result = await api.submitRecast({
+          video_path: state.editVideoPath,
+          ref_image_path: state.editRecastRefPath,
+          target: state.editRecastTarget || 'person',
+          ...(promptText ? { prompt: promptText } : {}),
+          start_time: state.editStartTime,
+          end_time: state.editEndTime,
+          seed: (state.params.seed as number) ?? -1,
+          negative_prompt: (state.params.negative_prompt as string) || '',
+          workspace: state.activeWorkspace,
+        })
+
+        set(s => ({
+          jobs: s.jobs.map(j => j === newJob ? { ...j, id: result.job_id, status: 'running', message: 'Queued...' } : j),
+        }))
+
+        const pollInterval = setInterval(async () => {
+          if (!get().jobs.find(j => j.id === result.job_id)) { clearInterval(pollInterval); return }
+          try {
+            const status = await api.fetchJobStatus(result.job_id)
+            set(s => ({
+              jobs: s.jobs.map(j => j.id !== result.job_id ? j : {
+                ...j, status: status.status, progress: status.progress / 100,
+                step: status.step, totalSteps: status.total_steps,
+                phase: status.phase, message: status.message,
+                outputFiles: status.output_files, error: status.error, oomInfo: status.oom_info ?? null,
+              }),
+            }))
+            if (status.status === 'running') get().refreshOutputs()
+            if (status.status === 'completed') {
+              clearInterval(pollInterval)
+              set(s => {
+                const remaining = s.jobs.filter(j => j.id !== result.job_id)
+                return {
+                  jobs: remaining,
+                  isGenerating: remaining.some(j => j.status === 'running' || j.status === 'queued'),
+                }
+              })
+              get().loadOutputs()
+            } else if (status.status === 'failed' || status.status === 'cancelled') {
+              clearInterval(pollInterval)
+              set(s => ({
+                isGenerating: s.jobs.some(j => j.id !== result.job_id && (j.status === 'running' || j.status === 'queued')),
+              }))
+            }
+          } catch { /* ignore poll errors */ }
+        }, 2000)
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : 'Recast failed'
+        set(s => ({
+          jobs: s.jobs.map(j => j === newJob ? { ...j, id: j.id || `submit-fail-${Date.now()}`, status: 'failed', message: msg, error: msg } : j),
+          isGenerating: s.jobs.some(j => j !== newJob && (j.status === 'running' || j.status === 'queued')),
+        }))
+        console.error('Recast failed:', msg)
       }
       return
     }
@@ -6790,7 +6875,7 @@ export const useStore = create<AppState>((set, get) => ({
     if (editSubMode) {
       set({
         generationMode: 'avatar',
-        editSubMode: editSubMode as 'retake' | 'inpaint' | 'restyle' | 'outpaint' | 'edit_anything',
+        editSubMode: editSubMode as 'retake' | 'inpaint' | 'restyle' | 'outpaint' | 'edit_anything' | 'recast',
       })
 
       // Re-link the source video. The sidecar stores either edit_video_path
@@ -6850,6 +6935,22 @@ export const useStore = create<AppState>((set, get) => ({
       if (editSubMode === 'edit_anything') {
         if (p.edit_anything_lora_strength != null) {
           set({ editAnythingLoraStrength: p.edit_anything_lora_strength as number })
+        }
+      }
+      if (editSubMode === 'recast') {
+        if (p.edit_recast_target) set({ editRecastTarget: p.edit_recast_target as string })
+        const recastRef = (p.edit_recast_ref_path as string) || ''
+        if (recastRef) {
+          const refName = recastRef.replace(/\\/g, '/').split('/').pop() || ''
+          const refUrl = `/api/v1/uploads/${refName}`
+          fetch(refUrl)
+            .then(r => r.ok ? r.blob() : null)
+            .then(blob => {
+              if (!blob) return
+              const file = new File([blob], refName, { type: blob.type || 'image/png' })
+              get().setEditRecastRef(file, recastRef, URL.createObjectURL(file))
+            })
+            .catch(() => {})
         }
       }
       if (editSubMode === 'outpaint') {

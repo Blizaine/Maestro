@@ -7303,6 +7303,249 @@ async def edit_anything_endpoint(request: Request):
     }
 
 
+def _resolve_recast_media(raw, workspace):
+    """Resolve a media reference the way edit endpoints do: absolute path
+    first, then workspace outputs, then uploads/, then outputs/."""
+    if not raw:
+        return None
+    raw = str(raw)
+    if os.path.isabs(raw) and os.path.isfile(raw):
+        return raw
+    for base in (
+        _workspace_dir(workspace),
+        os.path.join(os.getcwd(), "uploads"),
+        os.path.join(os.getcwd(), "outputs"),
+    ):
+        cand = os.path.join(base, os.path.basename(raw))
+        if os.path.isfile(cand):
+            return cand
+    if os.path.isfile(raw):
+        return raw
+    return None
+
+
+@api.post("/api/v1/recast/preview")
+async def recast_preview_endpoint(request: Request):
+    """Preview which person the Recast keyword selects: SAM3 keyword
+    segmentation on a single frame, returned as the frame with the mask
+    tinted. First call loads SAM3 (~10-15s); later calls are fast — the
+    model stays cached and the generation pre-step reuses it.
+
+    Body: { video_path: str, target?: str, time?: float, workspace?: str }
+    """
+    body = await request.json()
+    video_path = _resolve_recast_media(body.get("video_path"), body.get("workspace"))
+    if not video_path:
+        raise HTTPException(status_code=400, detail=f"Video not found: {body.get('video_path')}")
+    target = (body.get("target") or "person").strip() or "person"
+    at_time = float(body.get("time", 0) or 0)
+    try:
+        import decord
+        vr = decord.VideoReader(video_path)
+        fps = vr.get_avg_fps() or 25
+        idx = min(len(vr) - 1, max(0, int(at_time * fps)))
+        frame = vr[idx].asnumpy()
+        del vr
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Cannot read video: {e}")
+    try:
+        import numpy as np
+        from shared import magic_mask
+        mask = magic_mask.generate_keyword_masks(frame[None], target, no_hole=True)[0]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Segmentation failed: {e}")
+    found = bool(mask.any())
+    overlay = frame.copy()
+    if found:
+        sel = mask.astype(bool)
+        tint = np.array([60, 110, 255], dtype=np.float32)
+        overlay[sel] = (overlay[sel].astype(np.float32) * 0.45 + tint * 0.55).astype(np.uint8)
+    import base64
+    import io as _io
+    from PIL import Image as _PILImage
+    buf = _io.BytesIO()
+    _PILImage.fromarray(overlay).save(buf, format="JPEG", quality=85)
+    return {
+        "found": found,
+        "frame_index": idx,
+        "preview": "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode(),
+    }
+
+
+@api.post("/api/v1/recast")
+async def recast_endpoint(request: Request):
+    """Submit a Recast job: replace a person in an existing video with the
+    character from a reference image (SCAIL-2 Replace mode). The colored
+    person mask is built automatically with SAM3 keyword tracking as a
+    pre-step INSIDE the job thread — tracking a 10s clip takes about a
+    minute, so the endpoint returns a job_id immediately and the job's
+    message reflects detection progress.
+
+    Body: {
+        video_path: str, ref_image_path: str,
+        target?: str ("who to replace" keyword, default "person"),
+        prompt?: str (describing the new character in the scene helps),
+        start_time?: float, end_time?: float  (optional trim),
+        model_type?: str (default scail2_14B_fast),
+        negative_prompt?: str, seed?: int,
+        num_inference_steps?: int, guidance_scale?: float,
+        workspace?: str,
+    }
+    """
+    body = await request.json()
+    workspace = body.get("workspace")
+
+    video_path = _resolve_recast_media(body.get("video_path"), workspace)
+    if not video_path:
+        raise HTTPException(status_code=400, detail=f"Video not found: {body.get('video_path')}")
+    ref_image_path = _resolve_recast_media(body.get("ref_image_path"), workspace)
+    if not ref_image_path:
+        raise HTTPException(status_code=400, detail=f"Reference image not found: {body.get('ref_image_path')}")
+    target = (body.get("target") or "person").strip() or "person"
+    original_video_path = video_path
+
+    # Optional trim — outpaint's frame-accurate re-encode pattern. The
+    # trimmed clip becomes the canonical guide so the SAM3 mask and the
+    # generation windows stay 1:1 with the frames actually used.
+    trim_start = body.get("start_time")
+    trim_end = body.get("end_time")
+    if trim_start is not None and trim_end is not None:
+        try:
+            trim_start_f = float(trim_start)
+            trim_end_f = float(trim_end)
+            if trim_end_f - trim_start_f > 0.05 and trim_start_f >= 0:
+                import subprocess
+                trim_dir = os.path.join(os.getcwd(), "uploads")
+                os.makedirs(trim_dir, exist_ok=True)
+                trimmed_path = os.path.join(trim_dir, f"recast_trim_{uuid.uuid4().hex[:8]}.mp4")
+                cmd = [
+                    "ffmpeg", "-y", "-i", video_path,
+                    "-ss", f"{trim_start_f:.3f}",
+                    "-to", f"{trim_end_f:.3f}",
+                    "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+                    "-c:a", "aac", "-b:a", "192k",
+                    trimmed_path,
+                ]
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+                if proc.returncode == 0 and os.path.isfile(trimmed_path):
+                    print(f"[Recast] Trimmed source to [{trim_start_f:.2f}s, {trim_end_f:.2f}s] -> {os.path.basename(trimmed_path)}")
+                    video_path = trimmed_path
+                else:
+                    print(f"[Recast] Trim failed (continuing with full clip): {proc.stderr[:200]}")
+        except (TypeError, ValueError) as e:
+            print(f"[Recast] Invalid trim params: {e}")
+
+    try:
+        import decord
+        vr = decord.VideoReader(video_path)
+        fps = vr.get_avg_fps() or 25
+        total_frames = len(vr)
+        mid_frame = vr[total_frames // 2].asnumpy()
+        del vr
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Cannot read video: {e}")
+
+    model_type = body.get("model_type") or "scail2_14B_fast"
+    if wgp.get_model_def(model_type) is None:
+        raise HTTPException(status_code=400, detail=f"Unknown model: {model_type}")
+    # Operating point follows the model flavor: the Fast finetune runs the
+    # distill schedule (6 steps, no CFG), the base model its native 40/5.
+    is_fast = "fast" in model_type
+    duration_s = total_frames / fps if fps else 0
+
+    prompt = (body.get("prompt") or "").strip() or (
+        "The person from the reference image performs in the scene, "
+        "matching the original camera framing, motion, and lighting."
+    )
+
+    gen_params = {
+        "prompt": prompt,
+        "model_type": model_type,
+        "negative_prompt": body.get("negative_prompt", ""),
+        "seed": body.get("seed", -1),
+        "guidance_scale": float(body.get("guidance_scale", 1.0 if is_fast else 5.0)),
+        "num_inference_steps": int(body.get("num_inference_steps", 6 if is_fast else 40)),
+        "flow_shift": 5 if is_fast else 3,
+        "sample_solver": "euler" if is_fast else "unipc",
+        "generation_mode": "video",
+        "edit_sub_mode": "recast",
+        # SCAIL-2 Replace One Person + Persons Locations mask + Reference Image
+        "video_prompt_type": "V01AI",
+        "image_prompt_type": "",
+        "video_guide": video_path,
+        # video_mask is filled by the detection pre-step below.
+        "image_refs": [ref_image_path],
+        "video_length": total_frames,
+        "_duration_seconds": duration_s,
+        "resolution": "832x480",
+        "force_fps": "control",
+        "audio_prompt_type": "R",
+        "sliding_window_size": 81,
+        "sliding_window_overlap": 5,
+        "settings_version": 2.57,
+        "custom_settings": {"image_ref_keyword_content": "human character"},
+        # UI restore keys for the gallery Edits filter + Load Settings.
+        "edit_video_path": original_video_path,
+        "edit_start_time": float(trim_start) if trim_start is not None else 0.0,
+        "edit_end_time": float(trim_end) if trim_end is not None else duration_s,
+        "edit_recast_target": target,
+        "edit_recast_ref_path": ref_image_path,
+    }
+
+    workspace_name = workspace or _get_active_workspace()
+    job_out_dir = _workspace_dir(workspace_name)
+    job_id = uuid.uuid4().hex[:8]
+    job = {
+        "id": job_id, "status": "queued", "progress": 0, "step": 0, "total_steps": 0,
+        "phase": "", "message": "Queued (recast)", "created_at": time.time(),
+        "params": gen_params, "output_files": [], "error": None,
+        "workspace": workspace_name, "out_dir": job_out_dir,
+    }
+    _jobs[job_id] = job
+
+    def _run_recast():
+        try:
+            job["status"] = "running"
+            job["phase"] = "Detecting target"
+            job["message"] = f"Finding '{target}' in the video..."
+            from shared import magic_mask
+            # Fail fast with a clear error if the keyword matches nothing —
+            # cheaper than discovering it after a full tracking pass.
+            probe_mask = magic_mask.generate_keyword_masks(mid_frame[None], target, no_hole=True)[0]
+            if not bool(probe_mask.any()):
+                job["status"] = "failed"
+                job["error"] = f"Could not find '{target}' in the video. Try a different description (e.g. 'woman', 'man in red')."
+                job["message"] = "Target not found"
+                return
+            if job.get("status") == "cancelled":
+                return
+            job["message"] = f"Tracking '{target}' across {total_frames} frames..."
+            mask_path, _ = magic_mask.generate_video_mask(
+                video_path, target,
+                colorize_objects=True,
+                color_palette=[(0, 0, 255)],
+                max_colored_objects=1,
+                background_color=(255, 255, 255),
+                output_dir=os.path.join(os.getcwd(), "uploads"),
+            )
+            if job.get("status") == "cancelled":
+                return
+            job["params"]["video_mask"] = mask_path
+        except Exception as e:
+            traceback.print_exc()
+            job["status"] = "failed"
+            job["error"] = f"Target detection failed: {e}"
+            job["message"] = "Detection failed"
+            return
+        job["status"] = "queued"
+        _run_generation(job_id)
+
+    thread = threading.Thread(target=_run_recast, daemon=False)
+    thread.start()
+
+    return {"job_id": job_id, "status": "queued", "frames": total_frames, "target": target}
+
+
 @api.post("/api/v1/outpaint")
 async def outpaint_endpoint(request: Request):
     """Submit an outpaint job: extend video/image canvas using IC-LoRA.
