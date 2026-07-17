@@ -621,14 +621,36 @@ def _auto_ref_mask(image_ref, custom_settings, model_def, height, width, device,
     object_colors = model_def.get("magic_mask_object_colors", []) if isinstance(model_def, dict) else []
     color_count = min(max(1, int(max_people or 1)), len(object_colors))
     ref_image = convert_tensor_to_image(image_ref).convert("RGB")
-    ref_mask = magic_mask.generate_keyword_masks(
-        np.asarray(ref_image, dtype=np.uint8)[None],
-        keyword,
-        no_hole=True,
-        colorize_objects=len(object_colors) > 0,
-        color_palette=object_colors[:color_count] if len(object_colors) > 0 else None,
-        max_colored_objects=color_count if len(object_colors) > 0 else None,
-    )[0]
+    frame = np.asarray(ref_image, dtype=np.uint8)[None]
+
+    # Maestro: SAM3's text grounding is brittle with the default
+    # "human character" phrase — field report: a clear full-frame photo
+    # of a woman matched NOTHING while "person"/"woman" matched at 32%
+    # coverage on the same pixels. Cascade through generic person
+    # keywords so a weak configured phrase degrades gracefully instead
+    # of failing the whole job.
+    candidates = [keyword]
+    for fallback in ("person", "woman", "man"):
+        if fallback not in candidates:
+            candidates.append(fallback)
+
+    ref_mask = None
+    for candidate in candidates:
+        mask = magic_mask.generate_keyword_masks(
+            frame,
+            candidate,
+            no_hole=True,
+            colorize_objects=len(object_colors) > 0,
+            color_palette=object_colors[:color_count] if len(object_colors) > 0 else None,
+            max_colored_objects=color_count if len(object_colors) > 0 else None,
+        )[0]
+        if bool(mask.any()):
+            if candidate != keyword:
+                logging.info(f"[SCAIL-2] Image Ref keyword '{keyword}' matched nothing in the reference; using '{candidate}' instead.")
+            ref_mask = mask
+            break
+    if ref_mask is None:
+        return None
     mask_image = Image.fromarray(ref_mask.astype(np.uint8, copy=False), mode="RGB") if ref_mask.ndim == 3 else Image.fromarray(ref_mask.astype(np.uint8) * 255, mode="L").convert("RGB")
     return prepare_scail2_mask(convert_image_to_tensor(mask_image).unsqueeze(1), 1, height, width, device, dtype)
 
