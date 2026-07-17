@@ -318,6 +318,43 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
     }
   }
 
+  // Capture the frame the video preview is currently SHOWING (canvas grab
+  // of the <video> element at its currentTime — same-origin, so no taint)
+  // and append it to the Reference tiles. Pairs with SCAIL-2: scrub to the
+  // pose you want, one click, it's your character reference.
+  const handleSendFrameToRefs = async () => {
+    if (file.type !== 'video') return
+    try {
+      let video = videoRef.current
+      if (!video || video.videoWidth === 0) {
+        // Preview not loaded (never hovered) — decode frame 0 offscreen.
+        video = document.createElement('video')
+        video.src = getFileUrl(file.name)
+        video.muted = true
+        await new Promise<void>((resolve, reject) => {
+          video!.onloadeddata = () => resolve()
+          video!.onerror = () => reject(new Error('video load failed'))
+        })
+      }
+      const canvas = document.createElement('canvas')
+      canvas.width = video.videoWidth
+      canvas.height = video.videoHeight
+      const ctx = canvas.getContext('2d')
+      if (!ctx) throw new Error('canvas unavailable')
+      ctx.drawImage(video, 0, 0)
+      const blob: Blob = await new Promise((resolve, reject) =>
+        canvas.toBlob(b => (b ? resolve(b) : reject(new Error('frame capture failed'))), 'image/png')
+      )
+      const stem = file.name.replace(/\.[^.]+$/, '')
+      const frameFile = new File([blob], `${stem}_t${video.currentTime.toFixed(2)}s.png`, { type: 'image/png' })
+      addImageRef(frameFile)
+      setSentToInput(true)
+      setTimeout(() => setSentToInput(false), 2000)
+    } catch (e) {
+      console.error('Failed to capture video frame:', e)
+    }
+  }
+
   const handleContinueFrom = async () => {
     if (file.type !== 'video') return
     try {
@@ -510,6 +547,19 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
                   : 'hover:bg-bg-hover text-text-secondary hover:text-accent-blue'
               }`}
               title={generationMode === 'image' ? 'Use as input image' : 'Use as start frame'}
+            >
+              {sentToInput ? <Check size={13} /> : <ArrowLeftToLine size={13} />}
+            </button>
+          )}
+          {file.type === 'video' && (
+            <button
+              onClick={(e) => { e.stopPropagation(); handleSendFrameToRefs() }}
+              className={`p-1.5 rounded-lg transition-colors ${
+                sentToInput
+                  ? 'text-accent-green'
+                  : 'hover:bg-bg-hover text-text-secondary hover:text-accent-blue'
+              }`}
+              title="Use current frame as reference image"
             >
               {sentToInput ? <Check size={13} /> : <ArrowLeftToLine size={13} />}
             </button>
