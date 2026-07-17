@@ -1,0 +1,26 @@
+{
+    "model": {
+        "name": "SCAIL-2 14B Fast",
+        "architecture": "scail2_14B",
+        "description": "SCAIL-2 character animation accelerated with the lightx2v CFG-step-distill LoRA: 6 steps and no CFG instead of 40 steps with CFG, for roughly 13x faster generations at near-identical quality. Same Animate and Replace modes as the base model.",
+        "URLs": "scail2_14B",
+        "loras": ["https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank256_bf16.safetensors"],
+        "loras_multipliers": [0.8]
+    },
+    "prompt": "The character is dancing naturally with expressive body movement.",
+    "negative_prompt": "",
+    "video_length": 81,
+    "resolution": "832x480",
+    "num_inference_steps": 6,
+    "flow_shift": 5,
+    "guidance_scale": 1,
+    "guidance_phases": 1,
+    "sample_solver": "euler",
+    "custom_settings": {
+        "scail2_animate_preprocessing": "raw",
+        "image_ref_keyword_content": "human character"
+    },
+    "sliding_window_size": 81,
+    "sliding_window_overlap": 5,
+    "sliding_window_color_correction_strength": 0
+}

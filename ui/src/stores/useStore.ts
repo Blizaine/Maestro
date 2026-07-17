@@ -443,6 +443,10 @@ const DEFAULT_ENABLED_MODELS = new Set([
   // Settings → System → Model Visibility but off by default so the
   // first-launch picker isn't overwhelming.
   'ltx2_22B_distilled_1_1',
+  // SCAIL-2 character animation (Animate a character with a control
+  // video). Fast = lightx2v distill bundled (6 steps, no CFG, ~13x).
+  'scail2_14B',
+  'scail2_14B_fast',
   // Audio — Speech
   'kugelaudio_0_open',
   'qwen3_tts_base',
@@ -470,10 +474,12 @@ const DEFAULT_ENABLED_MODELS = new Set([
  * a user who then disables them stays disabled forever. (This is
  * deliberately narrower than auto-enabling every unknown model — only
  * the curated list's own additions are pushed.) */
-const DEFAULTS_VERSION = 2
+const DEFAULTS_VERSION = 3
 const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   // v1.2.0: the ACE-Step XL SFT pair; LM_4B becomes the music default.
   2: ['ace_step_v1_5_xl_sft', 'ace_step_v1_5_xl_sft_lm_4b'],
+  // v1.3.0: SCAIL-2 character animation, base + lightx2v-distilled Fast.
+  3: ['scail2_14B', 'scail2_14B_fast'],
 }
 const DEFAULTS_VERSION_KEY = 'maestro_defaults_version'
 
