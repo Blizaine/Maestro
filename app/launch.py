@@ -7527,32 +7527,44 @@ async def recast_endpoint(request: Request):
 
     def _run_recast():
         try:
-            job["status"] = "running"
-            job["phase"] = "Detecting target"
-            job["message"] = f"Finding '{target}' in the video..."
-            from shared import magic_mask
-            # Fail fast with a clear error if the keyword matches nothing —
-            # cheaper than discovering it after a full tracking pass.
-            probe_mask = magic_mask.generate_keyword_masks(mid_frame[None], target, no_hole=True)[0]
-            if not bool(probe_mask.any()):
-                job["status"] = "failed"
-                job["error"] = f"Could not find '{target}' in the video. Try a different description (e.g. 'woman', 'man in red')."
-                job["message"] = "Target not found"
-                return
-            if job.get("status") == "cancelled":
-                return
-            job["message"] = f"Tracking '{target}' across {total_frames} frames..."
-            mask_path, _ = magic_mask.generate_video_mask(
-                video_path, target,
-                colorize_objects=True,
-                color_palette=[(0, 0, 255)],
-                max_colored_objects=1,
-                background_color=(255, 255, 255),
-                output_dir=os.path.join(os.getcwd(), "uploads"),
-            )
-            if job.get("status") == "cancelled":
-                return
-            job["params"]["video_mask"] = mask_path
+            # The SAM3 tracking pass is GPU work. Take the generation lock
+            # for the detection phase so queued recasts don't run their
+            # propagate_in_video passes concurrently with (and on top of)
+            # the active job's denoising — user report: several queued
+            # recasts all tracked at once and everything crawled. The lock
+            # is released before _run_generation, which re-acquires it for
+            # the generation phase; a waiting job may slip its detection in
+            # between, but everything stays strictly one-GPU-task-at-a-time.
+            job["message"] = "Waiting for GPU (detection queued)..."
+            with _gen_lock:
+                if job.get("status") == "cancelled":
+                    return
+                job["status"] = "running"
+                job["phase"] = "Detecting target"
+                job["message"] = f"Finding '{target}' in the video..."
+                from shared import magic_mask
+                # Fail fast with a clear error if the keyword matches nothing —
+                # cheaper than discovering it after a full tracking pass.
+                probe_mask = magic_mask.generate_keyword_masks(mid_frame[None], target, no_hole=True)[0]
+                if not bool(probe_mask.any()):
+                    job["status"] = "failed"
+                    job["error"] = f"Could not find '{target}' in the video. Try a different description (e.g. 'woman', 'man in red')."
+                    job["message"] = "Target not found"
+                    return
+                if job.get("status") == "cancelled":
+                    return
+                job["message"] = f"Tracking '{target}' across {total_frames} frames..."
+                mask_path, _ = magic_mask.generate_video_mask(
+                    video_path, target,
+                    colorize_objects=True,
+                    color_palette=[(0, 0, 255)],
+                    max_colored_objects=1,
+                    background_color=(255, 255, 255),
+                    output_dir=os.path.join(os.getcwd(), "uploads"),
+                )
+                if job.get("status") == "cancelled":
+                    return
+                job["params"]["video_mask"] = mask_path
         except Exception as e:
             traceback.print_exc()
             job["status"] = "failed"
@@ -7560,6 +7572,7 @@ async def recast_endpoint(request: Request):
             job["message"] = "Detection failed"
             return
         job["status"] = "queued"
+        job["message"] = "Queued (recast)"
         _run_generation(job_id)
 
     thread = threading.Thread(target=_run_recast, daemon=False)
