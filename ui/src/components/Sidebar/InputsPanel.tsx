@@ -159,6 +159,18 @@ export function InputsPanel() {
   const soundtrackName = audioGuideFilename || (params.audio_guide ? basename(params.audio_guide as string) : null)
   const controlVidName = videoGuideFilename || (params.video_guide ? basename(params.video_guide as string) : null)
 
+  // ── Guide video (motion source) for guide_custom_choices models ────
+  // Models like SCAIL-2 take a Control Video as the motion/scene guide
+  // (video_prompt_type contains 'V') with no audio coupling. Models with
+  // guide_preprocessing keep their upload in Advanced Settings, and
+  // K-audio models keep the soundtrack-coupled tile above — this tile
+  // only fills the gap between them.
+  const guideCfg = modelOptions?.guide_custom_choices as { choices?: [string, string][]; default?: string } | undefined
+  const guideDefault = guideCfg?.default || ''
+  const guideProcess = ((params.video_prompt_type as string) || guideDefault).replace(/T$/, '')
+  const supportsGuideVid = !!guideCfg && !modelOptions?.guide_preprocessing && !supportsControlVid && guideProcess.includes('V')
+  const hasGuideVid = supportsGuideVid && !!params.video_guide
+
   // ── Reference images (image_ref_choices) ───────────────────────────
   const refCfg = modelOptions?.image_ref_choices as { choices?: [string, string][] } | undefined
   const supportsRefs = !!refCfg
@@ -461,6 +473,27 @@ export function InputsPanel() {
     setParam('audio_prompt_type', '')
     if (selected === 'ctrlvid') setSelected(null)
   }
+  const handleAddGuideVid = async (file: File) => {
+    try {
+      const result = await api.uploadImage(file)
+      setParam('video_guide', result.path)
+      setVideoGuideFilename(file.name)
+      // Lock in the guide process letters: defaults are not hydrated into
+      // params client-side, so without this a user who never opens
+      // Advanced Settings would submit video_prompt_type '' and the model
+      // would not receive the control video at all.
+      if (!params.video_prompt_type && guideDefault) setParam('video_prompt_type', guideDefault)
+      const dur = await getMediaDuration(file)
+      if (dur && dur > 0) setDurationSeconds(Math.round(dur * 10) / 10)
+    } catch (e) {
+      console.error('Guide video upload failed:', e)
+    }
+  }
+  const removeGuideVid = () => {
+    setParam('video_guide', undefined)
+    setVideoGuideFilename(null)
+    if (selected === 'guidevid') setSelected(null)
+  }
   const toggleAudioFlag = (flag: 'N' | 'V') => {
     const cur = (params.audio_prompt_type as string) || ''
     setParam('audio_prompt_type', cur.includes(flag) ? cur.replace(flag, '') : cur + flag)
@@ -536,6 +569,15 @@ export function InputsPanel() {
             onSelect={() => setSelected(selected === 'ctrlvid' ? null : 'ctrlvid')} />
         ) : supportsControlVid && !hasSoundtrack && (
           <AddTile label="Control video" icon={<Film size={18} />} onClick={() => pickFile('.mp4,.webm,.mkv,.mov', handleAddControlVid)} onDropFile={handleAddControlVid} dropAccept="video" />
+        )}
+
+        {/* Guide video (motion source) — guide_custom_choices models (SCAIL-2 etc.) */}
+        {hasGuideVid ? (
+          <Tile role="Control video" filledIcon={<Film size={20} />} filledLabel={controlVidName ?? undefined}
+            imgSrc={null} selected={selected === 'guidevid'} onClear={removeGuideVid}
+            onSelect={() => setSelected(selected === 'guidevid' ? null : 'guidevid')} />
+        ) : supportsGuideVid && (
+          <AddTile label="Control video" icon={<Film size={18} />} onClick={() => pickFile('.mp4,.webm,.mkv,.mov', handleAddGuideVid)} onDropFile={handleAddGuideVid} dropAccept="video" />
         )}
 
         {/* Voice reference (ID-LoRA) — keeps the speaker's voice consistent. */}
