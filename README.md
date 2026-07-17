@@ -75,6 +75,20 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.3.0 (2026-07-17)
+
+**New: SCAIL-2 character animation.** Z.ai's follow-up to SCAIL Preview, integrated end to end. It transfers a performance from any video onto any character with no skeleton extraction, and it comes in two flavors: **SCAIL-2 14B** (the full 40-step model) and **SCAIL-2 14B Fast** (bundled lightx2v distill, 6 steps, no CFG, roughly 13x faster at near-identical quality). Both are enabled by default. About 16.6 GB downloads on first use, plus a small detector model.
+
+- **Animate (Video tab).** Pick SCAIL-2 in Frames mode, drop a character image as the Start Image and a performance clip on the new Control Video tile, generate. The character performs the clip's motion in their own scene. Output follows the source clip's frame rate (capped at 30fps) and keeps its audio.
+- **Recast (Edit tab).** The headline: replace a person in an existing video with your character. Drop a video, type who to replace ("woman", "man in red"), preview the selection with the eye button, drop the character image, generate. Masking is fully automatic (SAM3 keyword tracking), and the scene, camera, and audio are preserved. The prompt is optional; describing the new character helps identity.
+- **Use current frame as reference.** Gallery videos now have the same left-arrow button images have: scrub the preview to the moment you want and click to send that exact frame to the Reference tiles, which is the perfect way to pick a character out of an existing clip for Recast.
+
+**Fixed**
+- Sliding-window, frame-rate, and audio defaults now reach generations reliably (previously a 10s SCAIL-2 run could go out as one giant window and overflow VRAM, render at 16fps instead of the source rate, or come back silent).
+- SCAIL-2's VRAM budget now accounts for its in-context conditioning (it carries the driving video as extra tokens), so 480p multi-window runs fit a 24 GB card with room to spare instead of spilling into system memory.
+- "10 seconds" now means 10 seconds of your source clip regardless of its frame rate, and 60fps sources no longer double the generation work.
+- Queued Recasts wait their turn for the GPU instead of running their detection passes on top of the active generation.
+
 ### v1.2.8 (2026-07-16)
 
 **Fixed**

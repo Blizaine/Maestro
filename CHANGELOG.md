@@ -3,6 +3,22 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [1.3.0] - 2026-07-17
+
+SCAIL-2 character animation, ported from upstream WanGP v12.3 onto
+Maestro's engine with the SAM3 "Magic Mask" stack. Added: SCAIL-2 14B
+and SCAIL-2 14B Fast (bundled lightx2v distill, 6 steps, ~13x faster)
+as default-enabled Video models; the Recast sub-mode in the Edit tab
+(replace a person in a video with a reference character, automatic
+keyword-driven masking, preview, scene and audio preserved); a Control
+Video input tile for guide-driven models; and a "use current frame as
+reference" button on gallery videos. Hardened through field testing:
+model-default hydration plus server-side operating guards (sliding
+windows, source-fps follow capped at 30, audio remux, true duration
+math), a SCAIL-2-aware VRAM budget (in-context tokens), GPU-serialized
+Recast detection, and mode-scoped model selection and validation. See
+the [README Updates section](README.md#updates).
+
 ## [1.2.8] - 2026-07-16
 
 Fix #16: the My LoRAs library view only walked Maestro's own loras
