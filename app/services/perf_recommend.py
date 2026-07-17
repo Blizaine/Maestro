@@ -375,6 +375,7 @@ def compute_per_job_coefficient(
     stage_count: int = 1,
     resolution: Optional[str] = None,
     video_length_frames: Optional[int] = None,
+    model_activation_gb: float = 0.0,
 ) -> dict:
     """Compute a per-job VRAM safety coefficient.
 
@@ -407,6 +408,14 @@ def compute_per_job_coefficient(
             None skips the compute-size penalty/bonus entirely.
         video_length_frames: Total output frames. None or 0 skips the
             compute-size penalty/bonus. (For images, pass 1.)
+        model_activation_gb: Flat activation surcharge in GB for model
+            classes whose conditioning inflates the attention sequence
+            beyond what resolution × frames predicts (e.g. SCAIL-2
+            appends the driving video as in-context tokens and prepends
+            reference latents — ~35% more sequence than a classic Wan
+            job at the same size). The generic compute curve rates such
+            jobs "lighter than baseline" and would loosen the cap; this
+            surcharge tightens it instead so activations fit. 0 = no-op.
 
     Returns:
         Dict with keys:
@@ -528,8 +537,18 @@ def compute_per_job_coefficient(
                 f"vs baseline ({width}×{height} × {frames} frames, lighter than baseline)"
             )
 
+    # 3b. Model-class activation surcharge — see docstring. Sized by the
+    # caller from measurement; applied as a straight cap reduction.
+    model_activation_penalty = 0.0
+    if model_activation_gb and model_activation_gb > 0:
+        model_activation_penalty = float(model_activation_gb) / total_vram_gb
+        reasons.append(
+            f"-{model_activation_penalty:.3f} for model-class activation "
+            f"overhead ({model_activation_gb:.1f} GB)"
+        )
+
     # 4. Apply all adjustments, then clamp to floor/ceiling.
-    raw_effective = base_coef - lora_penalty - pass_penalty - compute_penalty
+    raw_effective = base_coef - lora_penalty - pass_penalty - compute_penalty - model_activation_penalty
     effective = min(max(raw_effective, _COEFFICIENT_FLOOR), _COEFFICIENT_CEILING)
     floored = raw_effective < _COEFFICIENT_FLOOR
     ceilinged = raw_effective > _COEFFICIENT_CEILING

@@ -8864,6 +8864,36 @@ def _apply_per_job_coefficient(job: dict) -> None:
         ):
             effective_frames = sliding_window_size
 
+        # SCAIL-2 activation surcharge. The model appends the driving
+        # video as in-context tokens (~25% extra sequence) and prepends
+        # reference latents, so its attention working set is far larger
+        # than resolution × frames predicts — the generic compute curve
+        # rates a 480p SCAIL-2 window "lighter than baseline" and
+        # LOOSENS the cap. Measured on a 24GB RTX 4090: a 49-frame
+        # 848x480 window peaked at 23.1GB under a 17.8GB weight cap
+        # (~5.3GB activations); an 81-frame window extrapolates to
+        # ~8.5GB activations and overflowed 24GB in the field
+        # (user-reported OOM, 2026-07-17). Surcharge = 6GB at the
+        # 848x480 x 81-frame reference, scaled linearly by window
+        # pixels x frames, so the freed VRAM tracks the actual
+        # activation need.
+        model_activation_gb = 0.0
+        try:
+            _base_mt = wgp.get_base_model_type(model_type) if model_type else None
+        except Exception:
+            _base_mt = None
+        if _base_mt in ("scail2_14B", "scail2_1.3B"):
+            _ref_pixels, _ref_frames = 848 * 480, 81
+            _pixels = _ref_pixels
+            if isinstance(resolution, str) and "x" in resolution:
+                try:
+                    _w, _h = resolution.lower().split("x")
+                    _pixels = int(_w) * int(_h)
+                except (ValueError, TypeError):
+                    pass
+            _frames = effective_frames or _ref_frames
+            model_activation_gb = 6.0 * (_pixels / _ref_pixels) * (_frames / _ref_frames)
+
         adjustment = compute_per_job_coefficient(
             base_coef=base_coef,
             total_vram_gb=total_vram_gb,
@@ -8872,6 +8902,7 @@ def _apply_per_job_coefficient(job: dict) -> None:
             stage_count=stage_count,
             resolution=resolution,
             video_length_frames=effective_frames,
+            model_activation_gb=model_activation_gb,
         )
         job["vram_adjustment"] = adjustment
 
