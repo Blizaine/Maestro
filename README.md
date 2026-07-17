@@ -75,6 +75,12 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.3.1 (2026-07-17)
+
+**Fixed**
+- **Model downloads no longer fail when your saved Hugging Face token has gone stale.** A stale or expired token made Hugging Face reject even public files with a misleading "Repository Not Found" (reported as the SCAIL-2 download failing, issue #20). Maestro now detects the rejection and retries the download anonymously, which covers everything Maestro ships. Valid tokens are still used first, so gated models keep working.
+- Recast's Advanced Settings no longer show resolution and window controls that the generation ignores (Recast runs at SCAIL-2's native 480p with its 81-frame windows).
+
 ### v1.3.0 (2026-07-17)
 
 **New: SCAIL-2 character animation.** Z.ai's follow-up to SCAIL Preview, integrated end to end. It transfers a performance from any video onto any character with no skeleton extraction, and it comes in two flavors: **SCAIL-2 14B** (the full 40-step model) and **SCAIL-2 14B Fast** (bundled lightx2v distill, 6 steps, no CFG, roughly 13x faster at near-identical quality). Both are enabled by default. About 16.6 GB downloads on first use, plus a small detector model.

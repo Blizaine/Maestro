@@ -3,6 +3,16 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [1.3.1] - 2026-07-17
+
+Fix #20: a stale local Hugging Face token made HF reject public files
+with 401 ("OAuth token signature verification failed"), surfacing as
+"Repository Not Found" for the SCAIL-2 checkpoint. All model-download
+paths now retry anonymously when the token is rejected; valid tokens
+are still tried first so gated repos keep working. Also hides Recast's
+inert resolution/window controls (the endpoint pins SCAIL-2's native
+operating point).
+
 ## [1.3.0] - 2026-07-17
 
 SCAIL-2 character animation, ported from upstream WanGP v12.3 onto
