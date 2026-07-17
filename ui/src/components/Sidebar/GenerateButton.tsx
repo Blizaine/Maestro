@@ -8,10 +8,13 @@ export function GenerateButton() {
   const setSidebarOpen = useStore(s => s.setSidebarOpen)
   const [cooldown, setCooldown] = useState(false)
 
-  // Check if i2v-only model needs a start image
+  // Check if i2v-only model needs a start image. Video mode only: edit
+  // sub-modes supply their own source media (Recast runs the i2v-only
+  // SCAIL-2 against a source video + reference image, no start image).
+  const generationMode = useStore(s => s.generationMode)
   const isI2vOnly = useStore(s => s.modelOptions?.i2v_class && !s.modelOptions?.t2v_class)
   const hasStartImage = useStore(s => !!(s.startImage || s.params.image_start))
-  const needsImage = isI2vOnly && !hasStartImage
+  const needsImage = generationMode === 'video' && isI2vOnly && !hasStartImage
 
   // Brief gray flash after clicking
   useEffect(() => {

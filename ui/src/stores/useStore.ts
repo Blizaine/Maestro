@@ -3064,11 +3064,14 @@ export const useStore = create<AppState>((set, get) => ({
 
     const state = get()
 
-    // Validate: i2v-only models require a start image
+    // Validate: i2v-only models require a start image — Video mode only.
+    // Edit sub-modes supply their own source media and validate in their
+    // own branches (Recast runs the i2v-only SCAIL-2 against a source
+    // video + reference image; this guard silently ate its clicks).
     const isI2vOnly = state.modelOptions?.i2v_class && !state.modelOptions?.t2v_class
     const hasStartImage = state.startImage || state.params.image_start
     const hasMultiClipImages = state.clips.some(c => c.startImage || c.startImagePath)
-    if (isI2vOnly && !hasStartImage && !hasMultiClipImages) {
+    if (state.generationMode === 'video' && isI2vOnly && !hasStartImage && !hasMultiClipImages) {
       console.error('This model requires a start image')
       // Could show a toast/notification here in the future
       return
