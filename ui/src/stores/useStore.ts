@@ -3592,7 +3592,11 @@ export const useStore = create<AppState>((set, get) => ({
       params.force_fps === 'control' &&
       state.guideVideoFps && state.guideVideoFps > 0
     ) {
-      params.video_length = Math.max(5, Math.round(state.durationSeconds * state.guideVideoFps))
+      // Cap at 30fps to match the server's follow-rate cap — a 60fps
+      // guide would double the frame count (and sliding windows) for
+      // no visible gain.
+      const fpsUsed = Math.min(state.guideVideoFps, 30)
+      params.video_length = Math.max(5, Math.round(state.durationSeconds * fpsUsed))
     }
     // Always tell the server what duration the user actually asked for.
     // For control-fps models the server recomputes video_length from

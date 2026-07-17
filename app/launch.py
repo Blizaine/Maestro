@@ -6684,14 +6684,25 @@ async def generate(request: Request):
                     from shared.utils.utils import get_video_info
                     _gfps, _, _, _gframes = get_video_info(_guide)
                     if _gfps and float(_gfps) > 0:
-                        _want = int(round(float(_dur) * float(_gfps)))
+                        _gfps = float(_gfps)
+                        # Cap the follow rate at 30fps: a 60fps source would
+                        # double frames (and windows) for no visible gain —
+                        # user report: a 10s test ran as 8 windows because
+                        # the source was 60fps. wgp resamples the guide to
+                        # the forced integer rate.
+                        _fps_used = _gfps
+                        if _gfps > 30.5:
+                            _fps_used = 30.0
+                            body["force_fps"] = "30"
+                            print(f"[generate] SCAIL-2 fps cap: {_gfps:.6g}fps guide → generating at 30fps")
+                        _want = int(round(float(_dur) * _fps_used))
                         if _gframes:
-                            _want = min(_want, int(_gframes))
+                            _want = min(_want, int(int(_gframes) * _fps_used / _gfps))
                         if _want >= 5 and _want != int(body.get("video_length") or 0):
                             print(
                                 f"[generate] SCAIL-2 duration: video_length "
                                 f"{body.get('video_length')} → {_want} "
-                                f"({_dur}s × {float(_gfps):.6g}fps guide)"
+                                f"({_dur}s × {_fps_used:.6g}fps)"
                             )
                             body["video_length"] = _want
             except Exception as _sferr:
@@ -7453,6 +7464,17 @@ async def recast_endpoint(request: Request):
     is_fast = "fast" in model_type
     duration_s = total_frames / fps if fps else 0
 
+    # Cap the follow rate at 30fps (same rationale as the generate guard):
+    # a 60fps source doubles frames and windows for no visible gain. wgp
+    # resamples the guide (and the SAM3 mask video, which carries the
+    # source fps) to the forced integer rate.
+    recast_force_fps = "control"
+    gen_frames = total_frames
+    if fps and float(fps) > 30.5:
+        recast_force_fps = "30"
+        gen_frames = int(round(duration_s * 30.0))
+        print(f"[Recast] fps cap: {float(fps):.6g}fps source → generating at 30fps ({gen_frames} frames)")
+
     prompt = (body.get("prompt") or "").strip() or (
         "The person from the reference image performs in the scene, "
         "matching the original camera framing, motion, and lighting."
@@ -7475,10 +7497,10 @@ async def recast_endpoint(request: Request):
         "video_guide": video_path,
         # video_mask is filled by the detection pre-step below.
         "image_refs": [ref_image_path],
-        "video_length": total_frames,
+        "video_length": gen_frames,
         "_duration_seconds": duration_s,
         "resolution": "832x480",
-        "force_fps": "control",
+        "force_fps": recast_force_fps,
         "audio_prompt_type": "R",
         "sliding_window_size": 81,
         "sliding_window_overlap": 5,
