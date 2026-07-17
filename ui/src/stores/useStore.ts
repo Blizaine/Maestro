@@ -312,6 +312,15 @@ const _PRIMARY_MODEL_DEFAULT_FIELDS: ReadonlyArray<string> = [
   'top_p',
   'top_k',
   'alt_guidance_scale',
+  // Sliding-window geometry. The UI only writes sliding_window_size when
+  // the user touches the Advanced slider, so without hydration a request
+  // carries NO window size and the backend inherits one from unrelated
+  // primary settings — SCAIL-2 (window default 81) then ran a 10s
+  // generation as a single 160-frame window and overflowed VRAM at
+  // resolutions that fit fine per-window. LTX-2's defaults carry 481
+  // (~19s), so typical LTX generations stay single-window as before.
+  'sliding_window_size',
+  'sliding_window_overlap',
 ]
 
 // Monotonic sequence for loadModelOptions staleness detection — only the
