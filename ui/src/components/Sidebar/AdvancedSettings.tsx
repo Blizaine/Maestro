@@ -166,6 +166,7 @@ export function AdvancedSettings() {
   const isAudioOnly = modelOptions?.audio_only || isSfx
   const isVideo = generationMode === 'video'
   const isAvatar = generationMode === 'avatar'
+  const isRecast = isAvatar && editSubMode === 'recast'
   const hasStartImage = useStore(s => !!(s.startImage || s.params.image_start))
   const hasEndImage = useStore(s => !!(s.endImage || s.params.image_end))
   const hasImageRefs = useStore(s => {
@@ -227,16 +228,19 @@ export function AdvancedSettings() {
 
             {/* Scrollable content */}
             <div className="flex-1 overflow-y-auto px-4 py-4 space-y-5">
-              {/* Resolution + Aspect */}
+              {/* Resolution + Aspect. Recast hides both resolution and
+                  window settings: the endpoint owns them (SCAIL-2's native
+                  832x480, 81-frame windows), so the controls shown here
+                  would display values the generation ignores. */}
               {!isAudio && (
                 <>
-                  {!modelOptions?.hide_resolution_presets && <ResolutionPresets />}
+                  {!modelOptions?.hide_resolution_presets && !isRecast && <ResolutionPresets />}
                   {!isAvatar && <AspectRatioGrid />}
                 </>
               )}
 
               {/* Window Settings */}
-              {(isVideo || isAvatar) && <WindowSettings />}
+              {(isVideo || (isAvatar && !isRecast)) && <WindowSettings />}
 
               {/* TTS Settings */}
               {isAudioOnly && (
