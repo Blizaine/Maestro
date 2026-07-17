@@ -159,6 +159,7 @@ export function AdvancedSettings() {
   const setParam = useStore(s => s.setParam)
   const modelOptions = useStore(s => s.modelOptions)
   const generationMode = useStore(s => s.generationMode)
+  const editSubMode = useStore(s => s.editSubMode)
   const audioSubMode = useStore(s => s.audioSubMode)
   const isAudio = generationMode === 'audio'
   const isSfx = isAudio && audioSubMode === 'sfx'
@@ -791,8 +792,12 @@ export function AdvancedSettings() {
               {/* LoRAs */}
               <LoraSelector />
 
-              {/* Control Video / Frames Injection */}
-              {(modelOptions?.guide_preprocessing || modelOptions?.guide_custom_choices) && (
+              {/* Control Video / Frames Injection. Hidden in Recast: the
+                  endpoint pins "Replace One Person" + builds the mask from
+                  the "who to replace" keyword, so SCAIL-2's Type of
+                  Process dropdown would be a no-op there and mislead. */}
+              {(modelOptions?.guide_preprocessing || modelOptions?.guide_custom_choices) &&
+                !(generationMode === 'avatar' && editSubMode === 'recast') && (
                 <ControlVideoSection />
               )}
 
