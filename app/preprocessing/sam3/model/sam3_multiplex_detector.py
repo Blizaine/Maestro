@@ -704,6 +704,12 @@ class Sam3MultiplexDetector(Sam3MultiplexImageBase):
         else:
             valid_frame_start = 0
             valid_frame_end = num_frames
+        # Clamp to the video: with a non-zero start frame (re-anchored
+        # propagation) start+max_frame_num_to_track can point past the last
+        # frame, and an unclamped chunk_end then grounds frames that do not
+        # exist (IndexError in _get_img_feats).
+        valid_frame_start = max(valid_frame_start, 0)
+        valid_frame_end = min(valid_frame_end, num_frames)
 
         # Initialize grounding_buffer if not present
         if "grounding_buffer" not in grounding_cache:

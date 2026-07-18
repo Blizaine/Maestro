@@ -350,40 +350,96 @@ def run_sam3_video(
 
     try:
         total_progress_steps = len(keywords) * num_frames
+        # Probe stride for anchoring: fine enough to catch brief appearances,
+        # coarse enough that a keyword absent from a stretch of video does
+        # not cost one ~1s detection per frame (floor of 4 caps the worst
+        # case at a quarter of the frames; the both-direction propagation
+        # from the anchor covers the frames between probes).
+        probe_stride = max(4, num_frames // 64)
         for keyword_index, keyword in enumerate(keywords):
             progress_base = keyword_index * num_frames
             logger.info("SAM3 keyword currently being processed: '%s'", keyword)
-            request = {"type": "add_prompt", "session_id": session_id, "frame_index": 0, "text": keyword}
-            if preencoded_prompts is not None:
-                request["preencoded_text_outputs"] = _bf16_prompt_payload(preencoded_prompts[keyword])
-            with _autocast_context():
+
+            def _add_prompt(frame_index):
+                request = {"type": "add_prompt", "session_id": session_id, "frame_index": frame_index, "text": keyword}
+                if preencoded_prompts is not None:
+                    request["preencoded_text_outputs"] = _bf16_prompt_payload(preencoded_prompts[keyword])
                 result = video_predictor.handle_request(request)
-                merge_outputs(0, result.get("outputs") if isinstance(result, dict) else None)
-                if progress_callback is not None:
-                    progress_callback(progress_base, total_progress_steps)
-                internal_progress_seen = False
+                return result.get("outputs") if isinstance(result, dict) else None
 
-                def model_progress_callback(done, total):
-                    nonlocal internal_progress_seen
-                    internal_progress_seen = True
-                    progress_callback(min(progress_base + int(done), total_progress_steps), total_progress_steps)
+            with _autocast_context():
+                # Upstream prompts frame 0 only and propagates forward once.
+                # That crashes with "No points are provided" when the keyword
+                # detects nothing on frame 0 (target enters the video late),
+                # and again when the multiplex tracker's periodic
+                # reconditioning drops every tracked object mid-video. Anchor
+                # on a frame where the keyword actually detects, sweep both
+                # directions from it, and on a mid-video collapse re-anchor
+                # past the death point, keeping every mask produced so far.
+                segment_start = 0
+                first_segment = True
+                while segment_start < num_frames:
+                    # add_prompt resets the session state, so probing has no
+                    # side effects; the last successful call leaves the state
+                    # primed for propagation from that frame.
+                    anchor = None
+                    anchor_outputs = None
+                    for frame_index in range(segment_start, num_frames, probe_stride):
+                        outputs = _add_prompt(frame_index)
+                        if bool(_sam3_outputs_to_binary_mask(outputs, height, width).any()):
+                            anchor = frame_index
+                            anchor_outputs = outputs
+                            break
+                    if anchor is None:
+                        logger.warning(
+                            "SAM3 found no '%s' in frames %d-%d; leaving those masks empty.",
+                            keyword, segment_start, num_frames - 1,
+                        )
+                        break
+                    if anchor > segment_start:
+                        logger.info("SAM3 anchored '%s' at frame %d (not detected at frame %d).", keyword, anchor, segment_start)
+                    merge_outputs(anchor, anchor_outputs)
+                    if progress_callback is not None:
+                        progress_callback(min(progress_base + anchor, total_progress_steps), total_progress_steps)
+                    internal_progress_seen = False
 
-                stream_request = {
-                    "type": "propagate_in_video",
-                    "session_id": session_id,
-                    "propagation_direction": "forward",
-                    "start_frame_index": 0,
-                    "max_frame_num_to_track": num_frames,
-                }
-                if progress_callback is not None:
-                    stream_request["progress_callback"] = model_progress_callback
-                propagated_frames = 0
-                for result in video_predictor.handle_stream_request(stream_request):
-                    propagated_frames += 1
-                    if progress_callback is not None and not internal_progress_seen:
-                        progress_callback(min(progress_base + propagated_frames, total_progress_steps), total_progress_steps)
-                    outputs = result["outputs"]
-                    merge_outputs(result["frame_index"], outputs)
+                    def model_progress_callback(done, total):
+                        nonlocal internal_progress_seen
+                        internal_progress_seen = True
+                        progress_callback(min(progress_base + int(done), total_progress_steps), total_progress_steps)
+
+                    stream_request = {
+                        "type": "propagate_in_video",
+                        "session_id": session_id,
+                        # The first segment sweeps both directions so frames
+                        # before a late-appearing target are still covered;
+                        # recovery segments only need to continue forward.
+                        "propagation_direction": "both" if first_segment and anchor > 0 else "forward",
+                        "start_frame_index": anchor,
+                        "max_frame_num_to_track": num_frames,
+                    }
+                    if progress_callback is not None:
+                        stream_request["progress_callback"] = model_progress_callback
+                    propagated_frames = 0
+                    last_frame_seen = anchor
+                    try:
+                        for result in video_predictor.handle_stream_request(stream_request):
+                            propagated_frames += 1
+                            last_frame_seen = max(last_frame_seen, result["frame_index"])
+                            if progress_callback is not None and not internal_progress_seen:
+                                progress_callback(min(progress_base + propagated_frames, total_progress_steps), total_progress_steps)
+                            outputs = result["outputs"]
+                            merge_outputs(result["frame_index"], outputs)
+                        break  # keyword fully propagated
+                    except RuntimeError as exc:
+                        if "No points are provided" not in str(exc):
+                            raise
+                        logger.warning(
+                            "SAM3 tracking for '%s' collapsed around frame %d; re-anchoring past it.",
+                            keyword, last_frame_seen,
+                        )
+                        segment_start = last_frame_seen + 1
+                        first_segment = False
     finally:
         try:
             if session_id is not None and video_predictor is not None:
