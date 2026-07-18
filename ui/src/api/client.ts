@@ -1711,6 +1711,19 @@ export async function reclaimDuplicate(path: string): Promise<{ freed_bytes: num
   return res.json()
 }
 
+export async function removeLinkedDuplicate(path: string): Promise<{ freed_bytes: number; recycled: boolean }> {
+  const res = await fetch(`${BASE}/api/v1/storage/duplicates/remove-linked`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Remove failed' }))
+    throw new Error(err.detail || 'Remove failed')
+  }
+  return res.json()
+}
+
 export async function deleteLoraFile(directory: string, filename: string): Promise<{ deleted: string; deferred: boolean }> {
   const params = new URLSearchParams({ directory: directory || '.', filename })
   const res = await fetch(`${BASE}/api/v1/loras/file?${params.toString()}`, { method: 'DELETE' })

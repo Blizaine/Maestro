@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { X, HardDrive, Loader2, Trash2, RefreshCw, Copy, Boxes, FolderOpen, Film } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import {
-  fetchStorageUsage, fetchStorageDuplicates, reclaimDuplicate,
+  fetchStorageUsage, fetchStorageDuplicates, reclaimDuplicate, removeLinkedDuplicate,
   deleteModel, deleteLoraFile, deleteWorkspace as apiDeleteWorkspace,
   type StorageUsage, type StorageDuplicate,
 } from '../../api/client'
@@ -16,6 +16,8 @@ export function StorageDashboard() {
   const open = useStore(s => s.storageDashboardOpen)
   const setOpen = useStore(s => s.setStorageDashboardOpen)
   const loadWorkspaces = useStore(s => s.loadWorkspaces)
+  const allowLinkedRemoval = useStore(s => s.servicesConfig?.storage_allow_linked_removal ?? false)
+  const updateServicesConfig = useStore(s => s.updateServicesConfig)
   const [usage, setUsage] = useState<StorageUsage | null>(null)
   const [usageLoading, setUsageLoading] = useState(false)
   const [dupes, setDupes] = useState<{ duplicates: StorageDuplicate[]; conflicts: StorageDuplicate[]; total_reclaimable_bytes: number } | null>(null)
@@ -144,6 +146,15 @@ export function StorageDashboard() {
             <span className="text-[10px] text-text-muted">
               same file in Maestro AND a linked install — deleting Maestro's copy is free, the linked one keeps working
             </span>
+            <label className="ml-auto flex items-center gap-1.5 text-[10px] text-text-secondary cursor-pointer shrink-0" title="The inverse direction: keep Maestro's copy and remove the duplicate FROM the linked install. Removals go to the Windows Recycle Bin so they can be undone. Off by default because it modifies other installs.">
+              <input
+                type="checkbox"
+                checked={allowLinkedRemoval}
+                onChange={e => updateServicesConfig({ storage_allow_linked_removal: e.target.checked })}
+                className="w-3 h-3 rounded border-border bg-bg-tertiary accent-accent-blue"
+              />
+              Allow removing from linked installs
+            </label>
           </div>
           {dupes && dupes.duplicates.length === 0 && (
             <div className="text-xs text-text-muted py-2">No duplicates — nothing stored twice.</div>
@@ -158,6 +169,16 @@ export function StorageDashboard() {
                   <span className="text-text-secondary tabular-nums shrink-0">{formatBytes(d.size_bytes)}</span>
                   {rowBtn(`dup:${d.primary_path}`, 'Reclaim', async () => {
                     await reclaimDuplicate(d.primary_path)
+                    setDupes(prev => prev ? {
+                      ...prev,
+                      duplicates: prev.duplicates.filter(x => x.primary_path !== d.primary_path),
+                      total_reclaimable_bytes: prev.total_reclaimable_bytes - d.size_bytes,
+                    } : prev)
+                  })}
+                  {allowLinkedRemoval && rowBtn(`dupl:${d.linked_path}`, 'Remove linked', async () => {
+                    await removeLinkedDuplicate(d.linked_path)
+                    // Pair broken the other way: Maestro's copy stays, the
+                    // linked one is in that install's Recycle Bin.
                     setDupes(prev => prev ? {
                       ...prev,
                       duplicates: prev.duplicates.filter(x => x.primary_path !== d.primary_path),

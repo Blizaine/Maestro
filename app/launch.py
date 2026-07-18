@@ -5373,6 +5373,10 @@ def get_services_config():
         # mode picker hides Inpaint and Restyle. Toggling this on
         # surfaces those affordances for power users.
         "show_experimental": services.get("show_experimental", False),
+        # Storage Manager: opt-in gate for removing duplicate files FROM
+        # linked installs (the inverse of Reclaim). Default off — deleting
+        # from another install is informed-consent territory.
+        "storage_allow_linked_removal": services.get("storage_allow_linked_removal", False),
         # Performance auto-tune master switch. When True (default), the
         # Settings → System Performance section collapses to a single
         # "Detected: <hardware> → <profile>" card with all underlying
@@ -5422,7 +5426,7 @@ async def update_services_config(request: Request):
         "google_api_key", "openai_api_key", "anthropic_api_key",
         "use_director_v2", "nsfw_mode", "nsfw_accepted_at", "director_prompt_polish",
         "civitai_api_key", "voice_reference_enabled", "ltx_progressive_pipeline",
-        "show_experimental", "auto_performance",
+        "show_experimental", "auto_performance", "storage_allow_linked_removal",
         "director_multishot_lora_mode",
         "flashvsr_mode", "flashvsr_topk_ratio", "flashvsr_backend",
     }
@@ -5775,6 +5779,62 @@ async def storage_reclaim(request: Request):
     if not os.path.isfile(matched):
         print(f"[Storage] CRITICAL: surviving copy vanished immediately after reclaim: {matched}")
     return {"status": "ok", "freed_bytes": psize, "deferred": bool(result.get("deferred")), "surviving_copy": matched}
+
+
+@api.post("/api/v1/storage/duplicates/remove-linked")
+async def storage_remove_linked(request: Request):
+    """The inverse of reclaim: keep Maestro's copy, remove the LINKED
+    install's duplicate — to the Recycle Bin, never a hard delete.
+
+    Gated on the opt-in services.storage_allow_linked_removal flag:
+    deleting from another install is the one sanctioned exception to the
+    is_protected_path rule, and only with an identical different-physical
+    copy verified in Maestro's primary root at this exact moment."""
+    services = wgp.server_config.get("services", {})
+    if not services.get("storage_allow_linked_removal", False):
+        raise HTTPException(status_code=403, detail="Removing files from linked installs is disabled. Enable it in the Storage Manager first.")
+    body = await request.json()
+    path = body.get("path", "")
+    if not path or not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="File not found.")
+    target = os.path.abspath(path)
+    if not wgp.fl.is_protected_path(target):
+        raise HTTPException(status_code=400, detail="That file is not in a linked install — use Reclaim for Maestro's own copies.")
+    target_real = os.path.realpath(target)
+    try:
+        psize = os.path.getsize(target_real)
+    except OSError:
+        raise HTTPException(status_code=404, detail="File not found.")
+    surviving = None
+    for kind, (primary_root, linked_roots) in _storage_roots().items():
+        if not primary_root:
+            continue
+        for linked_root in linked_roots:
+            lroot_real = os.path.realpath(linked_root)
+            if not os.path.normcase(target_real).startswith(os.path.normcase(lroot_real + os.sep)):
+                continue
+            rel_key = os.path.relpath(target_real, lroot_real)
+            candidate = os.path.join(primary_root, rel_key)
+            try:
+                if not os.path.isfile(candidate) or os.path.getsize(candidate) != psize:
+                    continue
+                if _same_physical_file(candidate, target_real):
+                    continue
+                if not _files_probably_identical(target_real, candidate, psize):
+                    continue
+                surviving = os.path.abspath(candidate)
+                break
+            except OSError:
+                continue
+        if surviving:
+            break
+    if not surviving:
+        raise HTTPException(status_code=409, detail="Maestro does not hold an identical copy of that file — refusing to remove the linked install's only version.")
+    from services.win_safe_files import recycle_file
+    if not recycle_file(target):
+        raise HTTPException(status_code=423, detail="Could not move the file to the Recycle Bin (it may be locked, or too large for the Bin). Nothing was deleted.")
+    print(f"[Storage] Removed linked duplicate to Recycle Bin: {target} ({psize} bytes; Maestro's copy: {surviving})")
+    return {"status": "ok", "freed_bytes": psize, "recycled": True, "surviving_copy": surviving}
 
 
 @api.get("/api/v1/storage/usage")

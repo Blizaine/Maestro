@@ -310,6 +310,9 @@ export interface ServicesConfig {
    *  Studio prompt enhancer config; the Edit mode picker hides
    *  Inpaint and Restyle. Flipping this on surfaces all of them. */
   show_experimental: boolean
+  /** Storage Manager opt-in: allow removing duplicate files FROM linked
+   *  installs (Recycle Bin only). Default off — informed consent. */
+  storage_allow_linked_removal?: boolean
   /** Performance auto-tune master switch. When true (default for fresh
    *  installs), Settings → System Performance shows a single auto card
    *  with detected hardware + recommended profile, and the underlying

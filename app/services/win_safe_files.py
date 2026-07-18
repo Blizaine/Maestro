@@ -584,6 +584,46 @@ def sweep_trash(base: str) -> int:
     return count
 
 
+def recycle_file(path: str) -> bool:
+    """Send a file to the Windows Recycle Bin (SHFileOperationW with
+    FOF_ALLOWUNDO). Returns True only when the file is actually gone from
+    its original location. Used for deletions in OTHER installs' folders,
+    where an undo path matters more than reclaiming space instantly.
+    Falls back to False (caller decides) on non-Windows or API failure —
+    including oversized files the Bin silently refuses."""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class SHFILEOPSTRUCTW(ctypes.Structure):
+            _fields_ = [
+                ("hwnd", wintypes.HWND),
+                ("wFunc", wintypes.UINT),
+                ("pFrom", wintypes.LPCWSTR),
+                ("pTo", wintypes.LPCWSTR),
+                ("fFlags", ctypes.c_uint16),
+                ("fAnyOperationsAborted", wintypes.BOOL),
+                ("hNameMappings", ctypes.c_void_p),
+                ("lpszProgressTitle", wintypes.LPCWSTR),
+            ]
+
+        FO_DELETE = 3
+        FOF_ALLOWUNDO = 0x40
+        FOF_NOCONFIRMATION = 0x10
+        FOF_SILENT = 0x4
+        FOF_NOERRORUI = 0x400
+        op = SHFILEOPSTRUCTW()
+        op.wFunc = FO_DELETE
+        op.pFrom = os.path.abspath(path) + "\x00"  # double-null via LPCWSTR terminator
+        op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI
+        result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+        return result == 0 and not op.fAnyOperationsAborted and not os.path.exists(path)
+    except Exception:
+        return False
+
+
 def safe_join_under(base: str, *parts: str):
     """Join `parts` under `base`; return the absolute path only if it stays
     inside `base` after resolving symlinks, else None. Shared with services
