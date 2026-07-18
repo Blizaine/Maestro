@@ -1678,6 +1678,9 @@ export interface StorageUsageLora {
 
 export interface StorageUsage {
   models: StorageUsageModel[]
+  /** Globally deduped — per-model sizes overlap on shared weights
+   *  (base transformers, text encoders), so summing rows over-counts. */
+  models_total_bytes: number
   loras: StorageUsageLora[]
   workspaces: { name: string; file_count: number; size_bytes: number }[]
   scanned_sidecars: number

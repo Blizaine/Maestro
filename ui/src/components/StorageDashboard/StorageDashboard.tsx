@@ -73,7 +73,8 @@ export function StorageDashboard() {
   if (!open) return null
 
   const fmtWhen = (ts: number | null) => ts ? new Date(ts * 1000).toLocaleDateString() : 'never'
-  const totalModels = usage ? usage.models.reduce((a, m) => a + m.size_bytes, 0) : 0
+  // Server-side deduped total — per-model sizes overlap on shared weights.
+  const totalModels = usage ? usage.models_total_bytes : 0
   const totalLoras = usage ? usage.loras.reduce((a, l) => a + l.size_bytes, 0) : 0
   const totalMedia = usage ? usage.workspaces.reduce((a, w) => a + w.size_bytes, 0) : 0
 

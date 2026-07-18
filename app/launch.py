@@ -1661,7 +1661,10 @@ def check_lora_updates(force: bool = False):
         versions = {}
         for v in model_data.get("modelVersions", []) or []:
             if isinstance(v, dict) and v.get("id") is not None:
-                versions[int(v["id"])] = v.get("publishedAt")
+                try:
+                    versions[int(v["id"])] = v.get("publishedAt")
+                except (TypeError, ValueError):
+                    continue
         for path in sidecar_paths:
             try:
                 with open(path, "r", encoding="utf-8") as f:
@@ -5595,6 +5598,42 @@ def _walk_sized(root: str) -> dict:
     return out
 
 
+def _same_physical_file(a: str, b: str) -> bool:
+    """True when two paths reference the same on-disk data: junctions and
+    symlinks resolve via realpath; NTFS hardlinks (which realpath does NOT
+    resolve) via matching (st_dev, st_ino)."""
+    if os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b)):
+        return True
+    try:
+        sa, sb = os.stat(a), os.stat(b)
+        return sa.st_ino != 0 and (sa.st_dev, sa.st_ino) == (sb.st_dev, sb.st_ino)
+    except OSError:
+        return False
+
+
+def _files_probably_identical(a: str, b: str, size: int) -> bool:
+    """Sampled content comparison (1MB head/middle/tail) — same-size files
+    can still be divergent weights (a retrained LoRA at the same rank is
+    byte-size-identical), and reading multi-GB files fully is not viable
+    per scan."""
+    chunk = 1024 * 1024
+    offsets = [0]
+    if size > chunk * 3:
+        offsets += [size // 2, max(0, size - chunk)]
+    elif size > chunk:
+        offsets.append(max(0, size - chunk))
+    try:
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            for off in offsets:
+                fa.seek(off)
+                fb.seek(off)
+                if fa.read(chunk) != fb.read(chunk):
+                    return False
+        return True
+    except OSError:
+        return False
+
+
 def _storage_roots() -> dict:
     """Primary + linked roots for both file kinds, resolved once."""
     ckpt_roots = wgp.fl.get_checkpoints_paths()
@@ -5634,21 +5673,29 @@ def storage_duplicates():
                     continue
                 lpath, lsize = hit
                 if psize == lsize:
-                    # Junction/symlink check: a primary folder linked into
-                    # another install makes both paths THE SAME physical
-                    # file — zero reclaimable bytes, and deleting "one
-                    # copy" would delete the only copy.
-                    if os.path.normcase(os.path.realpath(ppath)) == os.path.normcase(os.path.realpath(lpath)):
+                    # Same physical data (junction, symlink, or hardlink)
+                    # is zero reclaimable bytes — "deleting one copy"
+                    # would delete the only copy.
+                    if _same_physical_file(ppath, lpath):
                         shared_via_link += 1
                         continue
+                # Both roots derive from <install>/app/<ckpts|loras>, so the
+                # install name is two levels up from the ROOT (deriving it
+                # from the file path mislabels subfoldered loras).
                 row = {
                     "kind": kind, "filename": os.path.basename(ppath), "rel_path": rel,
                     "primary_path": ppath, "size_bytes": psize,
                     "linked_path": lpath, "linked_size_bytes": lsize,
-                    "linked_install": os.path.basename(os.path.dirname(os.path.dirname(lpath if kind == "lora" else linked_root))),
+                    "linked_install": os.path.basename(os.path.dirname(os.path.dirname(linked_root))),
                 }
                 if psize == lsize and psize >= _STORAGE_MIN_DUP_BYTES:
-                    duplicates.append(row)
+                    # Same size is not same content: a retrained LoRA at the
+                    # same rank is byte-size-identical. Divergent pairs are
+                    # conflicts (the primary is the one actually in use).
+                    if _files_probably_identical(ppath, lpath, psize):
+                        duplicates.append(row)
+                    else:
+                        conflicts.append(row)
                 elif psize != lsize:
                     conflicts.append(row)
     # One primary file can match several linked installs — count it once,
@@ -5704,9 +5751,14 @@ async def storage_reclaim(request: Request):
             try:
                 if not os.path.isfile(candidate) or os.path.getsize(candidate) != psize:
                     continue
-                if os.path.normcase(os.path.realpath(candidate)) == os.path.normcase(target_real):
-                    continue  # same physical file through a junction — not a copy
-                matched = True
+                # Same physical data (junction/symlink/hardlink) is not a
+                # copy, and same size is not same content — a retrained
+                # LoRA at the same rank is byte-size-identical.
+                if _same_physical_file(candidate, target_real):
+                    continue
+                if not _files_probably_identical(target_real, candidate, psize):
+                    continue
+                matched = candidate
                 break
             except OSError:
                 continue
@@ -5717,8 +5769,12 @@ async def storage_reclaim(request: Request):
     result = safe_delete(target)
     if not result.get("deleted"):
         raise HTTPException(status_code=423, detail="The file is locked by another process. Try again in a moment.")
-    print(f"[Storage] Reclaimed duplicate: {target} ({psize} bytes; linked copy remains)")
-    return {"status": "ok", "freed_bytes": psize, "deferred": bool(result.get("deferred"))}
+    # Audit line names the exact surviving copy — if it ever turns out to
+    # be gone afterwards, this line is the forensic anchor.
+    print(f"[Storage] Reclaimed duplicate: {target} ({psize} bytes; surviving copy: {matched})")
+    if not os.path.isfile(matched):
+        print(f"[Storage] CRITICAL: surviving copy vanished immediately after reclaim: {matched}")
+    return {"status": "ok", "freed_bytes": psize, "deferred": bool(result.get("deferred")), "surviving_copy": matched}
 
 
 @api.get("/api/v1/storage/usage")
@@ -5759,6 +5815,12 @@ def storage_usage():
                     agg["last_used"] = max(agg["last_used"], created)
 
     models = []
+    # Shared weights (pointer-resolved base transformers, common text
+    # encoders) appear in MANY models' groups — per-model sizes overlap by
+    # design, so the dashboard's total comes from this global dedupe, not
+    # from summing rows.
+    global_seen = set()
+    models_total_bytes = 0
     for mt in wgp.displayed_model_types:
         md = wgp.get_model_def(mt)
         if md is None:
@@ -5781,8 +5843,20 @@ def storage_usage():
                     except OSError:
                         continue
                     total += size
-                    if not wgp.fl.is_protected_path(p):
-                        primary_bytes += size
+                    if key not in global_seen:
+                        global_seen.add(key)
+                        models_total_bytes += size
+            # What the row's Delete actually frees: DELETE /models/{mt}
+            # removes owned files only (a finetune's alias never deletes
+            # the shared base) — mirror that here or the button lies.
+            for group in _model_weight_groups(mt, owned_only=True):
+                for fname in _variant_group_filenames(group):
+                    p = wgp.fl.locate_file(fname, error_if_none=False)
+                    if p and not wgp.fl.is_protected_path(p):
+                        try:
+                            primary_bytes += os.path.getsize(p)
+                        except OSError:
+                            pass
         except Exception:
             pass
         usage = model_usage.get(mt, {})
@@ -5835,6 +5909,7 @@ def storage_usage():
 
     return {
         "models": sorted(models, key=lambda m: -m["size_bytes"]),
+        "models_total_bytes": models_total_bytes,
         "loras": sorted(loras, key=lambda l: -l["size_bytes"]),
         "workspaces": workspaces,
         "scanned_sidecars": sidecars,
