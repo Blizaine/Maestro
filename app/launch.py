@@ -1128,6 +1128,8 @@ def list_all_installed_loras():
                 "name": None,
                 "base_model": None,
                 "nsfw": False,
+                "downloaded_at": None,
+                "released_at": None,
                 "lora_id": f"local:{f}",  # overwritten below if sidecar has modelId
             }
             sidecar = next((b + ".civitai.json" for b in _bases if os.path.isfile(b + ".civitai.json")), _bases[0] + ".civitai.json")
@@ -1141,6 +1143,12 @@ def list_all_installed_loras():
                     info["hf_repo_id"] = meta.get("repoId")
                     info["name"] = meta.get("name")
                     info["base_model"] = meta.get("baseModel")
+                    # CivitAI sidecars have carried downloadedAt since the
+                    # download path first shipped; publishedAt (the version
+                    # release date) is newer — captured at download time and
+                    # backfilled for existing files by check-updates.
+                    info["downloaded_at"] = meta.get("downloadedAt")
+                    info["released_at"] = meta.get("publishedAt")
                     # Manual override (set via /api/v1/loras/nsfw-override)
                     # takes precedence over CivitAI's `nsfw` boolean, which
                     # is sometimes overly conservative (it's "worst content
@@ -1165,6 +1173,13 @@ def list_all_installed_loras():
                             info["preview_url"] = example_media[0]
                 except Exception:
                     pass
+            # Downloaded-date fallback for HF/hand-installed files without a
+            # CivitAI sidecar: the weight file's mtime.
+            if not info.get("downloaded_at"):
+                try:
+                    info["downloaded_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(os.path.getmtime(full_path)))
+                except OSError:
+                    info["downloaded_at"] = None
             # Check for local preview files (downloaded from HF)
             if not info.get("preview_url"):
                 for _b in _bases:
@@ -1592,6 +1607,9 @@ def check_lora_updates(force: bool = False):
 
     # Walk all LoRA files and collect (lora_id, model_id, current_version_id).
     targets: list[tuple[str, int, int | None]] = []
+    # Every sidecar per model, including superseded-version duplicates the
+    # targets list dedupes away — used to backfill publishedAt below.
+    sidecars_by_model: dict[int, list[str]] = {}
     for dirpath, _dirnames, filenames in os.walk(lora_root):
         for f in filenames:
             if not f.endswith((".safetensors", ".sft")):
@@ -1621,6 +1639,7 @@ def check_lora_updates(force: bool = False):
                 current_v_int = int(current_v) if current_v is not None else None
             except (TypeError, ValueError):
                 current_v_int = None
+            sidecars_by_model.setdefault(model_id_int, []).append(sidecar)
             lora_id = f"civitai:{model_id_int}"
             # If multiple files share a modelId (user kept v1 + v2 side by
             # side), we keep the highest current_version_id since that's
@@ -1635,6 +1654,29 @@ def check_lora_updates(force: bool = False):
 
     errors: list[str] = []
     new_entries: dict[str, dict] = dict(manifest.get("entries", {}))
+
+    def _backfill_published_at(sidecar_paths: list[str], model_data: dict):
+        """Write each version's publishedAt into local sidecars that predate
+        publishedAt capture, matched by the sidecar's versionId."""
+        versions = {}
+        for v in model_data.get("modelVersions", []) or []:
+            if isinstance(v, dict) and v.get("id") is not None:
+                versions[int(v["id"])] = v.get("publishedAt")
+        for path in sidecar_paths:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                if meta.get("publishedAt"):
+                    continue
+                vid = meta.get("versionId")
+                published = versions.get(int(vid)) if vid is not None else None
+                if not published:
+                    continue
+                meta["publishedAt"] = published
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(meta, f, indent=2)
+            except Exception:
+                continue
 
     def _fetch_one(target):
         lora_id, model_id, current_v = target
@@ -1686,6 +1728,11 @@ def check_lora_updates(force: bool = False):
                     consecutive_failures = 0  # reset on any success or 404
                 entry = _build_manifest_entry(model_id, current_v, data, status, now_iso)
                 new_entries[lora_id] = entry
+                # Backfill release dates into sidecars that predate
+                # publishedAt capture — the fetched model JSON carries
+                # every version's publishedAt, so this is free here.
+                if data is not None:
+                    _backfill_published_at(sidecars_by_model.get(model_id, []), data)
 
     # Drop entries for LoRAs that no longer exist on disk (deleted by user).
     live_ids = {t[0] for t in targets}
@@ -2468,13 +2515,50 @@ def checkpoints_check_updates(force: bool = False):
 
 
 
+# ── CivitAI response cache ──────────────────────────────────────────
+# Search and model-detail responses change rarely, the UI re-fetches
+# them constantly (results are wiped every time the browser opens, and
+# each filter keystroke re-searches), and CivitAI rate-limits by IP
+# aggressively enough that check-updates had to drop to 2 workers.
+# Successful responses are cached for a short TTL; errors and
+# maintenance pages are never cached.
+_CIVITAI_CACHE: dict = {}
+_CIVITAI_CACHE_LOCK = threading.Lock()
+_CIVITAI_CACHE_TTL = 15 * 60
+_CIVITAI_CACHE_MAX = 200
+
+
+def _civitai_cache_get(key):
+    with _CIVITAI_CACHE_LOCK:
+        entry = _CIVITAI_CACHE.get(key)
+        if entry and entry[0] > time.time():
+            return entry[1]
+        if entry:
+            _CIVITAI_CACHE.pop(key, None)
+    return None
+
+
+def _civitai_cache_put(key, payload):
+    with _CIVITAI_CACHE_LOCK:
+        if len(_CIVITAI_CACHE) >= _CIVITAI_CACHE_MAX:
+            # Evict the quarter closest to expiry.
+            for old_key, _ in sorted(_CIVITAI_CACHE.items(), key=lambda kv: kv[1][0])[: _CIVITAI_CACHE_MAX // 4]:
+                _CIVITAI_CACHE.pop(old_key, None)
+        _CIVITAI_CACHE[key] = (time.time() + _CIVITAI_CACHE_TTL, payload)
+
+
 @api.get("/api/v1/civitai/search")
 def civitai_search(
     query: str = "", sort: str = "Highest Rated", period: str = "AllTime",
     nsfw: bool = False, types: str = "LORA", baseModels: str = "",
     limit: int = 20, cursor: str = "",
 ):
-    """Proxy CivitAI model search."""
+    """Proxy CivitAI model search (TTL-cached)."""
+    # nsfw MUST be part of the key — mature-mode gating changes results.
+    cache_key = ("search", query, sort, period, nsfw, types, baseModels, limit, cursor)
+    cached = _civitai_cache_get(cache_key)
+    if cached is not None:
+        return cached
     params = {"limit": limit, "sort": sort, "period": period, "nsfw": str(nsfw).lower(), "types": types}
     if query:
         params["query"] = query
@@ -2517,6 +2601,7 @@ def civitai_search(
         resp.raise_for_status()
         data = resp.json()
         _fix_civitai_images(data)
+        _civitai_cache_put(cache_key, data)
         return data
     except HTTPException:
         raise
@@ -2542,7 +2627,11 @@ def civitai_search(
 
 @api.get("/api/v1/civitai/model/{model_id}")
 def civitai_model_detail(model_id: int):
-    """Fetch CivitAI model details with local architecture mapping."""
+    """Fetch CivitAI model details with local architecture mapping (TTL-cached)."""
+    cache_key = ("model", model_id)
+    cached = _civitai_cache_get(cache_key)
+    if cached is not None:
+        return cached
     try:
         resp = requests.get(f"{CIVITAI_BASE_URL}/models/{model_id}", headers=_civitai_headers(), timeout=15)
         # Same maintenance-page detection as /search — surface a 503 with
@@ -2575,6 +2664,9 @@ def civitai_model_detail(model_id: int):
             is_vid = img.get("type") == "video" or url.endswith(".mp4") or url.endswith(".webm")
             img["url"] = _fix_civitai_image_url(url, 450, is_vid)
 
+    # Cache post-enrichment — the mapping is deterministic, so cached
+    # hits skip both the network call and the enrichment pass.
+    _civitai_cache_put(cache_key, data)
     return data
 
 
@@ -2693,6 +2785,10 @@ async def civitai_download(request: Request):
         "_example_prompts": example_prompts,
         "_tags": tags,
         "_nsfw": model_nsfw,
+        # Version release date — powers "newest release" sorting in My
+        # LoRAs so users can tell which of a creator's renamed variants
+        # is actually current.
+        "_published_at": body.get("published_at"),
         "_kind": kind,
         "_target_architecture": target_architecture,
         "_auto_quantize": auto_quantize,
@@ -2930,6 +3026,8 @@ def _run_civitai_download(download_id: str):
             "images": dl["_images"][:4] if dl["_images"] else [],
             "downloadedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
+        if dl.get("_published_at"):
+            sidecar_data["publishedAt"] = dl["_published_at"]
         if dl.get("_kind") == "checkpoint":
             sidecar_data["modelType"] = "Checkpoint"
 

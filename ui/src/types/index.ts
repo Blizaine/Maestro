@@ -419,6 +419,9 @@ export interface CivitAIModelVersion {
   images: CivitAIImage[]
   description?: string
   localArch?: string | null
+  /** Version release date from CivitAI — persisted into the download
+   *  sidecar so My LoRAs can sort by newest release. */
+  publishedAt?: string
 }
 
 export interface CivitAIFile {

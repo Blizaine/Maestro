@@ -139,6 +139,9 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
       example_prompts: examplePrompts.slice(0, 5),
       tags: model.tags || [],
       nsfw: model.nsfw || false,
+      // Version release date — persisted in the sidecar so My LoRAs can
+      // sort by newest release.
+      published_at: version.publishedAt || undefined,
     }
     if (isCheckpoint) {
       startDownload({ ...common, target_arch: '', kind: 'checkpoint', target_architecture: targetArchitecture, auto_quantize: autoQuantize })

@@ -118,6 +118,10 @@ export function LoraBrowser() {
   // button (in case the user is already on My LoRAs view).
   const updatableCount = installedLoras.filter(l => l.update_status === 'available').length
 
+  // Installed-view sort. "released" falls back to downloaded date so
+  // files whose sidecars predate publishedAt capture still order sanely.
+  const [installedSort, setInstalledSort] = useState<'name' | 'downloaded' | 'released' | 'largest'>('name')
+
   // Per-card delete with two-step confirm, keyed by directory/filename.
   const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null)
   const [deletingKey, setDeletingKey] = useState<string | null>(null)
@@ -529,6 +533,23 @@ export function LoraBrowser() {
             </label>
           )}
 
+          {/* Sort control for the installed view — the storage story:
+              newest-download and newest-release make it obvious which of
+              a creator's renamed variants is current and what's stale. */}
+          {browseKind === 'lora' && showInstalled && (
+            <select
+              value={installedSort}
+              onChange={e => setInstalledSort(e.target.value as typeof installedSort)}
+              className="px-2 py-1 text-xs rounded-lg border border-border bg-bg-tertiary text-text-secondary focus:outline-none focus:border-accent-blue shrink-0"
+              title="Sort installed LoRAs"
+            >
+              <option value="name">Name</option>
+              <option value="downloaded">Newest download</option>
+              <option value="released">Newest release</option>
+              <option value="largest">Largest file</option>
+            </select>
+          )}
+
           {/* Check-for-updates button. Always visible so the user can
               trigger a refresh from any view. The amber count badge
               surfaces outdated LoRAs even before they open the My
@@ -648,6 +669,13 @@ export function LoraBrowser() {
                 }
                 return true
               })
+              if (installedSort !== 'name') {
+                filtered.sort((a, b) => {
+                  if (installedSort === 'largest') return (b.size_bytes ?? 0) - (a.size_bytes ?? 0)
+                  const dateOf = (l: typeof a) => (installedSort === 'released' ? (l.released_at || l.downloaded_at) : l.downloaded_at) || ''
+                  return dateOf(b).localeCompare(dateOf(a))
+                })
+              }
               return filtered.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-20 text-text-muted">
                   <Search size={32} className="mb-3 opacity-50" />
@@ -715,6 +743,18 @@ export function LoraBrowser() {
                           <span className="text-[9px] text-white/50 ml-auto shrink-0">{formatBytes(lora.size_bytes)}</span>
                         )}
                       </div>
+                      {(lora.downloaded_at || lora.released_at) && (
+                        <div
+                          className="text-[9px] text-white/40 mt-0.5 truncate"
+                          title={`Downloaded ${lora.downloaded_at ? new Date(lora.downloaded_at).toLocaleDateString() : 'unknown'}${lora.released_at ? ` — released ${new Date(lora.released_at).toLocaleDateString()}` : ''}`}
+                        >
+                          {installedSort === 'released' && lora.released_at
+                            ? `released ${new Date(lora.released_at).toLocaleDateString()}`
+                            : lora.downloaded_at
+                              ? `added ${new Date(lora.downloaded_at).toLocaleDateString()}`
+                              : `released ${new Date(lora.released_at as string).toLocaleDateString()}`}
+                        </div>
+                      )}
                       {lora.trained_words.length > 0 && (
                         <div className="flex items-center gap-0.5 mt-1 overflow-hidden">
                           <Tag size={8} className="text-white/50 shrink-0" />

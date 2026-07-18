@@ -1504,7 +1504,7 @@ export async function startCivitAIDownload(params: {
   model_name: string; images: { url: string }[]
   description?: string; version_description?: string; base_model?: string
   example_prompts?: string[]; tags?: string[]
-  nsfw?: boolean; target_dir_name?: string
+  nsfw?: boolean; target_dir_name?: string; published_at?: string
   // Checkpoint imports: kind='checkpoint' routes the file into ckpts/ and
   // registers a finetune for target_architecture instead of saving a LoRA.
   // auto_quantize=true sets the finetune to load-time int8 (mmgp).
@@ -1625,6 +1625,12 @@ export interface InstalledLora {
   latest_changelog?: string | null
   /** On-disk size of the .safetensors file (null when unreadable). */
   size_bytes?: number | null
+  /** When the file arrived: sidecar downloadedAt (CivitAI downloads) or
+   *  the weight file's mtime (HF/hand-installed). ISO string. */
+  downloaded_at?: string | null
+  /** The version's CivitAI release date (publishedAt) — captured at
+   *  download time, backfilled for older files by Check Updates. */
+  released_at?: string | null
 }
 
 export async function fetchInstalledLoras(): Promise<{
