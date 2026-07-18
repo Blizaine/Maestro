@@ -5920,9 +5920,19 @@ def storage_usage():
         except Exception:
             pass
         usage = model_usage.get(mt, {})
+        # Rows without deletable bytes need to say WHY: a finetune whose
+        # def aliases another model's weights frees nothing when deleted
+        # (delete the base row instead), and weights living only in
+        # linked installs are read-only here.
+        _raw_urls = md.get("URLs")
+        _alias_of = None
+        if isinstance(_raw_urls, str):
+            _alias_md = wgp.get_model_def(_raw_urls)
+            _alias_of = (_alias_md or {}).get("name", _raw_urls)
         models.append({
             "model_type": mt, "name": md.get("name", mt),
             "size_bytes": total, "primary_bytes": primary_bytes,
+            "alias_of": _alias_of,
             "use_count": usage.get("count", 0),
             "last_used": usage.get("last_used") or None,
         })

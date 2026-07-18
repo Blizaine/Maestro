@@ -207,13 +207,27 @@ export function StorageDashboard() {
                   <span className={`shrink-0 ${m.use_count === 0 ? 'text-indicator-warning' : 'text-text-muted'}`}>
                     {m.use_count === 0 ? 'never used' : `${m.use_count} uses, last ${fmtWhen(m.last_used)}`}
                   </span>
-                  <span className="text-text-secondary tabular-nums shrink-0" title={m.primary_bytes < m.size_bytes ? `${formatBytes(m.primary_bytes)} deletable here; the rest lives in linked installs` : undefined}>
+                  <span className="text-text-secondary tabular-nums shrink-0" title={m.primary_bytes < m.size_bytes ? `${formatBytes(m.primary_bytes)} deletable here; the rest lives in linked installs or belongs to a base model` : undefined}>
                     {formatBytes(m.size_bytes)}
                   </span>
-                  {m.primary_bytes > 0 && rowBtn(`model:${m.model_type}`, 'Delete', async () => {
+                  {m.primary_bytes > 0 ? rowBtn(`model:${m.model_type}`, 'Delete', async () => {
                     await deleteModel(m.model_type)
                     loadUsage()
-                  })}
+                  }) : m.alias_of ? (
+                    <span
+                      className="text-[9px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-muted shrink-0"
+                      title={`This entry runs on ${m.alias_of}'s weights — delete that row to free the space. Its own extras (like a bundled accelerator LoRA) are tiny.`}
+                    >
+                      shares weights
+                    </span>
+                  ) : m.size_bytes > 0 ? (
+                    <span
+                      className="text-[9px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-muted shrink-0"
+                      title="Every copy of these weights lives in a linked install (read-only from here). Free the space in that install, or unlink it."
+                    >
+                      linked only
+                    </span>
+                  ) : null}
                 </div>
               ))}
             </div>
@@ -228,7 +242,14 @@ export function StorageDashboard() {
               {usage.loras.map(l => (
                 <div key={`${l.directory}/${l.filename}`} className="flex items-center gap-2 px-3 py-1.5 text-xs border-b border-border last:border-b-0 hover:bg-bg-hover">
                   <span className="truncate text-text-primary flex-1 min-w-0">{l.filename}</span>
-                  {l.linked && <span className="text-[9px] px-1 py-0.5 rounded bg-accent-blue/20 text-accent-blue shrink-0">Linked</span>}
+                  {l.linked && (
+                    <span
+                      className="text-[9px] px-1 py-0.5 rounded bg-accent-blue/20 text-accent-blue shrink-0"
+                      title="Lives in a linked install's loras folder (read-only from here) — no delete. Free the space in that install, or unlink it."
+                    >
+                      Linked
+                    </span>
+                  )}
                   <span className={`shrink-0 ${l.use_count === 0 ? 'text-indicator-warning' : 'text-text-muted'}`}>
                     {l.use_count === 0 ? 'never used' : `${l.use_count} uses, last ${fmtWhen(l.last_used)}`}
                   </span>

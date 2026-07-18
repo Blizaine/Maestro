@@ -1663,6 +1663,9 @@ export interface StorageUsageModel {
   size_bytes: number
   /** Bytes living in the primary (deletable) roots — what deleting frees. */
   primary_bytes: number
+  /** Display name of the base model whose weights this entry aliases
+   *  (finetunes with "URLs": "<base>") — deleting this row frees nothing. */
+  alias_of?: string | null
   use_count: number
   last_used: number | null
 }
