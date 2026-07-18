@@ -3,6 +3,19 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [1.3.3] - 2026-07-17
+
+Recast tracking resilience (cocktailpeanut's second report). When the
+replace target left the scene mid-clip, or was absent from frame 0,
+SAM3's propagation crashed the whole job with "No points are provided".
+The mask driver now anchors on a frame where the keyword actually
+detects, propagates both directions, and re-anchors past a mid-video
+tracking collapse, keeping all masks produced so far; absent-target
+frames get empty masks (original footage passes through). Also clamps
+the batched grounding chunk window to the video length (latent upstream
+IndexError exposed by re-anchored propagation). Both root bugs are
+inherited from upstream WanGP's SAM3 tree.
+
 ## [1.3.2] - 2026-07-17
 
 Community-report round. Fixed: the first Recast on a fresh install

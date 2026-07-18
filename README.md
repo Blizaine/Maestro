@@ -75,6 +75,11 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.3.3 (2026-07-17)
+
+**Fixed**
+- **Recast no longer crashes when the person leaves the scene.** If the target walked out of frame partway through the clip (or only appeared later in the video), the tracking step died with a cryptic "No points are provided" error and took the whole job with it. Tracking now locks on wherever the person first appears, works in both directions from there, and if it loses them mid-video it keeps everything tracked so far and picks them back up when they return. Frames where the person genuinely is not present simply keep the original footage, which is what replace mode should do. Both underlying bugs exist in upstream WanGP too; a keyword that matches nothing in the video now shows the friendly "could not find" message instead of a traceback.
+
 ### v1.3.2 (2026-07-17)
 
 **New**
