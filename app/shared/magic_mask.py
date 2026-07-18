@@ -93,7 +93,23 @@ def _video_to_numpy(video_path, max_time_seconds=None):
     return frames.astype(np.uint8, copy=False), fps, width, height
 
 
+def _ensure_sam3_assets():
+    """Fetch the SAM3 checkpoint + BPE vocab if they aren't local yet.
+
+    Recast (and its mask preview) run SAM3 BEFORE any model load, so the
+    checkpoint that normally arrives with the SCAIL-2 model download may
+    not exist on a fresh install — the detection pre-step then died with
+    FileNotFoundError before anything could download. process_files_def
+    is existence-checked, so this is a few isfile() calls once the assets
+    are in place. Lazy wgp import: this module loads inside wgp's own
+    import cycle, but every SAM3 run happens long after wgp is up.
+    """
+    import wgp
+    wgp.process_files_def(**query_download_def())
+
+
 def _run_sam3(video: np.ndarray, keywords: list, batch_size, no_hole, progress_callback=None, colorize_objects=False, color_palette=None, max_colored_objects=None) -> np.ndarray:
+    _ensure_sam3_assets()
     from preprocessing.sam3.preprocessor import run_sam3_video
 
     with torch.inference_mode():
