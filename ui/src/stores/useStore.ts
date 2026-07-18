@@ -1136,6 +1136,10 @@ interface AppState {
   createWorkspace: (name: string) => Promise<void>
   deleteWorkspace: (name: string) => Promise<void>
 
+  // Storage Manager overlay
+  storageDashboardOpen: boolean
+  setStorageDashboardOpen: (open: boolean) => void
+
   // Outputs
   outputs: OutputFile[]
   outputsTotal: number
@@ -6328,6 +6332,9 @@ export const useStore = create<AppState>((set, get) => ({
     }
     get().loadWorkspaces()
   },
+
+  storageDashboardOpen: false,
+  setStorageDashboardOpen: (open) => set({ storageDashboardOpen: open }),
 
   outputs: [],
   outputsTotal: 0,

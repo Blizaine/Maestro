@@ -5571,6 +5571,277 @@ def delete_workspace(name: str):
 
 
 # ============================================================================
+# API Routes: Storage (duplicate finder + usage analytics)
+# ============================================================================
+
+_STORAGE_WEIGHT_EXTS = (".safetensors", ".sft", ".gguf", ".pth", ".ckpt", ".pt", ".bin", ".onnx")
+_STORAGE_MIN_DUP_BYTES = 10 * 1024 * 1024  # skip configs/tokenizers — reclaim noise
+
+
+def _walk_sized(root: str) -> dict:
+    """normcased relpath -> (abs_path, size) for weight files under root."""
+    out: dict = {}
+    root_abs = os.path.abspath(root)
+    for dirpath, _dirnames, filenames in os.walk(root_abs):
+        for f in filenames:
+            if not f.lower().endswith(_STORAGE_WEIGHT_EXTS):
+                continue
+            full = os.path.join(dirpath, f)
+            try:
+                size = os.path.getsize(full)
+            except OSError:
+                continue
+            out[os.path.normcase(os.path.relpath(full, root_abs))] = (full, size)
+    return out
+
+
+def _storage_roots() -> dict:
+    """Primary + linked roots for both file kinds, resolved once."""
+    ckpt_roots = wgp.fl.get_checkpoints_paths()
+    # The "." search root is the whole app folder — walking it would sweep
+    # the entire repo; only the real primary (index 0) is the reclaim target.
+    primary_ckpts = os.path.abspath(ckpt_roots[0]) if ckpt_roots else None
+    linked_ckpts = [os.path.abspath(r) for r in ckpt_roots[1:] if wgp.fl.is_external_root(r)]
+    lora_primary = _resolve_lora_root()
+    return {
+        "checkpoint": (primary_ckpts, linked_ckpts),
+        "lora": (os.path.abspath(lora_primary) if lora_primary else None, _linked_lora_roots()),
+    }
+
+
+@api.get("/api/v1/storage/duplicates")
+def storage_duplicates():
+    """Primary-root files that also exist (same relative path AND size) in
+    a linked install. Deleting the PRIMARY copy is pure reclaim — the
+    files locator keeps resolving the linked copy afterwards. Same-path
+    different-size pairs are conflicts, not duplicates: the primary copy
+    currently shadows a divergent linked file and deleting it would
+    silently change behavior."""
+    duplicates = []
+    conflicts = []
+    shared_via_link = 0
+    for kind, (primary_root, linked_roots) in _storage_roots().items():
+        if not primary_root or not os.path.isdir(primary_root):
+            continue
+        primary_files = _walk_sized(primary_root)
+        for linked_root in linked_roots:
+            if not os.path.isdir(linked_root):
+                continue
+            linked_files = _walk_sized(linked_root)
+            for rel, (ppath, psize) in primary_files.items():
+                hit = linked_files.get(rel)
+                if not hit:
+                    continue
+                lpath, lsize = hit
+                if psize == lsize:
+                    # Junction/symlink check: a primary folder linked into
+                    # another install makes both paths THE SAME physical
+                    # file — zero reclaimable bytes, and deleting "one
+                    # copy" would delete the only copy.
+                    if os.path.normcase(os.path.realpath(ppath)) == os.path.normcase(os.path.realpath(lpath)):
+                        shared_via_link += 1
+                        continue
+                row = {
+                    "kind": kind, "filename": os.path.basename(ppath), "rel_path": rel,
+                    "primary_path": ppath, "size_bytes": psize,
+                    "linked_path": lpath, "linked_size_bytes": lsize,
+                    "linked_install": os.path.basename(os.path.dirname(os.path.dirname(lpath if kind == "lora" else linked_root))),
+                }
+                if psize == lsize and psize >= _STORAGE_MIN_DUP_BYTES:
+                    duplicates.append(row)
+                elif psize != lsize:
+                    conflicts.append(row)
+    # One primary file can match several linked installs — count it once,
+    # keyed by PHYSICAL identity so a junctioned root can't double-list.
+    seen = set()
+    unique = []
+    for d in duplicates:
+        key = os.path.normcase(os.path.realpath(d["primary_path"]))
+        if key not in seen:
+            seen.add(key)
+            unique.append(d)
+    return {
+        "duplicates": sorted(unique, key=lambda d: -d["size_bytes"]),
+        "conflicts": conflicts,
+        "shared_via_link": shared_via_link,
+        "total_reclaimable_bytes": sum(d["size_bytes"] for d in unique),
+    }
+
+
+@api.post("/api/v1/storage/duplicates/reclaim")
+async def storage_reclaim(request: Request):
+    """Delete ONE primary-root duplicate. Revalidates from scratch: the
+    path must live under a primary root and a same-relpath same-size
+    linked copy must exist right now — a stale scan result can't delete
+    anything that isn't still redundant."""
+    body = await request.json()
+    path = body.get("path", "")
+    if not path or not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="File not found.")
+    target = os.path.abspath(path)
+    if wgp.fl.is_protected_path(target):
+        raise HTTPException(status_code=403, detail="That file is in a linked install (read-only).")
+    # All comparisons happen in realpath space: a junctioned primary root
+    # (e.g. ckpts linked into another install to share storage) makes
+    # abspath and physical location disagree, and a "linked copy" reached
+    # through the junction is the SAME file — deleting the primary would
+    # delete the only copy.
+    target_real = os.path.realpath(target)
+    try:
+        psize = os.path.getsize(target_real)
+    except OSError:
+        raise HTTPException(status_code=404, detail="File not found.")
+    matched = False
+    for kind, (primary_root, linked_roots) in _storage_roots().items():
+        if not primary_root:
+            continue
+        proot_real = os.path.realpath(primary_root)
+        if not os.path.normcase(target_real).startswith(os.path.normcase(proot_real + os.sep)):
+            continue
+        rel_key = os.path.relpath(target_real, proot_real)
+        for linked_root in linked_roots:
+            candidate = os.path.join(linked_root, rel_key)
+            try:
+                if not os.path.isfile(candidate) or os.path.getsize(candidate) != psize:
+                    continue
+                if os.path.normcase(os.path.realpath(candidate)) == os.path.normcase(target_real):
+                    continue  # same physical file through a junction — not a copy
+                matched = True
+                break
+            except OSError:
+                continue
+        break
+    if not matched:
+        raise HTTPException(status_code=409, detail="No identical linked copy exists (anymore) — refusing to delete the only copy.")
+    from services.win_safe_files import safe_delete
+    result = safe_delete(target)
+    if not result.get("deleted"):
+        raise HTTPException(status_code=423, detail="The file is locked by another process. Try again in a moment.")
+    print(f"[Storage] Reclaimed duplicate: {target} ({psize} bytes; linked copy remains)")
+    return {"status": "ok", "freed_bytes": psize, "deferred": bool(result.get("deferred"))}
+
+
+@api.get("/api/v1/storage/usage")
+def storage_usage():
+    """Usage analytics backfilled from generation sidecars: every job ever
+    run left a .meta.json with model_type, activated_loras, and created_at.
+    Joined with on-disk sizes so 'largest, least used' is one sort away."""
+    base = wgp.server_config.get("save_path", "outputs")
+    scan_dirs = [w["path"] for w in _list_workspaces()]
+    model_usage: dict = {}
+    lora_usage: dict = {}
+    sidecars = 0
+    for d in scan_dirs:
+        try:
+            entries = os.listdir(d)
+        except OSError:
+            continue
+        for n in entries:
+            if not n.endswith(".meta.json"):
+                continue
+            try:
+                with open(os.path.join(d, n), "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except Exception:
+                continue
+            sidecars += 1
+            params = meta.get("params") or {}
+            created = meta.get("created_at") or 0
+            mt = params.get("model_type")
+            if mt:
+                agg = model_usage.setdefault(mt, {"count": 0, "last_used": 0})
+                agg["count"] += 1
+                agg["last_used"] = max(agg["last_used"], created)
+            for lora in params.get("activated_loras") or []:
+                if isinstance(lora, str) and lora:
+                    agg = lora_usage.setdefault(lora, {"count": 0, "last_used": 0})
+                    agg["count"] += 1
+                    agg["last_used"] = max(agg["last_used"], created)
+
+    models = []
+    for mt in wgp.displayed_model_types:
+        md = wgp.get_model_def(mt)
+        if md is None:
+            continue
+        total = 0
+        primary_bytes = 0
+        seen_paths = set()
+        try:
+            for group in _model_weight_groups(mt):
+                for fname in _variant_group_filenames(group):
+                    p = wgp.fl.locate_file(fname, error_if_none=False)
+                    if not p:
+                        continue
+                    key = os.path.normcase(os.path.abspath(p))
+                    if key in seen_paths:
+                        continue
+                    seen_paths.add(key)
+                    try:
+                        size = os.path.getsize(p)
+                    except OSError:
+                        continue
+                    total += size
+                    if not wgp.fl.is_protected_path(p):
+                        primary_bytes += size
+        except Exception:
+            pass
+        usage = model_usage.get(mt, {})
+        models.append({
+            "model_type": mt, "name": md.get("name", mt),
+            "size_bytes": total, "primary_bytes": primary_bytes,
+            "use_count": usage.get("count", 0),
+            "last_used": usage.get("last_used") or None,
+        })
+
+    loras = []
+    lora_root = _resolve_lora_root()
+    walk_roots = ([(lora_root, False)] if lora_root else []) + [(r, True) for r in _linked_lora_roots()]
+    seen_keys = set()
+    for root, linked in walk_roots:
+        for dirpath, _dn, fns in os.walk(root):
+            for f in fns:
+                if not f.endswith((".safetensors", ".sft")):
+                    continue
+                rel_dir = os.path.relpath(dirpath, root)
+                key = os.path.normcase(os.path.normpath(os.path.join(rel_dir, f)))
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                try:
+                    size = os.path.getsize(os.path.join(dirpath, f))
+                except OSError:
+                    size = 0
+                usage = lora_usage.get(f, {})
+                loras.append({
+                    "filename": f, "directory": rel_dir, "linked": linked, "size_bytes": size,
+                    "use_count": usage.get("count", 0),
+                    "last_used": usage.get("last_used") or None,
+                })
+
+    workspaces = []
+    for w in _list_workspaces():
+        ws_bytes = 0
+        try:
+            with os.scandir(w["path"]) as it:
+                for e in it:
+                    if e.is_file() and not e.name.startswith("."):
+                        try:
+                            ws_bytes += e.stat().st_size
+                        except OSError:
+                            pass
+        except OSError:
+            pass
+        workspaces.append({"name": w["name"], "file_count": w.get("file_count", 0), "size_bytes": ws_bytes})
+
+    return {
+        "models": sorted(models, key=lambda m: -m["size_bytes"]),
+        "loras": sorted(loras, key=lambda l: -l["size_bytes"]),
+        "workspaces": workspaces,
+        "scanned_sidecars": sidecars,
+    }
+
+
+# ============================================================================
 # API Routes: LLM service
 # ============================================================================
 

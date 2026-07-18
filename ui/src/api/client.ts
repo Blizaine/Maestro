@@ -1644,6 +1644,70 @@ export async function fetchInstalledLoras(): Promise<{
   return res.json()
 }
 
+// --- Storage (duplicates + usage analytics) ---
+
+export interface StorageDuplicate {
+  kind: 'checkpoint' | 'lora'
+  filename: string
+  rel_path: string
+  primary_path: string
+  size_bytes: number
+  linked_path: string
+  linked_size_bytes: number
+  linked_install: string
+}
+
+export interface StorageUsageModel {
+  model_type: string
+  name: string
+  size_bytes: number
+  /** Bytes living in the primary (deletable) roots — what deleting frees. */
+  primary_bytes: number
+  use_count: number
+  last_used: number | null
+}
+
+export interface StorageUsageLora {
+  filename: string
+  directory: string
+  linked: boolean
+  size_bytes: number
+  use_count: number
+  last_used: number | null
+}
+
+export interface StorageUsage {
+  models: StorageUsageModel[]
+  loras: StorageUsageLora[]
+  workspaces: { name: string; file_count: number; size_bytes: number }[]
+  scanned_sidecars: number
+}
+
+export async function fetchStorageUsage(): Promise<StorageUsage> {
+  const res = await fetch(`${BASE}/api/v1/storage/usage`)
+  if (!res.ok) throw new Error('Failed to fetch storage usage')
+  return res.json()
+}
+
+export async function fetchStorageDuplicates(): Promise<{ duplicates: StorageDuplicate[]; conflicts: StorageDuplicate[]; total_reclaimable_bytes: number }> {
+  const res = await fetch(`${BASE}/api/v1/storage/duplicates`)
+  if (!res.ok) throw new Error('Failed to scan for duplicates')
+  return res.json()
+}
+
+export async function reclaimDuplicate(path: string): Promise<{ freed_bytes: number }> {
+  const res = await fetch(`${BASE}/api/v1/storage/duplicates/reclaim`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Reclaim failed' }))
+    throw new Error(err.detail || 'Reclaim failed')
+  }
+  return res.json()
+}
+
 export async function deleteLoraFile(directory: string, filename: string): Promise<{ deleted: string; deferred: boolean }> {
   const params = new URLSearchParams({ directory: directory || '.', filename })
   const res = await fetch(`${BASE}/api/v1/loras/file?${params.toString()}`, { method: 'DELETE' })

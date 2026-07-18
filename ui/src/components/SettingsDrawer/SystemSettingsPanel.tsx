@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { ChevronDown, ChevronRight, RotateCcw, Check, Download, Trash2, Cpu, RefreshCw, Loader2, FolderOpen, Plus } from 'lucide-react'
+import { ChevronDown, ChevronRight, RotateCcw, Check, Download, Trash2, Cpu, RefreshCw, Loader2, FolderOpen, Plus, HardDrive } from 'lucide-react'
 import type { ModelFolderCandidate } from '../../types'
 import { useStore, getFamiliesForMode, getModelsForFamily } from '../../stores/useStore'
 import * as api from '../../api/client'
@@ -1034,6 +1034,18 @@ export function SystemSettingsPanel() {
   return (
     <div className="space-y-5">
       <ThemeSection />
+
+      <hr className="border-border" />
+
+      {/* Storage Manager — usage analytics + duplicate reclaim */}
+      <button
+        onClick={() => useStore.getState().setStorageDashboardOpen(true)}
+        className="flex items-center gap-2 w-full px-3 py-2 rounded-lg border border-border text-xs text-text-secondary hover:text-text-primary hover:border-border-light transition-colors"
+      >
+        <HardDrive size={13} className="text-accent-blue" />
+        <span className="flex-1 text-left">Storage Manager</span>
+        <span className="text-[10px] text-text-muted">usage, duplicates, cleanup</span>
+      </button>
 
       <hr className="border-border" />
 

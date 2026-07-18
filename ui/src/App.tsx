@@ -5,6 +5,7 @@ import { MainContent } from './components/MainContent/MainContent'
 import { SettingsDrawer } from './components/SettingsDrawer/SettingsDrawer'
 import { LoraBrowser } from './components/LoraBrowser/LoraBrowser'
 import { DirectorDashboard } from './components/DirectorDashboard/DirectorDashboard'
+import { StorageDashboard } from './components/StorageDashboard/StorageDashboard'
 import { RetakeDialog } from './components/RetakeDialog'
 import { OomRecoveryBanner } from './components/OomRecoveryBanner'
 import { DownloadStatusBanner } from './components/DownloadStatusBanner'
@@ -78,6 +79,7 @@ function App() {
       <SettingsDrawer />
       <LoraBrowser />
       <DirectorDashboard />
+      <StorageDashboard />
       <RecipesOverlay />
       <RetakeDialog />
       {/* OomRecoveryBanner is a fixed-position overlay — renders nothing
