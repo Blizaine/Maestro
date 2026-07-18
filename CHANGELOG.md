@@ -3,6 +3,22 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [1.3.2] - 2026-07-17
+
+Community-report round. Fixed: the first Recast on a fresh install
+crashed with "SAM3.1 checkpoint not found" (the masking pre-step runs
+before the model download that carries the detector; it now fetches it
+on first use); downloaded badges lied for weight-aliased models
+(SCAIL-2 Fast, Z-Image ControlNets) because the checker iterated the
+alias string character by character - resolution is now recursive and
+also counts weight modules and bundled LoRAs; deleting a finetune
+leaves shared base weights in place for its siblings; SCAIL-2's
+image-reference mask falls back to broader keywords when the configured
+phrase matches nothing. New: the download icon in Settings -> System ->
+Enabled Models is a real button that pre-downloads everything a model
+needs (GPU-free, progress in the banner) via the new
+/api/v1/models/{type}/download endpoint.
+
 ## [1.3.1] - 2026-07-17
 
 Fix #20: a stale local Hugging Face token made HF reject public files

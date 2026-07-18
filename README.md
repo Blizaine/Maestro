@@ -75,6 +75,17 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.3.2 (2026-07-17)
+
+**New**
+- **Models can be downloaded ahead of time.** In Settings -> System -> Enabled Models, the download icon next to each model is now a real button: click it and Maestro fetches everything that model needs (weights, text encoder, add-on modules, bundled LoRAs) in the background, with progress in the download banner. The row flips to a check mark when it finishes. Generating still auto-downloads on first use as before; this just lets you get the wait out of the way on your schedule.
+
+**Fixed**
+- **Recast no longer crashes on a fresh install.** The automatic masking step runs before the SCAIL-2 model loads, but its detector checkpoint only downloaded together with the model, so the very first Recast on a clean install failed with "SAM3.1 checkpoint was not found". The masking step now downloads the detector itself on first use.
+- **The downloaded check marks tell the truth now.** Models that borrow their weights from a base model (SCAIL-2 14B Fast, the Z-Image ControlNets) always showed as not downloaded, even when they were ready to run. The check now follows those references and also requires add-on modules and bundled accelerator LoRAs, so a check mark means the model generates without downloading anything.
+- Deleting a model now removes only the files that belong to it, so deleting a finetune leaves shared base weights in place for the models that still use them.
+- SCAIL-2's image reference no longer fails when the detection phrase finds nothing in your character image; Maestro automatically falls back to broader phrases ("person", "woman", "man").
+
 ### v1.3.1 (2026-07-17)
 
 **Fixed**
