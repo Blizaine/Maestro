@@ -1,5 +1,5 @@
 import { useState, useEffect, Component, type ReactNode } from 'react'
-import { X, ChevronDown, ChevronRight, Play, ImageIcon, Check, AlertTriangle, Clock, Brain, Sparkles, Loader2, Camera, Film, Combine, Pencil } from 'lucide-react'
+import { X, ChevronDown, ChevronRight, Play, ImageIcon, Check, AlertTriangle, Clock, Brain, Sparkles, Loader2, Camera, Film, Combine, Pencil, Trash2 } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { getFileUrl } from '../../api/client'
 import type { PipelineClipState, SavedPipelineState } from '../../types'
@@ -494,7 +494,12 @@ function DirectorDashboardInner() {
   const rerunClipVideo = useStore(s => s.rerunClipVideo)
   const rejoinClips = useStore(s => s.rejoinPipelineClips)
   const resumePipeline = useStore(s => s.resumePipeline)
+  const deletePipeline = useStore(s => s.deletePipeline)
   const [resuming, setResuming] = useState(false)
+  // Keyed by pipeline id — a bare boolean would let "arm on pipeline A,
+  // switch to B, click once" delete B without a confirm.
+  const [confirmDeletePid, setConfirmDeletePid] = useState<string | null>(null)
+  const [deletingPipeline, setDeletingPipeline] = useState(false)
 
   // Auto-load first pipeline when list loads
   useEffect(() => {
@@ -614,6 +619,39 @@ function DirectorDashboardInner() {
             >
               <Combine size={10} />
               Re-join
+            </button>
+            <button
+              onClick={async () => {
+                if (!selectedPipeline) return
+                const pid = selectedPipeline.pipeline_id
+                if (confirmDeletePid !== pid) {
+                  setConfirmDeletePid(pid)
+                  setTimeout(() => setConfirmDeletePid(c => (c === pid ? null : c)), 4000)
+                  return
+                }
+                setConfirmDeletePid(null)
+                setDeletingPipeline(true)
+                setRegenError(null)
+                try {
+                  await deletePipeline(pid)
+                } catch (e) {
+                  setRegenError(e instanceof Error ? e.message : 'Delete failed')
+                } finally {
+                  setDeletingPipeline(false)
+                }
+              }}
+              disabled={loading || deletingPipeline}
+              className={`flex items-center gap-1 px-2 py-1 text-[10px] border rounded transition-colors disabled:opacity-40 ${
+                confirmDeletePid === selectedPipeline.pipeline_id
+                  ? 'bg-red-500/20 border-red-500/50 text-red-400'
+                  : 'bg-red-500/10 border-red-500/30 text-red-400/80 hover:bg-red-500/20'
+              }`}
+              title={confirmDeletePid === selectedPipeline.pipeline_id
+                ? `Click again to permanently delete this pipeline and its ${selectedPipeline.output_files?.length ?? 0} media files (they disappear from the gallery too)`
+                : 'Delete this pipeline and ALL media it generated'}
+            >
+              {deletingPipeline ? <Loader2 size={10} className="animate-spin" /> : <Trash2 size={10} />}
+              {confirmDeletePid === selectedPipeline.pipeline_id ? 'Confirm?' : 'Delete'}
             </button>
             {regenError && (
               <span className="text-[9px] text-red-400 max-w-[200px] truncate" title={regenError}>

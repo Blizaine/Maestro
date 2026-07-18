@@ -347,6 +347,173 @@ def _update_saved_pipeline(out_dir: str, pid: str, updater) -> Optional[dict]:
     return state
 
 
+# Pipeline statuses whose run thread is (or may become) alive — a paused
+# pipeline is blocked in _wait_for_resume and resurrects its state file
+# on resume, so deletion must refuse these, not just "running".
+_ACTIVE_PIPELINE_STATUSES = ("queued", "planning", "running", "paused")
+
+
+def any_pipeline_active() -> bool:
+    """True when any in-memory pipeline has a live (or resumable-in-place)
+    run thread. Used by workspace deletion: between generation jobs a
+    pipeline holds no _jobs entry yet will recreate its workspace folder
+    on its next step."""
+    with _pipeline_lock:
+        return any(p.get("status") in _ACTIVE_PIPELINE_STATUSES for p in _pipelines.values())
+
+
+def delete_pipeline(out_dir: str, pid: str) -> dict:
+    """Delete a saved pipeline and every media file it produced.
+
+    Refuses while the pipeline is running OR paused in memory: its state
+    file is re-written at phase boundaries (and on resume) and would
+    resurrect mid-delete, and popping a paused pipeline's entry crashes
+    its blocked run thread. The media set is the union of filenames the
+    state JSON references (start images, keyframes, clip videos,
+    joins/rejoins) and any media in the same folder whose .meta.json
+    sidecar carries this pipeline's id stamp — the second set catches
+    superseded rerun files the JSON no longer points at. Shared inputs
+    in uploads/ (the song, character and location refs) are absolute
+    paths outside the pipeline folder and are never touched.
+    """
+    with _pipeline_lock:
+        mem = _pipelines.get(pid)
+        if mem and mem.get("status") in _ACTIVE_PIPELINE_STATUSES:
+            return {"ok": False, "error": "running"}
+    filepath = _find_pipeline_file(out_dir, pid)
+    if not filepath:
+        return {"ok": False, "error": "not_found"}
+    pipeline_dir = os.path.dirname(filepath)
+
+    state = None
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            state = _backfill_clip_video_filenames(json.load(f), pipeline_dir)
+    except Exception:
+        pass
+
+    names = set()
+    if state:
+        for clip in state.get("clips", []) or []:
+            if clip.get("start_image_filename"):
+                names.add(clip["start_image_filename"])
+            for kf in clip.get("keyframe_filenames") or []:
+                if kf:
+                    names.add(kf)
+            if clip.get("video_filename"):
+                names.add(clip["video_filename"])
+        for out in state.get("output_files", []) or []:
+            if out:
+                names.add(out)
+    try:
+        dir_entries = os.listdir(pipeline_dir)
+    except OSError:
+        dir_entries = []
+    # Sidecar names strip the media extension ("clip_0.mp4" ->
+    # "clip_0.meta.json"), so map extensionless base -> real media file
+    # before sweeping; adding the bare base would silently no-op.
+    base_to_media = {}
+    for entry in dir_entries:
+        if entry.endswith(".meta.json") or entry.startswith(_PIPELINE_FILE_PREFIX):
+            continue
+        base_to_media.setdefault(os.path.splitext(entry)[0], entry)
+    for fname in dir_entries:
+        if not fname.endswith(".meta.json"):
+            continue
+        try:
+            with open(os.path.join(pipeline_dir, fname), "r", encoding="utf-8") as f:
+                meta = json.load(f)
+        except Exception:
+            continue
+        if meta.get("director_pipeline_id") == pid:
+            media = base_to_media.get(fname[: -len(".meta.json")])
+            if media:
+                names.add(media)
+            else:
+                # Orphan sidecar (media already gone) — remove it directly.
+                try:
+                    os.remove(os.path.join(pipeline_dir, fname))
+                except OSError:
+                    pass
+
+    from services.win_safe_files import safe_delete, safe_join_under, favorites_lock
+    deleted = 0
+    deferred = 0
+    errors = []
+    for name in sorted(names):
+        # State filenames are relative; contain them to the pipeline folder
+        # (symlink-resolving join) so a tampered state file cannot reach
+        # outside it.
+        target = safe_join_under(pipeline_dir, name)
+        if target is None:
+            errors.append(f"skipped suspicious path: {name}")
+            continue
+        # retries=1: bulk sweep — locked files go straight to the
+        # trash-rename path instead of sleeping through backoff per file.
+        result = safe_delete(target, retries=1)
+        if result.get("deferred"):
+            deferred += 1
+        elif result.get("deleted"):
+            deleted += 1
+        elif result.get("reason") == "locked":
+            errors.append(name)
+        sidecar = os.path.splitext(target)[0] + ".meta.json"
+        try:
+            if os.path.isfile(sidecar):
+                os.remove(sidecar)
+        except OSError:
+            pass
+
+    # Un-favorite everything that vanished (per-workspace .favorites.json).
+    # Lock shared with launch.py's favorites endpoints — both sides do
+    # read-modify-write on the same file from threadpool handlers.
+    with favorites_lock:
+        fav_path = os.path.join(pipeline_dir, ".favorites.json")
+        if os.path.isfile(fav_path):
+            try:
+                with open(fav_path, "r", encoding="utf-8") as f:
+                    favs = json.load(f)
+                if isinstance(favs, list):
+                    kept = [n for n in favs if n not in names]
+                    if len(kept) != len(favs):
+                        with open(fav_path, "w", encoding="utf-8") as f:
+                            json.dump(sorted(kept), f)
+            except Exception:
+                pass
+
+    # Rerun audio slices are not pid-scoped in their filenames and may be
+    # shared by another pipeline in this folder; only sweep them when this
+    # was the folder's last pipeline.
+    try:
+        others = [n for n in os.listdir(pipeline_dir)
+                  if n.startswith(_PIPELINE_FILE_PREFIX) and n.endswith(".json")
+                  and n != os.path.basename(filepath)]
+        if not others:
+            for n in os.listdir(pipeline_dir):
+                if n.startswith("_rerun_audio_c") and n.endswith(".wav"):
+                    safe_delete(os.path.join(pipeline_dir, n))
+    except OSError:
+        pass
+
+    try:
+        os.remove(filepath)
+    except OSError as exc:
+        errors.append(f"state file: {exc}")
+    with _pipeline_lock:
+        _pipelines.pop(pid, None)
+
+    try:
+        from services.search_index import get_search_index
+        get_search_index().invalidate()
+    except Exception:
+        pass
+
+    return {
+        "ok": True, "dir": pipeline_dir, "media_total": len(names),
+        "media_deleted": deleted, "media_deferred": deferred, "errors": errors,
+    }
+
+
 def rerun_clip_image(out_dir: str, pid: str, clip_index: int, prompt_override: str = None) -> dict:
     """Re-generate the start image for a single clip. Returns {job_id, filename} or raises."""
     state = load_pipeline_state(out_dir, pid)

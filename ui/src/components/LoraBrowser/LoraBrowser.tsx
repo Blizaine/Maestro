@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { X, Search, Loader2, BookOpen, HardDrive, Tag, Link2, ArrowUpCircle, RefreshCw, KeyRound, ExternalLink, Boxes } from 'lucide-react'
+import { X, Search, Loader2, BookOpen, HardDrive, Tag, Link2, ArrowUpCircle, RefreshCw, KeyRound, ExternalLink, Boxes, Trash2 } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
-import { fetchCivitAIModelFilters, startLoraScan, fetchLoraScanStatus, fetchInstalledLoras, importHuggingFaceLora, checkLoraUpdates } from '../../api/client'
+import { fetchCivitAIModelFilters, startLoraScan, fetchLoraScanStatus, fetchInstalledLoras, importHuggingFaceLora, checkLoraUpdates, deleteLoraFile } from '../../api/client'
+import { formatBytes } from '../../lib/format'
 import type { CivitAIModelFilter, InstalledLora } from '../../api/client'
 import { ModelCard } from './ModelCard'
 import { ModelDetail } from './ModelDetail'
@@ -116,6 +117,35 @@ export function LoraBrowser() {
   // both the My LoRAs button (visible from any view) and the Check
   // button (in case the user is already on My LoRAs view).
   const updatableCount = installedLoras.filter(l => l.update_status === 'available').length
+
+  // Per-card delete with two-step confirm, keyed by directory/filename.
+  const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null)
+  const [deletingKey, setDeletingKey] = useState<string | null>(null)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
+  const handleDeleteLora = useCallback(async (directory: string, filename: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    const key = `${directory}/${filename}`
+    if (confirmDeleteKey !== key) {
+      setConfirmDeleteKey(key)
+      setTimeout(() => setConfirmDeleteKey(c => (c === key ? null : c)), 4000)
+      return
+    }
+    setConfirmDeleteKey(null)
+    setDeletingKey(key)
+    setDeleteError(null)
+    try {
+      await deleteLoraFile(directory, filename)
+      // The endpoint response confirms exactly what was removed — drop the
+      // row locally instead of re-running the server's full multi-root
+      // sidecar rescan for every single delete.
+      setInstalledLoras(prev => prev.filter(l => !(l.directory === directory && l.filename === filename)))
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : String(err))
+      setTimeout(() => setDeleteError(null), 8000)
+    } finally {
+      setDeletingKey(null)
+    }
+  }, [confirmDeleteKey])
 
   const sentinelRef = useRef<HTMLDivElement>(null)
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined)
@@ -625,29 +655,40 @@ export function LoraBrowser() {
                   <p className="text-xs mt-1">{installedLoras.length} installed, try different filters</p>
                 </div>
               ) : (
+              <>
+              {deleteError && (
+                <div className="mb-3 px-3 py-2 text-[11px] text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg leading-snug">{deleteError}</div>
+              )}
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8 gap-3">
-                {filtered.map(lora => (
-                  <button
-                    key={`${lora.directory}/${lora.filename}`}
-                    onClick={() => {
-                      if (lora.civitai_model_id) {
-                        selectModel(lora.civitai_model_id)
-                      } else if ((lora as any).hf_repo_id) {
-                        window.open(`https://huggingface.co/${(lora as any).hf_repo_id}`, '_blank')
-                      }
-                    }}
-                    className={`relative rounded-lg border overflow-hidden bg-bg-tertiary text-left transition-all ${
-                      lora.civitai_model_id || (lora as any).hf_repo_id
-                        ? 'border-border hover:border-accent-blue cursor-pointer group'
+                {filtered.map(lora => {
+                  const cardKey = `${lora.directory}/${lora.filename}`
+                  const clickable = Boolean(lora.civitai_model_id || (lora as any).hf_repo_id)
+                  const openCard = () => {
+                    if (lora.civitai_model_id) {
+                      selectModel(lora.civitai_model_id)
+                    } else if ((lora as any).hf_repo_id) {
+                      window.open(`https://huggingface.co/${(lora as any).hf_repo_id}`, '_blank')
+                    }
+                  }
+                  return (
+                  <div
+                    key={cardKey}
+                    onClick={openCard}
+                    role={clickable ? 'button' : undefined}
+                    tabIndex={clickable ? 0 : undefined}
+                    onKeyDown={e => { if (clickable && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openCard() } }}
+                    className={`relative rounded-lg border overflow-hidden bg-bg-tertiary text-left transition-all group ${
+                      clickable
+                        ? 'border-border hover:border-accent-blue cursor-pointer'
                         : 'border-border/50 opacity-75'
                     }`}
                   >
                     <div className="aspect-[3/4] bg-bg-active overflow-hidden">
                       {lora.preview_url ? (
                         lora.preview_url.endsWith('.mp4') || lora.preview_url.endsWith('.webm') ? (
-                          <video src={lora.preview_url} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" muted loop autoPlay playsInline />
+                          <video src={lora.preview_url} className={`w-full h-full object-cover transition-transform duration-300 ${clickable ? 'group-hover:scale-105' : ''}`} muted loop autoPlay playsInline />
                         ) : (
-                          <img src={lora.preview_url} alt={lora.name || lora.filename} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" loading="lazy" referrerPolicy="no-referrer" />
+                          <img src={lora.preview_url} alt={lora.name || lora.filename} className={`w-full h-full object-cover transition-transform duration-300 ${clickable ? 'group-hover:scale-105' : ''}`} loading="lazy" referrerPolicy="no-referrer" />
                         )
                       ) : (
                         <div className="w-full h-full flex flex-col items-center justify-center text-text-muted gap-1">
@@ -670,6 +711,9 @@ export function LoraBrowser() {
                         )}
                         {lora.has_guide && <BookOpen size={9} className="text-accent-green" />}
                         {lora.base_model && <span className="text-[9px] text-white/50">{lora.base_model}</span>}
+                        {typeof lora.size_bytes === 'number' && (
+                          <span className="text-[9px] text-white/50 ml-auto shrink-0">{formatBytes(lora.size_bytes)}</span>
+                        )}
                       </div>
                       {lora.trained_words.length > 0 && (
                         <div className="flex items-center gap-0.5 mt-1 overflow-hidden">
@@ -703,9 +747,33 @@ export function LoraBrowser() {
                         </span>
                       </div>
                     )}
-                  </button>
-                ))}
+                    {/* Delete — primary-root files only; linked copies are
+                        read-only (deleting them would break the other install). */}
+                    {!lora.linked && (
+                      <button
+                        onClick={e => handleDeleteLora(lora.directory, lora.filename, e)}
+                        disabled={deletingKey === cardKey}
+                        className={`absolute bottom-1.5 right-1.5 p-1 rounded transition-all ${
+                          confirmDeleteKey === cardKey
+                            ? 'bg-red-500/90 text-white opacity-100'
+                            : deletingKey === cardKey
+                              ? 'bg-black/60 text-white/70 opacity-100 cursor-wait'
+                              : 'bg-black/60 text-white/70 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:text-red-400'
+                        }`}
+                        title={confirmDeleteKey === cardKey
+                          ? 'Click again to permanently delete this LoRA (weights + metadata + guide)'
+                          : 'Delete this LoRA from disk'}
+                      >
+                        {deletingKey === cardKey
+                          ? <Loader2 size={11} className="animate-spin" />
+                          : <Trash2 size={11} />}
+                      </button>
+                    )}
+                  </div>
+                  )
+                })}
               </div>
+              </>
               )
             })()}
           </div>

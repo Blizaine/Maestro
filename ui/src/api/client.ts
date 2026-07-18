@@ -223,6 +223,7 @@ export async function submitToolRevoice(params: {
 export interface Workspace {
   name: string
   path: string
+  file_count?: number
 }
 
 export async function fetchWorkspaces(): Promise<{ workspaces: Workspace[]; active: string }> {
@@ -250,6 +251,15 @@ export async function createWorkspace(name: string): Promise<void> {
     const err = await res.json().catch(() => ({ detail: 'Failed to create workspace' }))
     throw new Error(err.detail || 'Failed to create workspace')
   }
+}
+
+export async function deleteWorkspace(name: string): Promise<{ switched_to_default: boolean; files_deleted: number }> {
+  const res = await fetch(`${BASE}/api/v1/workspaces/${encodeURIComponent(name)}`, { method: 'DELETE' })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to delete workspace' }))
+    throw new Error(err.detail || 'Failed to delete workspace')
+  }
+  return res.json()
 }
 
 // --- Job Management ---
@@ -579,6 +589,15 @@ export async function rejoinPipeline(pid: string): Promise<{ filename: string }>
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: 'Rejoin failed' }))
     throw new Error(err.error || 'Rejoin failed')
+  }
+  return res.json()
+}
+
+export async function deletePipeline(pid: string): Promise<{ media_deleted: number; media_deferred: number }> {
+  const res = await fetch(`${BASE}/api/v1/director/pipelines/${encodeURIComponent(pid)}`, { method: 'DELETE' })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Delete failed' }))
+    throw new Error(err.detail || 'Delete failed')
   }
   return res.json()
 }
@@ -1604,6 +1623,8 @@ export interface InstalledLora {
   current_version_id?: number | null
   latest_published_at?: string | null
   latest_changelog?: string | null
+  /** On-disk size of the .safetensors file (null when unreadable). */
+  size_bytes?: number | null
 }
 
 export async function fetchInstalledLoras(): Promise<{
@@ -1614,6 +1635,16 @@ export async function fetchInstalledLoras(): Promise<{
 }> {
   const res = await fetch(`${BASE}/api/v1/loras/installed`)
   if (!res.ok) throw new Error('Failed to fetch installed LoRAs')
+  return res.json()
+}
+
+export async function deleteLoraFile(directory: string, filename: string): Promise<{ deleted: string; deferred: boolean }> {
+  const params = new URLSearchParams({ directory: directory || '.', filename })
+  const res = await fetch(`${BASE}/api/v1/loras/file?${params.toString()}`, { method: 'DELETE' })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to delete LoRA' }))
+    throw new Error(err.detail || 'Failed to delete LoRA')
+  }
   return res.json()
 }
 

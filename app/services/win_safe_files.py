@@ -382,7 +382,12 @@ _DEFERRED_THREAD_STARTED = False
 
 
 def _deferred_delete_worker():
-    """Periodically retry deletes from the queue. Never exits."""
+    """Periodically retry deletes from the queue. Never exits.
+
+    Entries may be files OR directories (trash-renamed folders from
+    safe_delete_dir) — directories are removed with rmtree.
+    """
+    import shutil
     while True:
         time.sleep(5)
         with _DEFERRED_LOCK:
@@ -392,7 +397,10 @@ def _deferred_delete_worker():
         still_pending: list[tuple[str, float]] = []
         for path, queued_at in queue_snapshot:
             try:
-                os.remove(path)
+                if os.path.isdir(path):
+                    shutil.rmtree(path)
+                else:
+                    os.remove(path)
                 print(f"[safe_delete] Deferred cleanup succeeded: {os.path.basename(path)}")
             except FileNotFoundError:
                 pass  # Already gone — drop from queue
@@ -475,3 +483,121 @@ def is_trash_name(name: str) -> bool:
     user doesn't see the in-flight cleanup files.
     """
     return name.startswith(".trash_")
+
+
+# Serializes .favorites.json read-modify-write cycles. Two writers exist
+# (launch.py's favorites endpoints and director_pipeline's delete sweep),
+# both on FastAPI's threadpool — without the lock an interleave can write
+# a stale favorites set back, resurrecting entries for deleted files.
+# RLock: RMW call sites hold it across load+modify+save, and the load/save
+# helpers re-acquire it internally.
+favorites_lock = threading.RLock()
+
+
+def safe_delete_dir(path: str) -> dict:
+    """Delete a directory tree with the same Windows-friendly fallbacks
+    as safe_delete.
+
+    Files are deleted with a single direct attempt (bulk callers should
+    not sleep through per-file retry backoff); anything locked gets the
+    trash-rename treatment. If the directory itself still can't be
+    removed, the WHOLE folder is renamed to a hidden .trash_* sibling
+    and queued for the deferred worker (which handles directories) —
+    per-file queue entries inside it are dropped at that point, since
+    renaming the folder invalidates their paths and the folder-level
+    rmtree covers them. Listings never see the renamed folder (all
+    filter dot-names) and sweep_trash reclaims it after a restart.
+
+    Returns {"removed": bool, "files_deleted": int, "files_deferred": int,
+    "errors": [...]} — "removed" means gone from the original path
+    (possibly hidden-pending-cleanup), matching what a UI should show.
+    """
+    import shutil
+    deleted = 0
+    deferred = 0
+    errors: list[str] = []
+    for root, dirs, files in os.walk(path, topdown=False):
+        for fname in files:
+            result = safe_delete(os.path.join(root, fname), retries=1)
+            if result.get("deferred"):
+                deferred += 1
+            elif result.get("deleted"):
+                deleted += 1
+            elif result.get("reason") != "not_found":
+                errors.append(fname)
+        for dname in dirs:
+            try:
+                os.rmdir(os.path.join(root, dname))
+            except OSError:
+                pass
+    try:
+        os.rmdir(path)
+        return {"removed": True, "files_deleted": deleted, "files_deferred": deferred, "errors": errors}
+    except FileNotFoundError:
+        return {"removed": True, "files_deleted": deleted, "files_deferred": deferred, "errors": errors}
+    except OSError:
+        pass
+    parent = os.path.dirname(path) or "."
+    hidden = os.path.join(parent, f".trash_{int(time.time() * 1000)}_{os.path.basename(path)}")
+    try:
+        os.rename(path, hidden)
+    except OSError as exc:
+        errors.append(f"folder: {exc}")
+        return {"removed": False, "files_deleted": deleted, "files_deferred": deferred, "errors": errors}
+    with _DEFERRED_LOCK:
+        stale_prefix = os.path.normcase(os.path.abspath(path)) + os.sep
+        _DEFERRED_DELETE_QUEUE[:] = [
+            (p, t) for (p, t) in _DEFERRED_DELETE_QUEUE
+            if not os.path.normcase(os.path.abspath(p)).startswith(stale_prefix)
+        ]
+        _DEFERRED_DELETE_QUEUE.append((hidden, time.time()))
+    _ensure_deferred_thread()
+    return {"removed": True, "files_deleted": deleted, "files_deferred": deferred, "errors": errors}
+
+
+def sweep_trash(base: str) -> int:
+    """Startup sweep: reclaim leftover .trash_* entries one level under
+    `base` — renamed by earlier runs whose deferred worker never finished
+    (server restarted while files were locked). Best-effort; anything
+    still locked goes back on the deferred queue."""
+    import shutil
+    count = 0
+    try:
+        entries = list(os.scandir(base))
+    except OSError:
+        return 0
+    for entry in entries:
+        if not is_trash_name(entry.name):
+            continue
+        try:
+            if entry.is_dir(follow_symlinks=False):
+                shutil.rmtree(entry.path)
+            else:
+                os.remove(entry.path)
+            count += 1
+        except OSError:
+            with _DEFERRED_LOCK:
+                _DEFERRED_DELETE_QUEUE.append((entry.path, time.time()))
+            _ensure_deferred_thread()
+    if count:
+        print(f"[safe_delete] Startup sweep reclaimed {count} leftover trash entries in {base}")
+    return count
+
+
+def safe_join_under(base: str, *parts: str):
+    """Join `parts` under `base`; return the absolute path only if it stays
+    inside `base` after resolving symlinks, else None. Shared with services
+    that cannot import launch.py's _safe_join (circular import)."""
+    try:
+        base_real = os.path.realpath(base)
+        joined = os.path.realpath(os.path.join(base_real, *parts))
+        if os.name == "nt":
+            if os.path.normcase(joined) != os.path.normcase(base_real) and \
+               not os.path.normcase(joined).startswith(os.path.normcase(base_real) + os.sep):
+                return None
+        else:
+            if joined != base_real and not joined.startswith(base_real + os.sep):
+                return None
+        return joined
+    except (ValueError, OSError):
+        return None

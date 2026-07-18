@@ -866,6 +866,7 @@ interface AppState {
   rerunClipVideo: (pid: string, clipIndex: number, prompt?: string) => Promise<unknown>
   rejoinPipelineClips: (pid: string) => Promise<unknown>
   resumePipeline: (pid: string) => Promise<void>
+  deletePipeline: (pid: string) => Promise<void>
   loadDirectorFromPipeline: (pid: string) => Promise<void>
 
   // Recipes (one-click Studio presets)
@@ -1124,7 +1125,7 @@ interface AppState {
   selectModel: (modelType: string) => void
 
   // Workspaces
-  workspaces: Array<{ name: string; path: string }>
+  workspaces: Array<{ name: string; path: string; file_count?: number }>
   activeWorkspace: string
   /** Gallery is showing the virtual "Uploads" view (browse-only — the
    *  server-side active workspace, and where generations save, is
@@ -1133,6 +1134,7 @@ interface AppState {
   loadWorkspaces: () => Promise<void>
   switchWorkspace: (name: string) => Promise<void>
   createWorkspace: (name: string) => Promise<void>
+  deleteWorkspace: (name: string) => Promise<void>
 
   // Outputs
   outputs: OutputFile[]
@@ -2110,6 +2112,22 @@ export const useStore = create<AppState>((set, get) => ({
       console.error('Failed to load pipeline:', e)
       set({ dashboardLoading: false })
     }
+  },
+  deletePipeline: async (pid) => {
+    // Clear the selection AND drop the pid from the list in the same
+    // update: the dashboard's auto-load effect selects pipelineList[0]
+    // whenever selection is null, so a stale list would immediately
+    // re-fetch the pipeline being deleted (re-mounting its <img>/<video>
+    // elements and re-locking the files on Windows).
+    set(s => ({
+      dashboardSelectedPipeline: null,
+      dashboardPipelineList: s.dashboardPipelineList.filter(p => p.id !== pid),
+    }))
+    await api.deletePipeline(pid)
+    await get().loadPipelineList()
+    // Pipeline media were gallery items too — refresh the feed.
+    get().loadOutputs()
+    get().loadWorkspaces()
   },
   tagClip: async (pid, clipIndex, tag) => {
     try {
@@ -6296,6 +6314,19 @@ export const useStore = create<AppState>((set, get) => ({
       console.error('Failed to create workspace:', e)
       throw e
     }
+  },
+  deleteWorkspace: async (name) => {
+    // The server refuses 'default', refuses while anything generates, and
+    // auto-switches to default when the deleted workspace was active —
+    // its switched_to_default answer is authoritative (a client-side
+    // activeWorkspace comparison could disagree after a desync and would
+    // widen it by force-resetting state the server never changed).
+    const result = await api.deleteWorkspace(name)
+    if (result.switched_to_default) {
+      set({ browsingUploads: false, activeWorkspace: 'default', outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
+      get().loadOutputs()
+    }
+    get().loadWorkspaces()
   },
 
   outputs: [],

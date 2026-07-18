@@ -102,6 +102,14 @@ else:
     _default_path = wgp.server_config.get("save_path", "outputs")
     print(f"[Workspace] Active workspace: default ({_default_path})")
 
+# Reclaim trash-renamed leftovers (deleted-but-locked files/folders from a
+# previous run whose deferred cleanup didn't finish before shutdown).
+try:
+    from services.win_safe_files import sweep_trash as _sweep_trash
+    _sweep_trash(wgp.server_config.get("save_path", "outputs"))
+except Exception as _sweep_err:
+    print(f"[Workspace] Trash sweep skipped: {_sweep_err}")
+
 # Performance auto-tune migration: pre-existing installs (config file
 # was loaded from disk, not freshly created) have no auto_performance
 # key in services. Default those to False so we never silently overwrite
@@ -243,15 +251,44 @@ def _workspace_dir(workspace: str = None) -> str:
     return ws_dir
 
 
+def _workspace_file_count(path: str) -> int:
+    """Non-hidden files directly inside a workspace folder (for delete
+    confirms). scandir answers is_file() from the enumeration data on
+    Windows — no per-entry stat syscall."""
+    try:
+        with os.scandir(path) as entries:
+            return sum(1 for e in entries if not e.name.startswith(".") and e.is_file())
+    except OSError:
+        return 0
+
+
 def _list_workspaces() -> list[dict]:
     """List all workspaces (subdirectories of the base output path + default)."""
-    workspaces = [{"name": "default", "path": wgp.server_config.get("save_path", "outputs")}]
-    if os.path.isdir(wgp.server_config.get("save_path", "outputs")):
-        for name in sorted(os.listdir(wgp.server_config.get("save_path", "outputs"))):
-            full = os.path.join(wgp.server_config.get("save_path", "outputs"), name)
+    base = wgp.server_config.get("save_path", "outputs")
+    workspaces = [{"name": "default", "path": base, "file_count": _workspace_file_count(base)}]
+    if os.path.isdir(base):
+        for name in sorted(os.listdir(base)):
+            full = os.path.join(base, name)
             if os.path.isdir(full) and not name.startswith(("_", ".")):
-                workspaces.append({"name": name, "path": full})
+                workspaces.append({"name": name, "path": full, "file_count": _workspace_file_count(full)})
     return workspaces
+
+
+def _persist_active_workspace(name: str, apply_save_paths: bool = True) -> str:
+    """Write services.active_workspace to config and (optionally) point
+    wgp's save paths at it. Pass apply_save_paths=False while a generation
+    is running — the in-flight job has locked wgp.save_path to its target
+    and the new value takes effect on the next job / restart."""
+    services = wgp.server_config.setdefault("services", {})
+    services["active_workspace"] = name
+    wgp.server_config["services"] = services
+    with open(wgp.server_config_filename, "w", encoding="utf-8") as f:
+        f.write(json.dumps(wgp.server_config, indent=4))
+    ws_dir = _workspace_dir(name)
+    if apply_save_paths:
+        wgp.save_path = ws_dir
+        wgp.image_save_path = ws_dir
+    return ws_dir
 
 # --- Director pipeline (lazy init after _run_generation is defined) ---
 _pipeline_initialized = False
@@ -1040,11 +1077,7 @@ def list_all_installed_loras():
     if not lora_root:
         return {"loras": []}
 
-    walk_roots = [(lora_root, False)]
-    for _linked_ckpts in _get_linked_model_folders():
-        _linked_loras = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(_linked_ckpts)), "loras"))
-        if os.path.isdir(_linked_loras):
-            walk_roots.append((_linked_loras, True))
+    walk_roots = [(lora_root, False)] + [(root, True) for root in _linked_lora_roots()]
 
     # Read the cached update manifest once per request so each row can
     # surface its update_status without an extra round trip.
@@ -1079,10 +1112,15 @@ def list_all_installed_loras():
                 _bases = [_mirror_base, own_base]
             else:
                 _bases = [own_base]
+            try:
+                _size_bytes = os.path.getsize(full_path)
+            except OSError:
+                _size_bytes = None
             info = {
                 "filename": f,
                 "directory": rel_dir,
                 "linked": is_linked,
+                "size_bytes": _size_bytes,
                 "trained_words": [],
                 "preview_url": None,
                 "civitai_model_id": None,
@@ -1184,6 +1222,86 @@ def list_all_installed_loras():
             ))
             loras.append(info)
     return {"loras": loras, "manifest_last_check_at": _manifest.get("last_full_check_at") if isinstance(_manifest, dict) else None}
+
+
+def _linked_lora_roots() -> list[str]:
+    """Loras folders of every linked install, derived from their ckpts
+    roots (the convention get_lora_search_dirs and the guide scan use)."""
+    roots = []
+    for _linked_ckpts in _get_linked_model_folders():
+        _linked_loras = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(_linked_ckpts)), "loras"))
+        if os.path.isdir(_linked_loras):
+            roots.append(_linked_loras)
+    return roots
+
+
+def _is_def_bundled_lora(filename: str) -> bool:
+    """True when any model definition bundles this LoRA (accelerator
+    distills like SCAIL-2 Fast's lightx2v). Deleting one of these only
+    triggers a re-download on that model's next generation — the model
+    loads it unconditionally. The try is PER model type: one malformed
+    def (e.g. a finetune whose "loras" points at a removed base) must
+    not abort the scan and fail the guard open for everything after it."""
+    base = os.path.normcase(filename)
+    for mt in wgp.displayed_model_types:
+        try:
+            for url in wgp.get_model_recursive_prop(mt, "loras", return_list=True) or []:
+                if isinstance(url, str) and os.path.normcase(url.split("/")[-1]) == base:
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+@api.delete("/api/v1/loras/file")
+def delete_lora_file(directory: str, filename: str):
+    """Delete an installed LoRA plus its sidecar, guide, and preview files.
+
+    Takes the {directory, filename} pair exactly as /loras/installed
+    reports it (directory is relative, "." for the root). Only files in
+    the primary loras root are deletable — linked installs are read-only,
+    same rule as checkpoint deletes.
+    """
+    if not filename.endswith((".safetensors", ".sft")) or os.path.basename(filename) != filename:
+        raise HTTPException(status_code=400, detail="Not a LoRA file.")
+    lora_root = _resolve_lora_root()
+    if not lora_root:
+        raise HTTPException(status_code=500, detail="LoRA folder not found.")
+    rel_dir = "" if directory in ("", ".") else directory
+    # _safe_join resolves symlinks before the containment check.
+    target = _safe_join(os.path.abspath(lora_root), rel_dir, filename) if rel_dir else _safe_join(os.path.abspath(lora_root), filename)
+    if target is None:
+        raise HTTPException(status_code=400, detail="Invalid path.")
+    if not os.path.isfile(target):
+        # The same relative key existing only under a linked root means the
+        # user clicked delete on a read-only linked copy.
+        for _linked_loras in _linked_lora_roots():
+            if os.path.isfile(os.path.join(_linked_loras, rel_dir, filename)):
+                raise HTTPException(status_code=403, detail="This LoRA lives in a linked model folder, which is read-only. Delete it from that install instead.")
+        raise HTTPException(status_code=404, detail=f"LoRA not found: {filename}")
+    # Def-bundled only — the fuzzy _is_system_managed_lora patterns
+    # over-match user LoRAs whose names merely contain words like
+    # "transition" and would make them permanently undeletable.
+    if _is_def_bundled_lora(filename):
+        raise HTTPException(status_code=409, detail="This LoRA is bundled with a model (a distill/accelerator) and would just re-download on next use. Delete the model instead.")
+
+    from services.win_safe_files import safe_delete
+    result = safe_delete(target)
+    if not result.get("deleted"):
+        raise HTTPException(status_code=423, detail="The file is locked by another process. Try again in a moment.")
+    base = os.path.splitext(target)[0]
+    extras_removed = []
+    extras = [base + ".civitai.json", base + ".guide.md"]
+    extras += [base + f"_preview1{ext}" for ext in (".mp4", ".png", ".jpg", ".webp")]
+    for extra in extras:
+        try:
+            if os.path.isfile(extra):
+                os.remove(extra)
+                extras_removed.append(os.path.basename(extra))
+        except OSError:
+            pass
+    print(f"[LoRA] Deleted {os.path.join(rel_dir, filename) if rel_dir else filename} (+{len(extras_removed)} sidecar files)")
+    return {"status": "ok", "deleted": filename, "deferred": bool(result.get("deferred")), "extras_removed": extras_removed}
 
 
 @api.get("/api/v1/loras/{model_type}")
@@ -5267,25 +5385,13 @@ async def set_active_workspace(request: Request):
     if name != "default" and not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9_-]*$', name):
         raise HTTPException(status_code=400, detail="Invalid workspace name. Use letters, numbers, hyphens, underscores.")
 
-    # Create workspace dir if needed
-    _workspace_dir(name)
-
-    # Save to config
-    services = wgp.server_config.setdefault("services", {})
-    services["active_workspace"] = name
-    wgp.server_config["services"] = services
-    with open(wgp.server_config_filename, "w", encoding="utf-8") as f:
-        f.write(json.dumps(wgp.server_config, indent=4))
-
-    # Update wgp save paths — but only if no generation is actively running.
-    # If a job is in progress, it has already locked wgp.save_path to its
-    # target workspace. Overwriting it mid-generation causes clips to scatter
-    # across workspaces. The config is still saved above, so the next job
-    # or app restart will pick up the new workspace.
-    ws_dir = _workspace_dir(name)
-    if not _active_gen_states:
-        wgp.save_path = ws_dir
-        wgp.image_save_path = ws_dir
+    # Persist the switch; only touch wgp.save_path when idle. If a job is
+    # in progress it has locked wgp.save_path to its target workspace —
+    # overwriting mid-generation scatters clips across workspaces. The
+    # config is saved either way, so the next job or restart picks it up.
+    idle = not _active_gen_states
+    ws_dir = _persist_active_workspace(name, apply_save_paths=idle)
+    if idle:
         print(f"[Workspace] Switched to: {name} ({ws_dir})")
     else:
         print(f"[Workspace] Config switched to: {name} (save_path deferred — generation in progress)")
@@ -5309,6 +5415,61 @@ async def create_workspace(request: Request):
     os.makedirs(ws_dir, exist_ok=True)
 
     return {"status": "ok", "name": name, "path": ws_dir}
+
+
+@api.delete("/api/v1/workspaces/{name}")
+def delete_workspace(name: str):
+    """Delete a workspace folder and every asset inside it.
+
+    Refused while anything is queued or generating: jobs capture their
+    workspace at submit time and _workspace_dir() recreates folders on
+    demand, so a mid-generation delete would silently resurrect the
+    workspace and scatter files into it.
+    """
+    import re
+    if name == "default":
+        raise HTTPException(status_code=400, detail="The default workspace is the outputs folder itself and cannot be deleted.")
+    if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9_-]*$', name):
+        raise HTTPException(status_code=400, detail="Invalid workspace name.")
+    base = os.path.abspath(wgp.server_config.get("save_path", "outputs"))
+    # _safe_join resolves symlinks/junctions before the containment check —
+    # the regex blocks traversal but not a junction inside outputs/.
+    ws_dir = _safe_join(base, name)
+    if ws_dir is None:
+        raise HTTPException(status_code=400, detail="Invalid workspace path.")
+    if not os.path.isdir(ws_dir):
+        raise HTTPException(status_code=404, detail=f"Workspace not found: {name}")
+
+    busy = any(j.get("status") in ("queued", "running") for j in _jobs.values())
+    if busy or _active_gen_states:
+        raise HTTPException(status_code=409, detail="A generation is queued or running. Wait for it to finish before deleting a workspace.")
+    # Director pipelines are alive between their generation jobs (LLM
+    # planning, review pauses) with no _jobs entry — but their next step
+    # would resurrect the folder via _workspace_dir().
+    try:
+        from services.director_pipeline import any_pipeline_active
+        if any_pipeline_active():
+            raise HTTPException(status_code=409, detail="A Director pipeline is running or paused. Stop it before deleting a workspace.")
+    except ImportError:
+        pass
+
+    # Deleting the active workspace switches to default first. Safe to write
+    # wgp.save_path directly here: nothing is generating (guards above).
+    switched = False
+    if _get_active_workspace() == name:
+        _persist_active_workspace("default")
+        switched = True
+        print(f"[Workspace] Active workspace deleted — switched to default")
+
+    from services.win_safe_files import safe_delete_dir
+    result = safe_delete_dir(ws_dir)
+    print(f"[Workspace] Deleted '{name}': {result['files_deleted']} files removed, "
+          f"{result['files_deferred']} deferred, dir_removed={result['removed']}")
+    return {
+        "status": "ok", "name": name,
+        "files_deleted": result["files_deleted"], "files_deferred": result["files_deferred"],
+        "dir_removed": result["removed"], "switched_to_default": switched, "errors": result["errors"],
+    }
 
 
 # ============================================================================
@@ -6659,6 +6820,22 @@ async def rejoin_pipeline_clips(pid: str):
         return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@api.delete("/api/v1/director/pipelines/{pid}")
+def delete_pipeline_endpoint(pid: str):
+    """Delete a saved pipeline and all media it produced (any workspace)."""
+    _init_pipeline()
+    from services.director_pipeline import delete_pipeline
+    base = wgp.server_config.get("save_path", "outputs")
+    result = delete_pipeline(base, pid)
+    if not result.get("ok"):
+        if result.get("error") == "running":
+            raise HTTPException(status_code=409, detail="This pipeline is still running. Stop it first, then delete.")
+        raise HTTPException(status_code=404, detail=f"Pipeline not found: {pid}")
+    print(f"[Pipeline] Deleted {pid}: {result['media_deleted']} media files removed "
+          f"({result['media_deferred']} deferred) from {result['dir']}")
+    return result
 
 
 # ── Director V2 Planning ─────────────────────────────────────────────────
@@ -11181,22 +11358,30 @@ def _favorites_path() -> str:
 
 def _load_favorites() -> set:
     """Load favorites set for the active workspace."""
+    from services.win_safe_files import favorites_lock
     fp = _favorites_path()
     if os.path.isfile(fp):
         try:
-            with open(fp, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return set(data) if isinstance(data, list) else set()
+            with favorites_lock:
+                with open(fp, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            return set(data) if isinstance(data, list) else set()
         except Exception:
             pass
     return set()
 
 
 def _save_favorites(favs: set):
-    """Save favorites set for the active workspace."""
+    """Save favorites set for the active workspace.
+
+    favorites_lock (shared with director_pipeline's delete sweep, which
+    rewrites the same file) serializes read-modify-write cycles so a
+    concurrent pipeline delete can't be clobbered by a stale write."""
+    from services.win_safe_files import favorites_lock
     fp = _favorites_path()
-    with open(fp, "w", encoding="utf-8") as f:
-        json.dump(sorted(favs), f)
+    with favorites_lock:
+        with open(fp, "w", encoding="utf-8") as f:
+            json.dump(sorted(favs), f)
 
 
 @api.get("/api/v1/favorites")
@@ -11208,14 +11393,19 @@ def list_favorites():
 @api.post("/api/v1/favorites/{name}")
 def toggle_favorite(name: str):
     """Toggle favorite status for a file. Returns new state."""
-    favs = _load_favorites()
-    if name in favs:
-        favs.discard(name)
-        is_fav = False
-    else:
-        favs.add(name)
-        is_fav = True
-    _save_favorites(favs)
+    from services.win_safe_files import favorites_lock
+    # Hold across the whole read-modify-write so a concurrent pipeline
+    # delete sweep can't be clobbered by this stale set (RLock — the
+    # load/save helpers re-acquire internally).
+    with favorites_lock:
+        favs = _load_favorites()
+        if name in favs:
+            favs.discard(name)
+            is_fav = False
+        else:
+            favs.add(name)
+            is_fav = True
+        _save_favorites(favs)
     return {"name": name, "favorite": is_fav}
 
 
@@ -11676,11 +11866,13 @@ async def move_output(name: str, request: Request):
         except Exception:
             pass
 
-    # Update favorites
-    favs = _load_favorites()
-    if name in favs:
-        favs.discard(name)
-        _save_favorites(favs)
+    # Update favorites (lock held across the read-modify-write)
+    from services.win_safe_files import favorites_lock
+    with favorites_lock:
+        favs = _load_favorites()
+        if name in favs:
+            favs.discard(name)
+            _save_favorites(favs)
 
     return {"moved": name, "to": target_ws}
 
@@ -11726,11 +11918,13 @@ def delete_output(name: str):
         except Exception:
             pass
 
-    # Remove from favorites
-    favs = _load_favorites()
-    if name in favs:
-        favs.discard(name)
-        _save_favorites(favs)
+    # Remove from favorites (lock held across the read-modify-write)
+    from services.win_safe_files import favorites_lock
+    with favorites_lock:
+        favs = _load_favorites()
+        if name in favs:
+            favs.discard(name)
+            _save_favorites(favs)
 
     # Remove from search index
     try:

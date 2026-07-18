@@ -5,13 +5,7 @@ import { useStore } from '../../stores/useStore'
 import { fetchLoraDirectories, fetchCheckpointArchitectures, reloadModels } from '../../api/client'
 import type { CheckpointArchitecture } from '../../api/client'
 import type { CivitAIModel, CivitAIModelVersion, CivitAIFile } from '../../types'
-
-function formatBytes(bytes: number): string {
-  if (bytes >= 1073741824) return `${(bytes / 1073741824).toFixed(1)} GB`
-  if (bytes >= 1048576) return `${(bytes / 1048576).toFixed(0)} MB`
-  if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`
-  return `${bytes} B`
-}
+import { formatBytes } from '../../lib/format'
 
 interface Props {
   model: CivitAIModel
