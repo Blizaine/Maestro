@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { Search, X, Loader2, Globe, Sparkles, BookOpen, Info, ArrowUpCircle, RefreshCw } from 'lucide-react'
+import { Search, X, Loader2, Globe, Sparkles, BookOpen, Info, ArrowUpCircle, RefreshCw, ArrowDownAZ, Clock } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { generateLoraGuide, fetchLoraGuide, fetchLoraDetails, checkLoraUpdates } from '../../api/client'
 import { formatAge } from '../../lib/format'
@@ -67,6 +67,43 @@ export function LoraAgeChip({ released, downloaded }: LoraDates) {
   )
 }
 
+// Persistence and cross-picker sync live in the store (loraPickerSort /
+// setLoraPickerSort) — per-component state would desync simultaneously
+// mounted pickers, e.g. Director's Image + Video accordions.
+export type LoraPickerSort = 'name' | 'newest'
+
+/** Order picker rows. 'name' keeps the backend's alphabetical order;
+ *  'newest' sorts by the same date the age chip shows (release date,
+ *  download/mtime fallback), newest first, dateless files last by name. */
+export function sortLoraNames(names: string[], sort: LoraPickerSort, dates: Record<string, LoraDates>): string[] {
+  if (sort !== 'newest') return names
+  const dateOf = (n: string) => {
+    const iso = dates[n]?.released || dates[n]?.downloaded
+    const t = iso ? Date.parse(iso) : NaN
+    return Number.isNaN(t) ? 0 : t
+  }
+  return [...names].sort((a, b) => dateOf(b) - dateOf(a) || a.localeCompare(b))
+}
+
+/** Two-state sort toggle shared by both pickers: A-Z <-> newest first. */
+export function LoraSortToggle({ sort, onChange }: { sort: LoraPickerSort; onChange: (s: LoraPickerSort) => void }) {
+  const newest = sort === 'newest'
+  return (
+    <button
+      onClick={() => onChange(newest ? 'name' : 'newest')}
+      className={`text-[10px] flex items-center gap-0.5 transition-colors ${
+        newest ? 'text-accent-blue hover:text-accent-blue-hover' : 'text-text-muted hover:text-accent-blue'
+      }`}
+      title={newest
+        ? 'Sorted by newest release first. Click to sort by name.'
+        : 'Sorted by name. Click to sort by newest release first.'}
+    >
+      {newest ? <Clock size={10} /> : <ArrowDownAZ size={10} />}
+      {newest ? 'New' : 'A-Z'}
+    </button>
+  )
+}
+
 export function LoraSelector() {
   const modelType = useStore(s => s.params.model_type)
   const activatedLoras = useStore(s => s.params.activated_loras)
@@ -110,6 +147,9 @@ export function LoraSelector() {
   // rendered as an age chip so similarly-named LoRAs can be told apart
   // by how new they are.
   const [loraDates, setLoraDates] = useState<Record<string, LoraDates>>({})
+  // Sticky list order shared with the Director picker via the store.
+  const sortMode = useStore(s => s.loraPickerSort)
+  const setSortSticky = useStore(s => s.setLoraPickerSort)
   // ISO timestamp of the last full CivitAI check, used to render
   // "checked Xm ago" next to the manual refresh button.
   const [lastCheckedAt, setLastCheckedAt] = useState<string | null>(null)
@@ -171,6 +211,7 @@ export function LoraSelector() {
     <div className="flex items-center justify-between mb-1.5">
       <label className="text-[11px] text-text-muted uppercase tracking-wider">LoRAs</label>
       <div className="flex items-center gap-2">
+        <LoraSortToggle sort={sortMode} onChange={setSortSticky} />
         <button
           onClick={handleCheckUpdates}
           disabled={checking || !modelType}
@@ -299,13 +340,13 @@ export function LoraSelector() {
   // LoRAs are always hidden (except already-activated ones — they
   // stay visible so the user can deactivate them).
   const effectiveShowNsfw = nsfwEnabled && showNsfw
-  const filtered = availableLoras.filter(name => {
+  const filtered = sortLoraNames(availableLoras.filter(name => {
     if (!displayName(name).toLowerCase().includes(search.toLowerCase())) return false
     const isActivated = activatedLoras.includes(name)
     if (!effectiveShowNsfw && !isActivated && nsfwFlags[name]) return false
     if (updatableOnly && !isActivated && updateStatuses[name] !== 'available') return false
     return true
-  })
+  }), sortMode, loraDates)
   // "X NSFW hidden" hint only meaningful when the user CAN reveal
   // them (NSFW mode enabled). Otherwise we don't hint at the existence
   // of hidden NSFW LoRAs at all.

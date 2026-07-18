@@ -1140,6 +1140,12 @@ interface AppState {
   storageDashboardOpen: boolean
   setStorageDashboardOpen: (open: boolean) => void
 
+  // LoRA picker sort order — store-backed (not per-component state) so
+  // simultaneously mounted pickers (e.g. Director's Image + Video
+  // accordions) stay in sync; persisted to localStorage.
+  loraPickerSort: 'name' | 'newest'
+  setLoraPickerSort: (sort: 'name' | 'newest') => void
+
   // Outputs
   outputs: OutputFile[]
   outputsTotal: number
@@ -6335,6 +6341,14 @@ export const useStore = create<AppState>((set, get) => ({
 
   storageDashboardOpen: false,
   setStorageDashboardOpen: (open) => set({ storageDashboardOpen: open }),
+
+  loraPickerSort: (() => {
+    try { return localStorage.getItem('maestro_lora_picker_sort') === 'newest' ? 'newest' as const : 'name' as const } catch { return 'name' as const }
+  })(),
+  setLoraPickerSort: (sort) => {
+    try { localStorage.setItem('maestro_lora_picker_sort', sort) } catch { /* private mode */ }
+    set({ loraPickerSort: sort })
+  },
 
   outputs: [],
   outputsTotal: 0,

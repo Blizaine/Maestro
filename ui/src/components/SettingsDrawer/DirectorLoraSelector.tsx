@@ -3,7 +3,7 @@ import { Search, X, Loader2, FolderOpen, Globe, Sparkles, BookOpen } from 'lucid
 import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
 import { generateLoraGuide, fetchLoraGuide, fetchLoraDetails } from '../../api/client'
-import { LoraGuideTooltip, LoraAgeChip } from './LoraSelector'
+import { LoraGuideTooltip, LoraAgeChip, LoraSortToggle, sortLoraNames } from './LoraSelector'
 import type { LoraDates } from './LoraSelector'
 import type { LoraRecommendedWeights } from '../../types'
 
@@ -74,6 +74,9 @@ export function DirectorLoraSelector({ mode, modelType }: {
   const [guideStatus, setGuideStatus] = useState<Record<string, 'none' | 'exists' | 'generating' | 'done'>>({})
   const [guideTexts, setGuideTexts] = useState<Record<string, string>>({})
   const [loraDates, setLoraDates] = useState<Record<string, LoraDates>>({})
+  // Sticky list order shared with the Studio picker via the store.
+  const sortMode = useStore(s => s.loraPickerSort)
+  const setSortSticky = useStore(s => s.setLoraPickerSort)
 
   // Load available LoRAs when model changes
   useEffect(() => {
@@ -241,8 +244,12 @@ export function DirectorLoraSelector({ mode, modelType }: {
   const displayName = (filename: string) =>
     filename.replace(/\.(safetensors|sft)$/i, '')
 
-  const filtered = availableLoras.filter(name =>
-    displayName(name).toLowerCase().includes(search.toLowerCase())
+  const filtered = sortLoraNames(
+    availableLoras.filter(name =>
+      displayName(name).toLowerCase().includes(search.toLowerCase())
+    ),
+    sortMode,
+    loraDates,
   )
 
   if (loading) {
@@ -276,13 +283,16 @@ export function DirectorLoraSelector({ mode, modelType }: {
       {/* Header with Browse */}
       <div className="flex items-center justify-between mb-1.5">
         <label className="text-[10px] text-text-muted uppercase tracking-wider">LoRAs</label>
-        <button
-          onClick={() => openBrowser(true, modelType)}
-          className="text-[10px] text-accent-blue hover:text-accent-blue-hover flex items-center gap-0.5 transition-colors"
-          title="Browse CivitAI"
-        >
-          <Globe size={10} /> Browse
-        </button>
+        <div className="flex items-center gap-2">
+          <LoraSortToggle sort={sortMode} onChange={setSortSticky} />
+          <button
+            onClick={() => openBrowser(true, modelType)}
+            className="text-[10px] text-accent-blue hover:text-accent-blue-hover flex items-center gap-0.5 transition-colors"
+            title="Browse CivitAI"
+          >
+            <Globe size={10} /> Browse
+          </button>
+        </div>
       </div>
 
       {/* Search */}
