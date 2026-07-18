@@ -80,6 +80,20 @@ export async function deleteModel(modelType: string): Promise<{ deleted: string[
   return res.json()
 }
 
+export type ModelDownloadStatus = 'downloading' | 'completed' | 'failed'
+
+export async function downloadModel(modelType: string): Promise<{ status: ModelDownloadStatus; model_type: string }> {
+  const res = await fetch(`${BASE}/api/v1/models/${encodeURIComponent(modelType)}/download`, { method: 'POST' })
+  if (!res.ok) throw new Error('Failed to start model download')
+  return res.json()
+}
+
+export async function fetchModelDownloads(): Promise<{ downloads: Record<string, { status: ModelDownloadStatus; error: string | null }> }> {
+  const res = await fetch(`${BASE}/api/v1/models/downloads/status`)
+  if (!res.ok) throw new Error('Failed to fetch model download status')
+  return res.json()
+}
+
 // --- Resolutions ---
 
 export async function fetchResolutions(): Promise<ApiResolution[]> {

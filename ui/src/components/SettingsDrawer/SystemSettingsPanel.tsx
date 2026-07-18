@@ -86,7 +86,57 @@ function ModelVisibilitySection() {
   const [expandedModes, setExpandedModes] = useState<Set<GenerationMode>>(new Set())
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<string | null>(null)
+  // Model pre-downloads in flight (click on the download icon). Byte-level
+  // progress shows in the global DownloadStatusBanner; this set only drives
+  // the per-row spinner and the completion refresh.
+  const [downloading, setDownloading] = useState<Set<string>>(new Set())
+  const [downloadErrors, setDownloadErrors] = useState<Record<string, string>>({})
   const sectionRef = useRef<HTMLDivElement>(null)
+
+  // Poll download status while any model download is in flight. Also runs
+  // once on mount so a download started before the drawer was closed and
+  // reopened picks its spinner back up.
+  useEffect(() => {
+    let cancelled = false
+    const tick = async () => {
+      try {
+        const { downloads } = await api.fetchModelDownloads()
+        if (cancelled) return
+        const active = new Set<string>()
+        const errors: Record<string, string> = {}
+        let anyCompleted = false
+        for (const [mt, d] of Object.entries(downloads)) {
+          if (d.status === 'downloading') active.add(mt)
+          else if (d.status === 'failed' && d.error) errors[mt] = d.error
+          else if (d.status === 'completed') anyCompleted = true
+        }
+        setDownloading(prev => {
+          if (prev.size === active.size && [...prev].every(mt => active.has(mt))) return prev
+          return active
+        })
+        setDownloadErrors(errors)
+        // A download finished since the last poll — refresh so the row
+        // flips to the downloaded check mark.
+        if (anyCompleted && downloading.size > 0 && active.size < downloading.size) loadModels()
+      } catch { /* endpoint unavailable — ignore */ }
+    }
+    tick()
+    if (downloading.size === 0) return
+    const interval = setInterval(tick, 2000)
+    return () => { cancelled = true; clearInterval(interval) }
+  }, [downloading.size, loadModels])
+
+  const handleDownload = useCallback(async (modelType: string) => {
+    setDownloadErrors(prev => { const next = { ...prev }; delete next[modelType]; return next })
+    setDownloading(prev => new Set(prev).add(modelType))
+    try {
+      await api.downloadModel(modelType)
+    } catch (e) {
+      console.error('Download start failed:', e)
+      setDownloading(prev => { const next = new Set(prev); next.delete(modelType); return next })
+      setDownloadErrors(prev => ({ ...prev, [modelType]: String(e) }))
+    }
+  }, [])
 
   // When the ModelSelector "+N more" hint fires, open this section, expand
   // the requested mode, and scroll it into view — then clear the request.
@@ -146,17 +196,17 @@ function ModelVisibilitySection() {
   // Group models by generation mode, hiding nsfw_only entries when
   // Mature Mode is off (they reappear instantly when the toggle flips).
   const visibleModels = models.filter(m => !m.nsfw_only || nsfwMode)
-  const modelsByMode = new Map<GenerationMode, { familyId: string; familyLabel: string; models: { model_type: string; name: string; is_downloaded?: boolean }[] }[]>()
+  const modelsByMode = new Map<GenerationMode, { familyId: string; familyLabel: string; models: { model_type: string; name: string; is_downloaded?: boolean; architecture?: string }[] }[]>()
   for (const { mode } of MODE_LABELS) {
     const modeFamilies = getFamiliesForMode(mode, families)
-    const groups: { familyId: string; familyLabel: string; models: { model_type: string; name: string; is_downloaded?: boolean }[] }[] = []
+    const groups: { familyId: string; familyLabel: string; models: { model_type: string; name: string; is_downloaded?: boolean; architecture?: string }[] }[] = []
     for (const fam of modeFamilies) {
       const familyModels = getModelsForFamily(fam.id, visibleModels, mode)
       if (familyModels.length > 0) {
         groups.push({
           familyId: fam.id,
           familyLabel: fam.label,
-          models: familyModels.map(m => ({ model_type: m.model_type, name: m.name, is_downloaded: m.is_downloaded })),
+          models: familyModels.map(m => ({ model_type: m.model_type, name: m.name, is_downloaded: m.is_downloaded, architecture: m.architecture })),
         })
       }
     }
@@ -282,11 +332,31 @@ function ModelVisibilitySection() {
                             onChange={() => toggleModelEnabled(m.model_type)}
                             className="w-3.5 h-3.5 rounded border-border bg-bg-tertiary accent-accent-blue shrink-0"
                           />
-                          {/* Download status indicator */}
+                          {/* Download status / click-to-download. preventDefault
+                              keeps the label from forwarding the click to the
+                              enable checkbox. MMAudio rows are virtual entries
+                              with no backend model def, so no button there —
+                              their files fetch on first SFX generation. */}
                           {m.is_downloaded ? (
                             <Check size={10} className="text-indicator-success shrink-0" />
-                          ) : (
+                          ) : downloading.has(m.model_type) ? (
+                            <Loader2 size={10} className="text-accent-blue shrink-0 animate-spin" />
+                          ) : m.architecture === 'mmaudio' ? (
                             <Download size={10} className="text-text-muted shrink-0" />
+                          ) : (
+                            <button
+                              onClick={e => { e.preventDefault(); e.stopPropagation(); handleDownload(m.model_type) }}
+                              className={`p-0.5 -m-0.5 rounded transition-colors shrink-0 ${
+                                downloadErrors[m.model_type]
+                                  ? 'text-red-400 hover:text-red-300'
+                                  : 'text-text-muted hover:text-accent-blue'
+                              }`}
+                              title={downloadErrors[m.model_type]
+                                ? `Download failed: ${downloadErrors[m.model_type]} — click to retry`
+                                : 'Download model files now'}
+                            >
+                              <Download size={10} />
+                            </button>
                           )}
                           <span className={`text-xs truncate ${
                             m.is_downloaded

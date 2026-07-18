@@ -269,39 +269,90 @@ def _init_pipeline():
 # API Routes: /api/v1/*
 # ============================================================================
 
+def _variant_group_filenames(urls) -> list:
+    """Flatten one weight group (list of variant URLs / dict entries) to file names."""
+    names = []
+    for url_entry in urls:
+        url_str = url_entry
+        if isinstance(url_entry, dict):
+            inner = url_entry.get("URLs", url_entry.get("url", []))
+            url_str = inner[0] if isinstance(inner, list) and inner else (inner if isinstance(inner, str) else "")
+        if not isinstance(url_str, str) or not url_str:
+            continue
+        names.append(url_str.rstrip("/").split("/")[-1])
+    return names
+
+
+def _variant_group_downloaded(urls) -> bool:
+    """True when ANY variant (full bf16 vs quantized int8...) of one weight
+    group exists locally. Resolves through the files locator so checkpoints
+    in linked model folders (Settings -> System -> Linked Model Folders)
+    light up too — a hardcoded ckpts_dir check misses every secondary root."""
+    for filename in _variant_group_filenames(urls):
+        if wgp.fl.locate_file(filename, error_if_none=False) is not None:
+            return True
+    return False
+
+
+def _model_weight_groups(model_type: str, owned_only: bool = False) -> list:
+    """All weight groups a model needs on disk: main URLs + weight modules.
+
+    "URLs" may be a string pointer to another model type (finetunes such as
+    z_image_control or scail2_14B_fast use "URLs": "<base_model>"). Resolve
+    recursively like the engine does — iterating the raw value would walk
+    the characters of the string and permanently report not-downloaded.
+
+    owned_only=True returns only groups this entry itself declares (skips a
+    string-pointer base). Used by delete: removing a finetune must not pull
+    the shared base transformer out from under its sibling entries — the
+    base is deleted from the base model's own row instead.
+
+    String-named modules resolve through the engine's module registry and
+    are intentionally left out (they were never counted here).
+    """
+    md = wgp.get_model_def(model_type) or {}
+    groups = []
+    raw_urls = md.get("URLs", None)
+    if isinstance(raw_urls, str):
+        if not owned_only:
+            urls = wgp.get_model_recursive_prop(model_type, "URLs", return_list=True)
+            if urls:
+                groups.append(urls)
+    elif raw_urls:
+        groups.append(raw_urls)
+    for module in md.get("modules", []):
+        if isinstance(module, list):
+            groups.append(module)
+        elif isinstance(module, dict):
+            group = module.get("URLs", [])
+            if group:
+                groups.append(group)
+    return groups
+
+
 def _check_model_downloaded(model_type: str) -> bool:
     """Check if a model's checkpoint files are downloaded.
 
-    Models often list multiple URLs (e.g. full bf16 + quantized int8).
-    The user only needs ONE variant downloaded, so check all URLs.
+    Models often list multiple URLs (e.g. full bf16 + quantized int8) per
+    weight group; ONE variant per group is enough. Every group (main
+    transformer + each weight module) must be present.
     """
     try:
-        md = wgp.get_model_def(model_type)
-        if not md:
+        if wgp.get_model_def(model_type) is None:
             return False
-
-        # Collect all URLs from the model definition
-        urls = md.get("URLs", [])
-        if not urls:
+        groups = _model_weight_groups(model_type)
+        if not groups:
             return False
-
-        # Check if ANY URL's file exists (user may have full or quantized
-        # variant). Resolve through the files locator so checkpoints found
-        # in linked model folders (e.g. an existing Wan2GP install added
-        # via Settings -> System -> Linked Model Folders) light up too —
-        # a hardcoded ckpts_dir check misses every secondary root.
-        for url_entry in urls:
-            url_str = url_entry
-            if isinstance(url_entry, dict):
-                inner = url_entry.get("URLs", url_entry.get("url", []))
-                url_str = inner[0] if isinstance(inner, list) and inner else (inner if isinstance(inner, str) else "")
-            if not isinstance(url_str, str) or not url_str:
-                continue
-            filename = url_str.rstrip("/").split("/")[-1]
-            if wgp.fl.locate_file(filename, error_if_none=False) is not None:
-                return True
-
-        return False
+        if not all(_variant_group_downloaded(g) for g in groups):
+            return False
+        # Def-bundled accelerator loras (e.g. SCAIL-2 Fast's lightx2v
+        # distill) are loaded unconditionally at generation time, so they
+        # count toward readiness too. resolve_lora_path searches linked
+        # read-only roots like the generation path does.
+        for url in wgp.get_model_recursive_prop(model_type, "loras", return_list=True):
+            if not os.path.isfile(wgp.resolve_lora_path(model_type, url.split("/")[-1])):
+                return False
+        return True
     except Exception:
         return False
 
@@ -380,15 +431,16 @@ def delete_model(model_type: str):
     if not md:
         return JSONResponse({"error": "Model not found"}, status_code=404)
 
-    urls = md.get("URLs", [])
+    # Same group resolution as _check_model_downloaded, restricted to files
+    # this entry owns — a finetune's delete removes its modules but leaves a
+    # shared base transformer for the base model's own delete button.
+    filenames = []
+    for group in _model_weight_groups(model_type, owned_only=True):
+        filenames.extend(_variant_group_filenames(group))
     deleted = []
     skipped_linked = []
     errors = []
-    for url_entry in urls:
-        url = url_entry if isinstance(url_entry, str) else (url_entry.get("URLs", [""])[0] if isinstance(url_entry, dict) else "")
-        if not url:
-            continue
-        filename = url.rstrip("/").split("/")[-1]
+    for filename in filenames:
         filepath = wgp.fl.locate_file(filename, error_if_none=False)
         if filepath and os.path.isfile(filepath):
             # locate_file also finds checkpoints in linked (read-only) model
@@ -407,6 +459,101 @@ def delete_model(model_type: str):
     if errors:
         return JSONResponse({"deleted": deleted, "skipped_linked": skipped_linked, "errors": errors}, status_code=207)
     return {"deleted": deleted, "skipped_linked": skipped_linked, "model_type": model_type}
+
+
+# ── Model pre-download ──────────────────────────────────────────────────
+# Backs the click-to-download icon in Settings → System → Enabled Models.
+# Fetches everything a generation would need (transformer + second-stage +
+# modules + shared assets + text encoder) without occupying the GPU, so
+# the first generation starts instantly. Progress reaches the UI through
+# the existing /api/v1/downloads/active feed (safe_download's tqdm hook).
+_model_downloads: dict = {}
+_model_downloads_lock = threading.Lock()
+
+
+def _download_model_files(model_type: str):
+    """Resolve and fetch every file load_models() would download.
+
+    Mirrors the file-resolution block at the top of wgp.load_models()
+    (wgp.py:4041-4143) — keep the two in sync.
+    """
+    model_def = wgp.get_model_def(model_type)
+    quantization = wgp.transformer_quantization
+    dtype_policy = wgp.transformer_dtype_policy
+    transformer_dtype = wgp.get_transformer_dtype(model_type, dtype_policy)
+
+    model_file_list = [wgp.get_model_filename(model_type=model_type, quantization=quantization, dtype_policy=dtype_policy)]
+    source_type_list = [0]
+    submodel_no_list = [1]
+    if "URLs2" in model_def:
+        model_file_list.append(wgp.get_model_filename(model_type=model_type, quantization=quantization, dtype_policy=dtype_policy, submodel_no=2))
+        source_type_list.append(0)
+        submodel_no_list.append(2)
+    modules = wgp.get_model_recursive_prop(model_type, "modules", return_list=True)
+    modules = [wgp.get_model_recursive_prop(module, "modules", sub_prop_name="_list", return_list=True) if isinstance(module, str) else module for module in modules]
+    for module_type in modules:
+        if isinstance(module_type, dict):
+            for urls_key, submodel_no in (("URLs", 1), ("URLs2", 2)):
+                urls = module_type.get(urls_key, None)
+                if urls is None:
+                    raise Exception(f"No {urls_key} defined for Module {module_type}")
+                model_file_list.append(wgp.get_model_filename(model_type, quantization, transformer_dtype, URLs=urls))
+                source_type_list.append(1)
+                submodel_no_list.append(submodel_no)
+        else:
+            model_file_list.append(wgp.get_model_filename(model_type, quantization, transformer_dtype, module_type=module_type))
+            source_type_list.append(1)
+            submodel_no_list.append(0)
+
+    for filename, source_type, submodel_no in zip(model_file_list, source_type_list, submodel_no_list):
+        if len(filename) == 0:
+            continue
+        wgp.download_models(filename, model_type, source_type, submodel_no)
+
+    text_encoder_URLs = wgp.get_model_recursive_prop(model_type, "text_encoder_URLs", return_list=True)
+    if text_encoder_URLs is not None:
+        te_quant = (model_def.get("text_encoder_quantization", None) if model_def else None) or wgp.text_encoder_quantization
+        text_encoder_filename = wgp.get_model_filename(model_type=model_type, quantization=te_quant, dtype_policy=dtype_policy, URLs=text_encoder_URLs)
+        if text_encoder_filename is not None and len(text_encoder_filename):
+            text_encoder_folder = model_def.get("text_encoder_folder", None)
+            wgp.download_models(text_encoder_filename, model_type, 2, -1, force_path=text_encoder_folder)
+            if wgp.get_local_model_filename(text_encoder_filename, extra_paths=text_encoder_folder) is None:
+                raise Exception(f"Text encoder '{os.path.basename(text_encoder_filename)}' could not be located after download.")
+
+    if not _check_model_downloaded(model_type):
+        raise Exception("Download finished but the checkpoint could not be located — check disk space and earlier terminal output.")
+
+
+@api.post("/api/v1/models/{model_type}/download")
+def download_model(model_type: str):
+    """Start downloading a model's files in the background."""
+    md = wgp.get_model_def(model_type)
+    if not md:
+        return JSONResponse({"error": "Model not found"}, status_code=404)
+    with _model_downloads_lock:
+        entry = _model_downloads.get(model_type)
+        if entry and entry["status"] == "downloading":
+            return {"status": "downloading", "model_type": model_type}
+        _model_downloads[model_type] = {"status": "downloading", "error": None, "started": time.time()}
+
+    def _worker():
+        try:
+            _download_model_files(model_type)
+            _model_downloads[model_type] = {"status": "completed", "error": None, "started": _model_downloads[model_type]["started"]}
+            print(f"[Models] Pre-download complete: {model_type}")
+        except Exception as e:
+            traceback.print_exc()
+            _model_downloads[model_type] = {"status": "failed", "error": str(e), "started": _model_downloads[model_type]["started"]}
+            print(f"[Models] Pre-download FAILED for {model_type}: {e}")
+
+    threading.Thread(target=_worker, daemon=True, name=f"model-dl-{model_type}").start()
+    return {"status": "downloading", "model_type": model_type}
+
+
+@api.get("/api/v1/models/downloads/status")
+def model_downloads_status():
+    """Status of model pre-downloads started via POST .../download."""
+    return {"downloads": {mt: {"status": e["status"], "error": e["error"]} for mt, e in _model_downloads.items()}}
 
 
 @api.get("/api/v1/resolutions")
