@@ -3,7 +3,8 @@ import { Search, X, Loader2, FolderOpen, Globe, Sparkles, BookOpen } from 'lucid
 import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
 import { generateLoraGuide, fetchLoraGuide, fetchLoraDetails } from '../../api/client'
-import { LoraGuideTooltip } from './LoraSelector'
+import { LoraGuideTooltip, LoraAgeChip } from './LoraSelector'
+import type { LoraDates } from './LoraSelector'
 import type { LoraRecommendedWeights } from '../../types'
 
 /**
@@ -72,6 +73,7 @@ export function DirectorLoraSelector({ mode, modelType }: {
   const [loraWeightRecs, setLoraWeightRecs] = useState<Record<string, LoraRecommendedWeights>>({})
   const [guideStatus, setGuideStatus] = useState<Record<string, 'none' | 'exists' | 'generating' | 'done'>>({})
   const [guideTexts, setGuideTexts] = useState<Record<string, string>>({})
+  const [loraDates, setLoraDates] = useState<Record<string, LoraDates>>({})
 
   // Load available LoRAs when model changes
   useEffect(() => {
@@ -115,14 +117,19 @@ export function DirectorLoraSelector({ mode, modelType }: {
       const recs: Record<string, LoraRecommendedWeights> = {}
       const guides: Record<string, string> = {}
       const statuses: Record<string, 'exists' | 'none'> = {}
+      const dates: Record<string, LoraDates> = {}
       for (const info of r.loras) {
         if (info.recommended_weights) recs[info.filename] = info.recommended_weights
         if (info.guide) { guides[info.filename] = info.guide; statuses[info.filename] = 'exists' }
         else if (info.has_guide) statuses[info.filename] = 'exists'
+        if (info.released_at || info.downloaded_at) {
+          dates[info.filename] = { released: info.released_at, downloaded: info.downloaded_at }
+        }
       }
       setLoraWeightRecs(recs)
       setGuideTexts(prev => ({ ...prev, ...guides }))
       setGuideStatus(prev => ({ ...prev, ...statuses }))
+      setLoraDates(dates)
 
       // Auto-apply recommended defaults to newly activated LoRAs at 1.0 fill
       for (const lora of activatedLoras) {
@@ -312,6 +319,12 @@ export function DirectorLoraSelector({ mode, modelType }: {
                 )}
               </div>
               <span className="truncate flex-1">{displayName(filename)}</span>
+              {loraDates[filename] && (
+                <LoraAgeChip
+                  released={loraDates[filename].released}
+                  downloaded={loraDates[filename].downloaded}
+                />
+              )}
               {guideTexts[filename] && (
                 <span onClick={e => e.stopPropagation()}>
                   <LoraGuideTooltip guide={guideTexts[filename]} />

@@ -1400,6 +1400,8 @@ def list_loras_details(model_type: str):
             "recommended_weights": None,
             "has_guide": False,
             "nsfw": False,
+            "downloaded_at": None,
+            "released_at": None,
             "lora_id": f"local:{basename}",  # overwritten below if sidecar has modelId
         }
         # Guides and sidecars for LINKED loras are stored in Maestro's own
@@ -1432,6 +1434,11 @@ def list_loras_details(model_type: str):
                 info["trained_words"] = meta.get("trainedWords", [])
                 info["civitai_model_id"] = meta.get("modelId")
                 info["recommended_weights"] = meta.get("recommendedWeights")
+                # Same date semantics as /api/v1/loras/installed: downloadedAt
+                # is stamped by the download path, publishedAt (version release
+                # date) is captured at download and backfilled by check-updates.
+                info["downloaded_at"] = meta.get("downloadedAt")
+                info["released_at"] = meta.get("publishedAt")
                 # Manual override > CivitAI flag > keyword fallback. See
                 # /api/v1/loras/installed for full rationale.
                 if isinstance(meta.get("nsfw_override"), bool):
@@ -1445,6 +1452,13 @@ def list_loras_details(model_type: str):
                     info["preview_url"] = images[0]["url"]
             except Exception:
                 meta = None
+        # Downloaded-date fallback for HF/hand-installed files without a
+        # CivitAI sidecar: the weight file's mtime.
+        if not info.get("downloaded_at"):
+            try:
+                info["downloaded_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(os.path.getmtime(f)))
+            except OSError:
+                info["downloaded_at"] = None
         # Fallback: infer NSFW from filename + tags + description + guide
         # only when no authoritative signal exists.
         has_override = isinstance(meta, dict) and isinstance(meta.get("nsfw_override"), bool)

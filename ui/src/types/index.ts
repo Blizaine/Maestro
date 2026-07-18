@@ -498,6 +498,13 @@ export interface LoraInfo {
    *  at a glance which LoRAs they've corrected vs which are using CivitAI's
    *  raw flag. */
   nsfw_overridden?: boolean
+  /** ISO timestamp of when the file was downloaded — sidecar `downloadedAt`
+   *  when present, else the weight file's mtime. Shown as an age chip in
+   *  the Studio/Director LoRA pickers. */
+  downloaded_at?: string | null
+  /** ISO timestamp of the CivitAI version's publish date (sidecar
+   *  `publishedAt`). Null for HF/hand-installed LoRAs without sidecar data. */
+  released_at?: string | null
   /** Stable identifier that survives version updates.
    *  Format: `civitai:{modelId}` when sidecar has a CivitAI modelId,
    *  otherwise `local:{filename}`. Use this as the persistence key for

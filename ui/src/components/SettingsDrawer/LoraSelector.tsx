@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { Search, X, Loader2, Globe, Sparkles, BookOpen, Info, ArrowUpCircle, RefreshCw } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { generateLoraGuide, fetchLoraGuide, fetchLoraDetails, checkLoraUpdates } from '../../api/client'
+import { formatAge } from '../../lib/format'
 import type { LoraRecommendedWeights, LoraUpdateStatus } from '../../types'
 
 export function LoraGuideTooltip({ guide }: { guide: string }) {
@@ -45,6 +46,27 @@ export function LoraGuideTooltip({ guide }: { guide: string }) {
   )
 }
 
+/** Per-file dates lifted from the /details response — shared shape between
+ *  the Studio and Director LoRA pickers. */
+export type LoraDates = { released?: string | null; downloaded?: string | null }
+
+/** Compact age chip for LoRA picker rows. Prefers the CivitAI release date
+ *  (answers "how new is this LoRA?"), falls back to the download/mtime date
+ *  for hand-installed files. Full dates live in the tooltip. */
+export function LoraAgeChip({ released, downloaded }: LoraDates) {
+  const age = formatAge(released || downloaded)
+  if (!age) return null
+  const tip = [
+    released ? `Released ${new Date(released).toLocaleDateString()}` : null,
+    downloaded ? `Downloaded ${new Date(downloaded).toLocaleDateString()}` : null,
+  ].filter(Boolean).join(' — ')
+  return (
+    <span className="text-[9px] text-text-muted shrink-0 tabular-nums" title={tip}>
+      {age}
+    </span>
+  )
+}
+
 export function LoraSelector() {
   const modelType = useStore(s => s.params.model_type)
   const activatedLoras = useStore(s => s.params.activated_loras)
@@ -84,6 +106,10 @@ export function LoraSelector() {
   // backend embeds this on every /details response so we don't need to
   // fetch it separately; we just lift it into a lookup map.
   const [updateStatuses, setUpdateStatuses] = useState<Record<string, LoraUpdateStatus>>({})
+  // Per-filename release/download dates from the /details sidecar data —
+  // rendered as an age chip so similarly-named LoRAs can be told apart
+  // by how new they are.
+  const [loraDates, setLoraDates] = useState<Record<string, LoraDates>>({})
   // ISO timestamp of the last full CivitAI check, used to render
   // "checked Xm ago" next to the manual refresh button.
   const [lastCheckedAt, setLastCheckedAt] = useState<string | null>(null)
@@ -103,10 +129,18 @@ export function LoraSelector() {
       await checkLoraUpdates(true) // force=true: bypass 24h staleness window
       const r = await fetchLoraDetails(modelType)
       const next: Record<string, LoraUpdateStatus> = {}
+      // check-updates backfills publishedAt into sidecars that predate its
+      // capture, so this refetch is exactly when release dates appear —
+      // refresh the age-chip map too, not just update statuses.
+      const dates: Record<string, LoraDates> = {}
       for (const info of r.loras) {
         if (info.update_status) next[info.filename] = info.update_status
+        if (info.released_at || info.downloaded_at) {
+          dates[info.filename] = { released: info.released_at, downloaded: info.downloaded_at }
+        }
       }
       setUpdateStatuses(next)
+      setLoraDates(dates)
       setLastCheckedAt(r.manifest_last_check_at ?? null)
     } catch (e) {
       console.error('LoRA update check failed:', e)
@@ -187,18 +221,23 @@ export function LoraSelector() {
       const statuses: Record<string, 'exists' | 'none'> = {}
       const nsfw: Record<string, boolean> = {}
       const updates: Record<string, LoraUpdateStatus> = {}
+      const dates: Record<string, LoraDates> = {}
       for (const info of r.loras) {
         if (info.recommended_weights) recs[info.filename] = info.recommended_weights
         if (info.guide) { guides[info.filename] = info.guide; statuses[info.filename] = 'exists' }
         else if (info.has_guide) statuses[info.filename] = 'exists'
         if (info.nsfw) nsfw[info.filename] = true
         if (info.update_status) updates[info.filename] = info.update_status
+        if (info.released_at || info.downloaded_at) {
+          dates[info.filename] = { released: info.released_at, downloaded: info.downloaded_at }
+        }
       }
       setLoraWeightRecs(recs)
       setGuideTexts(prev => ({ ...prev, ...guides }))
       setGuideStatus(prev => ({ ...prev, ...statuses }))
       setNsfwFlags(nsfw)
       setUpdateStatuses(updates)
+      setLoraDates(dates)
       setLastCheckedAt(r.manifest_last_check_at ?? null)
 
       // Apply recommended defaults to LoRAs that are still at the initial 1.0 fill
@@ -386,6 +425,12 @@ export function LoraSelector() {
                 )}
               </div>
               <span className="truncate flex-1">{displayName(filename)}</span>
+              {loraDates[filename] && (
+                <LoraAgeChip
+                  released={loraDates[filename].released}
+                  downloaded={loraDates[filename].downloaded}
+                />
+              )}
               {guideTexts[filename] && (
                 <span onClick={e => e.stopPropagation()}>
                   <LoraGuideTooltip guide={guideTexts[filename]} />
