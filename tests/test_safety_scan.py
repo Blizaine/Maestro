@@ -68,18 +68,29 @@ class TestScreenplayContainsMinorContent(unittest.TestCase):
         self.assertIn("pre-teen", matches)
         self.assertIn("pumping", matches)
 
-    def test_age_numeric_under_18_triggers_with_minor_vocab(self):
-        # The numeric-age regex is a sexual-side trigger. Co-occurring with
-        # minor vocab, it should fire even when no other sexual term is
-        # present in the snippet.
-        matches = screenplay_contains_minor_content(
-            "a 16-year-old kid kisses passionately and undresses"
-        )
+    def test_age_numeric_under_18_is_minor_evidence(self):
+        matches = screenplay_contains_minor_content("a 16-year-old undresses")
         self.assertTrue(matches)
-        # "undresses" -> "stripped/undressing"-family is NOT in the list, but
-        # "16-year-old" + "kid" should be enough on the minor-vocab side
-        # plus the numeric age supplies the sexual-side trigger.
         self.assertTrue(any("16" in m for m in matches), matches)
+        self.assertIn("undresses", matches)
+
+    def test_age_numeric_variants_under_18_trigger_with_sexual_vocab(self):
+        for age_text in (
+            "age 16", "age: 16", "aged 16", "16 years old",
+            "16-year-old", "16 yr old", "16 yo", "16 y/o", "16 y.o.",
+        ):
+            with self.subTest(age_text=age_text):
+                matches = screenplay_contains_minor_content(
+                    f"the person is {age_text} and undresses"
+                )
+                self.assertTrue(matches)
+                self.assertTrue(any("16" in match for match in matches), matches)
+
+    def test_age_numeric_without_sexual_vocab_returns_empty(self):
+        self.assertEqual(
+            screenplay_contains_minor_content("a 16-year-old kid rides a bike"),
+            [],
+        )
 
     def test_adult_age_no_co_occurrence_returns_empty(self):
         # Adult vocabulary with an over-18 age and no minor vocab. The age
@@ -107,6 +118,25 @@ class TestScreenplayContainsMinorContent(unittest.TestCase):
         )
         self.assertTrue(matches)
         self.assertIn("daughter", matches)
+
+    def test_canonical_minor_vocabulary_and_plurals_trigger(self):
+        terms = (
+            "pre-teen", "preteens", "tween", "teens", "teenager",
+            "adolescents", "schoolgirl", "schoolboys", "junior",
+            "elementary students", "middle schoolers", "high school students",
+            "little girl", "young boys", "daughters", "sons",
+            "stepdaughter", "stepsons", "niece", "nephews",
+            "granddaughter", "grandsons", "under 18",
+        )
+        for term in terms:
+            with self.subTest(term=term):
+                matches = screenplay_contains_minor_content(f"the {term} is nude")
+                self.assertTrue(matches, term)
+                self.assertIn(term, matches)
+
+    def test_plain_girl_and_boy_are_not_minor_terms(self):
+        self.assertEqual(screenplay_contains_minor_content("the party girl is nude"), [])
+        self.assertEqual(screenplay_contains_minor_content("the cowboy is nude"), [])
 
     def test_word_boundary_avoids_substring_false_positive(self):
         # "kindergarten" contains "kid" as a substring? Actually no — "kid"
@@ -186,6 +216,29 @@ class TestCollectPass2Text(unittest.TestCase):
         self.assertIn("SUBJECT_DESC", blob)
         self.assertIn("ALICE", blob)
         self.assertIn("SPOKEN_LINE", blob)
+
+    def test_collects_strings_from_arbitrarily_nested_schema_fields(self):
+        shots = [{
+            "spatial_setup": {"foreground": "FOREGROUND_TEXT"},
+            "performance_beats": [
+                {"action": "PERFORMANCE_TEXT", "constraints": ["CONSTRAINT_TEXT"]},
+            ],
+            "camera_plan": {"movement": "CAMERA_MOVEMENT_TEXT"},
+            "audio_plan": {"effects": ["AUDIO_EFFECT_TEXT"]},
+            "dialogue_beats": [{
+                "spoken_text": "SPOKEN_TEXT",
+                "delivery": "DELIVERY_TEXT",
+                "physical_cue": "PHYSICAL_CUE_TEXT",
+            }],
+        }]
+        blob = collect_pass2_text(shots)
+        for expected in (
+            "FOREGROUND_TEXT", "PERFORMANCE_TEXT", "CONSTRAINT_TEXT",
+            "CAMERA_MOVEMENT_TEXT", "AUDIO_EFFECT_TEXT", "SPOKEN_TEXT",
+            "DELIVERY_TEXT", "PHYSICAL_CUE_TEXT",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, blob)
 
     def test_pass2_blob_passes_through_safety_scan(self):
         # End-to-end: a Pass-2 shot list with minor + sexual vocab inside

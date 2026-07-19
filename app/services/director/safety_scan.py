@@ -51,14 +51,33 @@ class SafetyViolationError(RuntimeError):
 # in the same blob.
 
 _MINOR_TERMS: tuple[str, ...] = (
-    # Direct age vocabulary
+    # Direct age vocabulary.
     "child", "children", "kid", "kids", "minor", "minors", "underage",
-    "adolescent", "youngster", "juvenile",
-    # Very young
-    "baby", "babies", "infant", "toddler", "newborn",
-    # School-age contexts
-    "elementary student", "middle schooler", "high schooler",
-    "middle school student", "high school student",
+    "adolescent", "adolescents", "youngster", "youngsters",
+    "juvenile", "juveniles",
+    # Very young.
+    "baby", "babies", "infant", "infants", "toddler", "toddlers",
+    "newborn", "newborns",
+    # Pre-adult age descriptors.
+    "pre-teen", "pre-teens", "preteen", "preteens", "tween", "tweens",
+    "teen", "teens", "teenager", "teenagers", "teenage",
+    # School-age contexts.
+    "schoolgirl", "schoolgirls", "schoolboy", "schoolboys",
+    "junior", "juniors",
+    "elementary student", "elementary students",
+    "middle schooler", "middle schoolers", "high schooler", "high schoolers",
+    "middle school student", "middle school students",
+    "high school student", "high school students",
+    # Unambiguously young gendered phrases. Plain "girl" and "boy" are omitted
+    # to avoid flagging common adult descriptions.
+    "little girl", "little girls", "little boy", "little boys",
+    "young girl", "young girls", "young boy", "young boys",
+    # Family relationships that commonly imply a minor in prompt context.
+    "daughter", "daughters", "son", "sons",
+    "stepdaughter", "stepdaughters", "stepson", "stepsons",
+    "niece", "nieces", "nephew", "nephews",
+    "granddaughter", "granddaughters", "grandson", "grandsons",
+    "under 18",
 )
 
 _SEXUAL_TERMS: tuple[str, ...] = (
@@ -80,17 +99,20 @@ _SEXUAL_TERMS: tuple[str, ...] = (
     "buttocks", "anus",
     "erection", "erect", "aroused", "horny",
     # State / posture descriptors that almost always imply sex context
-    "naked", "nude", "topless", "bottomless", "stripped", "stripping",
+    "naked", "nude", "topless", "bottomless",
+    "undress", "undresses", "undressed", "undressing",
+    "strip", "strips", "stripped", "stripping",
     "moaning", "moans",
     "pumping", "pounding",  # caught the original incident
 )
 
-# Numerical age patterns explicitly under 18: "16-year-old", "17 yo",
-# "12 years old", etc. Treated as a sexual-side trigger because if a
-# screenplay mentions an under-18 age at all in any context near minor
-# vocabulary, that's enough to abort.
+# Numerical age patterns explicitly under 18: "16-year-old", "age: 16",
+# "17 y/o", etc. These are minor-side evidence and still require separate
+# sexual vocabulary before the scanner blocks the text.
 _AGE_NUMERIC = re.compile(
-    r"\b(?:[1-9]|1[0-7])[\s\-]?(?:year|yr|y\.?o\.?)s?(?:[\s\-]?old)?\b",
+    r"(?<!\w)(?:(?:age|aged)(?:\s*[:=]\s*|\s+)(?:[1-9]|1[0-7])|"
+    r"(?:[1-9]|1[0-7])\s*(?:-\s*)?(?:(?:years?|yrs?)"
+    r"(?:(?:\s*-\s*|\s+)old)?|y\.?\s*/?\s*o\.?))(?!\w)",
     re.IGNORECASE,
 )
 
@@ -130,9 +152,8 @@ def screenplay_contains_minor_content(text: str) -> list[str]:
       - only minor vocabulary present (e.g. children's content)
       - only sexual vocabulary present (e.g. adult-only NSFW)
 
-    The numerical-age regex (under 18) counts as a sexual-side trigger:
-    any reference to an under-18 age co-occurring with minor vocabulary
-    aborts.
+    The numerical-age regex (under 18) counts as minor vocabulary. It must
+    still co-occur with separate sexual vocabulary before the scan blocks.
 
     Cheap to call repeatedly — regex objects are lru_cached at module
     level and the typical screenplay is only a few KB.
@@ -140,10 +161,10 @@ def screenplay_contains_minor_content(text: str) -> list[str]:
     if not text:
         return []
     minor_hits = _hits(_minor_regex(), text)
+    minor_hits += [m.group(0).lower() for m in _AGE_NUMERIC.finditer(text)]
     if not minor_hits:
         return []
     sexual_hits = _hits(_sexual_regex(), text)
-    sexual_hits += [m.group(0).lower() for m in _AGE_NUMERIC.finditer(text)]
     if not sexual_hits:
         return []
     return sorted(set(minor_hits + sexual_hits))
@@ -163,47 +184,25 @@ def assert_no_minor_content(text: str, source: str) -> None:
 
 
 def collect_pass2_text(shot_dicts: list[dict]) -> str:
-    """Concatenate every free-text field from a Pass-2 shot list into one
-    blob suitable for `assert_no_minor_content`.
+    """Recursively concatenate every string value from a Pass-2 shot list.
 
-    Pass 2's output is structured JSON; the text-bearing fields are
-    spread across multiple keys per shot. This helper centralizes the
-    extraction so callsites stay short and so any future shot-schema
-    change updates the safety scan in one place.
+    Pass 2's output is nested structured JSON. Traversing all dictionary
+    values and list/tuple members makes the safety boundary resilient to
+    additions or reorganizations in the shot schema.
     """
     if not shot_dicts:
         return ""
-    text_fields = (
-        "title", "scene_goal", "narrative_role", "scene_type",
-        "environment", "visual_style", "lighting", "mood",
-        "image_prompt", "video_prompt", "ending_beat",
-    )
-    array_fields = (
-        "action_beats", "visual_changes",
-        "keyframe_prompts", "window_prompts",
-    )
     parts: list[str] = []
-    for sd in shot_dicts:
-        if not isinstance(sd, dict):
-            continue
-        for f in text_fields:
-            v = sd.get(f)
-            if isinstance(v, str):
-                parts.append(v)
-        for f in array_fields:
-            v = sd.get(f) or []
-            if isinstance(v, list):
-                parts.extend(x for x in v if isinstance(x, str))
-        for subj in (sd.get("subjects_on_screen") or []):
-            if isinstance(subj, dict):
-                for k in ("visual_description", "speaker_name",
-                          "position_or_relation"):
-                    v = subj.get(k)
-                    if isinstance(v, str):
-                        parts.append(v)
-        for db in (sd.get("dialogue_beats") or []):
-            if isinstance(db, dict):
-                v = db.get("spoken_text")
-                if isinstance(v, str):
-                    parts.append(v)
+
+    def collect(value: object) -> None:
+        if isinstance(value, str):
+            parts.append(value)
+        elif isinstance(value, dict):
+            for nested in value.values():
+                collect(nested)
+        elif isinstance(value, (list, tuple)):
+            for nested in value:
+                collect(nested)
+
+    collect(shot_dicts)
     return "\n".join(parts)
