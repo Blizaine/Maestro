@@ -6,13 +6,14 @@ name: CI
 # ever leak into tracked source (see scripts/verify_clean_repo.py).
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
+  workflow_dispatch:
 
 jobs:
   guard:
-    name: Clean-repo guard + Python syntax
+    name: Clean-repo guard + Python checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,6 +26,12 @@ jobs:
         # compileall only compiles (never imports), so it needs no deps and
         # skips heavy vendored model code. Covers the surface we edit.
         run: python -m compileall -q app/services app/launch.py scripts
+      - name: Python unit tests
+        run: python -m unittest discover -s tests -p "test_*.py"
+      - name: JSON grammar regression tests
+        # These are standalone test functions, so unittest discovery does not
+        # execute them yet. Keep this explicit runner until they are migrated.
+        run: python tests/test_call_llm_json_grammar.py
 
   ui-build:
     name: UI type-check + build
