@@ -5,7 +5,7 @@ module.exports = {
   description: "An all-in-one, 100% local AI video, image & music studio. Its Director mode turns a single prompt into a full music video or short film — LLM-planned, shot by shot. Built on the WanGP pipeline (Wan 2.1/2.2, LTX-2.3, Qwen, Hunyuan Video, Flux). Requires an NVIDIA GPU (6GB+ VRAM).",
   icon: "maestro_simplified_icon_alpha.png",
   menu: async (kernel, info) => {
-    if (kernel.gpu === "amd" || kernel.platform === "darwin") {
+    if (kernel.gpu !== "nvidia") {
       return [{
         icon: "fa-solid fa-circle-exclamation",
         text: "Not Supported (requires NVIDIA GPU on Windows or Linux)",

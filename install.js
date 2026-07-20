@@ -4,10 +4,10 @@ module.exports = {
   },
   run: [
     {
-      when: "{{gpu === 'amd' || platform === 'darwin'}}",
+      when: "{{gpu !== 'nvidia'}}",
       method: "notify",
       params: {
-        html: "This app requires an NVIDIA GPU. Not compatible with AMD GPUs and macOS."
+        html: "This app requires an NVIDIA GPU on Windows or Linux."
       },
       next: null
     },
