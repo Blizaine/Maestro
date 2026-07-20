@@ -41,6 +41,7 @@ class TestDirectorCancellation(unittest.TestCase):
             "starting": pipeline._pipeline_starting,
             "operations": pipeline._pipeline_operations,
             "deleting": pipeline._pipeline_deleting,
+            "repairs": pipeline._pipeline_repairs,
             "run_generation": pipeline._run_generation,
             "wgp": pipeline._wgp,
             "settle_grace": pipeline._GENERATION_SETTLE_GRACE_S,
@@ -54,6 +55,7 @@ class TestDirectorCancellation(unittest.TestCase):
         pipeline._pipeline_starting = set()
         pipeline._pipeline_operations = set()
         pipeline._pipeline_deleting = set()
+        pipeline._pipeline_repairs = {}
         pipeline._run_generation = None
         pipeline._wgp = SimpleNamespace(save_path=self.temp_dir.name)
         pipeline._GENERATION_SETTLE_GRACE_S = 10.0
@@ -67,6 +69,7 @@ class TestDirectorCancellation(unittest.TestCase):
         pipeline._pipeline_starting = self.originals["starting"]
         pipeline._pipeline_operations = self.originals["operations"]
         pipeline._pipeline_deleting = self.originals["deleting"]
+        pipeline._pipeline_repairs = self.originals["repairs"]
         pipeline._run_generation = self.originals["run_generation"]
         pipeline._wgp = self.originals["wgp"]
         pipeline._GENERATION_SETTLE_GRACE_S = self.originals["settle_grace"]
@@ -91,6 +94,36 @@ class TestDirectorCancellation(unittest.TestCase):
         }
         pipeline._pipelines[pid] = record
         return record
+
+    def _write_media(self, filename: str, payload: bytes = b"media") -> str:
+        filepath = os.path.join(self.temp_dir.name, filename)
+        with open(filepath, "wb") as handle:
+            handle.write(payload)
+        return filepath
+
+    def _wait_for_repair_terminal(
+        self, pid: str, timeout: float = 3.0,
+    ) -> dict:
+        deadline = time.monotonic() + timeout
+        last_repair = None
+        while time.monotonic() < deadline:
+            state = pipeline.load_pipeline_state(self.temp_dir.name, pid)
+            last_repair = (state or {}).get("repair")
+            with pipeline._pipeline_lock:
+                tracked = pid in pipeline._pipeline_repairs
+                leased = pid in pipeline._pipeline_operations
+            if (
+                isinstance(last_repair, dict)
+                and last_repair.get("status")
+                not in pipeline._REPAIR_ACTIVE_STATUSES
+                and not tracked
+                and not leased
+            ):
+                return last_repair
+            time.sleep(0.01)
+        self.fail(
+            f"Repair {pid} did not settle; last state was {last_repair!r}"
+        )
 
     def test_abort_marks_queued_and_running_children_cancelled(self):
         pid = "pipe-children"
@@ -996,6 +1029,1167 @@ class TestDirectorCancellation(unittest.TestCase):
             pipeline.rejoin_clips(self.temp_dir.name, pid)
 
         concatenate.assert_not_called()
+
+    def test_server_repair_skips_good_media_and_persists_joined_completion(self):
+        pid = "pipe-server-repair-order"
+        record = self._add_pipeline(pid, "completed")
+        record["clip_plans"] = [
+            {"image_prompt": f"image {index}", "video_prompt": f"video {index}"}
+            for index in range(3)
+        ]
+        record["clip_images"] = [None, "start-1.jpg", "start-2.jpg"]
+        record["_clip_video_files"] = [
+            "old-0.mp4", "old-1.mp4", "good-2.mp4",
+        ]
+        record["output_files"] = list(record["_clip_video_files"])
+        for filename in (
+            "start-1.jpg", "start-2.jpg", "old-0.mp4", "old-1.mp4",
+            "good-2.mp4",
+        ):
+            self._write_media(filename)
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+        pipeline._update_saved_pipeline(
+            self.temp_dir.name,
+            pid,
+            lambda state: state["clips"][1].__setitem__(
+                "video_stale", True,
+            ),
+        )
+
+        order: list[tuple[str, int | None]] = []
+
+        def fake_image(out_dir, actual_pid, clip_index):
+            self.assertEqual((out_dir, actual_pid), (self.temp_dir.name, pid))
+            order.append(("image", clip_index))
+            filename = f"new-start-{clip_index}.jpg"
+            self._write_media(filename, b"image")
+
+            def update(state):
+                clip = state["clips"][clip_index]
+                clip["start_image_filename"] = filename
+                clip["video_stale"] = bool(clip.get("video_filename"))
+                state["generated_reference_image_filename"] = filename
+
+            pipeline._update_saved_pipeline(out_dir, actual_pid, update)
+            return {"filename": filename, "clip_index": clip_index}
+
+        def fake_video(out_dir, actual_pid, clip_index):
+            order.append(("video", clip_index))
+            before = pipeline.load_pipeline_state(out_dir, actual_pid)
+            start_name = before["clips"][clip_index]["start_image_filename"]
+            self.assertTrue(os.path.isfile(os.path.join(out_dir, start_name)))
+            filename = f"new-video-{clip_index}.mp4"
+            self._write_media(filename, b"video")
+
+            def update(state):
+                clip = state["clips"][clip_index]
+                clip["video_filename"] = filename
+                clip["video_stale"] = False
+                state.setdefault("output_files", []).append(filename)
+
+            pipeline._update_saved_pipeline(out_dir, actual_pid, update)
+            return {"filename": filename, "clip_index": clip_index}
+
+        def fake_rejoin(out_dir, actual_pid):
+            order.append(("rejoin", None))
+            before = pipeline.load_pipeline_state(out_dir, actual_pid)
+            self.assertTrue(all(
+                clip.get("start_image_filename")
+                and clip.get("video_filename")
+                and not clip.get("video_stale")
+                for clip in before["clips"]
+            ))
+            filename = "repaired-join.mp4"
+            self._write_media(filename, b"joined")
+            pipeline._update_saved_pipeline(
+                out_dir,
+                actual_pid,
+                lambda state: state.setdefault("output_files", []).append(
+                    filename,
+                ),
+            )
+            return {"filename": filename}
+
+        with (
+            patch.object(
+                pipeline, "_rerun_clip_image_impl", side_effect=fake_image,
+            ),
+            patch.object(
+                pipeline, "_rerun_clip_video_impl", side_effect=fake_video,
+            ),
+            patch.object(
+                pipeline, "_rejoin_clips_impl", side_effect=fake_rejoin,
+            ),
+        ):
+            started = pipeline.start_pipeline_repair(self.temp_dir.name, pid)
+            terminal = self._wait_for_repair_terminal(pid)
+
+        self.assertEqual(started["repair"]["total"], 4)
+        self.assertEqual(order, [
+            ("image", 0),
+            ("video", 0),
+            ("video", 1),
+            ("rejoin", None),
+        ])
+        self.assertEqual(terminal["status"], "completed")
+        self.assertEqual(terminal["phase"], "completed")
+        self.assertEqual(terminal["current"], 4)
+        self.assertEqual(terminal["total"], 4)
+        self.assertEqual(terminal["result_filename"], "repaired-join.mp4")
+
+        saved = pipeline.load_pipeline_state(self.temp_dir.name, pid)
+        self.assertEqual(
+            [clip["start_image_filename"] for clip in saved["clips"]],
+            ["new-start-0.jpg", "start-1.jpg", "start-2.jpg"],
+        )
+        self.assertEqual(
+            [clip["video_filename"] for clip in saved["clips"]],
+            ["new-video-0.mp4", "new-video-1.mp4", "good-2.mp4"],
+        )
+        self.assertIn("repaired-join.mp4", saved["output_files"])
+
+    def test_server_repair_holds_lease_and_duplicate_start_is_idempotent(self):
+        pid = "pipe-server-repair-lease"
+        record = self._add_pipeline(pid, "completed")
+        record["clip_plans"] = [{
+            "image_prompt": "portrait", "video_prompt": "motion",
+        }]
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+
+        entered = threading.Event()
+        release = threading.Event()
+        calls: list[tuple[str, int]] = []
+
+        def blocking_image(out_dir, actual_pid, clip_index):
+            calls.append(("image", clip_index))
+            entered.set()
+            if not release.wait(timeout=3):
+                raise RuntimeError("test did not release image repair")
+            filename = "lease-start.jpg"
+            self._write_media(filename, b"image")
+            pipeline._update_saved_pipeline(
+                out_dir,
+                actual_pid,
+                lambda state: state["clips"][clip_index].__setitem__(
+                    "start_image_filename", filename,
+                ),
+            )
+            return {"filename": filename, "clip_index": clip_index}
+
+        def fake_video(out_dir, actual_pid, clip_index):
+            calls.append(("video", clip_index))
+            filename = "lease-video.mp4"
+            self._write_media(filename, b"video")
+
+            def update(state):
+                state["clips"][clip_index]["video_filename"] = filename
+                state["clips"][clip_index]["video_stale"] = False
+
+            pipeline._update_saved_pipeline(out_dir, actual_pid, update)
+            return {"filename": filename, "clip_index": clip_index}
+
+        with (
+            patch.object(
+                pipeline,
+                "_rerun_clip_image_impl",
+                side_effect=blocking_image,
+            ),
+            patch.object(
+                pipeline, "_rerun_clip_video_impl", side_effect=fake_video,
+            ),
+        ):
+            try:
+                before = time.monotonic()
+                first = pipeline.start_pipeline_repair(self.temp_dir.name, pid)
+                elapsed = time.monotonic() - before
+                self.assertLess(elapsed, 1.0)
+                self.assertTrue(entered.wait(timeout=1))
+
+                duplicate = pipeline.start_pipeline_repair(
+                    self.temp_dir.name, pid,
+                )
+                self.assertEqual(
+                    duplicate["repair"]["operation_id"],
+                    first["repair"]["operation_id"],
+                )
+                self.assertEqual(calls, [("image", 0)])
+                with pipeline._pipeline_lock:
+                    self.assertIn(pid, pipeline._pipeline_repairs)
+                    self.assertIn(pid, pipeline._pipeline_operations)
+
+                self.assertEqual(
+                    pipeline.delete_pipeline(self.temp_dir.name, pid),
+                    {"ok": False, "error": "running"},
+                )
+                self.assertEqual(
+                    pipeline.resume_pipeline(pid, self.temp_dir.name),
+                    (False, "Pipeline is already running."),
+                )
+                with self.assertRaises(pipeline.PipelineBusyError):
+                    pipeline.update_clip_tag(
+                        self.temp_dir.name, pid, 0, "good",
+                    )
+                with self.assertRaises(pipeline.PipelineBusyError):
+                    pipeline.rerun_clip_video(self.temp_dir.name, pid, 0)
+            finally:
+                release.set()
+            terminal = self._wait_for_repair_terminal(pid)
+
+        self.assertEqual(terminal["status"], "completed")
+        self.assertEqual(calls, [("image", 0), ("video", 0)])
+
+    def test_server_repair_failure_releases_lease_and_retry_skips_image(self):
+        pid = "pipe-server-repair-retry"
+        record = self._add_pipeline(pid, "completed")
+        record["clip_plans"] = [
+            {"image_prompt": "image 0", "video_prompt": "video 0"},
+            {"image_prompt": "image 1", "video_prompt": "video 1"},
+        ]
+        record["clip_images"] = [None, "good-start-1.jpg"]
+        record["_clip_video_files"] = [None, "good-video-1.mp4"]
+        record["output_files"] = ["good-video-1.mp4"]
+        self._write_media("good-start-1.jpg", b"image")
+        self._write_media("good-video-1.mp4", b"video")
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+
+        order: list[tuple[str, int | None]] = []
+        video_attempts = 0
+
+        def fake_image(out_dir, actual_pid, clip_index):
+            order.append(("image", clip_index))
+            filename = "retry-start-0.jpg"
+            self._write_media(filename, b"image")
+            pipeline._update_saved_pipeline(
+                out_dir,
+                actual_pid,
+                lambda state: state["clips"][clip_index].__setitem__(
+                    "start_image_filename", filename,
+                ),
+            )
+            return {"filename": filename, "clip_index": clip_index}
+
+        def flaky_video(out_dir, actual_pid, clip_index):
+            nonlocal video_attempts
+            video_attempts += 1
+            order.append(("video", clip_index))
+            if video_attempts == 1:
+                raise RuntimeError("video boom")
+            filename = "retry-video-0.mp4"
+            self._write_media(filename, b"video")
+
+            def update(state):
+                state["clips"][clip_index]["video_filename"] = filename
+                state["clips"][clip_index]["video_stale"] = False
+                state.setdefault("output_files", []).append(filename)
+
+            pipeline._update_saved_pipeline(out_dir, actual_pid, update)
+            return {"filename": filename, "clip_index": clip_index}
+
+        def fake_rejoin(out_dir, actual_pid):
+            order.append(("rejoin", None))
+            filename = "retry-join.mp4"
+            self._write_media(filename, b"joined")
+            pipeline._update_saved_pipeline(
+                out_dir,
+                actual_pid,
+                lambda state: state.setdefault("output_files", []).append(
+                    filename,
+                ),
+            )
+            return {"filename": filename}
+
+        with (
+            patch.object(
+                pipeline, "_rerun_clip_image_impl", side_effect=fake_image,
+            ),
+            patch.object(
+                pipeline, "_rerun_clip_video_impl", side_effect=flaky_video,
+            ),
+            patch.object(
+                pipeline, "_rejoin_clips_impl", side_effect=fake_rejoin,
+            ),
+        ):
+            first = pipeline.start_pipeline_repair(self.temp_dir.name, pid)
+            failed = self._wait_for_repair_terminal(pid)
+            self.assertEqual(failed["status"], "failed")
+            self.assertEqual(failed["current"], 1)
+            self.assertEqual(failed["total"], 3)
+            self.assertEqual(failed["error"], "video boom")
+            with pipeline._pipeline_lock:
+                self.assertNotIn(pid, pipeline._pipeline_repairs)
+                self.assertNotIn(pid, pipeline._pipeline_operations)
+
+            second = pipeline.start_pipeline_repair(self.temp_dir.name, pid)
+            completed = self._wait_for_repair_terminal(pid)
+
+        self.assertNotEqual(
+            first["repair"]["operation_id"],
+            second["repair"]["operation_id"],
+        )
+        self.assertEqual(second["repair"]["total"], 2)
+        self.assertEqual(order, [
+            ("image", 0),
+            ("video", 0),
+            ("video", 0),
+            ("rejoin", None),
+        ])
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["current"], 2)
+        self.assertEqual(completed["total"], 2)
+        self.assertEqual(completed["result_filename"], "retry-join.mp4")
+
+    def test_server_repair_cancel_is_persisted_and_stops_before_next_unit(self):
+        pid = "pipe-server-repair-cancel"
+        record = self._add_pipeline(pid, "completed")
+        record["clip_plans"] = [{
+            "image_prompt": "portrait", "video_prompt": "motion",
+        }]
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+
+        entered = threading.Event()
+        release = threading.Event()
+        video = Mock()
+
+        def blocking_image(_out_dir, _actual_pid, _clip_index):
+            entered.set()
+            if not release.wait(timeout=3):
+                raise RuntimeError("test did not release cancelled repair")
+            return {"filename": "ignored.jpg", "clip_index": 0}
+
+        with (
+            patch.object(
+                pipeline,
+                "_rerun_clip_image_impl",
+                side_effect=blocking_image,
+            ),
+            patch.object(pipeline, "_rerun_clip_video_impl", video),
+            patch.object(pipeline, "_abort_pipeline_jobs") as abort,
+        ):
+            try:
+                pipeline.start_pipeline_repair(self.temp_dir.name, pid)
+                self.assertTrue(entered.wait(timeout=1))
+                cancelling = pipeline.cancel_pipeline_repair(
+                    self.temp_dir.name, pid,
+                )
+                self.assertEqual(cancelling["status"], "cancelling")
+                self.assertTrue(cancelling["cancel_requested"])
+                abort.assert_called_once_with(pid)
+                with pipeline._pipeline_lock:
+                    self.assertIn(pid, pipeline._pipeline_operations)
+            finally:
+                release.set()
+            terminal = self._wait_for_repair_terminal(pid)
+
+        self.assertEqual(terminal["status"], "cancelled")
+        self.assertEqual(terminal["phase"], "cancelled")
+        self.assertEqual(terminal["current"], 0)
+        self.assertTrue(terminal["cancel_requested"])
+        video.assert_not_called()
+
+    def test_orphaned_active_repair_is_normalized_and_listed_interrupted(self):
+        pid = "pipe-orphaned-repair"
+        record = self._add_pipeline(pid, "completed")
+        record["clip_plans"] = [{
+            "image_prompt": "portrait", "video_prompt": "motion",
+        }]
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+        pipeline._update_saved_pipeline(
+            self.temp_dir.name,
+            pid,
+            lambda state: state.__setitem__("repair", {
+                "operation_id": "orphan-operation",
+                "status": "running",
+                "phase": "images",
+                "current": 0,
+                "total": 2,
+                "clip_index": 0,
+                "message": "Generating start image",
+                "error": None,
+                "started_at": time.time() - 60,
+                "updated_at": time.time() - 30,
+                "completed_at": None,
+                "result_filename": None,
+            }),
+        )
+
+        loaded = pipeline.load_pipeline_state(self.temp_dir.name, pid)
+        repair = loaded["repair"]
+        self.assertEqual(loaded["status"], "completed")
+        self.assertEqual(repair["status"], "interrupted")
+        self.assertEqual(repair["phase"], "interrupted")
+        self.assertIsNone(repair["clip_index"])
+        self.assertIn("Maestro stopped", repair["error"])
+        self.assertIsNotNone(repair["completed_at"])
+
+        summaries = pipeline.list_pipeline_states(self.temp_dir.name)
+        summary = next(item for item in summaries if item["id"] == pid)
+        self.assertEqual(summary["repair_status"], "interrupted")
+        persisted = pipeline.load_pipeline_state(self.temp_dir.name, pid)
+        self.assertEqual(persisted["repair"]["status"], "interrupted")
+
+    def test_list_normalization_cannot_overwrite_newer_repair_progress(self):
+        pid = "pipe-list-normalize-race"
+        record = self._add_pipeline(pid, "completed")
+        record["clip_plans"] = [{
+            "image_prompt": "portrait", "video_prompt": "motion",
+        }]
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+        pipeline._update_saved_pipeline(
+            self.temp_dir.name,
+            pid,
+            lambda state: state.__setitem__("repair", {
+                "operation_id": "orphan-list-operation",
+                "status": "running",
+                "phase": "images",
+                "current": 0,
+                "total": 2,
+                "clip_index": 0,
+                "message": "Old progress",
+                "error": None,
+            }),
+        )
+
+        original_normalize = pipeline._normalize_interrupted_repair
+        normalization_read = threading.Barrier(2)
+        allow_normalize = threading.Event()
+        writer_done = threading.Event()
+        failures: list[BaseException] = []
+
+        def paused_normalize(state, actual_pid):
+            if actual_pid == pid:
+                normalization_read.wait(timeout=2)
+                if not allow_normalize.wait(timeout=2):
+                    raise RuntimeError("test did not release normalization")
+            return original_normalize(state, actual_pid)
+
+        def list_states():
+            try:
+                pipeline.list_pipeline_states(self.temp_dir.name)
+            except BaseException as exc:
+                failures.append(exc)
+
+        def publish_newer_progress():
+            try:
+                def update(state):
+                    state["repair"].update({
+                        "status": "completed",
+                        "phase": "completed",
+                        "current": 2,
+                        "message": "Newer completed progress",
+                    })
+
+                pipeline._update_saved_pipeline(
+                    self.temp_dir.name, pid, update,
+                )
+            except BaseException as exc:
+                failures.append(exc)
+            finally:
+                writer_done.set()
+
+        with patch.object(
+            pipeline,
+            "_normalize_interrupted_repair",
+            side_effect=paused_normalize,
+        ):
+            reader = threading.Thread(target=list_states)
+            writer = threading.Thread(target=publish_newer_progress)
+            try:
+                reader.start()
+                normalization_read.wait(timeout=2)
+                writer.start()
+                # list_pipeline_states must retain the file lock from its
+                # stale read through normalization and replacement.
+                self.assertFalse(writer_done.wait(timeout=0.1))
+            finally:
+                allow_normalize.set()
+            reader.join(timeout=2)
+            writer.join(timeout=2)
+
+        self.assertFalse(reader.is_alive())
+        self.assertFalse(writer.is_alive())
+        self.assertEqual(failures, [])
+        saved = pipeline.load_pipeline_state(self.temp_dir.name, pid)
+        self.assertEqual(saved["repair"]["status"], "completed")
+        self.assertEqual(saved["repair"]["current"], 2)
+        self.assertEqual(
+            saved["repair"]["message"], "Newer completed progress",
+        )
+
+    def test_saved_media_validation_rejects_empty_and_wrong_kind_files(self):
+        for filename in ("empty.jpg", "empty.mp4"):
+            with open(
+                os.path.join(self.temp_dir.name, filename), "wb",
+            ):
+                pass
+        for filename in (
+            "image-named-like-video.mp4",
+            "video-named-like-image.png",
+            "valid-image.webp",
+            "valid-video.webm",
+        ):
+            self._write_media(filename)
+
+        self.assertEqual(
+            pipeline._invalid_saved_media_numbers(
+                [
+                    "empty.jpg",
+                    "image-named-like-video.mp4",
+                    "valid-image.webp",
+                ],
+                3,
+                self.temp_dir.name,
+                "image",
+            ),
+            [1, 2],
+        )
+        self.assertEqual(
+            pipeline._invalid_saved_media_numbers(
+                [
+                    "empty.mp4",
+                    "video-named-like-image.png",
+                    "valid-video.webm",
+                ],
+                3,
+                self.temp_dir.name,
+                "video",
+            ),
+            [1, 2],
+        )
+
+    def test_duplicate_start_waits_through_atomic_repair_reservation(self):
+        pid = "pipe-repair-start-handshake"
+        record = self._add_pipeline(pid, "completed")
+        record["clip_plans"] = [{
+            "image_prompt": "portrait", "video_prompt": "motion",
+        }]
+        record["clip_images"] = ["ready.jpg"]
+        record["_clip_video_files"] = ["ready.mp4"]
+        record["output_files"] = ["ready.mp4"]
+        self._write_media("ready.jpg")
+        self._write_media("ready.mp4")
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+
+        original_plan = pipeline._plan_pipeline_repair
+        planner_entered = threading.Event()
+        allow_plan = threading.Event()
+        results: list[dict] = []
+        failures: list[BaseException] = []
+
+        def paused_plan(out_dir, actual_pid, state):
+            planner_entered.set()
+            if not allow_plan.wait(timeout=2):
+                raise RuntimeError("test did not release repair planning")
+            return original_plan(out_dir, actual_pid, state)
+
+        def start_repair():
+            try:
+                results.append(
+                    pipeline.start_pipeline_repair(self.temp_dir.name, pid)
+                )
+            except BaseException as exc:
+                failures.append(exc)
+
+        with patch.object(
+            pipeline, "_plan_pipeline_repair", side_effect=paused_plan,
+        ):
+            first = threading.Thread(target=start_repair)
+            duplicate = threading.Thread(target=start_repair)
+            try:
+                first.start()
+                self.assertTrue(planner_entered.wait(timeout=1))
+                duplicate.start()
+                time.sleep(0.1)
+                self.assertTrue(duplicate.is_alive())
+                self.assertEqual(failures, [])
+            finally:
+                allow_plan.set()
+            first.join(timeout=2)
+            duplicate.join(timeout=2)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(duplicate.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(len(results), 2)
+        self.assertEqual(
+            results[0]["repair"]["operation_id"],
+            results[1]["repair"]["operation_id"],
+        )
+        # This one-clip pipeline is already valid, so preserve the planner's
+        # no-op result rather than adding an unnecessary unit or join.
+        self.assertEqual(results[0]["repair"]["total"], 0)
+        terminal = self._wait_for_repair_terminal(pid)
+        self.assertEqual(terminal["status"], "completed")
+
+    def test_fast_worker_cannot_teardown_before_ready_publication(self):
+        pid = "pipe-repair-post-start-ready-gap"
+        record = self._add_pipeline(pid, "completed")
+        record["clip_plans"] = [{
+            "image_prompt": "portrait", "video_prompt": "motion",
+        }]
+        record["clip_images"] = ["ready-gap.jpg"]
+        record["_clip_video_files"] = ["ready-gap.mp4"]
+        record["output_files"] = ["ready-gap.mp4"]
+        self._write_media("ready-gap.jpg")
+        self._write_media("ready-gap.mp4")
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+
+        original_plan = pipeline._plan_pipeline_repair
+        original_run = pipeline._run_pipeline_repair
+        original_thread_start = threading.Thread.start
+        planner_entered = threading.Event()
+        allow_plan = threading.Event()
+        worker_waiting = threading.Event()
+        post_start_gap = threading.Event()
+        release_thread_start = threading.Event()
+        duplicate_waiting = threading.Event()
+        core_entered = threading.Event()
+        results: list[dict] = []
+        failures: list[BaseException] = []
+
+        class ObservedReadyEvent:
+            def __init__(self):
+                self._event = threading.Event()
+
+            def set(self):
+                self._event.set()
+
+            def wait(self, timeout=None):
+                name = threading.current_thread().name
+                if name == f"director-repair-{pid}":
+                    worker_waiting.set()
+                elif name == "repair-duplicate":
+                    duplicate_waiting.set()
+                return self._event.wait(timeout)
+
+        def paused_plan(out_dir, actual_pid, state):
+            planner_entered.set()
+            if not allow_plan.wait(timeout=2):
+                raise RuntimeError("test did not release repair planning")
+            return original_plan(out_dir, actual_pid, state)
+
+        def observed_run(out_dir, actual_pid, control, plan):
+            core_entered.set()
+            return original_run(out_dir, actual_pid, control, plan)
+
+        def paused_thread_start(thread):
+            original_thread_start(thread)
+            if thread.name != f"director-repair-{pid}":
+                return
+            if not worker_waiting.wait(timeout=1):
+                raise RuntimeError("repair worker did not wait for publication")
+            post_start_gap.set()
+            if not release_thread_start.wait(timeout=2):
+                raise RuntimeError("test did not release Thread.start")
+
+        def start_repair():
+            try:
+                results.append(
+                    pipeline.start_pipeline_repair(self.temp_dir.name, pid)
+                )
+            except BaseException as exc:
+                failures.append(exc)
+
+        with (
+            patch.object(
+                pipeline, "_plan_pipeline_repair", side_effect=paused_plan,
+            ),
+            patch.object(
+                pipeline, "_run_pipeline_repair", side_effect=observed_run,
+            ),
+            patch.object(
+                pipeline.threading.Thread,
+                "start",
+                new=paused_thread_start,
+            ),
+        ):
+            starter = threading.Thread(
+                target=start_repair, name="repair-starter",
+            )
+            duplicate = threading.Thread(
+                target=start_repair, name="repair-duplicate",
+            )
+            try:
+                starter.start()
+                self.assertTrue(planner_entered.wait(timeout=1))
+                with pipeline._pipeline_lock:
+                    control = pipeline._pipeline_repairs[pid]
+                    control["ready_event"] = ObservedReadyEvent()
+                allow_plan.set()
+                self.assertTrue(post_start_gap.wait(timeout=1))
+
+                duplicate.start()
+                self.assertTrue(duplicate_waiting.wait(timeout=1))
+                self.assertFalse(core_entered.is_set())
+                with pipeline._pipeline_lock:
+                    self.assertIs(pipeline._pipeline_repairs.get(pid), control)
+            finally:
+                allow_plan.set()
+                release_thread_start.set()
+            starter.join(timeout=2)
+            duplicate.join(timeout=2)
+
+        self.assertFalse(starter.is_alive())
+        self.assertFalse(duplicate.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(len(results), 2)
+        self.assertEqual(
+            results[0]["repair"]["operation_id"],
+            results[1]["repair"]["operation_id"],
+        )
+        terminal = self._wait_for_repair_terminal(pid)
+        self.assertEqual(terminal["status"], "completed")
+
+    def test_cancel_waits_for_reserved_repair_publication(self):
+        original_plan = pipeline._plan_pipeline_repair
+
+        for prior_repair in (None, {
+            "operation_id": "old-operation",
+            "status": "completed",
+            "phase": "completed",
+            "current": 1,
+            "total": 1,
+            "message": "Old repair complete",
+        }):
+            label = "none" if prior_repair is None else "old"
+            with self.subTest(prior_repair=label):
+                pid = f"pipe-repair-cancel-reservation-{label}"
+                record = self._add_pipeline(pid, "completed")
+                record["clip_plans"] = [{
+                    "image_prompt": "portrait", "video_prompt": "motion",
+                }]
+                image_name = f"reservation-{label}.jpg"
+                video_name = f"reservation-{label}.mp4"
+                record["clip_images"] = [image_name]
+                record["_clip_video_files"] = [video_name]
+                record["output_files"] = [video_name]
+                self._write_media(image_name)
+                self._write_media(video_name)
+                self.assertTrue(pipeline._save_pipeline_state(pid))
+                if prior_repair is not None:
+                    pipeline._update_saved_pipeline(
+                        self.temp_dir.name,
+                        pid,
+                        lambda state: state.__setitem__(
+                            "repair", dict(prior_repair),
+                        ),
+                    )
+
+                planner_entered = threading.Event()
+                allow_plan = threading.Event()
+                cancel_waiting = threading.Event()
+                allow_cancel_return = threading.Event()
+                start_results: list[dict] = []
+                cancel_results: list[dict | None] = []
+                failures: list[BaseException] = []
+
+                class DelayedCancelReadyEvent:
+                    def __init__(self):
+                        self._event = threading.Event()
+
+                    def set(self):
+                        self._event.set()
+
+                    def wait(self, timeout=None):
+                        is_canceller = (
+                            threading.current_thread().name
+                            == "repair-canceller"
+                        )
+                        if is_canceller:
+                            cancel_waiting.set()
+                        published = self._event.wait(timeout)
+                        if is_canceller:
+                            if published and not allow_cancel_return.wait(timeout=2):
+                                raise RuntimeError(
+                                    "test did not release the waiting cancel"
+                                )
+                        return published
+
+                def paused_plan(out_dir, actual_pid, state):
+                    planner_entered.set()
+                    if not allow_plan.wait(timeout=2):
+                        raise RuntimeError("test did not release repair planning")
+                    return original_plan(out_dir, actual_pid, state)
+
+                def start_repair():
+                    try:
+                        start_results.append(
+                            pipeline.start_pipeline_repair(
+                                self.temp_dir.name, pid,
+                            )
+                        )
+                    except BaseException as exc:
+                        failures.append(exc)
+
+                def cancel_repair():
+                    try:
+                        cancel_results.append(
+                            pipeline.cancel_pipeline_repair(
+                                self.temp_dir.name, pid,
+                            )
+                        )
+                    except BaseException as exc:
+                        failures.append(exc)
+
+                with (
+                    patch.object(
+                        pipeline,
+                        "_plan_pipeline_repair",
+                        side_effect=paused_plan,
+                    ),
+                    patch.object(pipeline, "_abort_pipeline_jobs") as abort,
+                ):
+                    starter = threading.Thread(
+                        target=start_repair, name="repair-starter",
+                    )
+                    canceller = threading.Thread(
+                        target=cancel_repair, name="repair-canceller",
+                    )
+                    try:
+                        starter.start()
+                        self.assertTrue(planner_entered.wait(timeout=1))
+                        with pipeline._pipeline_lock:
+                            control = pipeline._pipeline_repairs[pid]
+                            control["ready_event"] = DelayedCancelReadyEvent()
+                        canceller.start()
+                        self.assertTrue(cancel_waiting.wait(timeout=1))
+                        self.assertTrue(canceller.is_alive())
+                        abort.assert_not_called()
+
+                        before = pipeline.load_pipeline_state(
+                            self.temp_dir.name, pid,
+                        )
+                        if prior_repair is None:
+                            self.assertNotIn("repair", before)
+                        else:
+                            self.assertEqual(
+                                before["repair"]["operation_id"],
+                                "old-operation",
+                            )
+                            self.assertEqual(
+                                before["repair"]["status"], "completed",
+                            )
+
+                        allow_plan.set()
+                        terminal = self._wait_for_repair_terminal(pid)
+                        self.assertEqual(terminal["status"], "completed")
+                        self.assertTrue(canceller.is_alive())
+                    finally:
+                        allow_plan.set()
+                        allow_cancel_return.set()
+                    starter.join(timeout=2)
+                    canceller.join(timeout=2)
+
+                self.assertFalse(starter.is_alive())
+                self.assertFalse(canceller.is_alive())
+                self.assertEqual(failures, [])
+                self.assertEqual(len(start_results), 1)
+                self.assertEqual(len(cancel_results), 1)
+                returned = cancel_results[0]
+                self.assertIsNotNone(returned)
+                self.assertEqual(returned["status"], "completed")
+                self.assertEqual(returned["phase"], "completed")
+                self.assertEqual(returned["total"], 0)
+                self.assertIsNotNone(returned["completed_at"])
+                self.assertFalse(returned["cancel_requested"])
+                self.assertEqual(
+                    returned["operation_id"],
+                    start_results[0]["repair"]["operation_id"],
+                )
+
+    def test_cancel_before_detached_child_registration_prevents_generation(self):
+        pid = "pipe-repair-child-registration-race"
+        operation_id = "repair-child-operation"
+        record = self._add_pipeline(pid, "completed")
+        record["clip_plans"] = [{
+            "image_prompt": "portrait", "video_prompt": "motion",
+        }]
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+        initial = {
+            "operation_id": operation_id,
+            "status": "running",
+            "phase": "images",
+            "current": 0,
+            "total": 2,
+            "clip_index": 0,
+            "message": "Generating start image",
+            "error": None,
+            "cancel_requested": False,
+        }
+        ready_event = threading.Event()
+        ready_event.set()
+        control = {
+            "operation_id": operation_id,
+            "snapshot": dict(initial),
+            "cancel_event": threading.Event(),
+            "state_lock": threading.Lock(),
+            "finishing": False,
+            "thread": None,
+            "ready_event": ready_event,
+            "start_error": None,
+        }
+        pipeline._update_saved_pipeline(
+            self.temp_dir.name,
+            pid,
+            lambda state: state.__setitem__("repair", dict(initial)),
+        )
+        with pipeline._pipeline_lock:
+            pipeline._pipeline_repairs[pid] = control
+            pipeline._pipeline_operations.add(pid)
+
+        original_abort = pipeline._abort_pipeline_jobs
+        abort_scan_complete = threading.Event()
+        allow_cancel_release = threading.Event()
+        submit_at_registration = threading.Event()
+        generation_called = threading.Event()
+        cancel_results: list[dict | None] = []
+        submit_errors: list[BaseException] = []
+
+        class ObservedParams(dict):
+            def get(self, key, default=None):
+                value = super().get(key, default)
+                if key == "_director_repair_operation_id":
+                    submit_at_registration.set()
+                return value
+
+        def paused_abort(actual_pid):
+            self.assertEqual(actual_pid, pid)
+            original_abort(actual_pid)
+            abort_scan_complete.set()
+            if not allow_cancel_release.wait(timeout=2):
+                raise RuntimeError("test did not release cancel scan")
+
+        def fake_generation(job_id):
+            generation_called.set()
+            job = pipeline._jobs[job_id]
+            if try_start(job):
+                finish_job(job, "completed", message="Unexpected generation")
+
+        def cancel_repair():
+            cancel_results.append(
+                pipeline.cancel_pipeline_repair(self.temp_dir.name, pid)
+            )
+
+        def submit_child():
+            try:
+                pipeline._submit_and_wait(
+                    ObservedParams({
+                        "_director_pipeline_id": pid,
+                        "_director_detached_operation": True,
+                        "_director_repair_operation_id": operation_id,
+                    }),
+                    timeout_s=1,
+                    out_dir=self.temp_dir.name,
+                )
+            except BaseException as exc:
+                submit_errors.append(exc)
+
+        pipeline._run_generation = fake_generation
+        with patch.object(
+            pipeline, "_abort_pipeline_jobs", side_effect=paused_abort,
+        ):
+            canceller = threading.Thread(target=cancel_repair)
+            submitter = threading.Thread(target=submit_child)
+            try:
+                canceller.start()
+                self.assertTrue(abort_scan_complete.wait(timeout=1))
+                submitter.start()
+                self.assertTrue(submit_at_registration.wait(timeout=1))
+            finally:
+                allow_cancel_release.set()
+            canceller.join(timeout=2)
+            submitter.join(timeout=2)
+
+        self.assertFalse(canceller.is_alive())
+        self.assertFalse(submitter.is_alive())
+        self.assertEqual(len(cancel_results), 1)
+        self.assertEqual(cancel_results[0]["status"], "cancelling")
+        self.assertEqual(len(submit_errors), 1)
+        self.assertIsInstance(
+            submit_errors[0], pipeline.GenerationCancelledError,
+        )
+        self.assertFalse(generation_called.is_set())
+        self.assertFalse(pipeline._pipeline_child_jobs.get(pid))
+        only_job = next(iter(pipeline._jobs.values()))
+        self.assertEqual(only_job["status"], "cancelled")
+
+    def test_cancel_holds_registry_lock_while_selecting_jobs_to_abort(self):
+        pid = "pipe-repair-cancel-successor-race"
+        record = self._add_pipeline(pid, "completed")
+        record["clip_plans"] = [{
+            "image_prompt": "portrait", "video_prompt": "motion",
+        }]
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+
+        image_entered = threading.Event()
+        release_image = threading.Event()
+        abort_entered = threading.Event()
+        release_abort = threading.Event()
+        contender_acquired = threading.Event()
+        cancel_result: list[dict | None] = []
+
+        def blocking_image(_out_dir, _actual_pid, _clip_index):
+            image_entered.set()
+            if not release_image.wait(timeout=3):
+                raise RuntimeError("test did not release image repair")
+            return {"filename": "ignored.jpg", "clip_index": 0}
+
+        def blocking_abort(actual_pid):
+            self.assertEqual(actual_pid, pid)
+            abort_entered.set()
+            if not release_abort.wait(timeout=3):
+                raise RuntimeError("test did not release repair abort")
+
+        def cancel():
+            cancel_result.append(
+                pipeline.cancel_pipeline_repair(self.temp_dir.name, pid)
+            )
+
+        def contend_for_teardown_lock():
+            with pipeline._pipeline_lock:
+                contender_acquired.set()
+
+        with (
+            patch.object(
+                pipeline,
+                "_rerun_clip_image_impl",
+                side_effect=blocking_image,
+            ),
+            patch.object(
+                pipeline, "_abort_pipeline_jobs", side_effect=blocking_abort,
+            ),
+        ):
+            cancel_thread = threading.Thread(target=cancel)
+            contender = threading.Thread(target=contend_for_teardown_lock)
+            try:
+                pipeline.start_pipeline_repair(self.temp_dir.name, pid)
+                self.assertTrue(image_entered.wait(timeout=1))
+                cancel_thread.start()
+                self.assertTrue(abort_entered.wait(timeout=1))
+                contender.start()
+                # A successor/teardown path uses this same lock. It cannot
+                # pass the old repair while that repair selects jobs to abort.
+                self.assertFalse(contender_acquired.wait(timeout=0.1))
+            finally:
+                release_abort.set()
+                release_image.set()
+            cancel_thread.join(timeout=2)
+            contender.join(timeout=2)
+            terminal = self._wait_for_repair_terminal(pid)
+
+        self.assertFalse(cancel_thread.is_alive())
+        self.assertFalse(contender.is_alive())
+        self.assertTrue(contender_acquired.is_set())
+        self.assertEqual(cancel_result[0]["status"], "cancelling")
+        self.assertEqual(terminal["status"], "cancelled")
+
+    def test_completion_decision_excludes_a_late_cancel_atomically(self):
+        pid = "pipe-repair-completion-cancel-race"
+        record = self._add_pipeline(pid, "completed")
+        record["clip_plans"] = [{
+            "image_prompt": "portrait", "video_prompt": "motion",
+        }]
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+
+        class PausingEvent:
+            def __init__(self):
+                self._event = threading.Event()
+                self.check_entered = threading.Event()
+                self.release_check = threading.Event()
+                self._paused = False
+                self._guard = threading.Lock()
+
+            def set(self):
+                self._event.set()
+
+            def is_set(self):
+                if threading.current_thread().name == "repair-finisher":
+                    with self._guard:
+                        should_pause = not self._paused
+                        self._paused = True
+                    if should_pause:
+                        value = self._event.is_set()
+                        self.check_entered.set()
+                        if not self.release_check.wait(timeout=3):
+                            raise RuntimeError(
+                                "test did not release terminal decision"
+                            )
+                        return value
+                return self._event.is_set()
+
+        operation_id = "completion-wins-operation"
+        initial = {
+            "operation_id": operation_id,
+            "status": "running",
+            "phase": "rejoin",
+            "current": 1,
+            "total": 2,
+            "clip_index": None,
+            "message": "Finishing",
+            "error": None,
+        }
+        cancel_event = PausingEvent()
+        control = {
+            "operation_id": operation_id,
+            "snapshot": dict(initial),
+            "cancel_event": cancel_event,
+            "state_lock": threading.Lock(),
+            "finishing": False,
+            "thread": None,
+        }
+        pipeline._update_saved_pipeline(
+            self.temp_dir.name,
+            pid,
+            lambda state: state.__setitem__("repair", dict(initial)),
+        )
+        with pipeline._pipeline_lock:
+            pipeline._pipeline_repairs[pid] = control
+
+        finish_result: list[dict | None] = []
+        cancel_result: list[dict | None] = []
+
+        def finish():
+            finish_result.append(pipeline._finish_pipeline_repair(
+                self.temp_dir.name,
+                pid,
+                control,
+                status="completed",
+                phase="completed",
+                current=2,
+                total=2,
+                message="Repair complete",
+            ))
+
+        def cancel():
+            cancel_result.append(
+                pipeline.cancel_pipeline_repair(self.temp_dir.name, pid)
+            )
+
+        with patch.object(pipeline, "_abort_pipeline_jobs") as abort:
+            finisher = threading.Thread(
+                target=finish, name="repair-finisher",
+            )
+            canceller = threading.Thread(target=cancel)
+            try:
+                finisher.start()
+                self.assertTrue(cancel_event.check_entered.wait(timeout=1))
+                canceller.start()
+                # The completion decision owns both state and registry locks;
+                # a late cancel cannot publish "cancelling" in the gap.
+                time.sleep(0.1)
+                self.assertTrue(canceller.is_alive())
+            finally:
+                cancel_event.release_check.set()
+            finisher.join(timeout=2)
+            canceller.join(timeout=2)
+
+        self.assertFalse(finisher.is_alive())
+        self.assertFalse(canceller.is_alive())
+        abort.assert_not_called()
+        self.assertEqual(finish_result[0]["status"], "completed")
+        self.assertEqual(cancel_result[0]["status"], "completed")
+        saved = pipeline.load_pipeline_state(self.temp_dir.name, pid)
+        self.assertEqual(saved["repair"]["status"], "completed")
+        self.assertFalse(saved["repair"]["cancel_requested"])
 
     def test_cancelled_partial_video_prefix_maps_to_dashboard_clips(self):
         pid = "pipe-partial"

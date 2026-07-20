@@ -103,6 +103,12 @@ class TestJobLifecycleWiring(unittest.TestCase):
                 }
                 self.assertIn(worker_name, awaited_thread_targets)
 
+    def test_director_bulk_repair_routes_to_server_owned_worker(self):
+        repair = _function(self.launch, "repair_saved_pipeline")
+        cancel = _function(self.launch, "cancel_saved_pipeline_repair")
+        self.assertIn("start_pipeline_repair", _called_names(repair))
+        self.assertIn("cancel_pipeline_repair", _called_names(cancel))
+
     def test_blend_defers_generation_completion(self):
         blend = _function(self.launch, "_run_blend_generation")
         matching_calls = [

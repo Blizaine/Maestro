@@ -1,4 +1,4 @@
-import { useState, useEffect, Component, type ReactNode } from 'react'
+import { useState, useEffect, useRef, Component, type ReactNode } from 'react'
 import { X, ChevronDown, ChevronRight, Play, ImageIcon, Check, AlertTriangle, Clock, Brain, Sparkles, Loader2, Camera, Film, Combine, Pencil, Trash2 } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { getFileUrl } from '../../api/client'
@@ -184,9 +184,10 @@ function LlmLogPanel({ pipeline }: { pipeline: SavedPipelineState }) {
   )
 }
 
-function ClipCard({ clip, pipeline: _pipeline, onTag, onRerunImage, onRerunVideo }: {
+function ClipCard({ clip, pipeline: _pipeline, busy = false, onTag, onRerunImage, onRerunVideo }: {
   clip: PipelineClipState
   pipeline: SavedPipelineState
+  busy?: boolean
   onTag: (tag: 'good' | 'needs_work' | null) => void
   onRerunImage: (clipIndex: number, prompt?: string) => void
   onRerunVideo: (clipIndex: number, prompt?: string) => void
@@ -236,12 +237,14 @@ function ClipCard({ clip, pipeline: _pipeline, onTag, onRerunImage, onRerunVideo
           )}
           {/* Tag buttons */}
           <button onClick={() => onTag(clip.tag === 'good' ? null : 'good')}
-            className={`ml-2 p-0.5 rounded ${clip.tag === 'good' ? 'bg-green-500 text-white' : 'text-text-muted hover:text-indicator-success'}`}
+            disabled={busy}
+            className={`ml-2 p-0.5 rounded disabled:opacity-40 ${clip.tag === 'good' ? 'bg-green-500 text-white' : 'text-text-muted hover:text-indicator-success'}`}
             title="Mark as good">
             <Check size={12} />
           </button>
           <button onClick={() => onTag(clip.tag === 'needs_work' ? null : 'needs_work')}
-            className={`p-0.5 rounded ${clip.tag === 'needs_work' ? 'bg-amber-500 text-white' : 'text-text-muted hover:text-indicator-warning'}`}
+            disabled={busy}
+            className={`p-0.5 rounded disabled:opacity-40 ${clip.tag === 'needs_work' ? 'bg-amber-500 text-white' : 'text-text-muted hover:text-indicator-warning'}`}
             title="Needs work">
             <AlertTriangle size={12} />
           </button>
@@ -273,7 +276,8 @@ function ClipCard({ clip, pipeline: _pipeline, onTag, onRerunImage, onRerunVideo
                   <Pencil size={9} />
                 </button>
                 <button onClick={() => onRerunImage(clip.index, editingImage ? editImagePrompt : undefined)}
-                  className="p-0.5 rounded text-text-muted hover:text-accent-blue transition-colors"
+                  disabled={busy}
+                  className="p-0.5 rounded text-text-muted hover:text-accent-blue transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                   title="Re-generate start image">
                   <Camera size={10} />
                 </button>
@@ -346,9 +350,9 @@ function ClipCard({ clip, pipeline: _pipeline, onTag, onRerunImage, onRerunVideo
                   onRerunVideo(clip.index, editingVideo ? editVideoPrompt : undefined)
                 }
               }}
-                disabled={!clip.start_image_filename}
+                disabled={busy || !clip.start_image_filename}
                 className="p-0.5 rounded text-text-muted hover:text-indicator-success transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                title={clip.start_image_filename ? 'Re-generate video clip' : 'Generate the start image first'}>
+                title={busy ? 'Wait for pipeline repair to finish' : clip.start_image_filename ? 'Re-generate video clip' : 'Generate the start image first'}>
                 <Film size={10} />
               </button>
             </div>
@@ -491,6 +495,8 @@ function DirectorDashboardInner() {
   const loading = useStore(s => s.dashboardLoading)
   const loadPipeline = useStore(s => s.loadSavedPipeline)
   const tagClip = useStore(s => s.tagClip)
+  const startPipelineRepair = useStore(s => s.startPipelineRepair)
+  const cancelPipelineRepair = useStore(s => s.cancelPipelineRepair)
   const rerunClipImage = useStore(s => s.rerunClipImage)
   const rerunClipVideo = useStore(s => s.rerunClipVideo)
   const rejoinClips = useStore(s => s.rejoinPipelineClips)
@@ -501,11 +507,43 @@ function DirectorDashboardInner() {
   // switch to B, click once" delete B without a confirm.
   const [confirmDeletePid, setConfirmDeletePid] = useState<string | null>(null)
   const [deletingPipeline, setDeletingPipeline] = useState(false)
+  const [repairStartingPid, setRepairStartingPid] = useState<string | null>(null)
+  const [repairCancellingPid, setRepairCancellingPid] = useState<string | null>(null)
+  const [regenErrors, setRegenErrors] = useState<Record<string, string>>({})
+  const autoLoadAttemptedPid = useRef<string | null>(null)
+  const selectedPid = selectedPipeline?.pipeline_id || null
+  const repairStarting = repairStartingPid === selectedPid
+  const repairCancelling = repairCancellingPid === selectedPid
+  const regenError = selectedPid ? regenErrors[selectedPid] || null : null
+  const setRegenError = (message: string | null) => {
+    const pid = selectedPid
+    if (!pid) return
+    setRegenErrors(current => {
+      const next = { ...current }
+      if (message) next[pid] = message
+      else delete next[pid]
+      return next
+    })
+  }
 
   // Auto-load first pipeline when list loads
   useEffect(() => {
+    if (selectedPipeline) {
+      autoLoadAttemptedPid.current = null
+      return
+    }
     if (pipelineList.length > 0 && !selectedPipeline && !loading) {
-      loadPipeline(pipelineList[0].id)
+      const active = pipelineList.find(p =>
+        p.repair_status === 'queued'
+        || p.repair_status === 'running'
+        || p.repair_status === 'cancelling')
+      const pid = (active || pipelineList[0]).id
+      // A stale list entry (for example, a pipeline removed outside Maestro)
+      // must not create an endless load/fail/render loop. Explicit selection
+      // and closing/reopening the Dashboard still provide retry paths.
+      if (autoLoadAttemptedPid.current === pid) return
+      autoLoadAttemptedPid.current = pid
+      void loadPipeline(pid)
     }
   }, [pipelineList, selectedPipeline, loading, loadPipeline])
 
@@ -520,36 +558,30 @@ function DirectorDashboardInner() {
   const incompleteClips = selectedPipeline?.clips.filter(c =>
     !c.start_image_filename || !c.video_filename || c.video_stale).length || 0
   const hasMissing = missingImages > 0 || missingVideos > 0
-
-  const [regenError, setRegenError] = useState<string | null>(null)
+  const repair = selectedPipeline?.repair
+  const repairActive = repair?.status === 'queued'
+    || repair?.status === 'running'
+    || repair?.status === 'cancelling'
+  const repairRetryable = repair?.status === 'failed'
+    || repair?.status === 'cancelled'
+    || repair?.status === 'interrupted'
+  const repairBusy = repairActive || repairStarting || repairCancelling
+  const pipelineTerminal = !!selectedPipeline && [
+    'completed', 'failed', 'crashed', 'cancelled',
+  ].includes(selectedPipeline.status)
+  const showRepairAction = hasMissing || repairActive || repairRetryable || pipelineTerminal
 
   const generateMissing = async () => {
     if (!selectedPipeline) return
-    setRegenError(null)
     const pid = selectedPipeline.pipeline_id
-    const regeneratedImages = new Set<number>()
+    setRegenError(null)
+    setRepairStartingPid(pid)
     try {
-      // Generate missing images first
-      for (const clip of selectedPipeline.clips) {
-        if (!clip.start_image_filename && clip.image_prompt) {
-          await rerunClipImage(pid, clip.index)
-          regeneratedImages.add(clip.index)
-        }
-      }
-      // Then generate videos that were missing/stale at the start, plus every
-      // clip whose image was replaced in the loop above.  The selectedPipeline
-      // closure is intentionally a snapshot, so track those replacements here
-      // rather than trusting its old video_filename values.
-      for (const clip of selectedPipeline.clips) {
-        if (
-          (!clip.video_filename || clip.video_stale || regeneratedImages.has(clip.index))
-          && clip.video_prompt
-        ) {
-          await rerunClipVideo(pid, clip.index)
-        }
-      }
+      await startPipelineRepair(pid)
     } catch (e) {
       setRegenError(String(e instanceof Error ? e.message : e))
+    } finally {
+      setRepairStartingPid(current => current === pid ? null : current)
     }
   }
 
@@ -568,6 +600,7 @@ function DirectorDashboardInner() {
           <option value="">Select pipeline...</option>
           {pipelineList.map(p => (
             <option key={p.id} value={p.id}>
+              {p.repair_status ? `[repair: ${p.repair_status}] ` : ''}
               {formatDate(p.created_at)} — {p.pipeline_type} ({p.clip_count} clips) [{p.status}]
               {p.scene_description ? ` — ${p.scene_description}` : ''}
             </option>
@@ -599,7 +632,7 @@ function DirectorDashboardInner() {
                     setResuming(false)
                   }
                 }}
-                disabled={resuming || loading}
+                disabled={resuming || loading || repairBusy}
                 className="flex items-center gap-1 px-2 py-1 text-[10px] bg-green-500/10 border border-green-500/30 rounded text-indicator-success hover:bg-green-500/20 disabled:opacity-40 transition-colors"
                 title="Re-run this pipeline from where it crashed — reuses the planning and start images that already completed"
               >
@@ -607,18 +640,72 @@ function DirectorDashboardInner() {
                 {resuming ? 'Resuming…' : 'Resume'}
               </button>
             )}
-            {hasMissing && (
+            {repairActive ? (
+              <>
+                <span
+                  className="flex items-center gap-1 px-2 py-1 text-[10px] bg-orange-500/10 border border-orange-500/30 rounded text-chip-orange"
+                  title={repair?.message || 'Repair running'}
+                >
+                  <Loader2 size={10} className="animate-spin" />
+                  {repair?.message || 'Repairing'}
+                  {repair && repair.total > 0 ? ` (${repair.current}/${repair.total})` : ''}
+                </span>
+                <button
+                  onClick={async () => {
+                    if (!selectedPipeline) return
+                    const pid = selectedPipeline.pipeline_id
+                    setRepairCancellingPid(pid); setRegenError(null)
+                    try {
+                      await cancelPipelineRepair(pid)
+                    } catch (e) {
+                      setRegenError(String(e instanceof Error ? e.message : e))
+                    } finally {
+                      setRepairCancellingPid(current => current === pid ? null : current)
+                    }
+                  }}
+                  disabled={repairCancelling || repair?.status === 'cancelling'}
+                  className="flex items-center gap-1 px-2 py-1 text-[10px] bg-red-500/10 border border-red-500/30 rounded text-red-400 hover:bg-red-500/20 disabled:opacity-40 transition-colors"
+                  title="Stop after aborting the current model step"
+                >
+                  {repairCancelling ? <Loader2 size={10} className="animate-spin" /> : <X size={10} />}
+                  {repair?.status === 'cancelling' ? 'Cancelling...' : 'Stop'}
+                </button>
+              </>
+            ) : showRepairAction ? (
               <button
                 onClick={generateMissing}
-                disabled={loading}
+                disabled={loading || repairBusy}
                 className="flex items-center gap-1 px-2 py-1 text-[10px] bg-orange-500/10 border border-orange-500/30 rounded text-chip-orange hover:bg-orange-500/20 disabled:opacity-40 transition-colors"
-                title={`Generate ${missingImages} missing images + ${missingVideos} missing or stale videos`}
+                title={hasMissing
+                  ? `Repair ${missingImages} missing images + ${missingVideos} missing or stale videos, then join when possible`
+                  : 'Check saved clip files and repair anything missing or invalid, then join when possible'}
               >
-                <Play size={10} />
-                {missingImages > 0
-                  ? `Repair ${incompleteClips} clip${incompleteClips === 1 ? '' : 's'}`
-                  : `Generate ${missingVideos} video${missingVideos === 1 ? '' : 's'}`}
+                {repairStarting ? <Loader2 size={10} className="animate-spin" /> : <Play size={10} />}
+                {repairRetryable && !hasMissing
+                  ? 'Retry repair'
+                  : missingImages > 0
+                    ? `Repair ${incompleteClips} clip${incompleteClips === 1 ? '' : 's'}`
+                    : missingVideos > 0
+                      ? `Repair ${missingVideos} video${missingVideos === 1 ? '' : 's'}`
+                      : 'Check + repair'}
               </button>
+            ) : null}
+            {repair?.status === 'completed' && (
+              repair.result_filename ? (
+                <a
+                  href={getFileUrl(repair.result_filename)}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-center gap-1 px-2 py-1 text-[10px] bg-green-500/10 border border-green-500/30 rounded text-indicator-success hover:bg-green-500/20 transition-colors"
+                  title="Open the repaired joined video"
+                >
+                  <Check size={10} /> Repaired + joined
+                </a>
+              ) : (
+                <span className="flex items-center gap-1 px-2 py-1 text-[10px] text-indicator-success">
+                  <Check size={10} /> Repair complete
+                </span>
+              )
             )}
             <button
               onClick={() => {
@@ -629,7 +716,7 @@ function DirectorDashboardInner() {
                 rejoinClips(selectedPipeline.pipeline_id).catch(e =>
                   setRegenError(e instanceof Error ? e.message : 'Rejoin failed'))
               }}
-              disabled={loading || totalClips < 2}
+              disabled={loading || repairBusy || totalClips < 2}
               className="flex items-center gap-1 px-2 py-1 text-[10px] bg-accent-blue/10 border border-accent-blue/30 rounded text-accent-blue hover:bg-accent-blue/20 disabled:opacity-40 transition-colors"
               title="Re-join all clips into a new video"
             >
@@ -656,7 +743,7 @@ function DirectorDashboardInner() {
                   setDeletingPipeline(false)
                 }
               }}
-              disabled={loading || deletingPipeline}
+              disabled={loading || deletingPipeline || repairBusy}
               className={`flex items-center gap-1 px-2 py-1 text-[10px] border rounded transition-colors disabled:opacity-40 ${
                 confirmDeletePid === selectedPipeline.pipeline_id
                   ? 'bg-red-500/20 border-red-500/50 text-red-400'
@@ -669,9 +756,9 @@ function DirectorDashboardInner() {
               {deletingPipeline ? <Loader2 size={10} className="animate-spin" /> : <Trash2 size={10} />}
               {confirmDeletePid === selectedPipeline.pipeline_id ? 'Confirm?' : 'Delete'}
             </button>
-            {regenError && (
-              <span className="text-[9px] text-red-400 max-w-[200px] truncate" title={regenError}>
-                {regenError}
+            {(regenError || (repairRetryable ? repair?.error || repair?.message : null)) && (
+              <span className="text-[9px] text-red-400 max-w-[200px] truncate" title={regenError || repair?.error || repair?.message || undefined}>
+                {regenError || repair?.error || repair?.message}
               </span>
             )}
           </div>
@@ -740,6 +827,7 @@ function DirectorDashboardInner() {
                     key={clip.index}
                     clip={clip}
                     pipeline={selectedPipeline}
+                    busy={repairBusy}
                     onTag={(tag) => tagClip(selectedPipeline.pipeline_id, clip.index, tag)}
                     onRerunImage={(idx, prompt) => { setRegenError(null); rerunClipImage(selectedPipeline.pipeline_id, idx, prompt).catch(e => setRegenError(String(e instanceof Error ? e.message : e))) }}
                     onRerunVideo={(idx, prompt) => { setRegenError(null); rerunClipVideo(selectedPipeline.pipeline_id, idx, prompt).catch(e => setRegenError(String(e instanceof Error ? e.message : e))) }}

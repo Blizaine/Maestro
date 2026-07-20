@@ -542,7 +542,9 @@ export async function fetchPipelineList(): Promise<{ pipelines: import('../types
 }
 
 export async function fetchSavedPipeline(pid: string): Promise<import('../types').SavedPipelineState> {
-  const res = await fetch(`${BASE}/api/v1/director/pipelines/${encodeURIComponent(pid)}`)
+  const res = await fetch(`${BASE}/api/v1/director/pipelines/${encodeURIComponent(pid)}`, {
+    cache: 'no-store',
+  })
   if (!res.ok) throw new Error('Pipeline not found')
   return res.json()
 }
@@ -554,6 +556,34 @@ export async function tagPipelineClip(pid: string, clipIndex: number, tag: strin
     body: JSON.stringify({ tag }),
   })
   if (!res.ok) throw new Error('Failed to tag clip')
+}
+
+export async function startPipelineRepair(pid: string): Promise<{
+  pipeline_id: string
+  repair: import('../types').PipelineRepairState
+}> {
+  const res = await fetch(`${BASE}/api/v1/director/pipelines/${encodeURIComponent(pid)}/repair`, {
+    method: 'POST',
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Repair failed to start' }))
+    throw new Error(err.error || err.detail || 'Repair failed to start')
+  }
+  return res.json()
+}
+
+export async function cancelPipelineRepair(pid: string): Promise<{
+  pipeline_id: string
+  repair: import('../types').PipelineRepairState
+}> {
+  const res = await fetch(`${BASE}/api/v1/director/pipelines/${encodeURIComponent(pid)}/repair/cancel`, {
+    method: 'POST',
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Repair cancel failed' }))
+    throw new Error(err.error || err.detail || 'Repair cancel failed')
+  }
+  return res.json()
 }
 
 export async function rerunClipImage(pid: string, clipIndex: number, prompt?: string): Promise<{ filename: string; clip_index: number }> {

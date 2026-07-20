@@ -806,6 +806,31 @@ export interface PipelineLlmLog {
   planning_time_sec: number
 }
 
+export type PipelineRepairStatus =
+  | 'queued'
+  | 'running'
+  | 'cancelling'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'interrupted'
+
+export interface PipelineRepairState {
+  operation_id: string
+  status: PipelineRepairStatus
+  phase: 'queued' | 'images' | 'videos' | 'rejoin' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
+  current: number
+  total: number
+  clip_index: number | null
+  message: string
+  error: string | null
+  cancel_requested?: boolean
+  started_at: number
+  updated_at: number
+  completed_at: number | null
+  result_filename: string | null
+}
+
 export interface SavedPipelineState {
   version: number
   pipeline_id: string
@@ -823,6 +848,7 @@ export interface SavedPipelineState {
   clips: PipelineClipState[]
   output_files: string[]
   total_time_sec: number | null
+  repair?: PipelineRepairState | null
 }
 
 export interface PipelineListItem {
@@ -834,4 +860,5 @@ export interface PipelineListItem {
   output_count: number
   scene_description: string
   workspace: string
+  repair_status?: PipelineRepairStatus | null
 }

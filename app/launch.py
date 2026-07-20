@@ -7646,6 +7646,41 @@ async def tag_pipeline_clip(pid: str, clip_index: int, request: Request):
 
 # ── Director Pipeline Re-run ──────────────────────────────────────────────
 
+@api.post("/api/v1/director/pipelines/{pid}/repair")
+def repair_saved_pipeline(pid: str):
+    """Start a browser-independent missing-media repair and final rejoin."""
+    _init_pipeline()
+    from services.director_pipeline import (
+        PipelineBusyError,
+        start_pipeline_repair,
+    )
+    base = wgp.server_config.get("save_path", "outputs")
+    try:
+        result = start_pipeline_repair(base, pid)
+        return JSONResponse(result, status_code=202)
+    except PipelineBusyError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        traceback.print_exc()
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@api.post("/api/v1/director/pipelines/{pid}/repair/cancel")
+def cancel_saved_pipeline_repair(pid: str):
+    """Cancel a server-owned repair and its current generation child."""
+    _init_pipeline()
+    from services.director_pipeline import cancel_pipeline_repair
+    base = wgp.server_config.get("save_path", "outputs")
+    repair = cancel_pipeline_repair(base, pid)
+    if not repair:
+        return JSONResponse(
+            {"error": "No active repair for this pipeline"}, status_code=409,
+        )
+    return {"pipeline_id": pid, "repair": repair}
+
+
 @api.post("/api/v1/director/pipelines/{pid}/clips/{clip_index}/rerun-image")
 async def rerun_pipeline_clip_image(pid: str, clip_index: int, request: Request):
     """Re-generate the start image for a specific clip in a saved pipeline."""

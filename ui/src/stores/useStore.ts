@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, GenerationJob, ModelFamily, ModelDef, GenerationMode, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, SavedPipelineState, SystemDetectResponse, SystemStats } from '../types'
+import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, GenerationJob, ModelFamily, ModelDef, GenerationMode, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineRepairState, SavedPipelineState, SystemDetectResponse, SystemStats } from '../types'
 import * as api from '../api/client'
 import { applyThemePrefs, getStoredPrefs, type FamilyId, type ThemeMode, type ThemePrefs } from '../lib/theme'
 
@@ -8,6 +8,26 @@ const CIVIT_DOWNLOAD_COMPLETED_VISIBLE_MS = 30_000
 let _civitDownloadPollTask: Promise<void> | null = null
 let _civitDownloadPollController: AbortController | null = null
 let _civitDownloadPollRequested = false
+const DIRECTOR_REPAIR_POLL_MS = 2000
+const DIRECTOR_REPAIR_ACTIVE = new Set(['queued', 'running', 'cancelling'])
+type DirectorRepairPoll = {
+  operationId: string
+  timer: number | null
+}
+const _directorRepairPolls = new Map<string, DirectorRepairPoll>()
+const _directorRepairDiscoveries = new Map<string, object>()
+let _dashboardPipelineLoadToken = 0
+let _dashboardPipelineListLoadToken = 0
+
+function _repairNeedsPolling(repair: PipelineRepairState | null | undefined): boolean {
+  return !!repair && DIRECTOR_REPAIR_ACTIVE.has(repair.status)
+}
+
+function _stopDirectorRepairPoll(pid: string): void {
+  const poll = _directorRepairPolls.get(pid)
+  if (poll?.timer != null) window.clearTimeout(poll.timer)
+  _directorRepairPolls.delete(pid)
+}
 
 function _downloadTimestampMs(value: number | null | undefined): number | null {
   const timestamp = Number(value)
@@ -46,6 +66,10 @@ if (import.meta.hot) {
     _civitDownloadPollController = null
     _civitDownloadPollTask = null
     _civitDownloadPollRequested = false
+    for (const pid of _directorRepairPolls.keys()) {
+      _stopDirectorRepairPoll(pid)
+    }
+    _directorRepairDiscoveries.clear()
   })
 }
 
@@ -908,6 +932,9 @@ interface AppState {
   loadPipelineList: () => Promise<void>
   loadSavedPipeline: (pid: string) => Promise<void>
   tagClip: (pid: string, clipIndex: number, tag: string | null) => Promise<void>
+  startPipelineRepair: (pid: string) => Promise<PipelineRepairState>
+  cancelPipelineRepair: (pid: string) => Promise<PipelineRepairState>
+  pollPipelineRepair: (pid: string, operationId: string) => void
   rerunClipImage: (pid: string, clipIndex: number, prompt?: string) => Promise<unknown>
   rerunClipVideo: (pid: string, clipIndex: number, prompt?: string) => Promise<unknown>
   rejoinPipelineClips: (pid: string) => Promise<unknown>
@@ -2149,22 +2176,74 @@ export const useStore = create<AppState>((set, get) => ({
   dashboardLoading: false,
   setDashboardOpen: (open) => {
     set({ dashboardOpen: open })
-    if (open) get().loadPipelineList()
+    if (open) {
+      get().loadPipelineList()
+      const selected = get().dashboardSelectedPipeline
+      if (selected) get().loadSavedPipeline(selected.pipeline_id)
+    }
   },
   loadPipelineList: async () => {
+    const loadToken = ++_dashboardPipelineListLoadToken
     try {
       const { pipelines } = await api.fetchPipelineList()
+      if (loadToken !== _dashboardPipelineListLoadToken) return
       set({ dashboardPipelineList: pipelines })
+
+      // The repair worker belongs to the server, so a browser reload must
+      // rediscover active operations and resume UI polling without requiring
+      // the Dashboard to be opened first. Keep discovery separate from the
+      // selected pipeline so bootstrapping never opens or changes the overlay.
+      for (const item of pipelines) {
+        if (!item.repair_status || !DIRECTOR_REPAIR_ACTIVE.has(item.repair_status)) continue
+        if (_directorRepairPolls.has(item.id) || _directorRepairDiscoveries.has(item.id)) continue
+
+        const discovery = {}
+        _directorRepairDiscoveries.set(item.id, discovery)
+        void api.fetchSavedPipeline(item.id).then(pipeline => {
+          if (_directorRepairDiscoveries.get(item.id) !== discovery) return
+          if (_directorRepairPolls.has(item.id)) return
+
+          const repair = pipeline.repair
+          if (_repairNeedsPolling(repair)) {
+            get().pollPipelineRepair(item.id, repair!.operation_id)
+            return
+          }
+
+          // The operation may have finished between the list and detail
+          // requests. Reflect that terminal state and refresh newly-created
+          // media instead of waiting for another Dashboard visit.
+          set(s => ({
+            dashboardPipelineList: s.dashboardPipelineList.map(entry =>
+              entry.id === item.id
+                ? { ...entry, repair_status: repair?.status || null }
+                : entry),
+          }))
+          void get().loadOutputs()
+        }).catch(e => {
+          console.warn(`Failed to reconnect Director repair for ${item.id}:`, e)
+        }).finally(() => {
+          if (_directorRepairDiscoveries.get(item.id) === discovery) {
+            _directorRepairDiscoveries.delete(item.id)
+          }
+        })
+      }
     } catch (e) {
+      if (loadToken !== _dashboardPipelineListLoadToken) return
       console.error('Failed to load pipeline list:', e)
     }
   },
   loadSavedPipeline: async (pid) => {
+    const loadToken = ++_dashboardPipelineLoadToken
     set({ dashboardLoading: true })
     try {
       const pipeline = await api.fetchSavedPipeline(pid)
+      if (loadToken !== _dashboardPipelineLoadToken) return
       set({ dashboardSelectedPipeline: pipeline, dashboardLoading: false })
+      if (_repairNeedsPolling(pipeline.repair)) {
+        get().pollPipelineRepair(pid, pipeline.repair!.operation_id)
+      }
     } catch (e) {
+      if (loadToken !== _dashboardPipelineLoadToken) return
       console.error('Failed to load pipeline:', e)
       set({ dashboardLoading: false })
     }
@@ -2175,6 +2254,8 @@ export const useStore = create<AppState>((set, get) => ({
     // whenever selection is null, so a stale list would immediately
     // re-fetch the pipeline being deleted (re-mounting its <img>/<video>
     // elements and re-locking the files on Windows).
+    _dashboardPipelineLoadToken += 1
+    _dashboardPipelineListLoadToken += 1
     set(s => ({
       dashboardSelectedPipeline: null,
       dashboardPipelineList: s.dashboardPipelineList.filter(p => p.id !== pid),
@@ -2200,6 +2281,96 @@ export const useStore = create<AppState>((set, get) => ({
     } catch (e) {
       console.error('Failed to tag clip:', e)
     }
+  },
+  startPipelineRepair: async (pid: string) => {
+    const { repair } = await api.startPipelineRepair(pid)
+    set(s => {
+      const dashboardPipelineList = s.dashboardPipelineList.map(item =>
+        item.id === pid ? { ...item, repair_status: repair.status } : item)
+      if (!s.dashboardSelectedPipeline || s.dashboardSelectedPipeline.pipeline_id !== pid) {
+        return { dashboardPipelineList }
+      }
+      return {
+        dashboardPipelineList,
+        dashboardSelectedPipeline: {
+          ...s.dashboardSelectedPipeline,
+          repair,
+        },
+      }
+    })
+    get().pollPipelineRepair(pid, repair.operation_id)
+    return repair
+  },
+  cancelPipelineRepair: async (pid: string) => {
+    const { repair } = await api.cancelPipelineRepair(pid)
+    set(s => {
+      const dashboardPipelineList = s.dashboardPipelineList.map(item =>
+        item.id === pid ? { ...item, repair_status: repair.status } : item)
+      if (!s.dashboardSelectedPipeline || s.dashboardSelectedPipeline.pipeline_id !== pid) {
+        return { dashboardPipelineList }
+      }
+      return {
+        dashboardPipelineList,
+        dashboardSelectedPipeline: {
+          ...s.dashboardSelectedPipeline,
+          repair,
+        },
+      }
+    })
+    get().pollPipelineRepair(pid, repair.operation_id)
+    return repair
+  },
+  pollPipelineRepair: (pid: string, operationId: string) => {
+    const existing = _directorRepairPolls.get(pid)
+    if (existing?.operationId === operationId) return
+    if (existing) _stopDirectorRepairPoll(pid)
+
+    const poll: DirectorRepairPoll = { operationId, timer: null }
+    _directorRepairPolls.set(pid, poll)
+
+    const tick = async () => {
+      if (_directorRepairPolls.get(pid) !== poll) return
+      poll.timer = null
+      try {
+        const pipeline = await api.fetchSavedPipeline(pid)
+        if (_directorRepairPolls.get(pid) !== poll) return
+
+        const repair = pipeline.repair
+        set(s => {
+          const dashboardPipelineList = s.dashboardPipelineList.map(item =>
+            item.id === pid ? { ...item, repair_status: repair?.status || null } : item)
+          if (!s.dashboardSelectedPipeline || s.dashboardSelectedPipeline.pipeline_id !== pid) {
+            return { dashboardPipelineList }
+          }
+          return { dashboardPipelineList, dashboardSelectedPipeline: pipeline }
+        })
+
+        if (repair?.operation_id !== operationId) {
+          _stopDirectorRepairPoll(pid)
+          if (_repairNeedsPolling(repair)) {
+            get().pollPipelineRepair(pid, repair!.operation_id)
+          } else {
+            void get().loadPipelineList()
+            void get().loadOutputs()
+          }
+          return
+        }
+        if (!_repairNeedsPolling(repair)) {
+          _stopDirectorRepairPoll(pid)
+          void get().loadPipelineList()
+          void get().loadOutputs()
+          return
+        }
+      } catch (e) {
+        console.warn(`Director repair poll failed for ${pid}; retrying:`, e)
+      }
+
+      if (_directorRepairPolls.get(pid) === poll) {
+        poll.timer = window.setTimeout(tick, DIRECTOR_REPAIR_POLL_MS)
+      }
+    }
+
+    void tick()
   },
   rerunClipImage: async (pid: string, clipIndex: number, prompt?: string) => {
     set({ dashboardLoading: true })

@@ -24,6 +24,7 @@ function App() {
   const loadServicesConfig = useStore(s => s.loadServicesConfig)
   const loadLlmStatus = useStore(s => s.loadLlmStatus)
   const loadLlmModels = useStore(s => s.loadLlmModels)
+  const loadPipelineList = useStore(s => s.loadPipelineList)
   const toggleSidebar = useStore(s => s.toggleSidebar)
   const setSidebarOpen = useStore(s => s.setSidebarOpen)
   const toggleSettings = useStore(s => s.toggleSettings)
@@ -38,8 +39,9 @@ function App() {
     loadServicesConfig()
     loadLlmStatus()
     loadLlmModels()
+    loadPipelineList()
     reconnectJobs()
-  }, [loadModels, loadWorkspaces, loadOutputs, loadSystemConfig, loadServicesConfig, loadLlmStatus, loadLlmModels, reconnectJobs])
+  }, [loadModels, loadWorkspaces, loadOutputs, loadSystemConfig, loadServicesConfig, loadLlmStatus, loadLlmModels, loadPipelineList, reconnectJobs])
 
   // Poll LLM status to stay in sync with backend auto-load/unload
   useEffect(() => {

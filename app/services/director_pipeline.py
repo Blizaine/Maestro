@@ -16,6 +16,7 @@ import time
 import json
 import uuid
 import threading
+import traceback
 from functools import wraps
 from typing import Optional
 
@@ -40,6 +41,8 @@ _pipeline_child_jobs: dict[str, set[str]] = {}
 _pipeline_starting: set[str] = set()
 _pipeline_operations: set[str] = set()
 _pipeline_deleting: set[str] = set()
+_pipeline_repairs: dict[str, dict] = {}
+_REPAIR_ACTIVE_STATUSES = {"queued", "running", "cancelling"}
 _GENERATION_SETTLE_GRACE_S = 10.0
 _CANCELLED_ARTIFACT_FIELDS = {
     "output_files",
@@ -54,22 +57,31 @@ class PipelineBusyError(RuntimeError):
     """Raised when a Dashboard mutation conflicts with active pipeline work."""
 
 
+class _RepairCancelledError(RuntimeError):
+    """Internal control-flow exception for a server-owned repair batch."""
+
+
+def _claim_pipeline_operation_locked(pid: str) -> bool:
+    """Reserve a terminal pipeline while ``_pipeline_lock`` is held."""
+    if (
+        pid in _pipeline_threads
+        or bool(_pipeline_child_jobs.get(pid))
+        or pid in _pipeline_starting
+        or pid in _pipeline_operations
+        or pid in _pipeline_deleting
+        or _pipelines.get(pid, {}).get("status") in {
+            "queued", "planning", "running", "paused",
+        }
+    ):
+        return False
+    _pipeline_operations.add(pid)
+    return True
+
+
 def _claim_pipeline_operation(pid: str) -> bool:
     """Reserve a terminal pipeline for one Dashboard mutation."""
     with _pipeline_lock:
-        if (
-            pid in _pipeline_threads
-            or bool(_pipeline_child_jobs.get(pid))
-            or pid in _pipeline_starting
-            or pid in _pipeline_operations
-            or pid in _pipeline_deleting
-            or _pipelines.get(pid, {}).get("status") in {
-                "queued", "planning", "running", "paused",
-            }
-        ):
-            return False
-        _pipeline_operations.add(pid)
-        return True
+        return _claim_pipeline_operation_locked(pid)
 
 
 def _release_pipeline_operation(pid: str) -> None:
@@ -367,6 +379,42 @@ def _save_pipeline_state_locked(pid: str) -> bool:
         return False
 
 
+def _normalize_interrupted_repair(state: dict, pid: str) -> bool:
+    """Mark a persisted active repair interrupted when its worker is gone.
+
+    Browser reloads leave the non-daemon worker registered, so they continue
+    normally.  A Maestro process restart removes the registry; changing the
+    saved status makes that distinction visible and leaves Repair available as
+    an idempotent resume-from-disk operation.
+    """
+    repair = state.get("repair")
+    if not isinstance(repair, dict):
+        return False
+    if repair.get("status") not in _REPAIR_ACTIVE_STATUSES:
+        return False
+    operation_id = repair.get("operation_id")
+    with _pipeline_lock:
+        control = _pipeline_repairs.get(pid)
+        worker_present = bool(
+            control
+            and control.get("operation_id") == operation_id
+        )
+    if worker_present:
+        return False
+
+    now = time.time()
+    repair.update({
+        "status": "interrupted",
+        "phase": "interrupted",
+        "clip_index": None,
+        "message": "Repair was interrupted when Maestro stopped. Start Repair again to continue.",
+        "error": "Maestro stopped before the repair finished.",
+        "updated_at": now,
+        "completed_at": now,
+    })
+    return True
+
+
 def list_pipeline_states(out_dir: str) -> list[dict]:
     """Scan directory for saved pipeline state files. Returns summary list."""
     results = []
@@ -387,19 +435,24 @@ def list_pipeline_states(out_dir: str) -> list[dict]:
                     with _pipeline_file_lock:
                         with open(filepath, "r", encoding="utf-8") as f:
                             data = json.load(f)
-                    # Detect stale "running" pipelines — if the JSON says running
-                    # but there's no active in-memory pipeline, it crashed
-                    status = data.get("status", "unknown")
-                    pid = data.get("pipeline_id", "")
-                    if status == "running" and pid not in _pipelines:
-                        with _pipeline_file_lock:
-                            with open(filepath, "r", encoding="utf-8") as f:
-                                latest = json.load(f)
-                            if latest.get("status") == "running" and pid not in _pipelines:
-                                latest["status"] = "crashed"
-                                _write_pipeline_json_unlocked(filepath, latest)
-                            data = latest
-                            status = data.get("status", "unknown")
+                        # Normalize and replace the exact snapshot read while
+                        # retaining the file lock. Releasing it between read
+                        # and write let a repair worker publish newer progress
+                        # that this stale list snapshot then overwrote.
+                        pid = data.get("pipeline_id", "")
+                        changed = _normalize_interrupted_repair(data, pid)
+
+                        # Detect stale "running" pipelines while retaining the
+                        # same serialization boundary as repair normalization.
+                        status = data.get("status", "unknown")
+                        with _pipeline_lock:
+                            pipeline_present = pid in _pipelines
+                        if status == "running" and not pipeline_present:
+                            data["status"] = "crashed"
+                            status = "crashed"
+                            changed = True
+                        if changed:
+                            _write_pipeline_json_unlocked(filepath, data)
                     results.append({
                         "id": pid,
                         "status": status,
@@ -409,6 +462,7 @@ def list_pipeline_states(out_dir: str) -> list[dict]:
                         "output_count": len(data.get("output_files", [])),
                         "scene_description": (data.get("scene_description", "") or "")[:100],
                         "workspace": os.path.basename(scan_dir) if scan_dir != out_dir else "default",
+                        "repair_status": (data.get("repair") or {}).get("status"),
                         "_filepath": filepath,
                     })
                 except Exception:
@@ -443,12 +497,22 @@ def _backfill_clip_video_filenames(state: dict, state_dir: str) -> dict:
     return state
 
 
+_SAVED_MEDIA_EXTENSIONS = {
+    "image": {".jpg", ".jpeg", ".png", ".webp"},
+    "video": {".mkv", ".mov", ".mp4", ".webm"},
+}
+
+
 def _invalid_saved_media_numbers(
     filenames: list,
     expected_count: int,
     output_dir: str,
+    media_kind: str,
 ) -> list[int]:
-    """Return 1-based slots without a valid direct-child media file."""
+    """Return 1-based slots without a non-empty direct-child media file."""
+    allowed_extensions = _SAVED_MEDIA_EXTENSIONS.get(media_kind)
+    if allowed_extensions is None:
+        raise ValueError(f"Unsupported saved media kind: {media_kind}")
     output_root = os.path.realpath(os.path.abspath(output_dir))
     normalized_root = os.path.normcase(output_root)
     invalid = []
@@ -464,8 +528,15 @@ def _invalid_saved_media_numbers(
         candidate = os.path.realpath(os.path.join(output_root, filename))
         if (
             os.path.normcase(os.path.dirname(candidate)) != normalized_root
+            or os.path.splitext(filename)[1].lower() not in allowed_extensions
             or not os.path.isfile(candidate)
         ):
+            invalid.append(index + 1)
+            continue
+        try:
+            if os.path.getsize(candidate) <= 0:
+                invalid.append(index + 1)
+        except OSError:
             invalid.append(index + 1)
     return invalid
 
@@ -477,7 +548,7 @@ def _require_video_start_images(
 ) -> None:
     """Stop the video phase rather than silently falling back to T2V."""
     invalid = _invalid_saved_media_numbers(
-        clip_images, clip_count, output_dir,
+        clip_images, clip_count, output_dir, "image",
     )
     if not invalid:
         return
@@ -503,7 +574,10 @@ def _load_pipeline_state_locked(out_dir: str, pid: str) -> Optional[dict]:
     if os.path.isfile(filepath):
         with _pipeline_file_lock:
             with open(filepath, "r", encoding="utf-8") as f:
-                return _backfill_clip_video_filenames(json.load(f), out_dir)
+                state = json.load(f)
+            if _normalize_interrupted_repair(state, pid):
+                _write_pipeline_json_unlocked(filepath, state)
+            return _backfill_clip_video_filenames(state, out_dir)
     # Search subdirectories (workspaces)
     if os.path.isdir(out_dir):
         for name in os.listdir(out_dir):
@@ -511,9 +585,12 @@ def _load_pipeline_state_locked(out_dir: str, pid: str) -> Optional[dict]:
             if os.path.isfile(sub):
                 with _pipeline_file_lock:
                     with open(sub, "r", encoding="utf-8") as f:
-                        return _backfill_clip_video_filenames(
-                            json.load(f), os.path.join(out_dir, name),
-                        )
+                        state = json.load(f)
+                    if _normalize_interrupted_repair(state, pid):
+                        _write_pipeline_json_unlocked(sub, state)
+                    return _backfill_clip_video_filenames(
+                        state, os.path.join(out_dir, name),
+                    )
     return None
 
 
@@ -824,6 +901,10 @@ def _delete_pipeline_locked(out_dir: str, pid: str) -> dict:
 
 @_exclusive_pipeline_operation
 def rerun_clip_image(out_dir: str, pid: str, clip_index: int, prompt_override: str = None) -> dict:
+    return _rerun_clip_image_impl(out_dir, pid, clip_index, prompt_override)
+
+
+def _rerun_clip_image_impl(out_dir: str, pid: str, clip_index: int, prompt_override: str = None) -> dict:
     """Re-generate the start image for a single clip. Returns {job_id, filename} or raises."""
     state = load_pipeline_state(out_dir, pid)
     if not state:
@@ -928,6 +1009,13 @@ def rerun_clip_image(out_dir: str, pid: str, clip_index: int, prompt_override: s
         "_director_pipeline_id": pid,
         "_director_detached_operation": True,
     }
+    with _pipeline_lock:
+        repair_control = _pipeline_repairs.get(pid)
+        repair_operation_id = (
+            repair_control.get("operation_id") if repair_control else None
+        )
+    if repair_operation_id:
+        gen_params["_director_repair_operation_id"] = repair_operation_id
 
     output_files = _submit_and_wait(gen_params, timeout_s=600, out_dir=clip_out_dir)
     new_filename = output_files[0] if output_files else ""
@@ -984,6 +1072,10 @@ def _slice_audio_segment(src_path: str, start_sec: float, duration_sec: float, d
 
 @_exclusive_pipeline_operation
 def rerun_clip_video(out_dir: str, pid: str, clip_index: int, prompt_override: str = None) -> dict:
+    return _rerun_clip_video_impl(out_dir, pid, clip_index, prompt_override)
+
+
+def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_override: str = None) -> dict:
     """Re-generate the video for a single clip. Returns {job_id, filename} or raises."""
     state = load_pipeline_state(out_dir, pid)
     if not state:
@@ -1007,7 +1099,9 @@ def rerun_clip_video(out_dir: str, pid: str, clip_index: int, prompt_override: s
 
     # Build start image path
     start_img = clip.get("start_image_filename")
-    if _invalid_saved_media_numbers([start_img], 1, clip_out_dir):
+    if _invalid_saved_media_numbers(
+        [start_img], 1, clip_out_dir, "image",
+    ):
         raise ValueError(
             "This clip has no valid start image. Regenerate its start image "
             "before regenerating video."
@@ -1052,6 +1146,13 @@ def rerun_clip_video(out_dir: str, pid: str, clip_index: int, prompt_override: s
         "_director_pipeline_id": pid,
         "_director_detached_operation": True,
     }
+    with _pipeline_lock:
+        repair_control = _pipeline_repairs.get(pid)
+        repair_operation_id = (
+            repair_control.get("operation_id") if repair_control else None
+        )
+    if repair_operation_id:
+        gen_params["_director_repair_operation_id"] = repair_operation_id
     gen_params["image_start"] = start_path
 
     # Soundtrack conditioning. The original pipeline run passes the FULL
@@ -1120,6 +1221,10 @@ def rerun_clip_video(out_dir: str, pid: str, clip_index: int, prompt_override: s
 
 @_exclusive_pipeline_operation
 def rejoin_clips(out_dir: str, pid: str) -> dict:
+    return _rejoin_clips_impl(out_dir, pid)
+
+
+def _rejoin_clips_impl(out_dir: str, pid: str) -> dict:
     """Re-join all clips from a saved pipeline using current best versions. Returns {filename}."""
     state = load_pipeline_state(out_dir, pid)
     if not state:
@@ -1144,6 +1249,7 @@ def rejoin_clips(out_dir: str, pid: str) -> dict:
         [clip.get("start_image_filename") for clip in clips],
         len(clips),
         clip_out_dir,
+        "image",
     )
     if invalid_start_numbers:
         invalid_labels = ", ".join(
@@ -1158,6 +1264,7 @@ def rejoin_clips(out_dir: str, pid: str) -> dict:
         [clip.get("video_filename") for clip in clips],
         len(clips),
         clip_out_dir,
+        "video",
     )
     if invalid_video_numbers:
         invalid_labels = ", ".join(
@@ -1210,6 +1317,511 @@ def rejoin_clips(out_dir: str, pid: str) -> dict:
         return {"filename": output_name}
     except Exception as e:
         raise RuntimeError(f"Rejoin failed: {e}")
+
+
+def _plan_pipeline_repair(out_dir: str, pid: str, state: dict) -> dict:
+    """Build a deterministic repair plan from recorded files on disk."""
+    pipeline_file = _find_pipeline_file(out_dir, pid)
+    if not pipeline_file:
+        raise ValueError(f"Pipeline {pid} not found")
+    clip_out_dir = os.path.dirname(pipeline_file)
+    clips = state.get("clips") or []
+
+    invalid_images = {
+        number - 1
+        for number in _invalid_saved_media_numbers(
+            [clip.get("start_image_filename") for clip in clips],
+            len(clips),
+            clip_out_dir,
+            "image",
+        )
+    }
+    invalid_videos = {
+        number - 1
+        for number in _invalid_saved_media_numbers(
+            [clip.get("video_filename") for clip in clips],
+            len(clips),
+            clip_out_dir,
+            "video",
+        )
+    }
+    image_indices = sorted(invalid_images)
+    video_indices = sorted(
+        invalid_videos
+        | invalid_images
+        | {
+            index
+            for index, clip in enumerate(clips)
+            if clip.get("video_stale")
+        }
+    )
+
+    missing_image_prompts = [
+        index + 1 for index in image_indices
+        if not str(clips[index].get("image_prompt") or "").strip()
+    ]
+    if missing_image_prompts:
+        labels = ", ".join(str(index) for index in missing_image_prompts)
+        raise ValueError(
+            f"Missing image prompt for repair clip(s) {labels}."
+        )
+    missing_video_prompts = [
+        index + 1 for index in video_indices
+        if not str(clips[index].get("video_prompt") or "").strip()
+    ]
+    if missing_video_prompts:
+        labels = ", ".join(str(index) for index in missing_video_prompts)
+        raise ValueError(
+            f"Missing video prompt for repair clip(s) {labels}."
+        )
+
+    should_rejoin = len(clips) >= 2
+    return {
+        "image_indices": image_indices,
+        "video_indices": video_indices,
+        "should_rejoin": should_rejoin,
+        "clip_count": len(clips),
+        "total": (
+            len(image_indices)
+            + len(video_indices)
+            + (1 if should_rejoin else 0)
+        ),
+    }
+
+
+def _repair_queue_message(plan: dict) -> str:
+    parts = []
+    image_count = len(plan["image_indices"])
+    video_count = len(plan["video_indices"])
+    if image_count:
+        parts.append(f"{image_count} image{'s' if image_count != 1 else ''}")
+    if video_count:
+        parts.append(f"{video_count} video{'s' if video_count != 1 else ''}")
+    if plan["should_rejoin"]:
+        parts.append("final join")
+    return "Queued " + (", ".join(parts) if parts else "repair check")
+
+
+def _persist_repair_state_unlocked(
+    out_dir: str,
+    pid: str,
+    control: dict,
+    *,
+    replace: bool = False,
+    **updates,
+) -> Optional[dict]:
+    """Persist repair status while the caller holds control['state_lock']."""
+    operation_id = control["operation_id"]
+    now = time.time()
+
+    def _update(state):
+        existing = state.get("repair")
+        if (
+            not replace
+            and isinstance(existing, dict)
+            and existing.get("operation_id") != operation_id
+        ):
+            return
+        repair = {} if replace else dict(existing or {})
+        repair.update(updates)
+        repair["operation_id"] = operation_id
+        repair["updated_at"] = now
+        state["repair"] = repair
+
+    saved = _update_saved_pipeline(out_dir, pid, _update)
+    repair = (saved or {}).get("repair")
+    if not isinstance(repair, dict) or repair.get("operation_id") != operation_id:
+        return None
+    snapshot = dict(repair)
+    with _pipeline_lock:
+        current = _pipeline_repairs.get(pid)
+        if current is control:
+            current["snapshot"] = snapshot
+    return snapshot
+
+
+def _persist_repair_state(
+    out_dir: str,
+    pid: str,
+    control: dict,
+    *,
+    replace: bool = False,
+    **updates,
+) -> Optional[dict]:
+    with control["state_lock"]:
+        return _persist_repair_state_unlocked(
+            out_dir, pid, control, replace=replace, **updates,
+        )
+
+
+def _raise_if_repair_cancelled(control: dict) -> None:
+    if control["cancel_event"].is_set():
+        raise _RepairCancelledError("Repair cancelled")
+
+
+def _finish_pipeline_repair(
+    out_dir: str,
+    pid: str,
+    control: dict,
+    *,
+    status: str,
+    phase: str,
+    current: int,
+    total: int,
+    message: str,
+    error: Optional[str] = None,
+    result_filename: Optional[str] = None,
+) -> Optional[dict]:
+    with control["state_lock"]:
+        # Decide completion-versus-cancellation while holding the same lock
+        # used by cancel_pipeline_repair. Whichever path enters first wins:
+        # completion marks the control as finishing, while cancellation sets
+        # the absorbing event before a terminal snapshot can be chosen.
+        with _pipeline_lock:
+            current_control = _pipeline_repairs.get(pid)
+            if current_control is control:
+                current_control["finishing"] = True
+            cancel_requested = control["cancel_event"].is_set()
+        if status == "completed" and cancel_requested:
+            status = "cancelled"
+            phase = "cancelled"
+            message = "Repair cancelled"
+            error = None
+        return _persist_repair_state_unlocked(
+            out_dir,
+            pid,
+            control,
+            status=status,
+            phase=phase,
+            current=current,
+            total=total,
+            clip_index=None,
+            message=message,
+            error=error,
+            cancel_requested=cancel_requested,
+            completed_at=time.time(),
+            result_filename=result_filename,
+        )
+
+
+def _run_pipeline_repair(
+    out_dir: str,
+    pid: str,
+    control: dict,
+    plan: dict,
+) -> None:
+    """Run one full Dashboard repair independently of the browser."""
+    current = 0
+    total = plan["total"]
+    clip_count = plan["clip_count"]
+    result_filename = None
+    try:
+        _raise_if_repair_cancelled(control)
+        _persist_repair_state(
+            out_dir,
+            pid,
+            control,
+            status="running",
+            phase="images" if plan["image_indices"] else "videos",
+            current=current,
+            total=total,
+            clip_index=None,
+            message="Starting repair",
+            error=None,
+        )
+
+        for clip_index in plan["image_indices"]:
+            _raise_if_repair_cancelled(control)
+            _persist_repair_state(
+                out_dir,
+                pid,
+                control,
+                status="running",
+                phase="images",
+                current=current,
+                total=total,
+                clip_index=clip_index,
+                message=f"Generating start image for clip {clip_index + 1} of {clip_count}",
+                error=None,
+            )
+            _rerun_clip_image_impl(out_dir, pid, clip_index)
+            _raise_if_repair_cancelled(control)
+            current += 1
+            _persist_repair_state(
+                out_dir,
+                pid,
+                control,
+                status="running",
+                phase="images",
+                current=current,
+                total=total,
+                clip_index=clip_index,
+                message=f"Finished start image for clip {clip_index + 1}",
+                error=None,
+            )
+
+        for clip_index in plan["video_indices"]:
+            _raise_if_repair_cancelled(control)
+            _persist_repair_state(
+                out_dir,
+                pid,
+                control,
+                status="running",
+                phase="videos",
+                current=current,
+                total=total,
+                clip_index=clip_index,
+                message=f"Generating video for clip {clip_index + 1} of {clip_count}",
+                error=None,
+            )
+            _rerun_clip_video_impl(out_dir, pid, clip_index)
+            _raise_if_repair_cancelled(control)
+            current += 1
+            _persist_repair_state(
+                out_dir,
+                pid,
+                control,
+                status="running",
+                phase="videos",
+                current=current,
+                total=total,
+                clip_index=clip_index,
+                message=f"Finished video for clip {clip_index + 1}",
+                error=None,
+            )
+
+        if plan["should_rejoin"]:
+            _raise_if_repair_cancelled(control)
+            _persist_repair_state(
+                out_dir,
+                pid,
+                control,
+                status="running",
+                phase="rejoin",
+                current=current,
+                total=total,
+                clip_index=None,
+                message=f"Joining {clip_count} repaired clips",
+                error=None,
+            )
+            result = _rejoin_clips_impl(out_dir, pid)
+            result_filename = result.get("filename")
+            _raise_if_repair_cancelled(control)
+            current += 1
+
+        _finish_pipeline_repair(
+            out_dir,
+            pid,
+            control,
+            status="completed",
+            phase="completed",
+            current=current,
+            total=total,
+            message=(
+                "Repair complete and clips joined"
+                if plan["should_rejoin"]
+                else "Repair complete"
+            ),
+            result_filename=result_filename,
+        )
+    except (GenerationCancelledError, _RepairCancelledError):
+        _finish_pipeline_repair(
+            out_dir,
+            pid,
+            control,
+            status="cancelled",
+            phase="cancelled",
+            current=current,
+            total=total,
+            message="Repair cancelled",
+        )
+    except Exception as exc:
+        print(f"[Pipeline {pid}] Repair failed: {exc}")
+        traceback.print_exc()
+        _finish_pipeline_repair(
+            out_dir,
+            pid,
+            control,
+            status="failed",
+            phase="failed",
+            current=current,
+            total=total,
+            message="Repair stopped after an error",
+            error=str(exc),
+        )
+    finally:
+        with _pipeline_lock:
+            if _pipeline_repairs.get(pid) is control:
+                _pipeline_repairs.pop(pid, None)
+        _release_pipeline_operation(pid)
+
+
+def _run_pipeline_repair_after_ready(
+    out_dir: str,
+    pid: str,
+    control: dict,
+    plan: dict,
+) -> None:
+    """Keep even a zero-unit worker alive until start publication finishes."""
+    ready_event = control.get("ready_event")
+    if ready_event is not None:
+        ready_event.wait()
+    # The starter owns cleanup when publication itself failed. In the rare
+    # case a Thread implementation began running before start() raised, do
+    # not let that worker execute a repair after the failed reservation.
+    if control.get("start_error") is not None:
+        return
+    _run_pipeline_repair(out_dir, pid, control, plan)
+
+
+def _repair_start_result(pid: str, control: dict) -> dict:
+    """Wait for an atomic start reservation to publish its first snapshot."""
+    ready_event = control.get("ready_event")
+    if ready_event is not None:
+        ready_event.wait()
+    start_error = control.get("start_error")
+    if start_error is not None:
+        raise start_error
+    return {
+        "pipeline_id": pid,
+        "repair": dict(control.get("snapshot") or {}),
+    }
+
+
+def start_pipeline_repair(out_dir: str, pid: str) -> dict:
+    """Start or reconnect to a server-owned repair batch."""
+    with _pipeline_lock:
+        existing = _pipeline_repairs.get(pid)
+        if existing is not None:
+            control = existing
+            starter = False
+        else:
+            # Claim the operation and publish a reservation in one critical
+            # section. A simultaneous duplicate now waits for this starter's
+            # persisted snapshot instead of falling into the claim gap and
+            # receiving a spurious busy response.
+            if not _claim_pipeline_operation_locked(pid):
+                raise PipelineBusyError(
+                    "Pipeline is still active; try again shortly."
+                )
+            operation_id = uuid.uuid4().hex[:12]
+            control = {
+                "operation_id": operation_id,
+                "snapshot": {},
+                "cancel_event": threading.Event(),
+                "state_lock": threading.Lock(),
+                "finishing": False,
+                "thread": None,
+                "ready_event": threading.Event(),
+                "start_error": None,
+            }
+            _pipeline_repairs[pid] = control
+            starter = True
+
+    if not starter:
+        return _repair_start_result(pid, control)
+
+    try:
+        state = load_pipeline_state(out_dir, pid)
+        if not state:
+            raise ValueError(f"Pipeline {pid} not found")
+        plan = _plan_pipeline_repair(out_dir, pid, state)
+        started_at = time.time()
+        initial = {
+            "operation_id": control["operation_id"],
+            "status": "queued",
+            "phase": "queued",
+            "current": 0,
+            "total": plan["total"],
+            "clip_index": None,
+            "message": _repair_queue_message(plan),
+            "error": None,
+            "cancel_requested": False,
+            "started_at": started_at,
+            "updated_at": started_at,
+            "completed_at": None,
+            "result_filename": None,
+        }
+        with _pipeline_lock:
+            if _pipeline_repairs.get(pid) is control:
+                control["snapshot"] = dict(initial)
+
+        persisted = _persist_repair_state(
+            out_dir, pid, control, replace=True, **initial,
+        )
+        if not persisted:
+            raise RuntimeError("Could not persist repair status")
+
+        thread = threading.Thread(
+            target=_run_pipeline_repair_after_ready,
+            args=(out_dir, pid, control, plan),
+            daemon=False,
+            name=f"director-repair-{pid}",
+        )
+        with _pipeline_lock:
+            control["thread"] = thread
+        thread.start()
+        control["ready_event"].set()
+        return {"pipeline_id": pid, "repair": persisted}
+    except BaseException as exc:
+        try:
+            _finish_pipeline_repair(
+                out_dir,
+                pid,
+                control,
+                status="failed",
+                phase="failed",
+                current=0,
+                total=(control.get("snapshot") or {}).get("total", 0),
+                message="Could not start repair",
+                error=str(exc),
+            )
+        except Exception:
+            traceback.print_exc()
+        with _pipeline_lock:
+            control["start_error"] = exc
+            if _pipeline_repairs.get(pid) is control:
+                _pipeline_repairs.pop(pid, None)
+        control["ready_event"].set()
+        _release_pipeline_operation(pid)
+        raise
+
+
+def cancel_pipeline_repair(out_dir: str, pid: str) -> Optional[dict]:
+    """Request cancellation and abort the repair's in-flight child job."""
+    with _pipeline_lock:
+        control = _pipeline_repairs.get(pid)
+        if not control:
+            return None
+
+    # A newly reserved repair has not persisted its operation snapshot yet.
+    # Wait outside both locks so the starter can publish (or fail), then
+    # revalidate the exact control below. The worker uses the same gate, so
+    # cancel never acts on an old/no repair record during this handshake.
+    ready_event = control.get("ready_event")
+    if ready_event is not None:
+        ready_event.wait()
+
+    with control["state_lock"]:
+        with _pipeline_lock:
+            current = _pipeline_repairs.get(pid)
+            if current is not control or current.get("finishing"):
+                return dict(control.get("snapshot") or {})
+            control["cancel_event"].set()
+            # Keep the registry lock through job selection and abort. Without
+            # this boundary the old repair could tear down, a successor could
+            # register the same pid, and this late abort would cancel the
+            # successor's child job instead.
+            _abort_pipeline_jobs(pid)
+        snapshot = _persist_repair_state_unlocked(
+            out_dir,
+            pid,
+            control,
+            status="cancelling",
+            message="Cancelling repair after the current model step",
+            cancel_requested=True,
+        )
+    return snapshot
 
 
 def init(jobs_dict, run_gen_fn, wgp_module, gen_lock=None, active_gen_states=None):
@@ -1290,19 +1902,20 @@ def _submit_and_wait(params: dict, timeout_s: float = 600, workspace: str = None
         "workspace": workspace,
         "out_dir": out_dir,
     }
-    _jobs[job_id] = job
     _dir_pid = params.get("_director_pipeline_id")
     _detached_operation = bool(params.get("_director_detached_operation"))
-    if _dir_pid and not _detached_operation:
-        with _pipeline_lock:
-            pipeline_cancelled = (
-                _pipelines.get(_dir_pid, {}).get("status") == "cancelled"
-            )
-        if pipeline_cancelled:
-            request_cancel(job)
+    _repair_operation_id = params.get("_director_repair_operation_id")
+    _skip_generation = False
 
     def _run_tracked_generation() -> None:
         try:
+            # A repair cancellation may win before this newly published
+            # child thread begins executing. Do not invoke generation for a
+            # detached repair child that registration already made terminal.
+            # Ordinary pipeline cancellation still enters _run_generation so
+            # its existing settle path can publish already-produced outputs.
+            if _skip_generation:
+                return
             _run_generation(job_id)
         finally:
             if _dir_pid:
@@ -1316,13 +1929,38 @@ def _submit_and_wait(params: dict, timeout_s: float = 600, workspace: str = None
     # Run generation in a separate thread (it acquires _gen_lock internally).
     # The child lease outlives this waiter if cancellation cannot settle
     # promptly, keeping destructive Dashboard actions away from a live writer.
-    if _dir_pid:
-        with _pipeline_lock:
-            _pipeline_child_jobs.setdefault(_dir_pid, set()).add(job_id)
-    # Non-daemon so the process stays alive if browser disconnects mid-generation
+    # Non-daemon so the process stays alive if browser disconnects mid-generation.
     thread = threading.Thread(target=_run_tracked_generation, daemon=False)
     try:
-        thread.start()
+        if _dir_pid:
+            # Publish, lease, recheck repair cancellation, and start under one
+            # registry boundary. If cancel scanned before this child existed,
+            # its operation-scoped event is observed here before generation;
+            # if it scans after, the job is already visible to that scan.
+            with _pipeline_lock:
+                _jobs[job_id] = job
+                _pipeline_child_jobs.setdefault(_dir_pid, set()).add(job_id)
+                if _detached_operation and _repair_operation_id:
+                    repair_control = _pipeline_repairs.get(_dir_pid)
+                    if (
+                        repair_control is not None
+                        and repair_control.get("operation_id")
+                            == _repair_operation_id
+                        and repair_control["cancel_event"].is_set()
+                    ):
+                        request_cancel(job)
+                        _skip_generation = True
+                elif not _detached_operation:
+                    pipeline_cancelled = (
+                        _pipelines.get(_dir_pid, {}).get("status")
+                        == "cancelled"
+                    )
+                    if pipeline_cancelled:
+                        request_cancel(job)
+                thread.start()
+        else:
+            _jobs[job_id] = job
+            thread.start()
     except BaseException:
         if _dir_pid:
             with _pipeline_lock:
