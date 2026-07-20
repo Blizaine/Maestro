@@ -108,6 +108,43 @@ class TestJobLifecycle(unittest.TestCase):
 
             self.assertEqual(outputs, ["clip-image.png"])
 
+    def test_relative_output_root_prefix_is_not_joined_twice(self):
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as work_dir:
+            out_dir = os.path.join(work_dir, "outputs")
+            os.makedirs(out_dir)
+            rooted_name = os.path.join("outputs", "rooted-image.jpg")
+            bare_name = "bare-image.jpg"
+            outside_name = os.path.join(work_dir, "outside-image.jpg")
+            for path in (
+                os.path.join(work_dir, rooted_name),
+                os.path.join(out_dir, bare_name),
+                outside_name,
+            ):
+                with open(path, "wb") as handle:
+                    handle.write(b"artifact")
+
+            try:
+                os.chdir(work_dir)
+                outputs = collect_job_outputs(
+                    {
+                        "artifact_list": [
+                            rooted_name,
+                            bare_name,
+                            outside_name,
+                        ],
+                    },
+                    "outputs",
+                    allow_legacy_fallback=False,
+                )
+            finally:
+                os.chdir(original_cwd)
+
+            self.assertEqual(
+                outputs,
+                ["rooted-image.jpg", "bare-image.jpg"],
+            )
+
     def test_director_job_never_uses_ambiguous_directory_fallback(self):
         with tempfile.TemporaryDirectory() as out_dir:
             with open(os.path.join(out_dir, "unrelated.png"), "wb") as handle:

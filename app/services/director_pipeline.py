@@ -310,6 +310,7 @@ def _save_pipeline_state_locked(pid: str) -> bool:
             "start_image_filename": clip_images[i] if i < len(clip_images) else None,
             "keyframe_filenames": (p.get("_clip_keyframes", []) or [])[i] if i < len(p.get("_clip_keyframes", [])) else [],
             "video_filename": clip_videos[i] if i < len(clip_videos) else None,
+            "video_stale": False,
             "tag": (p.get("_clip_tags", []) or [])[i] if i < len(p.get("_clip_tags", [])) else None,
             "image_gen_time_sec": clip_timings.get(f"image_{i}"),
             "video_gen_time_sec": clip_timings.get(f"video_{i}"),
@@ -325,6 +326,14 @@ def _save_pipeline_state_locked(pid: str) -> bool:
         "pipeline_type": params.get("pipeline_type", "music_video"),
         "scene_description": params.get("scene_description", ""),
         "reference_image_path": params.get("reference_image_path"),
+        # A no-reference run creates its own visual anchor inside the output
+        # directory.  Keep the basename separate from the user's input path so
+        # reruns and resume can reuse it without pretending the user uploaded
+        # a reference image.
+        "generated_reference_image_filename": (
+            params.get("generated_reference_image_filename")
+            or p.get("generated_reference_image_filename")
+        ),
         "character_ref_paths": params.get("character_ref_paths", []),
         "location_ref_paths": params.get("location_ref_paths", []),
         "auto_mode": params.get("auto_mode", True),
@@ -434,6 +443,52 @@ def _backfill_clip_video_filenames(state: dict, state_dir: str) -> dict:
     return state
 
 
+def _invalid_saved_media_numbers(
+    filenames: list,
+    expected_count: int,
+    output_dir: str,
+) -> list[int]:
+    """Return 1-based slots without a valid direct-child media file."""
+    output_root = os.path.realpath(os.path.abspath(output_dir))
+    normalized_root = os.path.normcase(output_root)
+    invalid = []
+    for index in range(expected_count):
+        filename = filenames[index] if index < len(filenames) else ""
+        if (
+            not isinstance(filename, str)
+            or not filename
+            or os.path.basename(filename) != filename
+        ):
+            invalid.append(index + 1)
+            continue
+        candidate = os.path.realpath(os.path.join(output_root, filename))
+        if (
+            os.path.normcase(os.path.dirname(candidate)) != normalized_root
+            or not os.path.isfile(candidate)
+        ):
+            invalid.append(index + 1)
+    return invalid
+
+
+def _require_video_start_images(
+    clip_images: list,
+    clip_count: int,
+    output_dir: str,
+) -> None:
+    """Stop the video phase rather than silently falling back to T2V."""
+    invalid = _invalid_saved_media_numbers(
+        clip_images, clip_count, output_dir,
+    )
+    if not invalid:
+        return
+    invalid_labels = ", ".join(str(index) for index in invalid)
+    raise RuntimeError(
+        "Start-image generation did not produce valid recorded files for "
+        f"shot(s) {invalid_labels}; video generation was not started. "
+        "Use the Dashboard to regenerate the missing images."
+    )
+
+
 def load_pipeline_state(out_dir: str, pid: str) -> Optional[dict]:
     """Load a saved state while serialized against deletion/replacement."""
     with _pipeline_file_lock:
@@ -517,7 +572,9 @@ def _update_saved_pipeline_locked(out_dir: str, pid: str, updater) -> Optional[d
     if not filepath:
         return None
     with open(filepath, "r", encoding="utf-8") as f:
-        state = json.load(f)
+        state = _backfill_clip_video_filenames(
+            json.load(f), os.path.dirname(filepath),
+        )
     updater(state)
     _write_pipeline_json_unlocked(filepath, state)
     return state
@@ -793,32 +850,70 @@ def rerun_clip_image(out_dir: str, pid: str, clip_index: int, prompt_override: s
     image_model = state.get("image_model") or "flux2_klein_9b"
     image_loras = state.get("image_loras") or {}
     image_params = state.get("image_params") or {}
-    ref_path = state.get("reference_image_path") or ""
+
+    # Determine the output directory before resolving the generated anchor:
+    # unlike the user's upload path, that anchor is stored as a basename in
+    # the pipeline workspace so saved pipelines remain portable.
+    pipeline_file = _find_pipeline_file(out_dir, pid)
+    clip_out_dir = os.path.dirname(pipeline_file) if pipeline_file else out_dir
+
+    user_ref_path = state.get("reference_image_path") or ""
+    ref_path = user_ref_path if os.path.isfile(user_ref_path) else ""
+    persisted_anchor = state.get("generated_reference_image_filename") or ""
+    anchor_to_persist = ""
+    if (
+        not ref_path
+        and persisted_anchor
+        and os.path.basename(persisted_anchor) == persisted_anchor
+    ):
+        candidate = os.path.join(clip_out_dir, persisted_anchor)
+        if os.path.isfile(candidate):
+            ref_path = candidate
+
+    # Backward-compatible recovery for pipelines saved before generated
+    # anchors were persisted: a valid first clip image is the safest visual
+    # identity reference available.
+    if not ref_path:
+        for saved_clip in clips:
+            saved_start = saved_clip.get("start_image_filename") or ""
+            if not saved_start or os.path.basename(saved_start) != saved_start:
+                continue
+            candidate = os.path.join(clip_out_dir, saved_start)
+            if os.path.isfile(candidate):
+                ref_path = candidate
+                anchor_to_persist = saved_start
+                break
 
     # Build refs: main + character + location
     all_refs = []
-    if ref_path and os.path.isfile(ref_path):
+    seen_refs = set()
+    if ref_path:
+        resolved_ref = os.path.normcase(os.path.realpath(ref_path))
+        seen_refs.add(resolved_ref)
         all_refs.append(ref_path)
     for cp in (state.get("character_ref_paths") or []):
-        if cp and os.path.isfile(cp):
+        resolved = os.path.normcase(os.path.realpath(cp)) if cp else ""
+        if cp and os.path.isfile(cp) and resolved not in seen_refs:
+            seen_refs.add(resolved)
             all_refs.append(cp)
     for lp in (state.get("location_ref_paths") or []):
-        if lp and os.path.isfile(lp):
+        resolved = os.path.normcase(os.path.realpath(lp)) if lp else ""
+        if lp and os.path.isfile(lp) and resolved not in seen_refs:
+            seen_refs.add(resolved)
             all_refs.append(lp)
-
-    # Determine the output directory from where the pipeline file lives
-    pipeline_file = _find_pipeline_file(out_dir, pid)
-    clip_out_dir = os.path.dirname(pipeline_file) if pipeline_file else out_dir
 
     gen_params = {
         "model_type": image_model,
         "prompt": prompt,
-        "image_refs": all_refs if all_refs else [ref_path],
+        "image_refs": all_refs,
         "image_mode": 1,
         "image_prompt_type": "",
         "num_inference_steps": image_params.get("num_inference_steps", 8),
         "guidance_scale": image_params.get("guidance_scale", 1),
-        "video_prompt_type": "KI",
+        # A legacy no-reference pipeline must bootstrap with plain T2I.  Once
+        # this image is saved below it becomes the durable anchor for every
+        # later clip rerun.
+        "video_prompt_type": "KI" if all_refs else "",
         "resolution": image_params.get("resolution", "1280x720"),
         "seed": -1,
         "settings_version": 2.52,
@@ -837,13 +932,33 @@ def rerun_clip_image(out_dir: str, pid: str, clip_index: int, prompt_override: s
     output_files = _submit_and_wait(gen_params, timeout_s=600, out_dir=clip_out_dir)
     new_filename = output_files[0] if output_files else ""
 
-    if new_filename:
-        # Update the saved pipeline state
-        def _update(s):
-            s["clips"][clip_index]["start_image_filename"] = new_filename
-            if prompt_override:
-                s["clips"][clip_index]["image_prompt"] = prompt_override
-        _update_saved_pipeline(out_dir, pid, _update)
+    if not new_filename:
+        raise RuntimeError(
+            "Start-image generation completed without a recorded output."
+        )
+
+    if not ref_path:
+        anchor_to_persist = new_filename
+
+    # Update the saved pipeline state
+    def _update(s):
+        s["clips"][clip_index]["start_image_filename"] = new_filename
+        # A video generated from the previous start image is still useful
+        # history, but it no longer represents this clip's current inputs.
+        # Keep its filename for playback/ownership and mark it for regeneration.
+        s["clips"][clip_index]["video_stale"] = bool(
+            s["clips"][clip_index].get("video_filename")
+        )
+        if prompt_override:
+            s["clips"][clip_index]["image_prompt"] = prompt_override
+        if anchor_to_persist:
+            s["generated_reference_image_filename"] = anchor_to_persist
+            snapshot = s.get("_params_snapshot")
+            if isinstance(snapshot, dict):
+                snapshot["generated_reference_image_filename"] = (
+                    anchor_to_persist
+                )
+    _update_saved_pipeline(out_dir, pid, _update)
 
     return {"filename": new_filename, "clip_index": clip_index}
 
@@ -892,8 +1007,12 @@ def rerun_clip_video(out_dir: str, pid: str, clip_index: int, prompt_override: s
 
     # Build start image path
     start_img = clip.get("start_image_filename")
-    start_path = os.path.join(clip_out_dir, start_img) if start_img else ""
-    has_start = start_path and os.path.isfile(start_path)
+    if _invalid_saved_media_numbers([start_img], 1, clip_out_dir):
+        raise ValueError(
+            "This clip has no valid start image. Regenerate its start image "
+            "before regenerating video."
+        )
+    start_path = os.path.join(clip_out_dir, start_img)
 
     # Use planned_clip for duration
     planned = clip.get("planned_clip") or {}
@@ -907,7 +1026,7 @@ def rerun_clip_video(out_dir: str, pid: str, clip_index: int, prompt_override: s
         "model_type": video_model,
         "prompt": prompt,
         "image_mode": 0,
-        "image_prompt_type": "S" if has_start else "",
+        "image_prompt_type": "S",
         "num_inference_steps": video_params.get("num_inference_steps", 8),
         "guidance_scale": video_params.get("guidance_scale", 1),
         "resolution": video_params.get("resolution", "1280x720"),
@@ -933,8 +1052,7 @@ def rerun_clip_video(out_dir: str, pid: str, clip_index: int, prompt_override: s
         "_director_pipeline_id": pid,
         "_director_detached_operation": True,
     }
-    if has_start:
-        gen_params["image_start"] = start_path
+    gen_params["image_start"] = start_path
 
     # Soundtrack conditioning. The original pipeline run passes the FULL
     # song as audio_guide (audio_prompt_type "A") and wgp slices it across
@@ -983,12 +1101,19 @@ def rerun_clip_video(out_dir: str, pid: str, clip_index: int, prompt_override: s
     # a 5s preview of a 13s clip.
     new_filename = output_files[-1] if output_files else ""
 
-    if new_filename:
-        def _update(s):
-            s["clips"][clip_index]["video_filename"] = new_filename
-            if prompt_override:
-                s["clips"][clip_index]["video_prompt"] = prompt_override
-        _update_saved_pipeline(out_dir, pid, _update)
+    if not new_filename:
+        raise RuntimeError(
+            "Video generation completed without a recorded output."
+        )
+
+    def _update(s):
+        s["clips"][clip_index]["video_filename"] = new_filename
+        s["clips"][clip_index]["video_stale"] = False
+        if new_filename not in s.get("output_files", []):
+            s.setdefault("output_files", []).append(new_filename)
+        if prompt_override:
+            s["clips"][clip_index]["video_prompt"] = prompt_override
+    _update_saved_pipeline(out_dir, pid, _update)
 
     return {"filename": new_filename, "clip_index": clip_index}
 
@@ -1004,13 +1129,49 @@ def rejoin_clips(out_dir: str, pid: str) -> dict:
     clip_out_dir = os.path.dirname(pipeline_file) if pipeline_file else out_dir
 
     clips = state.get("clips", [])
-    video_files = []
-    for clip in clips:
-        vf = clip.get("video_filename")
-        if vf:
-            full_path = os.path.join(clip_out_dir, vf)
-            if os.path.isfile(full_path):
-                video_files.append(full_path)
+    stale_clip_numbers = [
+        str(index + 1)
+        for index, clip in enumerate(clips)
+        if clip.get("video_stale")
+    ]
+    if stale_clip_numbers:
+        raise ValueError(
+            "Regenerate stale video clip(s) "
+            f"{', '.join(stale_clip_numbers)} before rejoining."
+        )
+
+    invalid_start_numbers = _invalid_saved_media_numbers(
+        [clip.get("start_image_filename") for clip in clips],
+        len(clips),
+        clip_out_dir,
+    )
+    if invalid_start_numbers:
+        invalid_labels = ", ".join(
+            str(index) for index in invalid_start_numbers
+        )
+        raise ValueError(
+            "Regenerate missing or invalid start image(s) for clip(s) "
+            f"{invalid_labels} before rejoining."
+        )
+
+    invalid_video_numbers = _invalid_saved_media_numbers(
+        [clip.get("video_filename") for clip in clips],
+        len(clips),
+        clip_out_dir,
+    )
+    if invalid_video_numbers:
+        invalid_labels = ", ".join(
+            str(index) for index in invalid_video_numbers
+        )
+        raise ValueError(
+            "Regenerate missing or invalid video clip(s) "
+            f"{invalid_labels} before rejoining."
+        )
+
+    video_files = [
+        os.path.join(clip_out_dir, clip["video_filename"])
+        for clip in clips
+    ]
 
     if len(video_files) < 2:
         raise ValueError(f"Need at least 2 video clips to rejoin, found {len(video_files)}")
@@ -1298,6 +1459,11 @@ def _start_pipeline_worker(pid: str, *, resume: bool = False) -> None:
 def start_pipeline(params: dict) -> str:
     """Start a new director pipeline. Returns pipeline_id."""
     pid = uuid.uuid4().hex[:8]
+
+    # Internal resume metadata must never be accepted from a fresh API request.
+    # Otherwise a caller could nominate unrelated workspace media as this
+    # pipeline's generated anchor and later influence repair/cleanup behavior.
+    params.pop("generated_reference_image_filename", None)
 
     # Capture workspace at submission time — not at execution time
     workspace = params.pop("workspace", None)
@@ -1770,6 +1936,10 @@ def _run_pipeline(pid: str, resume: bool = False):
         if _pipelines[pid]["status"] == "cancelled":
             return
 
+        _require_video_start_images(
+            clip_images, len(clip_plans), pipeline_out_dir,
+        )
+
         # In non-auto mode, pause for image review
         if not auto_mode:
             _update_pipeline(pid, status="paused", pause_reason="review_images",
@@ -1777,6 +1947,13 @@ def _run_pipeline(pid: str, resume: bool = False):
             _wait_for_resume(pid)
             if _pipelines[pid]["status"] == "cancelled":
                 return
+
+            # Review can be open for hours; a gallery cleanup or manual rename
+            # during that pause must not silently turn a planned I2V shot into
+            # unconditioned T2V.
+            _require_video_start_images(
+                clip_images, len(clip_plans), pipeline_out_dir,
+            )
 
         # ── Phase 3: Generate Video ─────────────────────────────────────
         _update_pipeline(pid, phase="generating_video",
@@ -2387,12 +2564,34 @@ def _run_image_generation(pid: str, params: dict, clip_plans: list[dict], out_di
     film_grain_intensity = params.get("image_film_grain_intensity", 0)
     film_grain_saturation = params.get("image_film_grain_saturation", 0.5)
 
-    # Build full refs list: main scene + character refs + location refs
-    extra_refs = [p for p in (character_ref_paths + location_ref_paths) if p and os.path.isfile(p)]
-    print(f"[Pipeline {pid}] Image refs: main={ref_image_path}, chars={len(character_ref_paths)}, locs={len(location_ref_paths)}, extra_valid={len(extra_refs)}")
-
     if not out_dir:
         out_dir = _wgp.save_path
+
+    # Resume and Dashboard repairs can carry a generated anchor even though
+    # the user-facing reference path is intentionally still empty.
+    if not (ref_image_path and os.path.isfile(ref_image_path)):
+        generated_anchor = params.get(
+            "generated_reference_image_filename", "",
+        )
+        if (
+            generated_anchor
+            and os.path.basename(generated_anchor) == generated_anchor
+        ):
+            generated_anchor_path = os.path.join(out_dir, generated_anchor)
+            if os.path.isfile(generated_anchor_path):
+                ref_image_path = generated_anchor_path
+
+    # Build full refs list: main scene + character refs + location refs. Keep
+    # character and location refs separate so a generated identity anchor can
+    # use the former without allowing location imagery to dominate the cast.
+    valid_character_refs = [
+        p for p in character_ref_paths if p and os.path.isfile(p)
+    ]
+    valid_location_refs = [
+        p for p in location_ref_paths if p and os.path.isfile(p)
+    ]
+    extra_refs = valid_character_refs + valid_location_refs
+    print(f"[Pipeline {pid}] Image refs: main={ref_image_path}, chars={len(character_ref_paths)}, locs={len(location_ref_paths)}, extra_valid={len(extra_refs)}")
 
     # Count total images to generate (start images + keyframes)
     total_images = len(clip_plans)
@@ -2411,7 +2610,12 @@ def _run_image_generation(pid: str, params: dict, clip_plans: list[dict], out_di
     # regardless of whether the planner remembered to name the medium.
     _style_prefix = _style_prefix_for(params.get("_reference_style") or "")
 
-    def _gen_image(prompt: str, source_ref: str, include_extra_refs: bool = True) -> str:
+    def _gen_image(
+        prompt: str,
+        source_ref: str,
+        include_extra_refs: bool = True,
+        supplemental_refs: Optional[list[str]] = None,
+    ) -> str:
         """Generate a single image using source_ref + optional extra refs."""
         nonlocal image_count
         _pre_strip = prompt
@@ -2420,7 +2624,21 @@ def _run_image_generation(pid: str, params: dict, clip_plans: list[dict], out_di
             print(f"[Pipeline {pid}] Stripped motion-effect language from image prompt")
         if _style_prefix and not prompt.lower().startswith("maintain the same"):
             prompt = _style_prefix + prompt
-        all_refs = [r for r in ([source_ref] + (extra_refs if include_extra_refs else [])) if r]
+        all_refs = []
+        seen_refs = set()
+        selected_extra_refs = (
+            extra_refs if supplemental_refs is None else supplemental_refs
+        )
+        for candidate in [source_ref] + (
+            selected_extra_refs if include_extra_refs else []
+        ):
+            if not candidate or not os.path.isfile(candidate):
+                continue
+            resolved = os.path.normcase(os.path.realpath(candidate))
+            if resolved in seen_refs:
+                continue
+            seen_refs.add(resolved)
+            all_refs.append(candidate)
         print(f"[Pipeline {pid}] _gen_image: {len(all_refs)} refs: {[os.path.basename(r) for r in all_refs]}")
         gen_params: dict = {
             "model_type": image_model,
@@ -2450,8 +2668,12 @@ def _run_image_generation(pid: str, params: dict, clip_plans: list[dict], out_di
             gen_params["film_grain_saturation"] = film_grain_saturation
 
         output_files = _submit_and_wait(gen_params, timeout_s=600, workspace=workspace, out_dir=out_dir)
+        if not output_files or not output_files[0]:
+            raise RuntimeError(
+                "Image generation completed without a recorded output."
+            )
         image_count += 1
-        return output_files[0] if output_files else ""
+        return output_files[0]
 
     # If no reference image was provided, generate a single establishing /
     # "anchor" image from the scene description and adopt it as the shared
@@ -2459,7 +2681,52 @@ def _run_image_generation(pid: str, params: dict, clip_plans: list[dict], out_di
     # each being generated independently with no visual through-line.
     if not (ref_image_path and os.path.isfile(ref_image_path)):
         scene_desc = (params.get("scene_description") or "").strip()
-        anchor_prompt = scene_desc or (clip_plans[0].get("image_prompt", "") if clip_plans else "") or "cinematic establishing shot"
+        first_shot_prompt = (
+            clip_plans[0].get("image_prompt", "") if clip_plans else ""
+        ).strip()
+        anchor_subject = first_shot_prompt or scene_desc or (
+            "cinematic establishing shot"
+        )
+        anchor_prompt = (
+            "Create a definitive cinematic character anchor for visual "
+            "continuity. Clearly establish the recurring subject or people, "
+            "especially faces, hair, wardrobe, body attributes, and overall "
+            f"design. {anchor_subject}"
+        )
+        character_profiles = []
+        for character in params.get("characters", []) or []:
+            if not isinstance(character, dict):
+                continue
+            name = str(
+                character.get("name")
+                or character.get("display_name")
+                or ""
+            ).strip()
+            description = str(
+                character.get("description")
+                or character.get("physical_description")
+                or character.get("visual_description")
+                or ""
+            ).strip()
+            wardrobe = str(character.get("wardrobe") or "").strip()
+            profile = ": ".join(part for part in (name, description) if part)
+            if wardrobe:
+                profile = f"{profile}; wardrobe: {wardrobe}" if profile else wardrobe
+            if profile:
+                character_profiles.append(profile)
+        if character_profiles:
+            anchor_prompt += (
+                " Recurring character profiles: "
+                + " | ".join(character_profiles)
+                + "."
+            )
+        if valid_character_refs:
+            anchor_prompt += (
+                " Use the provided character reference image(s) as the "
+                "definitive identity and appearance source."
+            )
+        if scene_desc and scene_desc.lower() not in anchor_subject.lower():
+            anchor_prompt += f" Project concept: {scene_desc}"
         total_images += 1
         _update_pipeline(pid, progress={
             "current": 0,
@@ -2468,11 +2735,28 @@ def _run_image_generation(pid: str, params: dict, clip_plans: list[dict], out_di
             "step": 0, "total_steps": 0,
         })
         print(f"[Pipeline {pid}] No reference image — generating establishing/anchor image first.")
-        anchor_file = _gen_image(anchor_prompt, "", include_extra_refs=False)
-        anchor_path = os.path.join(out_dir, anchor_file) if anchor_file else ""
-        if anchor_path and os.path.isfile(anchor_path):
-            ref_image_path = anchor_path
-            print(f"[Pipeline {pid}] Adopted establishing image as shared reference: {anchor_file}")
+        anchor_file = _gen_image(
+            anchor_prompt,
+            "",
+            supplemental_refs=valid_character_refs,
+        )
+        anchor_path = os.path.realpath(os.path.join(out_dir, anchor_file))
+        output_root = os.path.realpath(os.path.abspath(out_dir))
+        if (
+            os.path.normcase(os.path.dirname(anchor_path))
+                != os.path.normcase(output_root)
+            or not os.path.isfile(anchor_path)
+        ):
+            raise RuntimeError(
+                "The generated Director anchor could not be found in the "
+                "pipeline output directory; video generation was not started."
+            )
+        ref_image_path = anchor_path
+        params["generated_reference_image_filename"] = anchor_file
+        _update_pipeline(
+            pid, generated_reference_image_filename=anchor_file,
+        )
+        print(f"[Pipeline {pid}] Adopted establishing image as shared reference: {anchor_file}")
 
     for i, plan in enumerate(clip_plans):
         if _pipelines[pid]["status"] == "cancelled":

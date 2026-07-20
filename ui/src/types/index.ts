@@ -783,6 +783,7 @@ export interface PipelineClipState {
   start_image_filename: string | null
   keyframe_filenames: string[]
   video_filename: string | null
+  video_stale?: boolean
   tag: 'good' | 'needs_work' | null
   image_gen_time_sec: number | null
   video_gen_time_sec: number | null

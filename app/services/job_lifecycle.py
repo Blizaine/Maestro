@@ -70,17 +70,37 @@ def collect_job_outputs(
                 value = value[0] if value else None
             if not isinstance(value, str) or not value:
                 continue
-            candidate = value
-            if not os.path.isabs(candidate):
-                candidate = os.path.join(out_dir, candidate)
-            candidate = os.path.realpath(os.path.abspath(candidate))
-            if os.path.normcase(os.path.dirname(candidate)) != output_root:
+            # WGP registers both bare filenames (``clip.jpg``) and paths that
+            # are already rooted at a relative output directory
+            # (``outputs/clip.jpg``).  Blindly joining every relative value to
+            # ``out_dir`` turns the latter into ``outputs/outputs/clip.jpg``
+            # and silently loses the generated artifact.  Try the two exact
+            # interpretations, accepting only an existing direct child of the
+            # resolved output root so the ownership boundary remains strict.
+            candidates = [value] if os.path.isabs(value) else [
+                value,
+                os.path.join(out_dir, value),
+            ]
+            candidate = None
+            checked: set[str] = set()
+            for registered_path in candidates:
+                resolved = os.path.realpath(os.path.abspath(registered_path))
+                normalized = os.path.normcase(resolved)
+                if normalized in checked:
+                    continue
+                checked.add(normalized)
+                if (
+                    os.path.normcase(os.path.dirname(resolved)) == output_root
+                    and os.path.isfile(resolved)
+                ):
+                    candidate = resolved
+                    break
+            if candidate is None:
                 continue
             filename = os.path.basename(candidate)
             if (
                 filename.startswith("_continuation_")
                 or filename in seen
-                or not os.path.isfile(candidate)
             ):
                 continue
             seen.add(filename)

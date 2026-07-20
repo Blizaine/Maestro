@@ -467,6 +467,536 @@ class TestDirectorCancellation(unittest.TestCase):
 
         self.assertEqual(submit.call_count, 2)
 
+    def test_no_reference_run_persists_anchor_and_conditions_every_start(self):
+        pid = "pipe-generated-anchor"
+        record = self._add_pipeline(pid, "running")
+        params = {
+            "scene_description": "A singer performs beneath neon lights",
+            "image_model": "flux2_klein_9b",
+        }
+        record["params"] = params
+        plans = [
+            {"image_prompt": "wide portrait of the singer"},
+            {"image_prompt": "close portrait of the same singer"},
+        ]
+        generated = iter(["anchor.jpg", "shot-1.jpg", "shot-2.jpg"])
+        submitted: list[dict] = []
+
+        def fake_submit(gen_params, **_kwargs):
+            submitted.append({
+                **gen_params,
+                "image_refs": list(gen_params.get("image_refs") or []),
+            })
+            filename = next(generated)
+            with open(os.path.join(self.temp_dir.name, filename), "wb") as f:
+                f.write(b"image")
+            return [filename]
+
+        with patch.object(
+            pipeline, "_submit_and_wait", side_effect=fake_submit,
+        ):
+            clip_images, clip_keyframes = pipeline._run_image_generation(
+                pid, params, plans, out_dir=self.temp_dir.name,
+            )
+
+        anchor_path = os.path.realpath(
+            os.path.join(self.temp_dir.name, "anchor.jpg"),
+        )
+        self.assertEqual(clip_images, ["shot-1.jpg", "shot-2.jpg"])
+        self.assertEqual(clip_keyframes, [[], []])
+        self.assertEqual(len(submitted), 3)
+        self.assertEqual(submitted[0]["image_refs"], [])
+        self.assertEqual(submitted[0]["video_prompt_type"], "")
+        self.assertIn("definitive cinematic character anchor", submitted[0]["prompt"])
+        for request in submitted[1:]:
+            self.assertEqual(request["image_refs"], [anchor_path])
+            self.assertEqual(request["video_prompt_type"], "KI")
+        self.assertEqual(
+            params["generated_reference_image_filename"], "anchor.jpg",
+        )
+
+        record["clip_plans"] = plans
+        record["clip_images"] = clip_images
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+        saved = pipeline.load_pipeline_state(self.temp_dir.name, pid)
+        self.assertEqual(
+            saved["generated_reference_image_filename"], "anchor.jpg",
+        )
+        self.assertEqual(
+            [clip["start_image_filename"] for clip in saved["clips"]],
+            clip_images,
+        )
+
+    def test_generated_anchor_uses_character_refs_and_profiles_not_locations(self):
+        pid = "pipe-character-anchor"
+        self._add_pipeline(pid, "running")
+        character_ref = os.path.join(self.temp_dir.name, "character.jpg")
+        location_ref = os.path.join(self.temp_dir.name, "location.jpg")
+        for path in (character_ref, location_ref):
+            with open(path, "wb") as handle:
+                handle.write(b"image")
+        params = {
+            "scene_description": "An empty moonlit train platform",
+            "image_model": "flux2_klein_9b",
+            "character_ref_paths": [character_ref],
+            "location_ref_paths": [location_ref],
+            "characters": [{
+                "name": "Mara",
+                "description": "a tall woman with silver braids",
+            }],
+        }
+        plans = [{"image_prompt": "wide view of the empty platform"}]
+        submitted: list[dict] = []
+
+        def fake_submit(gen_params, **_kwargs):
+            submitted.append({
+                **gen_params,
+                "image_refs": list(gen_params.get("image_refs") or []),
+            })
+            filename = "anchor.jpg" if len(submitted) == 1 else "shot.jpg"
+            with open(os.path.join(self.temp_dir.name, filename), "wb") as handle:
+                handle.write(b"image")
+            return [filename]
+
+        with patch.object(
+            pipeline, "_submit_and_wait", side_effect=fake_submit,
+        ):
+            pipeline._run_image_generation(
+                pid, params, plans, out_dir=self.temp_dir.name,
+            )
+
+        anchor_path = os.path.join(self.temp_dir.name, "anchor.jpg")
+        self.assertEqual(submitted[0]["image_refs"], [character_ref])
+        self.assertNotIn(location_ref, submitted[0]["image_refs"])
+        self.assertIn(
+            "Mara: a tall woman with silver braids", submitted[0]["prompt"],
+        )
+        self.assertIn(
+            "definitive identity and appearance source", submitted[0]["prompt"],
+        )
+        self.assertEqual(
+            submitted[1]["image_refs"],
+            [anchor_path, character_ref, location_ref],
+        )
+
+    def test_user_reference_skips_generated_anchor(self):
+        pid = "pipe-user-reference"
+        self._add_pipeline(pid, "running")
+        reference_path = os.path.join(self.temp_dir.name, "user-ref.jpg")
+        with open(reference_path, "wb") as handle:
+            handle.write(b"image")
+        params = {
+            "reference_image_path": reference_path,
+            "image_model": "flux2_klein_9b",
+        }
+        plans = [
+            {"image_prompt": "first shot"},
+            {"image_prompt": "second shot"},
+        ]
+        generated = iter(["shot-1.jpg", "shot-2.jpg"])
+        submitted: list[dict] = []
+
+        def fake_submit(gen_params, **_kwargs):
+            submitted.append({
+                **gen_params,
+                "image_refs": list(gen_params.get("image_refs") or []),
+            })
+            filename = next(generated)
+            with open(os.path.join(self.temp_dir.name, filename), "wb") as f:
+                f.write(b"image")
+            return [filename]
+
+        with patch.object(
+            pipeline, "_submit_and_wait", side_effect=fake_submit,
+        ):
+            clip_images, _ = pipeline._run_image_generation(
+                pid, params, plans, out_dir=self.temp_dir.name,
+            )
+
+        self.assertEqual(clip_images, ["shot-1.jpg", "shot-2.jpg"])
+        self.assertEqual(len(submitted), 2)
+        for request in submitted:
+            self.assertEqual(request["image_refs"], [reference_path])
+            self.assertEqual(request["video_prompt_type"], "KI")
+        self.assertNotIn("generated_reference_image_filename", params)
+
+    def test_reference_free_rerun_bootstraps_and_reuses_saved_anchor(self):
+        pid = "pipe-rerun-anchor"
+        record = self._add_pipeline(pid, "completed")
+        record["params"] = {
+            "pipeline_type": "music_video",
+            "image_model": "flux2_klein_9b",
+        }
+        record["clip_plans"] = [
+            {"image_prompt": "first portrait", "video_prompt": "first motion"},
+            {"image_prompt": "second portrait", "video_prompt": "second motion"},
+        ]
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+        generated = iter(["bootstrap.jpg", "second.jpg"])
+        submitted: list[dict] = []
+
+        def fake_submit(gen_params, **_kwargs):
+            submitted.append({
+                **gen_params,
+                "image_refs": list(gen_params.get("image_refs") or []),
+            })
+            filename = next(generated)
+            with open(os.path.join(self.temp_dir.name, filename), "wb") as f:
+                f.write(b"image")
+            return [filename]
+
+        with patch.object(
+            pipeline, "_submit_and_wait", side_effect=fake_submit,
+        ):
+            pipeline.rerun_clip_image(self.temp_dir.name, pid, 0)
+            pipeline.rerun_clip_image(self.temp_dir.name, pid, 1)
+
+        bootstrap_path = os.path.join(self.temp_dir.name, "bootstrap.jpg")
+        self.assertEqual(submitted[0]["image_refs"], [])
+        self.assertEqual(submitted[0]["video_prompt_type"], "")
+        self.assertEqual(submitted[1]["image_refs"], [bootstrap_path])
+        self.assertEqual(submitted[1]["video_prompt_type"], "KI")
+        saved = pipeline.load_pipeline_state(self.temp_dir.name, pid)
+        self.assertEqual(
+            saved["generated_reference_image_filename"], "bootstrap.jpg",
+        )
+        self.assertEqual(
+            [clip["start_image_filename"] for clip in saved["clips"]],
+            ["bootstrap.jpg", "second.jpg"],
+        )
+        self.assertEqual(
+            saved["_params_snapshot"]["generated_reference_image_filename"],
+            "bootstrap.jpg",
+        )
+
+    def test_image_rerun_marks_video_stale_until_video_is_replaced(self):
+        pid = "pipe-stale-video"
+        record = self._add_pipeline(pid, "completed")
+        record["params"] = {
+            "pipeline_type": "music_video",
+            "image_model": "flux2_klein_9b",
+            "video_model": "ltx2_22B_distilled_1_1",
+        }
+        record["clip_plans"] = [{
+            "image_prompt": "new portrait", "video_prompt": "new motion",
+        }]
+        record["clip_images"] = ["old-start.jpg"]
+        record["_clip_video_files"] = ["old-video.mp4"]
+        record["output_files"] = ["old-video.mp4"]
+        for filename in ("old-start.jpg", "old-video.mp4"):
+            with open(os.path.join(self.temp_dir.name, filename), "wb") as f:
+                f.write(b"media")
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+
+        def replace_image(_gen_params, **_kwargs):
+            with open(
+                os.path.join(self.temp_dir.name, "new-start.jpg"), "wb",
+            ) as handle:
+                handle.write(b"image")
+            return ["new-start.jpg"]
+
+        with patch.object(
+            pipeline, "_submit_and_wait", side_effect=replace_image,
+        ):
+            pipeline.rerun_clip_image(self.temp_dir.name, pid, 0)
+
+        saved = pipeline.load_pipeline_state(self.temp_dir.name, pid)
+        self.assertEqual(saved["clips"][0]["video_filename"], "old-video.mp4")
+        self.assertTrue(saved["clips"][0]["video_stale"])
+
+        with patch.object(
+            pipeline, "_submit_and_wait", return_value=["new-video.mp4"],
+        ):
+            pipeline.rerun_clip_video(self.temp_dir.name, pid, 0)
+
+        saved = pipeline.load_pipeline_state(self.temp_dir.name, pid)
+        self.assertEqual(saved["clips"][0]["video_filename"], "new-video.mp4")
+        self.assertFalse(saved["clips"][0]["video_stale"])
+        self.assertEqual(
+            saved["output_files"],
+            ["old-video.mp4", "new-video.mp4"],
+        )
+
+    def test_image_rerun_marks_backfilled_legacy_video_stale(self):
+        pid = "pipe-legacy-image-rerun"
+        record = self._add_pipeline(pid, "completed")
+        record["params"].update({
+            "seamless": False,
+            "image_model": "flux2_klein_9b",
+        })
+        record["clip_plans"] = [{
+            "image_prompt": "new portrait", "video_prompt": "old motion",
+        }]
+        record["clip_images"] = ["old-start.jpg"]
+        record["output_files"] = ["old-video.mp4"]
+        for filename in ("old-start.jpg", "old-video.mp4"):
+            with open(os.path.join(self.temp_dir.name, filename), "wb") as handle:
+                handle.write(b"media")
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+
+        state_path = pipeline._find_pipeline_file(self.temp_dir.name, pid)
+        with open(state_path, "r", encoding="utf-8") as handle:
+            raw_state = json.load(handle)
+        raw_state["clips"][0]["video_filename"] = None
+        with open(state_path, "w", encoding="utf-8") as handle:
+            json.dump(raw_state, handle)
+
+        def replace_image(_gen_params, **_kwargs):
+            with open(
+                os.path.join(self.temp_dir.name, "new-start.jpg"), "wb",
+            ) as handle:
+                handle.write(b"image")
+            return ["new-start.jpg"]
+
+        with patch.object(
+            pipeline, "_submit_and_wait", side_effect=replace_image,
+        ):
+            pipeline.rerun_clip_image(self.temp_dir.name, pid, 0)
+
+        saved = pipeline.load_pipeline_state(self.temp_dir.name, pid)
+        self.assertEqual(saved["clips"][0]["video_filename"], "old-video.mp4")
+        self.assertTrue(saved["clips"][0]["video_stale"])
+
+    def test_video_rerun_preserves_other_backfilled_legacy_clip_mappings(self):
+        pid = "pipe-legacy-video-rerun"
+        record = self._add_pipeline(pid, "completed")
+        record["params"].update({
+            "seamless": False,
+            "video_model": "ltx2_22B_distilled_1_1",
+        })
+        record["clip_plans"] = [
+            {"image_prompt": "one", "video_prompt": "motion one"},
+            {"image_prompt": "two", "video_prompt": "motion two"},
+        ]
+        record["clip_images"] = ["start-one.jpg", "start-two.jpg"]
+        record["output_files"] = ["old-one.mp4", "old-two.mp4"]
+        for filename in (
+            "start-one.jpg", "start-two.jpg", "old-one.mp4", "old-two.mp4",
+        ):
+            with open(os.path.join(self.temp_dir.name, filename), "wb") as handle:
+                handle.write(b"media")
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+
+        state_path = pipeline._find_pipeline_file(self.temp_dir.name, pid)
+        with open(state_path, "r", encoding="utf-8") as handle:
+            raw_state = json.load(handle)
+        for clip in raw_state["clips"]:
+            clip["video_filename"] = None
+        with open(state_path, "w", encoding="utf-8") as handle:
+            json.dump(raw_state, handle)
+
+        with patch.object(
+            pipeline, "_submit_and_wait", return_value=["new-one.mp4"],
+        ):
+            pipeline.rerun_clip_video(self.temp_dir.name, pid, 0)
+
+        saved = pipeline.load_pipeline_state(self.temp_dir.name, pid)
+        self.assertEqual(
+            [clip["video_filename"] for clip in saved["clips"]],
+            ["new-one.mp4", "old-two.mp4"],
+        )
+        self.assertEqual(
+            saved["output_files"],
+            ["old-one.mp4", "old-two.mp4", "new-one.mp4"],
+        )
+
+    def test_standard_video_uses_each_generated_start_image(self):
+        pid = "pipe-video-starts"
+        self._add_pipeline(pid, "running")
+        clip_images = ["shot-1.jpg", "shot-2.jpg"]
+        for filename in clip_images:
+            with open(os.path.join(self.temp_dir.name, filename), "wb") as f:
+                f.write(b"image")
+        params = {
+            "pipeline_type": "short_film_story",
+            "seamless": False,
+            "video_model": "ltx2_22B_distilled_1_1",
+            "video_params": {"resolution": "1280x720"},
+            "fps": 25,
+        }
+        plans = [
+            {"video_prompt": "first motion"},
+            {"video_prompt": "second motion"},
+        ]
+        planned = [
+            {"start": 0, "end": 5, "duration_sec": 5},
+            {"start": 5, "end": 10, "duration_sec": 5},
+        ]
+        submitted: list[dict] = []
+        pipeline._wgp = SimpleNamespace(
+            save_path=self.temp_dir.name,
+            server_config={"services": {}},
+            get_model_def=lambda _model: {"fps": 25},
+            get_model_min_frames_and_step=lambda _model: (17, 8, 8),
+        )
+
+        def fake_submit(gen_params, **_kwargs):
+            submitted.append(gen_params)
+            return ["clip-1.mp4", "clip-2.mp4"]
+
+        with patch.object(
+            pipeline, "_submit_and_wait", side_effect=fake_submit,
+        ):
+            outputs = pipeline._run_video_generation(
+                pid,
+                params,
+                plans,
+                planned,
+                clip_images,
+                out_dir=self.temp_dir.name,
+            )
+
+        self.assertEqual(outputs, ["clip-1.mp4", "clip-2.mp4"])
+        self.assertEqual(len(submitted), 1)
+        self.assertEqual(
+            submitted[0]["image_start"],
+            [
+                os.path.join(self.temp_dir.name, "shot-1.jpg"),
+                os.path.join(self.temp_dir.name, "shot-2.jpg"),
+            ],
+        )
+        self.assertEqual(submitted[0]["image_prompt_type"], "S")
+
+    def test_video_phase_rejects_a_recorded_start_image_missing_on_disk(self):
+        with open(
+            os.path.join(self.temp_dir.name, "present.jpg"), "wb",
+        ) as handle:
+            handle.write(b"image")
+        with self.assertRaisesRegex(
+            RuntimeError, "valid recorded files.*shot\(s\) 2",
+        ):
+            pipeline._require_video_start_images(
+                ["present.jpg", "deleted.jpg"],
+                2,
+                self.temp_dir.name,
+            )
+
+    def test_reruns_reject_success_without_a_recorded_output(self):
+        pid = "pipe-empty-rerun"
+        record = self._add_pipeline(pid, "completed")
+        record["clip_plans"] = [{
+            "image_prompt": "portrait", "video_prompt": "motion",
+        }]
+        record["clip_images"] = ["start.jpg"]
+        with open(
+            os.path.join(self.temp_dir.name, "start.jpg"), "wb",
+        ) as handle:
+            handle.write(b"image")
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+
+        with patch.object(pipeline, "_submit_and_wait", return_value=[]):
+            with self.assertRaisesRegex(
+                RuntimeError, "without a recorded output",
+            ):
+                pipeline.rerun_clip_image(self.temp_dir.name, pid, 0)
+            with self.assertRaisesRegex(
+                RuntimeError, "without a recorded output",
+            ):
+                pipeline.rerun_clip_video(self.temp_dir.name, pid, 0)
+
+    def test_video_rerun_requires_an_existing_start_image(self):
+        pid = "pipe-video-needs-start"
+        record = self._add_pipeline(pid, "completed")
+        record["clip_plans"] = [{
+            "image_prompt": "portrait", "video_prompt": "motion",
+        }]
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+
+        with patch.object(pipeline, "_submit_and_wait") as submit:
+            with self.assertRaisesRegex(
+                ValueError, "Regenerate its start image",
+            ):
+                pipeline.rerun_clip_video(self.temp_dir.name, pid, 0)
+
+        submit.assert_not_called()
+
+    def test_rejoin_rejects_stale_video_instead_of_omitting_clip(self):
+        pid = "pipe-stale-rejoin"
+        record = self._add_pipeline(pid, "completed")
+        record["clip_plans"] = [
+            {"image_prompt": "one", "video_prompt": "one"},
+            {"image_prompt": "two", "video_prompt": "two"},
+        ]
+        record["_clip_video_files"] = ["one.mp4", "two.mp4"]
+        for filename in record["_clip_video_files"]:
+            with open(os.path.join(self.temp_dir.name, filename), "wb") as handle:
+                handle.write(b"video")
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+        pipeline._update_saved_pipeline(
+            self.temp_dir.name,
+            pid,
+            lambda state: state["clips"][0].__setitem__("video_stale", True),
+        )
+        concatenate = Mock(return_value=True)
+        pipeline._wgp.concatenate_multi_clip_videos = concatenate
+
+        with self.assertRaisesRegex(
+            ValueError, "stale video clip.*1.*before rejoining",
+        ):
+            pipeline.rejoin_clips(self.temp_dir.name, pid)
+
+        concatenate.assert_not_called()
+
+    def test_rejoin_rejects_clip_whose_start_image_is_missing(self):
+        pid = "pipe-missing-rejoin-start"
+        record = self._add_pipeline(pid, "completed")
+        record["clip_plans"] = [
+            {"image_prompt": str(index), "video_prompt": str(index)}
+            for index in range(3)
+        ]
+        record["clip_images"] = [
+            "start-one.jpg", "start-two.jpg", "start-three.jpg",
+        ]
+        record["_clip_video_files"] = [
+            "one.mp4", "two.mp4", "three.mp4",
+        ]
+        for filename in (
+            "start-one.jpg", "start-three.jpg",
+            "one.mp4", "two.mp4", "three.mp4",
+        ):
+            with open(os.path.join(self.temp_dir.name, filename), "wb") as handle:
+                handle.write(b"media")
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+        concatenate = Mock(return_value=True)
+        pipeline._wgp.concatenate_multi_clip_videos = concatenate
+
+        with self.assertRaisesRegex(
+            ValueError, "start image.*clip\(s\) 2.*before rejoining",
+        ):
+            pipeline.rejoin_clips(self.temp_dir.name, pid)
+
+        concatenate.assert_not_called()
+
+    def test_rejoin_rejects_recorded_video_missing_on_disk(self):
+        pid = "pipe-missing-rejoin-video"
+        record = self._add_pipeline(pid, "completed")
+        record["clip_plans"] = [
+            {"image_prompt": str(index), "video_prompt": str(index)}
+            for index in range(3)
+        ]
+        record["clip_images"] = [
+            "start-one.jpg", "start-two.jpg", "start-three.jpg",
+        ]
+        record["_clip_video_files"] = [
+            "one.mp4", "two.mp4", "three.mp4",
+        ]
+        for filename in (
+            "start-one.jpg", "start-two.jpg", "start-three.jpg",
+            "one.mp4", "two.mp4",
+        ):
+            with open(os.path.join(self.temp_dir.name, filename), "wb") as handle:
+                handle.write(b"media")
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+        concatenate = Mock(return_value=True)
+        pipeline._wgp.concatenate_multi_clip_videos = concatenate
+
+        with self.assertRaisesRegex(
+            ValueError, "video clip\(s\) 3.*before rejoining",
+        ):
+            pipeline.rejoin_clips(self.temp_dir.name, pid)
+
+        concatenate.assert_not_called()
+
     def test_cancelled_partial_video_prefix_maps_to_dashboard_clips(self):
         pid = "pipe-partial"
         record = self._add_pipeline(pid, "cancelled")
@@ -640,6 +1170,26 @@ class TestDirectorCancellation(unittest.TestCase):
                 os.path.splitext(media_path)[0] + ".zip",
             ))
 
+    def test_delete_does_not_trust_generated_anchor_name_without_ownership(self):
+        pid = "pipe-unowned-anchor"
+        record = self._add_pipeline(pid, "completed")
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+        unrelated_path = os.path.join(self.temp_dir.name, "unrelated.jpg")
+        with open(unrelated_path, "wb") as handle:
+            handle.write(b"unrelated")
+        pipeline._update_saved_pipeline(
+            self.temp_dir.name,
+            pid,
+            lambda state: state.__setitem__(
+                "generated_reference_image_filename", "unrelated.jpg",
+            ),
+        )
+
+        result = pipeline.delete_pipeline(self.temp_dir.name, pid)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(os.path.isfile(unrelated_path))
+
     def test_delete_reports_failure_when_state_file_cannot_be_removed(self):
         pid = "pipe-locked-state"
         self._add_pipeline(pid, "completed")
@@ -784,6 +1334,22 @@ class TestDirectorCancellation(unittest.TestCase):
         self.assertNotIn(pid, pipeline._pipeline_threads)
         saved = pipeline.load_pipeline_state(self.temp_dir.name, pid)
         self.assertEqual(saved["status"], "failed")
+
+    def test_fresh_start_strips_internal_generated_anchor_metadata(self):
+        params = {
+            "pipeline_type": "music_video",
+            "generated_reference_image_filename": "unrelated.jpg",
+        }
+
+        with patch.object(pipeline, "_start_pipeline_worker") as start_worker:
+            pid = pipeline.start_pipeline(params)
+
+        start_worker.assert_called_once_with(pid)
+        self.assertNotIn("generated_reference_image_filename", params)
+        self.assertNotIn(
+            "generated_reference_image_filename",
+            pipeline._pipelines[pid]["params"],
+        )
 
 
 if __name__ == "__main__":

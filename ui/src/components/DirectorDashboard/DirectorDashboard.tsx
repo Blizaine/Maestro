@@ -346,8 +346,9 @@ function ClipCard({ clip, pipeline: _pipeline, onTag, onRerunImage, onRerunVideo
                   onRerunVideo(clip.index, editingVideo ? editVideoPrompt : undefined)
                 }
               }}
-                className="p-0.5 rounded text-text-muted hover:text-indicator-success transition-colors"
-                title="Re-generate video clip">
+                disabled={!clip.start_image_filename}
+                className="p-0.5 rounded text-text-muted hover:text-indicator-success transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                title={clip.start_image_filename ? 'Re-generate video clip' : 'Generate the start image first'}>
                 <Film size={10} />
               </button>
             </div>
@@ -512,7 +513,12 @@ function DirectorDashboardInner() {
   const needsWorkCount = selectedPipeline?.clips.filter(c => c.tag === 'needs_work').length || 0
   const totalClips = selectedPipeline?.clips.length || 0
   const missingImages = selectedPipeline?.clips.filter(c => !c.start_image_filename).length || 0
-  const missingVideos = selectedPipeline?.clips.filter(c => !c.video_filename && c.start_image_filename).length || 0
+  // A video beside a missing/replaced start image is stale even if its file
+  // still exists: it was generated from different visual conditioning.
+  const missingVideos = selectedPipeline?.clips.filter(c =>
+    !c.video_filename || c.video_stale || !c.start_image_filename).length || 0
+  const incompleteClips = selectedPipeline?.clips.filter(c =>
+    !c.start_image_filename || !c.video_filename || c.video_stale).length || 0
   const hasMissing = missingImages > 0 || missingVideos > 0
 
   const [regenError, setRegenError] = useState<string | null>(null)
@@ -521,16 +527,24 @@ function DirectorDashboardInner() {
     if (!selectedPipeline) return
     setRegenError(null)
     const pid = selectedPipeline.pipeline_id
+    const regeneratedImages = new Set<number>()
     try {
       // Generate missing images first
       for (const clip of selectedPipeline.clips) {
         if (!clip.start_image_filename && clip.image_prompt) {
           await rerunClipImage(pid, clip.index)
+          regeneratedImages.add(clip.index)
         }
       }
-      // Then missing videos
+      // Then generate videos that were missing/stale at the start, plus every
+      // clip whose image was replaced in the loop above.  The selectedPipeline
+      // closure is intentionally a snapshot, so track those replacements here
+      // rather than trusting its old video_filename values.
       for (const clip of selectedPipeline.clips) {
-        if (!clip.video_filename && clip.video_prompt) {
+        if (
+          (!clip.video_filename || clip.video_stale || regeneratedImages.has(clip.index))
+          && clip.video_prompt
+        ) {
           await rerunClipVideo(pid, clip.index)
         }
       }
@@ -598,10 +612,12 @@ function DirectorDashboardInner() {
                 onClick={generateMissing}
                 disabled={loading}
                 className="flex items-center gap-1 px-2 py-1 text-[10px] bg-orange-500/10 border border-orange-500/30 rounded text-chip-orange hover:bg-orange-500/20 disabled:opacity-40 transition-colors"
-                title={`Generate ${missingImages} missing images + ${missingVideos} missing videos`}
+                title={`Generate ${missingImages} missing images + ${missingVideos} missing or stale videos`}
               >
                 <Play size={10} />
-                Generate {missingImages + missingVideos} missing
+                {missingImages > 0
+                  ? `Repair ${incompleteClips} clip${incompleteClips === 1 ? '' : 's'}`
+                  : `Generate ${missingVideos} video${missingVideos === 1 ? '' : 's'}`}
               </button>
             )}
             <button
