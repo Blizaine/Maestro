@@ -15,6 +15,7 @@ import re
 import time
 import json
 import uuid
+import math
 import threading
 import traceback
 from functools import wraps
@@ -1070,6 +1071,19 @@ def _slice_audio_segment(src_path: str, start_sec: float, duration_sec: float, d
     subprocess.run(cmd, check=True, capture_output=True, text=True)
 
 
+def _audio_timeline_start(planned_clips: list[dict]) -> float:
+    """Return the source-audio time represented by video frame zero."""
+    if not planned_clips:
+        return 0.0
+    try:
+        start_sec = float((planned_clips[0] or {}).get("start", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(start_sec) or start_sec <= 0:
+        return 0.0
+    return start_sec
+
+
 @_exclusive_pipeline_operation
 def rerun_clip_video(out_dir: str, pid: str, clip_index: int, prompt_override: str = None) -> dict:
     return _rerun_clip_video_impl(out_dir, pid, clip_index, prompt_override)
@@ -1291,6 +1305,9 @@ def _rejoin_clips_impl(out_dir: str, pid: str) -> dict:
     audio_path = snapshot.get("audio_path") or None
     if audio_path and not os.path.isfile(audio_path):
         audio_path = None
+    audio_start_sec = _audio_timeline_start([
+        clip.get("planned_clip") or {} for clip in clips
+    ]) if audio_path else 0.0
 
     import time as _time
     timestamp = _time.strftime("%Y-%m-%d-%Hh%Mm%Ss")
@@ -1303,10 +1320,15 @@ def _rejoin_clips_impl(out_dir: str, pid: str) -> dict:
         # previously-called wgp.concatenate_videos never existed — this path
         # was unreachable until the video_filename backfill fix, so the
         # AttributeError only surfaced now.
-        ok = _wgp.concatenate_multi_clip_videos(video_files, output_path, audio_path)
+        ok = _wgp.concatenate_multi_clip_videos(
+            video_files,
+            output_path,
+            audio_path,
+            audio_start_sec=audio_start_sec,
+        )
         if not ok or not os.path.isfile(output_path):
             raise RuntimeError("ffmpeg concatenation failed (see server log for the clip that broke it)")
-        print(f"[Pipeline] Rejoined {len(video_files)} clips → {output_name}")
+        print(f"[Pipeline] Rejoined {len(video_files)} clips -> {output_name}")
 
         # Update pipeline state
         def _update(s):
@@ -3787,11 +3809,19 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
 
     # Build audio params
     audio_params: dict = {}
+    audio_start_sec = (
+        _audio_timeline_start(planned_clips)
+        if pipeline_type != "short_film_story" and audio_path
+        else 0.0
+    )
     if pipeline_type == "short_film_story":
         audio_params["audio_prompt_type"] = ""
     elif audio_path:
         audio_params["audio_prompt_type"] = "A"
         audio_params["audio_guide"] = audio_path
+        # Music analysis may intentionally omit a silent intro. Align model
+        # conditioning to the source-audio time represented by video frame 0.
+        audio_params["audio_frame_offset"] = round(audio_start_sec * fps)
         audio_scale = params.get("audio_scale")
         if audio_scale is not None:
             audio_params["audio_scale"] = audio_scale
@@ -3865,6 +3895,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
             "video_length": total_frames,
             "sliding_window_size": sliding_window_frames,
             "per_clip_frames": per_clip_frames,
+            "multi_clip_audio_start_sec": audio_start_sec,
             "seed": -1,
             "settings_version": 2.52,
             "generation_mode": "video",

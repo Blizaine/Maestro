@@ -11636,6 +11636,7 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                 sw_size = raw_params.get("sliding_window_size", raw_params.get("video_length", 121))
                 per_clip_frames = raw_params.pop("per_clip_frames", None)  # optional per-clip durations
                 per_clip_keyframes = raw_params.pop("per_clip_keyframes", None)  # optional keyframe injection per clip
+                multi_clip_audio_start_sec = raw_params.pop("multi_clip_audio_start_sec", 0.0)
                 group_id = f"mc_{int(time.time())}_{raw_params.get('seed', 0)}"
                 clip_count = max(len(prompt_lines), len(image_starts), 1)
 
@@ -11649,7 +11650,19 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     _mc_min_f, _mc_fs, _mc_latent = 17, 8, 8
 
                 manifest = []
-                cumulative_offset = 0
+                # Director timelines can begin after a silent intro. Preserve
+                # that source-audio origin for every clip's conditioning; the
+                # ordinary Studio path continues to default to frame zero.
+                try:
+                    cumulative_offset = max(
+                        0, int(raw_params.get("audio_frame_offset", 0) or 0),
+                    )
+                    multi_clip_audio_start_sec = max(
+                        0.0, float(multi_clip_audio_start_sec or 0),
+                    )
+                except (TypeError, ValueError):
+                    cumulative_offset = 0
+                    multi_clip_audio_start_sec = 0.0
                 total_trimmed_frames = 0
                 last_se_clip_end_image = None  # track last clip's end image for tail compensation
                 for i in range(clip_count):
@@ -11686,7 +11699,13 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     clip_params["audio_frame_offset"] = cumulative_offset
                     cumulative_offset += clip_frames - trim_tail  # advance by post-trim frames for audio sync
                     total_trimmed_frames += trim_tail
-                    clip_params["multi_clip_info"] = {"group_id": group_id, "index": i, "total": clip_count, "cumulative_offset": True}
+                    clip_params["multi_clip_info"] = {
+                        "group_id": group_id,
+                        "index": i,
+                        "total": clip_count,
+                        "cumulative_offset": True,
+                        "audio_start_sec": multi_clip_audio_start_sec,
+                    }
                     # If the clip prompt has newlines (window_prompts), use mode 1 (per-window)
                     # Otherwise mode 0 (single task)
                     clip_prompt = clip_params.get("prompt", "")
@@ -11732,7 +11751,13 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     tail_params["video_length"] = tail_frames
                     tail_params["trim_tail_frames"] = 0
                     tail_params["audio_frame_offset"] = cumulative_offset
-                    tail_params["multi_clip_info"] = {"group_id": group_id, "index": clip_count, "total": clip_count + 1, "cumulative_offset": True}
+                    tail_params["multi_clip_info"] = {
+                        "group_id": group_id,
+                        "index": clip_count,
+                        "total": clip_count + 1,
+                        "cumulative_offset": True,
+                        "audio_start_sec": multi_clip_audio_start_sec,
+                    }
                     tail_params["multi_prompts_gen_type"] = 0
 
                     # Update all previous clips' total count to include the tail
@@ -13006,6 +13031,7 @@ def rejoin_clips(body: dict):
     # Scan all sidecar files to find clips belonging to this group
     clips_by_index: dict[int, dict] = {}
     audio_path = None
+    audio_start_sec = 0.0
     for fname in os.listdir(out_dir):
         if not fname.endswith(".meta.json"):
             continue
@@ -13036,6 +13062,12 @@ def rejoin_clips(body: dict):
                 ag = params.get("audio_guide", "")
                 if ag and os.path.isfile(ag):
                     audio_path = ag
+                    try:
+                        audio_start_sec = max(
+                            0.0, float(mci.get("audio_start_sec", 0) or 0),
+                        )
+                    except (TypeError, ValueError):
+                        audio_start_sec = 0.0
         except Exception:
             continue
 
@@ -13065,7 +13097,12 @@ def rejoin_clips(body: dict):
     concat_name = f"{timestamp}_rejoin_multiclip.mp4"
     concat_path = os.path.join(out_dir, concat_name)
 
-    success = concatenate_multi_clip_videos(clip_paths, concat_path, audio_path)
+    success = concatenate_multi_clip_videos(
+        clip_paths,
+        concat_path,
+        audio_path,
+        audio_start_sec=audio_start_sec,
+    )
     if not success or not os.path.isfile(concat_path):
         raise HTTPException(status_code=500, detail="Concatenation failed")
 

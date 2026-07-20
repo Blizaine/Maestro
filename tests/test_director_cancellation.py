@@ -890,6 +890,55 @@ class TestDirectorCancellation(unittest.TestCase):
         )
         self.assertEqual(submitted[0]["image_prompt_type"], "S")
 
+    def test_standard_video_uses_first_planned_time_as_audio_origin(self):
+        pid = "pipe-video-audio-origin"
+        self._add_pipeline(pid, "running")
+        audio_path = self._write_media("song.wav", b"audio")
+        for filename in ("shot-1.jpg", "shot-2.jpg"):
+            self._write_media(filename, b"image")
+        params = {
+            "pipeline_type": "music_video",
+            "seamless": False,
+            "video_model": "ltx2_22B_distilled_1_1",
+            "video_params": {"resolution": "1280x720"},
+            "audio_path": audio_path,
+            "fps": 25,
+        }
+        plans = [
+            {"video_prompt": "first motion"},
+            {"video_prompt": "second motion"},
+        ]
+        planned = [
+            {"start": 2, "end": 7, "duration_sec": 5},
+            {"start": 7, "end": 12, "duration_sec": 5},
+        ]
+        submitted: list[dict] = []
+        pipeline._wgp = SimpleNamespace(
+            save_path=self.temp_dir.name,
+            server_config={"services": {}},
+            get_model_def=lambda _model: {"fps": 25},
+            get_model_min_frames_and_step=lambda _model: (17, 8, 8),
+        )
+
+        with patch.object(
+            pipeline,
+            "_submit_and_wait",
+            side_effect=lambda gen_params, **_kwargs: (
+                submitted.append(gen_params) or ["one.mp4", "two.mp4"]
+            ),
+        ):
+            pipeline._run_video_generation(
+                pid,
+                params,
+                plans,
+                planned,
+                ["shot-1.jpg", "shot-2.jpg"],
+                out_dir=self.temp_dir.name,
+            )
+
+        self.assertEqual(submitted[0]["audio_frame_offset"], 50)
+        self.assertEqual(submitted[0]["multi_clip_audio_start_sec"], 2.0)
+
     def test_video_phase_rejects_a_recorded_start_image_missing_on_disk(self):
         with open(
             os.path.join(self.temp_dir.name, "present.jpg"), "wb",
@@ -1029,6 +1078,40 @@ class TestDirectorCancellation(unittest.TestCase):
             pipeline.rejoin_clips(self.temp_dir.name, pid)
 
         concatenate.assert_not_called()
+
+    def test_rejoin_offsets_source_audio_to_first_planned_time(self):
+        pid = "pipe-rejoin-audio-origin"
+        record = self._add_pipeline(pid, "completed")
+        audio_path = self._write_media("song.wav", b"audio")
+        record["params"]["audio_path"] = audio_path
+        record["clip_plans"] = [
+            {"image_prompt": "one", "video_prompt": "one"},
+            {"image_prompt": "two", "video_prompt": "two"},
+        ]
+        record["_planned_clips"] = [
+            {"start": 2, "end": 7, "duration_sec": 5},
+            {"start": 7, "end": 12, "duration_sec": 5},
+        ]
+        record["clip_images"] = ["one.jpg", "two.jpg"]
+        record["_clip_video_files"] = ["one.mp4", "two.mp4"]
+        for filename in (
+            "one.jpg", "two.jpg", "one.mp4", "two.mp4",
+        ):
+            self._write_media(filename)
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+
+        def concatenate(_clips, output_path, _audio, **_kwargs):
+            self._write_media(os.path.basename(output_path), b"joined")
+            return True
+
+        mock_concat = Mock(side_effect=concatenate)
+        pipeline._wgp.concatenate_multi_clip_videos = mock_concat
+
+        pipeline.rejoin_clips(self.temp_dir.name, pid)
+
+        args, kwargs = mock_concat.call_args
+        self.assertEqual(args[2], audio_path)
+        self.assertEqual(kwargs["audio_start_sec"], 2.0)
 
     def test_server_repair_skips_good_media_and_persists_joined_completion(self):
         pid = "pipe-server-repair-order"

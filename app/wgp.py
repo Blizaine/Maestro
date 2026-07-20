@@ -6245,15 +6245,19 @@ def _trim_video_tail(clip_path, trim_frames, fps):
             os.remove(tmp_path)
 
 
-def concatenate_multi_clip_videos(clip_paths, output_path, audio_path=None):
+def concatenate_multi_clip_videos(
+    clip_paths, output_path, audio_path=None, audio_start_sec=0.0,
+):
     """Concatenate video clips into one video, optionally adding a full audio track.
 
     Uses ffmpeg's concat FILTER (not demuxer) which re-encodes all clips to a
     uniform format.  This is slower than stream-copy but reliably handles
     codec, timebase, and resolution mismatches that cause the concat demuxer
-    to silently drop clips.
+    to silently drop clips. ``audio_start_sec`` identifies the source-track
+    timestamp represented by the joined video's first frame.
     """
     import subprocess
+    import math
     output_path = os.path.abspath(output_path)
     output_path_ffmpeg = output_path.replace("\\", "/")
     ffmpeg_bin = os.environ.get("FFMPEG_BINARY", "ffmpeg")
@@ -6280,6 +6284,13 @@ def concatenate_multi_clip_videos(clip_paths, output_path, audio_path=None):
 
     n = len(valid_paths)
 
+    try:
+        audio_start_sec = float(audio_start_sec or 0)
+    except (TypeError, ValueError):
+        audio_start_sec = 0.0
+    if not math.isfinite(audio_start_sec) or audio_start_sec < 0:
+        audio_start_sec = 0.0
+
     # Check if clips have embedded audio (e.g., LTX-2.3 generated video+audio)
     clips_have_audio = False
     if not audio_path:
@@ -6304,6 +6315,8 @@ def concatenate_multi_clip_videos(clip_paths, output_path, audio_path=None):
     use_clip_audio = clips_have_audio and not audio_path
     audio_label = "with embedded audio" if use_clip_audio else ("with external audio" if audio_path else "video only")
     print(f"[Multi-Clip] Joining {n} clips using concat filter (re-encode, {audio_label})")
+    if audio_path and audio_start_sec > 0:
+        print(f"[Multi-Clip] External audio begins at source time {audio_start_sec:.3f}s")
 
     # Probe clip fps so we can force constant frame rate on the output.
     # Without an explicit -r, the concat re-encode can accumulate small
@@ -6347,11 +6360,20 @@ def concatenate_multi_clip_videos(clip_paths, output_path, audio_path=None):
     else:
         filter_inputs = "".join(f"[{i}:v]" for i in range(n))
         filter_str = f"{filter_inputs}concat=n={n}:v=1:a=0[outv]"
+        if audio_path and audio_start_sec > 0:
+            filter_str += (
+                f";[{n}:a]atrim=start={audio_start_sec:.6f},"
+                "asetpts=PTS-STARTPTS[outa]"
+            )
         cmd += ["-filter_complex", filter_str]
         cmd += ["-map", "[outv]"]
 
     if audio_path:
-        cmd += ["-map", f"{n}:a:0"]  # audio is the last input
+        # Keep one pristine continuous soundtrack, but trim any leading time
+        # omitted by the Director plan. This avoids both lip-sync offset and
+        # the audible boundary blips caused by concatenating native clip audio.
+        audio_map = "[outa]" if audio_start_sec > 0 else f"{n}:a:0"
+        cmd += ["-map", audio_map]
         cmd += ["-c:a", "aac", "-shortest"]
 
     # Force constant frame rate to prevent cumulative timing drift.
@@ -8864,7 +8886,12 @@ def generate_video(
                         concat_name = f"{time_flag}_seed{seed}_multiclip{concat_ext}"
                         concat_path = os.path.join(save_path, concat_name)
                         print(f"[Multi-Clip] Concatenating {len(clip_paths)} clips into {concat_path}")
-                        if concatenate_multi_clip_videos(clip_paths, concat_path, concat_audio):
+                        if concatenate_multi_clip_videos(
+                            clip_paths,
+                            concat_path,
+                            concat_audio,
+                            audio_start_sec=multi_clip_info.get("audio_start_sec", 0),
+                        ):
                             print(f"[Multi-Clip] Concatenated video saved: {concat_path}")
                             with lock:
                                 file_list.append(concat_path)

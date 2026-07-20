@@ -242,6 +242,53 @@ class TestJobLifecycleWiring(unittest.TestCase):
                 self.assertFalse(concatenate([clip], output))
             self.assertFalse(os.path.exists(output))
 
+    def test_multiclip_external_audio_can_start_after_source_time_zero(self):
+        concatenate = _load_isolated_function(
+            "app/wgp.py",
+            "concatenate_multi_clip_videos",
+            {"os": os},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            clip = os.path.join(directory, "clip.mp4")
+            audio = os.path.join(directory, "song.wav")
+            output = os.path.join(directory, "joined.mp4")
+            for path in (clip, audio):
+                with open(path, "wb") as handle:
+                    handle.write(b"media")
+            commands = []
+
+            def fake_run(command, **kwargs):
+                commands.append(command)
+                if "-filter_complex" in command:
+                    with open(output, "wb") as handle:
+                        handle.write(b"joined")
+                stdout = "25/1\n" if "stream=r_frame_rate" in command else ""
+                return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+            with patch("subprocess.run", side_effect=fake_run):
+                self.assertTrue(concatenate(
+                    [clip], output, audio, audio_start_sec=2.0,
+                ))
+
+            command = next(c for c in commands if "-filter_complex" in c)
+            filter_value = command[command.index("-filter_complex") + 1]
+            self.assertIn(
+                "[1:a]atrim=start=2.000000,asetpts=PTS-STARTPTS[outa]",
+                filter_value,
+            )
+            self.assertIn("[outa]", command)
+
+    def test_multiclip_dispatch_preserves_audio_origin(self):
+        generation = _function(self.launch, "_run_generation")
+        with open(
+            os.path.join(_ROOT, "app", "launch.py"), "r", encoding="utf-8",
+        ) as handle:
+            source = ast.get_source_segment(handle.read(), generation)
+        self.assertIn('raw_params.get("audio_frame_offset", 0)', source)
+        self.assertGreaterEqual(source.count(
+            '"audio_start_sec": multi_clip_audio_start_sec'
+        ), 2)
+
     def test_failed_audio_mux_removes_partial_output(self):
         combine = _load_isolated_function(
             "app/shared/utils/audio_video.py",
