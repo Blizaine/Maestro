@@ -3,6 +3,36 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [1.4.0] - 2026-07-20
+
+Storage and library management: added the Storage Manager with usage
+analytics, safe workspace/pipeline/LoRA deletion, duplicate detection and
+reclamation across linked installs, and opt-in linked-copy removal through the
+Windows Recycle Bin. LoRA views now show sizes, download/release dates, age
+chips, and newest-first sorting; CivitAI browsing is cached to reduce repeated
+requests and rate-limit pressure.
+
+Director workflow: reference-free runs now create and persist a shared visual
+anchor before generating shot images. The Dashboard gained a server-owned,
+cancelable repair workflow that skips valid work, survives browser reloads,
+resumes interrupted batches, and rejoins completed clips. Fixed missing
+thumbnails and clip mappings, generated start images not reaching video jobs,
+repairs stopping after one item, and unsafe rejoin of missing or stale media.
+
+Music-video timing: Dashboard reruns now use the same model FPS, frame lattice,
+carried frame schedule, and audio window as the original Director run. Rejoin
+also preserves the planned source-audio origin while retaining one continuous
+soundtrack, fixing shortened replacement clips, cumulative lip-sync drift, and
+leading-silence offsets without reintroducing audible clip-boundary artifacts.
+
+Reliability and safety: job cancellation is terminal and race-safe, pipeline
+state writes and output ownership are deterministic, and failed media joins
+clean up partial files. Model/LoRA downloads now validate complete payloads and
+archives before atomic publication, prevent concurrent destination writes, and
+offer clearer progress and retry states. Restored expanded Director minor-
+content scanning, fixed conditional React hook crashes, tightened NVIDIA-only
+launcher gating, and enabled Python regression tests on both public branches.
+
 ## [1.3.3] - 2026-07-17
 
 Recast tracking resilience (cocktailpeanut's second report). When the
