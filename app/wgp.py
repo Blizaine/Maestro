@@ -84,6 +84,7 @@ from shared.utils.plugins import PluginManager, WAN2GPApplication, SYSTEM_PLUGIN
 from shared.llm_engines.nanovllm.vllm_support import resolve_lm_decoder_engine
 from shared import model_dropdowns
 from collections import defaultdict
+from services.job_lifecycle import call_with_sticky_interrupt
 
 # import torch._dynamo as dynamo
 # dynamo.config.recompile_limit = 2000   # default is 256
@@ -4364,7 +4365,12 @@ def build_callback(state, pipe, send_cmd, status, num_inference_steps, preview_m
         else:
             step_idx += 1         
             if gen.get("abort", False):
-                # pipe._interrupt = True
+                # Model wrappers may clear their flag at generate() entry;
+                # keep both the wrapper and transformer interrupt sticky.
+                if hasattr(pipe, "_interrupt"):
+                    pipe._interrupt = True
+                if wan_model is not None and hasattr(wan_model, "_interrupt"):
+                    wan_model._interrupt = True
                 phase = "Aborting"    
             elif gen.get("early_stop", False):
                 phase = "Early Stop in progress"
@@ -5832,9 +5838,6 @@ def edit_video(
     with lock:
         file_list = gen["file_list"]
         file_settings_list = gen["file_settings_list"]
-
-
-
     seed = set_seed(seed)
 
     from shared.utils.utils import get_video_info
@@ -5857,7 +5860,14 @@ def edit_video(
 
 
         if len(spatial_upsampling) > 0:
-            sample = perform_spatial_upsampling(sample, spatial_upsampling, seed=seed )
+            sample = perform_spatial_upsampling(
+                sample,
+                spatial_upsampling,
+                seed=seed,
+                abort_callback=lambda: gen.get("abort", False),
+            )
+            if sample is None or gen.get("abort", False):
+                return
             configs["spatial_upsampling"] = spatial_upsampling
 
         if film_grain_intensity > 0:
@@ -6356,6 +6366,16 @@ def concatenate_multi_clip_videos(clip_paths, output_path, audio_path=None):
 
     print(f"[Multi-Clip] Running: {' '.join(cmd[:6])} ... [{n} inputs] ... {' '.join(cmd[-8:])}")
 
+    def _remove_partial_output():
+        try:
+            if os.path.isfile(output_path):
+                os.remove(output_path)
+        except OSError as cleanup_error:
+            print(
+                f"[Multi-Clip] Warning: could not remove partial output: "
+                f"{cleanup_error}"
+            )
+
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
         if result.returncode != 0:
@@ -6370,21 +6390,26 @@ def concatenate_multi_clip_videos(clip_paths, output_path, audio_path=None):
             else:
                 tail = err[-1000:] if len(err) > 1000 else err
                 print(tail)
+            _remove_partial_output()
             return False
 
-        # Verify output file has reasonable size
-        if os.path.isfile(output_path):
+        # Verify output file has content; an ffmpeg zero-byte success is not a
+        # usable artifact and must not survive without ownership metadata.
+        if os.path.isfile(output_path) and os.path.getsize(output_path) > 0:
             size_mb = os.path.getsize(output_path) / (1024 * 1024)
             print(f"[Multi-Clip] Output: {size_mb:.1f} MB")
             return True
         else:
-            print(f"[Multi-Clip] Output file not created")
+            print(f"[Multi-Clip] Output file missing or empty")
+            _remove_partial_output()
             return False
     except subprocess.TimeoutExpired:
         print(f"[Multi-Clip] ffmpeg timed out after 1200s")
+        _remove_partial_output()
         return False
     except Exception as e:
         print(f"[Multi-Clip] Concatenation failed: {e}")
+        _remove_partial_output()
         return False
 
 _AUDIO_TRANSCODE_CACHE = {}
@@ -6781,6 +6806,8 @@ def generate_video(
 
     global wan_model, offloadobj, reload_needed, _last_vae_upsampling
     gen = get_gen_info(state)
+    if gen.get("abort", False):
+        return False
     gen["early_stop"] = False
     gen["early_stop_forwarded"] = False
     torch.set_grad_enabled(False) 
@@ -7387,6 +7414,29 @@ def generate_video(
         sliding_window_size = current_video_length
         reuse_frames = 0
 
+    def _cleanup_generation_resources():
+        """Release preparation/runtime state on success, failure, or abort."""
+        clear_status(state)
+        trans.cache = None
+        offload.unload_loras_from_model(trans_lora)
+        if trans2_lora is not None:
+            offload.unload_loras_from_model(trans2_lora)
+        if trans2 is not None:
+            trans2.cache = None
+        if control_audio_tracks or source_audio_tracks:
+            cleanup_temp_audio_files(control_audio_tracks + source_audio_tracks)
+        remove_temp_filenames(temp_filenames_list)
+        for temp_path in _progressive_temp_files:
+            try:
+                if os.path.isfile(temp_path):
+                    os.remove(temp_path)
+            except Exception:
+                pass
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            gc.collect()
+            torch.cuda.empty_cache()
+
     seed = set_seed(seed)
 
     torch.set_grad_enabled(False) 
@@ -7395,10 +7445,17 @@ def generate_video(
     os.makedirs(audio_save_path, exist_ok=True)
     gc.collect()
     torch.cuda.empty_cache()
-    wan_model._interrupt = False
-    abort = False
     if gen.get("abort", False):
-        return True
+        _cleanup_generation_resources()
+        return False
+    wan_model._interrupt = False
+    # Cancellation may race the reset above. Re-check the durable state and
+    # restore the model interrupt before any inference can start.
+    if gen.get("abort", False):
+        wan_model._interrupt = True
+        _cleanup_generation_resources()
+        return False
+    abort = False
     # gen["abort"] = False
     gen["prompt"] = prompt    
     repeat_no = 0
@@ -7986,7 +8043,10 @@ def generate_video(
                     prefix_video_for_model = prefix_video.float().div_(127.5).sub_(1.0)
                 custom_settings_for_model = custom_settings if isinstance(custom_settings, dict) else {}
                 overridden_inputs = None
-                samples = wan_model.generate(
+                samples = call_with_sticky_interrupt(
+                    gen,
+                    wan_model,
+                    wan_model.generate,
                     input_prompt = prompt,
                     alt_prompt = alt_prompt,
                     image_start = image_start_tensor,  
@@ -8134,6 +8194,9 @@ def generate_video(
                         "suffix_frames_count": suffix_frames_count,
                     }),
                 )
+                if gen.get("abort", False):
+                    abort = True
+                    break
             except Exception as e:
                 if len(control_audio_tracks) > 0 or len(source_audio_tracks) > 0:
                     cleanup_temp_audio_files(control_audio_tracks + source_audio_tracks)
@@ -8316,7 +8379,16 @@ def generate_video(
                             send_cmd("progress", [(int(current_step or 0), int(total_steps)), _msg])
                         else:
                             send_cmd("progress", [(0, 0), _msg])
-                    sample = perform_spatial_upsampling(sample, spatial_upsampling, seed=seed, progress_callback=_spatial_progress )
+                    sample = perform_spatial_upsampling(
+                        sample,
+                        spatial_upsampling,
+                        seed=seed,
+                        abort_callback=lambda: gen.get("abort", False),
+                        progress_callback=_spatial_progress,
+                    )
+                    if sample is None or gen.get("abort", False):
+                        abort = True
+                        break
                 if film_grain_intensity> 0:
                     from postprocessing.film_grain import add_film_grain
                     sample = add_film_grain(sample, film_grain_intensity, film_grain_saturation) 
@@ -8355,11 +8427,6 @@ def generate_video(
                 else:
                     file_name = f"{time_flag}_seed{seed}_{sanitize_file_name(truncate_for_filesystem(save_prompt)).strip()}.{extension}"
                 video_path = os.path.join(output_dir, file_name)
-
-                if BGRA_frames is not None:
-                    from models.wan.alpha.utils import write_zip_file
-                    write_zip_file(os.path.splitext(video_path)[0] + ".zip", BGRA_frames)
-                    BGRA_frames = None
 
                 # SE trim: remove distorted tail frames at the tensor level before saving
                 if trim_tail_frames > 0 and output_video_frames is not None and output_frame_count is not None:
@@ -8412,55 +8479,90 @@ def generate_video(
                     save_path_tmp = video_path.rsplit('.', 1)[0] + f"_tmp.{container}"
                     save_video( tensor=output_video_frames, save_file=save_path_tmp, fps=output_fps, nrow=1, normalize=True, value_range=(-1, 1), codec_type = server_config.get("video_output_codec", None), container=container)
                     output_new_audio_temp_filepath = None
-                    new_audio_added_from_audio_start =  reset_control_aligment or full_generated_audio is not None # if not beginning of audio will be skipped
-                    source_audio_duration = source_video_frames_count / fps
-                    if any_mmaudio:
-                        send_cmd("progress", [0, get_latest_status(state,"MMAudio Soundtrack Generation")])
-                        from postprocessing.mmaudio.mmaudio import video_to_audio
-                        output_new_audio_filepath = output_new_audio_temp_filepath = get_available_filename(save_path, f"tmp{time_flag}.wav" )
-                        video_to_audio(save_path_tmp, prompt = MMAudio_prompt, negative_prompt = MMAudio_neg_prompt, seed = seed, num_steps = 25, cfg_strength = 4.5, duration= output_frame_count / fps, save_path = output_new_audio_filepath, persistent_models = mmaudio_persistence == MMAUDIO_PERSIST_RAM, audio_file_only = True, verboseLevel = verbose_level, model_name = mmaudio_model_name, model_path = mmaudio_model_path)
-                        new_audio_added_from_audio_start =  False
-                    elif audio_source is not None:
-                        output_new_audio_filepath = audio_source
-                        new_audio_added_from_audio_start =  True
-                    elif output_new_audio_data is not None:
-                        output_new_audio_filepath = output_new_audio_temp_filepath = get_available_filename(save_path, f"tmp{time_flag}.wav" )
-                        write_wav_file(output_new_audio_filepath, output_new_audio_data, output_audio_sampling_rate)
-                    if output_new_audio_filepath is not None:
-                        new_audio_tracks = [output_new_audio_filepath]
-                    else:
-                        new_audio_tracks = control_audio_tracks
-                    if generated_audio is not None: output_new_audio_filepath = None
-                    mux_audio_sampling_rate = resolve_mux_audio_sampling_rate(output_audio_sampling_rate, source_audio_metadata, new_audio_tracks)
-
-                    combine_and_concatenate_video_with_audio_tracks(
-                        video_path,
-                        save_path_tmp,
-                        source_audio_tracks,
-                        new_audio_tracks,
-                        source_audio_duration,
-                        mux_audio_sampling_rate,
-                        new_audio_from_start=new_audio_added_from_audio_start,
-                        source_audio_metadata=source_audio_metadata,
-                        audio_codec_key=server_config.get("audio_output_codec", "aac_128"),
-                        verbose=verbose_level >= 2,
-                    )
                     try:
-                        os.remove(save_path_tmp)
-                    except PermissionError:
-                        gc.collect()
+                        new_audio_added_from_audio_start =  reset_control_aligment or full_generated_audio is not None # if not beginning of audio will be skipped
+                        source_audio_duration = source_video_frames_count / fps
+                        if any_mmaudio:
+                            send_cmd("progress", [0, get_latest_status(state,"MMAudio Soundtrack Generation")])
+                            from postprocessing.mmaudio.mmaudio import video_to_audio
+                            output_new_audio_filepath = output_new_audio_temp_filepath = get_available_filename(save_path, f"tmp{time_flag}.wav" )
+                            video_to_audio(save_path_tmp, prompt = MMAudio_prompt, negative_prompt = MMAudio_neg_prompt, seed = seed, num_steps = 25, cfg_strength = 4.5, duration= output_frame_count / fps, save_path = output_new_audio_filepath, persistent_models = mmaudio_persistence == MMAUDIO_PERSIST_RAM, audio_file_only = True, verboseLevel = verbose_level, model_name = mmaudio_model_name, model_path = mmaudio_model_path)
+                            new_audio_added_from_audio_start =  False
+                        elif audio_source is not None:
+                            output_new_audio_filepath = audio_source
+                            new_audio_added_from_audio_start =  True
+                        elif output_new_audio_data is not None:
+                            output_new_audio_filepath = output_new_audio_temp_filepath = get_available_filename(save_path, f"tmp{time_flag}.wav" )
+                            write_wav_file(output_new_audio_filepath, output_new_audio_data, output_audio_sampling_rate)
+                        if output_new_audio_filepath is not None:
+                            new_audio_tracks = [output_new_audio_filepath]
+                        else:
+                            new_audio_tracks = control_audio_tracks
+                        if generated_audio is not None: output_new_audio_filepath = None
+                        mux_audio_sampling_rate = resolve_mux_audio_sampling_rate(output_audio_sampling_rate, source_audio_metadata, new_audio_tracks)
+
+                        combine_and_concatenate_video_with_audio_tracks(
+                            video_path,
+                            save_path_tmp,
+                            source_audio_tracks,
+                            new_audio_tracks,
+                            source_audio_duration,
+                            mux_audio_sampling_rate,
+                            new_audio_from_start=new_audio_added_from_audio_start,
+                            source_audio_metadata=source_audio_metadata,
+                            audio_codec_key=server_config.get("audio_output_codec", "aac_128"),
+                            verbose=verbose_level >= 2,
+                        )
+                    finally:
                         try:
                             os.remove(save_path_tmp)
+                        except FileNotFoundError:
+                            pass
                         except PermissionError:
-                            print(f"  [WARN] Could not delete temp file (locked): {save_path_tmp}")
-                    if output_new_audio_temp_filepath is not None:
-                        try:
-                            os.remove(output_new_audio_temp_filepath)
-                        except PermissionError:
-                            print(f"  [WARN] Could not delete temp audio file (locked): {output_new_audio_temp_filepath}")
+                            gc.collect()
+                            try:
+                                os.remove(save_path_tmp)
+                            except PermissionError:
+                                print(f"  [WARN] Could not delete temp file (locked): {save_path_tmp}")
+                        if output_new_audio_temp_filepath is not None:
+                            try:
+                                os.remove(output_new_audio_temp_filepath)
+                            except FileNotFoundError:
+                                pass
+                            except PermissionError:
+                                print(f"  [WARN] Could not delete temp audio file (locked): {output_new_audio_temp_filepath}")
 
                 else:
                     save_video( tensor=output_video_frames, save_file=video_path, fps=output_fps, nrow=1, normalize=True, value_range=(-1, 1),  codec_type= server_config.get("video_output_codec", None), container= container)
+
+                # Register primary media immediately after its successful
+                # write. Gallery registration happens later, after metadata
+                # and retake work; exceptions in that interval must not make
+                # the file invisible to Director ownership/cleanup.
+                saved_artifacts = (
+                    video_path if isinstance(video_path, list)
+                    else [video_path]
+                )
+                with lock:
+                    artifact_list = gen.setdefault("artifact_list", [])
+                    for artifact_path in saved_artifacts:
+                        if (
+                            isinstance(artifact_path, str)
+                            and os.path.isfile(artifact_path)
+                            and artifact_path not in artifact_list
+                        ):
+                            artifact_list.append(artifact_path)
+
+                # Alpha-frame ZIPs are deterministic companions of the
+                # registered media. Write them only after the media succeeds;
+                # pipeline deletion removes the sibling ZIP with its media.
+                if BGRA_frames is not None and saved_artifacts:
+                    from models.wan.alpha.utils import write_zip_file
+                    write_zip_file(
+                        os.path.splitext(saved_artifacts[0])[0] + ".zip",
+                        BGRA_frames,
+                    )
+                    BGRA_frames = None
 
                 end_time = time.time()
 
@@ -8792,35 +8894,9 @@ def generate_video(
                 send_cmd("output")
 
         seed = set_seed(-1)
-    clear_status(state)
-    trans.cache = None
-    offload.unload_loras_from_model(trans_lora)
-    if not trans2_lora is None:
-        offload.unload_loras_from_model(trans2_lora)
+    _cleanup_generation_resources()
 
-    if not trans2 is None:
-       trans2.cache = None
- 
-    if len(control_audio_tracks) > 0 or len(source_audio_tracks) > 0:
-        cleanup_temp_audio_files(control_audio_tracks + source_audio_tracks)
-
-    remove_temp_filenames(temp_filenames_list)
-
-    # Clean up progressive pipeline temp padded images
-    for _tmp in _progressive_temp_files:
-        try:
-            if os.path.isfile(_tmp):
-                os.remove(_tmp)
-        except Exception:
-            pass
-
-    # Release CUDA memory after each generation to prevent fragmentation
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-        gc.collect()
-        torch.cuda.empty_cache()
-
-    return True
+    return not gen.get("abort", False)
 
 def prepare_generate_video(state):
 

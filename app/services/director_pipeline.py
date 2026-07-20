@@ -16,7 +16,14 @@ import time
 import json
 import uuid
 import threading
+from functools import wraps
 from typing import Optional
+
+from services.job_lifecycle import (
+    GENERATED_MEDIA_EXTENSIONS,
+    request_cancel,
+    snapshot_job,
+)
 
 # These will be set by launch.py on startup
 _jobs: dict = None          # reference to launch._jobs
@@ -27,6 +34,89 @@ _active_gen_states = None   # reference to launch._active_gen_states (abort sign
 
 _pipelines: dict = {}
 _pipeline_lock = threading.Lock()
+_pipeline_file_lock = threading.RLock()
+_pipeline_threads: dict[str, threading.Thread] = {}
+_pipeline_child_jobs: dict[str, set[str]] = {}
+_pipeline_starting: set[str] = set()
+_pipeline_operations: set[str] = set()
+_pipeline_deleting: set[str] = set()
+_GENERATION_SETTLE_GRACE_S = 10.0
+_CANCELLED_ARTIFACT_FIELDS = {
+    "output_files",
+    "clip_images",
+    "_clip_keyframes",
+    "_clip_video_files",
+    "_clip_timings",
+}
+
+
+class PipelineBusyError(RuntimeError):
+    """Raised when a Dashboard mutation conflicts with active pipeline work."""
+
+
+def _claim_pipeline_operation(pid: str) -> bool:
+    """Reserve a terminal pipeline for one Dashboard mutation."""
+    with _pipeline_lock:
+        if (
+            pid in _pipeline_threads
+            or bool(_pipeline_child_jobs.get(pid))
+            or pid in _pipeline_starting
+            or pid in _pipeline_operations
+            or pid in _pipeline_deleting
+            or _pipelines.get(pid, {}).get("status") in {
+                "queued", "planning", "running", "paused",
+            }
+        ):
+            return False
+        _pipeline_operations.add(pid)
+        return True
+
+
+def _release_pipeline_operation(pid: str) -> None:
+    with _pipeline_lock:
+        _pipeline_operations.discard(pid)
+
+
+def _claim_pipeline_delete(pid: str) -> bool:
+    """Reserve deletion before taking the state-file lock."""
+    with _pipeline_lock:
+        pipeline = _pipelines.get(pid)
+        if (
+            pid in _pipeline_threads
+            or bool(_pipeline_child_jobs.get(pid))
+            or pid in _pipeline_starting
+            or pid in _pipeline_operations
+            or pid in _pipeline_deleting
+            or (
+                pipeline
+                and pipeline.get("status") in {
+                    "queued", "planning", "running", "paused",
+                }
+            )
+        ):
+            return False
+        _pipeline_deleting.add(pid)
+        return True
+
+
+def _release_pipeline_delete(pid: str) -> None:
+    with _pipeline_lock:
+        _pipeline_deleting.discard(pid)
+
+
+def _exclusive_pipeline_operation(function):
+    """Keep delete/resume/live saves away from a Dashboard media mutation."""
+    @wraps(function)
+    def wrapped(out_dir: str, pid: str, *args, **kwargs):
+        if not _claim_pipeline_operation(pid):
+            raise PipelineBusyError(
+                "Pipeline is still active; try again shortly.",
+            )
+        try:
+            return function(out_dir, pid, *args, **kwargs)
+        finally:
+            _release_pipeline_operation(pid)
+    return wrapped
 
 
 # ── Reference art-style lock ────────────────────────────────────────────
@@ -110,12 +200,71 @@ PIPELINE_STATE_VERSION = 1
 _PIPELINE_FILE_PREFIX = "_director_pipeline_"
 
 
-def _save_pipeline_state(pid: str):
+def _write_pipeline_json_unlocked(filepath: str, state: dict) -> None:
+    """Atomically replace one pipeline JSON file while its file lock is held."""
+    temp_filepath = (
+        f"{filepath}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    try:
+        with open(temp_filepath, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, indent=2, ensure_ascii=False, default=str)
+        os.replace(temp_filepath, filepath)
+    finally:
+        if os.path.isfile(temp_filepath):
+            try:
+                os.remove(temp_filepath)
+            except OSError:
+                pass
+
+
+def _map_completed_clip_videos(
+    output_files: list[str], clip_count: int,
+) -> list[Optional[str]]:
+    """Map an unambiguous multi-clip output prefix to its planned clips."""
+    if clip_count <= 0:
+        return []
+    video_exts = {".mp4", ".webm", ".mkv", ".mov"}
+    clips = [
+        filename for filename in output_files
+        if os.path.splitext(filename)[1].lower() in video_exts
+        and "_multiclip" not in os.path.splitext(filename)[0].lower()
+    ]
+    if not clips or len(clips) > clip_count:
+        return []
+    return clips + [None] * (clip_count - len(clips))
+
+
+def _clip_video_slots(
+    output_files: list[str], clip_count: int,
+) -> list[Optional[str]]:
+    """Preserve explicit sparse clip indices, with legacy prefix fallback."""
+    indexed = getattr(output_files, "clip_output_files", None)
+    if isinstance(indexed, dict) and indexed and clip_count > 0:
+        slots: list[Optional[str]] = [None] * clip_count
+        for index, filename in indexed.items():
+            try:
+                position = int(index)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= position < clip_count and filename:
+                slots[position] = filename
+        if any(slots):
+            return slots
+    return _map_completed_clip_videos(output_files, clip_count)
+
+
+def _save_pipeline_state(pid: str) -> bool:
+    """Serialize one live pipeline snapshot without racing other writers."""
+    with _pipeline_file_lock:
+        return _save_pipeline_state_locked(pid)
+
+
+def _save_pipeline_state_locked(pid: str) -> bool:
     """Serialize pipeline state to JSON on disk. Called at phase boundaries."""
     with _pipeline_lock:
         p = _pipelines.get(pid)
         if not p:
-            return
+            return False
         p = dict(p)  # shallow copy for safe access outside lock
 
     out_dir = p.get("out_dir") or (_wgp.save_path if _wgp else "outputs")
@@ -127,16 +276,14 @@ def _save_pipeline_state(pid: str):
     pre_polish = p.get("_clip_plans_pre_polish", [])
     clip_timings = p.get("_clip_timings", {})
 
-    # Per-clip video filenames. _clip_video_files was never populated by the
-    # multi-clip runtime (the generation is one job whose outputs land in
-    # output_files: one video per clip, in order, plus the *_multiclip.mp4
-    # join), so derive positionally when the count matches. Seamless runs
-    # produce a single combined file and never match.
+    # Per-clip video filenames. Multi-clip output files are emitted in clip
+    # order, followed by the optional *_multiclip join. Preserve a completed
+    # prefix after cancellation so the Dashboard can rerun/rejoin those clips.
     clip_videos = p.get("_clip_video_files") or []
-    if not clip_videos:
-        _outs = [f for f in (p.get("output_files") or []) if not f.endswith("_multiclip.mp4")]
-        if len(_outs) == len(clip_plans):
-            clip_videos = _outs
+    if not clip_videos and not params.get("seamless", True):
+        clip_videos = _clip_video_slots(
+            p.get("output_files") or [], len(clip_plans),
+        )
 
     clips = []
     for i, plan in enumerate(clip_plans):
@@ -204,10 +351,11 @@ def _save_pipeline_state(pid: str):
     try:
         os.makedirs(out_dir, exist_ok=True)
         filepath = os.path.join(out_dir, f"{_PIPELINE_FILE_PREFIX}{pid}.json")
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2, ensure_ascii=False, default=str)
+        _write_pipeline_json_unlocked(filepath, state)
+        return True
     except Exception as e:
         print(f"[Pipeline] Failed to save state for {pid}: {e}")
+        return False
 
 
 def list_pipeline_states(out_dir: str) -> list[dict]:
@@ -227,20 +375,22 @@ def list_pipeline_states(out_dir: str) -> list[dict]:
             if fname.startswith(_PIPELINE_FILE_PREFIX) and fname.endswith(".json"):
                 try:
                     filepath = os.path.join(scan_dir, fname)
-                    with open(filepath, "r", encoding="utf-8") as f:
-                        data = json.load(f)
+                    with _pipeline_file_lock:
+                        with open(filepath, "r", encoding="utf-8") as f:
+                            data = json.load(f)
                     # Detect stale "running" pipelines — if the JSON says running
                     # but there's no active in-memory pipeline, it crashed
                     status = data.get("status", "unknown")
                     pid = data.get("pipeline_id", "")
                     if status == "running" and pid not in _pipelines:
-                        status = "crashed"
-                        data["status"] = "crashed"
-                        try:
-                            with open(filepath, "w", encoding="utf-8") as fw:
-                                json.dump(data, fw, indent=2, ensure_ascii=False, default=str)
-                        except Exception:
-                            pass
+                        with _pipeline_file_lock:
+                            with open(filepath, "r", encoding="utf-8") as f:
+                                latest = json.load(f)
+                            if latest.get("status") == "running" and pid not in _pipelines:
+                                latest["status"] = "crashed"
+                                _write_pipeline_json_unlocked(filepath, latest)
+                            data = latest
+                            status = data.get("status", "unknown")
                     results.append({
                         "id": pid,
                         "status": status,
@@ -272,7 +422,10 @@ def _backfill_clip_video_filenames(state: dict, state_dir: str) -> dict:
     output) never match the count and are left untouched.
     """
     clips = state.get("clips") or []
-    outputs = [f for f in (state.get("output_files") or []) if not f.endswith("_multiclip.mp4")]
+    outputs = [
+        filename for filename in (state.get("output_files") or [])
+        if "_multiclip" not in os.path.splitext(filename)[0].lower()
+    ]
     if not clips or len(outputs) != len(clips):
         return state
     for i, clip in enumerate(clips):
@@ -282,24 +435,44 @@ def _backfill_clip_video_filenames(state: dict, state_dir: str) -> dict:
 
 
 def load_pipeline_state(out_dir: str, pid: str) -> Optional[dict]:
+    """Load a saved state while serialized against deletion/replacement."""
+    with _pipeline_file_lock:
+        return _load_pipeline_state_locked(out_dir, pid)
+
+
+def _load_pipeline_state_locked(out_dir: str, pid: str) -> Optional[dict]:
     """Load a saved pipeline state by ID. Searches out_dir and subdirectories."""
     target = f"{_PIPELINE_FILE_PREFIX}{pid}.json"
     # Search top-level
     filepath = os.path.join(out_dir, target)
     if os.path.isfile(filepath):
-        with open(filepath, "r", encoding="utf-8") as f:
-            return _backfill_clip_video_filenames(json.load(f), out_dir)
+        with _pipeline_file_lock:
+            with open(filepath, "r", encoding="utf-8") as f:
+                return _backfill_clip_video_filenames(json.load(f), out_dir)
     # Search subdirectories (workspaces)
     if os.path.isdir(out_dir):
         for name in os.listdir(out_dir):
             sub = os.path.join(out_dir, name, target)
             if os.path.isfile(sub):
-                with open(sub, "r", encoding="utf-8") as f:
-                    return _backfill_clip_video_filenames(json.load(f), os.path.join(out_dir, name))
+                with _pipeline_file_lock:
+                    with open(sub, "r", encoding="utf-8") as f:
+                        return _backfill_clip_video_filenames(
+                            json.load(f), os.path.join(out_dir, name),
+                        )
     return None
 
 
 def update_clip_tag(out_dir: str, pid: str, clip_index: int, tag: Optional[str]) -> bool:
+    if not _claim_pipeline_operation(pid):
+        raise PipelineBusyError("Pipeline is still active; try again shortly.")
+    try:
+        with _pipeline_file_lock:
+            return _update_clip_tag_locked(out_dir, pid, clip_index, tag)
+    finally:
+        _release_pipeline_operation(pid)
+
+
+def _update_clip_tag_locked(out_dir: str, pid: str, clip_index: int, tag: Optional[str]) -> bool:
     """Update the tag on a specific clip in a saved pipeline state."""
     state = load_pipeline_state(out_dir, pid)
     if not state:
@@ -314,8 +487,7 @@ def update_clip_tag(out_dir: str, pid: str, clip_index: int, tag: Optional[str])
     for search_dir in [out_dir] + [os.path.join(out_dir, d) for d in os.listdir(out_dir) if os.path.isdir(os.path.join(out_dir, d))]:
         filepath = os.path.join(search_dir, target)
         if os.path.isfile(filepath):
-            with open(filepath, "w", encoding="utf-8") as f:
-                json.dump(state, f, indent=2, ensure_ascii=False, default=str)
+            _write_pipeline_json_unlocked(filepath, state)
             return True
     return False
 
@@ -335,6 +507,11 @@ def _find_pipeline_file(out_dir: str, pid: str) -> Optional[str]:
 
 
 def _update_saved_pipeline(out_dir: str, pid: str, updater) -> Optional[dict]:
+    with _pipeline_file_lock:
+        return _update_saved_pipeline_locked(out_dir, pid, updater)
+
+
+def _update_saved_pipeline_locked(out_dir: str, pid: str, updater) -> Optional[dict]:
     """Load a saved pipeline, apply an updater function, save back, and return the state."""
     filepath = _find_pipeline_file(out_dir, pid)
     if not filepath:
@@ -342,8 +519,7 @@ def _update_saved_pipeline(out_dir: str, pid: str, updater) -> Optional[dict]:
     with open(filepath, "r", encoding="utf-8") as f:
         state = json.load(f)
     updater(state)
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2, ensure_ascii=False, default=str)
+    _write_pipeline_json_unlocked(filepath, state)
     return state
 
 
@@ -359,10 +535,30 @@ def any_pipeline_active() -> bool:
     pipeline holds no _jobs entry yet will recreate its workspace folder
     on its next step."""
     with _pipeline_lock:
-        return any(p.get("status") in _ACTIVE_PIPELINE_STATUSES for p in _pipelines.values())
+        return bool(
+            _pipeline_threads
+            or _pipeline_child_jobs
+            or _pipeline_starting
+            or _pipeline_operations
+            or _pipeline_deleting
+        ) or any(
+            p.get("status") in _ACTIVE_PIPELINE_STATUSES
+            for p in _pipelines.values()
+        )
 
 
 def delete_pipeline(out_dir: str, pid: str) -> dict:
+    """Serialize deletion against every pipeline-state reader and writer."""
+    if not _claim_pipeline_delete(pid):
+        return {"ok": False, "error": "running"}
+    try:
+        with _pipeline_file_lock:
+            return _delete_pipeline_locked(out_dir, pid)
+    finally:
+        _release_pipeline_delete(pid)
+
+
+def _delete_pipeline_locked(out_dir: str, pid: str) -> dict:
     """Delete a saved pipeline and every media file it produced.
 
     Refuses while the pipeline is running OR paused in memory: its state
@@ -378,7 +574,15 @@ def delete_pipeline(out_dir: str, pid: str) -> dict:
     """
     with _pipeline_lock:
         mem = _pipelines.get(pid)
-        if mem and mem.get("status") in _ACTIVE_PIPELINE_STATUSES:
+        if (
+            pid in _pipeline_threads
+            or bool(_pipeline_child_jobs.get(pid))
+            or pid in _pipeline_starting
+            or pid in _pipeline_operations
+            or (
+                mem and mem.get("status") in _ACTIVE_PIPELINE_STATUSES
+            )
+        ):
             return {"ok": False, "error": "running"}
     filepath = _find_pipeline_file(out_dir, pid)
     if not filepath:
@@ -413,10 +617,16 @@ def delete_pipeline(out_dir: str, pid: str) -> dict:
     # "clip_0.meta.json"), so map extensionless base -> real media file
     # before sweeping; adding the bare base would silently no-op.
     base_to_media = {}
+    ambiguous_media_bases = set()
     for entry in dir_entries:
         if entry.endswith(".meta.json") or entry.startswith(_PIPELINE_FILE_PREFIX):
             continue
-        base_to_media.setdefault(os.path.splitext(entry)[0], entry)
+        stem, extension = os.path.splitext(entry)
+        if extension.lower() not in GENERATED_MEDIA_EXTENSIONS:
+            continue
+        existing = base_to_media.setdefault(stem, entry)
+        if existing != entry:
+            ambiguous_media_bases.add(stem)
     for fname in dir_entries:
         if not fname.endswith(".meta.json"):
             continue
@@ -426,7 +636,20 @@ def delete_pipeline(out_dir: str, pid: str) -> dict:
         except Exception:
             continue
         if meta.get("director_pipeline_id") == pid:
-            media = base_to_media.get(fname[: -len(".meta.json")])
+            sidecar_stem = fname[: -len(".meta.json")]
+            media = meta.get("output_filename")
+            if not (
+                isinstance(media, str)
+                and media == os.path.basename(media)
+                and os.path.splitext(media)[0] == sidecar_stem
+                and os.path.splitext(media)[1].lower()
+                    in GENERATED_MEDIA_EXTENSIONS
+                and os.path.isfile(os.path.join(pipeline_dir, media))
+            ):
+                media = (
+                    None if sidecar_stem in ambiguous_media_bases
+                    else base_to_media.get(sidecar_stem)
+                )
             if media:
                 names.add(media)
             else:
@@ -440,6 +663,7 @@ def delete_pipeline(out_dir: str, pid: str) -> dict:
     deleted = 0
     deferred = 0
     errors = []
+    cleanup_blocked = False
     for name in sorted(names):
         # State filenames are relative; contain them to the pipeline folder
         # (symlink-resolving join) so a tampered state file cannot reach
@@ -447,6 +671,7 @@ def delete_pipeline(out_dir: str, pid: str) -> dict:
         target = safe_join_under(pipeline_dir, name)
         if target is None:
             errors.append(f"skipped suspicious path: {name}")
+            cleanup_blocked = True
             continue
         # retries=1: bulk sweep — locked files go straight to the
         # trash-rename path instead of sleeping through backoff per file.
@@ -457,12 +682,25 @@ def delete_pipeline(out_dir: str, pid: str) -> dict:
             deleted += 1
         elif result.get("reason") == "locked":
             errors.append(name)
-        sidecar = os.path.splitext(target)[0] + ".meta.json"
-        try:
-            if os.path.isfile(sidecar):
-                os.remove(sidecar)
-        except OSError:
-            pass
+            cleanup_blocked = True
+            # Preserve ownership companions so a later retry can still find
+            # and safely remove this media.
+            continue
+        elif not result.get("deleted") and result.get("reason") != "not_found":
+            errors.append(name)
+            cleanup_blocked = True
+            continue
+        artifact_base = os.path.splitext(target)[0]
+        # WGP may write metadata JSON or an alpha-frame ZIP beside the media
+        # without registering those companions in its gallery list. Removing
+        # them with their owned media prevents cancelled window artifacts from
+        # accumulating invisibly.
+        for companion_ext in (".meta.json", ".json", ".zip"):
+            companion = artifact_base + companion_ext
+            companion_result = safe_delete(companion, retries=1)
+            if companion_result.get("reason") == "locked":
+                errors.append(os.path.basename(companion))
+                cleanup_blocked = True
 
     # Un-favorite everything that vanished (per-workspace .favorites.json).
     # Lock shared with launch.py's favorites endpoints — both sides do
@@ -481,26 +719,37 @@ def delete_pipeline(out_dir: str, pid: str) -> dict:
             except Exception:
                 pass
 
-    # Rerun audio slices are not pid-scoped in their filenames and may be
-    # shared by another pipeline in this folder; only sweep them when this
-    # was the folder's last pipeline.
+    # Current rerun slices are unique and cleaned in rerun_clip_video. Sweep
+    # any historical/crash leftovers only when this was the folder's last
+    # pipeline, because older names were not pipeline-scoped.
     try:
         others = [n for n in os.listdir(pipeline_dir)
                   if n.startswith(_PIPELINE_FILE_PREFIX) and n.endswith(".json")
                   and n != os.path.basename(filepath)]
         if not others:
             for n in os.listdir(pipeline_dir):
-                if n.startswith("_rerun_audio_c") and n.endswith(".wav"):
+                if n.startswith("_rerun_audio_") and n.endswith(".wav"):
                     safe_delete(os.path.join(pipeline_dir, n))
     except OSError:
         pass
 
-    try:
-        os.remove(filepath)
-    except OSError as exc:
-        errors.append(f"state file: {exc}")
-    with _pipeline_lock:
-        _pipelines.pop(pid, None)
+    delete_error = None
+    if cleanup_blocked:
+        # The state file is the recovery marker for retrying a partial delete.
+        # Never erase it while owned media or companions are still locked.
+        state_removed = False
+        delete_error = "media_locked"
+    else:
+        state_result = safe_delete(filepath, retries=1)
+        state_removed = bool(state_result.get("deleted")) or (
+            state_result.get("reason") == "not_found"
+        )
+        if not state_removed:
+            errors.append("state file is locked")
+            delete_error = "state_file_locked"
+    if state_removed:
+        with _pipeline_lock:
+            _pipelines.pop(pid, None)
 
     try:
         from services.search_index import get_search_index
@@ -509,11 +758,14 @@ def delete_pipeline(out_dir: str, pid: str) -> dict:
         pass
 
     return {
-        "ok": True, "dir": pipeline_dir, "media_total": len(names),
+        "ok": state_removed,
+        **({"error": delete_error} if delete_error else {}),
+        "dir": pipeline_dir, "media_total": len(names),
         "media_deleted": deleted, "media_deferred": deferred, "errors": errors,
     }
 
 
+@_exclusive_pipeline_operation
 def rerun_clip_image(out_dir: str, pid: str, clip_index: int, prompt_override: str = None) -> dict:
     """Re-generate the start image for a single clip. Returns {job_id, filename} or raises."""
     state = load_pipeline_state(out_dir, pid)
@@ -579,6 +831,7 @@ def rerun_clip_image(out_dir: str, pid: str, clip_index: int, prompt_override: s
             m.split(";")[0] for m in (image_loras.get("loras_multipliers", "") or "").split(" ") if m
         ),
         "_director_pipeline_id": pid,
+        "_director_detached_operation": True,
     }
 
     output_files = _submit_and_wait(gen_params, timeout_s=600, out_dir=clip_out_dir)
@@ -614,6 +867,7 @@ def _slice_audio_segment(src_path: str, start_sec: float, duration_sec: float, d
     subprocess.run(cmd, check=True, capture_output=True, text=True)
 
 
+@_exclusive_pipeline_operation
 def rerun_clip_video(out_dir: str, pid: str, clip_index: int, prompt_override: str = None) -> dict:
     """Re-generate the video for a single clip. Returns {job_id, filename} or raises."""
     state = load_pipeline_state(out_dir, pid)
@@ -677,6 +931,7 @@ def rerun_clip_video(out_dir: str, pid: str, clip_index: int, prompt_override: s
             m.split(";")[0] for m in (video_loras.get("loras_multipliers", "") or "").split(" ") if m
         ),
         "_director_pipeline_id": pid,
+        "_director_detached_operation": True,
     }
     if has_start:
         gen_params["image_start"] = start_path
@@ -692,8 +947,13 @@ def rerun_clip_video(out_dir: str, pid: str, clip_index: int, prompt_override: s
     pipeline_type = state.get("pipeline_type") or snapshot.get("pipeline_type") or "music_video"
     audio_path = snapshot.get("audio_path") or ""
     clip_start = planned.get("start")
+    slice_path = None
     if pipeline_type != "short_film_story" and audio_path and os.path.isfile(audio_path) and clip_start is not None:
-        slice_path = os.path.join(clip_out_dir, f"_rerun_audio_c{clip_index}.wav")
+        pid_token = re.sub(r"[^A-Za-z0-9_-]", "_", pid)[:32]
+        slice_path = os.path.join(
+            clip_out_dir,
+            f"_rerun_audio_{pid_token}_c{clip_index}_{uuid.uuid4().hex[:8]}.wav",
+        )
         try:
             _slice_audio_segment(audio_path, clip_start, duration_sec, slice_path)
             gen_params["audio_prompt_type"] = "A"
@@ -706,7 +966,16 @@ def rerun_clip_video(out_dir: str, pid: str, clip_index: int, prompt_override: s
             print(f"[Pipeline {pid}] Clip {clip_index} audio slice failed; "
                   f"regenerating without soundtrack conditioning: {e}")
 
-    output_files = _submit_and_wait(gen_params, timeout_s=3600, out_dir=clip_out_dir)
+    try:
+        output_files = _submit_and_wait(
+            gen_params, timeout_s=3600, out_dir=clip_out_dir,
+        )
+    finally:
+        if slice_path and os.path.isfile(slice_path):
+            try:
+                os.remove(slice_path)
+            except OSError:
+                pass
     # Sliding-window generations save CUMULATIVE progress files (each save
     # is the video so far) — the LAST file is the complete clip. With the
     # single-window sizing above there is normally exactly one file, but
@@ -724,6 +993,7 @@ def rerun_clip_video(out_dir: str, pid: str, clip_index: int, prompt_override: s
     return {"filename": new_filename, "clip_index": clip_index}
 
 
+@_exclusive_pipeline_operation
 def rejoin_clips(out_dir: str, pid: str) -> dict:
     """Re-join all clips from a saved pipeline using current best versions. Returns {filename}."""
     state = load_pipeline_state(out_dir, pid)
@@ -791,6 +1061,53 @@ def init(jobs_dict, run_gen_fn, wgp_module, gen_lock=None, active_gen_states=Non
     _active_gen_states = active_gen_states
 
 
+class _DirectorOutputs(list):
+    """List-compatible outputs that retain exact Director clip ownership."""
+
+    def __init__(self, values, clip_output_files=None):
+        super().__init__(values)
+        self.clip_output_files = dict(clip_output_files or {})
+
+
+class _GenerationTimeoutError(RuntimeError):
+    def __init__(self, output_files: _DirectorOutputs):
+        super().__init__("Generation timed out")
+        self.output_files = output_files
+
+
+class GenerationCancelledError(RuntimeError):
+    """A detached Dashboard generation was cancelled after settling."""
+
+    def __init__(self, output_files: _DirectorOutputs):
+        super().__init__("Re-run cancelled")
+        self.output_files = output_files
+
+
+def _director_job_outputs(job: dict) -> _DirectorOutputs:
+    """Collapse multi-window files to the final output for each clip."""
+    snapshot = snapshot_job(job)
+    output_files = list(snapshot.get("output_files") or [])
+    clip_outputs = snapshot.get("clip_output_files") or {}
+    if not isinstance(clip_outputs, dict) or not clip_outputs:
+        return _DirectorOutputs(output_files)
+
+    indexed = []
+    for index, filename in clip_outputs.items():
+        try:
+            indexed.append((int(index), filename))
+        except (TypeError, ValueError):
+            continue
+    indexed.sort(key=lambda item: item[0])
+    collapsed = [filename for _, filename in indexed if filename]
+    join_output = snapshot.get("join_output_file")
+    if join_output and join_output not in collapsed:
+        collapsed.append(join_output)
+    return _DirectorOutputs(
+        collapsed or output_files,
+        {index: filename for index, filename in indexed if filename},
+    )
+
+
 def _submit_and_wait(params: dict, timeout_s: float = 600, workspace: str = None, out_dir: str = None) -> list[str]:
     """Submit a generation job and block until it completes.
 
@@ -813,28 +1130,76 @@ def _submit_and_wait(params: dict, timeout_s: float = 600, workspace: str = None
         "out_dir": out_dir,
     }
     _jobs[job_id] = job
+    _dir_pid = params.get("_director_pipeline_id")
+    _detached_operation = bool(params.get("_director_detached_operation"))
+    if _dir_pid and not _detached_operation:
+        with _pipeline_lock:
+            pipeline_cancelled = (
+                _pipelines.get(_dir_pid, {}).get("status") == "cancelled"
+            )
+        if pipeline_cancelled:
+            request_cancel(job)
 
-    # Run generation in a separate thread (it acquires _gen_lock internally)
+    def _run_tracked_generation() -> None:
+        try:
+            _run_generation(job_id)
+        finally:
+            if _dir_pid:
+                with _pipeline_lock:
+                    child_jobs = _pipeline_child_jobs.get(_dir_pid)
+                    if child_jobs is not None:
+                        child_jobs.discard(job_id)
+                        if not child_jobs:
+                            _pipeline_child_jobs.pop(_dir_pid, None)
+
+    # Run generation in a separate thread (it acquires _gen_lock internally).
+    # The child lease outlives this waiter if cancellation cannot settle
+    # promptly, keeping destructive Dashboard actions away from a live writer.
+    if _dir_pid:
+        with _pipeline_lock:
+            _pipeline_child_jobs.setdefault(_dir_pid, set()).add(job_id)
     # Non-daemon so the process stays alive if browser disconnects mid-generation
-    thread = threading.Thread(target=_run_generation, args=(job_id,), daemon=False)
-    thread.start()
+    thread = threading.Thread(target=_run_tracked_generation, daemon=False)
+    try:
+        thread.start()
+    except BaseException:
+        if _dir_pid:
+            with _pipeline_lock:
+                child_jobs = _pipeline_child_jobs.get(_dir_pid)
+                if child_jobs is not None:
+                    child_jobs.discard(job_id)
+                    if not child_jobs:
+                        _pipeline_child_jobs.pop(_dir_pid, None)
+        raise
 
     # Wait for completion, mirroring job progress to pipeline status
     deadline = time.time() + timeout_s
-    _dir_pid = params.get("_director_pipeline_id")
     _abort_signalled = False
     while time.time() < deadline:
         j = _jobs.get(job_id)
         if not j:
             raise RuntimeError("Job disappeared")
         if j["status"] == "completed":
-            return j.get("output_files", [])
+            return _director_job_outputs(j)
         if j["status"] == "cancelled":
             # Keep whatever clips finished before the abort (multi-clip
             # jobs accrue output_files per clip) — callers tolerate a
             # partial or empty list and check the pipeline status.
             print(f"[Pipeline] Job {job_id} cancelled")
-            return j.get("output_files", [])
+            # Cancellation is published immediately. Settle the child only in
+            # this background pipeline thread so it can publish files that
+            # completed before the abort took effect.
+            thread.join(timeout=_GENERATION_SETTLE_GRACE_S)
+            if thread.is_alive():
+                print(
+                    f"[Pipeline] Job {job_id} is still shutting down; "
+                    "pipeline remains busy"
+                )
+            settled = _jobs.get(job_id) or j
+            settled_outputs = _director_job_outputs(settled)
+            if _detached_operation:
+                raise GenerationCancelledError(settled_outputs)
+            return settled_outputs
         if j["status"] == "failed":
             err = j.get("error") or "Generation failed"
             print(f"[Pipeline] Job {job_id} failed: {err}")
@@ -842,7 +1207,7 @@ def _submit_and_wait(params: dict, timeout_s: float = 600, workspace: str = None
         # Backstop for stop_pipeline's abort: if the pipeline was cancelled
         # while this job runs (e.g. the job was submitted in the window
         # after the stop endpoint scanned _jobs), signal abort from here.
-        if _dir_pid and not _abort_signalled:
+        if _dir_pid and not _detached_operation and not _abort_signalled:
             with _pipeline_lock:
                 _cancelled = _pipelines.get(_dir_pid, {}).get("status") == "cancelled"
             if _cancelled:
@@ -857,16 +1222,77 @@ def _submit_and_wait(params: dict, timeout_s: float = 600, workspace: str = None
                     p["progress"]["step"] = j.get("step", 0)
                     p["progress"]["total_steps"] = j.get("total_steps", 0)
                     p["progress"]["message"] = j.get("phase") or j.get("message") or "Generating..."
-        time.sleep(1)
+        time.sleep(min(1.0, max(0.01, deadline - time.time())))
 
-    raise RuntimeError("Generation timed out")
+    request_cancel(
+        job,
+        job_id=job_id,
+        active_states=_active_gen_states or {},
+    )
+    thread.join(timeout=_GENERATION_SETTLE_GRACE_S)
+    if thread.is_alive():
+        print(
+            f"[Pipeline] Timed-out job {job_id} is still shutting down; "
+            "pipeline remains busy"
+        )
+    settled = _jobs.get(job_id) or job
+    raise _GenerationTimeoutError(_director_job_outputs(settled))
 
 
 def _update_pipeline(pid: str, **kwargs):
-    """Thread-safe update of pipeline state."""
+    """Thread-safe update; cancellation is an absorbing terminal state."""
     with _pipeline_lock:
-        if pid in _pipelines:
-            _pipelines[pid].update(kwargs)
+        pipeline = _pipelines.get(pid)
+        if not pipeline:
+            return False
+        if pipeline.get("status") == "cancelled":
+            # Finished clips may still be reported after an in-flight abort,
+            # but no later phase, completion, or failure may replace Stop.
+            if set(kwargs) - _CANCELLED_ARTIFACT_FIELDS:
+                return False
+        pipeline.update(kwargs)
+        return True
+
+
+def _start_pipeline_worker(pid: str, *, resume: bool = False) -> None:
+    """Start and track a Director worker until its ``finally`` completes."""
+    thread = threading.Thread(
+        target=_run_pipeline,
+        args=(pid,),
+        kwargs={"resume": resume},
+        daemon=False,
+    )
+    with _pipeline_lock:
+        if pid in _pipeline_threads:
+            raise RuntimeError(f"Pipeline {pid} already has a worker")
+        if _pipeline_child_jobs.get(pid):
+            raise RuntimeError(
+                f"Pipeline {pid} still has a generation child"
+            )
+        _pipeline_threads[pid] = thread
+    try:
+        thread.start()
+    except BaseException as exc:
+        with _pipeline_lock:
+            if _pipeline_threads.get(pid) is thread:
+                _pipeline_threads.pop(pid, None)
+            pipeline = _pipelines.get(pid)
+            if pipeline and pipeline.get("status") not in {
+                "completed", "failed", "cancelled",
+            }:
+                pipeline["status"] = "failed"
+                pipeline["phase"] = "failed"
+                pipeline["error"] = f"Could not start pipeline worker: {exc}"
+                pipeline["_completed_at"] = time.time()
+                pipeline["progress"] = {
+                    "current": 0,
+                    "total": 0,
+                    "message": "Could not start pipeline worker",
+                    "step": 0,
+                    "total_steps": 0,
+                }
+        _save_pipeline_state(pid)
+        raise
 
 
 def start_pipeline(params: dict) -> str:
@@ -907,9 +1333,8 @@ def start_pipeline(params: dict) -> str:
     with _pipeline_lock:
         _pipelines[pid] = pipeline
 
-    # Non-daemon so pipeline survives browser disconnect during overnight runs
-    thread = threading.Thread(target=_run_pipeline, args=(pid,), daemon=False)
-    thread.start()
+    # Non-daemon so pipeline survives browser disconnect during overnight runs.
+    _start_pipeline_worker(pid)
 
     return pid
 
@@ -962,15 +1387,37 @@ def resume_pipeline(pid: str, out_dir: str) -> tuple[bool, str]:
     """
     with _pipeline_lock:
         existing = _pipelines.get(pid)
-        if existing and existing.get("status") in ("running", "queued", "planning"):
+        if (
+            pid in _pipeline_threads
+            or bool(_pipeline_child_jobs.get(pid))
+            or pid in _pipeline_starting
+            or pid in _pipeline_operations
+            or pid in _pipeline_deleting
+            or (
+                existing
+                and existing.get("status") in (
+                    "running", "queued", "planning",
+                )
+            )
+        ):
             return False, "Pipeline is already running."
+        _pipeline_starting.add(pid)
+    try:
+        return _resume_pipeline_reserved(pid, out_dir)
+    finally:
+        with _pipeline_lock:
+            _pipeline_starting.discard(pid)
 
+
+def _resume_pipeline_reserved(pid: str, out_dir: str) -> tuple[bool, str]:
+    """Resume implementation after ``pid`` has been atomically reserved."""
     state_path = _find_pipeline_state_file(pid, out_dir)
     if not state_path:
         return False, "No saved state found for this pipeline."
     try:
-        with open(state_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        with _pipeline_file_lock:
+            with open(state_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
     except Exception as e:
         return False, f"Could not read saved pipeline state: {e}"
 
@@ -1009,6 +1456,9 @@ def resume_pipeline(pid: str, out_dir: str) -> tuple[bool, str]:
         "_planned_clips": planned_clips,
         "clip_images": clip_images,
         "_clip_keyframes": clip_keyframes,
+        "_clip_video_files": [
+            c.get("video_filename") for c in saved_clips
+        ],
         "output_files": data.get("output_files", []) or [],
         "_llm_log": data.get("llm_log"),
         "error": None,
@@ -1022,8 +1472,7 @@ def resume_pipeline(pid: str, out_dir: str) -> tuple[bool, str]:
     with _pipeline_lock:
         _pipelines[pid] = pipeline
 
-    thread = threading.Thread(target=_run_pipeline, args=(pid,), kwargs={"resume": True}, daemon=False)
-    thread.start()
+    _start_pipeline_worker(pid, resume=True)
     return True, "resumed"
 
 
@@ -1042,26 +1491,38 @@ def _abort_pipeline_jobs(pid: str):
         params = job.get("params") or {}
         if params.get("_director_pipeline_id") != pid:
             continue
-        status = job.get("status")
-        if status == "queued":
-            job["status"] = "cancelled"
-            job["message"] = "Cancelled"
-        elif status == "running":
-            gen = (_active_gen_states or {}).get(job_id)
-            if gen is not None:
-                gen["abort"] = True
-            model = getattr(_wgp, "wan_model", None) if _wgp is not None else None
-            if model is not None and hasattr(model, "_interrupt"):
-                model._interrupt = True
+        result = request_cancel(
+            job,
+            job_id=job_id,
+            active_states=_active_gen_states or {},
+        )
+        if result.abort_signalled:
             print(f"[Pipeline {pid}] Abort signalled for in-flight job {job_id}")
 
 
-def stop_pipeline(pid: str):
+def stop_pipeline(pid: str) -> bool:
     with _pipeline_lock:
         p = _pipelines.get(pid)
-        if p:
-            p["status"] = "cancelled"
+        if not p or p.get("status") in ("completed", "failed", "cancelled"):
+            return False
+        p["status"] = "cancelled"
+        p["phase"] = "cancelled"
+        p["pause_reason"] = None
+        p["_completed_at"] = time.time()
+        p["progress"] = {
+            "current": 0,
+            "total": 0,
+            "message": "Cancelled",
+            "step": 0,
+            "total_steps": 0,
+        }
     _abort_pipeline_jobs(pid)
+    persisted = _save_pipeline_state(pid)
+    with _pipeline_lock:
+        current = _pipelines.get(pid)
+        if current is not None:
+            current["_state_persisted"] = persisted
+    return True
 
 
 def _run_pipeline(pid: str, resume: bool = False):
@@ -1075,7 +1536,10 @@ def _run_pipeline(pid: str, resume: bool = False):
     throw away the LLM planning that already succeeded.
     """
     try:
-        p = _pipelines[pid]
+        with _pipeline_lock:
+            p = _pipelines.get(pid)
+            if not p or p.get("status") == "cancelled":
+                return
         params = p["params"]
         pipeline_out_dir = p.get("out_dir") or _wgp.save_path
         pipeline_workspace = p.get("workspace")
@@ -1325,20 +1789,58 @@ def _run_pipeline(pid: str, resume: bool = False):
         # but don't overwrite the cancelled status with "completed".
         if _pipelines[pid]["status"] == "cancelled":
             print(f"[Pipeline {pid}] Cancelled during video generation — keeping {len(output_files or [])} finished clip(s)")
-            _update_pipeline(pid, output_files=output_files or [])
+            artifacts = {"output_files": output_files or []}
+            if not params.get("seamless", True):
+                clip_videos = _clip_video_slots(
+                    output_files or [], len(clip_plans),
+                )
+                if clip_videos:
+                    artifacts["_clip_video_files"] = clip_videos
+            _update_pipeline(pid, **artifacts)
             _save_pipeline_state(pid)
             return
 
-        _update_pipeline(pid,
-                         status="completed",
-                         phase="completed",
-                         output_files=output_files,
-                         _completed_at=time.time(),
-                         progress={"current": 3, "total": 3, "message": "Done!", "step": 0, "total_steps": 0})
+        completed_clip_videos = []
+        if not params.get("seamless", True):
+            completed_clip_videos = _clip_video_slots(
+                output_files or [], len(clip_plans),
+            )
+        completed = _update_pipeline(
+            pid,
+            status="completed",
+            phase="completed",
+            output_files=output_files,
+            _clip_video_files=completed_clip_videos,
+            _completed_at=time.time(),
+            progress={
+                "current": 3, "total": 3, "message": "Done!",
+                "step": 0, "total_steps": 0,
+            },
+        )
+        if not completed:
+            _update_pipeline(
+                pid,
+                output_files=output_files or [],
+                _clip_video_files=completed_clip_videos,
+            )
         _save_pipeline_state(pid)  # Save on completion
 
     except Exception as e:
         import traceback
+        partial_outputs = getattr(e, "output_files", None)
+        if partial_outputs:
+            artifact_updates = {"output_files": partial_outputs}
+            with _pipeline_lock:
+                current_pipeline = _pipelines.get(pid) or {}
+                current_plans = current_pipeline.get("clip_plans") or []
+                current_params = current_pipeline.get("params") or {}
+            if not current_params.get("seamless", True):
+                clip_slots = _clip_video_slots(
+                    partial_outputs, len(current_plans),
+                )
+                if clip_slots:
+                    artifact_updates["_clip_video_files"] = clip_slots
+            _update_pipeline(pid, **artifact_updates)
         # Special-case the safety scanner. Don't print a stack trace for
         # safety violations — they're a clean refusal, not a crash, and
         # the user-visible message is purpose-built. Other exceptions
@@ -1385,6 +1887,11 @@ def _run_pipeline(pid: str, resume: bool = False):
                          _completed_at=time.time(),
                          progress={"current": 0, "total": 0, "message": f"Error: {e}", "step": 0, "total_steps": 0})
         _save_pipeline_state(pid)  # Save on failure too
+    finally:
+        with _pipeline_lock:
+            current = _pipeline_threads.get(pid)
+            if current is threading.current_thread():
+                _pipeline_threads.pop(pid, None)
 
 
 def _wait_for_resume(pid: str, poll_interval: float = 1.0):
@@ -2005,6 +2512,8 @@ def _run_image_generation(pid: str, params: dict, clip_plans: list[dict], out_di
             else:
                 start_img = _gen_image(prompt, ref_image_path)
             clip_images.append(start_img)
+        except _GenerationTimeoutError:
+            raise
         except Exception as e:
             print(f"[Pipeline {pid}] Shot {i+1} start image failed: {e}")
             clip_images.append("")
@@ -2048,6 +2557,8 @@ def _run_image_generation(pid: str, params: dict, clip_plans: list[dict], out_di
                     # Chain: next keyframe edits from this one
                     if kf_img:
                         chain_ref = os.path.join(out_dir, kf_img)
+                except _GenerationTimeoutError:
+                    raise
                 except Exception as e:
                     print(f"[Pipeline {pid}] Shot {i+1} keyframe {ki+1} failed: {e}")
                     shot_keyframes.append("")

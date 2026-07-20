@@ -425,7 +425,19 @@ def combine_and_concatenate_video_with_audio_tracks(
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
-        raise Exception(f"FFmpeg error: {e.stderr}")
+        try:
+            if os.path.isfile(save_path_tmp):
+                os.remove(save_path_tmp)
+        except OSError:
+            pass
+        raise Exception(f"FFmpeg error: {e.stderr}") from e
+    except Exception:
+        try:
+            if os.path.isfile(save_path_tmp):
+                os.remove(save_path_tmp)
+        except OSError:
+            pass
+        raise
 
 
 def combine_video_with_audio_tracks(target_video, audio_tracks, output_video,

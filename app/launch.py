@@ -226,9 +226,32 @@ api.add_middleware(
 )
 
 # --- Generation job tracking ---
+from services.job_lifecycle import (
+    GENERATED_MEDIA_EXTENSIONS,
+    collect_job_outputs,
+    finish_job,
+    generation_slot,
+    is_cancel_requested,
+    record_job_outputs,
+    register_abort_state,
+    request_cancel,
+    snapshot_job,
+    try_requeue,
+    try_start,
+    unregister_abort_state,
+    update_job,
+)
+
 _jobs: dict = {}
 _gen_lock = threading.Lock()
 _active_gen_states: dict = {}  # job_id -> wgp gen state dict (for abort signaling)
+
+
+def _interrupt_wan_model() -> None:
+    """Interrupt only the Wan run bound to the active lifecycle state."""
+    model = wgp.wan_model
+    if model is not None and hasattr(model, "_interrupt"):
+        model._interrupt = True
 
 # --- Workspace support ---
 # Base path read from wgp.server_config["save_path"] wherever needed
@@ -7242,9 +7265,18 @@ async def director_pipeline_continue(pid: str, request: Request):
 @api.post("/api/v1/director/pipeline/{pid}/stop")
 def director_pipeline_stop(pid: str):
     """Cancel a running pipeline."""
-    from services.director_pipeline import stop_pipeline
-    stop_pipeline(pid)
-    return {"status": "cancelled"}
+    from services.director_pipeline import get_pipeline, stop_pipeline
+    if stop_pipeline(pid):
+        current = get_pipeline(pid) or {}
+        return {
+            "status": "cancelled",
+            "cancelled": True,
+            "persisted": current.get("_state_persisted", False),
+        }
+    current = get_pipeline(pid)
+    if not current:
+        raise HTTPException(status_code=404, detail="Pipeline not found")
+    return {"status": current.get("status", "unknown"), "cancelled": False}
 
 
 @api.post("/api/v1/director/pipeline/{pid}/resume")
@@ -7289,11 +7321,14 @@ def get_saved_pipeline(pid: str):
 @api.put("/api/v1/director/pipelines/{pid}/clips/{clip_index}/tag")
 async def tag_pipeline_clip(pid: str, clip_index: int, request: Request):
     """Tag a clip as 'good', 'needs_work', or null."""
-    from services.director_pipeline import update_clip_tag
+    from services.director_pipeline import PipelineBusyError, update_clip_tag
     body = await request.json()
     tag = body.get("tag")
     base = wgp.server_config.get("save_path", "outputs")
-    success = update_clip_tag(base, pid, clip_index, tag)
+    try:
+        success = update_clip_tag(base, pid, clip_index, tag)
+    except PipelineBusyError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
     if not success:
         return JSONResponse({"error": "Pipeline or clip not found"}, status_code=404)
     return {"status": "ok"}
@@ -7305,12 +7340,24 @@ async def tag_pipeline_clip(pid: str, clip_index: int, request: Request):
 async def rerun_pipeline_clip_image(pid: str, clip_index: int, request: Request):
     """Re-generate the start image for a specific clip in a saved pipeline."""
     _init_pipeline()
-    from services.director_pipeline import rerun_clip_image
+    from services.director_pipeline import (
+        GenerationCancelledError,
+        PipelineBusyError,
+        rerun_clip_image,
+    )
     body = await request.json()
     base = wgp.server_config.get("save_path", "outputs")
     try:
         result = rerun_clip_image(base, pid, clip_index, prompt_override=body.get("prompt"))
         return result
+    except PipelineBusyError as e:
+        return JSONResponse({"error": str(e)}, status_code=409)
+    except GenerationCancelledError as e:
+        return JSONResponse({
+            "error": str(e),
+            "cancelled": True,
+            "output_files": list(e.output_files),
+        }, status_code=409)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:
@@ -7322,12 +7369,24 @@ async def rerun_pipeline_clip_image(pid: str, clip_index: int, request: Request)
 async def rerun_pipeline_clip_video(pid: str, clip_index: int, request: Request):
     """Re-generate the video for a specific clip in a saved pipeline."""
     _init_pipeline()
-    from services.director_pipeline import rerun_clip_video
+    from services.director_pipeline import (
+        GenerationCancelledError,
+        PipelineBusyError,
+        rerun_clip_video,
+    )
     body = await request.json()
     base = wgp.server_config.get("save_path", "outputs")
     try:
         result = rerun_clip_video(base, pid, clip_index, prompt_override=body.get("prompt"))
         return result
+    except PipelineBusyError as e:
+        return JSONResponse({"error": str(e)}, status_code=409)
+    except GenerationCancelledError as e:
+        return JSONResponse({
+            "error": str(e),
+            "cancelled": True,
+            "output_files": list(e.output_files),
+        }, status_code=409)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:
@@ -7339,11 +7398,13 @@ async def rerun_pipeline_clip_video(pid: str, clip_index: int, request: Request)
 async def rejoin_pipeline_clips(pid: str):
     """Re-join all clips from a saved pipeline using current best versions."""
     _init_pipeline()
-    from services.director_pipeline import rejoin_clips
+    from services.director_pipeline import PipelineBusyError, rejoin_clips
     base = wgp.server_config.get("save_path", "outputs")
     try:
         result = rejoin_clips(base, pid)
         return result
+    except PipelineBusyError as e:
+        return JSONResponse({"error": str(e)}, status_code=409)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:
@@ -7360,6 +7421,16 @@ def delete_pipeline_endpoint(pid: str):
     if not result.get("ok"):
         if result.get("error") == "running":
             raise HTTPException(status_code=409, detail="This pipeline is still running. Stop it first, then delete.")
+        if result.get("error") == "state_file_locked":
+            raise HTTPException(
+                status_code=409,
+                detail="Pipeline media was cleaned, but its state file is locked. Close any process using it and retry deletion.",
+            )
+        if result.get("error") == "media_locked":
+            raise HTTPException(
+                status_code=409,
+                detail="Some pipeline media is still in use. Close its preview or any process using it, then retry deletion.",
+            )
         raise HTTPException(status_code=404, detail=f"Pipeline not found: {pid}")
     print(f"[Pipeline] Deleted {pid}: {result['media_deleted']} media files removed "
           f"({result['media_deferred']} deferred) from {result['dir']}")
@@ -8378,6 +8449,7 @@ async def recast_endpoint(request: Request):
     _jobs[job_id] = job
 
     def _run_recast():
+        abort_state = {"abort": False}
         try:
             # The SAM3 tracking pass is GPU work. Take the generation lock
             # for the detection phase so queued recasts don't run their
@@ -8387,25 +8459,38 @@ async def recast_endpoint(request: Request):
             # is released before _run_generation, which re-acquires it for
             # the generation phase; a waiting job may slip its detection in
             # between, but everything stays strictly one-GPU-task-at-a-time.
-            job["message"] = "Waiting for GPU (detection queued)..."
-            with _gen_lock:
-                if job.get("status") == "cancelled":
+            with generation_slot(_gen_lock, job) as acquired:
+                if not acquired:
                     return
-                job["status"] = "running"
-                job["phase"] = "Detecting target"
-                job["message"] = f"Finding '{target}' in the video..."
+                if not try_start(
+                    job,
+                    phase="Detecting target",
+                    message=f"Finding '{target}' in the video...",
+                ):
+                    return
+                if not register_abort_state(
+                    job, job_id, _active_gen_states, abort_state,
+                ):
+                    return
                 from shared import magic_mask
                 # Fail fast with a clear error if the keyword matches nothing —
                 # cheaper than discovering it after a full tracking pass.
                 probe_mask = magic_mask.generate_keyword_masks(mid_frame[None], target, no_hole=True)[0]
                 if not bool(probe_mask.any()):
-                    job["status"] = "failed"
-                    job["error"] = f"Could not find '{target}' in the video. Try a different description (e.g. 'woman', 'man in red')."
-                    job["message"] = "Target not found"
+                    finish_job(
+                        job,
+                        "failed",
+                        error=f"Could not find '{target}' in the video. Try a different description (e.g. 'woman', 'man in red').",
+                        message="Target not found",
+                    )
                     return
-                if job.get("status") == "cancelled":
+                if is_cancel_requested(job):
                     return
-                job["message"] = f"Tracking '{target}' across {total_frames} frames..."
+                if not update_job(
+                    job,
+                    message=f"Tracking '{target}' across {total_frames} frames...",
+                ):
+                    return
                 mask_path, _ = magic_mask.generate_video_mask(
                     video_path, target,
                     colorize_objects=True,
@@ -8414,17 +8499,24 @@ async def recast_endpoint(request: Request):
                     background_color=(255, 255, 255),
                     output_dir=os.path.join(os.getcwd(), "uploads"),
                 )
-                if job.get("status") == "cancelled":
+                if is_cancel_requested(job):
                     return
                 job["params"]["video_mask"] = mask_path
         except Exception as e:
             traceback.print_exc()
-            job["status"] = "failed"
-            job["error"] = f"Target detection failed: {e}"
-            job["message"] = "Detection failed"
+            finish_job(
+                job,
+                "failed",
+                error=f"Target detection failed: {e}",
+                message="Detection failed",
+            )
             return
-        job["status"] = "queued"
-        job["message"] = "Queued (recast)"
+        finally:
+            if abort_state is not None:
+                unregister_abort_state(job_id, _active_gen_states, abort_state)
+
+        if not try_requeue(job, message="Queued (recast)", phase=""):
+            return
         _run_generation(job_id)
 
     thread = threading.Thread(target=_run_recast, daemon=False)
@@ -9220,11 +9312,26 @@ def _run_blend_generation(job_id: str):
     """
     job = _jobs[job_id]
     temp_dir = job["params"].get("_blend_temp_dir")
+    assembly_state = {"abort": False}
 
     try:
-        _run_generation(job_id)
+        if not _run_generation(job_id, finalize=False):
+            return
 
-        if job["status"] != "completed" or not job.get("output_files"):
+        if not register_abort_state(
+            job, job_id, _active_gen_states, assembly_state,
+        ):
+            return
+        if not update_job(
+            job, message="Assembling blend...", phase="Assembling blend",
+        ):
+            return
+
+        if not job.get("output_files"):
+            finish_job(
+                job, "failed", error="Blend generation produced no output",
+                message="Blend generation failed",
+            )
             return
 
         blend_params = job["params"]
@@ -9243,6 +9350,10 @@ def _run_blend_generation(job_id: str):
         out_fps = float(blend_params.get("_blend_fps", 24.0))
 
         if not clip_a or not clip_b or not temp_dir:
+            finish_job(
+                job, "failed", error="Blend assembly inputs are incomplete",
+                message="Blend assembly failed",
+            )
             return
 
         import subprocess
@@ -9253,6 +9364,10 @@ def _run_blend_generation(job_id: str):
 
         if not os.path.isfile(transition_path):
             print(f"[Blend] Transition file not found: {transition_path}")
+            finish_job(
+                job, "failed", error="Generated transition file was not found",
+                message="Blend assembly failed",
+            )
             return
 
         # ── Durations ────────────────────────────────────────────────────
@@ -9385,6 +9500,15 @@ def _run_blend_generation(job_id: str):
         if input_idx <= 1:
             # Only the blend — nothing to concat. Leave job output as-is.
             print(f"[Blend] No flanking segments; output is the blend alone ({transition_file}).")
+            finish_job(
+                job,
+                "completed",
+                progress=100,
+                step=0,
+                total_steps=0,
+                phase="",
+                message="Done",
+            )
             return
 
         # Concat filter. ffmpeg's concat demands inputs **interleaved** as
@@ -9419,9 +9543,17 @@ def _run_blend_generation(job_id: str):
             blend_path,
         ]
 
+        if is_cancel_requested(job):
+            return
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        if result.returncode == 0 and os.path.isfile(blend_path):
-            job["output_files"] = [blend_name]
+        blend_ready = result.returncode == 0 and os.path.isfile(blend_path)
+        if blend_ready:
+            record_job_outputs(job, [blend_name])
+        if is_cancel_requested(job):
+            return
+        if blend_ready:
+            if not update_job(job, output_files=[blend_name]):
+                return
             print(f"[Blend] Concatenated {n} segments "
                   f"({'A_pre+' if have_pre else ''}blend{'+B_post' if have_post else ''}) → {blend_name}")
 
@@ -9431,17 +9563,34 @@ def _run_blend_generation(job_id: str):
             if os.path.isfile(meta_src):
                 import shutil
                 shutil.copy2(meta_src, meta_dst)
+            finish_job(
+                job,
+                "completed",
+                progress=100,
+                step=0,
+                total_steps=0,
+                phase="",
+                message="Done",
+            )
         else:
             print(f"[Blend] ffmpeg concat failed (returncode={result.returncode})")
             print(f"[Blend] filter_complex was:\n  {filter_complex}")
             print(f"[Blend] cmd: {' '.join(repr(c) for c in cmd)}")
             print(f"[Blend] stderr tail:\n{result.stderr[-800:]}")
+            finish_job(
+                job,
+                "failed",
+                error=f"Blend assembly failed (ffmpeg exit {result.returncode})",
+                message="Blend assembly failed",
+            )
 
     except Exception as e:
         import traceback
         print(f"[Blend] Concatenation failed: {e}")
         traceback.print_exc()
+        finish_job(job, "failed", error=str(e), message=f"Error: {e}")
     finally:
+        unregister_abort_state(job_id, _active_gen_states, assembly_state)
         if temp_dir and os.path.isdir(temp_dir):
             import shutil
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -10142,9 +10291,12 @@ def _run_sfx_generation(job: dict, raw_params: dict, start_time: float):
     - Text-only: prompt + duration → MMAudio generates audio from text description
     """
     try:
-        job["status"] = "running"
-        job["message"] = "Preparing MMAudio..."
-        job["phase"] = "Preparing MMAudio"
+        if is_cancel_requested(job):
+            return False
+        if not update_job(
+            job, message="Preparing MMAudio...", phase="Preparing MMAudio",
+        ):
+            return False
 
         out_dir = job.get("out_dir") or wgp.save_path
         os.makedirs(out_dir, exist_ok=True)
@@ -10194,15 +10346,22 @@ def _run_sfx_generation(job: dict, raw_params: dict, start_time: float):
             wgp.get_mmaudio_settings(wgp.server_config, variant_override=variant)
 
         if not mmaudio_enabled and variant is None:
-            job["status"] = "failed"
-            job["error"] = "MMAudio is not enabled in server configuration"
-            job["message"] = "Error: MMAudio not enabled. Enable it in Settings → Extensions."
-            return
+            finish_job(
+                job,
+                "failed",
+                error="MMAudio is not enabled in server configuration",
+                message="Error: MMAudio not enabled. Enable it in Settings → Extensions.",
+            )
+            return False
 
         # Download model files if needed
-        job["message"] = "Downloading MMAudio models..."
-        job["phase"] = "Downloading models"
+        if not update_job(
+            job, message="Downloading MMAudio models...", phase="Downloading models",
+        ):
+            return False
         wgp.download_mmaudio(variant_override=variant)
+        if is_cancel_requested(job):
+            return False
 
         # Generate output filename — .mp4 when remuxing onto video, .wav for text-only
         seed_val = seed if seed >= 0 else int(time.time()) % 100000
@@ -10213,9 +10372,13 @@ def _run_sfx_generation(job: dict, raw_params: dict, start_time: float):
         output_path = wgp.get_available_filename(out_dir, base_filename, force_extension=out_ext)
 
         # Run MMAudio
-        job["message"] = "Generating sound effects..."
-        job["phase"] = "MMAudio Generation"
-        job["progress"] = 10
+        if not update_job(
+            job,
+            message="Generating sound effects...",
+            phase="MMAudio Generation",
+            progress=10,
+        ):
+            return False
         print(f"[SFX] Running MMAudio: prompt='{prompt}', neg='{neg_prompt}', "
               f"duration={duration:.1f}s, model={mmaudio_model_name}, video={'yes' if video_path else 'no'}")
 
@@ -10237,11 +10400,13 @@ def _run_sfx_generation(job: dict, raw_params: dict, start_time: float):
             model_path=mmaudio_model_path,
             text_weight=text_weight,
         )
-
-        # Detect new output files
+        # Publish files even when cancellation arrived during MMAudio's
+        # non-cooperative call; terminal status/message remain untouched.
         after = set(os.listdir(out_dir)) if os.path.isdir(out_dir) else set()
         new_files = sorted(after - before)
-        job["output_files"] = new_files
+        record_job_outputs(job, new_files)
+        if is_cancel_requested(job):
+            return False
 
         # Save sidecar metadata
         elapsed = time.time() - start_time
@@ -10272,19 +10437,21 @@ def _run_sfx_generation(job: dict, raw_params: dict, start_time: float):
             except Exception:
                 pass
 
-        job["status"] = "completed"
-        job["progress"] = 100
-        job["step"] = 0
-        job["total_steps"] = 0
-        job["phase"] = ""
-        job["message"] = "Done"
+        completed = finish_job(
+            job,
+            "completed",
+            progress=100,
+            step=0,
+            total_steps=0,
+            phase="",
+            message="Done",
+        )
         print(f"[SFX] Completed in {wgp.format_time(elapsed)}: {output_path}")
+        return completed
 
     except Exception as e:
         traceback.print_exc()
-        job["status"] = "failed"
-        job["error"] = str(e)
-        job["message"] = f"Error: {e}"
+        failure_updates = {"error": str(e), "message": f"Error: {e}"}
         # Tag the failure with OOM info if applicable so the UI can
         # surface the OOM recovery banner. detect_oom returns None
         # for non-OOM failures, in which case oom_info stays absent.
@@ -10293,9 +10460,11 @@ def _run_sfx_generation(job: dict, raw_params: dict, start_time: float):
             _coef = float(wgp.server_config.get("vram_safety_coefficient", 0.80))
             _oom = detect_oom(e, _coef)
             if _oom:
-                job["oom_info"] = _oom
+                failure_updates["oom_info"] = _oom
         except Exception:
             pass  # Never fail a failure handler
+        finish_job(job, "failed", **failure_updates)
+        return False
 
 
 def _chunked_flashvsr_upscale(video_path: str, method: str, *, job: dict = None, abort_check=None, progress_callback=None):
@@ -10363,15 +10532,19 @@ def _chunked_flashvsr_upscale(video_path: str, method: str, *, job: dict = None,
             return
         if job is None:
             return
+        changes = {}
         if phase:
-            job["message"] = str(phase)
-            job["phase"] = str(phase)
+            changes.update(message=str(phase), phase=str(phase))
         try:
             if total_steps:
-                job["step"] = int(current_step or 0)
-                job["total_steps"] = int(total_steps)
+                changes.update(
+                    step=int(current_step or 0),
+                    total_steps=int(total_steps),
+                )
         except (TypeError, ValueError):
             pass
+        if changes:
+            update_job(job, **changes)
 
     output_fps = round(fps)
     container = wgp.server_config.get("video_container", "mp4")
@@ -10410,7 +10583,11 @@ def _chunked_flashvsr_upscale(video_path: str, method: str, *, job: dict = None,
             last = take_new < chunk_frames
             if n_chunks > 1:
                 if job is not None:
-                    job["message"] = f"Upscaling chunk {seg_idx + 1}/{n_chunks} (FlashVSR)..."
+                    if not update_job(
+                        job,
+                        message=f"Upscaling chunk {seg_idx + 1}/{n_chunks} (FlashVSR)...",
+                    ):
+                        return None
                 print(f"  [Upscale] Chunk {seg_idx + 1}/{n_chunks}: frames {written}-{written + take_new - 1} (+{ov} overlap)")
             seg = seg.permute(-1, 0, 1, 2)  # [F,H,W,C] -> [C,F,H,W]
             out, cache = wgp.flashvsr.upscale(
@@ -10438,6 +10615,8 @@ def _chunked_flashvsr_upscale(video_path: str, method: str, *, job: dict = None,
             seg_idx += 1
             if last:
                 break
+        if callable(abort_check) and abort_check():
+            return None
         if not segment_paths:
             raise RuntimeError("No frames read from source video")
 
@@ -10446,7 +10625,10 @@ def _chunked_flashvsr_upscale(video_path: str, method: str, *, job: dict = None,
             segment_paths = []
         else:
             if job is not None:
-                job["message"] = "Joining upscaled segments..."
+                if not update_job(job, message="Joining upscaled segments..."):
+                    return None
+            if callable(abort_check) and abort_check():
+                return None
             concat_list = video_path + ".upconcat.txt"
             with open(concat_list, "w", encoding="utf-8") as f:
                 for p in segment_paths:
@@ -10459,6 +10641,8 @@ def _chunked_flashvsr_upscale(video_path: str, method: str, *, job: dict = None,
             if result.returncode != 0 or not os.path.isfile(tmp_video):
                 raise RuntimeError(f"ffmpeg concat failed: {result.stderr[-400:]}")
 
+        if callable(abort_check) and abort_check():
+            return None
         result_path = tmp_video
         tmp_video = None  # ownership transfers to the caller
         return result_path
@@ -10498,16 +10682,27 @@ def _apply_spatial_upsampling_to_file(video_path: str, method: str, job: dict = 
     tmp_video = None
     tmp_muxed = None
     try:
-        tmp_video = _chunked_flashvsr_upscale(video_path, method, job=job)
+        abort_check = (
+            (lambda: is_cancel_requested(job)) if job is not None else None
+        )
+        tmp_video = _chunked_flashvsr_upscale(
+            video_path, method, job=job, abort_check=abort_check,
+        )
         if tmp_video is None:
+            raise RuntimeError("FlashVSR upscale was aborted")
+        if callable(abort_check) and abort_check():
             raise RuntimeError("FlashVSR upscale was aborted")
         if audio_tracks:
             container = wgp.server_config.get("video_container", "mp4")
             tmp_muxed = video_path + f".upscale_mux.{container}"
             wgp.combine_video_with_audio_tracks(tmp_video, audio_tracks, tmp_muxed, audio_metadata=audio_metadata)
+            if callable(abort_check) and abort_check():
+                raise RuntimeError("FlashVSR upscale was aborted")
             os.replace(tmp_muxed, video_path)
             tmp_muxed = None  # consumed by the replace
         else:
+            if callable(abort_check) and abort_check():
+                raise RuntimeError("FlashVSR upscale was aborted")
             os.replace(tmp_video, video_path)
             tmp_video = None  # consumed by the replace
     finally:
@@ -10577,12 +10772,20 @@ def _run_tool_upscale(job_id: str):
     of edit_video's postprocessing path — no model generation/Gradio state."""
     job = _jobs[job_id]
     start_time = time.time()
-    with _gen_lock:
+    abort_state = {"abort": False}
+    audio_tracks = []
+    with generation_slot(_gen_lock, job) as acquired:
+        if not acquired:
+            return False
         try:
-            job["status"] = "running"
-            job["message"] = "Preparing upscale..."
-            job["phase"] = "Preparing"
-            _active_gen_states[job_id] = {"abort": False}
+            if not try_start(
+                job, message="Preparing upscale...", phase="Preparing",
+            ):
+                return False
+            if not register_abort_state(
+                job, job_id, _active_gen_states, abort_state,
+            ):
+                return False
 
             params = job["params"]
             workspace = job.get("workspace")
@@ -10593,10 +10796,11 @@ def _run_tool_upscale(job_id: str):
             method = params.get("method") or "flashvsr2"
             video_source = _resolve_tool_clip_path(params.get("video_path"), workspace)
             if not video_source:
-                job["status"] = "failed"
-                job["error"] = "Input clip not found"
-                job["message"] = "Error: input clip not found"
-                return
+                finish_job(
+                    job, "failed", error="Input clip not found",
+                    message="Error: input clip not found",
+                )
+                return False
 
             before = set(os.listdir(out_dir)) if os.path.isdir(out_dir) else set()
 
@@ -10607,29 +10811,35 @@ def _run_tool_upscale(job_id: str):
             audio_tracks, audio_metadata = wgp.extract_audio_tracks(video_source)
             has_audio = len(audio_tracks) > 0
 
-            job["message"] = "Upscaling..."
-            job["phase"] = "Upscaling"
-            job["progress"] = 5
+            if not update_job(
+                job, message="Upscaling...", phase="Upscaling", progress=5,
+            ):
+                wgp.cleanup_temp_audio_files(audio_tracks)
+                return False
 
             def _abort():
-                return bool(_active_gen_states.get(job_id, {}).get("abort"))
+                return bool(abort_state.get("abort")) or is_cancel_requested(job)
 
             # FlashVSR's _report_progress always calls back with
             # (phase, current_step, total_steps); the latter two may be None.
             def _progress(phase, current_step=None, total_steps=None):
+                changes = {}
                 if phase:
-                    job["message"] = str(phase)
-                    job["phase"] = str(phase)
+                    changes.update(message=str(phase), phase=str(phase))
                 try:
                     if total_steps:
                         step = int(current_step or 0)
                         total = int(total_steps)
-                        job["step"] = step
-                        job["total_steps"] = total
                         # Map reported steps onto 5..95% so the bar moves.
-                        job["progress"] = max(5, min(95, int(step / total * 100)))
+                        changes.update(
+                            step=step,
+                            total_steps=total,
+                            progress=max(5, min(95, int(step / total * 100))),
+                        )
                 except (TypeError, ValueError, ZeroDivisionError):
                     pass
+                if changes:
+                    update_job(job, **changes)
 
             container = wgp.server_config.get("video_container", "mp4")
             codec = wgp.server_config.get("video_output_codec", None)
@@ -10649,9 +10859,7 @@ def _run_tool_upscale(job_id: str):
                         except OSError:
                             pass
                     wgp.cleanup_temp_audio_files(audio_tracks)
-                    job["status"] = "cancelled"
-                    job["message"] = "Cancelled"
-                    return
+                    return False
                 if has_audio:
                     wgp.combine_video_with_audio_tracks(tmp_path, audio_tracks, final_path, audio_metadata=audio_metadata)
                     try:
@@ -10671,9 +10879,7 @@ def _run_tool_upscale(job_id: str):
                 )
 
                 if _abort():
-                    job["status"] = "cancelled"
-                    job["message"] = "Cancelled"
-                    return
+                    return False
 
                 output_fps = round(fps)
                 if has_audio:
@@ -10691,22 +10897,31 @@ def _run_tool_upscale(job_id: str):
                 sample = None
             after = set(os.listdir(out_dir)) if os.path.isdir(out_dir) else set()
             new_files = sorted(f for f in (after - before) if not f.endswith(".meta.json") and "_uptmp" not in f)
-            job["output_files"] = new_files
+            record_job_outputs(job, new_files)
+            if is_cancel_requested(job):
+                return False
             for fname in new_files:
                 _write_tool_sidecar(out_dir, fname, source_name=os.path.basename(video_source), tool="upscale", params={"method": method, "model_type": "post_processing"}, elapsed=time.time() - start_time, job_id=job_id)
 
-            job["status"] = "completed"
-            job["progress"] = 100
-            job["phase"] = ""
-            job["message"] = "Done"
+            completed = finish_job(
+                job,
+                "completed",
+                progress=100,
+                phase="",
+                message="Done",
+            )
             print(f"[Tools/upscale] {os.path.basename(video_source)} -> {new_files} ({wgp.format_time(time.time() - start_time)})")
+            return completed
         except Exception as e:
             traceback.print_exc()
-            job["status"] = "failed"
-            job["error"] = str(e)
-            job["message"] = f"Error: {e}"
+            finish_job(job, "failed", error=str(e), message=f"Error: {e}")
+            return False
         finally:
-            _active_gen_states.pop(job_id, None)
+            unregister_abort_state(job_id, _active_gen_states, abort_state)
+            try:
+                wgp.cleanup_temp_audio_files(audio_tracks)
+            except Exception:
+                pass
             try:
                 wgp.release_flashvsr_vram()
             except Exception:
@@ -10720,11 +10935,20 @@ def _run_tool_revoice(job_id: str):
     import shutil
     job = _jobs[job_id]
     start_time = time.time()
-    with _gen_lock:
+    abort_state = {"abort": False}
+    final_path = None
+    with generation_slot(_gen_lock, job) as acquired:
+        if not acquired:
+            return False
         try:
-            job["status"] = "running"
-            job["message"] = "Preparing revoice..."
-            job["phase"] = "Preparing"
+            if not try_start(
+                job, message="Preparing revoice...", phase="Preparing",
+            ):
+                return False
+            if not register_abort_state(
+                job, job_id, _active_gen_states, abort_state,
+            ):
+                return False
 
             params = job["params"]
             workspace = job.get("workspace")
@@ -10733,10 +10957,11 @@ def _run_tool_revoice(job_id: str):
 
             video_source = _resolve_tool_clip_path(params.get("video_path"), workspace)
             if not video_source:
-                job["status"] = "failed"
-                job["error"] = "Input clip not found"
-                job["message"] = "Error: input clip not found"
-                return
+                finish_job(
+                    job, "failed", error="Input clip not found",
+                    message="Error: input clip not found",
+                )
+                return False
 
             mode = params.get("mode", "single")
             voice_refs = []
@@ -10745,20 +10970,37 @@ def _run_tool_revoice(job_id: str):
                 if resolved:
                     voice_refs.append(resolved)
             if not voice_refs:
-                job["status"] = "failed"
-                job["error"] = "No voice reference found"
-                job["message"] = "Error: no voice reference found"
-                return
+                finish_job(
+                    job, "failed", error="No voice reference found",
+                    message="Error: no voice reference found",
+                )
+                return False
 
             # Copy source -> new output, then revoice the copy in place so the
             # original gallery clip is never modified.
             src_ext = os.path.splitext(video_source)[1] or ".mp4"
             final_path = wgp.get_available_filename(out_dir, os.path.basename(video_source), "_revoiced", force_extension=src_ext)
+            if is_cancel_requested(job):
+                return False
             shutil.copyfile(video_source, final_path)
+            if is_cancel_requested(job):
+                try:
+                    os.remove(final_path)
+                except OSError:
+                    pass
+                return False
 
-            job["message"] = "Replacing voice (SeedVC)..."
-            job["phase"] = "Voice Conversion"
-            job["progress"] = 10
+            if not update_job(
+                job,
+                message="Replacing voice (SeedVC)...",
+                phase="Voice Conversion",
+                progress=10,
+            ):
+                try:
+                    os.remove(final_path)
+                except OSError:
+                    pass
+                return False
 
             from postprocessing.voice_clone import apply_voice_clone_to_file
             ok = apply_voice_clone_to_file(
@@ -10766,32 +11008,49 @@ def _run_tool_revoice(job_id: str):
                 diffusion_steps=int(params.get("diffusion_steps", 25)),
                 cfg_rate=float(params.get("cfg_rate", 0.5)),
             )
+            if is_cancel_requested(job):
+                try:
+                    os.remove(final_path)
+                except OSError:
+                    pass
+                return False
             if not ok:
                 try:
                     os.remove(final_path)
                 except OSError:
                     pass
-                job["status"] = "failed"
-                job["error"] = "Voice replacement failed (clip has no audio, or SeedVC is unavailable)"
-                job["message"] = "Error: voice replacement failed"
-                return
+                finish_job(
+                    job,
+                    "failed",
+                    error="Voice replacement failed (clip has no audio, or SeedVC is unavailable)",
+                    message="Error: voice replacement failed",
+                )
+                return False
 
             fname = os.path.basename(final_path)
-            job["output_files"] = [fname]
+            if not update_job(job, output_files=[fname]):
+                try:
+                    os.remove(final_path)
+                except OSError:
+                    pass
+                return False
             _write_tool_sidecar(out_dir, fname, source_name=os.path.basename(video_source), tool="revoice", params={"mode": mode, "model_type": "post_processing"}, elapsed=time.time() - start_time, job_id=job_id)
 
-            job["status"] = "completed"
-            job["progress"] = 100
-            job["phase"] = ""
-            job["message"] = "Done"
+            completed = finish_job(
+                job,
+                "completed",
+                progress=100,
+                phase="",
+                message="Done",
+            )
             print(f"[Tools/revoice] {os.path.basename(video_source)} -> {fname} ({wgp.format_time(time.time() - start_time)})")
+            return completed
         except Exception as e:
             traceback.print_exc()
-            job["status"] = "failed"
-            job["error"] = str(e)
-            job["message"] = f"Error: {e}"
+            finish_job(job, "failed", error=str(e), message=f"Error: {e}")
+            return False
         finally:
-            _active_gen_states.pop(job_id, None)
+            unregister_abort_state(job_id, _active_gen_states, abort_state)
 
 
 @api.post("/api/v1/tools/upscale")
@@ -10872,23 +11131,21 @@ async def tools_revoice(request: Request):
     return {"job_id": job_id, "status": "queued"}
 
 
-def _run_generation(job_id: str):
-    """Background thread: build task, process with live progress updates."""
+def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
+    """Build and run a job, optionally deferring success finalization."""
     from shared.utils.thread_utils import AsyncStream, async_run
     import inspect
 
     job = _jobs[job_id]
     start_time = time.time()
+    abort_state = None
 
-    with _gen_lock:
+    with generation_slot(_gen_lock, job) as acquired:
+        if not acquired:
+            return False
         try:
-            job["status"] = "running"
-            job["message"] = "Preparing..."
-
-            # Check if job was cancelled before we even start
-            if job.get("status") == "cancelled":
-                job["message"] = "Cancelled"
-                return
+            if not try_start(job, message="Preparing..."):
+                return False
 
             # Per-job VRAM coefficient adjustment — accounts for active
             # LoRAs and pipeline stage count beyond what the auto-tuned
@@ -10903,6 +11160,7 @@ def _run_generation(job_id: str):
                     "in_progress": False,
                     "abort": False,
                     "file_list": [],
+                    "artifact_list": [],
                     "file_settings_list": [],
                     "audio_file_list": [],
                     "audio_file_settings_list": [],
@@ -10920,11 +11178,22 @@ def _run_generation(job_id: str):
                 "loras": [],
             }
 
-            # Store gen state reference for abort signaling
-            _active_gen_states[job_id] = state["gen"]
-
             # Build task manifest from user params
             raw_params = job["params"].copy()
+
+            # Register the exact state before any model work. SFX uses the
+            # same queue but does not own the Wan model interrupt.
+            abort_state = state["gen"]
+            if not register_abort_state(
+                job,
+                job_id,
+                _active_gen_states,
+                abort_state,
+                interrupt_model=(
+                    None if raw_params.get("sfx_mode") else _interrupt_wan_model
+                ),
+            ):
+                return False
 
             # Inject progressive pipeline setting from services config (applies to all paths)
             _services_cfg = wgp.server_config.get("services", {})
@@ -10933,7 +11202,7 @@ def _run_generation(job_id: str):
             # and run MMAudio directly (with or without a source video).
             if raw_params.get("sfx_mode"):
                 _run_sfx_generation(job, raw_params, start_time)
-                return
+                return job.get("status") == "completed"
 
             # Safety net for managed auto-download LoRAs (e.g. Edit Anything):
             # fetch the file on first use if the frontend's proactive download
@@ -10943,13 +11212,11 @@ def _run_generation(job_id: str):
                 _ensure_managed_loras_present(
                     raw_params.get("activated_loras"),
                     raw_params.get("model_type"),
-                    progress=lambda msg: job.update({"message": msg}),
+                    progress=lambda msg: update_job(job, message=msg),
                 )
             except Exception as e:
-                job["status"] = "failed"
-                job["error"] = str(e)
-                job["message"] = str(e)
-                return
+                finish_job(job, "failed", error=str(e), message=str(e))
+                return False
 
             # For video: extract film grain settings and apply as post-processing
             # after generation (avoids 3x slowdown from pipeline re-processing).
@@ -11139,16 +11406,18 @@ def _run_generation(job_id: str):
             queue, error = wgp._parse_task_manifest(manifest, state, os.getcwd())
 
             if error:
-                job["status"] = "failed"
-                job["error"] = error
-                job["message"] = f"Validation error: {error}"
-                return
+                finish_job(
+                    job, "failed", error=error,
+                    message=f"Validation error: {error}",
+                )
+                return False
 
             if not queue:
-                job["status"] = "failed"
-                job["error"] = "Task validation failed"
-                job["message"] = "Task validation failed"
-                return
+                finish_job(
+                    job, "failed", error="Task validation failed",
+                    message="Task validation failed",
+                )
+                return False
 
             state["gen"]["queue"] = queue
 
@@ -11171,16 +11440,104 @@ def _run_generation(job_id: str):
             total_tasks = len(queue)
             completed = 0
             skipped = 0
+            cancelled = False
+            clip_output_files: dict[int, str] = {}
+            join_output_file = None
+
+            def _write_output_sidecars(file_names):
+                """Stamp every produced media file, including abort leftovers.
+
+                Director only exposes the final sliding-window file for each
+                clip, but pipeline deletion also needs ownership metadata on
+                superseded window saves.  Write these sidecars as soon as the
+                files are discovered so a later cancellation cannot strand
+                unowned intermediates.
+                """
+                if not file_names:
+                    return
+                upload_filenames = {}
+                for key in [
+                    "image_start", "image_end", "video_guide", "audio_guide",
+                    "audio_guide2", "audio_guide3", "audio_guide4",
+                    "audio_guide5", "audio_guide6",
+                ]:
+                    val = job["params"].get(key)
+                    if val and isinstance(val, str):
+                        upload_filenames[key] = os.path.basename(val)
+                    elif val and isinstance(val, list):
+                        upload_filenames[key] = [
+                            os.path.basename(v)
+                            if isinstance(v, str) and v else ""
+                            for v in val
+                        ]
+                sidecar_params = job["params"].copy()
+                # These settings are stripped before generation and applied
+                # afterward, so retain them for pencil-restore metadata.
+                if pp_film_grain_intensity > 0:
+                    sidecar_params["film_grain_intensity"] = (
+                        pp_film_grain_intensity
+                    )
+                    sidecar_params["film_grain_saturation"] = (
+                        pp_film_grain_saturation
+                    )
+                if pp_spatial_upsampling:
+                    sidecar_params["spatial_upsampling"] = (
+                        pp_spatial_upsampling
+                    )
+                sidecar = {
+                    "params": sidecar_params,
+                    "upload_filenames": upload_filenames,
+                    "generation_mode": job["params"].get("generation_mode"),
+                    "job_id": job_id,
+                    "generation_time": round(time.time() - start_time),
+                    "created_at": time.time(),
+                }
+                dpid = job["params"].get("_director_pipeline_id")
+                if dpid:
+                    sidecar["director_pipeline_id"] = dpid
+                clip_index_by_filename = {
+                    filename: index
+                    for index, filename in clip_output_files.items()
+                }
+                for fname in file_names:
+                    ext = os.path.splitext(fname)[1].lower()
+                    if ext not in GENERATED_MEDIA_EXTENSIONS:
+                        continue
+                    if fname in clip_index_by_filename:
+                        sidecar["director_clip_index"] = (
+                            clip_index_by_filename[fname]
+                        )
+                    else:
+                        sidecar.pop("director_clip_index", None)
+                    sidecar["output_filename"] = fname
+                    meta_path = os.path.join(
+                        out_dir, os.path.splitext(fname)[0] + ".meta.json",
+                    )
+                    try:
+                        with open(meta_path, "w", encoding="utf-8") as f:
+                            json.dump(sidecar, f, indent=2)
+                    except Exception:
+                        pass
 
             is_multiclip = total_tasks > 1 and any(t.get('params', {}).get('multi_clip_info') for t in queue)
 
             for task_idx, task in enumerate(queue):
+                if is_cancel_requested(job):
+                    cancelled = True
+                    break
                 task_no = task_idx + 1
+                task_file_start = len(gen.get("file_list") or [])
+                task_artifact_start = len(gen.get("artifact_list") or [])
                 prompt_preview = (task.get('prompt', '') or '')[:60]
                 print(f"\n[Task {task_no}/{total_tasks}] {prompt_preview}...")
                 if is_multiclip:
-                    job["message"] = f"Clip {task_no}/{total_tasks}"
-                    job["phase"] = f"Clip {task_no}/{total_tasks}"
+                    if not update_job(
+                        job,
+                        message=f"Clip {task_no}/{total_tasks}",
+                        phase=f"Clip {task_no}/{total_tasks}",
+                    ):
+                        cancelled = True
+                        break
 
                 validated_params = wgp.validate_task(task, state)
                 if validated_params is None:
@@ -11220,6 +11577,8 @@ def _run_generation(job_id: str):
                 in_status_line = False
                 while True:
                     cmd, data = com_stream.output_queue.next()
+                    if is_cancel_requested(job) and cmd != "exit":
+                        continue
                     if cmd == "exit":
                         if in_status_line:
                             print()
@@ -11228,9 +11587,10 @@ def _run_generation(job_id: str):
                         print(f"\n  [ERROR] {data}")
                         in_status_line = False
                         task_error = True
-                        job["message"] = f"Error: {data}"
+                        update_job(job, message=f"Error: {data}")
                     elif cmd == "progress":
                         if isinstance(data, list) and len(data) >= 2:
+                            progress_updates = {}
                             if isinstance(data[0], tuple):
                                 step, total = data[0]
                                 msg = data[1] if len(data) > 1 else ""
@@ -11243,45 +11603,54 @@ def _run_generation(job_id: str):
                                 if sec_match:
                                     # Single/text mode: show seconds generated as a pulsing progress
                                     sec_current = int(sec_match.group(1))
-                                    job["progress"] = min(95, sec_current * 3)  # rough estimate, caps at 95%
-                                    job["step"] = sec_current
-                                    job["total_steps"] = 0  # indeterminate
-                                    job["message"] = f"Generating audio... {sec_current}s"
+                                    progress_updates.update(
+                                        progress=min(95, sec_current * 3),
+                                        step=sec_current,
+                                        total_steps=0,
+                                        message=f"Generating audio... {sec_current}s",
+                                    )
                                 if seg_match:
                                     seg_current = int(seg_match.group(1))
                                     seg_total = int(seg_match.group(2))
-                                    job["progress"] = int((seg_current / seg_total) * 100) if seg_total > 0 else 0
-                                    job["step"] = seg_current
-                                    job["total_steps"] = seg_total
+                                    progress_updates.update(
+                                        progress=int((seg_current / seg_total) * 100) if seg_total > 0 else 0,
+                                        step=seg_current,
+                                        total_steps=seg_total,
+                                    )
                                 elif is_multiclip and total > 0:
                                     # Aggregate: each clip contributes 1/total_tasks of overall progress
                                     clip_progress = step / total
-                                    job["progress"] = int(((task_idx + clip_progress) / total_tasks) * 100)
+                                    progress_updates["progress"] = int(((task_idx + clip_progress) / total_tasks) * 100)
                                     msg = f"Clip {task_no}/{total_tasks}: {msg}"
-                                    job["step"] = step
-                                    job["total_steps"] = total
+                                    progress_updates.update(step=step, total_steps=total)
                                 else:
-                                    job["progress"] = int((step / total) * 100) if total > 0 else 0
-                                    job["step"] = step
-                                    job["total_steps"] = total
+                                    progress_updates.update(
+                                        progress=int((step / total) * 100) if total > 0 else 0,
+                                        step=step,
+                                        total_steps=total,
+                                    )
                             else:
                                 step = 0
                                 msg = data[1] if len(data) > 1 else str(data[0])
                                 total = 0
-                                job["step"] = 0
-                                job["total_steps"] = 0
-                            job["message"] = msg
-                            job["phase"] = msg
+                                progress_updates.update(step=0, total_steps=0)
+                            progress_updates.update(message=msg, phase=msg)
+                            if not update_job(job, **progress_updates):
+                                continue
                             status_line = f"\r  [{step}/{total}] {msg}" if total > 0 else f"\r  {msg}"
                             print(status_line.ljust(max(last_msg_len, len(status_line))), end="", flush=True)
                             last_msg_len = len(status_line)
                             in_status_line = True
                     elif cmd == "status":
-                        job["message"] = str(data)
-                        job["phase"] = str(data)
-                        job["step"] = 0
-                        job["total_steps"] = 0
-                        job["progress"] = 0
+                        if not update_job(
+                            job,
+                            message=str(data),
+                            phase=str(data),
+                            step=0,
+                            total_steps=0,
+                            progress=0,
+                        ):
+                            continue
                         if "Loading" in str(data):
                             print(data)
                             in_status_line = False
@@ -11294,6 +11663,43 @@ def _run_generation(job_id: str):
                     elif cmd == "info":
                         print(f"\n  [INFO] {data}")
                         in_status_line = False
+
+                # WGP may emit several cumulative sliding-window files for a
+                # single clip. Bind only the latest file from this task to its
+                # explicit multi-clip index; filename ordering is ambiguous.
+                task_files = []
+                for output_path in (
+                    (gen.get("artifact_list") or [])[task_artifact_start:]
+                    + (gen.get("file_list") or [])[task_file_start:]
+                ):
+                    if output_path not in task_files:
+                        task_files.append(output_path)
+                clip_info = (task.get("params") or {}).get("multi_clip_info")
+                if isinstance(clip_info, dict) and "index" in clip_info:
+                    latest_clip_file = None
+                    for output_path in reversed(task_files):
+                        filename = os.path.basename(output_path)
+                        stem, extension = os.path.splitext(filename)
+                        if extension.lower() not in {
+                            ".mp4", ".webm", ".mkv", ".mov",
+                        }:
+                            continue
+                        if "_multiclip" in stem.lower():
+                            if join_output_file is None:
+                                join_output_file = filename
+                        elif latest_clip_file is None:
+                            latest_clip_file = filename
+                    if latest_clip_file:
+                        try:
+                            clip_output_files[
+                                int(clip_info["index"])
+                            ] = latest_clip_file
+                        except (TypeError, ValueError):
+                            pass
+
+                if is_cancel_requested(job) or gen.get("abort"):
+                    cancelled = True
+                    break
 
                 if not task_error:
                     completed += 1
@@ -11310,14 +11716,26 @@ def _run_generation(job_id: str):
                         next_task = queue[task_idx + 1]
                         next_params = next_task.get('params', {})
                         if next_params.pop("_continuation", False):
-                            # Find the video file just generated
-                            current_after = set(os.listdir(out_dir)) if os.path.isdir(out_dir) else set()
-                            new_now = sorted(current_after - before)
-                            video_exts = {".mp4", ".webm", ".mkv"}
+                            # Find the latest video explicitly registered by
+                            # this task; a shared-folder diff can pick up a
+                            # concurrent dashboard operation's media.
+                            video_exts = {".mp4", ".webm", ".mkv", ".mov"}
                             latest_video = None
-                            for f in reversed(new_now):
-                                if os.path.splitext(f)[1].lower() in video_exts:
-                                    latest_video = os.path.join(out_dir, f)
+                            for output_path in reversed(task_files):
+                                if os.path.splitext(output_path)[1].lower() in video_exts:
+                                    latest_video = output_path
+                                    if not os.path.isabs(latest_video):
+                                        latest_video = os.path.join(
+                                            out_dir, latest_video,
+                                        )
+                                    latest_video = os.path.realpath(latest_video)
+                                    if (
+                                        os.path.normcase(os.path.dirname(latest_video))
+                                        != os.path.normcase(os.path.realpath(out_dir))
+                                        or not os.path.isfile(latest_video)
+                                    ):
+                                        latest_video = None
+                                        continue
                                     break
                             if latest_video:
                                 try:
@@ -11345,7 +11763,7 @@ def _run_generation(job_id: str):
             if skipped > 0:
                 summary += f" ({skipped} skipped)"
             print(summary)
-            success = completed == (total_tasks - skipped)
+            success = not cancelled and completed == (total_tasks - skipped)
 
             # Clean up continuation temp files
             if os.path.isdir(out_dir):
@@ -11356,14 +11774,30 @@ def _run_generation(job_id: str):
                         except Exception:
                             pass
 
-            # Detect new output files
+            # Publish any files that finished before an abort. Director waits
+            # for this worker to settle and persists these partial outputs.
+            new_files = []
             if os.path.isdir(out_dir):
-                after = set(os.listdir(out_dir))
-                new_files = sorted(after - before)
-                # Filter out any leftover continuation files
-                new_files = [f for f in new_files if not f.startswith("_continuation_")]
-                job["output_files"] = new_files
+                new_files = collect_job_outputs(
+                    gen,
+                    out_dir,
+                    before,
+                    allow_legacy_fallback=not bool(
+                        job["params"].get("_director_pipeline_id")
+                    ),
+                )
+                record_job_outputs(
+                    job,
+                    new_files,
+                    clip_output_files=clip_output_files,
+                    join_output_file=join_output_file,
+                )
+                _write_output_sidecars(new_files)
 
+            if cancelled or is_cancel_requested(job):
+                return False
+
+            if os.path.isdir(out_dir):
                 # Post-generation outpaint cleanup: combines two operations
                 # in a single ffmpeg invocation so we touch the output mp4
                 # only once.
@@ -11614,7 +12048,19 @@ def _run_generation(job_id: str):
                                     pass
                                 final_basename = os.path.basename(final_name)
                                 new_files = [f if f != fname else final_basename for f in new_files]
-                                job["output_files"] = new_files
+                                for clip_index, clip_filename in list(
+                                    clip_output_files.items()
+                                ):
+                                    if clip_filename == fname:
+                                        clip_output_files[clip_index] = final_basename
+                                record_job_outputs(
+                                    job,
+                                    [final_basename],
+                                    clip_output_files=clip_output_files,
+                                )
+                                _write_output_sidecars([final_basename])
+                                if not update_job(job, output_files=new_files):
+                                    return False
                                 print(f"  [Outpaint {op_str}] Original mp4 locked ({last_err}); promoted post copy → {final_basename}")
                             except Exception as outpaint_post_err:
                                 print(f"  [Outpaint] Post-process error (non-fatal): {outpaint_post_err}")
@@ -11633,8 +12079,12 @@ def _run_generation(job_id: str):
                             continue
                         video_path = os.path.join(out_dir, fname)
                         try:
-                            job["message"] = f"Upscaling {fname} (FlashVSR)..."
-                            job["phase"] = "Upscaling"
+                            if not update_job(
+                                job,
+                                message=f"Upscaling {fname} (FlashVSR)...",
+                                phase="Upscaling",
+                            ):
+                                return False
                             print(f"  [Upscale] Applying {pp_spatial_upsampling} to {fname}")
                             _apply_spatial_upsampling_to_file(video_path, pp_spatial_upsampling, job=job)
                             print(f"  [Upscale] Done: {fname}")
@@ -11651,7 +12101,10 @@ def _run_generation(job_id: str):
                             continue
                         video_path = os.path.join(out_dir, fname)
                         try:
-                            job["message"] = f"Applying film grain to {fname}..."
+                            if not update_job(
+                                job, message=f"Applying film grain to {fname}...",
+                            ):
+                                return False
                             print(f"  [Film Grain] Applying to {fname} (intensity={pp_film_grain_intensity}, saturation={pp_film_grain_saturation})")
                             _apply_film_grain_to_file(video_path, pp_film_grain_intensity, pp_film_grain_saturation)
                             print(f"  [Film Grain] Done: {fname}")
@@ -11677,7 +12130,11 @@ def _run_generation(job_id: str):
                             continue
                         video_path = os.path.join(out_dir, fname)
                         try:
-                            job["message"] = f"Voice cloning ({pp_voice_clone_mode}) on {fname}..."
+                            if not update_job(
+                                job,
+                                message=f"Voice cloning ({pp_voice_clone_mode}) on {fname}...",
+                            ):
+                                return False
                             print(f"  [Voice Clone] mode={pp_voice_clone_mode} refs={len(pp_voice_clone_refs)} on {fname}")
                             from postprocessing.voice_clone import apply_voice_clone_to_file
                             apply_voice_clone_to_file(
@@ -11699,7 +12156,10 @@ def _run_generation(job_id: str):
                             continue
                         audio_path = os.path.join(out_dir, fname)
                         try:
-                            job["message"] = f"Smoothing speaker volumes..."
+                            if not update_job(
+                                job, message="Smoothing speaker volumes...",
+                            ):
+                                return False
                             print(f"  [DynAudNorm] Applying to {fname}")
                             tmp_path = audio_path + ".dynaudnorm.wav"
                             import subprocess
@@ -11723,71 +12183,50 @@ def _run_generation(job_id: str):
                         except Exception as dan_err:
                             print(f"  [DynAudNorm] Warning: failed on {fname}: {dan_err}")
 
-                # Save .meta.json sidecar for each new output
-                if new_files:
-                    upload_filenames = {}
-                    for key in ["image_start", "image_end", "video_guide", "audio_guide", "audio_guide2", "audio_guide3", "audio_guide4", "audio_guide5", "audio_guide6"]:
-                        val = job["params"].get(key)
-                        if val and isinstance(val, str):
-                            upload_filenames[key] = os.path.basename(val)
-                        elif val and isinstance(val, list):
-                            upload_filenames[key] = [os.path.basename(v) if isinstance(v, str) and v else "" for v in val]
-                    sidecar_params = job["params"].copy()
-                    # Restore film grain settings in metadata (stripped from pipeline params)
-                    if pp_film_grain_intensity > 0:
-                        sidecar_params["film_grain_intensity"] = pp_film_grain_intensity
-                        sidecar_params["film_grain_saturation"] = pp_film_grain_saturation
-                    # Same for the deferred FlashVSR upscale, so pencil-restore
-                    # round-trips the user's Spatial Upsampling choice.
-                    if pp_spatial_upsampling:
-                        sidecar_params["spatial_upsampling"] = pp_spatial_upsampling
-                    sidecar = {
-                        "params": sidecar_params,
-                        "upload_filenames": upload_filenames,
-                        "generation_mode": job["params"].get("generation_mode"),
-                        "job_id": job_id,
-                        "generation_time": round(time.time() - start_time),
-                        "created_at": time.time(),
-                    }
-                    # Link Director outputs back to their pipeline
-                    dpid = job["params"].get("_director_pipeline_id")
-                    if dpid:
-                        sidecar["director_pipeline_id"] = dpid
-                    media_exts = {".mp4", ".webm", ".gif", ".png", ".jpg", ".jpeg", ".webp", ".wav", ".mp3"}
-                    for fname in new_files:
-                        ext = os.path.splitext(fname)[1].lower()
-                        if ext not in media_exts:
-                            continue
-                        meta_path = os.path.join(out_dir, os.path.splitext(fname)[0] + ".meta.json")
-                        try:
-                            with open(meta_path, "w", encoding="utf-8") as f:
-                                json.dump(sidecar, f, indent=2)
-                        except Exception:
-                            pass
+                # Refresh sidecars after post-processing/renames.
+                _write_output_sidecars(new_files)
 
-            job["status"] = "completed" if success else "failed"
-            job["progress"] = 100 if success else 0
-            job["step"] = 0
-            job["total_steps"] = 0
-            job["phase"] = ""
-            job["message"] = "Done" if success else "Generation failed"
+            if success and not finalize:
+                return update_job(
+                    job,
+                    progress=99,
+                    step=0,
+                    total_steps=0,
+                    phase="Finalizing",
+                    message="Finalizing...",
+                )
+
+            finish_job(
+                job,
+                "completed" if success else "failed",
+                progress=100 if success else 0,
+                step=0,
+                total_steps=0,
+                phase="",
+                message="Done" if success else "Generation failed",
+            )
+            return success and job.get("status") == "completed"
 
         except Exception as e:
             traceback.print_exc()
-            job["status"] = "failed"
-            job["error"] = str(e)
-            job["message"] = f"Error: {e}"
+            failure_updates = {
+                "error": str(e),
+                "message": f"Error: {e}",
+            }
             # Tag with OOM info — see _run_sfx_generation for rationale.
             try:
                 from services.oom_detect import detect_oom
                 _coef = float(wgp.server_config.get("vram_safety_coefficient", 0.80))
                 _oom = detect_oom(e, _coef)
                 if _oom:
-                    job["oom_info"] = _oom
+                    failure_updates["oom_info"] = _oom
             except Exception:
                 pass
+            finish_job(job, "failed", **failure_updates)
+            return False
         finally:
-            _active_gen_states.pop(job_id, None)
+            if abort_state is not None:
+                unregister_abort_state(job_id, _active_gen_states, abort_state)
             # Restore the persisted base coefficient so the next job
             # starts from the user's auto-tuned value, not whatever
             # this job's adjustment left it at.
@@ -11805,7 +12244,7 @@ def get_status(job_id: str):
     """Get generation job status."""
     if job_id not in _jobs:
         raise HTTPException(status_code=404, detail="Job not found")
-    j = _jobs[job_id]
+    j = snapshot_job(_jobs[job_id])
     return {
         "job_id": j["id"],
         "status": j["status"],
@@ -11829,34 +12268,22 @@ def cancel_job(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
 
     job = _jobs[job_id]
-
-    # If still queued (not yet picked up by _run_generation), just mark cancelled
-    if job["status"] == "queued":
-        job["status"] = "cancelled"
-        job["message"] = "Cancelled"
-        return {"status": "cancelled", "was_running": False}
-
-    # If running, signal abort to wgp
-    if job["status"] == "running":
-        gen_state = _active_gen_states.get(job_id)
-        if gen_state:
-            gen_state["abort"] = True
-            print(f"[Cancel] Signalling abort for job {job_id}")
-        # Also set interrupt on the model directly
-        if wgp.wan_model is not None and hasattr(wgp.wan_model, '_interrupt'):
-            wgp.wan_model._interrupt = True
-        job["status"] = "cancelled"
-        job["message"] = "Cancelled"
-        return {"status": "cancelled", "was_running": True}
-
-    return {"status": job["status"], "was_running": False}
+    result = request_cancel(
+        job,
+        job_id=job_id,
+        active_states=_active_gen_states,
+    )
+    if result.abort_signalled:
+        print(f"[Cancel] Signalling abort for job {job_id}")
+    return {"status": job["status"], "was_running": result.was_running}
 
 
 @api.get("/api/v1/jobs")
 def list_jobs():
     """List all active/recent jobs for reconnection after browser refresh."""
     active = []
-    for j in _jobs.values():
+    for job in list(_jobs.values()):
+        j = snapshot_job(job)
         if j["status"] in ("queued", "running"):
             active.append({
                 "job_id": j["id"],
