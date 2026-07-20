@@ -1084,6 +1084,25 @@ def _audio_timeline_start(planned_clips: list[dict]) -> float:
     return start_sec
 
 
+def _quantize_clip_frame_schedule(
+    requested_frames: list[float], min_frames: int, latent_size: int,
+) -> list[int]:
+    """Match Director's carried rounding for a sequence of clip lengths."""
+    latent_size = max(1, int(latent_size or 1))
+    min_frames = max(1, int(min_frames or 1))
+    carried: list[int] = []
+    carry = 0.0
+    for frame_count in requested_frames:
+        target = float(frame_count) + carry
+        quantized = max(
+            round((target - 1) / latent_size) * latent_size + 1,
+            min_frames,
+        )
+        carry = target - quantized
+        carried.append(int(quantized))
+    return carried
+
+
 @_exclusive_pipeline_operation
 def rerun_clip_video(out_dir: str, pid: str, clip_index: int, prompt_override: str = None) -> dict:
     return _rerun_clip_video_impl(out_dir, pid, clip_index, prompt_override)
@@ -1103,6 +1122,7 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
     if not prompt:
         raise ValueError("No video prompt for this clip")
 
+    snapshot = state.get("_params_snapshot") or {}
     video_model = state.get("video_model") or "ltx2_22B_distilled_1_1"
     video_loras = state.get("video_loras") or {}
     video_params = state.get("video_params") or {}
@@ -1122,13 +1142,65 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
         )
     start_path = os.path.join(clip_out_dir, start_img)
 
-    # Use planned_clip for duration
-    planned = clip.get("planned_clip") or {}
-    duration_sec = planned.get("duration_sec", planned.get("end", 20) - planned.get("start", 0))
-    if duration_sec <= 0:
-        duration_sec = 20
-    fps = 25  # LTX-2 default
-    video_length = int(duration_sec * fps)
+    # Reconstruct the SAME carried frame schedule used by a full Director run.
+    # Generators only accept lengths on a model-specific latent lattice. A
+    # standalone rerun previously floored this one clip independently, losing
+    # as many as latent_size-1 frames every time (over a second on a 32-frame
+    # lattice). Those losses shifted every later cut against the soundtrack.
+    fps = snapshot.get("fps", 16)
+    try:
+        model_def = _wgp.get_model_def(video_model)
+        if model_def and model_def.get("fps"):
+            fps = model_def["fps"]
+    except Exception:
+        pass
+    try:
+        fps = float(fps)
+        if not math.isfinite(fps) or fps <= 0:
+            raise ValueError("invalid fps")
+    except (TypeError, ValueError):
+        fps = 16.0
+    try:
+        min_frames, _, latent_size = _wgp.get_model_min_frames_and_step(video_model)
+    except Exception:
+        min_frames, latent_size = 17, 8
+
+    requested_frames = []
+    planned_clips = []
+    for saved_clip in clips:
+        saved_plan = saved_clip.get("planned_clip") or {}
+        planned_clips.append(saved_plan)
+        try:
+            saved_duration = float(saved_plan.get("duration_sec") or 0)
+        except (TypeError, ValueError):
+            saved_duration = 0.0
+        if saved_duration <= 0:
+            try:
+                saved_duration = float(saved_plan.get("end", 0) or 0) - float(
+                    saved_plan.get("start", 0) or 0
+                )
+            except (TypeError, ValueError):
+                saved_duration = 0.0
+        if saved_duration > 0:
+            frame_count = round(saved_duration * fps)
+        else:
+            try:
+                frame_count = int(saved_plan.get("duration_frames") or 0)
+            except (TypeError, ValueError):
+                frame_count = 0
+            if frame_count <= 0:
+                frame_count = round(20 * fps)
+        requested_frames.append(max(
+            frame_count, round(5 * fps),
+        ))
+    frame_schedule = _quantize_clip_frame_schedule(
+        requested_frames, min_frames, latent_size,
+    )
+    video_length = frame_schedule[clip_index]
+    print(
+        f"[Pipeline {pid}] Clip {clip_index} rerun frame budget: "
+        f"{video_length} frames at {fps:g} fps ({video_length / fps:.3f}s)"
+    )
 
     gen_params = {
         "model_type": video_model,
@@ -1147,7 +1219,7 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
         # 13s clip came back as its first 5s, shifting every later clip in
         # the rejoined video and breaking lip sync). Without this key the
         # primary-settings default (129 frames) applied.
-        "sliding_window_size": video_length + 8 + 1,
+        "sliding_window_size": video_length + latent_size + 1,
         "seed": -1,
         "settings_version": 2.52,
         "generation_mode": "video",
@@ -1176,25 +1248,31 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
     # regenerated clip no longer matches the music video's soundtrack.
     # Slice the song to this clip's window and condition on it, mirroring
     # the segment the clip was originally generated against.
-    snapshot = state.get("_params_snapshot") or {}
     pipeline_type = state.get("pipeline_type") or snapshot.get("pipeline_type") or "music_video"
     audio_path = snapshot.get("audio_path") or ""
-    clip_start = planned.get("start")
+    audio_origin_frames = round(_audio_timeline_start(planned_clips) * fps)
+    clip_start = (
+        audio_origin_frames + sum(frame_schedule[:clip_index])
+    ) / fps
+    clip_duration_sec = video_length / fps
     slice_path = None
-    if pipeline_type != "short_film_story" and audio_path and os.path.isfile(audio_path) and clip_start is not None:
+    if pipeline_type != "short_film_story" and audio_path and os.path.isfile(audio_path):
         pid_token = re.sub(r"[^A-Za-z0-9_-]", "_", pid)[:32]
         slice_path = os.path.join(
             clip_out_dir,
             f"_rerun_audio_{pid_token}_c{clip_index}_{uuid.uuid4().hex[:8]}.wav",
         )
         try:
-            _slice_audio_segment(audio_path, clip_start, duration_sec, slice_path)
+            _slice_audio_segment(
+                audio_path, clip_start, clip_duration_sec, slice_path,
+            )
             gen_params["audio_prompt_type"] = "A"
             gen_params["audio_guide"] = slice_path
             if snapshot.get("audio_scale") is not None:
                 gen_params["audio_scale"] = snapshot["audio_scale"]
             print(f"[Pipeline {pid}] Clip {clip_index} rerun conditioned on song segment "
-                  f"{float(clip_start):.1f}s-{float(clip_start) + float(duration_sec):.1f}s")
+                  f"{float(clip_start):.3f}s-"
+                  f"{float(clip_start) + float(clip_duration_sec):.3f}s")
         except Exception as e:
             print(f"[Pipeline {pid}] Clip {clip_index} audio slice failed; "
                   f"regenerating without soundtrack conditioning: {e}")
@@ -3624,12 +3702,6 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
     def _quantize_frames(cf):
         return max((cf - 1) // _latent * _latent + 1, _min_f)
 
-    def _quantize_frames_nearest(cf):
-        # Round to the NEAREST valid (latent*n + 1) length instead of
-        # flooring — used with a carry term for per-clip sequences where
-        # floor-truncation would compound (see below).
-        return max(round((cf - 1) / _latent) * _latent + 1, _min_f)
-
     # ── SEAMLESS MODE: one continuous rolling window generation ──────
     # Instead of separate per-clip jobs, build ONE generation that looks like
     # Studio mode: rolling windows with per-window prompts + keyframe injection.
@@ -3771,14 +3843,9 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
         # clip to the NEAREST valid length and carry the residual into the
         # next clip: every cumulative boundary stays within half a latent
         # step (±4 frames ≈ 0.16s) of the planned beat, forever.
-        _carried: list[int] = []
-        _carry = 0.0
-        for _cf in per_clip_frames:
-            _target = _cf + _carry
-            _q = _quantize_frames_nearest(_target)
-            _carry = _target - _q
-            _carried.append(_q)
-        per_clip_frames = _carried
+        per_clip_frames = _quantize_clip_frame_schedule(
+            per_clip_frames, _min_f, _latent,
+        )
         total_frames = sum(per_clip_frames)
         max_clip_frames = max(per_clip_frames) if per_clip_frames else round(5 * fps)
         # Single-window case: sliding_window_frames must be STRICTLY

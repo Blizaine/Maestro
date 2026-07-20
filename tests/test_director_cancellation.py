@@ -833,6 +833,80 @@ class TestDirectorCancellation(unittest.TestCase):
             ["old-one.mp4", "old-two.mp4", "new-one.mp4"],
         )
 
+    def test_video_rerun_reuses_full_director_carried_frame_schedule(self):
+        pid = "pipe-rerun-frame-schedule"
+        record = self._add_pipeline(pid, "completed")
+        audio_path = self._write_media("song.wav", b"audio")
+        record["params"].update({
+            "seamless": False,
+            "video_model": "ltx2_22B_distilled_1_1",
+            "audio_path": audio_path,
+            # The model definition must win over a stale frontend fps.
+            "fps": 16,
+        })
+        planned = [
+            {"start": 2, "end": 30},
+            {"start": 30, "end": 50},
+            {"start": 50, "end": 69.613},
+            {"start": 69.613, "end": 89},
+            {"start": 89, "end": 98},
+            {"start": 98, "end": 120},
+        ]
+        record["_planned_clips"] = planned
+        record["clip_plans"] = [
+            {"image_prompt": str(i), "video_prompt": f"motion {i}"}
+            for i in range(len(planned))
+        ]
+        record["clip_images"] = [
+            f"start-{i}.jpg" for i in range(len(planned))
+        ]
+        for filename in record["clip_images"]:
+            self._write_media(filename, b"image")
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+
+        submitted = []
+        audio_slices = []
+        pipeline._wgp = SimpleNamespace(
+            save_path=self.temp_dir.name,
+            get_model_def=lambda _model: {"fps": 25},
+            get_model_min_frames_and_step=lambda _model: (17, 8, 8),
+        )
+
+        with (
+            patch.object(
+                pipeline,
+                "_slice_audio_segment",
+                side_effect=lambda *args: audio_slices.append(args),
+            ),
+            patch.object(
+                pipeline,
+                "_submit_and_wait",
+                side_effect=lambda params, **_kwargs: (
+                    submitted.append(params) or ["replacement.mp4"]
+                ),
+            ),
+        ):
+            pipeline.rerun_clip_video(self.temp_dir.name, pid, 5)
+
+        # Full Director's carried schedule is [697, 505, 489, 481, 225, 553].
+        # Independent floor quantization used to turn this final request into
+        # 545 frames, shortening the joined timeline by another 0.32 seconds.
+        self.assertEqual(submitted[0]["video_length"], 553)
+        self.assertEqual(submitted[0]["sliding_window_size"], 562)
+        self.assertEqual(len(audio_slices), 1)
+        self.assertAlmostEqual(audio_slices[0][1], 97.88, places=3)
+        self.assertAlmostEqual(audio_slices[0][2], 22.12, places=3)
+
+        # Wider model lattices explain the public report's full one-second
+        # loss: carry alternates the extra frame block instead of discarding
+        # it independently from every regenerated clip.
+        self.assertEqual(
+            pipeline._quantize_clip_frame_schedule(
+                [240, 240, 240, 240], 33, 32,
+            ),
+            [225, 257, 225, 257],
+        )
+
     def test_standard_video_uses_each_generated_start_image(self):
         pid = "pipe-video-starts"
         self._add_pipeline(pid, "running")
