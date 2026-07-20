@@ -458,6 +458,9 @@ export interface CivitAIDownload {
   bytes_downloaded: number
   bytes_total: number
   error: string | null
+  /** Unix timestamps (seconds) supplied by the download registry. */
+  started_at: number | null
+  completed_at: number | null
   // Non-fatal warnings raised after the download finished — most
   // commonly the architecture-mismatch warning when a Klein-4B-trained
   // LoRA lands in flux2_klein_9b/ or vice versa. UI shows these inline

@@ -1548,7 +1548,7 @@ export async function fetchLoraGuide(modelType: string, filename: string): Promi
 }
 
 export async function importHuggingFaceLora(url: string, targetDir?: string, filename?: string): Promise<{
-  status: string; download_id: string; filename: string; target_dir: string; repo_id: string; base_model: string
+  status: string; download_id: string; filename: string; target_dir: string; repo_id?: string; base_model: string
 }> {
   const res = await fetch(`${BASE}/api/v1/huggingface/import-lora`, {
     method: 'POST',

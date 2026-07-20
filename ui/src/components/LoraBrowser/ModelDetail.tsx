@@ -4,7 +4,7 @@ import DOMPurify from 'dompurify'
 import { useStore } from '../../stores/useStore'
 import { fetchLoraDirectories, fetchCheckpointArchitectures, reloadModels } from '../../api/client'
 import type { CheckpointArchitecture } from '../../api/client'
-import type { CivitAIModel, CivitAIModelVersion, CivitAIFile } from '../../types'
+import type { CivitAIModel, CivitAIModelVersion, CivitAIFile, CivitAIDownload } from '../../types'
 import { formatBytes } from '../../lib/format'
 
 interface Props {
@@ -58,8 +58,18 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
     fetchLoraDirectories().then(r => setLoraDirs(r.directories)).catch(() => {})
   }, [])
 
-  // Check if this file is already downloading/completed
-  const activeDownload = file ? downloads.find(d => d.filename === file.name) : null
+  // A retry creates another record with the same filename. Prefer the newest
+  // one so an older failed/completed row cannot mask the current attempt.
+  const activeDownload = useMemo(() => {
+    if (!file) return undefined
+    return downloads.reduce<CivitAIDownload | undefined>((newest, candidate) => {
+      if (candidate.filename !== file.name) return newest
+      if (!newest) return candidate
+      const newestStarted = Number(newest.started_at) || 0
+      const candidateStarted = Number(candidate.started_at) || 0
+      return candidateStarted >= newestStarted ? candidate : newest
+    }, undefined)
+  }, [downloads, file])
 
   // ── Checkpoint import: target-architecture picker ──────────────────
   // For checkpoints we don't pick a loras directory — we pick which supported
@@ -351,14 +361,12 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
 
           {/* Download button (with optional API-key advisory above) */}
           <div className="pt-2 space-y-2">
-            {activeDownload ? (
+            {activeDownload && activeDownload.status !== 'failed' ? (
               <div className="space-y-2">
                 <div className="flex items-center justify-between text-xs">
                   <span className="text-text-secondary">
                     {activeDownload.status === 'completed' ? (
                       <span className="flex items-center gap-1 text-accent-green"><Check size={12} /> {isCheckpoint ? 'Imported — added to models' : 'Downloaded'}</span>
-                    ) : activeDownload.status === 'failed' ? (
-                      <span className="text-red-400">Failed: {activeDownload.error}</span>
                     ) : (
                       <span className="flex items-center gap-1"><Loader2 size={12} className="animate-spin" /> Downloading...</span>
                     )}
@@ -392,6 +400,11 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
               </div>
             ) : (
               <>
+                {activeDownload?.status === 'failed' && (
+                  <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-[11px] text-red-400 leading-snug">
+                    Failed: {activeDownload.error || 'Download failed'}. You can retry below.
+                  </div>
+                )}
                 {/* Inline API-key advisory shown only when no key is set.
                     Doesn't block the download (some public LoRAs are
                     available anonymously and we want to allow optimism)
@@ -429,7 +442,11 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
                   className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-accent-blue text-white text-sm rounded-lg hover:bg-accent-blue-hover transition-colors disabled:opacity-50"
                 >
                   <Download size={14} />
-                  {isCheckpoint ? `Import ${file?.name || 'checkpoint'}` : `Download ${file?.name || 'LoRA'}`}
+                  {activeDownload?.status === 'failed'
+                    ? `Retry ${file?.name || (isCheckpoint ? 'checkpoint' : 'LoRA')}`
+                    : isCheckpoint
+                      ? `Import ${file?.name || 'checkpoint'}`
+                      : `Download ${file?.name || 'LoRA'}`}
                 </button>
               </>
             )}

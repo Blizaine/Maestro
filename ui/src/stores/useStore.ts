@@ -3,6 +3,52 @@ import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPr
 import * as api from '../api/client'
 import { applyThemePrefs, getStoredPrefs, type FamilyId, type ThemeMode, type ThemePrefs } from '../lib/theme'
 
+const CIVIT_DOWNLOAD_POLL_MS = 2000
+const CIVIT_DOWNLOAD_COMPLETED_VISIBLE_MS = 30_000
+let _civitDownloadPollTask: Promise<void> | null = null
+let _civitDownloadPollController: AbortController | null = null
+let _civitDownloadPollRequested = false
+
+function _downloadTimestampMs(value: number | null | undefined): number | null {
+  const timestamp = Number(value)
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return null
+  return timestamp < 1_000_000_000_000 ? timestamp * 1000 : timestamp
+}
+
+function _downloadNeedsPolling(download: CivitAIDownload, now: number): boolean {
+  if (download.status === 'downloading') return true
+  if (download.status !== 'completed') return false
+  const completedAt = _downloadTimestampMs(download.completed_at)
+  return completedAt !== null && now - completedAt < CIVIT_DOWNLOAD_COMPLETED_VISIBLE_MS
+}
+
+function _waitForDownloadPoll(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise(resolve => {
+    if (signal.aborted) {
+      resolve()
+      return
+    }
+    const timer = window.setTimeout(done, ms)
+    function done() {
+      window.clearTimeout(timer)
+      signal.removeEventListener('abort', done)
+      resolve()
+    }
+    signal.addEventListener('abort', done, { once: true })
+  })
+}
+
+// Vite can replace this module without a full page unload. Abort the old
+// async loop so HMR never leaves an orphaned polling timer behind.
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    _civitDownloadPollController?.abort()
+    _civitDownloadPollController = null
+    _civitDownloadPollTask = null
+    _civitDownloadPollRequested = false
+  })
+}
+
 // --- LocalStorage persistence for per-mode settings ---
 const STORAGE_KEY = 'maestro_mode_settings'
 
@@ -2312,6 +2358,7 @@ export const useStore = create<AppState>((set, get) => ({
       model_id: 0, version_id: 0, trained_words: [],
       model_name: lora.filename, images: [],
     })
+    get().pollCivitAIDownloads()
   },
   loadDirectorFromPipeline: async (pid) => {
     try {
@@ -2349,6 +2396,9 @@ export const useStore = create<AppState>((set, get) => ({
   setLoraBrowserOpen: (open, arch) => {
     if (open) {
       set({ loraBrowserOpen: true, loraBrowserArch: arch || null, civitSearchResults: [], civitSearchCursor: null, civitSelectedModel: null })
+      // Adopt downloads started by URL imports, recipes, or another browser
+      // session instead of assuming this store initiated every transfer.
+      get().pollCivitAIDownloads()
     } else {
       set({ loraBrowserOpen: false })
       // Refresh LoRA list after closing (may have downloaded new ones)
@@ -2409,18 +2459,61 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   pollCivitAIDownloads: () => {
+    // Mark every invocation, including calls made while the singleton loop is
+    // awaiting an older request. The active loop consumes this before exit
+    // and takes a new snapshot that was initiated after the caller arrived.
+    _civitDownloadPollRequested = true
+    if (_civitDownloadPollTask) return
+
+    const controller = new AbortController()
+    _civitDownloadPollController = controller
     const poll = async () => {
+      let consecutiveErrors = 0
       try {
-        const { downloads } = await api.fetchCivitAIDownloads()
-        set({ civitDownloads: downloads })
-        if (downloads.some(d => d.status === 'downloading')) {
-          setTimeout(poll, 2000)
+        while (!controller.signal.aborted) {
+          _civitDownloadPollRequested = false
+          try {
+            const { downloads } = await api.fetchCivitAIDownloads()
+            consecutiveErrors = 0
+            set({ civitDownloads: downloads })
+
+            // A caller joined while this request was in flight. Its freshness
+            // guarantee requires another request, even when this response has
+            // no active/recent downloads and would normally end the loop.
+            if (_civitDownloadPollRequested) continue
+
+            // Keep taking snapshots while work is active and through the
+            // completed row's 30-second display window. This guarantees a
+            // caller that joins late still observes the terminal record.
+            if (!downloads.some(download => _downloadNeedsPolling(download, Date.now()))) return
+            await _waitForDownloadPoll(CIVIT_DOWNLOAD_POLL_MS, controller.signal)
+          } catch (error) {
+            if (controller.signal.aborted) return
+            consecutiveErrors += 1
+            if (_civitDownloadPollRequested) continue
+            const knownWork = get().civitDownloads.some(download =>
+              _downloadNeedsPolling(download, Date.now())
+            )
+            // Retry transient failures while the browser is open or known
+            // work is active. A background adoption probe gets three retries
+            // before yielding; a later caller can safely start a fresh loop.
+            if (!get().loraBrowserOpen && !knownWork && consecutiveErrors > 3) {
+              console.warn('Download polling paused after repeated errors:', error)
+              return
+            }
+            const retryMs = Math.min(10_000, 1000 * (2 ** Math.min(consecutiveErrors - 1, 3)))
+            await _waitForDownloadPoll(retryMs, controller.signal)
+          }
         }
-      } catch {
-        // silent
+      } finally {
+        if (_civitDownloadPollController === controller) {
+          _civitDownloadPollController = null
+          _civitDownloadPollTask = null
+        }
       }
     }
-    poll()
+
+    _civitDownloadPollTask = poll()
   },
 
   // Models & families

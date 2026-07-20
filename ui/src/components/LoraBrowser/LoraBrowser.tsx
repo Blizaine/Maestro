@@ -36,6 +36,7 @@ export function LoraBrowser() {
   const clearSelection = useStore(s => s.clearCivitSelection)
   const setDefaultDir = useStore(s => s.setLoraBrowserDefaultDir)
   const searchError = useStore(s => s.civitSearchError)
+  const pollDownloads = useStore(s => s.pollCivitAIDownloads)
   // API-key onboarding state. Without a CivitAI key, downloads of any
   // restricted/mature model produce error-page payloads — we now reject
   // those at download time, but a passive banner here saves the user a
@@ -164,6 +165,12 @@ export function LoraBrowser() {
     }
   }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Adopt any server-side download, including imports started before this
+  // browser session. The store action is singleton-safe across all callers.
+  useEffect(() => {
+    if (open) pollDownloads()
+  }, [open, pollDownloads])
+
   // Run initial search when opened
   useEffect(() => {
     if (open && results.length === 0) {
@@ -227,6 +234,7 @@ export function LoraBrowser() {
       const result = await importHuggingFaceLora(trimmed)
       setImportStatus(`Downloading ${result.filename} → ${result.target_dir}/ (base: ${result.base_model || 'auto-detected'})`)
       setImportUrl('')
+      pollDownloads()
       // The download runs in background on the server — it'll appear in the download bar
       setTimeout(() => setImportStatus(''), 10000)
     } catch (e) {
@@ -235,7 +243,7 @@ export function LoraBrowser() {
     } finally {
       setImporting(false)
     }
-  }, [importUrl, importing])
+  }, [importUrl, importing, pollDownloads])
 
   if (!open) return null
 

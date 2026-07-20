@@ -25,7 +25,7 @@ import asyncio
 import threading
 import traceback
 import requests
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 # --- Bootstrap: CWD must be app/ and sys.argv must be patched before importing wgp ---
 _app_dir = os.path.dirname(os.path.abspath(__file__))
@@ -643,16 +643,19 @@ def get_primary_settings():
 @api.get("/api/v1/loras/scan-status/{scan_id}")
 def scan_status(scan_id: str):
     """Get the status of a LoRA scan operation."""
-    state = _civitai_downloads.get(f"scan_{scan_id}")
+    with _lora_guide_scan_lock:
+        state = _lora_guide_scans.get(scan_id)
+        if state:
+            state = {
+                "status": state.get("status", "running"),
+                "current": state.get("current", 0),
+                "total": state.get("total", 0),
+                "message": state.get("message", ""),
+                "results": list(state.get("results", [])),
+            }
     if not state:
         raise HTTPException(status_code=404, detail="Scan not found")
-    return {
-        "status": state["status"],
-        "current": state["current"],
-        "total": state["total"],
-        "message": state["message"],
-        "results": state["results"],
-    }
+    return state
 
 
 @api.get("/api/v1/loras/directories")
@@ -2286,6 +2289,325 @@ def _scan_installed_checkpoints() -> list:
 
 _civitai_downloads: dict = {}
 _civitai_download_lock = threading.Lock()
+_download_target_reservations: dict[str, str] = {}
+_lora_guide_scans: dict = {}
+_lora_guide_scan_lock = threading.Lock()
+
+
+def _is_safe_path_component(value) -> bool:
+    """Return whether a user-controlled filename/directory is one component."""
+    if not isinstance(value, str) or not value:
+        return False
+    if value in (".", "..") or value.rstrip(" .") != value:
+        return False
+    if any(ord(char) < 32 or char in '<>:"|?*' for char in value):
+        return False
+    if "/" in value or "\\" in value or os.path.isabs(value):
+        return False
+    drive, _tail = os.path.splitdrive(value)
+    if drive:
+        return False
+    if PureWindowsPath(value).is_reserved():
+        return False
+    device_stem = value.split(".", 1)[0].upper()
+    if device_stem in {"CON", "PRN", "AUX", "NUL"}:
+        return False
+    if (
+        len(device_stem) == 4
+        and device_stem[:3] in {"COM", "LPT"}
+        and device_stem[3] in "123456789"
+    ):
+        return False
+    return True
+
+
+def _response_content_length(headers) -> int:
+    """Return a trustworthy wire length, or zero for decoded responses."""
+    try:
+        encoding = str(
+            headers.get("content-encoding")
+            or headers.get("Content-Encoding")
+            or ""
+        ).strip().lower()
+        if encoding not in ("", "identity"):
+            return 0
+        length = headers.get("content-length") or headers.get("Content-Length") or 0
+        return max(0, int(length))
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _download_progress_percent(bytes_downloaded, bytes_total) -> int:
+    """Return byte progress in the public download API's 0..100 scale."""
+    try:
+        downloaded = max(0, int(bytes_downloaded or 0))
+        total = max(0, int(bytes_total or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    if total <= 0:
+        return 0
+    return min(100, int(downloaded * 100 / total))
+
+
+def _require_complete_download(bytes_downloaded, bytes_total):
+    """Reject a cleanly-ended HTTP stream when Content-Length is short."""
+    if bytes_total > 0 and bytes_downloaded != bytes_total:
+        raise IOError(
+            f"Incomplete download: received {bytes_downloaded} of "
+            f"{bytes_total} bytes"
+        )
+
+
+def _new_download_record(download_id: str, filename: str, **internal) -> dict:
+    """Build the common record shared by CivitAI and HuggingFace imports."""
+    record = {
+        "id": str(download_id),
+        "filename": str(filename or ""),
+        "status": "downloading",
+        "progress": 0,
+        "bytes_downloaded": 0,
+        "bytes_total": 0,
+        "error": None,
+        "started_at": time.time(),
+        "completed_at": None,
+    }
+    record.update(internal)
+    return record
+
+
+def _safe_download_number(value, *, integer: bool = False):
+    """Coerce an internal value without letting status serialization fail."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0 if integer else None
+    if number != number or number in (float("inf"), float("-inf")):
+        return 0 if integer else None
+    if integer:
+        return max(0, int(number))
+    return number
+
+
+def _serialize_download_record(record, fallback_id: str = "") -> dict:
+    """Return the stable, JSON-safe public shape for any registry entry."""
+    if not isinstance(record, dict):
+        record = {}
+    progress = _safe_download_number(record.get("progress"), integer=True)
+    error = record.get("error")
+    warnings = record.get("warnings")
+    if not isinstance(warnings, (list, tuple)):
+        warnings = []
+    return {
+        "id": str(record.get("id") or fallback_id),
+        "filename": str(record.get("filename") or ""),
+        "status": str(record.get("status") or "downloading"),
+        "progress": min(100, progress),
+        "bytes_downloaded": _safe_download_number(
+            record.get("bytes_downloaded"), integer=True,
+        ),
+        "bytes_total": _safe_download_number(
+            record.get("bytes_total"), integer=True,
+        ),
+        "error": None if error is None else str(error),
+        "started_at": _safe_download_number(record.get("started_at")),
+        "completed_at": _safe_download_number(record.get("completed_at")),
+        "warnings": [str(warning) for warning in warnings],
+    }
+
+
+def _update_download_record(download_id: str, **changes):
+    """Mutate a download record under the registry lock."""
+    with _civitai_download_lock:
+        record = _civitai_downloads.get(download_id)
+        if record is not None:
+            record.update(changes)
+        return record
+
+
+def _complete_download_record(download_id: str):
+    _update_download_record(
+        download_id,
+        status="completed",
+        progress=100,
+        error=None,
+        completed_at=time.time(),
+    )
+
+
+def _fail_download_record(download_id: str, error):
+    _update_download_record(
+        download_id,
+        status="failed",
+        error=str(error),
+        completed_at=time.time(),
+    )
+
+
+def _normalize_download_target(target_path: str) -> str:
+    return os.path.normcase(os.path.realpath(os.path.abspath(target_path)))
+
+
+def _reserve_download_target(download_id: str, target_path: str):
+    """Reserve one normalized final path; return its key or None if busy."""
+    normalized = _normalize_download_target(target_path)
+    owner = str(download_id)
+    with _civitai_download_lock:
+        current_owner = _download_target_reservations.get(normalized)
+        if current_owner is not None and current_owner != owner:
+            return None
+        _download_target_reservations[normalized] = owner
+    return normalized
+
+
+def _release_download_target(download_id: str, target_path: str):
+    """Release a reservation only when it still belongs to this attempt."""
+    normalized = _normalize_download_target(target_path)
+    with _civitai_download_lock:
+        if _download_target_reservations.get(normalized) == str(download_id):
+            _download_target_reservations.pop(normalized, None)
+
+
+def _validate_safetensors_payload(path: str):
+    """Apply Maestro's minimum-size and header checks to a safetensors file."""
+    file_size = os.path.getsize(path)
+    if file_size < 100 * 1024:
+        raise ValueError(
+            f"file is only {file_size} bytes — too small to be a real LoRA"
+        )
+    with open(path, "rb") as handle:
+        raw_len = handle.read(8)
+        if len(raw_len) != 8:
+            raise ValueError("file is shorter than the 8-byte safetensors header prefix")
+        import struct as _struct
+        header_len = _struct.unpack("<Q", raw_len)[0]
+    if header_len <= 0 or header_len > 256 * 1024 * 1024:
+        raise ValueError(
+            f"safetensors header length {header_len} is out of range "
+            f"(file is not a valid safetensors)"
+        )
+    if 8 + header_len >= file_size:
+        raise ValueError(
+            f"safetensors header claims {header_len} bytes but file is only "
+            f"{file_size} bytes total"
+        )
+
+
+def _zip_member_target(target_dir: str, member_name: str, *, flatten: bool) -> str:
+    """Resolve one archive member without permitting unsafe components."""
+    normalized_name = str(member_name or "").replace("\\", "/")
+    components = normalized_name.split("/")
+    if flatten:
+        components = [components[-1]] if components else []
+    if not components or any(not _is_safe_path_component(part) for part in components):
+        raise ValueError(f"unsafe archive member path: {member_name!r}")
+    target = _safe_join(target_dir, *components)
+    if target is None:
+        raise ValueError(f"archive member escapes target directory: {member_name!r}")
+    return target
+
+
+def _copy_zip_member_to_partial(zip_file, member, partial_path: str) -> int:
+    copied = 0
+    with zip_file.open(member) as source, open(partial_path, "wb") as output:
+        while True:
+            chunk = source.read(1024 * 1024)
+            if not chunk:
+                break
+            output.write(chunk)
+            copied += len(chunk)
+    return copied
+
+
+def _extract_civitai_archive(
+    archive_path: str,
+    target_dir: str,
+    download_id: str,
+    reserved_targets: set,
+    partial_paths: set,
+) -> list[str]:
+    """Validate and atomically publish every selected member of a ZIP."""
+    import zipfile
+
+    prepared = []
+    seen_targets = set()
+    archive_target = _normalize_download_target(archive_path)
+    with zipfile.ZipFile(archive_path, "r") as zip_file:
+        members = [member for member in zip_file.infolist() if not member.is_dir()]
+        safetensor_members = [
+            member for member in members
+            if member.filename.lower().endswith((".safetensors", ".sft"))
+        ]
+        selected = safetensor_members or members
+        if not selected:
+            raise ValueError("archive contains no extractable files")
+
+        for member in selected:
+            is_safetensors = member in safetensor_members
+            final_path = _zip_member_target(
+                target_dir, member.filename, flatten=is_safetensors,
+            )
+            normalized_target = _normalize_download_target(final_path)
+            if normalized_target == archive_target:
+                raise ValueError(
+                    f"archive member {member.filename!r} collides with its archive path"
+                )
+            if normalized_target in seen_targets:
+                raise ValueError(
+                    f"archive contains duplicate target {os.path.basename(final_path)!r}"
+                )
+            seen_targets.add(normalized_target)
+
+            reservation = _reserve_download_target(download_id, final_path)
+            if reservation is None:
+                raise RuntimeError(
+                    f"Another download is already writing {os.path.basename(final_path)}"
+                )
+            reserved_targets.add(reservation)
+            os.makedirs(os.path.dirname(final_path), exist_ok=True)
+
+            partial_path = f"{final_path}.{uuid.uuid4().hex}.part"
+            partial_paths.add(partial_path)
+            copied = _copy_zip_member_to_partial(zip_file, member, partial_path)
+            if copied != member.file_size:
+                raise IOError(
+                    f"Incomplete archive member {member.filename!r}: received "
+                    f"{copied} of {member.file_size} bytes"
+                )
+            if is_safetensors:
+                try:
+                    _validate_safetensors_payload(partial_path)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Invalid safetensors archive member {member.filename!r}: {exc}"
+                    ) from exc
+            prepared.append((partial_path, final_path))
+
+    extracted = []
+    for partial_path, final_path in prepared:
+        os.replace(partial_path, final_path)
+        partial_paths.discard(partial_path)
+        extracted.append(final_path)
+    return extracted
+
+
+def _register_lora_guide_scan(scan_id: str, state: dict):
+    with _lora_guide_scan_lock:
+        _lora_guide_scans[scan_id] = state
+
+
+def _update_lora_guide_scan(scan_id: str, **changes):
+    with _lora_guide_scan_lock:
+        state = _lora_guide_scans.get(scan_id)
+        if state is not None:
+            state.update(changes)
+        return state
+
+
+def _append_lora_guide_scan_result(scan_id: str, result: dict):
+    with _lora_guide_scan_lock:
+        state = _lora_guide_scans.get(scan_id)
+        if state is not None:
+            state.setdefault("results", []).append(result)
 
 
 def _civitai_headers() -> dict:
@@ -2759,16 +3081,15 @@ async def civitai_download(request: Request):
         raise HTTPException(status_code=400, detail="download_url is required")
     if not _is_safe_civitai_url(url):
         raise HTTPException(status_code=400, detail="download_url must point to civitai.com")
+    if not _is_safe_path_component(filename):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    if target_arch and not _is_safe_path_component(target_arch):
+        raise HTTPException(status_code=400, detail="Invalid target_arch")
 
     # target_dir_name is user-supplied — reject anything that isn't a
     # plain directory name to defeat traversal into arbitrary filesystem
     # locations when combined with lora_root below.
-    if target_dir_name and (
-        "/" in target_dir_name
-        or "\\" in target_dir_name
-        or ".." in target_dir_name
-        or os.path.isabs(target_dir_name)
-    ):
+    if target_dir_name and not _is_safe_path_component(target_dir_name):
         raise HTTPException(status_code=400, detail="Invalid target_dir_name")
 
     # Resolve target directory.
@@ -2797,21 +3118,17 @@ async def civitai_download(request: Request):
             try:
                 target_dir = wgp.get_lora_dir(target_arch)
             except Exception:
-                target_dir = os.path.join(lora_root, target_arch)
+                target_dir = _safe_join(lora_root, target_arch)
+                if target_dir is None:
+                    raise HTTPException(status_code=400, detail="Invalid target_arch")
         else:
             target_dir = lora_root
     os.makedirs(target_dir, exist_ok=True)
 
     download_id = uuid.uuid4().hex[:8]
-    dl = {
-        "id": download_id,
-        "filename": filename,
+    dl = _new_download_record(download_id, filename)
+    dl.update({
         "target_dir": target_dir,
-        "status": "downloading",
-        "progress": 0,
-        "bytes_downloaded": 0,
-        "bytes_total": 0,
-        "error": None,
         # Metadata for sidecar
         "_url": url,
         "_model_id": model_id,
@@ -2832,7 +3149,7 @@ async def civitai_download(request: Request):
         "_kind": kind,
         "_target_architecture": target_architecture,
         "_auto_quantize": auto_quantize,
-    }
+    })
     with _civitai_download_lock:
         _civitai_downloads[download_id] = dl
 
@@ -2848,6 +3165,8 @@ def _run_civitai_download(download_id: str):
     url = dl["_url"]
     target_dir = dl["target_dir"]
     filename = dl["filename"]
+    partial_paths = set()
+    reserved_targets = set()
 
     try:
         # CivitAI's download endpoint sits behind Cloudflare with bot
@@ -2916,21 +3235,36 @@ def _run_civitai_download(download_id: str):
         if "filename=" in cd:
             fname = cd.split("filename=")[1].strip('"').strip(";").strip()
             if fname:
-                filename = fname
-                dl["filename"] = filename
+                remote_filename = os.path.basename(fname.replace("\\", "/"))
+                if _is_safe_path_component(remote_filename):
+                    filename = remote_filename
+                    _update_download_record(download_id, filename=filename)
 
-        total = int(resp.headers.get("content-length", 0))
-        dl["bytes_total"] = total
+        total = _response_content_length(resp.headers)
+        _update_download_record(download_id, bytes_total=total)
 
         save_path = os.path.join(target_dir, filename)
+        reserved_target = _reserve_download_target(download_id, save_path)
+        if reserved_target is None:
+            raise RuntimeError(f"Another download is already writing {filename}")
+        reserved_targets.add(reserved_target)
+        partial_path = f"{save_path}.{uuid.uuid4().hex}.part"
+        partial_paths.add(partial_path)
         downloaded = 0
 
-        with open(save_path, "wb") as f:
+        with open(partial_path, "wb") as f:
             for chunk in resp.iter_content(chunk_size=1024 * 1024):  # 1MB chunks
+                if not chunk:
+                    continue
                 f.write(chunk)
                 downloaded += len(chunk)
-                dl["bytes_downloaded"] = downloaded
-                dl["progress"] = int((downloaded / total) * 100) if total > 0 else 0
+                _update_download_record(
+                    download_id,
+                    bytes_downloaded=downloaded,
+                    progress=_download_progress_percent(downloaded, total),
+                )
+
+        _require_complete_download(downloaded, total)
 
         # ── Bogus-payload check ─────────────────────────────────────
         # Detect the case where CivitAI returned an auth-error page,
@@ -2943,48 +3277,8 @@ def _run_civitai_download(download_id: str):
         # — much harder to diagnose than failing here at download time.
         if filename.lower().endswith((".safetensors", ".sft")):
             try:
-                file_size = os.path.getsize(save_path)
-                # Anything below 100 KB is overwhelmingly likely to be
-                # an error response, not a LoRA. Smallest legitimate
-                # LoRAs (e.g. tiny LoHA adapters) are still measured in
-                # MB. If a future legitimate LoRA fails this gate we
-                # can revisit, but the false-negative cost is much
-                # lower than letting bogus files slip through.
-                if file_size < 100 * 1024:
-                    raise ValueError(
-                        f"downloaded file is only {file_size} bytes — "
-                        f"too small to be a real LoRA, likely a CivitAI "
-                        f"error/challenge response"
-                    )
-                # Validate the safetensors header is parseable and the
-                # claimed JSON header length is sane (<256 MB). This
-                # catches the case where the file was the right size
-                # but contained brotli-compressed garbage or some other
-                # non-safetensors payload.
-                with open(save_path, "rb") as vf:
-                    raw_len = vf.read(8)
-                    if len(raw_len) != 8:
-                        raise ValueError("file is shorter than the 8-byte safetensors header prefix")
-                    import struct as _struct
-                    header_len = _struct.unpack("<Q", raw_len)[0]
-                    if header_len <= 0 or header_len > 256 * 1024 * 1024:
-                        raise ValueError(
-                            f"safetensors header length {header_len} is out of range "
-                            f"(file is not a valid safetensors)"
-                        )
-                    # Header must fit inside the file with room for tensors
-                    if 8 + header_len >= file_size:
-                        raise ValueError(
-                            f"safetensors header claims {header_len} bytes but file is only "
-                            f"{file_size} bytes total"
-                        )
+                _validate_safetensors_payload(partial_path)
             except Exception as _validate_exc:
-                # Remove the bogus file so the user doesn't end up with
-                # 10KB junk masquerading as a LoRA in their library.
-                try:
-                    os.remove(save_path)
-                except Exception:
-                    pass
                 raise RuntimeError(
                     f"CivitAI returned an invalid LoRA payload: {_validate_exc}. "
                     f"This is usually a missing/expired CivitAI API key, a rate-limit, "
@@ -2992,56 +3286,30 @@ def _run_civitai_download(download_id: str):
                     f"CivitAI API Key."
                 )
 
+        # Publish only a fully-received (and, for safetensors, validated)
+        # payload. A failed stream leaves no truncated model at save_path.
+        os.replace(partial_path, save_path)
+        partial_paths.discard(partial_path)
+
         # Check if downloaded file is a ZIP archive (some CivitAI LoRAs are zipped)
         extracted_files = []
         import zipfile
         if zipfile.is_zipfile(save_path):
             print(f"[CivitAI] Downloaded file is a ZIP archive — extracting...")
-            try:
-                target_real = os.path.realpath(target_dir)
-                with zipfile.ZipFile(save_path, 'r') as zf:
-                    safetensor_files = [f for f in zf.namelist() if f.endswith('.safetensors')]
-                    if safetensor_files:
-                        # Strip directory components — never trust archive paths.
-                        for sf in safetensor_files:
-                            extracted_path = os.path.join(target_dir, os.path.basename(sf))
-                            with zf.open(sf) as src, open(extracted_path, 'wb') as dst:
-                                import shutil
-                                shutil.copyfileobj(src, dst)
-                            extracted_files.append(extracted_path)
-                            print(f"[CivitAI] Extracted: {os.path.basename(sf)}")
-                    else:
-                        # No safetensors in zip — extract every member, but
-                        # validate each path to defeat zip-slip (member names
-                        # like ../../malicious.py).
-                        for member in zf.infolist():
-                            if member.is_dir():
-                                continue
-                            # Reject absolute paths and traversal attempts.
-                            member_name = member.filename.replace("\\", "/")
-                            if member_name.startswith("/") or ".." in member_name.split("/"):
-                                print(f"[CivitAI] Skipping unsafe archive entry: {member_name}")
-                                continue
-                            dest = os.path.realpath(os.path.join(target_dir, member_name))
-                            if not (dest == target_real or dest.startswith(target_real + os.sep)):
-                                print(f"[CivitAI] Skipping zip-slip entry: {member_name}")
-                                continue
-                            os.makedirs(os.path.dirname(dest), exist_ok=True)
-                            with zf.open(member) as src, open(dest, "wb") as dst:
-                                import shutil
-                                shutil.copyfileobj(src, dst)
-                            extracted_files.append(dest)
-                        print(f"[CivitAI] Extracted {len(extracted_files)} file(s)")
-                # Remove the zip archive
-                os.remove(save_path)
-                # Update filename to first extracted file
-                if extracted_files:
-                    save_path = extracted_files[0]
-                    filename = os.path.basename(save_path)
-                    dl["filename"] = filename
-            except Exception as e:
-                print(f"[CivitAI] ZIP extraction failed (keeping original): {e}")
-                extracted_files = []
+            extracted_files = _extract_civitai_archive(
+                save_path,
+                target_dir,
+                download_id,
+                reserved_targets,
+                partial_paths,
+            )
+            # Delete the archive only after every selected member has passed
+            # path, size, payload, reservation, and atomic-publish checks.
+            os.remove(save_path)
+            save_path = extracted_files[0]
+            filename = os.path.basename(save_path)
+            _update_download_record(download_id, filename=filename)
+            print(f"[CivitAI] Extracted {len(extracted_files)} file(s)")
 
         # NOTE: A previous version did dim-based architecture verification
         # here (peeking the safetensors header and warning if the file's
@@ -3083,11 +3351,6 @@ def _run_civitai_download(download_id: str):
                     json.dump(sidecar_data, f, indent=2)
             except Exception as e:
                 print(f"[CivitAI] Failed to write sidecar for {fname}: {e}")
-
-        dl["status"] = "completed"
-        dl["progress"] = 100
-        print(f"[CivitAI] Download complete: {filename} ({downloaded / 1024 / 1024:.1f}MB)"
-              f"{f' — extracted {len(extracted_files)} file(s)' if extracted_files else ''}")
 
         # Post-download registration differs by kind:
         #   - checkpoint: write a finetune JSON so WGP lists it as a selectable
@@ -3135,32 +3398,32 @@ def _run_civitai_download(download_id: str):
                 except Exception as e:
                     print(f"[CivitAI] Guide auto-generation failed for {fname} (non-fatal): {e}")
 
+        _complete_download_record(download_id)
+        print(f"[CivitAI] Download complete: {filename} ({downloaded / 1024 / 1024:.1f}MB)"
+              f"{f' — extracted {len(extracted_files)} file(s)' if extracted_files else ''}")
+
     except Exception as e:
-        dl["status"] = "failed"
-        dl["error"] = str(e)
+        _fail_download_record(download_id, e)
         print(f"[CivitAI] Download failed: {e}")
+    finally:
+        for cleanup_path in tuple(partial_paths):
+            try:
+                if os.path.isfile(cleanup_path):
+                    os.remove(cleanup_path)
+            except OSError:
+                pass
+        for reserved_target in tuple(reserved_targets):
+            _release_download_target(download_id, reserved_target)
 
 
 @api.get("/api/v1/civitai/downloads")
 def civitai_downloads_status():
     """List active and recent downloads."""
     with _civitai_download_lock:
-        downloads = []
-        for dl in _civitai_downloads.values():
-            downloads.append({
-                "id": dl["id"],
-                "filename": dl["filename"],
-                "status": dl["status"],
-                "progress": dl["progress"],
-                "bytes_downloaded": dl["bytes_downloaded"],
-                "bytes_total": dl["bytes_total"],
-                "error": dl["error"],
-                # Non-fatal warnings raised after the download finished
-                # (architecture mismatch, etc.). UI surfaces these in the
-                # download history so the user knows the file landed but
-                # won't load against the chosen model.
-                "warnings": dl.get("warnings", []) or [],
-            })
+        downloads = [
+            _serialize_download_record(dl, fallback_id=download_id)
+            for download_id, dl in _civitai_downloads.items()
+        ]
     return {"downloads": downloads}
 
 
@@ -3269,7 +3532,10 @@ def _import_civitai_lora_by_url(url: str, target_dir_override: str = "") -> JSON
             return JSONResponse({"error": "CivitAI version has no files (may be a draft or missing upload)"}, status_code=400)
         primary_file = next((f for f in files if f.get("primary")), files[0])
         download_url = primary_file.get("downloadUrl")
-        filename = primary_file.get("name", "model.safetensors")
+        remote_filename = str(primary_file.get("name") or "model.safetensors")
+        filename = os.path.basename(remote_filename.replace("\\", "/"))
+        if not _is_safe_path_component(filename):
+            return JSONResponse({"error": "CivitAI returned an invalid filename"}, status_code=502)
         if not download_url:
             return JSONResponse({"error": "CivitAI file has no downloadUrl"}, status_code=502)
 
@@ -3286,7 +3552,7 @@ def _import_civitai_lora_by_url(url: str, target_dir_override: str = "") -> JSON
 
         if target_dir_override:
             # Reject traversal — same guard as /api/v1/civitai/download.
-            if "/" in target_dir_override or "\\" in target_dir_override or ".." in target_dir_override or os.path.isabs(target_dir_override):
+            if not _is_safe_path_component(target_dir_override):
                 return JSONResponse({"error": "Invalid target_dir"}, status_code=400)
             target_dir = _safe_join(lora_root, target_dir_override)
             if target_dir is None:
@@ -3303,15 +3569,9 @@ def _import_civitai_lora_by_url(url: str, target_dir_override: str = "") -> JSON
         # Build the download record using the same shape /civitai/download
         # creates, then dispatch to the same background-download function.
         download_id = uuid.uuid4().hex[:8]
-        dl = {
-            "id": download_id,
-            "filename": filename,
+        dl = _new_download_record(download_id, filename)
+        dl.update({
             "target_dir": target_dir,
-            "status": "downloading",
-            "progress": 0,
-            "bytes_downloaded": 0,
-            "bytes_total": 0,
-            "error": None,
             "_url": download_url,
             "_model_id": model_id,
             "_version_id": version_id,
@@ -3324,7 +3584,7 @@ def _import_civitai_lora_by_url(url: str, target_dir_override: str = "") -> JSON
             "_example_prompts": [],
             "_tags": model_data.get("tags", []) or [],
             "_nsfw": bool(model_data.get("nsfw", False)),
-        }
+        })
         with _civitai_download_lock:
             _civitai_downloads[download_id] = dl
 
@@ -3373,6 +3633,9 @@ async def hf_import_lora(request: Request):
     desired_filename = (body.get("filename", "") or "").strip()
 
     import re as _re
+
+    if target_dir_override and not _is_safe_path_component(target_dir_override):
+        return JSONResponse({"error": "Invalid target_dir"}, status_code=400)
 
     # Detect CivitAI URL FIRST so an HF-looking URL hidden inside a
     # CivitAI redirect doesn't accidentally fall through.
@@ -3490,6 +3753,11 @@ async def hf_import_lora(request: Request):
             lora_filename=lora_filename,
             user_specified=bool(desired_filename),
         )
+        if not _is_safe_path_component(disk_filename):
+            return JSONResponse(
+                {"error": "HuggingFace returned an invalid filename"},
+                status_code=502,
+            )
         save_path = os.path.join(lora_dir, disk_filename)
         if disk_filename != os.path.basename(lora_filename):
             print(
@@ -3558,10 +3826,9 @@ async def hf_import_lora(request: Request):
                     sidecar["trainedWords"] = words
                     break
 
-        # 9. Save sidecar
+        # 9. Prepare the sidecar path. It is written by the worker while the
+        # final model target is reserved against concurrent imports.
         sidecar_path = os.path.splitext(save_path)[0] + ".civitai.json"
-        with open(sidecar_path, "w", encoding="utf-8") as f:
-            f.write(json.dumps(sidecar, indent=2, ensure_ascii=False))
 
         # 10. Download the LoRA file
         download_url = f"https://huggingface.co/{repo_id}/resolve/main/{lora_filename}"
@@ -3569,37 +3836,49 @@ async def hf_import_lora(request: Request):
         # Track download progress — use disk_filename so the download bar
         # shows the user-visible name we'll write to disk, not the generic
         # HF repo name.
-        dl_id = f"hf_{repo_id.replace('/', '_')}"
+        dl_id = f"hf_{uuid.uuid4().hex}"
         with _civitai_download_lock:
-            _civitai_downloads[dl_id] = {
-                "filename": disk_filename,
-                "model_name": sidecar["name"],
-                "status": "downloading",
-                "progress": 0,
-                "started_at": time.time(),
-            }
+            _civitai_downloads[dl_id] = _new_download_record(
+                dl_id,
+                disk_filename,
+                target_dir=lora_dir,
+                model_name=sidecar["name"],
+            )
 
         def _do_download():
+            partial_path = None
+            reserved_target = None
             try:
+                reserved_target = _reserve_download_target(dl_id, save_path)
+                if reserved_target is None:
+                    raise RuntimeError(
+                        f"Another download is already writing {disk_filename}"
+                    )
+                partial_path = f"{save_path}.{uuid.uuid4().hex}.part"
                 dl_resp = requests.get(download_url, stream=True, timeout=30)
                 dl_resp.raise_for_status()
-                total = int(dl_resp.headers.get("content-length", 0))
+                total = _response_content_length(dl_resp.headers)
+                _update_download_record(dl_id, bytes_total=total)
                 downloaded = 0
-                with open(save_path, "wb") as out:
+                with open(partial_path, "wb") as out:
                     for chunk in dl_resp.iter_content(chunk_size=1024 * 1024):
+                        if not chunk:
+                            continue
                         out.write(chunk)
                         downloaded += len(chunk)
-                        if total > 0:
-                            with _civitai_download_lock:
-                                if dl_id in _civitai_downloads:
-                                    _civitai_downloads[dl_id]["progress"] = downloaded / total
+                        _update_download_record(
+                            dl_id,
+                            bytes_downloaded=downloaded,
+                            progress=_download_progress_percent(downloaded, total),
+                        )
 
-                with _civitai_download_lock:
-                    if dl_id in _civitai_downloads:
-                        _civitai_downloads[dl_id]["status"] = "completed"
-                        _civitai_downloads[dl_id]["progress"] = 1.0
+                _require_complete_download(downloaded, total)
+                os.replace(partial_path, save_path)
 
                 print(f"[HF Import] Downloaded {lora_filename} to {save_path}")
+
+                with open(sidecar_path, "w", encoding="utf-8") as f:
+                    f.write(json.dumps(sidecar, indent=2, ensure_ascii=False))
 
                 # 11. Download example media files — preview filenames are
                 # derived from disk_filename (not the generic HF name) so
@@ -3624,12 +3903,19 @@ async def hf_import_lora(request: Request):
                 except Exception as e:
                     print(f"[HF Import] Guide generation failed: {e}")
 
+                _complete_download_record(dl_id)
+
             except Exception as e:
-                with _civitai_download_lock:
-                    if dl_id in _civitai_downloads:
-                        _civitai_downloads[dl_id]["status"] = "failed"
-                        _civitai_downloads[dl_id]["error"] = str(e)
+                try:
+                    if partial_path and os.path.isfile(partial_path):
+                        os.remove(partial_path)
+                except OSError:
+                    pass
+                _fail_download_record(dl_id, e)
                 print(f"[HF Import] Download failed: {e}")
+            finally:
+                if reserved_target is not None:
+                    _release_download_target(dl_id, reserved_target)
 
         import threading
         threading.Thread(target=_do_download, daemon=True).start()
@@ -4373,7 +4659,7 @@ async def scan_and_generate_guides(request: Request):
         "message": "Starting scan...",
         "results": [],
     }
-    _civitai_downloads[f"scan_{scan_id}"] = scan_state  # reuse downloads dict for progress
+    _register_lora_guide_scan(scan_id, scan_state)
 
     def _run_scan():
         api_key = wgp.server_config.get("services", {}).get("civitai_api_key", "")
@@ -4382,8 +4668,11 @@ async def scan_and_generate_guides(request: Request):
             headers["Authorization"] = f"Bearer {api_key}"
 
         for i, item in enumerate(to_process):
-            scan_state["current"] = i + 1
-            scan_state["message"] = f"Processing {item['filename']}..."
+            _update_lora_guide_scan(
+                scan_id,
+                current=i + 1,
+                message=f"Processing {item['filename']}...",
+            )
             fname = item["filename"]
             full_path = item["path"]
             # All writes go to the primary-mirror base; full_path (possibly
@@ -4394,14 +4683,16 @@ async def scan_and_generate_guides(request: Request):
             # Step 1: Fetch metadata if missing
             if not item["has_sidecar"]:
                 try:
-                    scan_state["message"] = f"Hashing {fname}..."
+                    _update_lora_guide_scan(scan_id, message=f"Hashing {fname}...")
                     sha256 = hashlib.sha256()
                     with open(full_path, "rb") as f:
                         for chunk in iter(lambda: f.read(1024 * 1024), b""):
                             sha256.update(chunk)
                     file_hash = sha256.hexdigest()
 
-                    scan_state["message"] = f"Looking up {fname} on CivitAI..."
+                    _update_lora_guide_scan(
+                        scan_id, message=f"Looking up {fname} on CivitAI...",
+                    )
                     resp = requests.get(
                         f"{CIVITAI_BASE_URL}/model-versions/by-hash/{file_hash}",
                         headers=headers, timeout=15,
@@ -4452,14 +4743,21 @@ async def scan_and_generate_guides(request: Request):
                         with open(base + ".civitai.json", "w", encoding="utf-8") as f:
                             json.dump(sidecar, f, indent=2)
                         item["has_sidecar"] = True
-                        scan_state["results"].append({"filename": fname, "metadata": "fetched"})
+                        _append_lora_guide_scan_result(
+                            scan_id, {"filename": fname, "metadata": "fetched"},
+                        )
                         print(f"[Scan] Fetched metadata for {fname}")
                     else:
-                        scan_state["results"].append({"filename": fname, "metadata": "not_found"})
+                        _append_lora_guide_scan_result(
+                            scan_id, {"filename": fname, "metadata": "not_found"},
+                        )
                         print(f"[Scan] No CivitAI match for {fname} (hash: {file_hash[:12]}...)")
                         continue
                 except Exception as e:
-                    scan_state["results"].append({"filename": fname, "metadata": "error", "error": str(e)})
+                    _append_lora_guide_scan_result(
+                        scan_id,
+                        {"filename": fname, "metadata": "error", "error": str(e)},
+                    )
                     print(f"[Scan] Error fetching metadata for {fname}: {e}")
                     continue
 
@@ -4481,7 +4779,9 @@ async def scan_and_generate_guides(request: Request):
                     continue
 
             try:
-                scan_state["message"] = f"Generating guide for {fname}..."
+                _update_lora_guide_scan(
+                    scan_id, message=f"Generating guide for {fname}...",
+                )
                 with open(sidecar_path, "r", encoding="utf-8") as f:
                     meta = json.load(f)
 
@@ -4491,15 +4791,25 @@ async def scan_and_generate_guides(request: Request):
                 # linked install.
                 result = _generate_and_save_lora_guide(base + os.path.splitext(fname)[1], meta, fname)
                 if result["guide"]:
-                    scan_state["results"].append({"filename": fname, "guide": "generated"})
+                    _append_lora_guide_scan_result(
+                        scan_id, {"filename": fname, "guide": "generated"},
+                    )
                 else:
-                    scan_state["results"].append({"filename": fname, "guide": "empty"})
+                    _append_lora_guide_scan_result(
+                        scan_id, {"filename": fname, "guide": "empty"},
+                    )
             except Exception as e:
-                scan_state["results"].append({"filename": fname, "guide": "error", "error": str(e)})
+                _append_lora_guide_scan_result(
+                    scan_id,
+                    {"filename": fname, "guide": "error", "error": str(e)},
+                )
                 print(f"[Scan] Guide generation failed for {fname}: {e}")
 
-        scan_state["status"] = "complete"
-        scan_state["message"] = f"Done: processed {len(to_process)} LoRAs"
+        _update_lora_guide_scan(
+            scan_id,
+            status="complete",
+            message=f"Done: processed {len(to_process)} LoRAs",
+        )
 
     thread = threading.Thread(target=_run_scan, daemon=True)
     thread.start()
@@ -7989,13 +8299,13 @@ def _ensure_managed_loras_present(activated_loras, model_type, progress=None):
                 if rec is None or rec.get("status") != "downloading":
                     break
                 if progress:
-                    pct = int((rec.get("progress") or 0) * 100)
+                    pct = int(rec.get("progress") or 0)
                     progress(f"Downloading {label} model (one-time setup)… {pct}%")
                 time.sleep(2)
                 waited += 2
-            # That download writes in place and doesn't clean up on failure,
-            # so a failed attempt can leave a partial file at save_path. Drop
-            # it so the presence check below re-fetches a clean copy.
+            # A legacy or externally-created failed record may still point at
+            # an in-place partial. Drop it so the presence check below can
+            # re-fetch a clean copy.
             if rec is not None and rec.get("status") == "failed":
                 try:
                     if os.path.isfile(save_path):
