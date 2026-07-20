@@ -82,6 +82,27 @@ class TestJobLifecycleWiring(unittest.TestCase):
             for node in ast.walk(cancel)
         ))
 
+    def test_director_dashboard_mutations_run_off_the_event_loop(self):
+        expected = {
+            "rerun_pipeline_clip_image": "rerun_clip_image",
+            "rerun_pipeline_clip_video": "rerun_clip_video",
+            "rejoin_pipeline_clips": "rejoin_clips",
+        }
+        for endpoint_name, worker_name in expected.items():
+            with self.subTest(endpoint=endpoint_name):
+                endpoint = _function(self.launch, endpoint_name)
+                awaited_thread_targets = {
+                    call.args[0].id
+                    for node in ast.walk(endpoint)
+                    if isinstance(node, ast.Await)
+                    and isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Attribute)
+                    and node.value.func.attr == "to_thread"
+                    for call in [node.value]
+                    if call.args and isinstance(call.args[0], ast.Name)
+                }
+                self.assertIn(worker_name, awaited_thread_targets)
+
     def test_blend_defers_generation_completion(self):
         blend = _function(self.launch, "_run_blend_generation")
         matching_calls = [

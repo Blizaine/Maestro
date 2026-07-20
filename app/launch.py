@@ -7658,7 +7658,17 @@ async def rerun_pipeline_clip_image(pid: str, clip_index: int, request: Request)
     body = await request.json()
     base = wgp.server_config.get("save_path", "outputs")
     try:
-        result = rerun_clip_image(base, pid, clip_index, prompt_override=body.get("prompt"))
+        # Image generation can take minutes. Running it directly inside this
+        # async route blocks every heartbeat/poll request and can make the
+        # Pinokio webview reload, aborting the browser-owned bulk repair loop
+        # after its first clip.
+        result = await asyncio.to_thread(
+            rerun_clip_image,
+            base,
+            pid,
+            clip_index,
+            prompt_override=body.get("prompt"),
+        )
         return result
     except PipelineBusyError as e:
         return JSONResponse({"error": str(e)}, status_code=409)
@@ -7687,7 +7697,13 @@ async def rerun_pipeline_clip_video(pid: str, clip_index: int, request: Request)
     body = await request.json()
     base = wgp.server_config.get("save_path", "outputs")
     try:
-        result = rerun_clip_video(base, pid, clip_index, prompt_override=body.get("prompt"))
+        result = await asyncio.to_thread(
+            rerun_clip_video,
+            base,
+            pid,
+            clip_index,
+            prompt_override=body.get("prompt"),
+        )
         return result
     except PipelineBusyError as e:
         return JSONResponse({"error": str(e)}, status_code=409)
@@ -7711,7 +7727,7 @@ async def rejoin_pipeline_clips(pid: str):
     from services.director_pipeline import PipelineBusyError, rejoin_clips
     base = wgp.server_config.get("save_path", "outputs")
     try:
-        result = rejoin_clips(base, pid)
+        result = await asyncio.to_thread(rejoin_clips, base, pid)
         return result
     except PipelineBusyError as e:
         return JSONResponse({"error": str(e)}, status_code=409)
