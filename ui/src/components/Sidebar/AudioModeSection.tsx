@@ -21,6 +21,7 @@ export function AudioModeSection() {
   const removeTtsVoice = useStore(s => s.removeTtsVoice)
   const setTtsVoiceName = useStore(s => s.setTtsVoiceName)
   const setTtsVoiceFile = useStore(s => s.setTtsVoiceFile)
+  const setDurationSeconds = useStore(s => s.setDurationSeconds)
 
   if (!modelOptions?.audio_prompt_type_sources) return null
 
@@ -30,7 +31,6 @@ export function AudioModeSection() {
   const audioBaseMode = audioValue.replace(/[NV]/g, '')
   const needsAudioUpload = audioBaseMode.includes('A') && !isAudioOnly
   const needsVideoGuideUpload = audioValue === 'K' && !modelOptions.guide_preprocessing
-  const setDurationSeconds = useStore(s => s.setDurationSeconds)
   // Models that derive audio_prompt_type purely from the voice-clone slot count
   // (e.g. KugelAudio: 0→"", 1→"A", 2+→"AB") opt out of the manual ChoiceControl
   // by setting `audio_mode_from_voice_count: true` in their model_def. The Add

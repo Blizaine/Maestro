@@ -14,25 +14,23 @@ export function ImageRefSection() {
   const setRemoveBackgroundRefs = useStore(s => s.setRemoveBackgroundRefs)
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null)
 
-  if (!modelOptions?.image_ref_choices) return null
-
-  const config = modelOptions.image_ref_choices
-  const bgLabel = modelOptions.background_removal_label
+  const config = modelOptions?.image_ref_choices
+  const bgLabel = modelOptions?.background_removal_label
 
   // Determine available modes from choices
-  const hasLandscapeMode = config.choices?.some(([, v]: [string, string]) => v.includes('K')) ?? false
-  const hasPeopleMode = config.choices?.some(([, v]: [string, string]) => v === 'I') ?? false
+  const hasLandscapeMode = config?.choices?.some(([, v]: [string, string]) => v.includes('K')) ?? false
+  const hasPeopleMode = config?.choices?.some(([, v]: [string, string]) => v === 'I') ?? false
   const defaultRefType = hasLandscapeMode ? 'KI' : hasPeopleMode ? 'I' : ''
 
   // Auto-set ref type when images are added/removed
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
+    if (!config) return
     if (imageRefs.length > 0 && imageRefType === '') {
       setImageRefType(defaultRefType)
     } else if (imageRefs.length === 0 && imageRefType !== '') {
       setImageRefType('')
     }
-  }, [imageRefs.length])
+  }, [config, defaultRefType, imageRefs.length, imageRefType, setImageRefType])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -53,6 +51,8 @@ export function ImageRefSection() {
     }
     input.click()
   }, [addImageRef])
+
+  if (!config) return null
 
   return (
     <div className="space-y-2">
