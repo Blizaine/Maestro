@@ -75,6 +75,72 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.4 (2026-07-20)
+
+**Storage and space optimization**
+- Added a full Storage Manager with usage analytics and cleanup recommendations.
+- Added safe deletion for workspaces, saved Director projects, models, and LoRAs.
+- Added duplicate model and LoRA detection across linked installations.
+- Added safe duplicate reclamation while preserving a verified copy.
+- Added optional removal from linked installations through the Windows Recycle Bin.
+- Improved storage accounting for shared weights, linked folders, junctions, symlinks, and hardlinks.
+
+**LoRA management**
+- Added LoRA file sizes, release dates, download dates, and compact age indicators.
+- Added sorting by name, newest download, newest release, or file size.
+- Added newest-first sorting to the Studio and Director LoRA selectors.
+- Improved explanations for shared-weight, linked-only, and otherwise protected files.
+- Added CivitAI response caching for faster browsing and fewer rate-limit problems.
+
+**Director Dashboard and repair**
+- Added a durable Check + Repair workflow for saved Director projects.
+- Repair can regenerate missing images and videos, skip valid clips, and automatically rejoin the result.
+- Repair continues when the browser is refreshed or closed.
+- Interrupted repairs can be resumed without repeating completed clips.
+- Fixed repair stopping after generating only one image or video.
+- Fixed missing thumbnails, incorrect missing-clip counts, and incomplete clip tracking.
+- Regenerating a start image now correctly marks its existing video for regeneration.
+- Rejoin now rejects missing, invalid, or stale clips instead of creating an incomplete video.
+- Dashboard operations now remain responsive while regeneration or repair runs in the background.
+
+**Director character consistency**
+- Director now generates an establishing character image when no reference image is supplied.
+- The generated image becomes the shared reference for all subsequent start images.
+- Character references and profiles are incorporated into the generated anchor.
+- Generated start images are now correctly supplied to their corresponding video clips.
+- The generated reference is retained for later Dashboard regeneration.
+
+**Music-video timing and lip sync**
+- Fixed Dashboard-regenerated clips becoming shorter than their original timeline slots.
+- Regenerated clips now use the same FPS and frame schedule as a complete Director run.
+- Fixed cumulative lip-sync drift after replacing one or more clips.
+- Fixed rejoined videos using the wrong starting point in the source song.
+- Rejoined videos continue to use one clean, continuous soundtrack without audible clip-boundary blips.
+- Dashboard audio conditioning now matches the exact timeline segment assigned to each clip.
+
+**Job cancellation and reliability**
+- Significantly improved Stop and Cancel behavior across Director and Studio.
+- Queued and actively generating child jobs are now canceled together.
+- Late completion or failure can no longer overwrite a canceled job.
+- Improved timeout handling and cleanup of partial outputs.
+- Made Director state saving atomic to prevent damaged project files.
+- Prevented delete, resume, repair, and regeneration operations from conflicting with one another.
+
+**Downloads and model installation**
+- Added clearer model and LoRA download progress, completion, failure, and retry states.
+- Fixed inaccurate download percentages.
+- Prevented concurrent downloads from writing to the same destination.
+- Incomplete or corrupted downloads are no longer published as installed models.
+- Hardened CivitAI archive extraction against unsafe paths and invalid files.
+- Improved cleanup of failed and interrupted downloads.
+
+**Safety, compatibility, and stability**
+- Improved Director's minor-content safety checks.
+- Improved detection across deeply nested planning data while reducing common false positives.
+- Fixed sidebar crashes when changing models or generation modes.
+- Improved NVIDIA GPU compatibility checks during Pinokio installation.
+- Expanded automated regression testing for both dev and main.
+
 ### v1.3.3 (2026-07-17)
 
 **Fixed**
