@@ -605,6 +605,25 @@ def update_clip_tag(out_dir: str, pid: str, clip_index: int, tag: Optional[str])
         _release_pipeline_operation(pid)
 
 
+def update_clip_prompt(out_dir: str, pid: str, clip_index: int,
+                       field: str, value: str) -> bool:
+    """Update image_prompt or video_prompt for a clip without
+    triggering generation.  Returns True on success, raises
+    PipelineBusyError when the pipeline is still active."""
+    if not _claim_pipeline_operation(pid):
+        raise PipelineBusyError("Pipeline is still active; try again shortly.")
+    try:
+        def _update(state):
+            clips = state.get("clips", [])
+            if clip_index < 0 or clip_index >= len(clips):
+                return
+            state["clips"][clip_index][field] = value
+        _update_saved_pipeline(out_dir, pid, _update)
+        return True
+    finally:
+        _release_pipeline_operation(pid)
+
+
 def _update_clip_tag_locked(out_dir: str, pid: str, clip_index: int, tag: Optional[str]) -> bool:
     """Update the tag on a specific clip in a saved pipeline state."""
     state = load_pipeline_state(out_dir, pid)
@@ -1279,7 +1298,7 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
 
     try:
         output_files = _submit_and_wait(
-            gen_params, timeout_s=3600, out_dir=clip_out_dir,
+            gen_params, timeout_s=23600, out_dir=clip_out_dir,
         )
     finally:
         if slice_path and os.path.isfile(slice_path):
@@ -4005,5 +4024,5 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
         gen_params["film_grain_saturation"] = film_grain_saturation
 
     # Track progress by monitoring the generation job
-    output_files = _submit_and_wait(gen_params, timeout_s=7200, workspace=workspace, out_dir=out_dir)  # 2hr timeout for long videos
+    output_files = _submit_and_wait(gen_params, timeout_s=28000, workspace=workspace, out_dir=out_dir)  # 2hr timeout for long videos
     return output_files

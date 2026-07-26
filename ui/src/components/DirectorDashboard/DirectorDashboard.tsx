@@ -184,13 +184,14 @@ function LlmLogPanel({ pipeline }: { pipeline: SavedPipelineState }) {
   )
 }
 
-function ClipCard({ clip, pipeline: _pipeline, busy = false, onTag, onRerunImage, onRerunVideo }: {
+function ClipCard({ clip, pipeline: _pipeline, busy = false, onTag, onRerunImage, onRerunVideo, onSavePrompt }: {
   clip: PipelineClipState
   pipeline: SavedPipelineState
   busy?: boolean
   onTag: (tag: 'good' | 'needs_work' | null) => void
   onRerunImage: (clipIndex: number, prompt?: string) => void
   onRerunVideo: (clipIndex: number, prompt?: string) => void
+  onSavePrompt: (clipIndex: number, field: 'image_prompt' | 'video_prompt', value: string) => void
 }) {
   const [expandImage, setExpandImage] = useState(false)
   const [expandVideo, setExpandVideo] = useState(false)
@@ -270,7 +271,13 @@ function ClipCard({ clip, pipeline: _pipeline, busy = false, onTag, onRerunImage
             <div className="flex items-center justify-between mb-0.5">
               <span className="text-[9px] text-text-muted uppercase tracking-wider">Image Prompt</span>
               <div className="flex items-center gap-1">
-                <button onClick={() => { setEditingImage(!editingImage); setEditImagePrompt(clip.image_prompt || '') }}
+                <button onClick={() => {
+                  if (editingImage && editImagePrompt !== (clip.image_prompt || '')) {
+                    onSavePrompt(clip.index, 'image_prompt', editImagePrompt)
+                  }
+                  setEditingImage(!editingImage)
+                  setEditImagePrompt(clip.image_prompt || '')
+                }}
                   className={`p-0.5 rounded transition-colors ${editingImage ? 'text-accent-blue' : 'text-text-muted hover:text-text-secondary'}`}
                   title="Edit prompt">
                   <Pencil size={9} />
@@ -335,6 +342,16 @@ function ClipCard({ clip, pipeline: _pipeline, busy = false, onTag, onRerunImage
             </span>
             <div className="flex items-center gap-1">
               <button onClick={() => {
+                if (editingVideo) {
+                  // Multi-window: join windows with newline and save to video_prompt.
+                  // Single-window: save the edited video prompt directly.
+                  const newValue = editWindowPrompts.length > 1
+                    ? editWindowPrompts.join('\n')
+                    : editVideoPrompt
+                  if (newValue !== (clip.video_prompt || '')) {
+                    onSavePrompt(clip.index, 'video_prompt', newValue)
+                  }
+                }
                 setEditingVideo(!editingVideo)
                 setEditVideoPrompt(clip.video_prompt || '')
                 setEditWindowPrompts(clip.window_prompts || [])
@@ -495,6 +512,7 @@ function DirectorDashboardInner() {
   const loading = useStore(s => s.dashboardLoading)
   const loadPipeline = useStore(s => s.loadSavedPipeline)
   const tagClip = useStore(s => s.tagClip)
+  const updateClipPrompt = useStore(s => s.updateClipPrompt)
   const startPipelineRepair = useStore(s => s.startPipelineRepair)
   const cancelPipelineRepair = useStore(s => s.cancelPipelineRepair)
   const rerunClipImage = useStore(s => s.rerunClipImage)
@@ -829,6 +847,7 @@ function DirectorDashboardInner() {
                     pipeline={selectedPipeline}
                     busy={repairBusy}
                     onTag={(tag) => tagClip(selectedPipeline.pipeline_id, clip.index, tag)}
+                    onSavePrompt={(idx, field, value) => updateClipPrompt(selectedPipeline.pipeline_id, idx, field, value)}
                     onRerunImage={(idx, prompt) => { setRegenError(null); rerunClipImage(selectedPipeline.pipeline_id, idx, prompt).catch(e => setRegenError(String(e instanceof Error ? e.message : e))) }}
                     onRerunVideo={(idx, prompt) => { setRegenError(null); rerunClipVideo(selectedPipeline.pipeline_id, idx, prompt).catch(e => setRegenError(String(e instanceof Error ? e.message : e))) }}
                   />

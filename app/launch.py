@@ -7644,6 +7644,23 @@ async def tag_pipeline_clip(pid: str, clip_index: int, request: Request):
     return {"status": "ok"}
 
 
+@api.put("/api/v1/director/pipelines/{pid}/clips/{clip_index}/prompt")
+async def update_clip_prompt_endpoint(pid: str, clip_index: int, request: Request):
+    """Update a clip's image_prompt or video_prompt without regenerating."""
+    from services.director_pipeline import PipelineBusyError, update_clip_prompt
+    body = await request.json()
+    field = body.get("field")
+    value = body.get("value", "")
+    if field not in ("image_prompt", "video_prompt"):
+        return JSONResponse({"error": "field must be image_prompt or video_prompt"}, status_code=400)
+    base = wgp.server_config.get("save_path", "outputs")
+    try:
+        update_clip_prompt(base, pid, clip_index, field, value)
+    except PipelineBusyError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    return {"status": "ok"}
+
+
 # ── Director Pipeline Re-run ──────────────────────────────────────────────
 
 @api.post("/api/v1/director/pipelines/{pid}/repair")
@@ -13443,6 +13460,21 @@ _ui_dist = os.path.normpath(os.path.join(_app_dir, "..", "ui", "dist"))
 if os.path.isdir(_ui_dist):
     api.mount("/", StaticFiles(directory=_ui_dist, html=True))
     print(f"[Maestro] React UI serving from {_ui_dist}")
+
+    # Prevent the Pinokio proxy (Caddy) and the browser from caching the
+    # single-page app.  Vite already content-hashes asset filenames, but
+    # index.html and the service worker (if any) must never be stale,
+    # otherwise the browser keeps running old JS code that may call
+    # outdated (or missing) API endpoints.
+    @api.middleware("http")
+    async def _ui_no_cache(request: Request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        if path == "/" or path.endswith(".html") or path.startswith("/assets/"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
 else:
     @api.get("/")
     def index():

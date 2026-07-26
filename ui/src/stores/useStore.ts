@@ -932,6 +932,7 @@ interface AppState {
   loadPipelineList: () => Promise<void>
   loadSavedPipeline: (pid: string) => Promise<void>
   tagClip: (pid: string, clipIndex: number, tag: string | null) => Promise<void>
+  updateClipPrompt: (pid: string, clipIndex: number, field: 'image_prompt' | 'video_prompt', value: string) => Promise<void>
   startPipelineRepair: (pid: string) => Promise<PipelineRepairState>
   cancelPipelineRepair: (pid: string) => Promise<PipelineRepairState>
   pollPipelineRepair: (pid: string, operationId: string) => void
@@ -2280,6 +2281,31 @@ export const useStore = create<AppState>((set, get) => ({
       })
     } catch (e) {
       console.error('Failed to tag clip:', e)
+    }
+  },
+  updateClipPrompt: async (pid, clipIndex, field, value) => {
+    // Optimistic update — write to the store immediately so the UI
+    // reflects the change even before the API round-trip completes.
+    set(s => {
+      if (!s.dashboardSelectedPipeline || s.dashboardSelectedPipeline.pipeline_id !== pid) return {}
+      const clips = [...s.dashboardSelectedPipeline.clips]
+      if (clipIndex < clips.length) {
+        clips[clipIndex] = { ...clips[clipIndex], [field]: value }
+        // Multi-window video prompts are joined with \n for the
+        // video_prompt field.  Split them back into the individual
+        // window_prompts array so the per-window editing UI shows
+        // the updated values on the next pencil click (the backend
+        // stores only video_prompt; window_prompts is frontend-only).
+        if (field === 'video_prompt' && (clips[clipIndex].window_prompts?.length || 0) > 1) {
+          clips[clipIndex] = { ...clips[clipIndex], window_prompts: value.split('\n') }
+        }
+      }
+      return { dashboardSelectedPipeline: { ...s.dashboardSelectedPipeline, clips } }
+    })
+    try {
+      await api.updateClipPrompt(pid, clipIndex, field, value)
+    } catch (e) {
+      console.error('Failed to update clip prompt:', e)
     }
   },
   startPipelineRepair: async (pid: string) => {

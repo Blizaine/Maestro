@@ -558,6 +558,19 @@ export async function tagPipelineClip(pid: string, clipIndex: number, tag: strin
   if (!res.ok) throw new Error('Failed to tag clip')
 }
 
+export async function updateClipPrompt(
+  pid: string, clipIndex: number,
+  field: 'image_prompt' | 'video_prompt', value: string,
+): Promise<void> {
+  const res = await fetch(
+    `${BASE}/api/v1/director/pipelines/${encodeURIComponent(pid)}/clips/${clipIndex}/prompt`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ field, value }),
+    })
+  if (!res.ok) throw new Error('Failed to update clip prompt')
+}
+
 export async function startPipelineRepair(pid: string): Promise<{
   pipeline_id: string
   repair: import('../types').PipelineRepairState
