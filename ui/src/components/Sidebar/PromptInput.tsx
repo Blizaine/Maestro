@@ -66,6 +66,7 @@ export function PromptInput() {
   const prompt = useStore(s => s.params.prompt)
   const setParam = useStore(s => s.setParam)
   const generationMode = useStore(s => s.generationMode)
+  const editSubMode = useStore(s => s.editSubMode)
   const enhancePrompt = useStore(s => s.enhancePrompt)
   const isEnhancing = useStore(s => s.isEnhancing)
   const durationSeconds = useStore(s => s.durationSeconds)
@@ -102,6 +103,11 @@ export function PromptInput() {
     ? 1 + Math.ceil((durationSeconds - slidingWindowSeconds + discardSec) / stride)
     : 1
   const usesWindows = generationMode === 'video' && windowCount > 1 && imageMode !== 2
+  const modePlaceholder = generationMode === 'avatar' && editSubMode === 'recast'
+    ? 'Describe the finished video and replacement characters...'
+    : generationMode === 'avatar' && editSubMode === 'restyle'
+      ? 'Describe the finished video...'
+      : (placeholders[generationMode] || 'Describe your content...')
 
   // Close TTS menu on outside click
   useEffect(() => {
@@ -145,7 +151,7 @@ export function PromptInput() {
         onChange={e => setParam('prompt', e.target.value)}
         placeholder={usesWindows
           ? `Line 1 = window 1, line 2 = window 2... (${windowCount} windows)`
-          : (placeholders[generationMode] || 'Describe your content...')}
+          : modePlaceholder}
         className="w-full flex-1 bg-bg-tertiary border border-border rounded-lg px-3 py-2 pr-10 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue transition-colors"
         style={{ resize: 'none', minHeight: 112 }}
       />

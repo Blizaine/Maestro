@@ -422,6 +422,10 @@ class family_handler():
             if scail2:
                 extra_model_def["fake_start_image"] = True
                 extra_model_def["fit_into_canvas_image_refs"] = 0
+                # Preserve reference aspect through WanGP's shared loader.
+                # SCAIL-2 then applies its native centered rectangle crop to
+                # reference RGB, semantic masks, and recovered PNG alpha.
+                extra_model_def["custom_image_ref_postprocessor_handles_canvas"] = True
             extra_model_def["preprocess_all"] = preprocess_all_scail2 if scail2 else True
             extra_model_def["custom_preprocessor"] = "Preparing Scail2 Inputs" if scail2 else "Extracting 3D Pose (NLFPose)"
             extra_model_def["forced_guide_mask_inputs"] = True
@@ -438,6 +442,28 @@ class family_handler():
             if scail2:
                 extra_model_def["infos"] = model_def.get("infos", SCAIL2_INFOS)
                 extra_model_def["custom_image_ref_postprocessor"] = custom_image_ref_postprocessor_scail2
+                # These values are produced by Maestro's Recast endpoint, not
+                # by public Advanced Settings controls.  Keep the allowlist on
+                # the model definition so wgp can preserve only the trusted
+                # runtime values while still dropping arbitrary custom keys.
+                extra_model_def["runtime_custom_settings"] = [
+                    "scail2_recast_conditioning",
+                    "scail2_primary_reference_people",
+                    "scail2_isolate_reference_background",
+                    "scail2_reference_alpha_path",
+                    "scail2_reference_mask_path",
+                    "scail2_additional_reference_mask_paths",
+                    "scail2_reference_expected_colors",
+                    "scail2_clip_reference_path",
+                    "scail2_identity_latent_isolation",
+                    "scail2_identity_latent_reference_index",
+                    "scail2_recast_warmup_frames",
+                    "scail2_dynamic_source_scene_reference",
+                    "scail2_timeline_source_scene_reference",
+                    "scail2_source_scene_reference_path",
+                    "scail2_source_scene_mask_path",
+                    "scail2_primary_only_continuations",
+                ]
                 extra_model_def["custom_settings"] = list(model_def.get("custom_settings", [])) if isinstance(model_def.get("custom_settings", []), list) else []
                 extra_model_def["custom_settings"].append({
                     "id": "scail2_animate_preprocessing",
@@ -476,7 +502,9 @@ class family_handler():
                 extra_model_def["custom_preprocessor_raw_inputs"] = True
                 extra_model_def["video_mask_replace_background_color"] = [255, 255, 255]
                 extra_model_def["background_removal_color"] = [255, 255, 255]
-                extra_model_def["ref_matte_background_color"] = [0, 0, 0]
+                # Zero in the VAE's [-1, 1] input range: a deliberately
+                # scene-neutral matte for Recast reference isolation.
+                extra_model_def["ref_matte_background_color"] = [127, 127, 127]
 
         if base_model_type in ["infinitetalk"]: 
             extra_model_def["no_background_removal"] = True

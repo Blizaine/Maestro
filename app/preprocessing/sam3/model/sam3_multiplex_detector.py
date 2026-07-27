@@ -7,7 +7,7 @@ try:
     from ..model.vl_combiner import SAM3VLBackboneTri
 except ImportError:
     SAM3VLBackboneTri = None
-from typing import Dict, List, Optional
+from typing import List
 
 import numpy as np
 from ..model.data_misc import BatchedDatapoint, FindStage
@@ -15,6 +15,89 @@ from ..model.geometry_encoders import Prompt
 from ..model.model_misc import SAM3Output
 from ..model.sam3_image import Sam3Image
 from ..model.sam3_multiplex_detector_utils import nms_masks
+
+
+def _sam3_grounding_chunk_bounds(
+    frame_idx: int,
+    num_frames: int,
+    batch_size: int,
+    max_frame_num_to_track=None,
+    propagate_in_video_start_frame_idx=None,
+    track_in_reverse: bool = False,
+):
+    """Return one non-empty grounding chunk inside the propagation range.
+
+    SAM3 treats ``max_frame_num_to_track`` as an inclusive distance for
+    forward propagation, but as a count of frames before the anchor for
+    reverse propagation. The detector batches over half-open ranges, so those
+    two directions need different conversions.
+    """
+    frame_count = max(0, int(num_frames))
+    frame_index = int(frame_idx)
+    grounding_batch_size = int(batch_size)
+    if grounding_batch_size <= 0:
+        raise ValueError("SAM3 grounding batch size must be positive.")
+
+    if max_frame_num_to_track is None:
+        valid_frame_start = 0
+        valid_frame_end = frame_count
+    else:
+        max_distance = max(0, int(max_frame_num_to_track))
+        propagation_start = (
+            0
+            if propagate_in_video_start_frame_idx is None
+            else int(propagate_in_video_start_frame_idx)
+        )
+        if track_in_reverse:
+            # Reverse propagation processes anchor - 1 through
+            # anchor - max_distance; the prompted anchor is excluded.
+            valid_frame_start = propagation_start - max_distance
+            valid_frame_end = propagation_start
+        else:
+            # Forward propagation includes both the anchor and the frame at
+            # anchor + max_distance.
+            valid_frame_start = propagation_start
+            valid_frame_end = propagation_start + max_distance + 1
+
+    valid_frame_start = max(0, min(frame_count, valid_frame_start))
+    valid_frame_end = max(0, min(frame_count, valid_frame_end))
+    if not valid_frame_start <= frame_index < valid_frame_end:
+        raise IndexError(
+            "SAM3 grounding frame "
+            f"{frame_index} is outside propagation frames "
+            f"{valid_frame_start}-{max(valid_frame_start, valid_frame_end - 1)}."
+        )
+
+    if track_in_reverse:
+        # Align reverse chunks from the upper boundary. This makes the first
+        # reverse batch full-sized and leaves any partial batch at the lower
+        # boundary, matching the order in which frames are requested.
+        chunk_end = valid_frame_end - (
+            (valid_frame_end - 1 - frame_index)
+            // grounding_batch_size
+        ) * grounding_batch_size
+        chunk_start = max(
+            valid_frame_start,
+            chunk_end - grounding_batch_size,
+        )
+    else:
+        # Align forward chunks to this propagation range rather than frame
+        # zero, so a new camera shot never batches frames from the prior shot.
+        chunk_start = valid_frame_start + (
+            (frame_index - valid_frame_start)
+            // grounding_batch_size
+        ) * grounding_batch_size
+        chunk_end = min(
+            chunk_start + grounding_batch_size,
+            valid_frame_end,
+        )
+
+    return (
+        valid_frame_start,
+        valid_frame_end,
+        chunk_start,
+        chunk_end,
+    )
 
 
 class Sam3MultiplexImageBase(Sam3Image):
@@ -687,37 +770,25 @@ class Sam3MultiplexDetector(Sam3MultiplexImageBase):
         Returns:
             Tuple of (out, backbone_out) where out contains detection results for frame_idx.
         """
-        # Calculate valid frame range based on max_frame_num_to_track
-        if max_frame_num_to_track is not None:
-            if propagate_in_video_start_frame_idx is None:
-                propagate_in_video_start_frame_idx = 0
-            if track_in_reverse:
-                valid_frame_start = (
-                    propagate_in_video_start_frame_idx - max_frame_num_to_track + 1
-                )
-                valid_frame_end = propagate_in_video_start_frame_idx
-            else:
-                valid_frame_start = propagate_in_video_start_frame_idx
-                valid_frame_end = (
-                    propagate_in_video_start_frame_idx + max_frame_num_to_track
-                )
-        else:
-            valid_frame_start = 0
-            valid_frame_end = num_frames
-        # Clamp to the video: with a non-zero start frame (re-anchored
-        # propagation) start+max_frame_num_to_track can point past the last
-        # frame, and an unclamped chunk_end then grounds frames that do not
-        # exist (IndexError in _get_img_feats).
-        valid_frame_start = max(valid_frame_start, 0)
-        valid_frame_end = min(valid_frame_end, num_frames)
-
         # Initialize grounding_buffer if not present
         if "grounding_buffer" not in grounding_cache:
             grounding_cache["grounding_buffer"] = {}
 
-        # Calculate chunk boundaries - use batch_size instead of world_size
-        chunk_start = (frame_idx // batch_size) * batch_size
-        chunk_end = min(chunk_start + batch_size, valid_frame_end)
+        (
+            _valid_frame_start,
+            _valid_frame_end,
+            chunk_start,
+            chunk_end,
+        ) = _sam3_grounding_chunk_bounds(
+            frame_idx=frame_idx,
+            num_frames=num_frames,
+            batch_size=batch_size,
+            max_frame_num_to_track=max_frame_num_to_track,
+            propagate_in_video_start_frame_idx=(
+                propagate_in_video_start_frame_idx
+            ),
+            track_in_reverse=track_in_reverse,
+        )
         chunk_key = (chunk_start, chunk_end)
 
         # Process chunk if not already cached
@@ -935,22 +1006,17 @@ class Sam3MultiplexDetector(Sam3MultiplexImageBase):
         num_frames: int,
         track_in_reverse: bool,
     ):
-        """Remove previous chunks from cache to save GPU memory."""
-        chunk_start, chunk_end = current_chunk_key
+        """Keep only the on-demand grounding chunk needed by this frame.
 
-        if not track_in_reverse:
-            prev_chunk_start = chunk_start - batch_size
-            if prev_chunk_start >= 0:
-                prev_chunk_end = chunk_start
-                prev_chunk_key = (prev_chunk_start, prev_chunk_end)
-
-                # Cleanup grounding_buffer entry
-                chunk = grounding_cache["grounding_buffer"].pop(prev_chunk_key, None)
-                if chunk is not None:
-                    del chunk
-        else:
-            next_chunk_start = chunk_end
-            if next_chunk_start < num_frames:
-                next_chunk_end = min(next_chunk_start + batch_size, num_frames)
-                next_chunk_key = (next_chunk_start, next_chunk_end)
-                grounding_cache["grounding_buffer"].pop(next_chunk_key, None)
+        Shot-relative and reverse-aligned chunks may be shorter at a camera
+        boundary, so deriving the previous key by adding or subtracting the
+        nominal batch size can miss it. The batched path does not prefetch,
+        making every non-current entry stale.
+        """
+        grounding_buffer = grounding_cache.get("grounding_buffer", {})
+        for cached_key in list(grounding_buffer):
+            if cached_key == current_chunk_key:
+                continue
+            chunk = grounding_buffer.pop(cached_key, None)
+            if chunk is not None:
+                del chunk

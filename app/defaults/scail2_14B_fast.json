@@ -2,7 +2,7 @@
     "model": {
         "name": "SCAIL-2 14B Fast",
         "architecture": "scail2_14B",
-        "description": "SCAIL-2 character animation accelerated with the lightx2v CFG-step-distill LoRA: 6 steps and no CFG instead of 40 steps with CFG, for roughly 13x faster generations at near-identical quality. Same Animate and Replace modes as the base model.",
+        "description": "SCAIL-2 character animation accelerated with the I2V lightx2v CFG-step-distill LoRA: 6 steps and no CFG instead of 40 steps with CFG. Intended for fast Studio/Video animation; Recast uses its dedicated T2V-accelerated model.",
         "URLs": "scail2_14B",
         "loras": ["https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank256_bf16.safetensors"],
         "loras_multipliers": [0.8]

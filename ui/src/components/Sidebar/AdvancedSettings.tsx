@@ -114,20 +114,35 @@ export function useAdvancedActiveItems(): string[] {
   const modelOptions = useStore(s => s.modelOptions)
   const spatialUpsampling = useStore(s => s.spatialUpsampling)
   const filmGrainIntensity = useStore(s => s.filmGrainIntensity)
+  const generationMode = useStore(s => s.generationMode)
+  const editSubMode = useStore(s => s.editSubMode)
+  const isScailEdit = (
+    generationMode === 'avatar'
+    && (editSubMode === 'recast' || editSubMode === 'restyle')
+  )
+  const isScailHq = isScailEdit && params.model_type === 'scail2_14B'
 
   const items: string[] = []
   if (params.seed !== -1) items.push(`Seed ${params.seed}`)
-  if ((params.negative_prompt?.length ?? 0) > 0) items.push('Negative prompt')
+  if (
+    (params.negative_prompt?.length ?? 0) > 0
+    && (!isScailEdit || isScailHq)
+  ) items.push('Negative prompt')
   for (const l of params.activated_loras) items.push(`LoRA: ${l.replace(/\.(safetensors|sft)$/i, '')}`)
-  if (spatialUpsampling) items.push(`Upscaling (${spatialUpsampling})`)
-  if (filmGrainIntensity > 0) items.push('Film grain')
-  if ((params.self_refiner_setting ?? 0) > 0) items.push('Self refiner')
+  if (!isScailEdit && spatialUpsampling) items.push(`Upscaling (${spatialUpsampling})`)
+  if (!isScailEdit && filmGrainIntensity > 0) items.push('Film grain')
+  if (!isScailEdit && (params.self_refiner_setting ?? 0) > 0) items.push('Self refiner')
   // injection_strength only matters when injected frames actually exist.
   // The persisted snapshot strips image_refs (file paths are ephemeral)
   // but kept the strength value — counting it alone produced a ghost
   // badge with nothing visibly active in the panel.
   const refCount = Array.isArray(params.image_refs) ? params.image_refs.length : (params.image_refs ? 1 : 0)
-  if (params.injection_strength != null && params.injection_strength !== 1.0 && refCount > 0) items.push('Injection strength')
+  if (
+    !isScailEdit
+    && params.injection_strength != null
+    && params.injection_strength !== 1.0
+    && refCount > 0
+  ) items.push('Injection strength')
   // Process letter codes persist by design (the dropdown remembers the
   // user's choice across sessions), but their REQUIRED inputs are
   // ephemeral and stripped from persistence: frames injection ("F")
@@ -137,7 +152,7 @@ export function useAdvancedActiveItems(): string[] {
   // a TRAILING "T" (the extend-alignment flag); an internal "T" is a real
   // process letter (depth_temporal: TVG/PTVG/TEVG) and must survive.
   const vptVisible = (params.video_prompt_type || '').replace(/T$/, '')
-  if (modelOptions?.guide_custom_choices && vptVisible) {
+  if (!isScailEdit && modelOptions?.guide_custom_choices && vptVisible) {
     const effective = vptVisible.includes('F')
       ? refCount > 0
       : vptVisible.includes('V')
@@ -167,6 +182,33 @@ export function AdvancedSettings() {
   const isVideo = generationMode === 'video'
   const isAvatar = generationMode === 'avatar'
   const isRecast = isAvatar && editSubMode === 'recast'
+  const isRepaint = isAvatar && editSubMode === 'restyle'
+  const isScailEdit = isRecast || isRepaint
+  const scailModelType = String(params.model_type || '')
+  const isScailFast = (
+    isScailEdit
+    && (
+      scailModelType === 'scail2_14B_fast'
+      || scailModelType === 'scail2_14B_recast_fast'
+    )
+  )
+  const isScailHq = isScailEdit && scailModelType === 'scail2_14B'
+  const showInferenceSteps = (
+    !isAudioOnly
+    && (isScailEdit || !modelOptions?.lock_inference_steps)
+  )
+  const showGuidanceScale = (
+    !isAudioOnly
+    && (
+      isScailEdit
+        ? isScailHq
+        : !modelOptions?.lock_guidance_scale
+    )
+  )
+  const showNegativePrompt = (
+    !modelOptions?.no_negative_prompt
+    && (!isScailEdit || isScailHq)
+  )
   const hasStartImage = useStore(s => !!(s.startImage || s.params.image_start))
   const hasEndImage = useStore(s => !!(s.endImage || s.params.image_end))
   const hasImageRefs = useStore(s => {
@@ -228,19 +270,18 @@ export function AdvancedSettings() {
 
             {/* Scrollable content */}
             <div className="flex-1 overflow-y-auto px-4 py-4 space-y-5">
-              {/* Resolution + Aspect. Recast hides both resolution and
-                  window settings: the endpoint owns them (SCAIL-2's native
-                  832x480, 81-frame windows), so the controls shown here
-                  would display values the generation ignores. */}
-              {!isAudio && (
+              {/* Recast/Repaint own their output-quality profiles in the main
+                  workflow. Their dedicated endpoints also choose adaptive
+                  windows, so generic controls would be misleading here. */}
+              {!isAudio && !isScailEdit && (
                 <>
-                  {!modelOptions?.hide_resolution_presets && !isRecast && <ResolutionPresets />}
+                  {!modelOptions?.hide_resolution_presets && <ResolutionPresets />}
                   {!isAvatar && <AspectRatioGrid />}
                 </>
               )}
 
               {/* Window Settings */}
-              {(isVideo || (isAvatar && !isRecast)) && <WindowSettings />}
+              {(isVideo || (isAvatar && !isScailEdit)) && <WindowSettings />}
 
               {/* TTS Settings */}
               {isAudioOnly && (
@@ -388,7 +429,7 @@ export function AdvancedSettings() {
               )}
 
               {/* Post Processing */}
-              {!isAudio && <PostProcessing />}
+              {!isAudio && !isScailEdit && <PostProcessing />}
 
               {/* Seed */}
               {((
@@ -410,7 +451,7 @@ export function AdvancedSettings() {
               ) as any)}
 
               {/* Self Refiner */}
-              {modelOptions?.self_refiner && (
+              {!isScailEdit && modelOptions?.self_refiner && (
                 <div>
                   <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">Self Refiner</label>
                   <select
@@ -427,7 +468,7 @@ export function AdvancedSettings() {
 
               {/* Stage 2 Steps */}
               {/* Pipeline Mode Toggle — distilled LTX models only */}
-              {modelOptions?.lock_inference_steps && (
+              {!isScailEdit && modelOptions?.lock_inference_steps && (
                 <div className="space-y-3">
                   {/* Single / 2-Stage / 3-Stage segmented control — mutually exclusive */}
                   <div>
@@ -581,7 +622,7 @@ export function AdvancedSettings() {
                   2.0/1.5 then off, STG on blocks 14+19 for the first 4
                   steps, RF euler_ancestral). Shown only for models whose
                   def declares reference_pipeline support. */}
-              {(modelOptions as Record<string, unknown> | null)?.reference_pipeline && (
+              {!isScailEdit && (modelOptions as Record<string, unknown> | null)?.reference_pipeline && (
                 <div className="space-y-1">
                   <label className="flex items-center gap-2 cursor-pointer group">
                     <input type="checkbox"
@@ -600,8 +641,9 @@ export function AdvancedSettings() {
                 </div>
               )}
 
-              {/* Inference Steps (hidden for distilled/locked models and TTS) */}
-              {!modelOptions?.lock_inference_steps && !isAudioOnly && (
+              {/* Dedicated SCAIL edit endpoints honor this value for both
+                  Fast and HQ; other distilled models retain their lock. */}
+              {showInferenceSteps && (
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
                     <label className="text-[11px] text-text-muted uppercase tracking-wider">Inference Steps</label>
@@ -618,11 +660,17 @@ export function AdvancedSettings() {
                     onChange={e => setParam('num_inference_steps', Number(e.target.value))}
                     className="w-full"
                   />
+                  {isScailFast && (
+                    <p className="text-[9px] text-text-muted mt-0.5">
+                      Fast keeps its distilled CFG 1 recipe; guidance and
+                      negative-prompt controls do not apply.
+                    </p>
+                  )}
                 </div>
               )}
 
               {/* Guidance Scale (hidden for TTS — shown in TTS section above) */}
-              {!modelOptions?.lock_guidance_scale && !isAudioOnly && (
+              {showGuidanceScale && (
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
                     <label className="text-[11px] text-text-muted uppercase tracking-wider">Guidance Scale</label>
@@ -644,7 +692,7 @@ export function AdvancedSettings() {
               )}
 
               {/* LTX-2 Dev Pipeline Controls — only for models with perturbation/CFG-Star support */}
-              {(modelOptions as Record<string, unknown> | null)?.perturbation && (
+              {!isScailEdit && (modelOptions as Record<string, unknown> | null)?.perturbation && (
                 <>
                   {/* STG Scale */}
                   <div>
@@ -703,7 +751,7 @@ export function AdvancedSettings() {
               )}
 
               {/* Keyframe Conditioning Mode — Start/End frames */}
-              {(isVideo || isAvatar) && (hasStartImage || hasEndImage) && (
+              {!isScailEdit && (isVideo || isAvatar) && (hasStartImage || hasEndImage) && (
                 <div>
                   <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">Start/End Frame Mode</label>
                   <select
@@ -719,7 +767,7 @@ export function AdvancedSettings() {
               )}
 
               {/* Keyframe Conditioning Mode — Injected keyframes */}
-              {(isVideo || isAvatar) && hasImageRefs && (
+              {!isScailEdit && (isVideo || isAvatar) && hasImageRefs && (
                 <div>
                   <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">Injected Keyframe Mode</label>
                   <select
@@ -735,7 +783,7 @@ export function AdvancedSettings() {
               )}
 
               {/* Negative Prompt */}
-              {!modelOptions?.no_negative_prompt && (
+              {showNegativePrompt && (
                 <div>
                   <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">Negative Prompt</label>
                   <textarea
@@ -796,17 +844,15 @@ export function AdvancedSettings() {
               {/* LoRAs */}
               <LoraSelector />
 
-              {/* Control Video / Frames Injection. Hidden in Recast: the
-                  endpoint pins "Replace One Person" + builds the mask from
-                  the "who to replace" keyword, so SCAIL-2's Type of
-                  Process dropdown would be a no-op there and mislead. */}
+              {/* Dedicated SCAIL edit endpoints own their source video,
+                  edited/reference frames, masks, and process selection. */}
               {(modelOptions?.guide_preprocessing || modelOptions?.guide_custom_choices) &&
-                !(generationMode === 'avatar' && editSubMode === 'recast') && (
+                !isScailEdit && (
                 <ControlVideoSection />
               )}
 
-              {/* Output Count */}
-              <div>
+              {/* Dedicated Recast/Repaint submissions create one edit job. */}
+              {!isScailEdit && <div>
                 <div className="flex items-center justify-between mb-1.5">
                   <label className="text-[11px] text-text-muted uppercase tracking-wider">Output Count</label>
                   <span className="text-xs text-text-secondary">{params.repeat_generation || 1}</span>
@@ -817,7 +863,7 @@ export function AdvancedSettings() {
                   onChange={e => setParam('repeat_generation', Number(e.target.value))}
                   className="w-full"
                 />
-              </div>
+              </div>}
             </div>
           </div>
     </>
