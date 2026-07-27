@@ -32,9 +32,10 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 
 ENV TORCH_CUDA_ARCH_LIST="${CUDA_ARCHITECTURES}"
 ENV FORCE_CUDA="1"
-# ponytail: 2 parallel nvcc jobs — each eats ~8 GB RAM compiling the sage
-# kernels; raise if the build machine has >48 GB.
-ENV MAX_JOBS="2"
+# Parallel nvcc jobs — each eats ~8 GB RAM compiling the sage kernels.
+# 2 fits a 31 GB WSL2 VM; CI's 16 GB runner needs --build-arg MAX_JOBS=1.
+ARG MAX_JOBS=2
+ENV MAX_JOBS="${MAX_JOBS}"
 
 # SageAttention's setup.py detects GPUs at build time — there are none in a
 # Docker build, so patch it to use the arch list from the env var instead.

@@ -52,6 +52,10 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Hosted runners have 16 GB RAM — one nvcc job (~8 GB) is all
+          # that fits while compiling the SageAttention kernels.
+          build-args: |
+            MAX_JOBS=1
           # Layer cache lives in GHCR — the GitHub Actions cache (10 GB cap)
           # is far too small for these layers.
           cache-from: type=registry,ref=${{ steps.image.outputs.name }}:buildcache
