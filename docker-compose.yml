@@ -1,0 +1,43 @@
+services:
+  maestro:
+    build: .
+    image: maestro:latest
+    # Prebuilt image instead of building locally:
+    # image: ghcr.io/fgilde/maestro:latest
+    container_name: maestro
+    restart: unless-stopped
+    ports:
+      - "7860:7860"
+    environment:
+      # Optional HuggingFace token — not required (all default models are on
+      # public repos) but lifts anonymous rate limits and unlocks gated models.
+      # - HF_TOKEN=hf_xxx
+      - HF_HOME=/data/huggingface
+    volumes:
+      - config:/data/config                       # wgp_config.json + queue autosave
+      - hf-cache:/data/huggingface                # HuggingFace download cache
+      - settings:/workspace/app/settings          # per-model settings
+      - ckpts:/workspace/app/ckpts                # model weights (50–300 GB!)
+      - loras:/workspace/app/loras                # T2V LoRAs
+      - loras_i2v:/workspace/app/loras_i2v        # I2V LoRAs
+      - loras_metadata:/workspace/app/loras_metadata
+      - outputs:/workspace/app/outputs            # generated videos/images/audio
+      - uploads:/workspace/app/uploads            # user-uploaded reference media
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  config:
+  hf-cache:
+  settings:
+  ckpts:
+  loras:
+  loras_i2v:
+  loras_metadata:
+  outputs:
+  uploads:
