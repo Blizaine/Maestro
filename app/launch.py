@@ -8679,6 +8679,7 @@ async def recast_endpoint(request: Request):
     Body: {
         video_path: str, ref_image_path: str,
         target?: str ("who to replace" keyword, default "person"),
+        ref_target?: str (reference-image keyword, default "human character"),
         prompt?: str (describing the new character in the scene helps),
         start_time?: float, end_time?: float  (optional trim),
         model_type?: str (default scail2_14B_fast),
@@ -8697,6 +8698,7 @@ async def recast_endpoint(request: Request):
     if not ref_image_path:
         raise HTTPException(status_code=400, detail=f"Reference image not found: {body.get('ref_image_path')}")
     target = (body.get("target") or "person").strip() or "person"
+    ref_target = (body.get("ref_target") or "human character").strip() or "human character"
     original_video_path = video_path
 
     # Optional trim — outpaint's frame-accurate re-encode pattern. The
@@ -8789,7 +8791,7 @@ async def recast_endpoint(request: Request):
         "sliding_window_size": 81,
         "sliding_window_overlap": 5,
         "settings_version": 2.57,
-        "custom_settings": {"image_ref_keyword_content": "human character"},
+        "custom_settings": {"image_ref_keyword_content": ref_target},
         # UI restore keys for the gallery Edits filter + Load Settings.
         "edit_video_path": original_video_path,
         "edit_start_time": float(trim_start) if trim_start is not None else 0.0,
