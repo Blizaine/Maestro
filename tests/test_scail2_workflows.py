@@ -1101,6 +1101,7 @@ class TestMultiPersonRecast(unittest.TestCase):
                 "_normalize_repaint_region_mappings",
                 "_repaint_resolution_for_aspect",
                 "_validate_repaint_target_aspect",
+                "_build_repaint_shot_prompt",
             ),
             {
                 "_RECAST_MASK_COLORS": [
@@ -1909,6 +1910,392 @@ class TestMultiPersonRecast(unittest.TestCase):
                 "A blonde woman in silver fights a redhead in black.",
             )
 
+    def test_repaint_shot_manifest_preserves_scene_and_exact_timeline(self):
+        colors = [
+            (0, 0, 255), (255, 0, 0), (0, 255, 0),
+            (255, 0, 255), (0, 255, 255),
+        ]
+        written = {}
+        reference_options = []
+
+        def fake_resize(frames, _canvas, semantic=False):
+            return np.asarray(frames, dtype=np.uint8).copy()
+
+        def fake_write(path, frames, _fps, semantic=False):
+            written[os.path.basename(path)] = {
+                "frames": np.asarray(frames, dtype=np.uint8).copy(),
+                "semantic": semantic,
+            }
+            with open(path, "wb") as handle:
+                handle.write(b"shot")
+            return path
+
+        def fake_references(
+            _target, _target_masks, active, _frame, mask, output_dir,
+            job_id, shot_index, **_kwargs,
+        ):
+            stem = os.path.join(
+                output_dir,
+                f"{job_id}_{shot_index + 1}",
+            )
+            self.assertTrue(np.all(np.asarray(mask)[0, 0] == 0))
+            reference_options.append(
+                bool(_kwargs.get("use_exact_target_frame")),
+            )
+            return {
+                "image_start": stem + "_ref.png",
+                "primary_mask": stem + "_mask.png",
+                "expected_colors": [
+                    list(colors[0]) if len(active) == 1 else None
+                ],
+                "source_scene_reference": {
+                    "image": stem + "_scene.png",
+                    "mask": stem + "_scene_mask.png",
+                },
+                "primary_mode": "shot_layout",
+            }
+
+        build = _load_functions(
+            _LAUNCH_PATH,
+            ("_build_repaint_shot_manifest",),
+            {
+                "os": os,
+                "_RECAST_MASK_COLORS": colors,
+                "_resample_recast_tracking_timeline": self.helpers[
+                    "_resample_recast_tracking_timeline"
+                ],
+                "_plan_recast_shot_segments": self.helpers[
+                    "_plan_recast_shot_segments"
+                ],
+                "_remap_recast_shot_mask": self.helpers[
+                    "_remap_recast_shot_mask"
+                ],
+                "_quantize_recast_shot_frame_count": self.helpers[
+                    "_quantize_recast_shot_frame_count"
+                ],
+                "_build_repaint_shot_prompt": self.helpers[
+                    "_build_repaint_shot_prompt"
+                ],
+                "_resize_recast_shot_frames": fake_resize,
+                "_write_recast_shot_video": fake_write,
+                "_build_repaint_shot_reference_conditioning": (
+                    fake_references
+                ),
+            },
+        )["_build_repaint_shot_manifest"]
+
+        source = np.full((12, 8, 12, 3), 40, dtype=np.uint8)
+        blue = np.zeros_like(source)
+        red = np.zeros_like(source)
+        blue[0:4, 1:7, 1:5] = colors[0]
+        blue[4:8, 1:7, 1:5] = colors[0]
+        red[4:8, 1:7, 7:11] = colors[1]
+        target_frame = np.full((8, 12, 3), 90, dtype=np.uint8)
+        target_blue = np.zeros_like(target_frame)
+        target_red = np.zeros_like(target_frame)
+        target_blue[1:7, 1:5] = colors[0]
+        target_red[1:7, 7:11] = colors[1]
+        conditioning = {
+            "source_frames": source,
+            "mapping_masks": [blue, red],
+            "shot_ranges": [(0, 4), (4, 8), (8, 12)],
+            "target_frame": target_frame,
+            "target_masks": [target_blue, target_red],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = build(
+                {
+                    "custom_settings": {},
+                    "prompt": "A chrome tool transforms into a sci-fi weapon.",
+                },
+                conditioning,
+                temp_dir,
+                "paint123",
+                reference_canvas=(12, 8),
+                target_frame_count=12,
+                generation_fps=24,
+                minimum_frames=5,
+                latent_size=4,
+            )
+            single_result = build(
+                {
+                    "custom_settings": {},
+                    "prompt": "The edited tool follows the source motion.",
+                },
+                {
+                    "source_frames": source[:4],
+                    "mapping_masks": [blue[:4]],
+                    "shot_ranges": [(0, 4)],
+                    "target_frame": target_frame,
+                    "target_masks": [target_blue],
+                },
+                temp_dir,
+                "paint456",
+                reference_canvas=(12, 8),
+                target_frame_count=4,
+                generation_fps=24,
+                minimum_frames=5,
+                latent_size=4,
+            )
+
+            self.assertEqual(len(result["tasks"]), 2)
+            self.assertEqual(len(result["shots"]), 3)
+            self.assertEqual(result["shots"][2]["mode"], "passthrough")
+            self.assertTrue(
+                os.path.isfile(result["shots"][2]["passthrough_path"]),
+            )
+            first, second = [
+                task["params"] for task in result["tasks"]
+            ]
+            self.assertEqual(first["video_prompt_type"], "V1A")
+            self.assertEqual(second["video_prompt_type"], "V2A")
+            self.assertIn("mapped edited region", first["prompt"])
+            self.assertEqual(
+                second["prompt"],
+                "A chrome tool transforms into a sci-fi weapon.",
+            )
+            for params in (first, second):
+                self.assertEqual(params["audio_prompt_type"], "")
+                self.assertIsNone(params["audio_source"])
+                self.assertEqual(params["video_length"], 5)
+                self.assertEqual(params["trim_tail_frames"], 1)
+                self.assertEqual(params["force_fps"], "control")
+                self.assertEqual(params["image_refs"], [])
+                custom = params["custom_settings"]
+                self.assertTrue(
+                    custom["scail2_dynamic_source_scene_reference"],
+                )
+                self.assertFalse(
+                    custom["scail2_timeline_source_scene_reference"],
+                )
+                self.assertTrue(
+                    custom["scail2_source_scene_reference_path"].endswith(
+                        "_scene.png",
+                    ),
+                )
+            semantic_writes = [
+                item for item in written.values() if item["semantic"]
+            ]
+            self.assertEqual(len(semantic_writes), 3)
+            for item in semantic_writes:
+                self.assertTrue(
+                    np.all(item["frames"][:, 0, 0] == 0),
+                )
+            self.assertEqual(len(single_result["tasks"]), 1)
+            self.assertEqual(reference_options, [False, False, True])
+
+    def test_repaint_first_shot_keeps_exact_edited_frame_reference(self):
+        from PIL import Image
+
+        colors = [
+            (0, 0, 255), (255, 0, 0), (0, 255, 0),
+            (255, 0, 255), (0, 255, 255),
+        ]
+        scene_calls = []
+
+        def fail_layout(*_args, **_kwargs):
+            self.fail("Exact first-frame Repaint should not rebuild layout")
+
+        def fake_scene(
+            _frame, _mask, count, output_dir, job_id, **_kwargs,
+        ):
+            scene_calls.append((count, job_id))
+            return {
+                "image": os.path.join(output_dir, "scene.png"),
+                "mask": os.path.join(output_dir, "scene-mask.png"),
+            }
+
+        build = _load_functions(
+            _LAUNCH_PATH,
+            (
+                "_recolor_recast_reference_mask",
+                "_save_recast_reference_pair",
+                "_build_repaint_shot_reference_conditioning",
+            ),
+            {
+                "os": os,
+                "_RECAST_MASK_COLORS": colors,
+                "_compose_recast_character_masks": self.helpers[
+                    "_compose_recast_character_masks"
+                ],
+                "_compose_recast_group_reference_frame": fail_layout,
+                "_compose_recast_cast_reference_frame": fail_layout,
+                "_build_recast_source_scene_reference": fake_scene,
+            },
+        )["_build_repaint_shot_reference_conditioning"]
+
+        target = np.zeros((8, 12, 3), dtype=np.uint8)
+        target[..., 1] = np.arange(12, dtype=np.uint8)[None]
+        target_mask = np.zeros_like(target)
+        target_mask[1:7, 3:9] = colors[0]
+        source = np.full_like(target, 60)
+        local_mask = target_mask.copy()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = build(
+                target,
+                [target_mask],
+                [0],
+                source,
+                local_mask,
+                temp_dir,
+                "paint",
+                0,
+                cooccurring=True,
+                reference_canvas=(12, 8),
+                use_exact_target_frame=True,
+            )
+            with Image.open(result["image_start"]) as image:
+                saved_image = np.asarray(image.convert("RGB"))
+            with Image.open(result["primary_mask"]) as image:
+                saved_mask = np.asarray(image.convert("RGB"))
+
+        self.assertTrue(np.array_equal(saved_image, target))
+        self.assertTrue(np.all(saved_mask[1:7, 3:9] == colors[0]))
+        self.assertTrue(np.all(saved_mask[0, 0] == 255))
+        self.assertEqual(result["primary_mode"], "edited_first_frame")
+        self.assertEqual(scene_calls, [(1, "repaint_paint_shot_1")])
+
+    def test_repaint_shot_assembly_restores_one_exact_source_track(self):
+        import time
+        import traceback
+        import types
+
+        calls = {}
+
+        def fake_run(job_id, finalize=True):
+            self.assertFalse(finalize)
+            jobs[job_id]["_internal_clip_output_files"] = {
+                0: "generated.mp4",
+            }
+            return True
+
+        def fake_finish(job, status, **updates):
+            calls["finish"] = (status, updates)
+            job.update(updates)
+            job["status"] = status
+            return True
+
+        def fake_concat(
+            ordered, final_path, audio_source, **kwargs,
+        ):
+            calls["concat"] = (
+                list(ordered),
+                final_path,
+                audio_source,
+                kwargs,
+            )
+            with open(final_path, "wb") as handle:
+                handle.write(b"joined")
+            return True
+
+        with tempfile.TemporaryDirectory() as outer:
+            shot_dir = tempfile.mkdtemp(
+                prefix="maestro-repaint-shots-",
+                dir=outer,
+            )
+            final_dir = os.path.join(outer, "published")
+            os.makedirs(final_dir)
+            generated = os.path.join(shot_dir, "generated.mp4")
+            passthrough = os.path.join(shot_dir, "source.mp4")
+            source_video = os.path.join(outer, "source-with-audio.mp4")
+            for path in (generated, passthrough, source_video):
+                with open(path, "wb") as handle:
+                    handle.write(b"video")
+
+            bundle = {
+                "shots": [
+                    {"shot_index": 0, "mode": "solo"},
+                    {
+                        "shot_index": 1,
+                        "mode": "passthrough",
+                        "passthrough_path": passthrough,
+                    },
+                ],
+                "published_shots": [{"shot_index": 0}, {"shot_index": 1}],
+                "frame_count": 48,
+                "fps": 24.0,
+                "resolved_seed": 77,
+            }
+            jobs = {
+                "paint": {
+                    "id": "paint",
+                    "status": "running",
+                    "workspace": "tests",
+                    "out_dir": shot_dir,
+                    "params": {
+                        "_defer_output_publication": True,
+                        "_repaint_shot_manifest": [{"params": {}}],
+                        "_repaint_shot_temp_dir": shot_dir,
+                        "_repaint_final_out_dir": final_dir,
+                        "_repaint_source_video": source_video,
+                        "_repaint_shot_bundle": bundle,
+                    },
+                },
+            }
+            fake_wgp = types.SimpleNamespace(
+                get_available_filename=(
+                    lambda out_dir, name: os.path.join(out_dir, name)
+                ),
+                concatenate_multi_clip_videos=fake_concat,
+            )
+            run = _load_functions(
+                _LAUNCH_PATH,
+                ("_run_repaint_shot_generation",),
+                {
+                    "os": os,
+                    "time": time,
+                    "traceback": traceback,
+                    "_jobs": jobs,
+                    "_active_gen_states": {},
+                    "_run_generation": fake_run,
+                    "register_abort_state": (
+                        lambda *_args, **_kwargs: True
+                    ),
+                    "unregister_abort_state": (
+                        lambda *_args, **_kwargs: None
+                    ),
+                    "update_job": (
+                        lambda job, **updates: (
+                            job.update(updates) is None
+                        )
+                    ),
+                    "finish_job": fake_finish,
+                    "is_cancel_requested": lambda _job: False,
+                    "_workspace_dir": lambda _workspace=None: final_dir,
+                    "_recast_video_has_audio": lambda _path: True,
+                    "_recast_video_frame_count": lambda _path: 48,
+                    "_write_repaint_shot_aware_sidecar": (
+                        lambda *_args: calls.setdefault("sidecar", True)
+                    ),
+                    "wgp": fake_wgp,
+                },
+            )["_run_repaint_shot_generation"]
+
+            run("paint")
+
+            concat = calls["concat"]
+            self.assertEqual(concat[0], [generated, passthrough])
+            self.assertEqual(concat[2], source_video)
+            self.assertEqual(concat[3]["audio_start_sec"], 0.0)
+            self.assertEqual(concat[3]["audio_duration_sec"], 2.0)
+            self.assertTrue(concat[3]["pad_audio"])
+            self.assertEqual(calls["finish"][0], "completed")
+            self.assertTrue(calls["sidecar"])
+            self.assertFalse(os.path.exists(shot_dir))
+            self.assertTrue(
+                jobs["paint"]["params"]["edit_repaint_shot_aware"],
+            )
+            self.assertTrue(
+                jobs["paint"]["params"][
+                    "edit_repaint_native_scene_preservation"
+                ],
+            )
+            self.assertNotIn(
+                "_repaint_shot_manifest",
+                jobs["paint"]["params"],
+            )
+
     def test_sam3_tracking_segments_are_clamped_and_disjoint(self):
         helpers = _load_functions(
             _SAM3_PREPROCESSOR_PATH,
@@ -2274,6 +2661,111 @@ class TestMultiPersonRecast(unittest.TestCase):
 
         self.assertTrue(np.all(merged[:, 2:7, 3:8] == (0, 0, 255)))
         self.assertTrue(np.all(merged[:, 0, 0] == 0))
+
+    def test_repaint_reacquires_each_mapping_after_camera_cuts(self):
+        import sys
+        import types
+        import uuid
+        from unittest.mock import patch
+        from PIL import Image
+
+        colors = [
+            (0, 0, 255), (255, 0, 0), (0, 255, 0),
+            (255, 0, 255), (0, 255, 255),
+        ]
+        source_frames = np.full((6, 8, 12, 3), 45, dtype=np.uint8)
+        tracking_calls = []
+        saved_backgrounds = []
+
+        def fake_prepare(_source):
+            return "source.mp4", source_frames, 24.0
+
+        def fake_generate(
+            frames, keyword, *, color_palette, tracking_segments=None,
+            **_kwargs,
+        ):
+            color = np.asarray(color_palette[0], dtype=np.uint8)
+            mask = np.zeros((*frames.shape[:3], 3), dtype=np.uint8)
+            if tracking_segments is not None:
+                tracking_calls.append(
+                    (keyword, [tuple(bounds) for bounds in tracking_segments]),
+                )
+                if "wrench" in keyword:
+                    mask[:3, 1:6, 1:5] = color
+                    mask[3:, 2:7, 1:5] = color
+                else:
+                    mask[:3, 1:6, 7:11] = color
+                    mask[3:, 2:7, 7:11] = color
+            else:
+                if "gun" in keyword:
+                    mask[:, 1:7, 1:5] = color
+                else:
+                    mask[:, 1:7, 7:11] = color
+            return mask
+
+        def fake_save(
+            _source, _mask, _fps, _keywords, *, output_dir,
+            background_color, **_kwargs,
+        ):
+            saved_backgrounds.append(tuple(background_color))
+            path = os.path.join(output_dir, "repaint-mask.mp4")
+            with open(path, "wb") as handle:
+                handle.write(b"mask")
+            return path
+
+        fake_shared = types.ModuleType("shared")
+        fake_shared.magic_mask = types.SimpleNamespace(
+            prepare_video_mask_input=fake_prepare,
+            generate_keyword_masks=fake_generate,
+            save_mask_video=fake_save,
+        )
+        helpers = _load_functions(
+            _LAUNCH_PATH,
+            ("_build_repaint_semantic_conditioning",),
+            {
+                "os": os,
+                "uuid": uuid,
+                "_RECAST_MASK_COLORS": colors,
+                "_detect_recast_shot_ranges": (
+                    lambda _frames: [(0, 3), (3, 6)]
+                ),
+                "_summarize_recast_mapping_mask": self.helpers[
+                    "_summarize_recast_mapping_mask"
+                ],
+                "_compose_recast_character_masks": self.helpers[
+                    "_compose_recast_character_masks"
+                ],
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target_path = os.path.join(temp_dir, "target.png")
+            Image.fromarray(
+                np.full((8, 12, 3), 120, dtype=np.uint8),
+            ).save(target_path)
+            with patch.dict(sys.modules, {"shared": fake_shared}):
+                result = helpers["_build_repaint_semantic_conditioning"](
+                    "source.mp4",
+                    target_path,
+                    [
+                        {"source": "electric wrench", "target": "ray gun"},
+                        {"source": "bare hand", "target": "gloved hand"},
+                    ],
+                    temp_dir,
+                )
+
+        self.assertEqual(
+            tracking_calls,
+            [
+                ("electric wrench", [(0, 3), (3, 6)]),
+                ("bare hand", [(0, 3), (3, 6)]),
+            ],
+        )
+        self.assertEqual(result["shot_ranges"], [[0, 3], [3, 6]])
+        self.assertEqual(result["shot_count"], 2)
+        self.assertEqual(len(result["mapping_summaries"]), 2)
+        self.assertEqual(saved_backgrounds, [(0, 0, 0)])
+        self.assertTrue(np.all(result["mapping_masks"][0][:, 0, 0] == 0))
 
     def test_repaint_regions_and_aspect_are_validated(self):
         normalize = self.helpers["_normalize_repaint_region_mappings"]
@@ -3565,6 +4057,34 @@ class TestMultiPersonRecast(unittest.TestCase):
         )
         self.assertIn(
             '"scail2_primary_reference_people"',
+            launch,
+        )
+        self.assertIn(
+            "def _build_repaint_shot_manifest(",
+            launch,
+        )
+        self.assertIn(
+            "def _run_repaint_shot_generation(",
+            launch,
+        )
+        self.assertIn(
+            '"_repaint_shot_manifest"',
+            launch,
+        )
+        self.assertIn(
+            '"scail2_dynamic_source_scene_reference": True',
+            launch,
+        )
+        self.assertIn(
+            '"edit_repaint_native_scene_preservation": True',
+            launch,
+        )
+        self.assertIn(
+            "tracking_segments=shot_ranges",
+            launch,
+        )
+        self.assertIn(
+            "Repaint camera-shot assembly changed the timeline length",
             launch,
         )
 

@@ -13301,7 +13301,7 @@ def _build_repaint_semantic_conditioning(
     source_video, target_frame_path, mappings, output_dir,
     progress_callback=None, abort_callback=None,
 ):
-    """Track optional region mappings and write paired SCAIL semantic masks."""
+    """Track mapped regions independently inside every detected camera shot."""
     import numpy as np
     from PIL import Image as _PILImage
     from shared import magic_mask
@@ -13309,11 +13309,19 @@ def _build_repaint_semantic_conditioning(
     source_path, source_frames, fps = magic_mask.prepare_video_mask_input(
         source_video,
     )
+    shot_ranges = _detect_recast_shot_ranges(source_frames)
+    if len(shot_ranges) > 1:
+        print(
+            "[Repaint] Detected "
+            f"{len(shot_ranges)} camera shots; SAM3 will reacquire each "
+            "mapped region after every cut."
+        )
     with _PILImage.open(target_frame_path) as target_image:
         target_frame = np.asarray(target_image.convert("RGB"), dtype=np.uint8)
 
     source_masks = []
     target_masks = []
+    mapping_summaries = []
     total = len(mappings)
     for index, mapping in enumerate(mappings):
         if abort_callback is not None:
@@ -13339,11 +13347,13 @@ def _build_repaint_semantic_conditioning(
             color_palette=[color],
             max_colored_objects=1,
             progress_callback=_source_progress,
+            tracking_segments=shot_ranges,
         )
-        if not bool(source_mask.any()):
+        summary = _summarize_recast_mapping_mask(source_mask, fps)
+        if summary is None:
             raise ValueError(
                 f"Repaint region {index + 1} found no "
-                f"'{mapping['source']}' in the source video."
+                f"'{mapping['source']}' anywhere in the selected video."
             )
         target_mask = magic_mask.generate_keyword_masks(
             target_frame[None],
@@ -13360,6 +13370,7 @@ def _build_repaint_semantic_conditioning(
             )
         source_masks.append(source_mask)
         target_masks.append(target_mask)
+        mapping_summaries.append(summary)
 
     driving_mask, _ = _compose_recast_character_masks(
         source_masks,
@@ -13389,9 +13400,352 @@ def _build_repaint_semantic_conditioning(
     )
     _PILImage.fromarray(reference_mask).save(reference_mask_path)
     return {
+        "source_video": source_path,
+        "source_frames": source_frames,
+        "fps": float(fps),
+        "mapping_masks": source_masks,
+        "mapping_summaries": mapping_summaries,
+        "target_frame": target_frame,
+        "target_masks": target_masks,
+        "shot_ranges": [list(bounds) for bounds in shot_ranges],
+        "shot_count": len(shot_ranges),
         "video_mask": video_mask_path,
         "reference_mask": reference_mask_path,
         "region_count": total,
+    }
+
+
+def _build_repaint_shot_prompt(
+    active_count, *, finished_video_prompt=None, total_mapping_count=None,
+):
+    """Avoid mentioning mapped subjects that are absent from a camera shot."""
+    count = max(1, min(5, int(active_count)))
+    try:
+        total_count = max(1, min(5, int(total_mapping_count)))
+    except (TypeError, ValueError):
+        total_count = None
+    requested_prompt = str(finished_video_prompt or "").strip()
+    if (
+        total_count == count
+        and any(character.isalnum() for character in requested_prompt)
+    ):
+        return requested_prompt
+    noun = "region" if count == 1 else "regions"
+    return (
+        f"The {count} mapped edited {noun} move naturally with the exact "
+        "source action and camera motion. Their edited appearance remains "
+        "consistent, while the surrounding original scene, people, objects, "
+        "lighting, and composition remain coherent and unchanged."
+    )
+
+
+def _build_repaint_shot_reference_conditioning(
+    target_frame, target_masks, active_mapping_indices, source_frame,
+    local_semantic_mask, output_dir, job_id, shot_index, *,
+    cooccurring, reference_canvas, use_exact_target_frame=False,
+):
+    """Build one shot-local edited-region reference plus a clean scene anchor."""
+    active = [int(index) for index in active_mapping_indices]
+    if not active:
+        raise ValueError("A generated Repaint shot needs an active region.")
+    if any(
+        index < 0 or index >= len(target_masks)
+        for index in active
+    ):
+        raise ValueError("Repaint shot references contain an invalid mapping.")
+
+    target_layers = []
+    for local_index, mapping_index in enumerate(active):
+        target_layers.append((
+            target_frame,
+            _recolor_recast_reference_mask(
+                target_masks[mapping_index],
+                mapping_index,
+                local_index,
+            ),
+        ))
+
+    if use_exact_target_frame:
+        primary_image = target_frame
+        primary_mask, _ = _compose_recast_character_masks(
+            [layer[1] for layer in target_layers],
+            _RECAST_MASK_COLORS[:len(active)],
+            background_color=(255, 255, 255),
+        )
+        primary_mode = "edited_first_frame"
+    else:
+        primary_mode = "shot_layout"
+        try:
+            if len(active) > 1 and not cooccurring:
+                raise ValueError(
+                    "active edited regions never share one frame in this shot"
+                )
+            primary_image, primary_mask = (
+                _compose_recast_group_reference_frame(
+                    source_frame,
+                    local_semantic_mask,
+                    target_layers,
+                    len(active),
+                )
+            )
+        except ValueError as composition_error:
+            print(
+                f"[Repaint] Shot {shot_index + 1} has no usable shared "
+                f"layout; using a balanced region sheet: "
+                f"{composition_error}"
+            )
+            primary_image, primary_mask = (
+                _compose_recast_cast_reference_frame(
+                    target_layers,
+                    len(active),
+                    reference_canvas,
+                )
+            )
+            primary_mode = "region_sheet"
+
+    stem = f"repaint_shot_ref_{job_id}_{shot_index + 1}"
+    primary_path, primary_mask_path = _save_recast_reference_pair(
+        output_dir,
+        stem,
+        primary_image,
+        primary_mask,
+    )
+    scene_reference = _build_recast_source_scene_reference(
+        source_frame,
+        local_semantic_mask,
+        len(active),
+        output_dir,
+        f"repaint_{job_id}_shot_{shot_index + 1}",
+        output_size=tuple(reference_canvas),
+    )
+    return {
+        "image_start": primary_path,
+        "primary_mask": primary_mask_path,
+        "expected_colors": [
+            list(_RECAST_MASK_COLORS[0])
+            if len(active) == 1
+            else None
+        ],
+        "source_scene_reference": scene_reference,
+        "primary_mode": primary_mode,
+    }
+
+
+def _build_repaint_shot_manifest(
+    base_params, conditioning, output_dir, job_id, *,
+    reference_canvas, target_frame_count, generation_fps,
+    minimum_frames, latent_size,
+):
+    """Create silent, exact-length mapped Repaint tasks per camera shot."""
+    import copy
+    import numpy as np
+
+    source_frames, mapping_masks, shot_ranges = (
+        _resample_recast_tracking_timeline(
+            conditioning["source_frames"],
+            conditioning["mapping_masks"],
+            conditioning["shot_ranges"],
+            target_frame_count,
+        )
+    )
+    plans = _plan_recast_shot_segments(mapping_masks, shot_ranges)
+
+    global_semantic = np.zeros(
+        (*source_frames.shape[:-1], 3),
+        dtype=np.uint8,
+    )
+    occupied = np.zeros(source_frames.shape[:-1], dtype=bool)
+    for mapping_index, mapping_mask in enumerate(mapping_masks):
+        region = (
+            np.any(mapping_mask > 30, axis=-1)
+            if mapping_mask.ndim == 4
+            else mapping_mask.astype(bool)
+        )
+        writable = region & ~occupied
+        global_semantic[writable] = np.asarray(
+            _RECAST_MASK_COLORS[mapping_index],
+            dtype=np.uint8,
+        )
+        occupied |= region
+
+    os.makedirs(output_dir, exist_ok=True)
+    tasks = []
+    published_plans = []
+    for plan in plans:
+        shot_index = int(plan["shot_index"])
+        start, end = int(plan["start_frame"]), int(plan["end_frame"])
+        active = list(plan["active_mapping_indices"])
+        resized_source = _resize_recast_shot_frames(
+            source_frames[start:end],
+            reference_canvas,
+        )
+        published = dict(plan)
+        published["active_mapping_indices"] = list(active)
+
+        if not active:
+            passthrough_path = os.path.join(
+                output_dir,
+                f"repaint_{job_id}_shot_{shot_index + 1}_source.mp4",
+            )
+            _write_recast_shot_video(
+                passthrough_path,
+                resized_source,
+                generation_fps,
+            )
+            plan["passthrough_path"] = passthrough_path
+            published["generation_mode"] = "source_passthrough"
+            published_plans.append(published)
+            continue
+
+        local_mask = _remap_recast_shot_mask(
+            global_semantic[start:end],
+            active,
+            background_color=(0, 0, 0),
+        )
+        resized_mask = _resize_recast_shot_frames(
+            local_mask,
+            reference_canvas,
+            semantic=True,
+        )
+        use_exact_target_frame = (
+            shot_index == 0
+            and len(active) == len(mapping_masks)
+            and all(
+                bool(np.any(mapping_masks[index][start] > 30))
+                for index in active
+            )
+        )
+        # The user's edited image is the selected first source frame. Keep
+        # its clean scene anchor on that same frame; pairing it with a later
+        # camera position would create contradictory background references.
+        anchor_index = (
+            start
+            if use_exact_target_frame
+            else int(plan["anchor_frame_index"])
+        )
+        anchor_mask = _remap_recast_shot_mask(
+            global_semantic[anchor_index],
+            active,
+            background_color=(0, 0, 0),
+        )
+        shot_refs = _build_repaint_shot_reference_conditioning(
+            conditioning["target_frame"],
+            conditioning["target_masks"],
+            active,
+            source_frames[anchor_index],
+            anchor_mask,
+            output_dir,
+            job_id,
+            shot_index,
+            cooccurring=bool(plan["cooccurring"]),
+            reference_canvas=reference_canvas,
+            use_exact_target_frame=use_exact_target_frame,
+        )
+
+        generated_frames, trim_tail = (
+            _quantize_recast_shot_frame_count(
+                end - start,
+                minimum_frames,
+                latent_size,
+            )
+        )
+        pad_count = generated_frames - (end - start)
+        if pad_count > 0:
+            resized_source = np.concatenate([
+                resized_source,
+                np.repeat(resized_source[-1:], pad_count, axis=0),
+            ])
+            resized_mask = np.concatenate([
+                resized_mask,
+                np.repeat(resized_mask[-1:], pad_count, axis=0),
+            ])
+
+        guide_path = os.path.join(
+            output_dir,
+            f"repaint_{job_id}_shot_{shot_index + 1}_guide.mp4",
+        )
+        mask_path = os.path.join(
+            output_dir,
+            f"repaint_{job_id}_shot_{shot_index + 1}_mask.mp4",
+        )
+        _write_recast_shot_video(
+            guide_path,
+            resized_source,
+            generation_fps,
+        )
+        _write_recast_shot_video(
+            mask_path,
+            resized_mask,
+            generation_fps,
+            semantic=True,
+        )
+
+        custom_settings = copy.deepcopy(
+            base_params.get("custom_settings") or {},
+        )
+        custom_settings.update({
+            "scail2_reference_mask_path": shot_refs["primary_mask"],
+            "scail2_additional_reference_mask_paths": [],
+            "scail2_reference_expected_colors": list(
+                shot_refs["expected_colors"],
+            ),
+            "scail2_clip_reference_path": shot_refs["image_start"],
+            "scail2_primary_reference_people": len(active),
+            "scail2_dynamic_source_scene_reference": True,
+            "scail2_timeline_source_scene_reference": False,
+            "scail2_source_scene_reference_path": shot_refs[
+                "source_scene_reference"
+            ]["image"],
+            "scail2_source_scene_mask_path": shot_refs[
+                "source_scene_reference"
+            ]["mask"],
+        })
+        shot_prompt = _build_repaint_shot_prompt(
+            len(active),
+            finished_video_prompt=base_params.get("prompt"),
+            total_mapping_count=len(mapping_masks),
+        )
+        tasks.append({
+            "shot_index": shot_index,
+            "params": {
+                "prompt": shot_prompt,
+                "video_guide": guide_path,
+                "video_mask": mask_path,
+                "image_start": shot_refs["image_start"],
+                "image_refs": [],
+                "video_length": generated_frames,
+                "trim_tail_frames": trim_tail,
+                "video_prompt_type": f"V{len(active)}A",
+                "image_prompt_type": "S",
+                # Internal shots remain silent. The finishing worker restores
+                # one pristine source track after exact-frame assembly.
+                "audio_prompt_type": "",
+                "audio_guide": None,
+                "audio_source": None,
+                "force_fps": "control",
+                "custom_settings": custom_settings,
+                "output_filename": (
+                    f"repaint_{job_id}_shot_{shot_index + 1}.mp4"
+                ),
+            },
+        })
+        plan["generated_task_index"] = len(tasks) - 1
+        published.update({
+            "generation_mode": "scail2",
+            "generated_frame_count": generated_frames,
+            "trim_tail_frames": trim_tail,
+            "reference_mode": shot_refs["primary_mode"],
+            "reference_anchor_frame_index": anchor_index,
+            "native_scene_preservation": True,
+        })
+        published_plans.append(published)
+
+    return {
+        "tasks": tasks,
+        "shots": plans,
+        "published_shots": published_plans,
+        "frame_count": int(target_frame_count),
+        "fps": float(generation_fps),
     }
 
 
@@ -13855,6 +14209,8 @@ async def repaint_endpoint(request: Request):
 
     def _run_repaint():
         abort_state = {"abort": False}
+        shot_temp_dir = None
+        shot_final_out_dir = None
         try:
             with generation_slot(_gen_lock, job) as acquired:
                 if not acquired:
@@ -13941,14 +14297,127 @@ async def repaint_endpoint(request: Request):
                 job["params"]["edit_repaint_reference_mask"] = conditioning[
                     "reference_mask"
                 ]
+                job["params"]["edit_repaint_shot_ranges"] = conditioning[
+                    "shot_ranges"
+                ]
+                job["params"]["edit_repaint_mapping_summaries"] = (
+                    conditioning["mapping_summaries"]
+                )
                 print(
                     "[Repaint] Built native semantic correspondence for "
                     f"{region_count} region{'s' if region_count != 1 else ''}."
+                )
+
+                if not update_job(
+                    job,
+                    phase="Preparing camera shots",
+                    message="Preparing shot-specific Repaint references...",
+                ):
+                    return
+                import secrets
+                import shutil
+                import tempfile
+
+                try:
+                    resolved_seed = int(job["params"].get("seed", -1))
+                except (TypeError, ValueError):
+                    resolved_seed = -1
+                if resolved_seed < 0:
+                    resolved_seed = secrets.randbelow(1_000_000_000)
+                job["params"]["seed"] = resolved_seed
+
+                generation_fps = (
+                    30.0
+                    if force_fps == "30"
+                    else float(conditioning.get("fps") or fps or 25.0)
+                )
+                try:
+                    minimum_frames, _frame_step, latent_size = (
+                        wgp.get_model_min_frames_and_step(model_type)
+                    )
+                except Exception:
+                    minimum_frames, latent_size = 5, 4
+
+                shot_temp_dir = tempfile.mkdtemp(
+                    prefix="maestro-repaint-shots-",
+                )
+                try:
+                    shot_manifest = _build_repaint_shot_manifest(
+                        job["params"],
+                        conditioning,
+                        shot_temp_dir,
+                        job_id,
+                        reference_canvas=(output_width, output_height),
+                        target_frame_count=generation_frames,
+                        generation_fps=generation_fps,
+                        minimum_frames=minimum_frames,
+                        latent_size=latent_size,
+                    )
+                    if not shot_manifest["tasks"]:
+                        raise ValueError(
+                            "The mapped Repaint regions were too small to "
+                            "schedule in any camera shot."
+                        )
+                except Exception:
+                    shutil.rmtree(
+                        shot_temp_dir,
+                        ignore_errors=True,
+                    )
+                    shot_temp_dir = None
+                    raise
+
+                final_out_dir = job.get("out_dir") or _workspace_dir(
+                    workspace_name,
+                )
+                shot_final_out_dir = final_out_dir
+                job["params"].update({
+                    "_defer_output_publication": True,
+                    "_repaint_shot_manifest": shot_manifest["tasks"],
+                    "_repaint_shot_temp_dir": shot_temp_dir,
+                    "_repaint_final_out_dir": final_out_dir,
+                    "_repaint_source_video": video_path,
+                    "_repaint_shot_bundle": {
+                        "shots": shot_manifest["shots"],
+                        "published_shots": shot_manifest[
+                            "published_shots"
+                        ],
+                        "frame_count": shot_manifest["frame_count"],
+                        "fps": shot_manifest["fps"],
+                        "resolved_seed": resolved_seed,
+                    },
+                    "edit_repaint_shot_aware": True,
+                    "edit_repaint_shot_plan": shot_manifest[
+                        "published_shots"
+                    ],
+                    "edit_repaint_native_scene_preservation": True,
+                })
+                # Generated shots and their references are disposable. The
+                # finishing worker publishes only the exact joined timeline.
+                job["out_dir"] = shot_temp_dir
+                generated_count = len(shot_manifest["tasks"])
+                passthrough_count = sum(
+                    1
+                    for shot in shot_manifest["shots"]
+                    if shot["mode"] == "passthrough"
+                )
+                print(
+                    "[Repaint] Shot-aware plan prepared "
+                    f"{len(shot_manifest['shots'])} camera shots "
+                    f"({generated_count} generated, "
+                    f"{passthrough_count} source passthrough), "
+                    f"{shot_manifest['frame_count']} exact output frames "
+                    f"at {shot_manifest['fps']:.6g}fps."
                 )
         except InterruptedError:
             return
         except Exception as exc:
             traceback.print_exc()
+            if shot_temp_dir and os.path.isdir(shot_temp_dir):
+                import shutil
+
+                shutil.rmtree(shot_temp_dir, ignore_errors=True)
+                if shot_final_out_dir:
+                    job["out_dir"] = shot_final_out_dir
             finish_job(
                 job,
                 "failed",
@@ -13964,8 +14433,14 @@ async def repaint_endpoint(request: Request):
             )
 
         if not try_requeue(job, message="Queued (repaint)", phase=""):
+            if shot_temp_dir and os.path.isdir(shot_temp_dir):
+                import shutil
+
+                shutil.rmtree(shot_temp_dir, ignore_errors=True)
+                if shot_final_out_dir:
+                    job["out_dir"] = shot_final_out_dir
             return
-        _run_generation(job_id)
+        _run_repaint_shot_generation(job_id)
 
     threading.Thread(target=_run_repaint, daemon=False).start()
     return {
@@ -18152,25 +18627,39 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                 "_recast_shot_manifest",
                 None,
             )
+            repaint_shot_manifest = raw_params.pop(
+                "_repaint_shot_manifest",
+                None,
+            )
+            shot_manifest = (
+                recast_shot_manifest
+                if recast_shot_manifest is not None
+                else repaint_shot_manifest
+            )
+            shot_workflow = (
+                "Recast"
+                if recast_shot_manifest is not None
+                else "Repaint"
+            )
 
-            # Shot-aware Recast supplies exact per-shot control videos, masks,
-            # references, and prompts. They run through the ordinary task
-            # engine but deliberately defer concatenation and publication to
-            # the Recast finishing worker.
-            if recast_shot_manifest:
+            # Shot-aware Recast/Repaint supply exact per-shot control videos,
+            # masks, references, and prompts. They run through the ordinary
+            # task engine but defer concatenation and publication to their
+            # finishing worker.
+            if shot_manifest is not None:
                 import copy
 
-                if not isinstance(recast_shot_manifest, list):
+                if not isinstance(shot_manifest, list):
                     finish_job(
                         job,
                         "failed",
-                        error="Recast shot manifest is invalid",
-                        message="Recast shot preparation failed",
+                        error=f"{shot_workflow} shot manifest is invalid",
+                        message=f"{shot_workflow} shot preparation failed",
                     )
                     return False
                 generated_entries = [
                     entry
-                    for entry in recast_shot_manifest
+                    for entry in shot_manifest
                     if isinstance(entry, dict)
                     and isinstance(entry.get("params"), dict)
                 ]
@@ -18178,13 +18667,16 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     finish_job(
                         job,
                         "failed",
-                        error="Recast shot manifest contains no generated shots",
-                        message="Recast shot preparation failed",
+                        error=(
+                            f"{shot_workflow} shot manifest contains no "
+                            "generated shots"
+                        ),
+                        message=f"{shot_workflow} shot preparation failed",
                     )
                     return False
 
                 manifest = []
-                group_id = f"recast_shots_{job_id}"
+                group_id = f"{shot_workflow.casefold()}_shots_{job_id}"
                 for sequence_index, entry in enumerate(generated_entries):
                     wgp.task_id += 1
                     shot_params = copy.deepcopy(raw_params)
@@ -19323,8 +19815,8 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                             print(f"  [DynAudNorm] Warning: failed on {fname}: {dan_err}")
 
                 # Refresh sidecars after post-processing/renames. Internal
-                # shot clips are deleted after Recast assembly and therefore
-                # must never be published as gallery artifacts.
+                # shot clips are deleted after shot-aware edit assembly and
+                # therefore must never be published as gallery artifacts.
                 if not defer_output_publication:
                     _write_output_sidecars(new_files)
 
@@ -19641,6 +20133,255 @@ def _run_recast_shot_generation(job_id):
         if temp_dir and os.path.isdir(temp_dir):
             resolved_temp = os.path.realpath(temp_dir)
             expected_prefix = "maestro-recast-shots-"
+            if os.path.basename(resolved_temp).startswith(expected_prefix):
+                shutil.rmtree(resolved_temp, ignore_errors=True)
+
+
+def _write_repaint_shot_aware_sidecar(
+    job, output_path, shot_bundle, generation_time,
+):
+    """Persist mapped Repaint settings without disposable shot artifacts."""
+    import copy
+
+    output_name = os.path.basename(output_path)
+    params = copy.deepcopy(job.get("params") or {})
+    for key in (
+        "_defer_output_publication",
+        "_repaint_shot_manifest",
+        "_repaint_shot_temp_dir",
+        "_repaint_final_out_dir",
+        "_repaint_source_video",
+        "_repaint_shot_bundle",
+    ):
+        params.pop(key, None)
+    params["video_length"] = int(shot_bundle["frame_count"])
+    params["seed"] = int(shot_bundle["resolved_seed"])
+    params["edit_repaint_shot_aware"] = True
+    params["edit_repaint_native_scene_preservation"] = True
+    params["edit_repaint_shot_plan"] = list(
+        shot_bundle.get("published_shots") or [],
+    )
+
+    upload_filenames = {}
+    for key in (
+        "image_start", "image_end", "video_guide", "audio_guide",
+        "audio_guide2", "audio_guide3", "audio_guide4",
+        "audio_guide5", "audio_guide6",
+    ):
+        value = params.get(key)
+        if isinstance(value, str) and value:
+            upload_filenames[key] = os.path.basename(value)
+        elif isinstance(value, list):
+            upload_filenames[key] = [
+                os.path.basename(item)
+                if isinstance(item, str) and item else ""
+                for item in value
+            ]
+
+    sidecar = {
+        "params": params,
+        "upload_filenames": upload_filenames,
+        "generation_mode": params.get("generation_mode"),
+        "job_id": job.get("id"),
+        "generation_time": int(round(float(generation_time))),
+        "created_at": time.time(),
+        "output_filename": output_name,
+    }
+    meta_path = os.path.splitext(output_path)[0] + ".meta.json"
+    with open(meta_path, "w", encoding="utf-8") as handle:
+        json.dump(sidecar, handle, indent=2)
+
+
+def _run_repaint_shot_generation(job_id):
+    """Generate mapped camera shots, then restore one exact source track."""
+    import shutil
+
+    job = _jobs[job_id]
+    params = job.get("params") or {}
+    shot_bundle = params.get("_repaint_shot_bundle") or {}
+    temp_dir = params.get("_repaint_shot_temp_dir")
+    final_out_dir = params.get("_repaint_final_out_dir") or _workspace_dir(
+        job.get("workspace"),
+    )
+    assembly_state = {"abort": False}
+    final_path = None
+    published = False
+    started_at = time.time()
+
+    try:
+        if not _run_generation(job_id, finalize=False):
+            return
+        if not register_abort_state(
+            job,
+            job_id,
+            _active_gen_states,
+            assembly_state,
+        ):
+            return
+        if not update_job(
+            job,
+            progress=99,
+            step=0,
+            total_steps=0,
+            phase="Joining camera shots",
+            message="Joining Repaint shots and restoring source audio...",
+        ):
+            return
+
+        clip_outputs = job.get("_internal_clip_output_files") or {}
+        ordered_paths = []
+        for shot in shot_bundle.get("shots") or []:
+            if shot.get("mode") == "passthrough":
+                clip_path = shot.get("passthrough_path")
+            else:
+                raw_name = (
+                    clip_outputs.get(int(shot["shot_index"]))
+                    or clip_outputs.get(str(int(shot["shot_index"])))
+                )
+                clip_path = (
+                    raw_name
+                    if raw_name and os.path.isabs(raw_name)
+                    else os.path.join(temp_dir or "", raw_name or "")
+                )
+            if not clip_path or not os.path.isfile(clip_path):
+                raise RuntimeError(
+                    "Repaint shot assembly is missing camera shot "
+                    f"{int(shot.get('shot_index', 0)) + 1}."
+                )
+            ordered_paths.append(clip_path)
+
+        if not ordered_paths:
+            raise RuntimeError("Repaint shot assembly has no video segments.")
+
+        os.makedirs(final_out_dir, exist_ok=True)
+        seed = int(shot_bundle["resolved_seed"])
+        timestamp = time.strftime("%Y-%m-%d-%Hh%Mm%Ss")
+        extension = os.path.splitext(ordered_paths[0])[1] or ".mp4"
+        final_path = wgp.get_available_filename(
+            final_out_dir,
+            f"{timestamp}_seed{seed}_repaint_shot_aware{extension}",
+        )
+        source_video = params.get("_repaint_source_video")
+        source_audio = None
+        if source_video and os.path.isfile(source_video):
+            try:
+                if _recast_video_has_audio(source_video):
+                    source_audio = source_video
+            except Exception as audio_probe_error:
+                print(
+                    "[Repaint] Could not probe source audio; assembling "
+                    f"video-only: {audio_probe_error}"
+                )
+
+        assembled = wgp.concatenate_multi_clip_videos(
+            ordered_paths,
+            final_path,
+            source_audio,
+            audio_start_sec=0.0,
+            abort_callback=lambda: is_cancel_requested(job),
+            pad_audio=True,
+            audio_duration_sec=(
+                float(shot_bundle["frame_count"])
+                / float(shot_bundle["fps"])
+            ),
+        )
+        if is_cancel_requested(job):
+            if final_path and os.path.isfile(final_path):
+                try:
+                    os.remove(final_path)
+                except OSError:
+                    pass
+            return
+        if not assembled or not os.path.isfile(final_path):
+            raise RuntimeError("Repaint camera-shot assembly failed.")
+
+        expected_frames = int(shot_bundle["frame_count"])
+        actual_frames = _recast_video_frame_count(final_path)
+        if actual_frames != expected_frames:
+            try:
+                os.remove(final_path)
+            except OSError:
+                pass
+            raise RuntimeError(
+                "Repaint camera-shot assembly changed the timeline length "
+                f"({actual_frames}/{expected_frames} frames)."
+            )
+
+        _write_repaint_shot_aware_sidecar(
+            job,
+            final_path,
+            shot_bundle,
+            time.time() - started_at,
+        )
+        final_name = os.path.basename(final_path)
+        job["out_dir"] = final_out_dir
+        published = finish_job(
+            job,
+            "completed",
+            output_files=[final_name],
+            clip_output_files={},
+            join_output_file=final_name,
+            progress=100,
+            step=0,
+            total_steps=0,
+            phase="",
+            message="Done",
+        )
+        if not published:
+            return
+        print(
+            "[Repaint] Shot-aware assembly completed: "
+            f"{len(ordered_paths)} shots, {actual_frames} frames, "
+            f"{'continuous source audio' if source_audio else 'video only'}."
+        )
+    except Exception as error:
+        traceback.print_exc()
+        if not is_cancel_requested(job):
+            finish_job(
+                job,
+                "failed",
+                error=str(error),
+                message=f"Repaint assembly failed: {error}",
+            )
+    finally:
+        if final_path and not published:
+            for leftover in (
+                final_path,
+                os.path.splitext(final_path)[0] + ".meta.json",
+            ):
+                if os.path.isfile(leftover):
+                    try:
+                        os.remove(leftover)
+                    except OSError:
+                        pass
+        unregister_abort_state(
+            job_id,
+            _active_gen_states,
+            assembly_state,
+        )
+        job["out_dir"] = final_out_dir
+        job.pop("_internal_output_files", None)
+        job.pop("_internal_clip_output_files", None)
+        job.pop("_internal_join_output_file", None)
+        if isinstance(job.get("params"), dict):
+            published_shots = list(
+                (shot_bundle or {}).get("published_shots") or [],
+            )
+            if published_shots:
+                job["params"]["edit_repaint_shot_aware"] = True
+                job["params"]["edit_repaint_shot_plan"] = published_shots
+                job["params"][
+                    "edit_repaint_native_scene_preservation"
+                ] = True
+            job["params"].pop("_repaint_shot_manifest", None)
+            job["params"].pop("_repaint_shot_temp_dir", None)
+            job["params"].pop("_repaint_final_out_dir", None)
+            job["params"].pop("_repaint_source_video", None)
+            job["params"].pop("_repaint_shot_bundle", None)
+            job["params"].pop("_defer_output_publication", None)
+        if temp_dir and os.path.isdir(temp_dir):
+            resolved_temp = os.path.realpath(temp_dir)
+            expected_prefix = "maestro-repaint-shots-"
             if os.path.basename(resolved_temp).startswith(expected_prefix):
                 shutil.rmtree(resolved_temp, ignore_errors=True)
 
