@@ -21,6 +21,13 @@ export function RecastControls() {
   const setEditVideo = useStore(s => s.setEditVideo)
   const clearEditVideo = useStore(s => s.clearEditVideo)
   const recastTarget = useStore(s => s.editRecastTarget)
+  const refKeyword = useStore(s => {
+    const custom = s.params.custom_settings as Record<string, unknown> | undefined
+    return typeof custom?.image_ref_keyword_content === 'string'
+      ? custom.image_ref_keyword_content
+      : 'human character'
+  })
+  const setParam = useStore(s => s.setParam)
   const refFile = useStore(s => s.editRecastRefFile)
   const refUrl = useStore(s => s.editRecastRefUrl)
   const setEditRecastRef = useStore(s => s.setEditRecastRef)
@@ -156,6 +163,27 @@ export function RecastControls() {
         {previewState === 'error' && (
           <p className="text-[9px] text-status-error mt-0.5">Preview failed — check the server log.</p>
         )}
+      </div>
+
+      {/* The source-video target and reference-image target are separate
+          detector prompts. Keep them together so the distinction is visible
+          before the user uploads either asset. */}
+      <div className="bg-bg-tertiary/50 border border-border/70 rounded-lg p-2.5">
+        <label className="text-[10px] text-text-muted uppercase tracking-wider mb-1 block">Reference image contains</label>
+        <input
+          type="text"
+          value={refKeyword}
+          onChange={e => {
+            const custom = { ...(useStore.getState().params.custom_settings || {}) } as Record<string, unknown>
+            custom.image_ref_keyword_content = e.target.value
+            setParam('custom_settings', custom)
+          }}
+          placeholder="human character"
+          className="w-full bg-bg-tertiary border border-border rounded px-2 py-1.5 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue"
+        />
+        <p className="text-[9px] text-text-muted mt-1">
+          Describe the subject in the new-character image, e.g. &quot;red panda&quot;.
+        </p>
       </div>
 
       {/* Reference character image */}

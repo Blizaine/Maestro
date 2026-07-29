@@ -3625,6 +3625,10 @@ export const useStore = create<AppState>((set, get) => ({
           video_path: state.editVideoPath,
           ref_image_path: state.editRecastRefPath,
           target: state.editRecastTarget || 'person',
+          ref_target: String(
+            (state.params.custom_settings as Record<string, unknown> | undefined)?.image_ref_keyword_content
+              || 'human character',
+          ).trim() || 'human character',
           ...(promptText ? { prompt: promptText } : {}),
           ...(recastIsScail2 ? {
             model_type: recastModel,

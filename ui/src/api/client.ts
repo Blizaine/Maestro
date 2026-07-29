@@ -844,6 +844,8 @@ export async function submitRecast(params: {
   ref_image_path: string;
   /** Who to replace, as a SAM3 keyword ("woman", "man in red"). */
   target?: string;
+  /** What to isolate in the reference image ("human character", "red panda"). */
+  ref_target?: string;
   /** Optional scene/character description — a good one helps identity. */
   prompt?: string;
   start_time?: number;
