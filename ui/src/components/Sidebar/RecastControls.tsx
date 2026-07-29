@@ -165,6 +165,27 @@ export function RecastControls() {
         )}
       </div>
 
+      {/* The source-video target and reference-image target are separate
+          detector prompts. Keep them together so the distinction is visible
+          before the user uploads either asset. */}
+      <div className="bg-bg-tertiary/50 border border-border/70 rounded-lg p-2.5">
+        <label className="text-[10px] text-text-muted uppercase tracking-wider mb-1 block">Reference image contains</label>
+        <input
+          type="text"
+          value={refKeyword}
+          onChange={e => {
+            const custom = { ...(useStore.getState().params.custom_settings || {}) } as Record<string, unknown>
+            custom.image_ref_keyword_content = e.target.value
+            setParam('custom_settings', custom)
+          }}
+          placeholder="human character"
+          className="w-full bg-bg-tertiary border border-border rounded px-2 py-1.5 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue"
+        />
+        <p className="text-[9px] text-text-muted mt-1">
+          Describe the subject in the new-character image, e.g. &quot;red panda&quot;.
+        </p>
+      </div>
+
       {/* Reference character image */}
       <div>
         <label className="text-[10px] text-text-muted uppercase tracking-wider mb-1 block">New character</label>
@@ -194,21 +215,6 @@ export function RecastControls() {
             </button>
           </div>
         )}
-        <label className="text-[10px] text-text-muted uppercase tracking-wider mt-2 mb-1 block">Reference image keyword</label>
-        <input
-          type="text"
-          value={refKeyword}
-          onChange={e => {
-            const custom = { ...(useStore.getState().params.custom_settings || {}) } as Record<string, unknown>
-            custom.image_ref_keyword_content = e.target.value
-            setParam('custom_settings', custom)
-          }}
-          placeholder="human character"
-          className="w-full bg-bg-tertiary border border-border rounded px-2 py-1.5 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue"
-        />
-        <p className="text-[9px] text-text-muted mt-0.5">
-          What to isolate in the new-character image, e.g. &quot;red panda&quot;.
-        </p>
       </div>
 
       <p className="text-[9px] text-text-muted">
