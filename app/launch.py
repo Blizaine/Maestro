@@ -16325,6 +16325,471 @@ def _format_outpaint_percentage(value):
     return text or "0"
 
 
+def _detect_outpaint_video_shot_ranges(
+    source_video, target_frame_count, *, abort_callback=None,
+    min_shot_frames=4, absolute_cut_threshold=0.12,
+):
+    """Stream a video into tiny thumbnails and return hard-cut ranges.
+
+    Outpaint only needs camera-cut boundaries, not the full-resolution frame
+    tensor that Recast keeps for SAM tracking. Retaining 64x36 RGB thumbnails
+    bounds memory while deliberately reusing Recast's proven adaptive cut
+    scoring. ``target_frame_count`` matches the exact timeline LTX will
+    generate; any source tail outside its causal 8n+1 grid is ignored just as
+    it is by the ordinary continuous Outpaint path.
+    """
+    import cv2
+    import numpy as np
+
+    frame_limit = max(1, int(target_frame_count))
+    capture = cv2.VideoCapture(str(source_video))
+    if not capture.isOpened():
+        capture.release()
+        raise ValueError(
+            f"Outpaint could not open the source video: {source_video}"
+        )
+
+    thumbnails = []
+    try:
+        while len(thumbnails) < frame_limit:
+            if abort_callback is not None:
+                abort_callback()
+            ok, frame = capture.read()
+            if not ok or frame is None:
+                break
+            thumbnail = cv2.resize(
+                frame,
+                (64, 36),
+                interpolation=cv2.INTER_AREA,
+            )
+            thumbnails.append(cv2.cvtColor(thumbnail, cv2.COLOR_BGR2RGB))
+    finally:
+        capture.release()
+
+    decoded_count = len(thumbnails)
+    if decoded_count <= 0:
+        raise ValueError("Outpaint source video contains no decodable frames.")
+    if decoded_count < frame_limit:
+        raise ValueError(
+            "Outpaint source ended before its planned timeline "
+            f"({decoded_count}/{frame_limit} frames)."
+        )
+
+    return _detect_recast_shot_ranges(
+        np.stack(thumbnails),
+        min_shot_frames=min_shot_frames,
+        absolute_cut_threshold=absolute_cut_threshold,
+    )
+
+
+def _build_outpaint_shot_filter(
+    start_frame, end_frame, pad_frames, fps,
+):
+    """Build an exact-frame, CFR filter for one lossless internal guide."""
+    start = int(start_frame)
+    end = int(end_frame)
+    padding = max(0, int(pad_frames))
+    rate = float(fps)
+    if start < 0 or end <= start:
+        raise ValueError("Outpaint shot frame bounds are invalid.")
+    if not math.isfinite(rate) or rate <= 0:
+        raise ValueError("Outpaint shot FPS must be positive.")
+    rate_text = f"{rate:.12g}"
+    return (
+        f"trim=start_frame={start}:end_frame={end},"
+        f"setpts=N/({rate_text}*TB),"
+        f"tpad=stop_mode=clone:stop={padding}"
+    )
+
+
+def _write_outpaint_shot_guide(
+    source_video, output_path, *, start_frame, end_frame, pad_frames,
+    fps, abort_callback=None,
+):
+    """Write one frame-exact, lossless H.264 guide without loading it whole."""
+    import subprocess
+
+    if abort_callback is not None:
+        abort_callback()
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    filter_graph = _build_outpaint_shot_filter(
+        start_frame,
+        end_frame,
+        pad_frames,
+        fps,
+    )
+    ffmpeg_bin = os.environ.get("FFMPEG_BINARY", "ffmpeg")
+    expected_frames = (
+        int(end_frame) - int(start_frame) + max(0, int(pad_frames))
+    )
+    timeout = max(
+        120,
+        min(900, int(math.ceil(expected_frames / float(fps) * 10.0))),
+    )
+    command = [
+        ffmpeg_bin,
+        "-y",
+        "-v",
+        "error",
+        "-i",
+        str(source_video),
+        "-map",
+        "0:v:0",
+        "-vf",
+        filter_graph,
+        "-an",
+        "-map_metadata",
+        "0",
+        # The generated margins are color-sensitive. CRF 0 prevents an
+        # intermediate guide encode from softening or shifting the protected
+        # source before the IC-LoRA sees it.
+        "-c:v",
+        "libx264",
+        "-crf",
+        "0",
+        "-preset",
+        "fast",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if abort_callback is not None:
+        abort_callback()
+    if completed.returncode != 0 or not os.path.isfile(output_path):
+        if os.path.isfile(output_path):
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
+        detail = (completed.stderr or "unknown ffmpeg error").strip()
+        raise RuntimeError(
+            "Could not prepare Outpaint camera shot: " + detail[:500]
+        )
+
+    actual_frames = _recast_video_frame_count(output_path)
+    if actual_frames != expected_frames:
+        try:
+            os.remove(output_path)
+        except OSError:
+            pass
+        raise RuntimeError(
+            "Outpaint camera-shot guide changed timeline length "
+            f"({actual_frames}/{expected_frames} frames)."
+        )
+    return output_path
+
+
+def _build_outpaint_shot_manifest(
+    base_params, source_video, shot_ranges, output_dir, job_id, *,
+    target_frame_count, generation_fps, minimum_frames, latent_size,
+    guide_writer=None, progress_callback=None, abort_callback=None,
+):
+    """Create exact-length official Outpaint tasks for every camera shot."""
+    target_count = int(target_frame_count)
+    if target_count <= 0:
+        raise ValueError("Outpaint target timeline must contain frames.")
+    ranges = [
+        (int(bounds[0]), int(bounds[1]))
+        for bounds in (shot_ranges or [])
+    ]
+    if not ranges:
+        ranges = [(0, target_count)]
+    cursor = 0
+    for start, end in ranges:
+        if start != cursor or end <= start or end > target_count:
+            raise ValueError(
+                "Outpaint camera shots must cover one contiguous timeline."
+            )
+        cursor = end
+    if cursor != target_count:
+        raise ValueError(
+            "Outpaint camera shots do not cover the complete timeline."
+        )
+
+    writer = guide_writer or _write_outpaint_shot_guide
+    os.makedirs(output_dir, exist_ok=True)
+    tasks = []
+    plans = []
+    total_shots = len(ranges)
+    for shot_index, (start, end) in enumerate(ranges):
+        if abort_callback is not None:
+            abort_callback()
+        if progress_callback is not None:
+            progress_callback(shot_index, total_shots)
+        exact_frames = end - start
+        generated_frames, trim_tail = _quantize_recast_shot_frame_count(
+            exact_frames,
+            minimum_frames,
+            latent_size,
+        )
+        guide_path = os.path.join(
+            output_dir,
+            f"outpaint_{job_id}_shot_{shot_index + 1}_guide.mp4",
+        )
+        writer(
+            source_video,
+            guide_path,
+            start_frame=start,
+            end_frame=end,
+            pad_frames=trim_tail,
+            fps=generation_fps,
+            abort_callback=abort_callback,
+        )
+        tasks.append({
+            "shot_index": shot_index,
+            "params": {
+                "video_guide": guide_path,
+                "video_length": generated_frames,
+                "trim_tail_frames": trim_tail,
+                "video_prompt_type": "VG",
+                "image_prompt_type": "",
+                "force_fps": "control",
+                # Internal shots never replace their audio or perform the
+                # continuous-path smear trim. One source track is attached
+                # only after exact-frame assembly.
+                "audio_prompt_type": "",
+                "audio_guide": None,
+                "audio_source": None,
+                "_outpaint_preserve_audio": False,
+                "_outpaint_source_video": None,
+                "_outpaint_lock_source_pixels": False,
+                "_outpaint_trim_smear": False,
+                "output_filename": (
+                    f"outpaint_{job_id}_shot_{shot_index + 1}.mp4"
+                ),
+            },
+        })
+        plans.append({
+            "shot_index": shot_index,
+            "start_frame": start,
+            "end_frame": end,
+            "frame_count": exact_frames,
+            "generated_frame_count": generated_frames,
+            "trim_tail_frames": trim_tail,
+            "mode": "outpaint",
+        })
+
+    return {
+        "tasks": tasks,
+        "shots": plans,
+        "published_shots": [dict(plan) for plan in plans],
+        "frame_count": target_count,
+        "fps": float(generation_fps),
+    }
+
+
+def _prepare_and_run_outpaint(job_id):
+    """Detect camera cuts, prepare private shot tasks, then generate."""
+    import secrets
+    import shutil
+    import tempfile
+
+    job = _jobs[job_id]
+    abort_state = {"abort": False}
+    shot_temp_dir = None
+    shot_final_out_dir = None
+    has_shot_manifest = False
+
+    try:
+        # Match Recast/Repaint's two-phase lifecycle. Preparation is short and
+        # CPU-bound, but taking the slot preserves submission order and avoids
+        # stacking ffmpeg decoding on top of another active generation.
+        with generation_slot(_gen_lock, job) as acquired:
+            if not acquired:
+                return
+            if not try_start(
+                job,
+                phase="Detecting camera shots",
+                message="Detecting camera cuts for Outpaint...",
+            ):
+                return
+            if not register_abort_state(
+                job,
+                job_id,
+                _active_gen_states,
+                abort_state,
+            ):
+                return
+
+            def _abort_preparation():
+                if is_cancel_requested(job):
+                    raise InterruptedError(
+                        "Outpaint camera-shot preparation was cancelled",
+                    )
+
+            params = job.get("params") or {}
+            source_video = params.get("video_guide")
+            target_frame_count = int(params.get("video_length") or 0)
+            generation_fps = float(
+                params.get("_outpaint_generation_fps") or 0
+            )
+            if not source_video or not os.path.isfile(source_video):
+                raise ValueError("Outpaint source video is unavailable.")
+            if target_frame_count <= 0 or generation_fps <= 0:
+                raise ValueError("Outpaint timeline metadata is invalid.")
+
+            shot_ranges = _detect_outpaint_video_shot_ranges(
+                source_video,
+                target_frame_count,
+                abort_callback=_abort_preparation,
+            )
+            params["edit_outpaint_detected_shot_ranges"] = [
+                [int(start), int(end)]
+                for start, end in shot_ranges
+            ]
+            if len(shot_ranges) <= 1:
+                print(
+                    "[Outpaint] Detected one continuous camera shot; "
+                    "using the proven continuous pipeline."
+                )
+            else:
+                cut_times = ", ".join(
+                    f"{start / generation_fps:.2f}s"
+                    for start, _end in shot_ranges[1:]
+                )
+                print(
+                    f"[Outpaint] Detected {len(shot_ranges)} camera shots; "
+                    f"generating each independently after cuts at "
+                    f"{cut_times}."
+                )
+                if not update_job(
+                    job,
+                    phase="Preparing camera shots",
+                    message=(
+                        f"Preparing {len(shot_ranges)} Outpaint shots..."
+                    ),
+                ):
+                    raise InterruptedError(
+                        "Outpaint camera-shot preparation was cancelled",
+                    )
+
+                try:
+                    resolved_seed = int(params.get("seed", -1))
+                except (TypeError, ValueError):
+                    resolved_seed = -1
+                if resolved_seed < 0:
+                    resolved_seed = secrets.randbelow(1_000_000_000)
+                params["seed"] = resolved_seed
+
+                model_type = params.get("model_type")
+                try:
+                    minimum_frames, _frame_step, latent_size = (
+                        wgp.get_model_min_frames_and_step(model_type)
+                    )
+                except Exception:
+                    minimum_frames, latent_size = 17, 8
+
+                shot_temp_dir = tempfile.mkdtemp(
+                    prefix="maestro-outpaint-shots-",
+                )
+
+                def _preparation_progress(index, total):
+                    if not update_job(
+                        job,
+                        phase="Preparing camera shots",
+                        message=(
+                            f"Preparing Outpaint shot {index + 1}/{total}..."
+                        ),
+                    ):
+                        raise InterruptedError(
+                            "Outpaint camera-shot preparation was cancelled",
+                        )
+
+                try:
+                    shot_manifest = _build_outpaint_shot_manifest(
+                        params,
+                        source_video,
+                        shot_ranges,
+                        shot_temp_dir,
+                        job_id,
+                        target_frame_count=target_frame_count,
+                        generation_fps=generation_fps,
+                        minimum_frames=minimum_frames,
+                        latent_size=latent_size,
+                        progress_callback=_preparation_progress,
+                        abort_callback=_abort_preparation,
+                    )
+                except Exception:
+                    shutil.rmtree(shot_temp_dir, ignore_errors=True)
+                    shot_temp_dir = None
+                    raise
+
+                shot_final_out_dir = job.get("out_dir") or _workspace_dir(
+                    job.get("workspace"),
+                )
+                params.update({
+                    "_defer_output_publication": True,
+                    "_outpaint_shot_manifest": shot_manifest["tasks"],
+                    "_outpaint_shot_temp_dir": shot_temp_dir,
+                    "_outpaint_final_out_dir": shot_final_out_dir,
+                    "_outpaint_shot_source_video": source_video,
+                    "_outpaint_shot_bundle": {
+                        "shots": shot_manifest["shots"],
+                        "published_shots": shot_manifest[
+                            "published_shots"
+                        ],
+                        "frame_count": shot_manifest["frame_count"],
+                        "fps": shot_manifest["fps"],
+                        "resolved_seed": resolved_seed,
+                        "preserve_source_audio": bool(
+                            params.get("_outpaint_preserve_audio", True)
+                        ),
+                    },
+                    "edit_outpaint_shot_aware": True,
+                    "edit_outpaint_shot_plan": shot_manifest[
+                        "published_shots"
+                    ],
+                })
+                job["out_dir"] = shot_temp_dir
+                has_shot_manifest = True
+                print(
+                    "[Outpaint] Shot-aware plan prepared "
+                    f"{len(shot_manifest['shots'])} camera shots, "
+                    f"{shot_manifest['frame_count']} exact output frames "
+                    f"at {shot_manifest['fps']:.6g}fps."
+                )
+    except InterruptedError:
+        return
+    except Exception as error:
+        traceback.print_exc()
+        if shot_temp_dir and os.path.isdir(shot_temp_dir):
+            shutil.rmtree(shot_temp_dir, ignore_errors=True)
+        if shot_final_out_dir:
+            job["out_dir"] = shot_final_out_dir
+        finish_job(
+            job,
+            "failed",
+            error=f"Outpaint shot preparation failed: {error}",
+            message="Outpaint shot preparation failed",
+        )
+        return
+    finally:
+        unregister_abort_state(
+            job_id,
+            _active_gen_states,
+            abort_state,
+        )
+
+    if not try_requeue(job, message="Queued (outpaint)", phase=""):
+        if shot_temp_dir and os.path.isdir(shot_temp_dir):
+            shutil.rmtree(shot_temp_dir, ignore_errors=True)
+        if shot_final_out_dir:
+            job["out_dir"] = shot_final_out_dir
+        return
+    if has_shot_manifest:
+        _run_outpaint_shot_generation(job_id)
+    else:
+        _run_generation(job_id)
+
+
 @api.post("/api/v1/outpaint")
 async def outpaint_endpoint(request: Request):
     """Submit an outpaint job: extend video/image canvas using IC-LoRA.
@@ -16779,6 +17244,12 @@ async def outpaint_endpoint(request: Request):
         "_outpaint_overlay_y": overlay_y,
         "_outpaint_canvas_w": final_w,
         "_outpaint_canvas_h": final_h,
+        # Private preparation metadata for automatic camera-shot dispatch.
+        # It is stripped from the final sidecar after assembly.
+        "_outpaint_generation_fps": generation_fps if is_video else None,
+        "_outpaint_source_frame_count": (
+            source_total_frames if is_video else None
+        ),
         # Smear trim params: only meaningful when total_frames > sliding_window_size
         # (multi-window mode). Boundary 1 is at output position
         # sliding_window_size - sliding_window_discard_last_frames.
@@ -16820,7 +17291,12 @@ async def outpaint_endpoint(request: Request):
     }
     _jobs[job_id] = job
 
-    thread = threading.Thread(target=_run_generation, args=(job_id,), daemon=False)
+    worker = (
+        _prepare_and_run_outpaint
+        if official_outpaint and is_video
+        else _run_generation
+    )
+    thread = threading.Thread(target=worker, args=(job_id,), daemon=False)
     thread.start()
 
     # Estimate window count for the response so the UI can surface it.
@@ -19311,21 +19787,33 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                 "_repaint_shot_manifest",
                 None,
             )
-            shot_manifest = (
-                recast_shot_manifest
-                if recast_shot_manifest is not None
-                else repaint_shot_manifest
+            outpaint_shot_manifest = raw_params.pop(
+                "_outpaint_shot_manifest",
+                None,
             )
-            shot_workflow = (
-                "Recast"
-                if recast_shot_manifest is not None
-                else "Repaint"
-            )
+            if recast_shot_manifest is not None:
+                shot_manifest = recast_shot_manifest
+                shot_workflow = "Recast"
+            elif repaint_shot_manifest is not None:
+                shot_manifest = repaint_shot_manifest
+                shot_workflow = "Repaint"
+            else:
+                shot_manifest = outpaint_shot_manifest
+                shot_workflow = "Outpaint"
 
-            # Shot-aware Recast/Repaint supply exact per-shot control videos,
-            # masks, references, and prompts. They run through the ordinary
-            # task engine but defer concatenation and publication to their
-            # finishing worker.
+            if outpaint_shot_manifest is not None:
+                # Internal Outpaint shots must not run the continuous job's
+                # postprocessor against the complete source video. The final
+                # shot-aware worker restores one pristine audio track only
+                # after all exact-length clips have been assembled.
+                raw_params["_outpaint_preserve_audio"] = False
+                raw_params["_outpaint_source_video"] = None
+                raw_params["_outpaint_lock_source_pixels"] = False
+                raw_params["_outpaint_trim_smear"] = False
+
+            # Shot-aware edits supply exact per-shot guides and settings. They
+            # run through the ordinary task engine but defer concatenation and
+            # publication to their finishing worker.
             if shot_manifest is not None:
                 import copy
 
@@ -21062,6 +21550,262 @@ def _run_repaint_shot_generation(job_id):
         if temp_dir and os.path.isdir(temp_dir):
             resolved_temp = os.path.realpath(temp_dir)
             expected_prefix = "maestro-repaint-shots-"
+            if os.path.basename(resolved_temp).startswith(expected_prefix):
+                shutil.rmtree(resolved_temp, ignore_errors=True)
+
+
+def _write_outpaint_shot_aware_sidecar(
+    job, output_path, shot_bundle, generation_time,
+):
+    """Persist restorable Outpaint settings without private shot paths."""
+    import copy
+
+    output_name = os.path.basename(output_path)
+    params = copy.deepcopy(job.get("params") or {})
+    params.pop("_defer_output_publication", None)
+    for key in list(params):
+        if str(key).startswith("_outpaint_"):
+            params.pop(key, None)
+    params["video_length"] = int(shot_bundle["frame_count"])
+    params["seed"] = int(shot_bundle["resolved_seed"])
+    params["edit_outpaint_shot_aware"] = True
+    params["edit_outpaint_shot_plan"] = list(
+        shot_bundle.get("published_shots") or [],
+    )
+    params["outpaint_preserve_source_audio"] = bool(
+        shot_bundle.get("preserve_source_audio", True)
+    )
+
+    upload_filenames = {}
+    for key in (
+        "image_start", "image_end", "video_guide", "audio_guide",
+        "audio_guide2", "audio_guide3", "audio_guide4",
+        "audio_guide5", "audio_guide6",
+    ):
+        value = params.get(key)
+        if isinstance(value, str) and value:
+            upload_filenames[key] = os.path.basename(value)
+        elif isinstance(value, list):
+            upload_filenames[key] = [
+                os.path.basename(item)
+                if isinstance(item, str) and item else ""
+                for item in value
+            ]
+
+    sidecar = {
+        "params": params,
+        "upload_filenames": upload_filenames,
+        "generation_mode": params.get("generation_mode"),
+        "job_id": job.get("id"),
+        "generation_time": int(round(float(generation_time))),
+        "created_at": time.time(),
+        "output_filename": output_name,
+    }
+    meta_path = os.path.splitext(output_path)[0] + ".meta.json"
+    with open(meta_path, "w", encoding="utf-8") as handle:
+        json.dump(sidecar, handle, indent=2)
+
+
+def _run_outpaint_shot_generation(job_id):
+    """Generate Outpaint shots independently, then join one exact timeline."""
+    import shutil
+
+    job = _jobs[job_id]
+    params = job.get("params") or {}
+    shot_bundle = params.get("_outpaint_shot_bundle") or {}
+    temp_dir = params.get("_outpaint_shot_temp_dir")
+    final_out_dir = params.get("_outpaint_final_out_dir") or _workspace_dir(
+        job.get("workspace"),
+    )
+    assembly_state = {"abort": False}
+    final_path = None
+    published = False
+    started_at = time.time()
+
+    try:
+        if not _run_generation(job_id, finalize=False):
+            return
+        if not register_abort_state(
+            job,
+            job_id,
+            _active_gen_states,
+            assembly_state,
+        ):
+            return
+        if not update_job(
+            job,
+            progress=99,
+            step=0,
+            total_steps=0,
+            phase="Joining camera shots",
+            message="Joining Outpaint shots and restoring source audio...",
+        ):
+            return
+
+        clip_outputs = job.get("_internal_clip_output_files") or {}
+        ordered_paths = []
+        for shot in shot_bundle.get("shots") or []:
+            shot_index = int(shot.get("shot_index", len(ordered_paths)))
+            raw_name = (
+                clip_outputs.get(shot_index)
+                or clip_outputs.get(str(shot_index))
+            )
+            clip_path = (
+                raw_name
+                if raw_name and os.path.isabs(raw_name)
+                else os.path.join(temp_dir or "", raw_name or "")
+            )
+            if not clip_path or not os.path.isfile(clip_path):
+                raise RuntimeError(
+                    "Outpaint shot assembly is missing camera shot "
+                    f"{shot_index + 1}."
+                )
+            expected_shot_frames = int(shot.get("frame_count") or 0)
+            actual_shot_frames = _recast_video_frame_count(clip_path)
+            if actual_shot_frames != expected_shot_frames:
+                raise RuntimeError(
+                    f"Outpaint camera shot {shot_index + 1} changed "
+                    "timeline length "
+                    f"({actual_shot_frames}/{expected_shot_frames} frames)."
+                )
+            ordered_paths.append(clip_path)
+
+        if not ordered_paths:
+            raise RuntimeError("Outpaint shot assembly has no video segments.")
+
+        os.makedirs(final_out_dir, exist_ok=True)
+        seed = int(shot_bundle["resolved_seed"])
+        timestamp = time.strftime("%Y-%m-%d-%Hh%Mm%Ss")
+        extension = os.path.splitext(ordered_paths[0])[1] or ".mp4"
+        final_path = wgp.get_available_filename(
+            final_out_dir,
+            f"{timestamp}_seed{seed}_outpaint_shot_aware{extension}",
+        )
+        source_video = params.get("_outpaint_shot_source_video")
+        source_audio = None
+        if (
+            shot_bundle.get("preserve_source_audio", True)
+            and source_video
+            and os.path.isfile(source_video)
+        ):
+            try:
+                if _recast_video_has_audio(source_video):
+                    source_audio = source_video
+            except Exception as audio_probe_error:
+                print(
+                    "[Outpaint] Could not probe source audio; using "
+                    f"generated shot audio: {audio_probe_error}"
+                )
+
+        expected_frames = int(shot_bundle["frame_count"])
+        fps = float(shot_bundle["fps"])
+        assembled = wgp.concatenate_multi_clip_videos(
+            ordered_paths,
+            final_path,
+            source_audio,
+            audio_start_sec=0.0,
+            abort_callback=lambda: is_cancel_requested(job),
+            pad_audio=bool(source_audio),
+            audio_duration_sec=float(expected_frames) / fps,
+        )
+        if is_cancel_requested(job):
+            if final_path and os.path.isfile(final_path):
+                try:
+                    os.remove(final_path)
+                except OSError:
+                    pass
+            return
+        if not assembled or not os.path.isfile(final_path):
+            raise RuntimeError("Outpaint camera-shot assembly failed.")
+
+        actual_frames = _recast_video_frame_count(final_path)
+        if actual_frames != expected_frames:
+            try:
+                os.remove(final_path)
+            except OSError:
+                pass
+            raise RuntimeError(
+                "Outpaint camera-shot assembly changed the timeline length "
+                f"({actual_frames}/{expected_frames} frames)."
+            )
+
+        _write_outpaint_shot_aware_sidecar(
+            job,
+            final_path,
+            shot_bundle,
+            time.time() - started_at,
+        )
+        final_name = os.path.basename(final_path)
+        job["out_dir"] = final_out_dir
+        published = finish_job(
+            job,
+            "completed",
+            output_files=[final_name],
+            clip_output_files={},
+            join_output_file=final_name,
+            progress=100,
+            step=0,
+            total_steps=0,
+            phase="",
+            message="Done",
+        )
+        if not published:
+            return
+        print(
+            "[Outpaint] Shot-aware assembly completed: "
+            f"{len(ordered_paths)} shots, {actual_frames} frames, "
+            f"{'continuous source audio' if source_audio else 'generated audio'}."
+        )
+    except Exception as error:
+        traceback.print_exc()
+        if not is_cancel_requested(job):
+            finish_job(
+                job,
+                "failed",
+                error=str(error),
+                message=f"Outpaint assembly failed: {error}",
+            )
+    finally:
+        if final_path and not published:
+            for leftover in (
+                final_path,
+                os.path.splitext(final_path)[0] + ".meta.json",
+            ):
+                if os.path.isfile(leftover):
+                    try:
+                        os.remove(leftover)
+                    except OSError:
+                        pass
+        unregister_abort_state(
+            job_id,
+            _active_gen_states,
+            assembly_state,
+        )
+        job["out_dir"] = final_out_dir
+        job.pop("_internal_output_files", None)
+        job.pop("_internal_clip_output_files", None)
+        job.pop("_internal_join_output_file", None)
+        if isinstance(job.get("params"), dict):
+            published_shots = list(
+                (shot_bundle or {}).get("published_shots") or [],
+            )
+            if published_shots:
+                job["params"]["edit_outpaint_shot_aware"] = True
+                job["params"]["edit_outpaint_shot_plan"] = published_shots
+            for key in (
+                "_outpaint_shot_manifest",
+                "_outpaint_shot_temp_dir",
+                "_outpaint_final_out_dir",
+                "_outpaint_shot_source_video",
+                "_outpaint_shot_bundle",
+                "_outpaint_generation_fps",
+                "_outpaint_source_frame_count",
+                "_defer_output_publication",
+            ):
+                job["params"].pop(key, None)
+        if temp_dir and os.path.isdir(temp_dir):
+            resolved_temp = os.path.realpath(temp_dir)
+            expected_prefix = "maestro-outpaint-shots-"
             if os.path.basename(resolved_temp).startswith(expected_prefix):
                 shutil.rmtree(resolved_temp, ignore_errors=True)
 

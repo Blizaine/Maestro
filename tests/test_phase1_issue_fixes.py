@@ -1905,6 +1905,471 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
         )
 
 
+class TestOutpaintShotAwarePlanning(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        planning = _load_functions(
+            _LAUNCH_PATH,
+            (
+                "_detect_recast_shot_ranges",
+                "_detect_outpaint_video_shot_ranges",
+            ),
+        )
+        cls.detect = staticmethod(
+            planning["_detect_outpaint_video_shot_ranges"]
+        )
+        cls.build_filter = staticmethod(
+            _load_functions(
+                _LAUNCH_PATH,
+                ("_build_outpaint_shot_filter",),
+                {"math": math},
+            )["_build_outpaint_shot_filter"]
+        )
+        quantize = _load_functions(
+            _LAUNCH_PATH,
+            ("_quantize_recast_shot_frame_count",),
+        )["_quantize_recast_shot_frame_count"]
+        cls.build_manifest = staticmethod(
+            _load_functions(
+                _LAUNCH_PATH,
+                ("_build_outpaint_shot_manifest",),
+                {
+                    "os": os,
+                    "_quantize_recast_shot_frame_count": quantize,
+                },
+            )["_build_outpaint_shot_manifest"]
+        )
+
+    @staticmethod
+    def _capture(frames):
+        class FakeCapture:
+            def __init__(self, source_frames):
+                self.frames = list(source_frames)
+                self.index = 0
+                self.released = False
+
+            def isOpened(self):
+                return True
+
+            def read(self):
+                if self.index >= len(self.frames):
+                    return False, None
+                frame = self.frames[self.index]
+                self.index += 1
+                return True, frame.copy()
+
+            def release(self):
+                self.released = True
+
+        return FakeCapture(frames)
+
+    def test_streaming_detector_finds_hard_cut_on_generation_timeline(self):
+        import cv2
+        import numpy as np
+
+        frames = [
+            np.zeros((72, 128, 3), dtype=np.uint8)
+            for _ in range(8)
+        ] + [
+            np.full((72, 128, 3), 255, dtype=np.uint8)
+            for _ in range(12)
+        ]
+        capture = self._capture(frames)
+        with mock.patch.object(cv2, "VideoCapture", return_value=capture):
+            ranges = self.detect("fixture.mp4", 16)
+        self.assertEqual(ranges, [(0, 8), (8, 16)])
+        self.assertEqual(capture.index, 16)
+        self.assertTrue(capture.released)
+
+    def test_streaming_detector_releases_video_when_cancelled(self):
+        import cv2
+        import numpy as np
+
+        capture = self._capture([
+            np.zeros((72, 128, 3), dtype=np.uint8)
+            for _ in range(20)
+        ])
+        calls = {"count": 0}
+
+        def abort():
+            calls["count"] += 1
+            if calls["count"] == 4:
+                raise InterruptedError("cancelled")
+
+        with mock.patch.object(cv2, "VideoCapture", return_value=capture):
+            with self.assertRaises(InterruptedError):
+                self.detect(
+                    "fixture.mp4",
+                    16,
+                    abort_callback=abort,
+                )
+        self.assertTrue(capture.released)
+
+    def test_lossless_guide_filter_is_frame_exact_and_tail_padded(self):
+        self.assertEqual(
+            self.build_filter(10, 25, 2, 25.0),
+            "trim=start_frame=10:end_frame=25,"
+            "setpts=N/(25*TB),"
+            "tpad=stop_mode=clone:stop=2",
+        )
+
+    def test_manifest_quantizes_then_trims_every_shot_exactly(self):
+        import tempfile
+
+        writes = []
+        progress = []
+
+        def writer(source, output, **kwargs):
+            writes.append((source, output, kwargs))
+            return output
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            manifest = self.build_manifest(
+                {},
+                "source.mp4",
+                [(0, 10), (10, 25)],
+                output_dir,
+                "job123",
+                target_frame_count=25,
+                generation_fps=25.0,
+                minimum_frames=17,
+                latent_size=8,
+                guide_writer=writer,
+                progress_callback=lambda index, total: progress.append(
+                    (index, total)
+                ),
+            )
+
+        self.assertEqual(manifest["frame_count"], 25)
+        self.assertEqual(len(manifest["tasks"]), 2)
+        self.assertEqual(progress, [(0, 2), (1, 2)])
+        self.assertEqual(
+            [plan["generated_frame_count"] for plan in manifest["shots"]],
+            [17, 17],
+        )
+        self.assertEqual(
+            [plan["trim_tail_frames"] for plan in manifest["shots"]],
+            [7, 2],
+        )
+        self.assertEqual(
+            [task["params"]["video_length"] for task in manifest["tasks"]],
+            [17, 17],
+        )
+        self.assertEqual(
+            [task["params"]["trim_tail_frames"] for task in manifest["tasks"]],
+            [7, 2],
+        )
+        self.assertTrue(all(
+            task["params"]["_outpaint_preserve_audio"] is False
+            for task in manifest["tasks"]
+        ))
+        self.assertEqual(
+            [(call[2]["start_frame"], call[2]["end_frame"])
+             for call in writes],
+            [(0, 10), (10, 25)],
+        )
+
+    def test_manifest_rejects_a_gap_between_camera_shots(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            with self.assertRaisesRegex(ValueError, "contiguous timeline"):
+                self.build_manifest(
+                    {},
+                    "source.mp4",
+                    [(0, 8), (9, 17)],
+                    output_dir,
+                    "job123",
+                    target_frame_count=17,
+                    generation_fps=25.0,
+                    minimum_frames=17,
+                    latent_size=8,
+                    guide_writer=lambda *args, **kwargs: None,
+                )
+
+    def test_sidecar_retains_public_plan_without_private_paths(self):
+        import json
+        import tempfile
+        import time
+
+        writer = _load_functions(
+            _LAUNCH_PATH,
+            ("_write_outpaint_shot_aware_sidecar",),
+            {"os": os, "json": json, "time": time},
+        )["_write_outpaint_shot_aware_sidecar"]
+        with tempfile.TemporaryDirectory() as output_dir:
+            output_path = os.path.join(output_dir, "result.mp4")
+            writer(
+                {
+                    "id": "job123",
+                    "params": {
+                        "generation_mode": "video",
+                        "edit_sub_mode": "outpaint",
+                        "video_guide": os.path.join("uploads", "source.mp4"),
+                        "_outpaint_shot_temp_dir": "private",
+                        "_outpaint_generation_fps": 25.0,
+                    },
+                },
+                output_path,
+                {
+                    "frame_count": 25,
+                    "resolved_seed": 123,
+                    "published_shots": [
+                        {"shot_index": 0, "start_frame": 0, "end_frame": 25},
+                    ],
+                    "preserve_source_audio": True,
+                },
+                12.4,
+            )
+            with open(
+                os.path.splitext(output_path)[0] + ".meta.json",
+                "r",
+                encoding="utf-8",
+            ) as handle:
+                sidecar = json.load(handle)
+
+        params = sidecar["params"]
+        self.assertTrue(params["edit_outpaint_shot_aware"])
+        self.assertEqual(params["video_length"], 25)
+        self.assertEqual(params["seed"], 123)
+        self.assertFalse(any(
+            key.startswith("_outpaint_") for key in params
+        ))
+        self.assertEqual(
+            sidecar["upload_filenames"]["video_guide"],
+            "source.mp4",
+        )
+
+    def test_assembly_joins_in_order_restores_audio_and_validates_frames(self):
+        import tempfile
+        import time
+        import traceback
+
+        with tempfile.TemporaryDirectory() as final_dir:
+            temp_dir = tempfile.mkdtemp(
+                prefix="maestro-outpaint-shots-",
+            )
+            source_video = os.path.join(final_dir, "source.mp4")
+            clip_one = os.path.join(temp_dir, "shot1.mp4")
+            clip_two = os.path.join(temp_dir, "shot2.mp4")
+            for path in (source_video, clip_one, clip_two):
+                with open(path, "wb") as handle:
+                    handle.write(b"fixture")
+
+            job_id = "job123"
+            jobs = {
+                job_id: {
+                    "id": job_id,
+                    "status": "queued",
+                    "workspace": "tests",
+                    "out_dir": temp_dir,
+                    "params": {
+                        "_defer_output_publication": True,
+                        "_outpaint_shot_temp_dir": temp_dir,
+                        "_outpaint_final_out_dir": final_dir,
+                        "_outpaint_shot_source_video": source_video,
+                        "_outpaint_shot_manifest": [{"params": {}}],
+                        "_outpaint_generation_fps": 25.0,
+                        "_outpaint_shot_bundle": {
+                            "shots": [
+                                {
+                                    "shot_index": 0,
+                                    "frame_count": 10,
+                                },
+                                {
+                                    "shot_index": 1,
+                                    "frame_count": 15,
+                                },
+                            ],
+                            "published_shots": [
+                                {"shot_index": 0},
+                                {"shot_index": 1},
+                            ],
+                            "frame_count": 25,
+                            "fps": 25.0,
+                            "resolved_seed": 123,
+                            "preserve_source_audio": True,
+                        },
+                    },
+                },
+            }
+            joined = {}
+
+            def run_generation(_job_id, *, finalize=True):
+                self.assertFalse(finalize)
+                jobs[_job_id]["status"] = "running"
+                jobs[_job_id]["_internal_clip_output_files"] = {
+                    0: os.path.basename(clip_one),
+                    1: os.path.basename(clip_two),
+                }
+                return True
+
+            def concatenate(paths, output, audio, **kwargs):
+                joined.update({
+                    "paths": list(paths),
+                    "output": output,
+                    "audio": audio,
+                    "kwargs": kwargs,
+                })
+                with open(output, "wb") as handle:
+                    handle.write(b"joined")
+                return True
+
+            def frame_count(path):
+                name = os.path.basename(path)
+                if name == "shot1.mp4":
+                    return 10
+                if name == "shot2.mp4":
+                    return 15
+                return 25
+
+            fake_wgp = types.SimpleNamespace(
+                get_available_filename=lambda directory, name: os.path.join(
+                    directory,
+                    name,
+                ),
+                concatenate_multi_clip_videos=concatenate,
+            )
+
+            def finish(job, status, **updates):
+                job.update(updates)
+                job["status"] = status
+                return True
+
+            runner = _load_functions(
+                _LAUNCH_PATH,
+                ("_run_outpaint_shot_generation",),
+                {
+                    "os": os,
+                    "time": time,
+                    "traceback": traceback,
+                    "_jobs": jobs,
+                    "_active_gen_states": {},
+                    "_workspace_dir": lambda _workspace=None: final_dir,
+                    "_run_generation": run_generation,
+                    "register_abort_state": lambda *args, **kwargs: True,
+                    "unregister_abort_state": lambda *args, **kwargs: None,
+                    "update_job": lambda *args, **kwargs: True,
+                    "is_cancel_requested": lambda _job: False,
+                    "finish_job": finish,
+                    "_recast_video_frame_count": frame_count,
+                    "_recast_video_has_audio": lambda _path: True,
+                    "_write_outpaint_shot_aware_sidecar": (
+                        lambda *args, **kwargs: None
+                    ),
+                    "wgp": fake_wgp,
+                },
+            )["_run_outpaint_shot_generation"]
+
+            runner(job_id)
+
+            self.assertEqual(joined["paths"], [clip_one, clip_two])
+            self.assertEqual(joined["audio"], source_video)
+            self.assertTrue(joined["kwargs"]["pad_audio"])
+            self.assertEqual(joined["kwargs"]["audio_duration_sec"], 1.0)
+            self.assertEqual(jobs[job_id]["status"], "completed")
+            self.assertTrue(jobs[job_id]["params"]["edit_outpaint_shot_aware"])
+            self.assertNotIn(
+                "_outpaint_shot_temp_dir",
+                jobs[job_id]["params"],
+            )
+            self.assertFalse(os.path.isdir(temp_dir))
+
+    def test_single_shot_preparation_uses_unchanged_continuous_worker(self):
+        import contextlib
+        import tempfile
+        import traceback
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            source_video = os.path.join(output_dir, "source.mp4")
+            with open(source_video, "wb") as handle:
+                handle.write(b"fixture")
+            job_id = "single123"
+            jobs = {
+                job_id: {
+                    "id": job_id,
+                    "status": "queued",
+                    "workspace": "tests",
+                    "out_dir": output_dir,
+                    "params": {
+                        "video_guide": source_video,
+                        "video_length": 17,
+                        "_outpaint_generation_fps": 25.0,
+                    },
+                },
+            }
+            calls = []
+
+            def try_start(job, **updates):
+                job.update(updates)
+                job["status"] = "running"
+                return True
+
+            def try_requeue(job, **updates):
+                job.update(updates)
+                job["status"] = "queued"
+                return True
+
+            runner = _load_functions(
+                _LAUNCH_PATH,
+                ("_prepare_and_run_outpaint",),
+                {
+                    "os": os,
+                    "traceback": traceback,
+                    "_jobs": jobs,
+                    "_gen_lock": object(),
+                    "_active_gen_states": {},
+                    "generation_slot": lambda *args, **kwargs: (
+                        contextlib.nullcontext(True)
+                    ),
+                    "try_start": try_start,
+                    "try_requeue": try_requeue,
+                    "register_abort_state": lambda *args, **kwargs: True,
+                    "unregister_abort_state": lambda *args, **kwargs: None,
+                    "is_cancel_requested": lambda _job: False,
+                    "_detect_outpaint_video_shot_ranges": (
+                        lambda *args, **kwargs: [(0, 17)]
+                    ),
+                    "_run_generation": lambda _job_id: calls.append(
+                        ("continuous", _job_id)
+                    ),
+                    "_run_outpaint_shot_generation": (
+                        lambda _job_id: calls.append(("shots", _job_id))
+                    ),
+                    "finish_job": lambda *args, **kwargs: self.fail(
+                        "single-shot preparation should not fail"
+                    ),
+                    "wgp": types.SimpleNamespace(),
+                },
+            )["_prepare_and_run_outpaint"]
+
+            runner(job_id)
+
+        self.assertEqual(calls, [("continuous", job_id)])
+        self.assertNotIn(
+            "_outpaint_shot_manifest",
+            jobs[job_id]["params"],
+        )
+        self.assertEqual(
+            jobs[job_id]["params"]["edit_outpaint_detected_shot_ranges"],
+            [[0, 17]],
+        )
+
+    def test_endpoint_and_task_engine_dispatch_shot_aware_outpaint(self):
+        launch = _read(_LAUNCH_PATH)
+        self.assertIn("_prepare_and_run_outpaint", launch)
+        self.assertIn('"_outpaint_shot_manifest"', launch)
+        self.assertIn("_run_outpaint_shot_generation(job_id)", launch)
+        self.assertIn(
+            'raw_params["_outpaint_preserve_audio"] = False',
+            launch,
+        )
+        self.assertIn(
+            "Outpaint camera-shot assembly changed the timeline length",
+            launch,
+        )
+
+
 class TestLtx2OutpaintPipelineDispatch(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
