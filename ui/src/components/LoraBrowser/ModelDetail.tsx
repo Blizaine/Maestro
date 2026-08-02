@@ -1,8 +1,8 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { ArrowLeft, Download, Tag, Loader2, Check, ExternalLink, KeyRound, Boxes } from 'lucide-react'
 import DOMPurify from 'dompurify'
 import { useStore } from '../../stores/useStore'
-import { fetchLoraDirectories, fetchCheckpointArchitectures, reloadModels } from '../../api/client'
+import { fetchLoraDirectories, fetchCheckpointArchitectures } from '../../api/client'
 import type { CheckpointArchitecture } from '../../api/client'
 import type { CivitAIModel, CivitAIModelVersion, CivitAIFile, CivitAIDownload } from '../../types'
 import { formatBytes } from '../../lib/format'
@@ -18,7 +18,6 @@ interface Props {
 export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
   const isCheckpoint = kind === 'checkpoint'
   const startDownload = useStore(s => s.startCivitAIDownload)
-  const loadModels = useStore(s => s.loadModels)
   const downloads = useStore(s => s.civitDownloads)
   // API-key gate. Downloads still attempt without a key (some public
   // LoRAs work fine), but we warn for the much larger set that won't
@@ -106,19 +105,6 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
   useEffect(() => {
     if (isCheckpoint) setAutoQuantize(fileBytes > LARGE_CKPT_BYTES)
   }, [isCheckpoint, fileBytes, LARGE_CKPT_BYTES])
-
-  // After a checkpoint import completes, hot-reload the server model list +
-  // refresh the UI so the new model appears in the dropdown without a restart.
-  const reloadedRef = useRef(false)
-  useEffect(() => {
-    if (!isCheckpoint) return
-    if (activeDownload?.status === 'completed' && !reloadedRef.current) {
-      reloadedRef.current = true
-      reloadModels().then(() => loadModels()).catch(() => {})
-    } else if (!activeDownload || activeDownload.status === 'downloading') {
-      reloadedRef.current = false
-    }
-  }, [isCheckpoint, activeDownload?.status]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleDownload = () => {
     if (!file || !version) return

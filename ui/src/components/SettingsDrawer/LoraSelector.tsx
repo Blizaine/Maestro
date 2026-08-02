@@ -111,6 +111,8 @@ export function LoraSelector() {
   const lorasLoading = useStore(s => s.lorasLoading)
   const loraWeights = useStore(s => s.loraWeights)
   const modelOptions = useStore(s => s.modelOptions)
+  const generationMode = useStore(s => s.generationMode)
+  const editSubMode = useStore(s => s.editSubMode)
   const toggleLora = useStore(s => s.toggleLora)
   const setLoraWeight = useStore(s => s.setLoraWeight)
   const loadLoras = useStore(s => s.loadLoras)
@@ -319,7 +321,10 @@ export function LoraSelector() {
     }
   }
 
-  const phases = modelOptions?.guidance_max_phases ?? 1
+  // Recast owns a one-phase SCAIL-2 schedule. Showing the Wan family's
+  // generic three phase sliders produced invalid `1;1;1` multipliers.
+  const recastSinglePhase = generationMode === 'avatar' && editSubMode === 'recast'
+  const phases = recastSinglePhase ? 1 : Math.max(1, modelOptions?.guidance_max_phases ?? 1)
 
   // Load LoRAs when model changes
   useEffect(() => {
@@ -527,7 +532,11 @@ export function LoraSelector() {
             </button>
           </div>
           {activatedLoras.map(filename => {
-            const weights = loraWeights[filename] || Array(phases).fill(1.0)
+            const storedWeights = loraWeights[filename] || [1.0]
+            const weights = Array.from(
+              { length: phases },
+              (_, i) => storedWeights[i] ?? storedWeights[storedWeights.length - 1] ?? 1.0,
+            )
             return (
               <div key={filename} className="bg-bg-tertiary border border-border rounded-lg px-2.5 py-2">
                 <div className="flex items-center justify-between mb-1.5">

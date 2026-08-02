@@ -3,6 +3,40 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [1.5.0] - 2026-08-02
+
+SCAIL-2 editing: rebuilt Recast around native replacement conditioning with
+automatic reference isolation, face-detail conditioning, optional official
+relighting, bystander preservation, and VRAM-aware 480p/512p/704p profiles.
+Added stable color-mapped replacement for up to five people and shot-aware
+SAM3 tracking so identities are reacquired and correctly routed across camera
+cuts, close-ups, wide shots, and group shots. Added Repaint as a first-class,
+shot-aware Edit mode that preserves the source timeline and audio while
+changing characters, objects, or scene styling.
+
+LTX-2.3 editing: rebuilt Outpaint around the official In/Outpainting IC-LoRA
+and mask-preserving source conditioning, including bounded seam blending,
+marker-spill cleanup, accurate canvas geometry, and model-correct sampling.
+Multi-scene sources are now split at camera cuts, processed independently,
+and reassembled at the exact original length with source audio. Retake now
+supports distilled and two-stage LTX-2.3 pipelines. This resolves #28 and #37.
+
+Krea 2: added RAW and Turbo Identity Edit v1.2 models with Qwen3-VL vision
+conditioning, instruction editing, inpainting/outpainting, background removal,
+and multi-reference support. Added current Diffusers/Kohya LoRA and GGUF
+compatibility, a dedicated CivitAI/My LoRAs Krea 2 filter, accurate companion-
+weight readiness checks, and default visibility for all four Krea 2 models.
+This resolves #35 and #43.
+
+Studio and reliability: model visibility now persists server-side across
+Pinokio ports and restarts; newly installed CivitAI checkpoints appear without
+a restart; control-video motion is independent of generated, uploaded, or
+source audio; Temporal Depth assets are provisioned and verified on demand;
+and Voice Reference is enabled independently of experimental features.
+Director no longer duplicates single-clip outputs, SCAIL-2 LoRA phases are
+normalized correctly, and installed apps survive early GPU-detection failures.
+This resolves #19, #36, and #40.
+
 ## [1.4.0] - 2026-07-20
 
 Storage and library management: added the Storage Manager with usage

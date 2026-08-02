@@ -282,6 +282,85 @@ def load_sam3_mask_predictor(
     )
 
 
+def _normalize_sam3_tracking_segments(tracking_segments, num_frames: int):
+    """Clamp optional half-open tracking ranges to one video timeline."""
+    frame_count = max(0, int(num_frames))
+    if frame_count <= 0:
+        return []
+    if not tracking_segments:
+        return [(0, frame_count)]
+
+    normalized = []
+    for raw_segment in tracking_segments:
+        if not isinstance(raw_segment, (list, tuple)) or len(raw_segment) != 2:
+            raise ValueError(
+                "SAM3 tracking segments must contain (start, end) frame pairs."
+            )
+        try:
+            start = max(0, min(frame_count, int(raw_segment[0])))
+            end = max(0, min(frame_count, int(raw_segment[1])))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "SAM3 tracking segment boundaries must be integers."
+            ) from exc
+        if end > start:
+            normalized.append((start, end))
+    if not normalized:
+        return [(0, frame_count)]
+
+    normalized.sort()
+    disjoint = []
+    for start, end in normalized:
+        if disjoint and start < disjoint[-1][1]:
+            start = disjoint[-1][1]
+        if end > start:
+            disjoint.append((start, end))
+    return disjoint or [(0, frame_count)]
+
+
+def _sam3_segment_propagation_plan(
+    segment_start: int,
+    segment_end: int,
+    anchor: int,
+):
+    """Return direction/distance pairs bounded to one half-open shot.
+
+    SAM3's ``max_frame_num_to_track`` is an inclusive distance for forward
+    propagation: a value of zero still processes the anchor frame, while a
+    value of N reaches ``anchor + N``. Backward propagation excludes the
+    anchor and reaches ``anchor - N``. A single ``both`` distance therefore
+    cannot represent an asymmetric range safely and may cross a camera cut.
+    """
+    start = int(segment_start)
+    end = int(segment_end)
+    anchor_index = int(anchor)
+    if not start <= anchor_index < end:
+        raise ValueError(
+            "SAM3 propagation anchor must be inside its half-open segment."
+        )
+
+    plan = []
+    forward_distance = end - 1 - anchor_index
+    if forward_distance > 0:
+        plan.append(("forward", forward_distance))
+    backward_distance = anchor_index - start
+    if backward_distance > 0:
+        plan.append(("backward", backward_distance))
+    return plan
+
+
+def _is_sam3_tracking_collapse_error(error) -> bool:
+    """Recognize SAM3's public and low-level empty-object failure forms."""
+    message = str(error)
+    return (
+        "No points are provided" in message
+        or (
+            "existing size (0) at non-singleton dimension 1" in message
+            and "Tensor sizes:" in message
+        )
+    )
+
+
 def run_sam3_video(
     video: np.ndarray,
     keywords: Iterable[str],
@@ -299,6 +378,7 @@ def run_sam3_video(
     color_palette=None,
     max_colored_objects=None,
     progress_callback=None,
+    tracking_segments=None,
 ):
     keywords = [str(keyword).strip() for keyword in keywords if str(keyword).strip()]
     if len(keywords) == 0:
@@ -330,8 +410,56 @@ def run_sam3_video(
     num_frames, height, width, _ = video.shape
     video_pil = [Image.fromarray(video[i]) for i in range(num_frames)]
     session_id = None
-    response = video_predictor.handle_request({"type": "start_session", "resource_path": video_pil, "offload_video_to_cpu": not keep_video_frames_on_cuda, "cache_frame_outputs": cache_frame_outputs})
-    session_id = response["session_id"]
+    session_frame_offset = 0
+    timeline_segments = _normalize_sam3_tracking_segments(
+        tracking_segments,
+        num_frames,
+    )
+    isolate_segment_sessions = tracking_segments is not None
+
+    def _close_active_session(*, run_gc_collect=True):
+        nonlocal session_id
+        if session_id is None or video_predictor is None:
+            return
+        closing_session_id = session_id
+        session_id = None
+        # A failed synchronize should be reported, but it must not prevent
+        # the predictor from discarding the session it still owns.
+        try:
+            # SAM3's propagation generator launches asynchronous CUDA work.
+            # Finish that work before deleting the shot's inference state;
+            # otherwise a following prompt can race the allocator and crash
+            # the entire Python process inside c10_cuda.dll.
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+        except Exception as exc:
+            logger.warning(
+                "SAM3 CUDA synchronization failed during cleanup: %s",
+                exc,
+            )
+        try:
+            video_predictor.handle_request({
+                "type": "close_session",
+                "session_id": closing_session_id,
+                "run_gc_collect": run_gc_collect,
+            })
+        except Exception as exc:
+            logger.warning("SAM3 close_session failed during cleanup: %s", exc)
+
+    def _start_session(frame_start=0, frame_end=None):
+        nonlocal session_id, session_frame_offset
+        frame_end = num_frames if frame_end is None else int(frame_end)
+        frame_start = int(frame_start)
+        _close_active_session()
+        session_frame_offset = frame_start
+        response = video_predictor.handle_request({
+            "type": "start_session",
+            "resource_path": video_pil[frame_start:frame_end],
+            "offload_video_to_cpu": not keep_video_frames_on_cuda,
+            "cache_frame_outputs": cache_frame_outputs,
+        })
+        session_id = response["session_id"]
+
     dynamic_mask = np.zeros((num_frames, height, width, 3), dtype=np.uint8) if colorize_objects else np.zeros((num_frames, height, width), dtype=np.bool_)
     color_palette = np.asarray(DEFAULT_INSTANCE_PALETTE_RGB if color_palette is None else color_palette, dtype=np.uint8).reshape(-1, 3) if colorize_objects else None
     if colorize_objects:
@@ -350,103 +478,232 @@ def run_sam3_video(
 
     try:
         total_progress_steps = len(keywords) * num_frames
+        if isolate_segment_sessions:
+            logger.info(
+                "SAM3 isolating %d camera-shot segment(s) in independent "
+                "tracking sessions.",
+                len(timeline_segments),
+            )
+        else:
+            _start_session()
         # Probe stride for anchoring: fine enough to catch brief appearances,
         # coarse enough that a keyword absent from a stretch of video does
         # not cost one ~1s detection per frame (floor of 4 caps the worst
-        # case at a quarter of the frames; the both-direction propagation
-        # from the anchor covers the frames between probes).
+        # case at a quarter of the frames; bounded forward/backward
+        # propagation from the anchor covers the frames between probes).
         probe_stride = max(4, num_frames // 64)
         for keyword_index, keyword in enumerate(keywords):
             progress_base = keyword_index * num_frames
             logger.info("SAM3 keyword currently being processed: '%s'", keyword)
 
             def _add_prompt(frame_index):
-                request = {"type": "add_prompt", "session_id": session_id, "frame_index": frame_index, "text": keyword}
+                request = {
+                    "type": "add_prompt",
+                    "session_id": session_id,
+                    "frame_index": frame_index - session_frame_offset,
+                    "text": keyword,
+                }
                 if preencoded_prompts is not None:
                     request["preencoded_text_outputs"] = _bf16_prompt_payload(preencoded_prompts[keyword])
                 result = video_predictor.handle_request(request)
                 return result.get("outputs") if isinstance(result, dict) else None
 
             with _autocast_context():
-                # Upstream prompts frame 0 only and propagates forward once.
-                # That crashes with "No points are provided" when the keyword
-                # detects nothing on frame 0 (target enters the video late),
-                # and again when the multiplex tracker's periodic
-                # reconditioning drops every tracked object mid-video. Anchor
-                # on a frame where the keyword actually detects, sweep both
-                # directions from it, and on a mid-video collapse re-anchor
-                # past the death point, keeping every mask produced so far.
-                segment_start = 0
-                first_segment = True
-                while segment_start < num_frames:
-                    # add_prompt resets the session state, so probing has no
-                    # side effects; the last successful call leaves the state
-                    # primed for propagation from that frame.
-                    anchor = None
-                    anchor_outputs = None
-                    for frame_index in range(segment_start, num_frames, probe_stride):
-                        outputs = _add_prompt(frame_index)
-                        if bool(_sam3_outputs_to_binary_mask(outputs, height, width).any()):
-                            anchor = frame_index
-                            anchor_outputs = outputs
+                # Each supplied range is an independent camera shot. Prompt
+                # and propagate inside that range so a hard cut cannot carry
+                # the previous actor's track into a different composition.
+                # The output remains one full-timeline mask.
+                for shot_start, shot_end in timeline_segments:
+                    segment_start = shot_start
+                    if isolate_segment_sessions:
+                        # Reacquiring after a hard cut must also reset SAM3's
+                        # native inference state. Reusing one long-lived state
+                        # across many cuts can accumulate stale CUDA tracker
+                        # buffers and terminate Python without a traceback.
+                        _start_session(shot_start, shot_end)
+                    if tracking_segments is not None:
+                        # Object ids are session-local. Reuse the palette from
+                        # slot one after every camera cut so a compact generic
+                        # recovery pass can enumerate each shot's people
+                        # independently instead of exhausting colors across
+                        # unrelated SAM sessions.
+                        object_color_map.clear()
+                    while segment_start < shot_end:
+                        # add_prompt resets the session state, so probing has
+                        # no side effects; the last successful call leaves the
+                        # state primed for propagation from that frame.
+                        anchor = None
+                        anchor_outputs = None
+                        probe_indices = list(
+                            range(segment_start, shot_end, probe_stride),
+                        )
+                        if shot_end - 1 not in probe_indices:
+                            probe_indices.append(shot_end - 1)
+                        for frame_index in probe_indices:
+                            outputs = _add_prompt(frame_index)
+                            has_detection = bool(
+                                _sam3_outputs_to_binary_mask(
+                                    outputs, height, width,
+                                ).any(),
+                            )
+                            if has_detection:
+                                anchor = frame_index
+                                anchor_outputs = outputs
+                                break
+                            # Do not retain a CUDA output tensor while the next
+                            # add_prompt resets SAM3's internal state.
+                            outputs = None
+                        if anchor is None:
+                            logger.info(
+                                "SAM3 found no '%s' in shot frames %d-%d; "
+                                "leaving that range empty.",
+                                keyword, segment_start, shot_end - 1,
+                            )
                             break
-                    if anchor is None:
-                        logger.warning(
-                            "SAM3 found no '%s' in frames %d-%d; leaving those masks empty.",
-                            keyword, segment_start, num_frames - 1,
+                        if anchor > segment_start:
+                            logger.info(
+                                "SAM3 anchored '%s' at frame %d (not "
+                                "detected at frame %d).",
+                                keyword, anchor, segment_start,
+                            )
+                        merge_outputs(anchor, anchor_outputs)
+                        if progress_callback is not None:
+                            progress_callback(
+                                min(
+                                    progress_base + anchor,
+                                    total_progress_steps,
+                                ),
+                                total_progress_steps,
+                            )
+                        if shot_end - shot_start <= 1:
+                            anchor_outputs = None
+                            break
+                        propagation_plan = _sam3_segment_propagation_plan(
+                            shot_start,
+                            shot_end,
+                            anchor,
                         )
-                        break
-                    if anchor > segment_start:
-                        logger.info("SAM3 anchored '%s' at frame %d (not detected at frame %d).", keyword, anchor, segment_start)
-                    merge_outputs(anchor, anchor_outputs)
-                    if progress_callback is not None:
-                        progress_callback(min(progress_base + anchor, total_progress_steps), total_progress_steps)
-                    internal_progress_seen = False
+                        if not propagation_plan:
+                            anchor_outputs = None
+                            break
+                        internal_progress_seen = False
 
-                    def model_progress_callback(done, total):
-                        nonlocal internal_progress_seen
-                        internal_progress_seen = True
-                        progress_callback(min(progress_base + int(done), total_progress_steps), total_progress_steps)
+                        def model_progress_callback(done, total):
+                            nonlocal internal_progress_seen
+                            internal_progress_seen = True
+                            progress_callback(
+                                min(
+                                    progress_base + int(done),
+                                    total_progress_steps,
+                                ),
+                                total_progress_steps,
+                            )
 
-                    stream_request = {
-                        "type": "propagate_in_video",
-                        "session_id": session_id,
-                        # The first segment sweeps both directions so frames
-                        # before a late-appearing target are still covered;
-                        # recovery segments only need to continue forward.
-                        "propagation_direction": "both" if first_segment and anchor > 0 else "forward",
-                        "start_frame_index": anchor,
-                        "max_frame_num_to_track": num_frames,
-                    }
+                        propagated_frames = 0
+                        last_frame_seen = anchor
+                        try:
+                            for (
+                                propagation_direction,
+                                max_frame_distance,
+                            ) in propagation_plan:
+                                boundary_frame = (
+                                    shot_end - 1
+                                    if propagation_direction == "forward"
+                                    else shot_start
+                                )
+                                logger.info(
+                                    "SAM3 propagating '%s' %s from frame %d "
+                                    "to %d within shot frames %d-%d.",
+                                    keyword,
+                                    propagation_direction,
+                                    anchor,
+                                    boundary_frame,
+                                    shot_start,
+                                    shot_end - 1,
+                                )
+                                stream_request = {
+                                    "type": "propagate_in_video",
+                                    "session_id": session_id,
+                                    "propagation_direction": (
+                                        propagation_direction
+                                    ),
+                                    "start_frame_index": (
+                                        anchor - session_frame_offset
+                                    ),
+                                    "max_frame_num_to_track": (
+                                        max_frame_distance
+                                    ),
+                                }
+                                if progress_callback is not None:
+                                    stream_request[
+                                        "progress_callback"
+                                    ] = model_progress_callback
+                                for result in (
+                                    video_predictor.handle_stream_request(
+                                        stream_request,
+                                    )
+                                ):
+                                    frame_index = int(
+                                        result["frame_index"]
+                                    ) + session_frame_offset
+                                    if not (
+                                        shot_start
+                                        <= frame_index
+                                        < shot_end
+                                    ):
+                                        continue
+                                    propagated_frames += 1
+                                    last_frame_seen = max(
+                                        last_frame_seen,
+                                        frame_index,
+                                    )
+                                    if (
+                                        progress_callback is not None
+                                        and not internal_progress_seen
+                                    ):
+                                        progress_callback(
+                                            min(
+                                                progress_base
+                                                + propagated_frames,
+                                                total_progress_steps,
+                                            ),
+                                            total_progress_steps,
+                                        )
+                                    merge_outputs(
+                                        frame_index,
+                                        result["outputs"],
+                                    )
+                                    result = None
+                            anchor_outputs = None
+                            break
+                        except RuntimeError as exc:
+                            anchor_outputs = None
+                            if not _is_sam3_tracking_collapse_error(exc):
+                                raise
+                            logger.warning(
+                                "SAM3 tracking for '%s' collapsed around "
+                                "frame %d; re-anchoring within this shot.",
+                                keyword, last_frame_seen,
+                            )
+                            segment_start = max(
+                                segment_start + 1,
+                                last_frame_seen + 1,
+                            )
                     if progress_callback is not None:
-                        stream_request["progress_callback"] = model_progress_callback
-                    propagated_frames = 0
-                    last_frame_seen = anchor
-                    try:
-                        for result in video_predictor.handle_stream_request(stream_request):
-                            propagated_frames += 1
-                            last_frame_seen = max(last_frame_seen, result["frame_index"])
-                            if progress_callback is not None and not internal_progress_seen:
-                                progress_callback(min(progress_base + propagated_frames, total_progress_steps), total_progress_steps)
-                            outputs = result["outputs"]
-                            merge_outputs(result["frame_index"], outputs)
-                        break  # keyword fully propagated
-                    except RuntimeError as exc:
-                        if "No points are provided" not in str(exc):
-                            raise
-                        logger.warning(
-                            "SAM3 tracking for '%s' collapsed around frame %d; re-anchoring past it.",
-                            keyword, last_frame_seen,
+                        progress_callback(
+                            min(progress_base + shot_end, total_progress_steps),
+                            total_progress_steps,
                         )
-                        segment_start = last_frame_seen + 1
-                        first_segment = False
+                    if isolate_segment_sessions:
+                        # Drop any loop-local output references before the
+                        # shot state is destroyed and CUDA memory is reused.
+                        anchor_outputs = None
+                        outputs = None
+                        result = None
+                        _close_active_session()
     finally:
         try:
-            if session_id is not None and video_predictor is not None:
-                try:
-                    video_predictor.handle_request({"type": "close_session", "session_id": session_id})
-                except Exception as exc:
-                    logger.warning("SAM3 close_session failed during cleanup: %s", exc)
+            _close_active_session()
         finally:
             if video_predictor is not None:
                 try:

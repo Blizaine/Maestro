@@ -10,6 +10,34 @@ interface Props {
   srcH: number
 }
 
+const OUTPUT_PIXEL_BUDGETS: Partial<Record<
+  'auto' | '480p' | '540p' | '720p' | '1080p',
+  number
+>> = {
+  '480p': 480 * 848,
+  '540p': 540 * 960,
+  '720p': 720 * 1280,
+  '1080p': 1088 * 1920,
+}
+
+function resolveOutputCanvas(
+  native: { w: number; h: number },
+  preset: 'auto' | '480p' | '540p' | '720p' | '1080p',
+  alignment: number
+): { w: number; h: number } {
+  if (native.w <= 0 || native.h <= 0) return native
+  const budget = OUTPUT_PIXEL_BUDGETS[preset]
+  const scale = budget
+    ? Math.sqrt(budget / (native.w * native.h))
+    : 1
+  const align = (value: number) =>
+    Math.max(alignment, Math.round(value / alignment) * alignment)
+  return {
+    w: align(native.w * scale),
+    h: align(native.h * scale),
+  }
+}
+
 /**
  * Interactive composer for the outpaint canvas.
  *
@@ -32,6 +60,8 @@ export function OutpaintCanvas({ videoUrl, srcW, srcH }: Props) {
   const setAspect = useStore(s => s.setOutpaintAspect)
   const box = useStore(s => s.outpaintVideoBox)
   const setBox = useStore(s => s.setOutpaintVideoBox)
+  const resolutionPreset = useStore(s => s.outpaintResolutionPreset)
+  const modelType = useStore(s => String(s.params.model_type || ''))
 
   const canvasRef = useRef<HTMLDivElement>(null)
   const [renderedSize, setRenderedSize] = useState({ w: 0, h: 0 })
@@ -53,6 +83,18 @@ export function OutpaintCanvas({ videoUrl, srcW, srcH }: Props) {
     if (srcRatio > target) return { w: srcW, h: Math.round(srcW / target) }
     return { w: Math.round(srcH * target), h: srcH }
   }, [aspect, srcW, srcH])
+
+  // The composer continues to use source-pixel coordinates so dragging and
+  // submission remain stable. This second geometry mirrors the backend's
+  // quality-preset scaling and model-grid alignment for accurate readouts.
+  const resolvedCanvasPx = useMemo(
+    () => resolveOutputCanvas(
+      canvasPx,
+      resolutionPreset,
+      modelType.toLowerCase().includes('ltx2') ? 64 : 32
+    ),
+    [canvasPx, resolutionPreset, modelType]
+  )
 
   // Re-fit the video to the new canvas whenever aspect changes. Centered,
   // at native source scale relative to the canvas. (User can then drag/
@@ -158,8 +200,7 @@ export function OutpaintCanvas({ videoUrl, srcW, srcH }: Props) {
     }
   }, [drag, renderedSize, srcW, srcH, canvasPx, setBox])
 
-  // Padding readout (in source-pixel-space, same as what we submit).
-  const pads = useMemo(() => {
+  const nativePads = useMemo(() => {
     if (canvasPx.w <= 0) return null
     return {
       top: Math.max(0, Math.round(box.y * canvasPx.h)),
@@ -168,6 +209,28 @@ export function OutpaintCanvas({ videoUrl, srcW, srcH }: Props) {
       right: Math.max(0, Math.round((1 - box.x - box.w) * canvasPx.w)),
     }
   }, [box, canvasPx])
+
+  // Display the resolved output-pixel padding, including the few centering
+  // pixels introduced when the target is aligned to the LTX-2 grid.
+  const pads = useMemo(() => {
+    if (!nativePads || canvasPx.w <= 0 || canvasPx.h <= 0) return null
+    const scale = Math.min(
+      resolvedCanvasPx.w / canvasPx.w,
+      resolvedCanvasPx.h / canvasPx.h
+    )
+    const offsetX = (resolvedCanvasPx.w - canvasPx.w * scale) / 2
+    const offsetY = (resolvedCanvasPx.h - canvasPx.h * scale) / 2
+    const left = Math.max(0, Math.round(offsetX + nativePads.left * scale))
+    const top = Math.max(0, Math.round(offsetY + nativePads.top * scale))
+    const sourceRight = offsetX + (canvasPx.w - nativePads.right) * scale
+    const sourceBottom = offsetY + (canvasPx.h - nativePads.bottom) * scale
+    return {
+      top,
+      left,
+      bottom: Math.max(0, resolvedCanvasPx.h - Math.round(sourceBottom)),
+      right: Math.max(0, resolvedCanvasPx.w - Math.round(sourceRight)),
+    }
+  }, [nativePads, canvasPx, resolvedCanvasPx])
 
   const ASPECTS: { v: Aspect; label: string }[] = [
     { v: 'source', label: 'Source' },
@@ -260,9 +323,9 @@ export function OutpaintCanvas({ videoUrl, srcW, srcH }: Props) {
       </div>
 
       {/* Output dimensions readout */}
-      {canvasPx.w > 0 && (
+      {resolvedCanvasPx.w > 0 && (
         <p className="text-[9px] text-text-muted text-center font-mono">
-          Canvas: {canvasPx.w}×{canvasPx.h}px
+          Canvas: {resolvedCanvasPx.w}×{resolvedCanvasPx.h}px
         </p>
       )}
     </div>

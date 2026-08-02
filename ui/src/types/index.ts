@@ -166,9 +166,37 @@ export interface OutputFile {
 export type MediaFilter = 'all' | 'images' | 'videos' | 'audio' | 'avatars' | 'multiclip' | 'favorites'
 export type AspectRatio = 'auto' | '16:9' | '9:16' | '1:1' | '4:3' | '3:4'
 export type ResolutionPreset = 'auto' | '480p' | '540p' | '720p' | '1080p'
+export type ScailResolutionProfile = '480p' | '512p' | '704p'
+/** Backward-compatible name for saved Recast/API callers. */
+export type RecastResolutionProfile = ScailResolutionProfile
 export type GenerationMode = 'image' | 'video' | 'audio' | 'avatar' | 'tools'
 export type EditSubMode = 'retake' | 'inpaint' | 'restyle' | 'outpaint' | 'edit_anything' | 'recast'
 export type AudioSubMode = 'speech' | 'music' | 'sfx' | 'mixer'
+
+export interface RecastReferenceAsset {
+  file: File | null
+  path: string
+  url: string
+}
+
+export interface RecastCharacterMapping {
+  id: string
+  target: string
+  refFile: File | null
+  refPath: string
+  refUrl: string
+  additionalRefs: RecastReferenceAsset[]
+  referenceAlignedToSource: boolean
+}
+
+/** Optional SCAIL-2 Repaint correspondence. The source phrase is tracked
+ * through the control video and the target phrase is segmented in the edited
+ * first frame; both receive the same stable semantic color. */
+export interface RepaintRegionMapping {
+  id: string
+  source: string
+  target: string
+}
 
 export interface ChoiceConfig {
   selection?: string[]
@@ -204,6 +232,7 @@ export interface ModelOptions {
   image_ref_choices: ChoiceConfig | null
   audio_prompt_type_sources: ChoiceConfig | null
   background_removal_label: string | null
+  max_image_refs?: number | null
   sample_solvers: [string, string][] | null
   self_refiner: boolean
   self_refiner_max_plans: number
@@ -308,7 +337,7 @@ export interface ServicesConfig {
    *  (default), the Services panel hides Director v2 engine, Voice
    *  Reference, external API keys (Google/OpenAI/Anthropic), and the
    *  Studio prompt enhancer config; the Edit mode picker hides
-   *  Inpaint and Restyle. Flipping this on surfaces all of them. */
+   *  Inpaint. Flipping this on surfaces all of them. */
   show_experimental: boolean
   /** Storage Manager opt-in: allow removing duplicate files FROM linked
    *  installs (Recycle Bin only). Default off — informed consent. */
@@ -461,6 +490,8 @@ export interface CivitAIDownload {
   /** Unix timestamps (seconds) supplied by the download registry. */
   started_at: number | null
   completed_at: number | null
+  /** Present after a downloaded checkpoint is registered as a model. */
+  model_type?: string | null
   // Non-fatal warnings raised after the download finished — most
   // commonly the architecture-mismatch warning when a Klein-4B-trained
   // LoRA lands in flux2_klein_9b/ or vice versa. UI shows these inline

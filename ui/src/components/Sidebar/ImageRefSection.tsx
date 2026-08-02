@@ -4,6 +4,7 @@ import { useStore } from '../../stores/useStore'
 
 export function ImageRefSection() {
   const modelOptions = useStore(s => s.modelOptions)
+  const imageMode = useStore(s => Number(s.params.image_mode ?? 1))
   const imageRefs = useStore(s => s.imageRefs)
   const imageRefType = useStore(s => s.imageRefType)
   const removeBackgroundRefs = useStore(s => s.removeBackgroundRefs)
@@ -16,6 +17,16 @@ export function ImageRefSection() {
 
   const config = modelOptions?.image_ref_choices
   const bgLabel = modelOptions?.background_removal_label
+  // max_image_refs is the model's total conditioning-image budget. In Edit
+  // mode the uploaded source already consumes one slot.
+  const configuredMaxRefs = modelOptions?.max_image_refs ?? null
+  const maxRefs = configuredMaxRefs == null ? null : Math.max(0, configuredMaxRefs - (imageMode === 2 ? 1 : 0))
+  const canAddMore = maxRefs == null || imageRefs.length < maxRefs
+
+  const addFiles = useCallback((files: File[]) => {
+    const room = maxRefs == null ? files.length : Math.max(0, maxRefs - imageRefs.length)
+    files.slice(0, room).forEach(addImageRef)
+  }, [addImageRef, imageRefs.length, maxRefs])
 
   // Determine available modes from choices
   const hasLandscapeMode = config?.choices?.some(([, v]: [string, string]) => v.includes('K')) ?? false
@@ -37,8 +48,8 @@ export function ImageRefSection() {
     // If it's a reorder drag (has our index data), ignore — handled by item onDrop
     if (e.dataTransfer.getData('ref-index')) return
     const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'))
-    files.forEach(addImageRef)
-  }, [addImageRef])
+    addFiles(files)
+  }, [addFiles])
 
   const handleFileSelect = useCallback(() => {
     const input = document.createElement('input')
@@ -47,10 +58,10 @@ export function ImageRefSection() {
     input.multiple = true
     input.onchange = () => {
       const files = Array.from(input.files || [])
-      files.forEach(addImageRef)
+      addFiles(files)
     }
     input.click()
-  }, [addImageRef])
+  }, [addFiles])
 
   if (!config) return null
 
@@ -111,16 +122,24 @@ export function ImageRefSection() {
         ))}
 
         {/* Add button / drop zone */}
-        <div
-          className="w-[90px] h-[90px] border border-dashed border-border rounded-lg flex flex-col items-center justify-center gap-0.5 cursor-pointer hover:border-border-light transition-colors"
-          onDrop={handleDrop}
-          onDragOver={e => e.preventDefault()}
-          onClick={handleFileSelect}
-        >
-          <Upload size={14} className="text-text-muted" />
-          <span className="text-[8px] text-text-muted">Add</span>
-        </div>
+        {canAddMore && (
+          <div
+            className="w-[90px] h-[90px] border border-dashed border-border rounded-lg flex flex-col items-center justify-center gap-0.5 cursor-pointer hover:border-border-light transition-colors"
+            onDrop={handleDrop}
+            onDragOver={e => e.preventDefault()}
+            onClick={handleFileSelect}
+          >
+            <Upload size={14} className="text-text-muted" />
+            <span className="text-[8px] text-text-muted">Add</span>
+          </div>
+        )}
       </div>
+
+      {maxRefs != null && (
+        <p className="text-[9px] text-text-muted">
+          Up to {maxRefs} reference image{maxRefs === 1 ? '' : 's'}.
+        </p>
+      )}
 
       {/* Focus mode toggle — only when images present and model supports both modes */}
       {imageRefs.length > 0 && hasLandscapeMode && hasPeopleMode && (

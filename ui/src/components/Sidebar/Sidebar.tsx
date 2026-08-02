@@ -2,7 +2,6 @@ import { Settings, X, Globe, BookMarked } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { useIsMobile } from '../../lib/useIsMobile'
 import { GenerationModeSelector } from './GenerationModeSelector'
-import { ImageUpload } from './ImageUpload'
 import { InputsPanel } from './InputsPanel'
 import { PromptInput } from './PromptInput'
 import { ImageRefSection } from './ImageRefSection'
@@ -118,8 +117,6 @@ export function Sidebar() {
       {isRestyle && (
         <>
           <RestyleControls />
-          <DurationSlider />
-          <ImageUpload />
           <PromptInput />
         </>
       )}
@@ -140,9 +137,8 @@ export function Sidebar() {
 
   const studioControls = (
     <>
-      {/* Edit Anything → Image Mode round-trip banner. Visible whenever
-          the user is in the middle of editing boundary anchors via the
-          Image Mode workflow; null otherwise. */}
+      {/* Edit Anything/Recast → Image Mode round-trip banner. Visible while
+          a boundary anchor or Recast reference is being edited; null otherwise. */}
       <AnchorReturnBanner />
 
       {/* [&>*]:shrink-0 — keep every section at its natural height and let
@@ -229,13 +225,15 @@ export function Sidebar() {
           >
             <BookMarked size={14} />
           </button>
-          <button
-            onClick={() => openLoraBrowser(true, modelType)}
-            className="p-2 rounded-lg bg-bg-tertiary border border-border hover:border-border-light text-text-secondary hover:text-accent-blue transition-colors shrink-0"
-            title="Browse LoRAs on CivitAI"
-          >
-            <Globe size={14} />
-          </button>
+          {!isOutpaint && (
+            <button
+              onClick={() => openLoraBrowser(true, modelType)}
+              className="p-2 rounded-lg bg-bg-tertiary border border-border hover:border-border-light text-text-secondary hover:text-accent-blue transition-colors shrink-0"
+              title="Browse LoRAs on CivitAI"
+            >
+              <Globe size={14} />
+            </button>
+          )}
           <div className="flex-1 min-w-0">
             <ModelSelector />
           </div>

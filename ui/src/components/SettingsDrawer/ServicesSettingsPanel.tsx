@@ -598,27 +598,16 @@ export function ServicesSettingsPanel() {
           </div>
         </label>
 
-        {/* Voice Reference (ID-LoRA) toggle — experimental.
-            Disabled by default. Currently relies on third-party ID-LoRAs
-            whose distilled-model compatibility is inconsistent (most
-            produce noise on distilled pipelines unless retrained on the
-            target architecture). Surfaces a voice-sample dropzone in
-            Studio Video and Director when enabled.
-            Wrapped in the show_experimental gate so the entire affordance
-            stays out of the way for non-power users. */}
-        {servicesConfig.show_experimental && (
+        {/* Voice Reference (ID-LoRA) is a standard setting, independent of
+            the in-development feature gate and enabled by default. */}
         <label className="flex items-center justify-between cursor-pointer group">
           <div className="flex-1 mr-3">
-            <div className="text-sm text-text-primary group-hover:text-accent-blue transition-colors flex items-center gap-2">
+            <div className="text-sm text-text-primary group-hover:text-accent-blue transition-colors">
               Voice Reference (ID-LoRA)
-              <span className="text-[9px] uppercase tracking-wider text-indicator-warning bg-amber-400/10 border border-indicator-warning/30 rounded px-1.5 py-px">
-                Experimental
-              </span>
             </div>
             <div className="text-[10px] text-text-muted mt-0.5">
               Adds a voice-sample dropzone to Studio Video and Director for speaker identity preservation across clips.
-              Most third-party ID-LoRAs produce noise on distilled models — best results require a LoRA trained against
-              the active model. Disabled by default.
+              Maestro loads the matching ID-LoRA when a reference is supplied. Enabled by default.
             </div>
           </div>
           <div
@@ -632,7 +621,6 @@ export function ServicesSettingsPanel() {
             }`} />
           </div>
         </label>
-        )}
       </div>
 
       <hr className="border-border" />
@@ -781,9 +769,8 @@ export function ServicesSettingsPanel() {
               focused on features known to work well.
             </div>
             <div className="text-[10px] text-text-muted mt-1 leading-relaxed">
-              Currently gates: Director v2 engine, Voice Reference, external
-              LLM APIs (Google / OpenAI / Anthropic), Studio Prompt Enhancer
-              config, Inpaint and Restyle edit modes.
+              Currently gates: external LLM APIs (Google / OpenAI / Anthropic),
+              Studio Prompt Enhancer config, and the Inpaint edit mode.
             </div>
           </div>
           <div

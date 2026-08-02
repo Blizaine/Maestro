@@ -14,6 +14,17 @@ DISTILLED_SIGMA_VALUES = [1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725,
 # in the official LTX-2.3 2-stage ComfyUI workflow.
 STAGE_2_DISTILLED_SIGMA_VALUES = [0.85, 0.725, 0.4219, 0.0]
 
+# Lightricks' official decoded-pixel Outpaint refinement schedule.
+OUTPAINT_FULL_RES_REFINE_SIGMA_VALUES = [0.725, 0.4219, 0.0]
+
+# Compatibility schedule for the older learned-latent/source-attention path.
+OUTPAINT_ATTENTION_STAGE_2_SIGMA_VALUES = [
+    0.909375,
+    0.725,
+    0.421875,
+    0.0,
+]
+
 # Progressive pipeline upscale stages (same 0.85 start as stage 2 distilled)
 PROGRESSIVE_UPSCALE_SIGMA_VALUES = [0.85, 0.725, 0.421875, 0.0]
 
