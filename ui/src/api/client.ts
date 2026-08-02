@@ -68,6 +68,33 @@ export async function fetchModels(): Promise<{ families: ApiFamily[]; models: Ap
   return res.json()
 }
 
+export interface ModelVisibilitySettings {
+  configured: boolean
+  enabled_models: string[]
+  initialized_mature_models: string[]
+  defaults_version: number
+}
+
+export async function fetchModelVisibility(): Promise<ModelVisibilitySettings> {
+  const res = await fetch(`${BASE}/api/v1/model-visibility`)
+  if (!res.ok) throw new Error('Failed to fetch model visibility')
+  return res.json()
+}
+
+export async function updateModelVisibility(params: {
+  enabled_models: string[]
+  initialized_mature_models: string[]
+  defaults_version: number
+}): Promise<ModelVisibilitySettings> {
+  const res = await fetch(`${BASE}/api/v1/model-visibility`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!res.ok) throw new Error('Failed to save model visibility')
+  return res.json()
+}
+
 // Re-scan defaults/ + finetunes/ on the server so a newly-imported checkpoint
 // appears in the model list without a restart. Returns model_types that appeared.
 export async function reloadModels(): Promise<{ status: string; model_count: number; added: string[] }> {
@@ -1066,9 +1093,14 @@ export async function recastPreview(params: {
 export async function submitOutpaint(params: {
   video_path: string; prompt: string; model_type: string;
   pad_top?: number; pad_bottom?: number; pad_left?: number; pad_right?: number;
+  outpaint_aspect?: 'source' | '16:9' | '9:16' | '1:1' | '4:3' | '3:4';
   resolution_preset?: 'auto' | '480p' | '540p' | '720p' | '1080p';
   source_preservation?: number;
   outpaint_lora_strength?: number;
+  mask_preserving_outpaint?: boolean;
+  num_inference_steps?: number;
+  guidance_scale?: number;
+  negative_prompt?: string;
   seed?: number;
   activated_loras?: string[]; loras_multipliers?: string;
   workspace?: string;

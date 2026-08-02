@@ -155,8 +155,11 @@ export function InputsPanel() {
   const audioPT = (params.audio_prompt_type as string) || ''
   const audioBase = audioPT.replace(/[NV]/g, '')
   const audioFlags = audioPT.replace(/[^NV]/g, '')
-  const hasSoundtrack = !audioOnly && audioBase.includes('A')
-  const hasControlVid = audioBase === 'K'
+  // Media presence and audio behavior are independent. A control video can
+  // keep driving motion while LTX-2 generates its soundtrack from text,
+  // derives fresh audio from the video, or uses an uploaded soundtrack.
+  const hasSoundtrack = supportsSoundtrack && !!params.audio_guide
+  const hasControlVid = supportsControlVid && !!params.video_guide
   const soundtrackName = audioGuideFilename || (params.audio_guide ? basename(params.audio_guide as string) : null)
   const controlVidName = videoGuideFilename || (params.video_guide ? basename(params.video_guide as string) : null)
 
@@ -168,6 +171,8 @@ export function InputsPanel() {
   // only fills the gap between them.
   const guideCfg = modelOptions?.guide_custom_choices as { choices?: [string, string][]; default?: string } | undefined
   const guideDefault = guideCfg?.default || ''
+  const guideValues = guideCfg?.choices?.map(([, value]) => value) || []
+  const rawControlProcess = guideValues.find(value => value === 'VG' || value === 'V') || ''
   const guideProcess = ((params.video_prompt_type as string) || guideDefault).replace(/T$/, '')
   const supportsGuideVid = !!guideCfg && !modelOptions?.guide_preprocessing && !supportsControlVid && guideProcess.includes('V')
   const hasGuideVid = supportsGuideVid && !!params.video_guide
@@ -455,7 +460,9 @@ export function InputsPanel() {
   const removeSoundtrack = () => {
     setParam('audio_guide', undefined)
     setAudioGuideFilename(null)
-    setParam('audio_prompt_type', audioFlags)  // back to text mode, keep N/V flags
+    if (audioBase.includes('A')) {
+      setParam('audio_prompt_type', audioFlags)
+    }
     if (selected === 'audio') setSelected(null)
   }
   const handleAddControlVid = async (file: File) => {
@@ -463,7 +470,14 @@ export function InputsPanel() {
       const result = await api.uploadImage(file)  // full video kept (generic upload)
       setParam('video_guide', result.path)
       setVideoGuideFilename(file.name)
-      setParam('audio_prompt_type', 'K')
+      // Preserve an explicit Pose/Depth/etc. process; otherwise make a
+      // dropped LTX control video immediately usable as raw control.
+      if (!((params.video_prompt_type as string) || '').includes('V') && rawControlProcess) {
+        setParam('video_prompt_type', rawControlProcess)
+      }
+      // Source audio remains the default, with alternatives exposed in the
+      // selected control tile instead of replacing the motion input.
+      setParam('audio_prompt_type', `K${audioFlags}`)
     } catch (e) {
       console.error('Control video upload failed:', e)
     }
@@ -471,7 +485,9 @@ export function InputsPanel() {
   const removeControlVid = () => {
     setParam('video_guide', undefined)
     setVideoGuideFilename(null)
-    setParam('audio_prompt_type', '')
+    if (audioBase === 'K' || audioBase === '2') {
+      setParam('audio_prompt_type', audioFlags)
+    }
     if (selected === 'ctrlvid') setSelected(null)
   }
   const handleAddGuideVid = async (file: File) => {
@@ -563,7 +579,7 @@ export function InputsPanel() {
           <Tile role="Soundtrack" filledIcon={<Music size={20} />} filledLabel={soundtrackName ?? undefined}
             imgSrc={null} selected={selected === 'audio'} onClear={removeSoundtrack}
             onSelect={() => setSelected(selected === 'audio' ? null : 'audio')} />
-        ) : supportsSoundtrack && !hasControlVid && (
+        ) : supportsSoundtrack && (
           <AddTile label="Soundtrack" icon={<Music size={18} />} onClick={() => pickFile('.wav,.mp3,.flac,.ogg,.m4a,.mp4,.mov,.mkv,.webm', handleAddSoundtrack)} onDropFile={handleAddSoundtrack} />
         )}
 
@@ -572,7 +588,7 @@ export function InputsPanel() {
           <Tile role="Control video" filledIcon={<Film size={20} />} filledLabel={controlVidName ?? undefined}
             imgSrc={null} selected={selected === 'ctrlvid'} onClear={removeControlVid}
             onSelect={() => setSelected(selected === 'ctrlvid' ? null : 'ctrlvid')} />
-        ) : supportsControlVid && !hasSoundtrack && (
+        ) : supportsControlVid && (
           <AddTile label="Control video" icon={<Film size={18} />} onClick={() => pickFile('.mp4,.webm,.mkv,.mov', handleAddControlVid)} onDropFile={handleAddControlVid} dropAccept="video" />
         )}
 
@@ -695,6 +711,40 @@ export function InputsPanel() {
             <input type="checkbox" checked={audioPT.includes('V')} onChange={() => toggleAudioFlag('V')} className="accent-accent-blue" />
             <span className="text-[10px] text-text-secondary">Remove background music</span>
           </label>
+        </Strip>
+      )}
+
+      {/* Option strip — control-video audio stays independent from motion. */}
+      {selected === 'ctrlvid' && hasControlVid && (
+        <Strip>
+          <label className="text-[10px] text-text-muted uppercase tracking-wider">
+            Audio behavior
+          </label>
+          <select
+            value={
+              audioBase === 'K' || audioBase === '2'
+                ? audioBase
+                : audioBase.includes('A') && hasSoundtrack
+                  ? 'A'
+                  : ''
+            }
+            onChange={event => {
+              setParam('audio_prompt_type', `${event.target.value}${audioFlags}`)
+            }}
+            className="w-full bg-bg-secondary border border-border rounded-lg px-2 py-1.5 text-[11px] text-text-primary focus:outline-none focus:border-accent-blue"
+          >
+            <option value="K">Use control video's audio</option>
+            <option value="">Generate soundtrack from text prompt</option>
+            {audioVals.includes('2') && (
+              <option value="2">Generate new audio from control video</option>
+            )}
+            {hasSoundtrack && soundtrackVal && (
+              <option value="A">Use uploaded soundtrack</option>
+            )}
+          </select>
+          <p className="text-[9px] text-text-muted">
+            The control video remains attached as the motion guide in every mode.
+          </p>
         </Strip>
       )}
 

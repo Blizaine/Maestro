@@ -20,6 +20,34 @@ const _directorRepairDiscoveries = new Map<string, object>()
 let _dashboardPipelineLoadToken = 0
 let _dashboardPipelineListLoadToken = 0
 
+type OutpaintAspect = 'source' | '16:9' | '9:16' | '1:1' | '4:3' | '3:4'
+
+const _OUTPAINT_ASPECT_RATIOS: Array<[Exclude<OutpaintAspect, 'source'>, number]> = [
+  ['16:9', 16 / 9],
+  ['9:16', 9 / 16],
+  ['1:1', 1],
+  ['4:3', 4 / 3],
+  ['3:4', 3 / 4],
+]
+
+function _inferOutpaintAspect(width: number, height: number): OutpaintAspect | null {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null
+  const ratio = width / height
+  let nearest: Exclude<OutpaintAspect, 'source'> | null = null
+  let nearestError = Number.POSITIVE_INFINITY
+  for (const [aspect, target] of _OUTPAINT_ASPECT_RATIOS) {
+    const relativeError = Math.abs(ratio - target) / target
+    if (relativeError < nearestError) {
+      nearest = aspect
+      nearestError = relativeError
+    }
+  }
+  // Grid alignment can move either dimension by several pixels. Four percent
+  // safely recognizes those canvases without pretending an arbitrary ratio
+  // is one of the six choices supported by the composer.
+  return nearestError <= 0.04 ? nearest : null
+}
+
 function _repairNeedsPolling(repair: PipelineRepairState | null | undefined): boolean {
   return !!repair && DIRECTOR_REPAIR_ACTIVE.has(repair.status)
 }
@@ -580,11 +608,29 @@ const OLD_MUSIC_DEFAULT = 'ace_step_v1_5_xl_turbo_lm_4b'
 const NEW_MUSIC_DEFAULT = 'ace_step_v1_5_xl_sft_lm_4b'
 
 const ENABLED_MODELS_KEY = 'maestro_enabled_models'
+let _initializedMatureModels = new Set<string>()
+let _modelVisibilityHydrated = false
+let _modelVisibilityDefaultsVersion = 1
+let _modelVisibilitySaveTask: Promise<void> = Promise.resolve()
 
 function _saveEnabledModels(models: Set<string>) {
   try {
     localStorage.setItem(ENABLED_MODELS_KEY, JSON.stringify([...models]))
   } catch { /* quota exceeded */ }
+  const payload = {
+    enabled_models: [...models],
+    initialized_mature_models: [..._initializedMatureModels],
+    defaults_version: _modelVisibilityDefaultsVersion,
+  }
+  _modelVisibilitySaveTask = _modelVisibilitySaveTask
+    .catch(() => { /* a later save should still run */ })
+    .then(async () => {
+      try {
+        await api.updateModelVisibility(payload)
+      } catch (error) {
+        console.warn('Failed to persist model visibility:', error)
+      }
+    })
 }
 
 function _loadEnabledModels(): Set<string> | null {
@@ -593,6 +639,40 @@ function _loadEnabledModels(): Set<string> | null {
     if (raw) return new Set(JSON.parse(raw))
   } catch { /* ignore */ }
   return null
+}
+
+function _markMatureModelsInitialized(
+  models: ModelDef[],
+  modelTypes?: Iterable<string>,
+) {
+  const requested = modelTypes ? new Set(modelTypes) : null
+  for (const model of models) {
+    if (
+      model.nsfw_only
+      && (requested == null || requested.has(model.model_type))
+    ) {
+      _initializedMatureModels.add(model.model_type)
+    }
+  }
+}
+
+function _enableUninitializedMatureModels(
+  models: ModelDef[],
+  enabledModels: Set<string>,
+): Set<string> | null {
+  const next = new Set(enabledModels)
+  let changed = false
+  for (const model of models) {
+    if (
+      model.nsfw_only
+      && !_initializedMatureModels.has(model.model_type)
+    ) {
+      _initializedMatureModels.add(model.model_type)
+      next.add(model.model_type)
+      changed = true
+    }
+  }
+  return changed ? next : null
 }
 
 // Default model_type per generation mode
@@ -912,6 +992,10 @@ interface AppState {
   setOutpaintSourcePreservation: (v: number) => void
   outpaintLoraStrength: number
   setOutpaintLoraStrength: (v: number) => void
+  // Official LTX-2.3 binary-mask conditioning plus multiscale source blend.
+  // Enabled by default; false keeps the legacy black-sentinel path for A/B.
+  outpaintMaskPreserving: boolean
+  setOutpaintMaskPreserving: (v: boolean) => void
   outpaintPreserveSourceAudio: boolean
   setOutpaintPreserveSourceAudio: (v: boolean) => void
   // Lock source pixels: composite original source clip back into the source
@@ -1983,6 +2067,8 @@ export const useStore = create<AppState>((set, get) => ({
   setOutpaintSourcePreservation: (v) => set({ outpaintSourcePreservation: v }),
   outpaintLoraStrength: 1.0,
   setOutpaintLoraStrength: (v) => set({ outpaintLoraStrength: v }),
+  outpaintMaskPreserving: true,
+  setOutpaintMaskPreserving: (v) => set({ outpaintMaskPreserving: v }),
   outpaintPreserveSourceAudio: true,
   setOutpaintPreserveSourceAudio: (v) => set({ outpaintPreserveSourceAudio: v }),
   outpaintLockSourcePixels: false,  // default OFF — visible rectangle seam outweighs benefit
@@ -2879,6 +2965,7 @@ export const useStore = create<AppState>((set, get) => ({
   modelsLoaded: false,
   enabledModels: _loadEnabledModels() ?? new Set(DEFAULT_ENABLED_MODELS),
   toggleModelEnabled: (modelType) => {
+    _markMatureModelsInitialized(get().models, [modelType])
     set(s => {
       const next = new Set(s.enabledModels)
       if (next.has(modelType)) next.delete(modelType)
@@ -2888,11 +2975,13 @@ export const useStore = create<AppState>((set, get) => ({
     })
   },
   resetEnabledModels: () => {
+    _markMatureModelsInitialized(get().models)
     const next = new Set(DEFAULT_ENABLED_MODELS)
     _saveEnabledModels(next)
     set({ enabledModels: next })
   },
   setAllModelsEnabled: (enabled) => {
+    _markMatureModelsInitialized(get().models)
     if (enabled) {
       const all = new Set(get().models.map(m => m.model_type))
       _saveEnabledModels(all)
@@ -2904,6 +2993,7 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
   setModelsEnabled: (modelTypes, enabled) => {
+    _markMatureModelsInitialized(get().models, modelTypes)
     set(s => {
       const next = new Set(s.enabledModels)
       for (const mt of modelTypes) {
@@ -2925,7 +3015,16 @@ export const useStore = create<AppState>((set, get) => ({
   clearModelVisibilityFocus: () => set({ modelVisibilityFocus: null }),
   loadModels: async () => {
     try {
-      const data = await api.fetchModels()
+      const shouldHydrateVisibility = !_modelVisibilityHydrated
+      const [data, visibility] = await Promise.all([
+        api.fetchModels(),
+        shouldHydrateVisibility
+          ? api.fetchModelVisibility().catch(error => {
+              console.warn('Failed to load model visibility:', error)
+              return null
+            })
+          : Promise.resolve(null),
+      ])
       const families = data.families
       const backendModels = data.models.map(m => ({
         model_type: m.model_type,
@@ -2942,13 +3041,60 @@ export const useStore = create<AppState>((set, get) => ({
       // Inject virtual SFX (MMAudio) models alongside backend models
       const models = [...backendModels, ...SFX_VIRTUAL_MODELS]
 
+      // Pinokio can assign a different web-server port on every launch.
+      // Browser localStorage is origin-bound, so hydrate durable visibility
+      // once from the server config and keep localStorage only as a
+      // migration/cache layer.
+      if (shouldHydrateVisibility && visibility) {
+        let restoredModels: Set<string>
+        if (visibility.configured) {
+          restoredModels = new Set(visibility.enabled_models)
+          _initializedMatureModels = new Set(
+            visibility.initialized_mature_models,
+          )
+          _modelVisibilityDefaultsVersion = (
+            visibility.defaults_version || 1
+          )
+        } else {
+          const legacyModels = _loadEnabledModels()
+          restoredModels = legacyModels ?? new Set(DEFAULT_ENABLED_MODELS)
+          const legacyDefaultsVersion = parseInt(
+            localStorage.getItem(DEFAULTS_VERSION_KEY) || '',
+            10,
+          )
+          _modelVisibilityDefaultsVersion = legacyModels
+            ? (legacyDefaultsVersion || 1)
+            : DEFAULTS_VERSION
+          // An existing browser whitelist is an explicit snapshot. Mark the
+          // current Mature entries initialized so migration cannot re-enable
+          // one the user deliberately disabled.
+          _initializedMatureModels = legacyModels
+            ? new Set(
+                models
+                  .filter(model => model.nsfw_only)
+                  .map(model => model.model_type),
+              )
+            : new Set()
+        }
+        _modelVisibilityHydrated = true
+        set({ enabledModels: restoredModels })
+        if (!visibility.configured) _saveEnabledModels(restoredModels)
+      }
+
       // One-time curated-defaults upgrade for existing installs (see
       // DEFAULTS_VERSION). Fresh installs already start from the full
       // DEFAULT_ENABLED_MODELS list; for them this only stamps the
       // version key.
       let migrateMusicDefault = false
       try {
-        const storedVer = parseInt(localStorage.getItem(DEFAULTS_VERSION_KEY) || '1', 10) || 1
+        const storedVer = _modelVisibilityHydrated
+          ? _modelVisibilityDefaultsVersion
+          : (
+              parseInt(
+                localStorage.getItem(DEFAULTS_VERSION_KEY) || '1',
+                10,
+              ) || 1
+            )
         if (storedVer < DEFAULTS_VERSION) {
           const additions: string[] = []
           for (let v = storedVer + 1; v <= DEFAULTS_VERSION; v++) {
@@ -2964,7 +3110,9 @@ export const useStore = create<AppState>((set, get) => ({
             })
           }
           migrateMusicDefault = storedVer < 2
+          _modelVisibilityDefaultsVersion = DEFAULTS_VERSION
           localStorage.setItem(DEFAULTS_VERSION_KEY, String(DEFAULTS_VERSION))
+          _saveEnabledModels(get().enabledModels)
         }
       } catch { /* localStorage blocked — defaults only apply this session */ }
 
@@ -3062,28 +3210,20 @@ export const useStore = create<AppState>((set, get) => ({
       // filename without user intervention).
       get().refreshLoraIdMap()
 
-      // Cold-start case for nsfw_only auto-enable: if Mature Mode is
-      // already on (loaded from server config), make sure all nsfw_only
-      // models are in enabledModels. updateServicesConfig handles the
-      // toggle-on path, but on first launch / page refresh the persisted
-      // enabledModels set may pre-date the nsfw_only models existing in
-      // the registry — without this sweep they'd be hidden from selectors
-      // until the user manually flips Mature Mode off and back on.
+      // Auto-enable each Mature model once, then preserve an explicit
+      // disable. The initialized IDs live in the same server-side visibility
+      // record, so a changing Pinokio port cannot reset this decision.
       const cfg = get().servicesConfig
-      if (cfg?.nsfw_mode) {
-        const nsfwModels = models.filter(m => m.nsfw_only).map(m => m.model_type)
-        if (nsfwModels.length > 0) {
-          set(s => {
-            const next = new Set(s.enabledModels)
-            let changed = false
-            for (const mt of nsfwModels) {
-              if (!next.has(mt)) { next.add(mt); changed = true }
-            }
-            if (!changed) return s
-            _saveEnabledModels(next)
-            return { enabledModels: next }
-          })
-        }
+      if (cfg?.nsfw_mode && _modelVisibilityHydrated) {
+        set(s => {
+          const next = _enableUninitializedMatureModels(
+            models,
+            s.enabledModels,
+          )
+          if (!next) return s
+          _saveEnabledModels(next)
+          return { enabledModels: next }
+        })
       }
     } catch (e) {
       console.error('Failed to load models:', e)
@@ -3730,15 +3870,20 @@ export const useStore = create<AppState>((set, get) => ({
           pad_bottom: padBottom,
           pad_left: padLeft,
           pad_right: padRight,
+          outpaint_aspect: state.outpaintAspect,
           resolution_preset: state.outpaintResolutionPreset,
-          source_preservation: state.outpaintSourcePreservation,
-          outpaint_lora_strength: state.outpaintLoraStrength,
+          source_preservation: 1.0,
+          outpaint_lora_strength: 1.0,
+          mask_preserving_outpaint: state.outpaintMaskPreserving,
           preserve_source_audio: state.outpaintPreserveSourceAudio,
-          lock_source_pixels: state.outpaintLockSourcePixels,
+          lock_source_pixels: false,
           trim_window_smear: state.outpaintTrimSmear,
           sliding_window_size: windowFrames,
           sliding_window_overlap: overlapFrames,
           ...(sendTrim ? { start_time: trimStart, end_time: trimEnd } : {}),
+          num_inference_steps: (state.params.num_inference_steps as number) ?? undefined,
+          guidance_scale: (state.params.guidance_scale as number) ?? undefined,
+          negative_prompt: (state.params.negative_prompt as string) || undefined,
           seed: (state.params.seed as number) ?? -1,
           activated_loras: (state.params.activated_loras as string[]) || [],
           loras_multipliers: (state.params.loras_multipliers as string) || '',
@@ -5358,6 +5503,21 @@ export const useStore = create<AppState>((set, get) => ({
     try {
       const config = await api.fetchServicesConfig()
       set({ servicesConfig: config, servicesConfigLoading: false })
+      if (
+        config.nsfw_mode
+        && _modelVisibilityHydrated
+        && get().models.length > 0
+      ) {
+        set(s => {
+          const next = _enableUninitializedMatureModels(
+            s.models,
+            s.enabledModels,
+          )
+          if (!next) return s
+          _saveEnabledModels(next)
+          return { enabledModels: next }
+        })
+      }
     } catch (e) {
       console.error('Failed to load services config:', e)
       set({ servicesConfigLoading: false })
@@ -5367,30 +5527,18 @@ export const useStore = create<AppState>((set, get) => ({
     try {
       await api.updateServicesConfig(partial)
       get().loadServicesConfig()
-      // When Mature Mode flips ON, auto-add all nsfw_only models to
-      // enabledModels so they show up in selectors immediately. Without
-      // this the user would have to walk Settings → System → Model
-      // Visibility and individually enable each one — defeats the
-      // "auto-selected when NSFW is enabled" UX.
-      //
-      // Flipping nsfw_mode OFF doesn't remove them from enabledModels
-      // (they're filtered from view by the nsfw_only + nsfw_mode check
-      // in ModelSelector / SystemSettingsPanel anyway). That way if the
-      // user toggles mature mode back on later, their selections persist.
-      if (partial.nsfw_mode === true) {
-        const nsfwModels = get().models.filter(m => m.nsfw_only).map(m => m.model_type)
-        if (nsfwModels.length > 0) {
-          set(s => {
-            const next = new Set(s.enabledModels)
-            let changed = false
-            for (const mt of nsfwModels) {
-              if (!next.has(mt)) { next.add(mt); changed = true }
-            }
-            if (!changed) return s
-            _saveEnabledModels(next)
-            return { enabledModels: next }
-          })
-        }
+      // Newly-discovered Mature models appear once when Mature Mode is
+      // enabled. Previously initialized models retain the user's whitelist.
+      if (partial.nsfw_mode === true && _modelVisibilityHydrated) {
+        set(s => {
+          const next = _enableUninitializedMatureModels(
+            s.models,
+            s.enabledModels,
+          )
+          if (!next) return s
+          _saveEnabledModels(next)
+          return { enabledModels: next }
+        })
       }
     } catch (e) {
       console.error('Failed to update services config:', e)
@@ -7252,13 +7400,14 @@ export const useStore = create<AppState>((set, get) => ({
     const hadStartImage = !!(p.image_start || (p.image_prompt_type as string || '').includes('S'))
     const hadEndImage = !!(p.image_end || (p.image_prompt_type as string || '').includes('E'))
 
-    // TTS restores names before Speaker 1/2 substitution. Recast restores the
-    // user's original text rather than Maestro's optional appended guidance,
-    // so toggling guidance after Load Settings remains a meaningful A/B test.
+    // TTS restores names before Speaker 1/2 substitution. Edit workflows
+    // restore the user's text rather than internal conditioning guidance.
     const originalPrompt = (p._tts_original_prompt as string) || (
       p.edit_sub_mode === 'recast' && typeof p.edit_recast_raw_prompt === 'string'
         ? p.edit_recast_raw_prompt as string
-        : p.prompt as string
+        : p.edit_sub_mode === 'outpaint' && typeof p.edit_outpaint_raw_prompt === 'string'
+          ? p.edit_outpaint_raw_prompt as string
+          : p.prompt as string
     ) || ''
 
     // Build params from metadata
@@ -7816,9 +7965,27 @@ export const useStore = create<AppState>((set, get) => ({
         const padRight = (p.outpaint_pad_right as number) ?? 0
         set({ outpaintPadding: { top: padTop, bottom: padBottom, left: padLeft, right: padRight } })
 
-        if (p.outpaint_aspect) {
-          set({ outpaintAspect: p.outpaint_aspect as 'source' | '16:9' | '9:16' | '1:1' | '4:3' | '3:4' })
+        const canvasW = (p._outpaint_canvas_w as number) || 0
+        const canvasH = (p._outpaint_canvas_h as number) || 0
+        const savedAspect = String(p.outpaint_aspect || '') as OutpaintAspect
+        const validSavedAspect = (
+          savedAspect === 'source'
+          || _OUTPAINT_ASPECT_RATIOS.some(([aspect]) => aspect === savedAspect)
+        )
+        let restoredAspect: OutpaintAspect | null = validSavedAspect ? savedAspect : null
+        if (!restoredAspect) {
+          let aspectW = canvasW
+          let aspectH = canvasH
+          if (aspectW <= 0 || aspectH <= 0) {
+            const resolutionMatch = /^(\d+)x(\d+)$/i.exec(String(p.resolution || '').trim())
+            if (resolutionMatch) {
+              aspectW = Number(resolutionMatch[1])
+              aspectH = Number(resolutionMatch[2])
+            }
+          }
+          restoredAspect = _inferOutpaintAspect(aspectW, aspectH)
         }
+        if (restoredAspect) set({ outpaintAspect: restoredAspect })
         if (p.outpaint_resolution_preset) {
           set({ outpaintResolutionPreset: p.outpaint_resolution_preset as 'auto' | '480p' | '540p' | '720p' | '1080p' })
         }
@@ -7828,21 +7995,26 @@ export const useStore = create<AppState>((set, get) => ({
         if (p.outpaint_lora_strength_ui != null) {
           set({ outpaintLoraStrength: p.outpaint_lora_strength_ui as number })
         }
+        if (p.outpaint_mask_preserving != null) {
+          set({ outpaintMaskPreserving: !!p.outpaint_mask_preserving })
+        }
 
         // Recompute the canvas-relative video box from saved pad pixels +
         // saved canvas dimensions, so the OutpaintCanvas reproduces the
         // exact composition. Falls back to centered-fit if anything is
         // missing.
-        const canvasW = (p._outpaint_canvas_w as number) || 0
-        const canvasH = (p._outpaint_canvas_h as number) || 0
         if (canvasW > 0 && canvasH > 0) {
-          const srcW = canvasW - padLeft - padRight
-          const srcH = canvasH - padTop - padBottom
+          const savedX = (p._outpaint_overlay_x as number) ?? padLeft
+          const savedY = (p._outpaint_overlay_y as number) ?? padTop
+          const srcW = (p._outpaint_overlay_w as number)
+            || (canvasW - padLeft - padRight)
+          const srcH = (p._outpaint_overlay_h as number)
+            || (canvasH - padTop - padBottom)
           if (srcW > 0 && srcH > 0) {
             set({
               outpaintVideoBox: {
-                x: padLeft / canvasW,
-                y: padTop / canvasH,
+                x: savedX / canvasW,
+                y: savedY / canvasH,
                 w: srcW / canvasW,
                 h: srcH / canvasH,
               },

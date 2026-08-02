@@ -6189,7 +6189,20 @@ def enhance_prompt(state, prompt, prompt_enhancer, multi_images_gen_type, multi_
     return prompt, prompt
 
 def get_outpainting_dims(video_guide_outpainting):
-    return None if video_guide_outpainting== None or len(video_guide_outpainting) == 0 or video_guide_outpainting == "0 0 0 0" or video_guide_outpainting.startswith("#") else [int(v) for v in video_guide_outpainting.split(" ")] 
+    if (
+        video_guide_outpainting is None
+        or len(video_guide_outpainting) == 0
+        or video_guide_outpainting == "0 0 0 0"
+        or video_guide_outpainting.startswith("#")
+    ):
+        return None
+    # Fractional percentages let Maestro place the protected source rectangle
+    # exactly after snapping the output canvas to LTX-2's 64-pixel grid.
+    values = [
+        float(value)
+        for value in video_guide_outpainting.split()
+    ]
+    return values if any(value > 0 for value in values) else None
 
 def parse_guide_inpaint_color(value):
     if isinstance(value, str):
@@ -6982,11 +6995,20 @@ def generate_video(
     # pull during outpainting without having to also activate it in the UI
     # (which would double-load it).
     outpaint_lora_strength=1.0,
+    # Maestro Outpaint's official LTX-2.3 masked workflow. The dedicated
+    # Outpaint endpoint enables it by default; generic Studio control-video
+    # runs retain their existing behavior unless they opt in explicitly.
+    outpaint_mask_preserve=False,
     # Distilled single-stage mode — run the distilled pipeline at full target
     # resolution with no stage-2 upscale+refine. Exclusive with
     # progressive_pipeline. Read by ltx2.py and forwarded into
     # DistilledPipeline via kwargs.
     single_stage_pipeline=False,
+    # Official Lightricks masked workflow. It decodes and Laplacian-blends the
+    # first pass in pixel space before target-resolution refinement.
+    outpaint_full_resolution_refine=False,
+    # Use Maestro's managed In/Outpaint IC-LoRA stack.
+    outpaint_official_stack=False,
 ):
 
 
@@ -7304,7 +7326,16 @@ def generate_video(
     if len(prompts) > 1:
         print(f"[Prompt Split] {len(prompts)} prompts from multi-line input (multi_prompts_gen_type={multi_prompts_gen_type})")
     parsed_keep_frames_video_source= max_source_video_frames if len(keep_frames_video_source) ==0 else int(keep_frames_video_source) 
-    transformer_loras_filenames, transformer_loras_multipliers  = get_transformer_loras(model_type)
+    if outpaint_official_stack:
+        # The current reference route owns its system adapter schedule. Suppress any
+        # model-definition LoRAs so a saved special variant cannot accidentally
+        # remain active beside the managed two-stage In/Outpainting IC-LoRA.
+        transformer_loras_filenames = []
+        transformer_loras_multipliers = []
+    else:
+        transformer_loras_filenames, transformer_loras_multipliers = (
+            get_transformer_loras(model_type)
+        )
     if guidance_phases < 1: guidance_phases = 1
     # LoRA multipliers may use the ";" phase syntax (e.g. "0.75;0.50" =
     # stage 1 / stage 2 on LTX-2 two-stage models). Parse them against the
@@ -7474,6 +7505,16 @@ def generate_video(
     if "K" in video_prompt_type: 
         any_background_ref = 2 if model_def.get("all_image_refs_are_background_ref", False) or custom_frames_injection else 1
     outpainting_dims = get_outpainting_dims(video_guide_outpainting)
+    if (
+        outpaint_mask_preserve
+        and base_model_type == "ltx2_22B"
+        and outpainting_dims is not None
+    ):
+        # Keep shared preprocessing neutral. This is also the canvas color
+        # used by the Diffusers LTX-2.3 Outpaint reference Space. ltx2.py
+        # applies the spatial source-attention mask after the reference tensor
+        # has been isolated.
+        guide_inpaint_color = (128, 128, 128)
     # Aspect-ratio outpainting ("Fit into a X:Y box") is an upstream Wan2GP
     # feature we never ported, but the cherry-picked pose-alignment refactor
     # (the "O" mode block below) references video_guide_outpainting_ratio at
@@ -8391,6 +8432,7 @@ def generate_video(
                     original_input_ref_images = original_image_refs[nb_frames_positions:] if original_image_refs is not None else [],
                     image_refs_relative_size = image_refs_relative_size,
                     outpainting_dims = outpainting_dims,
+                    outpaint_mask_preserve=outpaint_mask_preserve,
                     face_arc_embeds = face_arc_embeds,
                     custom_settings=custom_settings_for_model,
                     save_masks=args.save_masks,
@@ -8431,6 +8473,8 @@ def generate_video(
                     reference_pipeline=reference_pipeline,
                     progressive_pipeline=progressive_pipeline,
                     single_stage_pipeline=single_stage_pipeline,
+                    outpaint_full_resolution_refine=outpaint_full_resolution_refine,
+                    outpaint_official_stack=outpaint_official_stack,
                     progressive_stage2_steps=progressive_stage2_steps,
                     progressive_stage3_steps=progressive_stage3_steps,
                     progressive_stage2_sigma=progressive_stage2_sigma,
@@ -9115,6 +9159,10 @@ def generate_video(
                     and not is_image
                     and not audio_only
                     and is_last_window
+                    # A one-shot Director timeline is already the finished
+                    # video. Registering a one-item "group" created a second,
+                    # byte-equivalent _multiclip file for no useful purpose.
+                    and int(multi_clip_info.get("total", 0) or 0) > 1
                     and not multi_clip_info.get("defer_concat", False)
                 ):
                     clip_path = video_path[0] if isinstance(video_path, list) else video_path

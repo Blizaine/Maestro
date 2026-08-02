@@ -181,6 +181,7 @@ export function AdvancedSettings() {
   const isAudioOnly = modelOptions?.audio_only || isSfx
   const isVideo = generationMode === 'video'
   const isAvatar = generationMode === 'avatar'
+  const isOutpaint = isAvatar && editSubMode === 'outpaint'
   const isRecast = isAvatar && editSubMode === 'recast'
   const isRepaint = isAvatar && editSubMode === 'restyle'
   const isScailEdit = isRecast || isRepaint
@@ -275,7 +276,7 @@ export function AdvancedSettings() {
                   windows, so generic controls would be misleading here. */}
               {!isAudio && !isScailEdit && (
                 <>
-                  {!modelOptions?.hide_resolution_presets && <ResolutionPresets />}
+                  {!isOutpaint && !modelOptions?.hide_resolution_presets && <ResolutionPresets />}
                   {!isAvatar && <AspectRatioGrid />}
                 </>
               )}
@@ -841,8 +842,8 @@ export function AdvancedSettings() {
               {/* Presets */}
               <PresetManager />
 
-              {/* LoRAs */}
-              <LoraSelector />
+              {/* Official Outpaint owns its stage-one-only IC-LoRA schedule. */}
+              {!isOutpaint && <LoraSelector />}
 
               {/* Dedicated SCAIL edit endpoints own their source video,
                   edited/reference frames, masks, and process selection. */}

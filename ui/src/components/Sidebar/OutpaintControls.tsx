@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useMemo } from 'react'
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { Upload, X } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { VideoTimelineSelector } from '../shared/VideoTimelineSelector'
@@ -15,8 +15,8 @@ import * as api from '../../api/client'
  *      the chosen aspect ratio with the source clip draggable +
  *      resizable on top. Embeds its own 6-button aspect picker.
  *   3. Output Quality button group (replaces the legacy dropdown).
- *   4. Advanced section (collapsed by default) — source preservation,
- *      LoRA strength, preserve audio, lock source pixels, trim smear.
+ *   4. Advanced section (collapsed by default) — mask preservation,
+ *      preserve audio, and sliding-window cleanup.
  *
  * The previous version exposed per-side padding sliders + a separate
  * aspect-ratio dropdown that drove those sliders. The interactive
@@ -55,16 +55,15 @@ export function OutpaintControls() {
 
   const outpaintResolutionPreset = useStore(s => s.outpaintResolutionPreset)
   const setOutpaintResolutionPreset = useStore(s => s.setOutpaintResolutionPreset)
-  const outpaintSourcePreservation = useStore(s => s.outpaintSourcePreservation)
-  const setOutpaintSourcePreservation = useStore(s => s.setOutpaintSourcePreservation)
-  const outpaintLoraStrength = useStore(s => s.outpaintLoraStrength)
-  const setOutpaintLoraStrength = useStore(s => s.setOutpaintLoraStrength)
+  const outpaintMaskPreserving = useStore(s => s.outpaintMaskPreserving)
+  const setOutpaintMaskPreserving = useStore(s => s.setOutpaintMaskPreserving)
   const outpaintPreserveSourceAudio = useStore(s => s.outpaintPreserveSourceAudio)
   const setOutpaintPreserveSourceAudio = useStore(s => s.setOutpaintPreserveSourceAudio)
-  const outpaintLockSourcePixels = useStore(s => s.outpaintLockSourcePixels)
-  const setOutpaintLockSourcePixels = useStore(s => s.setOutpaintLockSourcePixels)
   const outpaintTrimSmear = useStore(s => s.outpaintTrimSmear)
   const setOutpaintTrimSmear = useStore(s => s.setOutpaintTrimSmear)
+  const windowSize = useStore(s => s.slidingWindowSeconds)
+  const setWindowSize = useStore(s => s.setSlidingWindowSeconds)
+  const windowLocked = useStore(s => s.slidingWindowLocked)
 
   const [error, setError] = useState<string | null>(null)
   const [showAdvanced, setShowAdvanced] = useState(false)
@@ -121,6 +120,23 @@ export function OutpaintControls() {
   }, [handleUpload])
 
   const isVideoFile = editVideoFile?.type.startsWith('video/')
+  const selectedDuration = trimEnd > trimStart
+    ? trimEnd - trimStart
+    : editVideoDuration
+
+  // Match Studio Frames mode: an unlocked window follows a short clip with
+  // a one-second quantization buffer, up to the model's ~20-second limit.
+  // Outpaint has a trim timeline instead of DurationSlider, so it needs the
+  // same tracking behavior here.
+  useEffect(() => {
+    if (windowLocked || !isVideoFile || selectedDuration <= 0) return
+    if (selectedDuration <= 20) {
+      const nextWindow = Math.min(21, Math.ceil(selectedDuration) + 1)
+      if (windowSize !== nextWindow) setWindowSize(nextWindow)
+    } else if (windowSize < 10) {
+      setWindowSize(20)
+    }
+  }, [isVideoFile, selectedDuration, windowLocked]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="space-y-3">
@@ -218,10 +234,7 @@ export function OutpaintControls() {
         </p>
       </div>
 
-      {/* Advanced section — collapsed by default to keep the panel from
-          being overwhelming. The four toggles + two sliders here are the
-          knobs the user only reaches for after a baseline outpaint is
-          working but they want to tune quality/cost. */}
+      {/* Advanced remains collapsed so the default workflow stays simple. */}
       <button
         onClick={() => setShowAdvanced(!showAdvanced)}
         className="text-[10px] text-text-muted hover:text-text-primary transition-colors"
@@ -230,39 +243,28 @@ export function OutpaintControls() {
       </button>
       {showAdvanced && (
         <div className="space-y-3 pl-2 border-l border-border/50">
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <label className="text-[10px] text-text-muted uppercase tracking-wider">Source Preservation</label>
-              <span className="text-[10px] text-text-secondary tabular-nums">{outpaintSourcePreservation.toFixed(2)}</span>
-            </div>
+          <label
+            className="flex items-start gap-2 cursor-pointer"
+            title="Uses LTX-2.3's binary-mask conditioning and a soft multiscale boundary blend. Disable only to compare with Maestro's legacy Outpaint path."
+          >
             <input
-              type="range"
-              min={0.3} max={1.0} step={0.05}
-              value={outpaintSourcePreservation}
-              onChange={e => setOutpaintSourcePreservation(parseFloat(e.target.value))}
-              className="w-full"
+              type="checkbox"
+              checked={outpaintMaskPreserving}
+              onChange={e => setOutpaintMaskPreserving(e.target.checked)}
+              className="w-3 h-3 mt-0.5 rounded border-border accent-accent-blue shrink-0"
             />
-            <p className="text-[9px] text-text-muted mt-0.5">
-              Higher = source area pinned tighter. Lower = model gets creative latitude across the boundary (more blending).
-            </p>
-          </div>
-
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <label className="text-[10px] text-text-muted uppercase tracking-wider">Outpaint LoRA Strength</label>
-              <span className="text-[10px] text-text-secondary tabular-nums">{outpaintLoraStrength.toFixed(2)}</span>
+            <div className="flex-1">
+              <span className="text-[10px] text-text-secondary">
+                Preserve original scene
+              </span>
+              <span className="ml-1 text-[9px] text-accent-blue">
+                Recommended
+              </span>
+              <p className="text-[9px] text-text-muted mt-0.5">
+                Protects the source and softly blends the new area.
+              </p>
             </div>
-            <input
-              type="range"
-              min={0.0} max={2.0} step={0.05}
-              value={outpaintLoraStrength}
-              onChange={e => setOutpaintLoraStrength(parseFloat(e.target.value))}
-              className="w-full"
-            />
-            <p className="text-[9px] text-text-muted mt-0.5">
-              1.0 is the trained default. Try 0.7–0.8 if the LoRA is over-modifying your source area.
-            </p>
-          </div>
+          </label>
 
           <label className="flex items-start gap-2 cursor-pointer">
             <input
@@ -275,21 +277,6 @@ export function OutpaintControls() {
               <span className="text-[10px] text-text-secondary">Preserve source audio</span>
               <p className="text-[9px] text-text-muted mt-0.5">
                 Re-mux the original soundtrack into the outpainted clip. The model would otherwise generate fresh audio that doesn't match the source.
-              </p>
-            </div>
-          </label>
-
-          <label className="flex items-start gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={outpaintLockSourcePixels}
-              onChange={e => setOutpaintLockSourcePixels(e.target.checked)}
-              className="w-3 h-3 mt-0.5 rounded border-border accent-accent-blue shrink-0"
-            />
-            <div className="flex-1">
-              <span className="text-[10px] text-text-secondary">Lock source pixels</span>
-              <p className="text-[9px] text-text-muted mt-0.5">
-                Composite the original frames back over the source area in post. Strongest preservation; pixel-perfect inside the original frame.
               </p>
             </div>
           </label>

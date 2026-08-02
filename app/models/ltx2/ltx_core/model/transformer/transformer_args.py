@@ -377,6 +377,11 @@ class TransformerArgsPreprocessor:
     def _prepare_self_attention_mask(self, attention_mask: torch.Tensor | None, x_dtype: torch.dtype) -> torch.Tensor | None:
         if attention_mask is None:
             return None
+        if attention_mask.dtype == torch.bool:
+            # PyTorch SDPA accepts a boolean mask directly (True = allowed).
+            # Retaining the compact boolean representation halves the memory
+            # used by LTX outpaint's large noisy+reference attention matrix.
+            return attention_mask.unsqueeze(2)
         finfo = torch.finfo(x_dtype)
         eps = finfo.tiny
         bias = torch.full_like(attention_mask, finfo.min, dtype=x_dtype)

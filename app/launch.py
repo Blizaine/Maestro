@@ -19,6 +19,7 @@ import torch
 import os
 import glob
 import json
+import math
 import time
 import uuid
 import asyncio
@@ -457,6 +458,130 @@ def list_models():
         })
 
     return {"families": families, "models": models}
+
+
+_MODEL_VISIBILITY_CONFIG_KEY = "maestro_model_visibility"
+_MODEL_VISIBILITY_WRITE_LOCK = threading.RLock()
+
+
+def _normalize_model_visibility_ids(values):
+    """Return a stable, de-duplicated list of persisted model identifiers."""
+    if not isinstance(values, list):
+        raise ValueError("Model visibility must be a list.")
+    normalized = []
+    seen = set()
+    for value in values:
+        if not isinstance(value, str):
+            raise ValueError("Model visibility entries must be strings.")
+        model_type = value.strip()
+        if not model_type or model_type in seen:
+            continue
+        if len(model_type) > 200:
+            raise ValueError("A model identifier is too long.")
+        seen.add(model_type)
+        normalized.append(model_type)
+    if len(normalized) > 5000:
+        raise ValueError("Too many model visibility entries.")
+    return normalized
+
+
+def _model_visibility_response():
+    raw = wgp.server_config.get(_MODEL_VISIBILITY_CONFIG_KEY)
+    configured = isinstance(raw, dict) and isinstance(
+        raw.get("enabled_models"), list,
+    )
+    if not configured:
+        return {
+            "configured": False,
+            "enabled_models": [],
+            "initialized_mature_models": [],
+            "defaults_version": 0,
+        }
+    try:
+        enabled_models = _normalize_model_visibility_ids(
+            raw.get("enabled_models", []),
+        )
+        initialized_mature_models = _normalize_model_visibility_ids(
+            raw.get("initialized_mature_models", []),
+        )
+    except ValueError:
+        return {
+            "configured": False,
+            "enabled_models": [],
+            "initialized_mature_models": [],
+            "defaults_version": 0,
+        }
+    try:
+        defaults_version = max(0, int(raw.get("defaults_version", 0)))
+    except (TypeError, ValueError):
+        defaults_version = 0
+    return {
+        "configured": True,
+        "enabled_models": enabled_models,
+        "initialized_mature_models": initialized_mature_models,
+        "defaults_version": defaults_version,
+    }
+
+
+def _persist_model_visibility_config():
+    """Atomically persist visibility across Pinokio's changing UI ports."""
+    config_path = os.path.abspath(wgp.server_config_filename)
+    temp_path = (
+        f"{config_path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    with _MODEL_VISIBILITY_WRITE_LOCK:
+        try:
+            with open(temp_path, "w", encoding="utf-8") as handle:
+                json.dump(wgp.server_config, handle, indent=4)
+            os.replace(temp_path, config_path)
+        finally:
+            if os.path.isfile(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+
+
+@api.get("/api/v1/model-visibility")
+def get_model_visibility():
+    """Return the server-persisted model selector whitelist."""
+    return _model_visibility_response()
+
+
+@api.put("/api/v1/model-visibility")
+async def update_model_visibility(request: Request):
+    """Persist model visibility independently of the browser's origin."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="Model visibility payload must be an object.",
+        )
+    try:
+        enabled_models = _normalize_model_visibility_ids(
+            body.get("enabled_models"),
+        )
+        initialized_mature_models = _normalize_model_visibility_ids(
+            body.get("initialized_mature_models", []),
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    try:
+        defaults_version = max(0, int(body.get("defaults_version", 0)))
+    except (TypeError, ValueError) as error:
+        raise HTTPException(
+            status_code=400,
+            detail="defaults_version must be an integer.",
+        ) from error
+
+    with _MODEL_VISIBILITY_WRITE_LOCK:
+        wgp.server_config[_MODEL_VISIBILITY_CONFIG_KEY] = {
+            "enabled_models": enabled_models,
+            "initialized_mature_models": initialized_mature_models,
+            "defaults_version": defaults_version,
+        }
+        _persist_model_visibility_config()
+        return _model_visibility_response()
 
 
 @api.get("/api/v1/models/{model_type}/debug")
@@ -15835,6 +15960,371 @@ async def recast_endpoint(request: Request):
     }
 
 
+def _resolve_outpaint_sampling(
+    body, base_model_type, model_def, model_defaults,
+):
+    """Resolve model-aware Outpaint steps and guidance.
+
+    Outpaint used to omit the Studio Advanced values and independently fall
+    back to 8 steps. That is valid for distilled LTX-2, but LTXV 13B Dev
+    rejects fewer than 20 steps. Use each model's own defaults, honor locked
+    schedules, and reject invalid API input before it reaches the queue.
+    """
+    model_def = model_def if isinstance(model_def, dict) else {}
+    model_defaults = (
+        model_defaults if isinstance(model_defaults, dict) else {}
+    )
+    default_steps = (
+        model_def.get("num_inference_steps")
+        or model_defaults.get("num_inference_steps")
+        or 8
+    )
+    default_guidance = (
+        model_def.get("guidance_scale")
+        or model_defaults.get("guidance_scale")
+        or 1.0
+    )
+
+    try:
+        default_steps = int(default_steps)
+        default_guidance = float(default_guidance)
+        if model_def.get("lock_inference_steps", False):
+            inference_steps = default_steps
+        else:
+            inference_steps = int(
+                body.get("num_inference_steps", default_steps)
+            )
+        if model_def.get("lock_guidance_scale", False):
+            guidance_scale = default_guidance
+        else:
+            guidance_scale = float(
+                body.get("guidance_scale", default_guidance)
+            )
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "Inference Steps and Guidance Scale must be numeric."
+        ) from error
+
+    if inference_steps <= 0:
+        raise ValueError("Inference Steps must be greater than zero.")
+    if (
+        base_model_type == "ltxv_13B"
+        and not model_def.get("lock_inference_steps", False)
+        and inference_steps < 20
+    ):
+        raise ValueError(
+            "LTX Video 13B requires at least 20 inference steps."
+        )
+    return inference_steps, guidance_scale
+
+
+def _resolve_outpaint_video_timing(
+    source_frames,
+    source_fps,
+    model_def,
+    reference_fps=None,
+):
+    """Resolve Outpaint duration, FPS, and the model's 8n+1 frame grid.
+
+    The short-form Diffusers LTX-2.3 Outpaint demo resamples every source to
+    24 fps.  ``reference_fps`` remains available for reproducing that narrow
+    demo contract and rounds *up* to the next complete latent group so the
+    source tail is not discarded. Maestro's production video path omits it:
+    preserving source timing produced materially better long-form continuity
+    and lets the normal sliding-window path carry clips beyond one window.
+    """
+    model_def = model_def if isinstance(model_def, dict) else {}
+    try:
+        fallback_fps = float(model_def.get("fps") or 25)
+    except (TypeError, ValueError):
+        fallback_fps = 25.0
+    if not math.isfinite(fallback_fps) or fallback_fps <= 0:
+        fallback_fps = 25.0
+
+    try:
+        source_frame_count = max(1, int(source_frames))
+    except (TypeError, ValueError):
+        source_frame_count = 1
+    try:
+        source_rate = float(source_fps)
+    except (TypeError, ValueError):
+        source_rate = fallback_fps
+    if not math.isfinite(source_rate) or source_rate <= 0:
+        source_rate = fallback_fps
+    uses_reference_rate = reference_fps is not None
+    if uses_reference_rate:
+        try:
+            target_fps = float(reference_fps)
+        except (TypeError, ValueError):
+            target_fps = 24.0
+        if not math.isfinite(target_fps) or target_fps <= 0:
+            target_fps = 24.0
+    else:
+        target_fps = source_rate
+
+    duration = source_frame_count / source_rate
+    try:
+        minimum_frames = max(
+            1,
+            int(model_def.get("frames_minimum") or 1),
+        )
+    except (TypeError, ValueError):
+        minimum_frames = 1
+    try:
+        frame_step = max(
+            1,
+            int(
+                model_def.get("latent_size")
+                or model_def.get("frames_steps")
+                or 1
+            ),
+        )
+    except (TypeError, ValueError):
+        frame_step = 1
+
+    nominal_frames = max(
+        float(minimum_frames),
+        (
+            duration * target_fps
+            if uses_reference_rate
+            else float(source_frame_count)
+        ),
+    )
+    if uses_reference_rate:
+        # The reference loader clamps samples past EOF to the final source
+        # frame.  Preserve that behavior instead of dropping up to seven
+        # source frames when converting to LTX's causal temporal grid.
+        latent_steps = max(
+            0,
+            int(math.ceil((nominal_frames - 1) / frame_step)),
+        )
+    else:
+        latent_steps = max(
+            0,
+            int((nominal_frames - 1) // frame_step),
+        )
+    target_frames = max(
+        minimum_frames,
+        latent_steps * frame_step + 1,
+    )
+    return duration, target_fps, target_frames
+
+
+def _resolve_ltx2_outpaint_reference_model(requested_model_type):
+    """Select the best locally available model for official Outpaint.
+
+    Lightricks' published two-stage graph uses the LTX-2.3 Dev transformer
+    with the Distilled 1.1 LoRA at 0.5.  Keep an explicitly selected Dev
+    model.  When the UI supplied a baked-Distilled model, prefer a compatible
+    Dev checkpoint only when it is already installed; otherwise retain the
+    requested model as a no-download compatibility fallback.
+    """
+
+    from urllib.parse import unquote, urlparse
+    from shared.utils import files_locator as fl
+
+    requested_def = wgp.get_model_def(requested_model_type) or {}
+    requested_is_dev = bool(
+        requested_def.get("architecture") == "ltx2_22B"
+        and requested_def.get("ltx2_pipeline", "two_stage")
+        != "distilled"
+    )
+    if requested_is_dev:
+        return requested_model_type
+
+    requested_lower = str(requested_model_type or "").lower()
+    dev_candidates = (
+        ("ltx2_22B_fp8", "ltx2_22B_1_1", "ltx2_22B")
+        if "fp8" in requested_lower
+        else ("ltx2_22B_1_1", "ltx2_22B_fp8", "ltx2_22B")
+    )
+    seen = set()
+    for candidate in dev_candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        candidate_def = wgp.get_model_def(candidate) or {}
+        if (
+            candidate_def.get("architecture") != "ltx2_22B"
+            or candidate_def.get("ltx2_pipeline", "two_stage")
+            == "distilled"
+        ):
+            continue
+        urls = wgp.get_model_recursive_prop(
+            candidate,
+            "URLs",
+            return_list=True,
+        )
+        for url in urls or []:
+            filename = os.path.basename(
+                unquote(urlparse(str(url)).path)
+            )
+            if (
+                filename
+                and fl.locate_file(filename, error_if_none=False)
+                is not None
+            ):
+                return candidate
+    return requested_model_type
+
+
+_OUTPAINT_PIXEL_BUDGETS = {
+    "480p": 480 * 848,
+    "540p": 540 * 960,
+    "720p": 720 * 1280,
+    "1080p": 1088 * 1920,
+}
+
+# A 257-frame 704x1280 two-stage Outpaint is the largest composition verified
+# to fit a 24 GB card with Maestro's normal streaming profile.
+# Keep larger canvases within the same approximate pixel-frame activation
+# budget by shortening each diffusion window. This affects peak VRAM, not the
+# total clip length; the existing sliding-window path covers the remainder.
+_OUTPAINT_SINGLE_STAGE_REFERENCE_PIXELS = 704 * 1280
+_OUTPAINT_SINGLE_STAGE_REFERENCE_FRAMES = 257
+
+
+def _cap_outpaint_single_stage_window(
+    requested_frames,
+    target_width,
+    target_height,
+    window_min=17,
+    window_max=501,
+):
+    requested_frames = max(1, int(requested_frames))
+    target_pixels = max(1, int(target_width) * int(target_height))
+    window_min = max(1, int(window_min))
+    window_max = max(window_min, int(window_max))
+    capped = max(window_min, min(window_max, requested_frames))
+    if target_pixels <= _OUTPAINT_SINGLE_STAGE_REFERENCE_PIXELS:
+        return capped
+
+    pixel_frame_budget = (
+        _OUTPAINT_SINGLE_STAGE_REFERENCE_PIXELS
+        * _OUTPAINT_SINGLE_STAGE_REFERENCE_FRAMES
+    )
+    safe_frames = max(window_min, int(pixel_frame_budget / target_pixels))
+    # LTX-2's causal temporal grid is 1 + 8k frames. Keeping the window on
+    # that grid prevents downstream rounding from increasing it again.
+    safe_frames = 1 + max(0, (safe_frames - 1) // 8) * 8
+    safe_frames = max(window_min, min(window_max, safe_frames))
+    return min(capped, safe_frames)
+
+
+def _resolve_outpaint_canvas_geometry(
+    src_w,
+    src_h,
+    pad_top,
+    pad_bottom,
+    pad_left,
+    pad_right,
+    resolution_preset="auto",
+    alignment=64,
+):
+    """Resolve one grid-aligned Outpaint canvas and protected source rect.
+
+    LTX-2's VAE works on a 64-pixel spatial grid. Previously the endpoint
+    computed padding against an arbitrary target (for example 896x1593)
+    and wgp silently floored that target later (to 896x1536). The model and
+    source-overlay coordinates consequently described different canvases.
+
+    Scale the complete composition uniformly, snap the final canvas once,
+    then derive fractional padding percentages from that exact canvas.
+    """
+    src_w = max(1, int(src_w))
+    src_h = max(1, int(src_h))
+    pad_top = max(0, int(pad_top))
+    pad_bottom = max(0, int(pad_bottom))
+    pad_left = max(0, int(pad_left))
+    pad_right = max(0, int(pad_right))
+    alignment = max(1, int(alignment))
+
+    composed_w = src_w + pad_left + pad_right
+    composed_h = src_h + pad_top + pad_bottom
+    target_w = float(composed_w)
+    target_h = float(composed_h)
+    preset = str(resolution_preset or "auto").lower()
+    if preset in _OUTPAINT_PIXEL_BUDGETS:
+        scale = (
+            _OUTPAINT_PIXEL_BUDGETS[preset]
+            / max(1.0, target_w * target_h)
+        ) ** 0.5
+        target_w *= scale
+        target_h *= scale
+
+    def _align(value):
+        return max(
+            alignment,
+            int(math.floor((float(value) / alignment) + 0.5))
+            * alignment,
+        )
+
+    final_w = _align(target_w)
+    final_h = _align(target_h)
+
+    # Uniformly fit the requested composition into the aligned canvas. Any
+    # few grid-rounding pixels left over are centered around the composition,
+    # preserving both the source aspect and the user's source placement.
+    scale = min(
+        final_w / max(1.0, float(composed_w)),
+        final_h / max(1.0, float(composed_h)),
+    )
+    fitted_w = composed_w * scale
+    fitted_h = composed_h * scale
+    composition_x = (final_w - fitted_w) / 2.0
+    composition_y = (final_h - fitted_h) / 2.0
+    overlay_x = int(round(composition_x + pad_left * scale))
+    overlay_y = int(round(composition_y + pad_top * scale))
+    overlay_w = max(1, int(round(src_w * scale)))
+    overlay_h = max(1, int(round(src_h * scale)))
+    overlay_x = max(0, min(overlay_x, final_w - overlay_w))
+    overlay_y = max(0, min(overlay_y, final_h - overlay_h))
+
+    resolved_left = overlay_x
+    resolved_top = overlay_y
+    resolved_right = max(0, final_w - overlay_x - overlay_w)
+    resolved_bottom = max(0, final_h - overlay_y - overlay_h)
+    dims = (
+        100.0 * resolved_top / overlay_h,
+        100.0 * resolved_bottom / overlay_h,
+        100.0 * resolved_left / overlay_w,
+        100.0 * resolved_right / overlay_w,
+    )
+
+    # Re-resolve through the same helper inference uses. These coordinates
+    # are retained for legacy overlay metadata and make any float rounding
+    # difference observable instead of allowing two geometries to diverge.
+    from shared.utils.utils import get_outpainting_frame_location
+
+    (
+        model_overlay_h,
+        model_overlay_w,
+        model_overlay_y,
+        model_overlay_x,
+    ) = get_outpainting_frame_location(
+        final_h,
+        final_w,
+        list(dims),
+        1,
+    )
+    return {
+        "final_w": final_w,
+        "final_h": final_h,
+        "dims": dims,
+        "overlay_w": int(model_overlay_w),
+        "overlay_h": int(model_overlay_h),
+        "overlay_x": int(model_overlay_x),
+        "overlay_y": int(model_overlay_y),
+        "requested_w": composed_w,
+        "requested_h": composed_h,
+    }
+
+
+def _format_outpaint_percentage(value):
+    text = f"{float(value):.8f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
 @api.post("/api/v1/outpaint")
 async def outpaint_endpoint(request: Request):
     """Submit an outpaint job: extend video/image canvas using IC-LoRA.
@@ -15843,6 +16333,8 @@ async def outpaint_endpoint(request: Request):
         video_path: str, prompt: str, model_type: str,
         pad_top?: int, pad_bottom?: int, pad_left?: int, pad_right?: int,
         gamma_correct?: bool, seed?: int,
+        num_inference_steps?: int, guidance_scale?: float,
+        negative_prompt?: str,
         activated_loras?: list, loras_multipliers?: str, workspace?: str,
     }
     """
@@ -15867,6 +16359,7 @@ async def outpaint_endpoint(request: Request):
     model_type = body.get("model_type")
     if not model_type:
         raise HTTPException(status_code=400, detail="model_type is required")
+    requested_model_type = model_type
 
     pad_top = int(body.get("pad_top", 0))
     pad_bottom = int(body.get("pad_bottom", 0))
@@ -15923,68 +16416,128 @@ async def outpaint_endpoint(request: Request):
     if is_video:
         import decord
         vr = decord.VideoReader(video_path)
-        total_frames = len(vr)
+        source_total_frames = len(vr)
+        source_fps = float(vr.get_avg_fps() or 0)
         src_h, src_w = vr[0].shape[:2]
         del vr
+        total_frames = source_total_frames
     else:
         img = PILImage.open(video_path).convert("RGB")
         src_w, src_h = img.size
+        source_total_frames = 1
+        source_fps = 0.0
         total_frames = 1
         del img
 
-    # Convert pixel pads to INTEGER percentages relative to source dimensions
-    # — wgp.get_outpainting_dims parses with int() and raises on decimals, so
-    # float format was silently dropping outpainting_dims → the model skipped
-    # canvas expansion entirely. Minimum 1% when any pad is requested so a
-    # small pixel ask doesn't round to zero.
-    def _pct(pad, dim):
-        if pad <= 0:
-            return 0
-        return max(1, round(100.0 * pad / max(1, dim)))
-    pct_top = _pct(pad_top, src_h)
-    pct_bottom = _pct(pad_bottom, src_h)
-    pct_left = _pct(pad_left, src_w)
-    pct_right = _pct(pad_right, src_w)
-    video_guide_outpainting = f"{pct_top} {pct_bottom} {pct_left} {pct_right}"
-
-    final_w = src_w + pad_left + pad_right
-    final_h = src_h + pad_top + pad_bottom
-
-    # Resolution budget: Auto keeps native size (may OOM on bigger models);
-    # presets scale the final canvas down to a fixed pixel budget while
-    # preserving the target aspect. Outpainting percentages are unchanged —
-    # they're relative and the pipeline fits source into the scaled canvas.
-    _OUTPAINT_PIXEL_BUDGETS = {
-        "480p": 480 * 848,      # ~407k
-        "540p": 540 * 960,      # ~518k
-        "720p": 720 * 1280,     # ~922k
-        "1080p": 1088 * 1920,   # ~2.08M
-    }
+    # Resolve the output grid and protected source rectangle together. The
+    # fractional percentages survive through wgp so inference and later
+    # metadata describe the same exact canvas.
     resolution_preset = str(body.get("resolution_preset") or "auto").lower()
-    if resolution_preset in _OUTPAINT_PIXEL_BUDGETS and final_w > 0 and final_h > 0:
-        target_pixels = _OUTPAINT_PIXEL_BUDGETS[resolution_preset]
-        current_pixels = final_w * final_h
-        scale = (target_pixels / current_pixels) ** 0.5
-        scaled_w = max(32, round(final_w * scale / 32) * 32)
-        scaled_h = max(32, round(final_h * scale / 32) * 32)
-        print(f"[Outpaint] Resolution preset '{resolution_preset}': {final_w}x{final_h} -> {scaled_w}x{scaled_h}")
-        final_w, final_h = scaled_w, scaled_h
+    base_model_type = wgp.get_base_model_type(model_type)
+    outpaint_alignment = 64 if base_model_type == "ltx2_22B" else 32
+    geometry = _resolve_outpaint_canvas_geometry(
+        src_w,
+        src_h,
+        pad_top,
+        pad_bottom,
+        pad_left,
+        pad_right,
+        resolution_preset,
+        outpaint_alignment,
+    )
+    final_w = geometry["final_w"]
+    final_h = geometry["final_h"]
+    overlay_w = geometry["overlay_w"]
+    overlay_h = geometry["overlay_h"]
+    overlay_x = geometry["overlay_x"]
+    overlay_y = geometry["overlay_y"]
+    video_guide_outpainting = " ".join(
+        _format_outpaint_percentage(value)
+        for value in geometry["dims"]
+    )
 
-    print(f"[Outpaint] Source: {src_w}x{src_h}, Target: {final_w}x{final_h}, Dims (%): {video_guide_outpainting}")
+    # Auto stays near native dimensions; quality presets apply a pixel budget
+    # before both axes are snapped to the model grid.
+    if (
+        final_w != geometry["requested_w"]
+        or final_h != geometry["requested_h"]
+    ):
+        print(
+            f"[Outpaint] Grid-aligned canvas: "
+            f"{geometry['requested_w']}x{geometry['requested_h']} -> "
+            f"{final_w}x{final_h}"
+        )
+    print(
+        f"[Outpaint] Source: {src_w}x{src_h}, "
+        f"Target: {final_w}x{final_h}, "
+        f"Protected rect: {overlay_w}x{overlay_h}"
+        f"+{overlay_x}+{overlay_y}, "
+        f"Dims (%): {video_guide_outpainting}"
+    )
 
-    # Source preservation: maps to denoising_strength (which wgp reads as
-    # control_strength for the masked-gen path). Higher = source region more
-    # tightly pinned to the input, lower = model gets more creative latitude
-    # across the boundary. Range clamped to [0.3, 1.0].
-    source_preservation = float(body.get("source_preservation", 1.0))
-    source_preservation = max(0.3, min(1.0, source_preservation))
+    requested_mask_preservation = bool(
+        body.get("mask_preserving_outpaint", True)
+    )
+    mask_preserving_outpaint = bool(
+        requested_mask_preservation
+        and is_video
+        and base_model_type == "ltx2_22B"
+    )
+    if requested_mask_preservation and not mask_preserving_outpaint:
+        print(
+            "[Outpaint] Mask-preserving workflow is currently available "
+            "for LTX-2.3 22B video outpainting; using the legacy path."
+        )
+    official_outpaint = bool(mask_preserving_outpaint)
+    if official_outpaint:
+        model_type = _resolve_ltx2_outpaint_reference_model(model_type)
+        if model_type != requested_model_type:
+            print(
+                "[Outpaint] Official reference model stack: "
+                f"{requested_model_type} -> {model_type} "
+                "(installed Dev checkpoint + Distilled 1.1 LoRA at 0.5 "
+                "+ In/Outpainting IC-LoRA)."
+            )
+        else:
+            selected_def = wgp.get_model_def(model_type) or {}
+            if selected_def.get("ltx2_pipeline", "two_stage") == "distilled":
+                print(
+                    "[Outpaint] No installed Dev checkpoint was found; "
+                    "using the selected baked-Distilled model as a "
+                    "compatibility fallback."
+                )
+        base_model_type = wgp.get_base_model_type(model_type)
+        print(
+            "[Outpaint] Using Lightricks' official two-stage workflow "
+            "(#66FF00 mask guide, full reference attention, decoded-pixel "
+            "handoff, and Laplacian source restoration)."
+        )
 
-    # Outpaint LoRA strength: read by ltx2.get_loras_transformer when
-    # auto-loading the outpaint IC-LoRA. Stronger = more assertive mask
-    # adherence (can also bleed into the source). Default 1.0 is the
-    # upstream-trained value.
-    outpaint_lora_strength = float(body.get("outpaint_lora_strength", 1.0))
-    outpaint_lora_strength = max(0.0, min(2.0, outpaint_lora_strength))
+    # The official mask-conditioned path requires full control strength. The
+    # legacy rollback path keeps accepting the old conditioning control.
+    if mask_preserving_outpaint:
+        source_preservation = 1.0
+    else:
+        source_preservation = float(
+            body.get("source_preservation", 1.0)
+        )
+        source_preservation = max(
+            0.3,
+            min(1.0, source_preservation),
+        )
+
+    # The official in/outpainting LoRA is fixed at its trained strength.
+    # Legacy mode retains the old multiplier solely for rollback testing.
+    if mask_preserving_outpaint:
+        outpaint_lora_strength = 1.0
+    else:
+        outpaint_lora_strength = float(
+            body.get("outpaint_lora_strength", 1.0)
+        )
+        outpaint_lora_strength = max(
+            0.0,
+            min(2.0, outpaint_lora_strength),
+        )
 
     # Preserve source audio: outpainting only changes spatial canvas — the
     # temporal content (and therefore the audio) is identical to the source.
@@ -16003,7 +16556,9 @@ async def outpaint_endpoint(request: Request):
     # visible rectangular seam because the model's outpainted region has
     # slightly different color/tone than raw source. Kept as opt-in for
     # power users who explicitly want pixel-perfect source area.
-    lock_source_pixels = bool(body.get("lock_source_pixels", False)) and is_video
+    lock_source_pixels = bool(
+        body.get("lock_source_pixels", False)
+    ) and is_video and not mask_preserving_outpaint
 
     # Trim sliding-window smear: at the boundary between window 1 and
     # window 2, the model's prefix-conditioning produces ~reuse_frames
@@ -16017,22 +16572,6 @@ async def outpaint_endpoint(request: Request):
     # lip sync. Single-window outpaint has no boundary so no-op.
     trim_window_smear = bool(body.get("trim_window_smear", True)) and is_video
 
-    # Compute source-area overlay coordinates in OUTPUT canvas (post-rescale).
-    # The source rectangle in the pre-rescale canvas is (pad_left, pad_top,
-    # src_w, src_h). After rescale by ratio = final_w/pre_final_w, both
-    # the offset and the size scale uniformly.
-    pre_final_w = src_w + pad_left + pad_right
-    pre_final_h = src_h + pad_top + pad_bottom
-    if pre_final_w > 0 and pre_final_h > 0:
-        ratio_w = final_w / pre_final_w
-        ratio_h = final_h / pre_final_h
-        overlay_w = max(2, round(src_w * ratio_w))
-        overlay_h = max(2, round(src_h * ratio_h))
-        overlay_x = max(0, round(pad_left * ratio_w))
-        overlay_y = max(0, round(pad_top * ratio_h))
-    else:
-        overlay_w = overlay_h = overlay_x = overlay_y = 0
-
     # Sliding window for long clips: outpaint VRAM scales with window frames ×
     # canvas pixels. Single-shot generation works for short clips at modest
     # resolutions but OOMs on longer clips (e.g. 57s @ 720p needs ~6 windows).
@@ -16045,6 +16584,48 @@ async def outpaint_endpoint(request: Request):
         _model_def = wgp.get_model_def(model_type) or {}
     except Exception:
         _model_def = {}
+    try:
+        _model_defaults = wgp.get_default_settings(model_type) or {}
+    except Exception:
+        _model_defaults = {}
+    if is_video:
+        (
+            source_duration,
+            generation_fps,
+            total_frames,
+        ) = _resolve_outpaint_video_timing(
+            source_total_frames,
+            source_fps,
+            _model_def,
+        )
+        print(
+            "[Outpaint] Timing: "
+            f"{source_total_frames} frames at {source_fps:.3f} fps "
+            f"({source_duration:.3f}s) -> {total_frames} frames at "
+            f"{generation_fps:g} fps"
+        )
+    if official_outpaint:
+        # The official graph distills the Dev transformer to the published
+        # eight-step schedule. Do not let stale saved settings alter it.
+        inference_steps = 8
+        guidance_scale = 1.0
+        print(
+            "[Outpaint] Reference sampling: 8-step masked first pass + "
+            "2-step decoded-pixel refinement, CFG 1."
+        )
+    else:
+        try:
+            inference_steps, guidance_scale = _resolve_outpaint_sampling(
+                body,
+                wgp.get_base_model_type(model_type),
+                _model_def,
+                _model_defaults,
+            )
+        except ValueError as error:
+            raise HTTPException(
+                status_code=400,
+                detail=str(error),
+            ) from error
     _sw_defaults = _model_def.get("sliding_window_defaults", {})
     sliding_window_size = int(body.get("sliding_window_size", _sw_defaults.get("window_default", 241)))
     sliding_window_overlap = int(body.get("sliding_window_overlap", _sw_defaults.get("overlap_default", 9)))
@@ -16056,15 +16637,100 @@ async def outpaint_endpoint(request: Request):
     _window_max = int(_sw_defaults.get("window_max", 501))
     _window_min = int(_sw_defaults.get("window_min", 17))
     sliding_window_size = max(_window_min, min(_window_max, sliding_window_size))
+    if official_outpaint and is_video:
+        requested_window_size = sliding_window_size
+        sliding_window_size = _cap_outpaint_single_stage_window(
+            sliding_window_size,
+            final_w,
+            final_h,
+            _window_min,
+            _window_max,
+        )
+        if sliding_window_size < requested_window_size:
+            print(
+                "[Outpaint] Two-stage Outpaint VRAM window cap: "
+                f"{requested_window_size} -> {sliding_window_size} frames "
+                f"for {final_w}x{final_h}. The complete clip will use "
+                "additional sliding windows."
+            )
+    # Outpaint system LoRAs are selected internally. Remove a persisted manual
+    # selection of either system file so rerunning old settings cannot load
+    # both the legacy and official variants at once.
+    activated_loras = list(body.get("activated_loras") or [])
+    multiplier_tokens = [
+        token.split(";", 1)[0]
+        for token in str(body.get("loras_multipliers") or "").split()
+    ]
+    system_outpaint_loras = {
+        "ltx-2.3-22b-ic-lora-outpaint.safetensors",
+        "ltx-2.3-22b-ic-lora-in-outpainting-0.9.safetensors",
+    }
+    filtered_loras = []
+    filtered_multipliers = []
+    for index, lora in enumerate(activated_loras):
+        if os.path.basename(str(lora)).lower() in system_outpaint_loras:
+            print(
+                "[Outpaint] Ignoring manually selected system LoRA "
+                f"{os.path.basename(str(lora))}; the workflow manages it."
+            )
+            continue
+        if official_outpaint:
+            print(
+                "[Outpaint] Ignoring user LoRA "
+                f"{os.path.basename(str(lora))}; the reference workflow "
+                "manages its Distilled and IC-LoRA adapters internally."
+            )
+            continue
+        filtered_loras.append(lora)
+        filtered_multipliers.append(
+            multiplier_tokens[index]
+            if index < len(multiplier_tokens)
+            else "1"
+        )
+
+    submitted_outpaint_prompt = str(body.get("prompt") or "").strip()
+    if official_outpaint:
+        # Lightricks recommends an empty/minimal prompt, or a description of
+        # only the missing region. Appending a whole-scene instruction makes
+        # the model redraw or duplicate subjects at the source boundary.
+        outpaint_prompt = (
+            "."
+            if not submitted_outpaint_prompt
+            or submitted_outpaint_prompt.lower() == "extend the scene naturally"
+            else submitted_outpaint_prompt
+        )
+    else:
+        raw_outpaint_prompt = submitted_outpaint_prompt
+        if not raw_outpaint_prompt or raw_outpaint_prompt.lower() == "extend the scene naturally":
+            raw_outpaint_prompt = (
+                "the scene continues naturally beyond the original frame, "
+                "consistent style and lighting"
+            )
+        outpaint_prompt = (
+            f"{raw_outpaint_prompt}; seamlessly extend the scene into the "
+            "empty margins, matching the existing content."
+        )
 
     gen_params = {
-        "prompt": body.get("prompt", "extend the scene naturally"),
+        "prompt": outpaint_prompt,
         "model_type": model_type,
-        "negative_prompt": body.get("negative_prompt", "pc game, console game, video game, ugly, 3d render, photo, still, static, slow"),
+        # The published Outpaint app deliberately leaves this empty. A broad
+        # generic negative prompt can shift the generated margins away from
+        # the appearance of the protected source.
+        "negative_prompt": (
+            ""
+            if official_outpaint
+            else str(body.get("negative_prompt") or "")
+        ),
         "seed": body.get("seed", -1),
-        "guidance_scale": 1.0,
-        "num_inference_steps": body.get("num_inference_steps", 8),
+        "guidance_scale": guidance_scale,
+        "num_inference_steps": inference_steps,
         "video_length": max(total_frames, 17) if is_video else 1,
+        # Keep the generated timeline on the source video's native cadence.
+        # Forcing the reference demo's 24 fps collapsed a known-good 305-frame
+        # / two-window clip into one 249-frame window and caused the generated
+        # margins to diverge visibly from the protected source rectangle.
+        "force_fps": "control" if is_video else "auto",
         "resolution": f"{final_w}x{final_h}",
         "generation_mode": "video" if is_video else "image",
         # Tag for the gallery's Edits filter + Load Settings restore path.
@@ -16082,15 +16748,24 @@ async def outpaint_endpoint(request: Request):
         # must survive the signature filter. We pass it through raw_params and
         # ltx2.py picks it up via kwargs.get.
         "outpaint_lora_strength": outpaint_lora_strength,
-        "activated_loras": body.get("activated_loras", []),
-        "loras_multipliers": " ".join(m.split(";")[0] for m in (body.get("loras_multipliers", "") or "").split()),
+        "outpaint_mask_preserve": mask_preserving_outpaint,
+        "outpaint_official_stack": official_outpaint,
+        # Match the current Lightricks graph as one coherent pipeline. The
+        # implementation paints the exact marker immediately before VAE
+        # encoding, keeps full reference attention, blends pass one back to
+        # source pixels, resizes with Lanczos, and restores source again after
+        # pass two. The marker-safe source pyramid prevents #66FF00 leakage.
+        "single_stage_pipeline": False,
+        "outpaint_full_resolution_refine": official_outpaint,
+        "activated_loras": filtered_loras,
+        "loras_multipliers": " ".join(filtered_multipliers),
         # Sliding window engages automatically when total_frames > sliding_window_size
         # (wgp.py:6739). For images / very short clips, force window > clip so the
         # pipeline runs single-shot (cheaper than multi-window for tiny inputs).
         "sliding_window_size": sliding_window_size if (is_video and total_frames > sliding_window_size) else (max(total_frames, 17) + 10 if is_video else 17),
         "sliding_window_overlap": sliding_window_overlap,
         "sliding_window_discard_last_frames": sliding_window_discard_last_frames,
-        "settings_version": 2.52,
+        "settings_version": 2.53,
         # Underscore-prefixed flags survive job["params"] but get stripped by
         # the wgp.generate_video signature filter (line ~5119), so they don't
         # reach the inference pipeline. _run_generation reads them after the
@@ -16124,6 +16799,9 @@ async def outpaint_endpoint(request: Request):
         "outpaint_resolution_preset": resolution_preset,
         "outpaint_source_preservation": source_preservation,
         "outpaint_lora_strength_ui": outpaint_lora_strength,
+        "outpaint_mask_preserving": mask_preserving_outpaint,
+        "outpaint_requested_model_type": requested_model_type,
+        "edit_outpaint_raw_prompt": submitted_outpaint_prompt,
         "outpaint_trim_start": body.get("start_time"),
         "outpaint_trim_end": body.get("end_time"),
     }
@@ -17422,6 +18100,8 @@ def _stage_count_from_params(params: dict) -> int:
         return 1
     if params.get("progressive_pipeline"):
         return 3
+    if params.get("outpaint_full_resolution_refine"):
+        return 2
     if params.get("single_stage_pipeline"):
         return 1
     return 2

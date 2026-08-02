@@ -225,13 +225,15 @@ export function Sidebar() {
           >
             <BookMarked size={14} />
           </button>
-          <button
-            onClick={() => openLoraBrowser(true, modelType)}
-            className="p-2 rounded-lg bg-bg-tertiary border border-border hover:border-border-light text-text-secondary hover:text-accent-blue transition-colors shrink-0"
-            title="Browse LoRAs on CivitAI"
-          >
-            <Globe size={14} />
-          </button>
+          {!isOutpaint && (
+            <button
+              onClick={() => openLoraBrowser(true, modelType)}
+              className="p-2 rounded-lg bg-bg-tertiary border border-border hover:border-border-light text-text-secondary hover:text-accent-blue transition-colors shrink-0"
+              title="Browse LoRAs on CivitAI"
+            >
+              <Globe size={14} />
+            </button>
+          )}
           <div className="flex-1 min-w-0">
             <ModelSelector />
           </div>
