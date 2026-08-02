@@ -6,6 +6,7 @@ import importlib.util
 import os
 from pathlib import Path
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -13,6 +14,7 @@ from unittest import mock
 _ROOT = Path(__file__).resolve().parents[1]
 _APP = _ROOT / "app"
 _SERVICE_PATH = _APP / "services" / "managed_preprocessors.py"
+_FILES_LOCATOR_PATH = _APP / "shared" / "utils" / "files_locator.py"
 _WGP_PATH = _APP / "wgp.py"
 _LAUNCH_PATH = _APP / "launch.py"
 _GITIGNORE_PATH = _ROOT / ".gitignore"
@@ -25,13 +27,36 @@ def _load_service():
     app_path = str(_APP)
     if app_path not in sys.path:
         sys.path.insert(0, app_path)
+    files_spec = importlib.util.spec_from_file_location(
+        "shared.utils.files_locator", _FILES_LOCATOR_PATH,
+    )
+    if files_spec is None or files_spec.loader is None:
+        raise AssertionError("Could not load files_locator")
+    files_module = importlib.util.module_from_spec(files_spec)
+    files_spec.loader.exec_module(files_module)
+
+    shared_package = types.ModuleType("shared")
+    shared_package.__path__ = [str(_APP / "shared")]
+    utils_package = types.ModuleType("shared.utils")
+    utils_package.__path__ = [str(_APP / "shared" / "utils")]
+    utils_package.files_locator = files_module
+    shared_package.utils = utils_package
+
     spec = importlib.util.spec_from_file_location(
         "managed_preprocessors_test", _SERVICE_PATH,
     )
     if spec is None or spec.loader is None:
         raise AssertionError("Could not load managed_preprocessors")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    with mock.patch.dict(
+        sys.modules,
+        {
+            "shared": shared_package,
+            "shared.utils": utils_package,
+            "shared.utils.files_locator": files_module,
+        },
+    ):
+        spec.loader.exec_module(module)
     return module
 
 

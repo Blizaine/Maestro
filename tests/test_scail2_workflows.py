@@ -12,6 +12,12 @@ import unittest
 import numpy as np
 
 
+_requires_torch = unittest.skipUnless(
+    importlib.util.find_spec("torch") is not None,
+    "PyTorch is required for SAM3 runtime regressions",
+)
+
+
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 _LAUNCH_PATH = os.path.join(_ROOT, "app", "launch.py")
 _WGP_PATH = os.path.join(_ROOT, "app", "wgp.py")
@@ -2342,6 +2348,7 @@ class TestMultiPersonRecast(unittest.TestCase):
         )
         self.assertFalse(is_collapse(RuntimeError("CUDA out of memory")))
 
+    @_requires_torch
     def test_sam3_camera_shots_use_isolated_local_sessions(self):
         import contextlib
         import sys

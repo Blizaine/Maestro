@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
 import math
 import os
 import sys
@@ -38,6 +39,13 @@ _LTX2_HELPERS_PATH = os.path.join(
     "utils",
     "helpers.py",
 )
+_LORAS_MULTIPLIERS_PATH = os.path.join(
+    _ROOT,
+    "app",
+    "shared",
+    "utils",
+    "loras_mutipliers.py",
+)
 _CLIENT_PATH = os.path.join(_ROOT, "ui", "src", "api", "client.ts")
 _STORE_PATH = os.path.join(_ROOT, "ui", "src", "stores", "useStore.ts")
 _INPUTS_PATH = os.path.join(
@@ -58,6 +66,11 @@ _OUTPAINT_CANVAS_PATH = os.path.join(
     "components",
     "Sidebar",
     "OutpaintCanvas.tsx",
+)
+
+_requires_torch = unittest.skipUnless(
+    importlib.util.find_spec("torch") is not None,
+    "PyTorch is required for tensor-level Outpaint regressions",
 )
 
 
@@ -399,6 +412,7 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
             )["get_outpainting_dims"]
         )
 
+    @_requires_torch
     def test_portrait_canvas_is_aligned_before_mask_geometry(self):
         geometry = self.resolve_geometry(
             896,
@@ -437,6 +451,7 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
             501,
         )
 
+    @_requires_torch
     def test_mask_and_neutral_canvas_protect_the_source_rect(self):
         import torch
         from models.ltx2.inpainting import (
@@ -466,6 +481,7 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
         )
         self.assertTrue(torch.all(prepared[:, :, :, 64:] == 0))
 
+    @_requires_torch
     def test_official_outpaint_green_marker_remains_exact(self):
         import torch
         from models.ltx2.inpainting import (
@@ -485,6 +501,7 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
         )
         self.assertTrue(torch.all(prepared[:, :, :, 64:] == 0))
 
+    @_requires_torch
     def test_source_attention_uses_area_and_causal_temporal_reduction(self):
         import torch
         from models.ltx2.ltx_pipelines.utils.helpers import (
@@ -509,6 +526,7 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
         self.assertTrue(torch.all(attention[:, :, 1, :, :1] == 0))
         self.assertTrue(torch.all(attention[:, :, 1, :, 1:] == 1))
 
+    @_requires_torch
     def test_source_attention_retains_partial_outpaint_boundary_rows(self):
         import torch
         from models.ltx2.ltx_pipelines.utils.helpers import (
@@ -554,6 +572,7 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
         self.assertAlmostEqual(float(attention.sum()), 27.78125, places=5)
         self.assertEqual(int((attention > 0).sum()), 35)
 
+    @_requires_torch
     def test_single_stage_edge_extension_cannot_carry_green_canvas(self):
         import torch
         from models.ltx2.inpainting import (
@@ -592,6 +611,7 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
             torch.allclose(prepared[:, 0, 0, 0], expected_green)
         )
 
+    @_requires_torch
     def test_masked_reference_retains_canvas_and_builds_official_attention(self):
         import torch
         from models.ltx2.ltx_core.components.patchifiers import (
@@ -649,6 +669,7 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
         self.assertTrue(torch.all(result.attention_mask[:, :8, :8]))
         self.assertTrue(torch.all(result.attention_mask[:, 8:, 8:]))
 
+    @_requires_torch
     def test_unpruned_reference_matches_stable_keyframe_layout(self):
         import torch
         from models.ltx2.ltx_core.components.patchifiers import (
@@ -704,6 +725,7 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
             torch.equal(reference.clean_latent, keyframe.clean_latent)
         )
 
+    @_requires_torch
     def test_boolean_self_attention_mask_stays_compact_for_sdpa(self):
         import torch
         from models.ltx2.ltx_core.model.transformer.transformer_args import (
@@ -732,6 +754,7 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
         )
         self.assertEqual(tuple(output.shape), (1, 1, 2, 4))
 
+    @_requires_torch
     def test_clear_conditioning_drops_reference_attention_mask(self):
         import torch
         from models.ltx2.ltx_core.components.patchifiers import (
@@ -758,6 +781,7 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
         self.assertEqual(tuple(cleared.latent.shape), (1, 8, 1))
         self.assertIsNone(cleared.attention_mask)
 
+    @_requires_torch
     def test_boundary_blend_cannot_reach_deep_into_protected_source(self):
         import torch
         from models.ltx2.inpainting import _apply_ltx2_mask_blend
@@ -798,6 +822,7 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
         self.assertTrue(torch.all(result[:, :, 24, 24:104] > 0))
         self.assertTrue(torch.all(result[:, :, 31, 24:104] > 0))
 
+    @_requires_torch
     def test_official_gaussian_restore_never_grades_generated_canvas(self):
         import torch
         from models.ltx2.inpainting import _apply_ltx2_mask_blend
@@ -827,6 +852,7 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
         self.assertTrue(torch.equal(result[:, :, 64:96, 32:96], source[:, :, 64:96, 32:96]))
         self.assertTrue(torch.all(result[:, :, 32, 32:96] > 0))
 
+    @_requires_torch
     def test_green_mask_is_sanitized_before_bounded_laplacian_blend(self):
         import torch
         from models.ltx2.inpainting import (
@@ -872,6 +898,7 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
             )
         )
 
+    @_requires_torch
     def test_refinement_mask_keeps_odd_boundary_as_fractional_area(self):
         import torch
         from models.ltx2.ltx_pipelines.distilled import (
@@ -894,6 +921,7 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
         self.assertTrue(torch.all(resized[:, :, 2] == 0.5))
         self.assertTrue(torch.all(resized[:, :, 3] == 1.0))
 
+    @_requires_torch
     def test_refinement_source_removes_marker_before_area_resize(self):
         import torch
         from models.ltx2.inpainting import (
@@ -925,6 +953,7 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
             )
         )
 
+    @_requires_torch
     def test_refinement_handoff_decodes_blends_then_reencodes_pixels(self):
         from collections.abc import Callable
 
@@ -1016,6 +1045,7 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
             )
         )
 
+    @_requires_torch
     def test_generated_canvas_matches_source_render_without_touching_source(self):
         import torch
         import torch.nn.functional as F
@@ -1081,6 +1111,7 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
             )
         )
 
+    @_requires_torch
     def test_generated_canvas_removes_mask_marker_chroma_without_tinting_black(self):
         import torch
         from models.ltx2.inpainting import _apply_ltx2_mask_blend
@@ -1185,6 +1216,7 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
             )
         )
 
+    @_requires_torch
     def test_generated_only_marker_spill_uses_source_boundary_chroma(self):
         import torch
         from models.ltx2.inpainting import (
@@ -1286,6 +1318,7 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
             )
         )
 
+    @_requires_torch
     def test_low_correlation_window_cannot_reverse_boundary_chroma_fix(self):
         import torch
         from models.ltx2.inpainting import _estimate_canvas_match
@@ -1343,6 +1376,7 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
         self.assertGreater(match[3], 0.03)
         self.assertGreaterEqual(match[7], 2)
 
+    @_requires_torch
     def test_marker_spill_growing_away_from_one_seam_is_corrected_per_side(self):
         import torch
         from models.ltx2.inpainting import (
@@ -1461,6 +1495,7 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
             )
         )
 
+    @_requires_torch
     def test_single_stage_blend_leaves_generated_canvas_unfiltered(self):
         import torch
         from models.ltx2.inpainting import _apply_ltx2_mask_blend
@@ -1501,6 +1536,7 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
             )
         )
 
+    @_requires_torch
     def test_official_blend_removes_only_detected_marker_gradient(self):
         import torch
         from models.ltx2.inpainting import _apply_ltx2_mask_blend
@@ -1597,6 +1633,7 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
             )
         )
 
+    @_requires_torch
     def test_feather_factories_inherit_the_cpu_mask_device(self):
         import torch
         from models.ltx2 import inpainting
@@ -1644,6 +1681,7 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
         self.assertEqual(alpha.device, mask.device)
         self.assertEqual(gaussian_alpha.device, mask.device)
 
+    @_requires_torch
     def test_canvas_match_sampling_inherits_the_cpu_mask_device(self):
         import torch
         from models.ltx2 import inpainting
@@ -2502,13 +2540,16 @@ class TestLtx2OutpaintPipelineDispatch(unittest.TestCase):
         )
 
     def test_managed_outpaint_lora_remains_on_for_both_passes(self):
-        app_root = os.path.join(_ROOT, "app")
-        if app_root not in sys.path:
-            sys.path.insert(0, app_root)
-        from shared.utils.loras_mutipliers import (
-            expand_slist,
-            parse_loras_multipliers,
+        helpers = _load_functions(
+            _LORAS_MULTIPLIERS_PATH,
+            (
+                "preparse_loras_multipliers",
+                "expand_slist",
+                "parse_loras_multipliers",
+            ),
         )
+        expand_slist = helpers["expand_slist"]
+        parse_loras_multipliers = helpers["parse_loras_multipliers"]
 
         initial, phases, error = parse_loras_multipliers(
             "1;1",
