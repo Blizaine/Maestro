@@ -183,6 +183,12 @@ export function InputsPanel() {
   const hasLandscapeMode = refCfg?.choices?.some(([, v]) => v.includes('K')) ?? false
   const hasPeopleMode = refCfg?.choices?.some(([, v]) => v === 'I') ?? false
   const refBgLabel = modelOptions?.background_removal_label
+  // max_image_refs includes the Edit source image, when present.
+  const configuredMaxRefs = modelOptions?.max_image_refs ?? null
+  const maxRefs = configuredMaxRefs == null
+    ? null
+    : Math.max(0, configuredMaxRefs - ((params.image_mode as number) === 2 ? 1 : 0))
+  const canAddRef = maxRefs == null || imageRefs.length < maxRefs
   const defaultRefType = hasLandscapeMode ? 'KI' : hasPeopleMode ? 'I' : ''
 
   // Auto-set the ref type when references are added/removed (mirrors ImageRefSection).
@@ -197,7 +203,11 @@ export function InputsPanel() {
     input.type = 'file'
     input.accept = '.png,.jpg,.jpeg,.webp,.bmp'
     input.multiple = true
-    input.onchange = () => Array.from(input.files || []).forEach(addImageRef)
+    input.onchange = () => {
+      const files = Array.from(input.files || [])
+      const room = maxRefs == null ? files.length : Math.max(0, maxRefs - imageRefs.length)
+      files.slice(0, room).forEach(addImageRef)
+    }
     input.click()
   }
 
@@ -635,7 +645,7 @@ export function InputsPanel() {
             </div>
           </div>
         ))}
-        {supportsRefs && <AddTile label="Reference" icon={<Plus size={18} />} onClick={pickReferences} onDropFile={addImageRef} dropAccept="image" />}
+        {supportsRefs && canAddRef && <AddTile label="Reference" icon={<Plus size={18} />} onClick={pickReferences} onDropFile={addImageRef} dropAccept="image" />}
       </div>
 
       {/* Option strip — Frame: position picker (routes start / end / inject

@@ -544,11 +544,14 @@ const SFX_VIRTUAL_MODELS: ModelDef[] = [
 // Default enabled models (shown by default in selectors)
 const DEFAULT_ENABLED_MODELS = new Set([
   // Image
-  // Only Flux 2 Klein is enabled by default. Qwen Image Edit and
-  // other image models stay available via Settings → System → Model
-  // Visibility but are off by default to keep the first-launch
-  // picker focused.
+  // Keep the general-purpose Flux default plus the complete Krea 2 family:
+  // base RAW/Turbo generation and their identity-preserving Edit variants.
+  // Other image models remain opt-in through Model Visibility.
   'flux2_klein_9b',
+  'krea2_raw',
+  'krea2_turbo',
+  'krea2_raw_edit',
+  'krea2_turbo_edit',
   // Video
   // Default to just the LTX-2.3 Distilled 1.1 22B checkpoint (newer /
   // better quality). The FP8 build and every other video model
@@ -588,7 +591,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
  * a user who then disables them stays disabled forever. (This is
  * deliberately narrower than auto-enabling every unknown model — only
  * the curated list's own additions are pushed.) */
-const DEFAULTS_VERSION = 4
+const DEFAULTS_VERSION = 5
 const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   // v1.2.0: the ACE-Step XL SFT pair; LM_4B becomes the music default.
   2: ['ace_step_v1_5_xl_sft', 'ace_step_v1_5_xl_sft_lm_4b'],
@@ -596,6 +599,8 @@ const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   3: ['scail2_14B', 'scail2_14B_fast'],
   // Dedicated Recast recipe: native replacement + official I2V LightX point.
   4: ['scail2_14B_recast_fast'],
+  // Krea 2 image generation + identity-preserving image editing.
+  5: ['krea2_raw', 'krea2_turbo', 'krea2_raw_edit', 'krea2_turbo_edit'],
 }
 const DEFAULTS_VERSION_KEY = 'maestro_defaults_version'
 

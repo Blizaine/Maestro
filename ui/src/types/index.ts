@@ -232,6 +232,7 @@ export interface ModelOptions {
   image_ref_choices: ChoiceConfig | null
   audio_prompt_type_sources: ChoiceConfig | null
   background_removal_label: string | null
+  max_image_refs?: number | null
   sample_solvers: [string, string][] | null
   self_refiner: boolean
   self_refiner_max_plans: number

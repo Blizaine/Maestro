@@ -399,12 +399,24 @@ def _check_model_downloaded(model_type: str) -> bool:
     transformer + each weight module) must be present.
     """
     try:
-        if wgp.get_model_def(model_type) is None:
+        model_def = wgp.get_model_def(model_type)
+        if model_def is None:
             return False
         groups = _model_weight_groups(model_type)
         if not groups:
             return False
         if not all(_variant_group_downloaded(g) for g in groups):
+            return False
+        # Some edit pipelines split required conditioning weights out of the
+        # main transformer/text-encoder groups. Krea 2 Edit cannot run without
+        # its Qwen3-VL vision tower, so do not report it as ready until that
+        # preloaded companion file is actually discoverable (including through
+        # linked checkpoint roots).
+        vision_encoder_filename = model_def.get("vision_encoder_filename")
+        if (
+            vision_encoder_filename
+            and wgp.fl.locate_file(vision_encoder_filename, error_if_none=False) is None
+        ):
             return False
         # Def-bundled accelerator loras (e.g. SCAIL-2 Fast's lightx2v
         # distill) are loaded unconditionally at generation time, so they
@@ -2011,6 +2023,8 @@ CIVIT_TO_LOCAL_ARCH = {
     "LTXV 2.3": "ltx2",
     # Qwen Image
     "Qwen": "qwen_image_20B",
+    # Krea 2
+    "Krea 2": "krea2",
     # Other
     "ZImageTurbo": "z_image",
     "Mochi": "mocha",
@@ -2086,6 +2100,9 @@ HF_BASE_TO_LOCAL_DIR = {
     "tencent/HunyuanVideo": "hunyuan",
     "Qwen/Qwen-Image-Edit-2511": "qwen",
     "Alibaba/Qwen-Image-20B": "qwen",
+    "krea/Krea-2-Raw": "krea2",
+    "krea/Krea-2-Turbo": "krea2",
+    "DeepBeepMeep/krea-2": "krea2",
 }
 
 # Smart base model filters for the browser.
@@ -2128,6 +2145,7 @@ CIVITAI_MODEL_FILTERS = [
     {"label": "Flux.2 Klein 9B", "civitai_base": "Flux.2 Klein 9B,Flux.2 Klein 9B-base", "default_dir": "flux2_klein_9b"},
     {"label": "Flux.2 Klein 4B", "civitai_base": "Flux.2 Klein 4B,Flux.2 Klein 4B-base", "default_dir": "flux2_klein_4b"},
     {"label": "Qwen", "civitai_base": "Qwen", "default_dir": "qwen"},
+    {"label": "Krea 2", "civitai_base": "Krea 2", "default_dir": "krea2"},
     {"label": "ZImageTurbo", "civitai_base": "ZImageTurbo", "default_dir": "z_image"},
 ]
 
@@ -5032,6 +5050,7 @@ def get_model_options(model_type: str):
 
         # Image reference options
         "background_removal_label": md.get("background_removal_label"),
+        "max_image_refs": md.get("max_image_refs"),
         "sample_solvers": solvers,
 
         # Self refiner
