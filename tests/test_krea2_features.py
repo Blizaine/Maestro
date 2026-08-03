@@ -236,7 +236,8 @@ class TestKrea2LoraBrowser(unittest.TestCase):
         ):
             with self.subTest(model_type=model_type):
                 self.assertIn(f"'{model_type}'", default_block)
-        self.assertIn("const DEFAULTS_VERSION = 5", store)
+        defaults_version = int(store.split("const DEFAULTS_VERSION = ", 1)[1].splitlines()[0])
+        self.assertGreaterEqual(defaults_version, 5)
         self.assertIn(
             "5: ['krea2_raw', 'krea2_turbo', 'krea2_raw_edit', 'krea2_turbo_edit']",
             store,

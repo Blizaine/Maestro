@@ -564,6 +564,8 @@ const DEFAULT_ENABLED_MODELS = new Set([
   'scail2_14B',
   'scail2_14B_fast',
   'scail2_14B_recast_fast',
+  // MiniMax H3 Base: text, first/last-frame video, and native stereo audio.
+  'minimax_h3',
   // Audio — Speech
   'kugelaudio_0_open',
   'qwen3_tts_base',
@@ -591,7 +593,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
  * a user who then disables them stays disabled forever. (This is
  * deliberately narrower than auto-enabling every unknown model — only
  * the curated list's own additions are pushed.) */
-const DEFAULTS_VERSION = 5
+const DEFAULTS_VERSION = 6
 const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   // v1.2.0: the ACE-Step XL SFT pair; LM_4B becomes the music default.
   2: ['ace_step_v1_5_xl_sft', 'ace_step_v1_5_xl_sft_lm_4b'],
@@ -601,6 +603,8 @@ const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   4: ['scail2_14B_recast_fast'],
   // Krea 2 image generation + identity-preserving image editing.
   5: ['krea2_raw', 'krea2_turbo', 'krea2_raw_edit', 'krea2_turbo_edit'],
+  // MiniMax H3 Base native audio-video generation.
+  6: ['minimax_h3'],
 }
 const DEFAULTS_VERSION_KEY = 'maestro_defaults_version'
 

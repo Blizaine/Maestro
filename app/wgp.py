@@ -2059,7 +2059,7 @@ def update_generation_status(html_content):
     if(html_content):
         return gr.update(value=html_content)
 
-family_handlers = ["models.wan.wan_handler", "models.wan.ovi_handler", "models.wan.df_handler", "models.hyvideo.hunyuan_handler", "models.ltx_video.ltxv_handler", "models.ltx2.ltx2_handler", "models.ltx2.scenema_audio_handler", "models.ltx2.ltx_audio_tts_handler", "models.longcat.longcat_handler", "models.flux.flux_handler", "models.qwen.qwen_handler", "models.kandinsky5.kandinsky_handler",  "models.z_image.z_image_handler", "models.krea2.krea2_handler", "models.hidream.hidream_handler", "models.TTS.ace_step_handler", "models.TTS.chatterbox_handler", "models.TTS.qwen3_handler", "models.TTS.yue_handler", "models.TTS.heartmula_handler", "models.TTS.kugelaudio_handler", "models.TTS.index_tts2_handler"]
+family_handlers = ["models.wan.wan_handler", "models.wan.ovi_handler", "models.wan.df_handler", "models.hyvideo.hunyuan_handler", "models.ltx_video.ltxv_handler", "models.ltx2.ltx2_handler", "models.ltx2.scenema_audio_handler", "models.ltx2.ltx_audio_tts_handler", "models.minimax_h3.minimax_h3_handler", "models.longcat.longcat_handler", "models.flux.flux_handler", "models.qwen.qwen_handler", "models.kandinsky5.kandinsky_handler",  "models.z_image.z_image_handler", "models.krea2.krea2_handler", "models.hidream.hidream_handler", "models.TTS.ace_step_handler", "models.TTS.chatterbox_handler", "models.TTS.qwen3_handler", "models.TTS.yue_handler", "models.TTS.heartmula_handler", "models.TTS.kugelaudio_handler", "models.TTS.index_tts2_handler"]
 DEFAULT_LORA_ROOT = "loras"
 
 def register_family_lora_args(parser, lora_root):
@@ -2865,6 +2865,39 @@ def get_model_min_frames_and_step(model_type):
     frames_steps = model_def.get("frames_steps", 4)
     latent_size = model_def.get("latent_size", frames_steps)
     return frames_minimum, frames_steps, latent_size 
+
+def align_model_frame_count(frame_count, model_def, for_generation=False):
+    """Align a requested frame count to a model's native temporal grid."""
+    frame_count = int(frame_count)
+    modulus = int(model_def.get("frame_alignment_modulus", 0) or 0)
+    if modulus > 0:
+        remainder = int(model_def.get("frame_alignment_remainder", 1)) % modulus
+        minimum = int(model_def.get("frames_minimum", 1))
+        maximum = model_def.get("frames_maximum", None)
+        frame_count = max(minimum, frame_count)
+        if maximum is not None:
+            frame_count = min(int(maximum), frame_count)
+
+        delta = (frame_count - remainder) % modulus
+        mode = str(model_def.get("frame_alignment_mode", "floor")).lower()
+        if delta:
+            if mode == "ceil":
+                frame_count += modulus - delta
+            elif mode == "nearest":
+                frame_count += modulus - delta if delta >= modulus / 2 else -delta
+            else:
+                frame_count -= delta
+
+        if maximum is not None and frame_count > int(maximum):
+            frame_count -= modulus
+        if frame_count < minimum:
+            frame_count += modulus
+        return frame_count
+
+    latent_size = int(model_def.get("latent_size", model_def.get("frames_steps", 4)))
+    if for_generation:
+        return (frame_count // latent_size) * latent_size + 1
+    return (frame_count - 1) // latent_size * latent_size + 1
     
 def get_model_fps(model_type):
     model_def = get_model_def(model_type)
@@ -3536,7 +3569,7 @@ def get_local_model_filename(model_filename, use_locator = True, extra_paths = N
     
 
 
-def process_files_def(repoId = None, sourceFolderList = None, fileList = None, targetFolderList = None):
+def process_files_def(repoId = None, sourceFolderList = None, fileList = None, targetFolderList = None, revision = None):
     if targetFolderList is None:
         targetFolderList = [None] * len(sourceFolderList)
     for targetFolder, sourceFolder, files in zip(targetFolderList, sourceFolderList,fileList ):
@@ -3546,7 +3579,12 @@ def process_files_def(repoId = None, sourceFolderList = None, fileList = None, t
         local_dir = os.path.join(targetRoot, targetFolder) if targetFolder is not None else targetRoot
         if len(files)==0:
             if fl.locate_folder(sourceFolder if targetFolder is None else os.path.join(targetFolder, sourceFolder), error_if_none= False ) is None:
-                snapshot_download(repo_id=repoId,  allow_patterns=sourceFolder +"/*", local_dir= local_dir)
+                snapshot_download(
+                    repo_id=repoId,
+                    revision=revision,
+                    allow_patterns=sourceFolder + "/*",
+                    local_dir=local_dir,
+                )
         else:
             folder_parts = [p for p in (targetFolder, sourceFolder) if p]
             if folder_parts:
@@ -3580,13 +3618,29 @@ def process_files_def(repoId = None, sourceFolderList = None, fileList = None, t
                     for onefile, rel_key in zip(files, rel_keys):
                         if not os.path.isfile(os.path.join(targetRoot, rel_key)):
                             if len(sourceFolder) > 0:
-                                hf_download_with_public_fallback(repo_id=repoId,  filename=onefile, local_dir = local_dir, subfolder=sourceFolder)
+                                hf_download_with_public_fallback(
+                                    repo_id=repoId,
+                                    revision=revision,
+                                    filename=onefile,
+                                    local_dir=local_dir,
+                                    subfolder=sourceFolder,
+                                )
                             else:
-                                hf_download_with_public_fallback(repo_id=repoId,  filename=onefile, local_dir = local_dir)
+                                hf_download_with_public_fallback(
+                                    repo_id=repoId,
+                                    revision=revision,
+                                    filename=onefile,
+                                    local_dir=local_dir,
+                                )
             else:
                 for onefile in files:
                     if fl.locate_file(onefile, error_if_none= False) is None:
-                        hf_download_with_public_fallback(repo_id=repoId,  filename=onefile, local_dir = local_dir)
+                        hf_download_with_public_fallback(
+                            repo_id=repoId,
+                            revision=revision,
+                            filename=onefile,
+                            local_dir=local_dir,
+                        )
 
 
 def download_mmaudio(variant_override=None):
@@ -3661,21 +3715,34 @@ def hf_download_with_public_fallback(**kwargs):
         raise
 
 def download_file(url,filename):
-    if url.startswith("https://huggingface.co/") and "/resolve/main/" in url:
+    hf_match = re.match(
+        r"^https://huggingface\.co/([^/]+/[^/]+)/resolve/([^/]+)/(.+)$",
+        url,
+    )
+    if hf_match is not None:
         base_dir = os.path.dirname(filename)
-        url = url[len("https://huggingface.co/"):]
-        url_parts = url.split("/resolve/main/")
-        repoId = url_parts[0]
-        onefile = os.path.basename(url_parts[-1])
-        sourceFolder = os.path.dirname(url_parts[-1])
+        repoId, revision, repo_path = hf_match.groups()
+        onefile = os.path.basename(repo_path)
+        sourceFolder = os.path.dirname(repo_path)
         if len(sourceFolder) == 0:
-            hf_download_with_public_fallback(repo_id=repoId,  filename=onefile, local_dir = fl.get_download_location() if len(base_dir)==0 else base_dir)
+            hf_download_with_public_fallback(
+                repo_id=repoId,
+                revision=revision,
+                filename=onefile,
+                local_dir=fl.get_download_location() if len(base_dir) == 0 else base_dir,
+            )
         else:
             temp_dir_path = os.path.join(fl.get_download_location(), "temp")
             target_path = os.path.join(temp_dir_path, sourceFolder)
             if not os.path.exists(target_path):
                 os.makedirs(target_path)
-            hf_download_with_public_fallback(repo_id=repoId,  filename=onefile, local_dir = temp_dir_path, subfolder=sourceFolder)
+            hf_download_with_public_fallback(
+                repo_id=repoId,
+                revision=revision,
+                filename=onefile,
+                local_dir=temp_dir_path,
+                subfolder=sourceFolder,
+            )
             final_dir = fl.get_download_location() if len(base_dir)==0 else base_dir
             # shutil.move(file, missing_dir) RENAMES the file to the dir's
             # path — a 13GB text encoder became a file literally named
@@ -7430,7 +7497,7 @@ def generate_video(
     model_filename = get_model_filename(base_model_type)  
 
     _, _, latent_size = get_model_min_frames_and_step(model_type)
-    video_length = (video_length -1) // latent_size * latent_size + 1
+    video_length = align_model_frame_count(video_length, model_def)
     published_video_length = video_length
     recast_warmup_frames = _resolve_scail2_recast_warmup_frames(
         custom_settings, model_def, video_prompt_type, latent_size,
@@ -8389,7 +8456,7 @@ def generate_video(
                     denoising_strength=denoising_strength,
                     masking_strength=masking_strength,
                     prefix_frames_count = prefix_frames_count,
-                    frame_num= (current_video_length // latent_size)* latent_size + 1,
+                    frame_num=align_model_frame_count(current_video_length, model_def, for_generation=True),
                     batch_size = batch_size,
                     height = image_size[0],
                     width = image_size[1],
@@ -12529,7 +12596,13 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                     current_video_length = video_length_locked if video_length_locked is not None else ui_get("video_length", 81 if get_model_family(base_model_type)=="wan" else 97)
 
                     computed_fps = get_computed_fps(ui_get("force_fps"), base_model_type , ui_defaults.get("video_guide", None), ui_defaults.get("video_source", None))
-                    video_length = gr.Slider(0 if audio_only else min_frames, get_max_frames(737 if test_any_sliding_window(base_model_type) else 337), value=current_video_length, 
+                    model_frames_maximum = model_def.get("frames_maximum", None)
+                    max_frames = (
+                        int(model_frames_maximum)
+                        if model_frames_maximum is not None
+                        else get_max_frames(737 if test_any_sliding_window(base_model_type) else 337)
+                    )
+                    video_length = gr.Slider(0 if audio_only else min_frames, max_frames, value=current_video_length,
                          step=frames_step, label=compute_video_length_label(computed_fps, current_video_length, video_length_locked) , visible = True, interactive= video_length_locked is None, show_reset_button= False)
 
             with gr.Row(visible = not lock_inference_steps) as inference_steps_row:                                       

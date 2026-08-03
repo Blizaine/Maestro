@@ -458,7 +458,7 @@ def list_models():
             "guidance_max_phases": md.get("guidance_max_phases", 1),
             "fps": md.get("fps", 16),
             "supports_end_frame": "E" in md.get("image_prompt_types_allowed", ""),
-            "supports_audio": bool(md.get("any_audio_prompt", False)),
+            "supports_audio": bool(md.get("any_audio_prompt", False) or md.get("returns_audio", False)),
             "supports_ref_images": bool(md.get("image_ref_choices")),
             "is_downloaded": _check_model_downloaded(mt),
             # When True, the UI hides this model unless Mature Mode is
