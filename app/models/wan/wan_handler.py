@@ -458,6 +458,7 @@ class family_handler():
                     "scail2_identity_latent_isolation",
                     "scail2_identity_latent_reference_index",
                     "scail2_recast_warmup_frames",
+                    "scail2_recast_warmup_anchor_offset",
                     "scail2_dynamic_source_scene_reference",
                     "scail2_timeline_source_scene_reference",
                     "scail2_source_scene_reference_path",

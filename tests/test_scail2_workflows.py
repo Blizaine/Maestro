@@ -464,6 +464,17 @@ class TestScail2ControlVideoFraming(unittest.TestCase):
         )
         self.assertEqual(padded[9:, 0, 0, 0].tolist(), list(range(1, 10)))
 
+        anchored = prepend_motion(raw, 4, anchor_offset=9)
+        self.assertEqual(tuple(anchored.shape), (14, 1, 1, 1))
+        self.assertEqual(
+            anchored[:5, 0, 0, 0].tolist(),
+            [9, 6, 4, 1, 0],
+        )
+        self.assertEqual(
+            anchored[5:, 0, 0, 0].tolist(),
+            list(range(1, 10)),
+        )
+
         short = torch.arange(3, dtype=torch.uint8).view(3, 1, 1, 1)
         padded = prepend_motion(short, 8)
         self.assertEqual(tuple(padded.shape), (11, 1, 1, 1))
@@ -474,10 +485,11 @@ class TestScail2ControlVideoFraming(unittest.TestCase):
 
         repeated = repeat_first(short, 2)
         self.assertEqual(repeated[:, 0, 0, 0].tolist(), [0, 0, 0, 1, 2])
+        source = _read(_WGP_PATH)
+        self.assertIn("def prepend_padding(video):", source)
         self.assertIn(
-            "prepend_padding = (\n"
-            "        _prepend_reverse_motion_preroll",
-            _read(_WGP_PATH),
+            '"scail2_recast_warmup_anchor_offset"',
+            source,
         )
 
     def test_control_dimensions_are_shared_by_animate_and_replace(self):
@@ -693,6 +705,7 @@ class TestRuntimeCustomSettings(unittest.TestCase):
                 "scail2_identity_latent_isolation",
                 "scail2_identity_latent_reference_index",
                 "scail2_recast_warmup_frames",
+                "scail2_recast_warmup_anchor_offset",
                 "scail2_primary_only_continuations",
             ],
         }
@@ -708,6 +721,7 @@ class TestRuntimeCustomSettings(unittest.TestCase):
                     "scail2_identity_latent_isolation": True,
                     "scail2_identity_latent_reference_index": 1,
                     "scail2_recast_warmup_frames": 8,
+                    "scail2_recast_warmup_anchor_offset": 50,
                     "scail2_primary_only_continuations": True,
                     "untrusted_unknown_key": "discard me",
                 },
@@ -729,6 +743,10 @@ class TestRuntimeCustomSettings(unittest.TestCase):
         self.assertIs(parsed["scail2_identity_latent_isolation"], True)
         self.assertEqual(parsed["scail2_identity_latent_reference_index"], 1)
         self.assertEqual(parsed["scail2_recast_warmup_frames"], 8)
+        self.assertEqual(
+            parsed["scail2_recast_warmup_anchor_offset"],
+            50,
+        )
         self.assertIs(parsed["scail2_primary_only_continuations"], True)
         self.assertNotIn("untrusted_unknown_key", parsed)
 
@@ -1610,6 +1628,86 @@ class TestMultiPersonRecast(unittest.TestCase):
         self.assertTrue(shots[2]["cooccurring"])
         self.assertIn(shots[2]["anchor_frame_index"], range(12, 20))
 
+    def test_shot_plan_splits_when_second_character_enters_mid_shot(self):
+        plan = self.helpers["_plan_recast_shot_segments"]
+        blue = np.zeros((30, 12, 20, 3), dtype=np.uint8)
+        red = np.zeros_like(blue)
+        red[:, 2:10, 2:6] = (255, 0, 0)
+        blue[10:, 2:10, 14:18] = (0, 0, 255)
+
+        segments = plan(
+            [blue, red],
+            [(0, 30)],
+            split_cast_transitions=True,
+            min_cast_run_frames=4,
+        )
+
+        self.assertEqual(
+            [(item["start_frame"], item["end_frame"]) for item in segments],
+            [(0, 10), (10, 30)],
+        )
+        self.assertEqual(
+            [item["active_mapping_indices"] for item in segments],
+            [[1], [0, 1]],
+        )
+        self.assertEqual(
+            [item["mode"] for item in segments],
+            ["solo", "group"],
+        )
+        self.assertEqual(
+            [item["cast_segment_index"] for item in segments],
+            [0, 1],
+        )
+        self.assertEqual(segments[1]["segment_reason"], "cast_change")
+        self.assertTrue(all(
+            item["starts_with_all_active_mappings"] for item in segments
+        ))
+
+    def test_shot_plan_splits_when_character_exits_mid_shot(self):
+        plan = self.helpers["_plan_recast_shot_segments"]
+        blue = np.zeros((30, 12, 20, 3), dtype=np.uint8)
+        red = np.zeros_like(blue)
+        blue[:20, 2:10, 2:6] = (0, 0, 255)
+        red[:, 2:10, 14:18] = (255, 0, 0)
+
+        segments = plan(
+            [blue, red],
+            [(0, 30)],
+            split_cast_transitions=True,
+            min_cast_run_frames=4,
+        )
+
+        self.assertEqual(
+            [(item["start_frame"], item["end_frame"]) for item in segments],
+            [(0, 20), (20, 30)],
+        )
+        self.assertEqual(
+            [item["active_mapping_indices"] for item in segments],
+            [[0, 1], [1]],
+        )
+
+    def test_shot_plan_ignores_brief_tracking_dropout(self):
+        plan = self.helpers["_plan_recast_shot_segments"]
+        blue = np.zeros((30, 12, 20, 3), dtype=np.uint8)
+        red = np.zeros_like(blue)
+        blue[:, 2:10, 2:6] = (0, 0, 255)
+        red[:, 2:10, 14:18] = (255, 0, 0)
+        blue[12:14] = 0
+
+        segments = plan(
+            [blue, red],
+            [(0, 30)],
+            split_cast_transitions=True,
+            min_cast_run_frames=4,
+        )
+
+        self.assertEqual(len(segments), 1)
+        self.assertEqual(segments[0]["active_mapping_indices"], [0, 1])
+        self.assertEqual(
+            (segments[0]["start_frame"], segments[0]["end_frame"]),
+            (0, 30),
+        )
+
     def test_shot_mask_reassigns_active_character_to_local_blue(self):
         remap = self.helpers["_remap_recast_shot_mask"]
         semantic = np.full((2, 8, 12, 3), 255, dtype=np.uint8)
@@ -1892,9 +1990,36 @@ class TestMultiPersonRecast(unittest.TestCase):
                 minimum_frames=5,
                 latent_size=4,
             )
+            late_blue = np.zeros((20, 8, 12, 3), dtype=np.uint8)
+            persistent_red = np.zeros_like(late_blue)
+            late_blue[8:, 1:7, 1:5] = colors[0]
+            persistent_red[:, 1:7, 7:11] = colors[1]
+            transition_result = build(
+                {
+                    "custom_settings": {},
+                    "prompt": (
+                        "A blonde woman in silver fights a redhead in black."
+                    ),
+                },
+                {
+                    "source_frames": np.full_like(late_blue, 40),
+                    "mapping_masks": [late_blue, persistent_red],
+                    "shot_ranges": [(0, 20)],
+                },
+                {},
+                temp_dir,
+                "job456",
+                reference_canvas=(12, 8),
+                target_frame_count=20,
+                generation_fps=30,
+                minimum_frames=5,
+                latent_size=4,
+            )
 
             self.assertEqual(len(result["tasks"]), 2)
             self.assertEqual(len(result["shots"]), 3)
+            self.assertEqual(result["camera_shot_count"], 3)
+            self.assertEqual(result["cast_transition_count"], 0)
             self.assertEqual(result["shots"][2]["mode"], "passthrough")
             self.assertTrue(
                 os.path.isfile(result["shots"][2]["passthrough_path"]),
@@ -1914,6 +2039,47 @@ class TestMultiPersonRecast(unittest.TestCase):
             self.assertEqual(
                 result["tasks"][1]["params"]["prompt"],
                 "A blonde woman in silver fights a redhead in black.",
+            )
+            self.assertEqual(transition_result["camera_shot_count"], 1)
+            self.assertEqual(transition_result["cast_transition_count"], 1)
+            self.assertEqual(len(transition_result["shots"]), 1)
+            self.assertEqual(len(transition_result["tasks"]), 1)
+            self.assertEqual(
+                [
+                    item["active_mapping_indices"]
+                    for item in transition_result["shots"]
+                ],
+                [[0, 1]],
+            )
+            self.assertFalse(
+                transition_result["shots"][0][
+                    "starts_with_all_active_mappings"
+                ],
+            )
+            self.assertEqual(
+                transition_result["shots"][0][
+                    "first_all_active_frame_index"
+                ],
+                8,
+            )
+            transition_settings = transition_result["tasks"][0][
+                "params"
+            ]["custom_settings"]
+            self.assertEqual(
+                transition_settings["scail2_recast_warmup_frames"],
+                8,
+            )
+            self.assertEqual(
+                transition_settings[
+                    "scail2_recast_warmup_anchor_offset"
+                ],
+                19,
+            )
+            self.assertEqual(
+                transition_result["published_shots"][0][
+                    "identity_warmup_anchor_frame_index"
+                ],
+                19,
             )
 
     def test_repaint_shot_manifest_preserves_scene_and_exact_timeline(self):

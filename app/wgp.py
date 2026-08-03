@@ -6720,25 +6720,44 @@ def _prepend_first_video_frame(video, frame_count):
     return torch.cat([repeated, video], dim=0)
 
 
-def _prepend_reverse_motion_preroll(video, frame_count):
+def _prepend_reverse_motion_preroll(
+    video, frame_count, anchor_offset=None,
+):
     """Prepend disposable reverse motion ending immediately before frame zero.
 
     Repeating frame zero does not consume SCAIL-2's reference-to-control
     transition: the transition simply waits until real control motion starts.
     Walking the first source frames backwards gives the model real motion
     during the internal pre-roll while still landing exactly on source frame
-    zero when the published timeline begins.
+    zero when the published timeline begins. When a mapped identity enters
+    later in one continuous camera shot, ``anchor_offset`` starts the hidden
+    walk at a strong frame where every identity is visible. The walk is
+    sampled down to the bounded pre-roll length, so no visible cut is added.
     """
     count = max(0, int(frame_count or 0))
     if video is None or count == 0 or video.shape[0] == 0:
         return video
-    available = min(count, max(0, int(video.shape[0]) - 1))
+    maximum_offset = max(0, int(video.shape[0]) - 1)
+    try:
+        requested_anchor = int(anchor_offset)
+    except (TypeError, ValueError):
+        requested_anchor = count
+    available = min(maximum_offset, max(0, requested_anchor))
     if available == 0:
         return _prepend_first_video_frame(video, count)
-    reverse_motion = video[1:available + 1].flip(0)
-    if available < count:
+    if available > count:
+        indices = torch.linspace(
+            float(available),
+            1.0,
+            steps=count,
+            device=video.device,
+        ).round().to(dtype=torch.long)
+        reverse_motion = video.index_select(0, indices)
+    else:
+        reverse_motion = video[1:available + 1].flip(0)
+    if len(reverse_motion) < count:
         farthest = reverse_motion[:1].expand(
-            count - available, *video.shape[1:],
+            count - len(reverse_motion), *video.shape[1:],
         )
         reverse_motion = torch.cat([farthest, reverse_motion], dim=0)
     return torch.cat([reverse_motion, video], dim=0)
@@ -6764,19 +6783,33 @@ def custom_preprocess_video_with_mask(model_handler, base_model_type, pre_video_
         and isinstance(custom_settings, dict)
         and bool(custom_settings.get("scail2_recast_warmup_frames", 0))
     )
-    prepend_padding = (
-        _prepend_reverse_motion_preroll
-        if recast_motion_preroll
-        else _prepend_first_video_frame
-    )
+    try:
+        recast_warmup_anchor_offset = int(
+            custom_settings.get(
+                "scail2_recast_warmup_anchor_offset",
+                0,
+            ) or 0
+        ) if isinstance(custom_settings, dict) else 0
+    except (TypeError, ValueError):
+        recast_warmup_anchor_offset = 0
+
+    def prepend_padding(video):
+        if recast_motion_preroll:
+            return _prepend_reverse_motion_preroll(
+                video,
+                pad_frames,
+                anchor_offset=(recast_warmup_anchor_offset or None),
+            )
+        return _prepend_first_video_frame(video, pad_frames)
+
     video_guide = get_resampled_video(video_guide, start_frame, max_frames, target_fps)
-    video_guide = prepend_padding(video_guide, pad_frames)
+    video_guide = prepend_padding(video_guide)
     if not raw_custom_preprocessor_inputs:
         video_guide = video_guide.permute(-1, 0, 1, 2) / 127.5 - 1.
     any_mask = video_mask is not None
     if video_mask is not None:
         video_mask = get_resampled_video(video_mask, start_frame, max_frames, target_fps)
-        video_mask = prepend_padding(video_mask, pad_frames)
+        video_mask = prepend_padding(video_mask)
         if not raw_custom_preprocessor_inputs:
             video_mask = video_mask.permute(-1, 0, 1, 2)[:1] / 255.
 
