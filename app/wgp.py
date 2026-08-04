@@ -7203,7 +7203,14 @@ def generate_video(
     
     base_model_type = get_base_model_type(model_type)
     model_handler = get_model_handler(base_model_type)
-    block_size = model_handler.get_vae_block_size(base_model_type) if hasattr(model_handler, "get_vae_block_size") else 16
+    # Handlers defining get_vae_block_size() still win, but fall back to the
+    # model_def key before the generic 16. Several handlers declare
+    # "vae_block_size" without the method, and nothing read it — models/hidream
+    # asks for 32 and was silently snapping dimensions to 16.
+    if hasattr(model_handler, "get_vae_block_size"):
+        block_size = model_handler.get_vae_block_size(base_model_type)
+    else:
+        block_size = model_def.get("vae_block_size", 16)
 
     if "P" in preload_model_policy and not "U" in preload_model_policy:
         while wan_model == None:
