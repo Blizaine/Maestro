@@ -15,6 +15,13 @@ import os
 
 import torch
 
+from .prompt_enhancer import (
+    FL2VA_IMAGE_SYSTEM_PROMPT,
+    FL2VA_TEXT_SYSTEM_PROMPT,
+    REF2VA_IMAGE_SYSTEM_PROMPT,
+    REF2VA_TEXT_SYSTEM_PROMPT,
+)
+
 
 _MODEL_TYPE = "minimax_h3"
 _MODEL_TYPE_REF2VA = "minimax_h3_ref2va"
@@ -116,6 +123,30 @@ class family_handler:
             "text_encoder_URLs": [
                 _hf_url(_COMFY_REPO, _COMFY_REVISION, "text_encoders", _TEXT_ENCODER)
             ],
+            # H3 does not read a free-form prompt: it reads a structured, field-by-field block with its own
+            # dialogue markup. A generic enhancer rewrites that into prose the model cannot parse, so the two
+            # tasks get their own instructions. Ref2VA's are longer because its prompt has six sections, not three.
+            "prompt_enhancer_button_label": "Write H3 Prompt",
+            "prompt_enhancer_def": {
+                "selection": ["T", "TI"],
+                "labels": {
+                    "T": "Write an H3 Reference Prompt from Text"
+                    if reference_mode
+                    else "Write an H3 Prompt from Text",
+                    "TI": "Write an H3 Reference Prompt from Text + First Reference Image"
+                    if reference_mode
+                    else "Write an H3 Prompt from Text + Start Image",
+                },
+                "default": "",
+            },
+            "text_prompt_enhancer_instructions": (
+                REF2VA_TEXT_SYSTEM_PROMPT if reference_mode else FL2VA_TEXT_SYSTEM_PROMPT
+            ),
+            "video_prompt_enhancer_instructions": (
+                REF2VA_IMAGE_SYSTEM_PROMPT if reference_mode else FL2VA_IMAGE_SYSTEM_PROMPT
+            ),
+            "text_prompt_enhancer_max_tokens": 2048 if reference_mode else 1024,
+            "video_prompt_enhancer_max_tokens": 2048 if reference_mode else 1024,
         }
         if reference_mode:
             # Ref2VA conditions on material that is not on the output timeline, so it takes no start/end frame.
