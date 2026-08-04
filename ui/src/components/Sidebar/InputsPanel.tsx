@@ -716,7 +716,9 @@ export function InputsPanel() {
             </div>
           </div>
         ))}
-        {supportsRefs && canAddRef && <AddTile label="Reference" icon={<Plus size={18} />} onClick={pickReferences} onDropFile={dropOnReferenceTile} dropAccept={supportsRefVideo ? ['image', 'video'] : 'image'} />}
+        {/* The tile says what it takes. Only models that actually accept a reference clip advertise one --
+            everywhere else it stays "Reference" and stays image-only. */}
+        {supportsRefs && canAddRef && <AddTile label={supportsRefVideo ? 'Reference (Image and/or Video)' : 'Reference'} icon={<Plus size={18} />} onClick={pickReferences} onDropFile={dropOnReferenceTile} dropAccept={supportsRefVideo ? ['image', 'video'] : 'image'} />}
       </div>
 
       {/* Option strip — Frame: position picker (routes start / end / inject
@@ -897,7 +899,7 @@ function AddTile({ label, icon, onClick, onDropFile, dropAccept }: {
       onDragOver={onDropFile ? (e => e.preventDefault()) : undefined}
       className="w-[90px] h-[90px] shrink-0 rounded-xl border border-dashed border-border hover:border-accent-blue flex flex-col items-center justify-center gap-1 text-text-muted hover:text-text-primary transition-colors">
       {icon ?? <Plus size={18} />}
-      <span className="text-[10px] text-center px-1">{label}</span>
+      <span className="text-[10px] leading-tight text-center px-1">{label}</span>
     </button>
   )
 }
