@@ -31,20 +31,26 @@ from .checkpoint import (
 from .conditioner import MiniMaxH3Conditioner, MiniMaxH3Qwen3VL, build_h3_processor, load_h3_qwen_config
 from .packing import (
     MINIMAX_H3_AUDIO_CHANNELS,
+    MINIMAX_H3_CANVAS_MULTIPLE,
     MINIMAX_H3_FPS,
+    MINIMAX_H3_FRAMES_PER_CHUNK,
     MINIMAX_H3_KEYFRAME_ENCODE_SEED,
     MINIMAX_H3_KEYFRAME_NOISE_AUG,
+    MINIMAX_H3_LATENTS_PER_CHUNK,
     MINIMAX_H3_MAX_DURATION,
     MINIMAX_H3_MIN_DURATION,
     MINIMAX_H3_PIXEL_MEAN,
     MINIMAX_H3_PIXEL_STD,
+    MiniMaxH3PreparedReference,
     align_num_frames,
     audio_latent_num_frames,
     build_packed_sequence,
+    build_ref2va_packed_sequence,
     build_row_timesteps,
     keyframe_condition_noise,
     patchify_video_latents,
     prepare_keyframe_image,
+    resolve_canvas_size,
     unpack_audio_tokens,
     unpatchify_video_tokens,
     video_latent_num_frames,
@@ -174,6 +180,38 @@ AUDIO_LATENTS_STD = (
     1.8661226051202384,
     1.5613768203168363,
 )
+
+
+# How many conditioning rows one reference clip may contribute. A reference is packed into the same
+# sequence as the shot being generated, and attention over that sequence is quadratic, so an unbounded
+# reference does not merely cost more -- it decides whether the generation runs at all. At the generation
+# canvas a 15s clip produces ~103k rows against a 5s 480p target's ~15k, which is a ~59x attention blowup
+# and a guaranteed out-of-memory.
+#
+# This budget is an engineering choice, not a MiniMax-published figure: it keeps a reference's cost roughly
+# level with the target's regardless of clip length, by trading resolution for duration. A reference exists
+# to carry identity, motion and look, all of which survive downscaling far better than they survive not
+# fitting in VRAM.
+MINIMAX_H3_REFERENCE_ROW_BUDGET = 12000
+
+
+def _reference_canvas_size(source_width: int, source_height: int, num_frames: int) -> tuple[int, int]:
+    """Resolve a reference clip's canvas: its own aspect ratio, at whatever size fits the row budget.
+
+    Rows scale as `latent_frames * (height * width) / 1024` -- the 16x VAE compression and the 2x2 patchify
+    together divide each axis by 32 -- so the pixel budget falls as the clip gets longer. Never larger than
+    the generation canvas would be, and never below one 32px block per axis.
+    """
+    height, width = resolve_canvas_size(source_width, source_height)
+    latent_frames = max(1, video_latent_num_frames(num_frames))
+    max_pixels = (MINIMAX_H3_REFERENCE_ROW_BUDGET * 1024) / latent_frames
+    area = float(height * width)
+    if area > max_pixels:
+        scale = (max_pixels / area) ** 0.5
+        multiple = MINIMAX_H3_CANVAS_MULTIPLE
+        height = max(multiple, int(height * scale) // multiple * multiple)
+        width = max(multiple, int(width * scale) // multiple * multiple)
+    return height, width
 
 
 def _keyframe_latent_stats_cpu() -> tuple[torch.Tensor, torch.Tensor]:
@@ -352,6 +390,29 @@ class MiniMaxH3Model:
     def patch_size(self) -> tuple[int, int, int]:
         return tuple(self.transformer.config.patch_size)
 
+    def _condition_normalization(self):
+        """The pixel and latent normalization constants every conditioning still is encoded through."""
+        means, stds = _keyframe_latent_stats_cpu()
+        pixel_mean = torch.tensor(MINIMAX_H3_PIXEL_MEAN, device=self.device).view(1, -1, 1, 1, 1)
+        pixel_std = torch.tensor(MINIMAX_H3_PIXEL_STD, device=self.device).view(1, -1, 1, 1, 1)
+        return means, stds, pixel_mean, pixel_std
+
+    def _encode_condition_still(self, image: Image.Image, normalization) -> tuple[torch.Tensor, tuple[int, int]]:
+        """Encode one still into normalized, patchified latent rows, and report the latent size it encoded to.
+
+        The posterior is sampled under a fixed seed rather than off the request's generator, and the sample is
+        rounded through float16 before it is normalized on CPU — both are part of the reference contract.
+        """
+        means, stds, pixel_mean, pixel_std = normalization
+        pixels = torch.from_numpy(np.array(image, dtype=np.uint8)).to(self.device)
+        pixels = pixels.permute(2, 0, 1)[None, :, None]
+        pixels = (pixels.float().div(255.0) - pixel_mean) / pixel_std
+        moments = self.vae._encode_clip(pixels)
+        posterior = DiagonalGaussianDistribution(moments)
+        encoded = posterior.sample(generator=torch.Generator().manual_seed(MINIMAX_H3_KEYFRAME_ENCODE_SEED))
+        encoded = encoded.to(torch.float16).float().cpu()
+        return patchify_video_latents((encoded - means) / stds, self.patch_size), tuple(encoded.shape[-2:])
+
     def _encode_keyframes(
         self,
         images: list[Image.Image],
@@ -362,22 +423,13 @@ class MiniMaxH3Model:
         if not images:
             return None
 
-        means, stds = _keyframe_latent_stats_cpu()
-        pixel_mean = torch.tensor(MINIMAX_H3_PIXEL_MEAN, device=self.device).view(1, -1, 1, 1, 1)
-        pixel_std = torch.tensor(MINIMAX_H3_PIXEL_STD, device=self.device).view(1, -1, 1, 1, 1)
-
+        normalization = self._condition_normalization()
         rows = []
         for image in images:
             if self._interrupt:
                 return None
-            pixels = torch.from_numpy(np.array(image, dtype=np.uint8)).to(self.device)
-            pixels = pixels.permute(2, 0, 1)[None, :, None]
-            pixels = (pixels.float().div(255.0) - pixel_mean) / pixel_std
-            moments = self.vae._encode_clip(pixels)
-            posterior = DiagonalGaussianDistribution(moments)
-            encoded = posterior.sample(generator=torch.Generator().manual_seed(MINIMAX_H3_KEYFRAME_ENCODE_SEED))
-            encoded = encoded.to(torch.float16).float().cpu()
-            rows.append(patchify_video_latents((encoded - means) / stds, self.patch_size))
+            frame_rows, _ = self._encode_condition_still(image, normalization)
+            rows.append(frame_rows)
 
         clean_rows = torch.cat(rows).to(self.device)
         noise = keyframe_condition_noise(
@@ -389,12 +441,228 @@ class MiniMaxH3Model:
         )
         return self.scheduler.scale_noise(clean_rows, MINIMAX_H3_KEYFRAME_NOISE_AUG, noise)
 
+    def _prepare_reference_image(self, image) -> Image.Image | None:
+        """Fit one `ref2va` reference still onto a canvas of its own.
+
+        A keyframe is stretched or cropped onto the target's canvas because it *is* a frame of the output. A
+        reference is not on the timeline, so it keeps its own framing and its canvas is resolved from its own aspect
+        ratio -- landing, as always, on the multiple of 32 that the VAE's 16x compression and the 2x2 patchify need.
+        """
+        image = _tensor_to_pil(image)
+        if image is None:
+            return None
+        height, width = resolve_canvas_size(image.width, image.height)
+        if image.size != (width, height):
+            image = image.resize((width, height), Image.Resampling.LANCZOS)
+        return image
+
+    def _encode_reference_images(
+        self,
+        images: list[Image.Image],
+        generator: torch.Generator,
+    ) -> tuple[torch.Tensor | None, list[MiniMaxH3PreparedReference]]:
+        """Encode `ref2va` reference stills into their conditioning rows.
+
+        Same encode and the same noise augmentation as a keyframe -- what differs is that each still reports the
+        latent size it landed on, because the layout can no longer assume the target's.
+        """
+        if not images:
+            return None, []
+
+        normalization = self._condition_normalization()
+        rows, references = [], []
+        for image in images:
+            if self._interrupt:
+                return None, []
+            still_rows, (latent_height, latent_width) = self._encode_condition_still(image, normalization)
+            rows.append(still_rows)
+            references.append(
+                MiniMaxH3PreparedReference(kind="image", latent_height=latent_height, latent_width=latent_width)
+            )
+
+        clean_rows = torch.cat(rows).to(self.device)
+        noise = keyframe_condition_noise(
+            tuple((1, reference.latent_height, reference.latent_width) for reference in references),
+            self.patch_size,
+            24,
+            generator=generator,
+            device=self.device,
+        )
+        return self.scheduler.scale_noise(clean_rows, MINIMAX_H3_KEYFRAME_NOISE_AUG, noise), references
+
+    def _reference_video_soundtrack(self, video_path) -> torch.Tensor | None:
+        """Pull a reference clip's own audio out as a waveform, for conditioning on how the clip sounds.
+
+        Extracted to a temporary wav rather than decoded in place, because the loader wants a file and
+        ffmpeg is already the thing that knows how to demux one. A clip with no audio track is not an error:
+        it simply contributes no audio reference.
+        """
+        import tempfile
+
+        from shared.utils.audio_video import extract_audio_track_to_wav
+
+        if not video_path:
+            return None
+        with tempfile.TemporaryDirectory() as workspace:
+            target = os.path.join(workspace, "reference_soundtrack.wav")
+            try:
+                if extract_audio_track_to_wav(video_path, target) is None:
+                    return None
+            except Exception:
+                return None
+            return self._load_reference_waveform(target)
+
+    def _load_reference_waveform(self, source) -> torch.Tensor | None:
+        """Load one audio reference as the stereo waveform the audio VAE expects, at the VAE's own sample rate."""
+        if source is None:
+            return None
+        import librosa
+
+        waveform, _ = librosa.load(source, sr=self.audio_vae.config.sampling_rate, mono=False)
+        waveform = torch.as_tensor(np.asarray(waveform), dtype=torch.float32)
+        if waveform.ndim == 1:
+            waveform = waveform[None]
+        if waveform.shape[0] < MINIMAX_H3_AUDIO_CHANNELS:
+            waveform = waveform.repeat(MINIMAX_H3_AUDIO_CHANNELS, 1)
+        return waveform[:MINIMAX_H3_AUDIO_CHANNELS]
+
+    def _encode_reference_audio(
+        self,
+        waveforms: list[torch.Tensor],
+    ) -> tuple[torch.Tensor | None, list[MiniMaxH3PreparedReference]]:
+        """Encode `ref2va` audio references into their conditioning rows.
+
+        Two differences from the visual conditions. The audio VAE takes the stereo channels as the batch, so one
+        reference encodes as `[2, 1, samples]`. And the rows are packed clean: audio references carry no noise
+        augmentation, they sit at a conditioning timestep of their own.
+        """
+        if not waveforms:
+            return None, []
+
+        rows, references = [], []
+        for waveform in waveforms:
+            if self._interrupt:
+                return None, []
+            sample = waveform.to(device=self.device, dtype=torch.float32).unsqueeze(1)
+            latents = self.audio_vae.encode(sample, return_dict=False)[0].mode().float()
+            # Inverse of `unpack_audio_tokens`: [C, D, T] -> [C, T, D] -> channel-major rows.
+            rows.append(latents.permute(0, 2, 1).reshape(-1, latents.shape[1]))
+            references.append(MiniMaxH3PreparedReference(kind="audio", num_audio_latents=latents.shape[-1]))
+
+        return torch.cat(rows).to(self.device), references
+
+    def _decode_reference_video(self, source, max_frames: int) -> torch.Tensor | None:
+        """Decode a reference clip at H3's frame rate, onto a canvas of its own.
+
+        Deliberately not the guide pipeline's frames. Those are already fitted to the output canvas and
+        length, so reusing them would resample a second time and force the reference onto the target's
+        aspect ratio -- while a reference is not on the timeline and keeps its own framing. Decoding from
+        the source keeps the clip to a single resampling step, and that step is Lanczos.
+        """
+        from wgp import get_resampled_video
+
+        frames = get_resampled_video(source, 0, max_frames, MINIMAX_H3_FPS)
+        if not torch.is_tensor(frames):
+            frames = torch.from_numpy(np.asarray(frames))
+        frames = frames[:max_frames]
+        if frames.shape[0] < MINIMAX_H3_LATENTS_PER_CHUNK:
+            return None
+        # The video VAE consumes 17n + 5 frames; trim rather than pad, so no invented frames get encoded.
+        chunks = (frames.shape[0] - MINIMAX_H3_LATENTS_PER_CHUNK) // MINIMAX_H3_FRAMES_PER_CHUNK
+        frames = frames[: chunks * MINIMAX_H3_FRAMES_PER_CHUNK + MINIMAX_H3_LATENTS_PER_CHUNK]
+
+        height, width = _reference_canvas_size(frames.shape[2], frames.shape[1], frames.shape[0])
+        if (int(frames.shape[1]), int(frames.shape[2])) != (height, width):
+            frames = torch.stack(
+                [
+                    # np.array rather than np.asarray: PIL hands back a read-only buffer, and torch warns
+                    # (rightly) about wrapping one in a tensor.
+                    torch.from_numpy(
+                        np.array(
+                            Image.fromarray(frame.cpu().numpy().astype(np.uint8))
+                            .convert("RGB")
+                            .resize((width, height), Image.Resampling.LANCZOS)
+                        )
+                    )
+                    for frame in frames
+                ]
+            )
+        return frames.float().div_(255.0).clamp_(0.0, 1.0)
+
+    def _encode_reference_videos(
+        self,
+        clips: list[torch.Tensor],
+        generator: torch.Generator,
+    ) -> tuple[torch.Tensor | None, list[MiniMaxH3PreparedReference]]:
+        """Encode `ref2va` reference clips into their conditioning rows.
+
+        A clip goes through the VAE's chunked `_encode` -- the method its own docstring names as the one
+        MiniMax-H3 encodes a video reference through -- rather than the single-clip path a still uses. Like
+        every visual condition it is noise-augmented at 0.999, and each clip reports its own latent shape,
+        which unlike a still includes a temporal extent for the layout to place on the rotary clock.
+        """
+        if not clips:
+            return None, []
+
+        means, stds, pixel_mean, pixel_std = self._condition_normalization()
+        rows, references = [], []
+        for clip in clips:
+            if self._interrupt:
+                return None, []
+            pixels = clip.permute(3, 0, 1, 2)[None].to(self.device)
+            pixels = (pixels - pixel_mean) / pixel_std
+            moments = self.vae._encode(pixels)
+            posterior = DiagonalGaussianDistribution(moments)
+            encoded = posterior.sample(generator=torch.Generator().manual_seed(MINIMAX_H3_KEYFRAME_ENCODE_SEED))
+            encoded = encoded.to(torch.float16).float().cpu()
+            rows.append(patchify_video_latents((encoded - means) / stds, self.patch_size))
+            references.append(
+                MiniMaxH3PreparedReference(
+                    kind="video",
+                    num_latent_frames=encoded.shape[2],
+                    latent_height=encoded.shape[3],
+                    latent_width=encoded.shape[4],
+                )
+            )
+
+        clean_rows = torch.cat(rows).to(self.device)
+        noise = keyframe_condition_noise(
+            tuple(
+                (reference.num_latent_frames, reference.latent_height, reference.latent_width)
+                for reference in references
+            ),
+            self.patch_size,
+            24,
+            generator=generator,
+            device=self.device,
+        )
+        return self.scheduler.scale_noise(clean_rows, MINIMAX_H3_KEYFRAME_NOISE_AUG, noise), references
+
+    @staticmethod
+    def _clip_presentation(clip: torch.Tensor) -> dict:
+        """Sample a clip at 2 fps for the text encoder, with the timestamps Qwen3-VL reads it by."""
+        stride = MINIMAX_H3_FPS // 2
+        indices = list(range(0, clip.shape[0], stride))
+        return {
+            "type": "video",
+            "frames": clip[indices].clone(),
+            "timestamps": [index / MINIMAX_H3_FPS for index in indices],
+        }
+
     @torch.inference_mode()
     def generate(
         self,
         input_prompt: str,
         image_start=None,
         image_end=None,
+        input_ref_images=None,
+        audio_guide=None,
+        audio_guide2=None,
+        video_guide_path=None,
+        video_prompt_type: str = "",
+        audio_prompt_type: str = "",
+        input_video=None,
+        prefix_frames_count: int = 0,
         frame_num: int = 124,
         height: int = 480,
         width: int = 864,
@@ -419,6 +687,13 @@ class MiniMaxH3Model:
         if int(sampling_steps) < 2:
             raise ValueError("MiniMax H3 needs at least two scheduler grid points.")
 
+        # Studio's Extend hands back the clip being continued. H3 cannot carry latents across a 15s boundary,
+        # so a continuation starts a fresh generation anchored on the last frame of the requested overlap --
+        # the same frame the viewer just saw, which is what makes the seam read as continuous.
+        if image_start is None and input_video is not None and int(prefix_frames_count or 0) > 0:
+            available = input_video.shape[1]
+            image_start = input_video[:, min(int(prefix_frames_count), available) - 1][:, None]
+
         keyframes = [item for item in (_tensor_to_pil(image_start), _tensor_to_pil(image_end)) if item is not None]
         anchors = tuple(
             anchor
@@ -430,6 +705,44 @@ class MiniMaxH3Model:
             for index, image in enumerate(keyframes)
         ]
 
+        # `ref2va` references, in the order MiniMax-H3 packs them: stills first, then audio.
+        reference_images = [
+            prepared
+            for prepared in (self._prepare_reference_image(image) for image in input_ref_images or ())
+            if prepared is not None
+        ]
+        reference_waveforms = [
+            waveform
+            for waveform in (self._load_reference_waveform(source) for source in (audio_guide, audio_guide2))
+            if waveform is not None
+        ]
+        reference_clips = []
+        if "V" in (video_prompt_type or "") and video_guide_path:
+            clip = self._decode_reference_video(
+                video_guide_path, int(MINIMAX_H3_MAX_DURATION * MINIMAX_H3_FPS)
+            )
+            if clip is not None:
+                reference_clips.append(clip)
+            # "K": condition on how the clip sounds as well as how it looks. Appended after any uploaded
+            # audio references so the packed order still matches the order they are announced in.
+            if "K" in (audio_prompt_type or ""):
+                soundtrack = self._reference_video_soundtrack(video_guide_path)
+                if soundtrack is not None:
+                    reference_waveforms.append(soundtrack)
+        # Say out loud what conditioning actually arrived. A reference that silently fails to reach the
+        # model looks identical to one the model ignored, and the two have completely different fixes.
+        print(
+            f"MiniMax H3: {len(reference_images)} reference image(s), "
+            f"{len(reference_clips)} reference clip(s), {len(reference_waveforms)} audio reference(s), "
+            f"{len(keyframes)} keyframe(s) "
+            f"[video_prompt_type={video_prompt_type!r}, video_guide_path={'set' if video_guide_path else 'None'}]"
+        )
+        if (reference_images or reference_waveforms or reference_clips) and keyframes:
+            raise ValueError(
+                "MiniMax H3 conditions on either keyframes or references, not both: a keyframe is a frame of the "
+                "output, a reference is material that precedes it, and they occupy the same conditioning rows."
+            )
+
         request_seed = int(torch.seed() if seed is None else seed)
         generator = torch.Generator(device=self.device).manual_seed(request_seed)
         num_latent_frames = video_latent_num_frames(frame_num)
@@ -437,27 +750,72 @@ class MiniMaxH3Model:
         latent_width = width // self.vae.spatial_compression_ratio
         num_audio_latents = audio_latent_num_frames(frame_num)
 
-        prompt_embeds, text_tags = self.conditioner(input_prompt, self.device, keyframes or None)
+        # A clip cannot be announced through the processor, so any reference set containing one is presented
+        # in full by the conditioner's hand-assembled path. Still-only sets keep the processor path.
+        presentation = None
+        if reference_clips:
+            presentation = [
+                # A still is a one-frame clip here: the vision tower reads THWC, and without the leading
+                # temporal axis its height is mistaken for the frame count.
+                {
+                    "type": "image",
+                    "frames": torch.from_numpy(np.array(image, dtype=np.uint8))[None].float().div_(255.0),
+                }
+                for image in reference_images
+            ]
+            presentation += [self._clip_presentation(clip) for clip in reference_clips]
+            presentation += [{"type": "audio"}] * len(reference_waveforms)
+
+        prompt_embeds, text_tags = self.conditioner(
+            input_prompt,
+            self.device,
+            (keyframes or reference_images) or None,
+            len(reference_waveforms),
+            references=presentation,
+        )
         if prompt_embeds is None or self._interrupt:
             return None
-        layout = build_packed_sequence(
-            text_tags,
-            num_latent_frames,
-            latent_height,
-            latent_width,
-            num_audio_latents,
-            self.patch_size,
-            anchors,
-        )
 
-        condition_rows = self._encode_keyframes(
-            keyframes,
-            latent_height,
-            latent_width,
-            generator,
-        )
-        if self._interrupt:
-            return None
+        # The conditioning rows are encoded before the layout is built, because a reference reports the latent size
+        # it landed on and the layout needs it. Their noise is drawn first either way, which is what the request's
+        # generator reproduces.
+        audio_condition_rows = None
+        if reference_images or reference_waveforms or reference_clips:
+            # Packed order matches the order the conditioner announced them in: stills, clips, then audio.
+            image_rows, references = self._encode_reference_images(reference_images, generator)
+            clip_rows, clip_references = self._encode_reference_videos(reference_clips, generator)
+            audio_condition_rows, audio_references = self._encode_reference_audio(reference_waveforms)
+            if self._interrupt:
+                return None
+            visual_rows = [rows for rows in (image_rows, clip_rows) if rows is not None]
+            condition_rows = torch.cat(visual_rows) if visual_rows else None
+            layout = build_ref2va_packed_sequence(
+                text_tags,
+                tuple(references + clip_references + audio_references),
+                num_latent_frames,
+                latent_height,
+                latent_width,
+                num_audio_latents,
+                self.patch_size,
+            )
+        else:
+            condition_rows = self._encode_keyframes(
+                keyframes,
+                latent_height,
+                latent_width,
+                generator,
+            )
+            if self._interrupt:
+                return None
+            layout = build_packed_sequence(
+                text_tags,
+                num_latent_frames,
+                latent_height,
+                latent_width,
+                num_audio_latents,
+                self.patch_size,
+                anchors,
+            )
 
         video_noise = randn_tensor(
             (1, 24, num_latent_frames, latent_height, latent_width),
@@ -474,6 +832,8 @@ class MiniMaxH3Model:
         )
         if condition_rows is not None:
             video_rows = torch.cat([condition_rows, video_rows])
+        if audio_condition_rows is not None:
+            audio_rows = torch.cat([audio_condition_rows, audio_rows])
 
         self.scheduler.set_timesteps(int(sampling_steps), device=self.device)
         self.audio_scheduler.set_timesteps(int(sampling_steps), device=self.device)

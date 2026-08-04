@@ -15,8 +15,20 @@ Environment variables:
 
 import gc
 import sys
-import torch
+
+# Before torch, because the caching allocator reads this when it initializes and ignores it afterwards.
+#
+# Video models allocate a handful of very large, short-lived activation tensors per block, which leaves the
+# default allocator holding gigabytes of reserved-but-unallocated blocks too fragmented to reuse -- enough
+# that a generation can fail to find room for a tensor while nominally having the memory free. Expandable
+# segments let those regions grow and be reused instead of stranding them.
+#
+# `setdefault`, so anyone already tuning the allocator keeps their setting.
 import os
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+import torch
 import glob
 import json
 import math
@@ -5041,10 +5053,18 @@ def get_model_options(model_type: str):
         "t2v_class": md.get("t2v_class", False),
         "image_outputs": md.get("image_outputs", False),
         "supports_end_frame": "E" in md.get("image_prompt_types_allowed", ""),
+        # The raw letters, alongside the single derived flag above: the Studio sub-mode tabs each need a different
+        # subset of them ("S" for Multi-Shot, "S"+"E" for Blend, "V" or video_continuation for Extend), so a model
+        # that only accepts "T" can be shown Frames alone instead of tabs that would fail at generation time.
+        "image_prompt_types_allowed": md.get("image_prompt_types_allowed", ""),
+        "video_continuation": md.get("video_continuation", False),
 
         # Choice configs
         "guide_preprocessing": extract_choice("guide_preprocessing"),
         "guide_custom_choices": extract_choice("guide_custom_choices"),
+        # What the guide video *is* to this model. A control video and a reference clip are different
+        # things and the handler names it; without this the UI calls every one of them a Control Video.
+        "video_guide_label": md.get("video_guide_label"),
         "image_ref_choices": extract_choice("image_ref_choices"),
         "audio_prompt_type_sources": extract_choice("audio_prompt_type_sources"),
 
@@ -5076,6 +5096,16 @@ def get_model_options(model_type: str):
         # Check model def first, then fall back to ui_defaults from the handler
         "default_num_inference_steps": md.get("num_inference_steps") or _ui_defaults.get("num_inference_steps"),
         "default_guidance_scale": md.get("guidance_scale") or _ui_defaults.get("guidance_scale"),
+        # Read ONLY from ui_defaults: model_def's "flow_shift" is a boolean
+        # capability flag (whether to show the control), not a value.
+        "default_flow_shift": _ui_defaults.get("flow_shift"),
+        # The model's declared temporal grid, so the UI can mirror
+        # align_model_frame_count instead of guessing. Absent (modulus 0) for
+        # models that declare none, and the UI then leaves frame counts alone.
+        "frame_alignment_modulus": int(md.get("frame_alignment_modulus", 0) or 0),
+        "frame_alignment_remainder": int(md.get("frame_alignment_remainder", 1)),
+        "frame_alignment_mode": str(md.get("frame_alignment_mode", "floor")).lower(),
+        "frames_maximum": md.get("frames_maximum"),
         "hide_resolution_presets": md.get("hide_resolution_presets", False),
 
         # Image/video conditioning strength

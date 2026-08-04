@@ -461,6 +461,38 @@ function _applyModelDefaults(
   }).catch(() => { /* fetch failure shouldn't break model switch */ })
 }
 
+/** Mirror of the backend's align_model_frame_count.
+ *
+ *  Only models that declare a temporal grid (frame_alignment_modulus > 0) are
+ *  aligned here; every other model keeps the plain round(seconds * fps) it has
+ *  always used. Without this the slider can promise a duration the model
+ *  cannot produce: MiniMax H3 accepts 17n + 5 frames, so a 5s request (120)
+ *  becomes 124 and the clip is 5.17s, not 5.00s.
+ */
+export function alignFrameCount(
+  frames: number,
+  o: { frame_alignment_modulus?: number; frame_alignment_remainder?: number;
+       frame_alignment_mode?: string; frames_minimum?: number; frames_maximum?: number | null } | null | undefined,
+): number {
+  const modulus = o?.frame_alignment_modulus ?? 0
+  if (!modulus || modulus <= 0) return frames
+  const remainder = (o?.frame_alignment_remainder ?? 1) % modulus
+  const minimum = o?.frames_minimum ?? 1
+  const maximum = o?.frames_maximum ?? null
+  let n = Math.max(minimum, Math.round(frames))
+  if (maximum != null) n = Math.min(maximum, n)
+  const delta = ((n - remainder) % modulus + modulus) % modulus
+  if (delta) {
+    const mode = (o?.frame_alignment_mode ?? 'floor').toLowerCase()
+    if (mode === 'ceil') n += modulus - delta
+    else if (mode === 'nearest') n += delta >= modulus / 2 ? modulus - delta : -delta
+    else n -= delta
+  }
+  if (maximum != null && n > maximum) n -= modulus
+  while (n < minimum) n += modulus
+  return n
+}
+
 // Family → generation mode mapping
 const familyModeMap: Record<string, GenerationMode> = {
   flux: 'image',
@@ -1636,6 +1668,7 @@ const BLANK_VIDEO_INPUT_PARAMS: Partial<GenerateParams> = {
 const resolutionMap: Record<ResolutionPreset, Record<AspectRatio, string>> = {
   'auto': {
     'auto': 'auto',
+    '21:9': 'auto',
     '16:9': 'auto',
     '9:16': 'auto',
     '1:1': 'auto',
@@ -1644,6 +1677,7 @@ const resolutionMap: Record<ResolutionPreset, Record<AspectRatio, string>> = {
   },
   '480p': {
     'auto': 'auto_480p',
+    '21:9': '1120x480',
     '16:9': '848x480',
     '9:16': '480x848',
     '1:1': '672x672',
@@ -1652,6 +1686,7 @@ const resolutionMap: Record<ResolutionPreset, Record<AspectRatio, string>> = {
   },
   '540p': {
     'auto': 'auto_540p',
+    '21:9': '1280x544',
     '16:9': '960x544',
     '9:16': '544x960',
     '1:1': '736x736',
@@ -1660,6 +1695,7 @@ const resolutionMap: Record<ResolutionPreset, Record<AspectRatio, string>> = {
   },
   '720p': {
     'auto': 'auto_720p',
+    '21:9': '1664x704',
     '16:9': '1280x720',
     '9:16': '720x1280',
     '1:1': '1024x1024',
@@ -1668,6 +1704,7 @@ const resolutionMap: Record<ResolutionPreset, Record<AspectRatio, string>> = {
   },
   '1080p': {
     'auto': 'auto_1080p',
+    '21:9': '2560x1088',
     '16:9': '1920x1088',
     '9:16': '1088x1920',
     '1:1': '1024x1024',
@@ -3261,8 +3298,9 @@ export const useStore = create<AppState>((set, get) => ({
 
   durationSeconds: 5,
   setDurationSeconds: (s) => {
-    const fps = get().modelOptions?.fps ?? 16
-    const frames = Math.round(s * fps)
+    const o = get().modelOptions
+    const fps = o?.fps ?? 16
+    const frames = alignFrameCount(Math.round(s * fps), o)
     set(state => ({
       durationSeconds: s,
       params: { ...state.params, video_length: frames },
@@ -5392,9 +5430,13 @@ export const useStore = create<AppState>((set, get) => ({
       const swDefaults = (options as unknown as Record<string, unknown>).sliding_window_defaults as Record<string, number> | undefined
       const overlapDefault = swDefaults?.overlap_default ?? 5
       const discardDefault = swDefaults?.discard_last_frames ?? 0
+      // Same lattice snap as setDurationSeconds. This runs on every model
+      // switch and would otherwise overwrite the snapped value with an
+      // unaligned one, which the backend then floors.
+      const _snapFrames = (seconds: number) => alignFrameCount(Math.round(seconds * fps), options)
       const paramUpdates: Record<string, unknown> = {
         guidance_phases: options.guidance_max_phases,
-        video_length: Math.round(durationSeconds * fps),
+        video_length: _snapFrames(durationSeconds),
         sliding_window_size: Math.round(slidingWindowSeconds * fps),
         sliding_window_overlap: overlapDefault,
         sliding_window_discard_last_frames: discardDefault,
@@ -5405,6 +5447,11 @@ export const useStore = create<AppState>((set, get) => ({
       }
       if (options.default_guidance_scale != null) {
         paramUpdates.guidance_scale = options.default_guidance_scale
+      }
+      // Flow shift is model-specific but was never applied on model switch,
+      // so it carried over from whichever model was selected before.
+      if (options.default_flow_shift != null) {
+        paramUpdates.flow_shift = options.default_flow_shift
       }
       // TTS default duration. Prefer the model's declared `default` (DramaBox
       // uses 0 = auto-derive from prompt); fall back to `max` (legacy behavior

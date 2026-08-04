@@ -1049,12 +1049,33 @@ def _ensure_llama_server(bin_dir: str) -> None:
             else:  # tar.gz
                 with tarfile.open(archive_path, "r:gz") as t:
                     for member in t.getmembers():
-                        if not member.isfile():
-                            continue
                         flat_name = os.path.basename(member.name)
                         if not flat_name:
                             continue
                         target = os.path.join(bin_dir, flat_name)
+                        # SONAME entries (libllama.so.0 -> libllama.so.0.0.10252)
+                        # ship as symlinks. Skipping them leaves only the fully
+                        # versioned files on disk, and llama-server then dies at
+                        # startup with "libllama-common.so.0: cannot open shared
+                        # object file" (exit 127). Recreate them; the link target
+                        # is a bare filename, so it survives the flattening above.
+                        if member.issym() or member.islnk():
+                            link_target = os.path.basename(member.linkname)
+                            if not link_target:
+                                continue
+                            try:
+                                if os.path.lexists(target):
+                                    os.remove(target)
+                                os.symlink(link_target, target)
+                            except (OSError, NotImplementedError):
+                                # Filesystems/platforms without symlink support:
+                                # fall back to a copy of the real file.
+                                real = os.path.join(bin_dir, link_target)
+                                if os.path.isfile(real):
+                                    shutil.copyfile(real, target)
+                            continue
+                        if not member.isfile():
+                            continue
                         src = t.extractfile(member)
                         if src is None:
                             continue
@@ -1076,7 +1097,57 @@ def _ensure_llama_server(bin_dir: str) -> None:
             f"Downloaded llama.cpp release but {exe_name} not found in {bin_dir} "
             f"after extraction. Tried: {asset_urls}"
         )
+    # Runs on every call, not just after a download: installs extracted before
+    # the symlink fix above are already on disk missing their SONAMEs, and the
+    # download is skipped once the binary exists — so they would stay broken
+    # forever without a repair pass here. Idempotent and cheap.
+    _repair_soname_links(bin_dir)
     print(f"[LLM] llama-server installed to {exe_path}")
+
+
+_SOVERSION_RE = _re.compile(r"^(?P<base>.+\.so)\.(?P<version>\d+(?:\.\d+)*)$")
+
+
+def _repair_soname_links(bin_dir: str) -> None:
+    """Recreate missing `libfoo.so.N` links next to `libfoo.so.N.M.P`.
+
+    The loader resolves the SONAME recorded in the binary (e.g.
+    `libllama-common.so.0`), not the fully versioned filename, so without these
+    llama-server exits 127 before printing anything useful.
+    """
+    import shutil
+
+    try:
+        entries = os.listdir(bin_dir)
+    except OSError:
+        return
+    created = []
+    for filename in entries:
+        match = _SOVERSION_RE.match(filename)
+        if match is None or not os.path.isfile(os.path.join(bin_dir, filename)):
+            continue
+        base = match.group("base")
+        parts = match.group("version").split(".")
+        # libfoo.so.0.0.10252 -> libfoo.so.0.0, libfoo.so.0, libfoo.so
+        for count in range(len(parts) - 1, -1, -1):
+            suffix = ".".join(parts[:count])
+            link_path = os.path.join(bin_dir, f"{base}.{suffix}" if suffix else base)
+            if os.path.lexists(link_path):
+                continue
+            try:
+                os.symlink(filename, link_path)
+                created.append(os.path.basename(link_path))
+            except (OSError, NotImplementedError):
+                # Windows without developer mode: copy instead. Costs disk but
+                # keeps the loader happy.
+                try:
+                    shutil.copyfile(os.path.join(bin_dir, filename), link_path)
+                    created.append(os.path.basename(link_path))
+                except OSError:
+                    pass
+    if created:
+        print(f"[LLM] Restored {len(created)} missing shared-library links: {', '.join(sorted(created)[:6])}"
+              + (" ..." if len(created) > 6 else ""))
 
 
 def _get_server_exe() -> str:

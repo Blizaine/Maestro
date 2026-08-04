@@ -794,8 +794,15 @@ def validate_settings(state, model_type, single_prompt, inputs):
         return ret()
 
     multi_prompts_gen_type = inputs["multi_prompts_gen_type"]
-    if single_prompt or multi_prompts_gen_type == 2:
-        prompts = [prompt] 
+    # Some models take a structured, inherently multi-line prompt (MiniMax H3's
+    # integrated_multimodal_description / overall_soundscape /
+    # non_diegetic_music block). Splitting that on newlines turns one prompt
+    # into several unrelated generations, so those models opt out.
+    # gen_type 3 is excluded because there the newlines ARE clip boundaries.
+    if single_prompt or multi_prompts_gen_type == 2 or (
+        multi_prompts_gen_type != 3 and model_def.get("single_block_prompt", False)
+    ):
+        prompts = [prompt]
     else:
         prompts = [one_line.strip() for one_line in prompt.split("\n") if len(one_line.strip()) > 0]
 
@@ -4618,7 +4625,9 @@ def refresh_gallery(state): #, msg
             enhanced = True
             prompt = prompt[len("!enhanced!\n"):]
         prompt = html.escape(prompt)
-        if multi_prompts_gen_type == 2:
+        # A structured multi-line prompt is one generation, so render it as one
+        # block rather than splitting it into per-window lines and bolding one.
+        if multi_prompts_gen_type == 2 or model_def.get("single_block_prompt", False):
             prompt = prompt.replace("\n", "<BR>")
         elif "\n" in prompt :
             prompts = prompt.split("\n")
@@ -6087,7 +6096,32 @@ class DynamicClass:
         """Alias for assign() - more dict-like"""
         return self.assign(**dict)
 
-def process_prompt_enhancer(model_def, prompt_enhancer, original_prompts,  image_start, original_image_refs, is_image, audio_only, seed, prompt_enhancer_instructions = None ):
+def sample_reference_video_frames(video_path, count = 3):
+    """Evenly spaced stills from a clip, for a prompt enhancer that has to describe it.
+
+    The enhancer is a vision model and can only be shown images, so a reference video reaches it as a few
+    frames across its span rather than as motion. Sampled from the middle of each interval so the very
+    first and last frames -- often a fade or a slate -- are not what the model is asked to describe.
+    """
+    from shared.utils.utils import get_video_info, get_video_frame
+
+    try:
+        _, _, _, frame_count = get_video_info(video_path)
+    except Exception:
+        return []
+    if not frame_count:
+        return []
+    frames = []
+    for index in range(count):
+        frame_no = min(int(frame_count * (index + 0.5) / count), frame_count - 1)
+        try:
+            frames.append(get_video_frame(video_path, frame_no, return_PIL = True))
+        except Exception:
+            pass
+    return frames
+
+
+def process_prompt_enhancer(model_def, prompt_enhancer, original_prompts,  image_start, original_image_refs, is_image, audio_only, seed, prompt_enhancer_instructions = None, reference_video = None ):
     global enhancer_offloadobj
     prompt_enhancer_mode = str(prompt_enhancer or "")
     prompt_enhancer_instructions = model_def.get("image_prompt_enhancer_instructions" if is_image else "video_prompt_enhancer_instructions", None)
@@ -6110,6 +6144,10 @@ def process_prompt_enhancer(model_def, prompt_enhancer, original_prompts,  image
             prompt_images += image_start[:1]
         if original_image_refs != None:
             prompt_images += original_image_refs[:1]
+        # A reference video is conditioning the generation, so the enhancer has to be able to describe it --
+        # otherwise it writes around a clip it cannot see and invents whatever it needs.
+        if reference_video is not None:
+            prompt_images += sample_reference_video_frames(reference_video)
     prompt_images = [Image.open(img) if isinstance(img,str) else img for img in prompt_images]
     if len(original_prompts) == 0 and "T" not in prompt_enhancer_mode:
         return None
@@ -6207,6 +6245,12 @@ def enhance_prompt(state, prompt, prompt_enhancer, multi_images_gen_type, multi_
         download_models()
     model_def = get_model_def(get_state_model_type(state))
     audio_only = model_def.get("audio_only", False)
+    # Shown to the enhancer as sampled frames, so a prompt written against a reference clip describes what
+    # is actually in it rather than what the model imagines is in it.
+    enhancer_reference_video = inputs.get("video_guide")
+    if not (model_def.get("reference_video_source_path", False) and "V" in (video_prompt_type or "")
+            and isinstance(enhancer_reference_video, str)):
+        enhancer_reference_video = None
 
     acquire_GPU_ressources(state, "prompt_enhancer", "Prompt Enhancer")
 
@@ -6229,7 +6273,7 @@ def enhance_prompt(state, prompt, prompt_enhancer, multi_images_gen_type, multi_
         progress((i , num_prompts), desc=status, total= num_prompts)
 
         try:
-            enhanced_prompt = process_prompt_enhancer(model_def, prompt_enhancer, [one_prompt],  start_images, original_image_refs, is_image, audio_only, seed)    
+            enhanced_prompt = process_prompt_enhancer(model_def, prompt_enhancer, [one_prompt],  start_images, original_image_refs, is_image, audio_only, seed, reference_video = enhancer_reference_video)    
         except Exception as e:
             unload_prompt_enhancer_runtime()
             enhancer_offloadobj.unload_all()
@@ -6913,6 +6957,21 @@ def custom_preprocess_video_with_mask(model_handler, base_model_type, pre_video_
 def _video_tensor_to_uint8_chunk_inplace(sample, value_range=(-1, 1)):
     if sample.dtype == torch.uint8:
         return sample
+    # A model whose generate() runs under torch.inference_mode() hands back an
+    # "inference tensor", and PyTorch refuses to mutate one in place once that
+    # scope has been left:
+    #
+    #   RuntimeError: Inplace update to inference tensor outside InferenceMode
+    #   is not allowed.
+    #
+    # MiniMax H3 decorates generate() that way, so saving its output raised
+    # here. Take one copy for such tensors only, so every other model keeps the
+    # zero-copy path this helper exists for. The clone must happen inside
+    # inference_mode(False): a clone taken while still inside inference mode
+    # inherits the flag.
+    if torch.is_inference(sample):
+        with torch.inference_mode(False):
+            sample = sample.clone()
     min_val, max_val = value_range
     sample = sample.clamp_(min_val, max_val)
     sample = sample.sub_(min_val).mul_(255.0 / (max_val - min_val)).to(torch.uint8)
@@ -7181,7 +7240,14 @@ def generate_video(
     
     base_model_type = get_base_model_type(model_type)
     model_handler = get_model_handler(base_model_type)
-    block_size = model_handler.get_vae_block_size(base_model_type) if hasattr(model_handler, "get_vae_block_size") else 16
+    # Handlers defining get_vae_block_size() still win, but fall back to the
+    # model_def key before the generic 16. Several handlers declare
+    # "vae_block_size" without the method, and nothing read it — models/hidream
+    # asks for 32 and was silently snapping dimensions to 16.
+    if hasattr(model_handler, "get_vae_block_size"):
+        block_size = model_handler.get_vae_block_size(base_model_type)
+    else:
+        block_size = model_def.get("vae_block_size", 16)
 
     if "P" in preload_model_policy and not "U" in preload_model_policy:
         while wan_model == None:
@@ -7418,7 +7484,9 @@ def generate_video(
     trans2 = get_transformer_model(wan_model, 2)
     audio_sampling_rate = 16000
 
-    if multi_prompts_gen_type == 2:
+    if multi_prompts_gen_type == 2 or model_def.get("single_block_prompt", False):
+        # See validate_settings: a structured multi-line prompt must reach the
+        # model whole.
         prompts = [prompt]
     else:
         prompts = prompt.split("\n")
@@ -7937,7 +8005,7 @@ def generate_video(
         start_time = time.time()
         if prompt_enhancer_image_caption_model != None and prompt_enhancer !=None and len(prompt_enhancer)>0 and enhancer_mode == 0:
             send_cmd("progress", [0, get_latest_status(state, "Enhancing Prompt")])
-            enhanced_prompts = process_prompt_enhancer(model_def, prompt_enhancer, original_prompts,  image_start if image_start is not None else image_end , original_image_refs, is_image, audio_only, seed )
+            enhanced_prompts = process_prompt_enhancer(model_def, prompt_enhancer, original_prompts,  image_start if image_start is not None else image_end , original_image_refs, is_image, audio_only, seed, reference_video = video_guide if model_def.get("reference_video_source_path", False) and "V" in (video_prompt_type or "") and isinstance(video_guide, str) else None )
             unload_prompt_enhancer_runtime()
             if enhanced_prompts is not None:
                 print(f"Enhanced prompts: {enhanced_prompts}" )
@@ -8319,7 +8387,12 @@ def generate_video(
                 )
 
             frames_to_inject_parsed = frames_to_inject[ window_start_frame if extract_guide_from_window_start else guide_start_frame: guide_end_frame]
-            if video_guide is not None or len(frames_to_inject_parsed) > 0 or model_def.get("forced_guide_mask_inputs", False): 
+            # A model that treats the guide as a *reference* decodes it from source itself, so preparing it
+            # as a control video is pure waste: it decodes and resizes the clip onto the output canvas, then
+            # trims it to the latent grid ("N frames will be lost"), and hands over a tensor the model does
+            # not read -- while holding a full-length copy of it in memory that the generation then needs.
+            reference_video_only = model_def.get("reference_video_source_path", False) and len(frames_to_inject_parsed) == 0
+            if not reference_video_only and (video_guide is not None or len(frames_to_inject_parsed) > 0 or model_def.get("forced_guide_mask_inputs", False)):
                 any_mask = video_mask is not None or model_def.get("forced_guide_mask_inputs", False)
                 any_guide_padding = model_def.get("pad_guide_video", False)
                 dont_cat_preguide = extract_guide_from_window_start or model_def.get("dont_cat_preguide", False) or sparse_video_image is not None 
@@ -8588,6 +8661,15 @@ def generate_video(
                     **({} if suffix_video_tensor is None else {
                         "input_video_end": suffix_video_tensor,
                         "suffix_frames_count": suffix_frames_count,
+                    }),
+                    # The guide's source path, for models that treat a video as a *reference* rather than a
+                    # control signal. Those have to decode it themselves: the guide pipeline fits frames onto
+                    # the output canvas and length, which is correct for a control video and wrong for a
+                    # reference that keeps its own framing and duration. Passed only when the model asks for
+                    # it, since most handlers' generate() take no **kwargs and would raise on an extra one.
+                    **({} if not model_def.get("reference_video_source_path", False)
+                       or not isinstance(video_guide, str) else {
+                        "video_guide_path": video_guide,
                     }),
                 )
                 if gen.get("abort", False):

@@ -164,7 +164,7 @@ export interface OutputFile {
 }
 
 export type MediaFilter = 'all' | 'images' | 'videos' | 'audio' | 'avatars' | 'multiclip' | 'favorites'
-export type AspectRatio = 'auto' | '16:9' | '9:16' | '1:1' | '4:3' | '3:4'
+export type AspectRatio = 'auto' | '21:9' | '16:9' | '9:16' | '1:1' | '4:3' | '3:4'
 export type ResolutionPreset = 'auto' | '480p' | '540p' | '720p' | '1080p'
 export type ScailResolutionProfile = '480p' | '512p' | '704p'
 /** Backward-compatible name for saved Recast/API callers. */
@@ -227,6 +227,10 @@ export interface ModelOptions {
   t2v_class: boolean
   image_outputs: boolean
   supports_end_frame: boolean
+  /** Which conditioning letters the model accepts: T(ext), S(tart), E(nd), V(ideo), L(ast). */
+  image_prompt_types_allowed?: string
+  video_continuation?: boolean
+  video_guide_label?: string | null
   guide_preprocessing: ChoiceConfig | null
   guide_custom_choices: ChoiceConfig | null
   image_ref_choices: ChoiceConfig | null
@@ -247,6 +251,16 @@ export interface ModelOptions {
   frames_minimum: number
   frames_steps: number
   default_num_inference_steps: number | null
+  /** Model's preferred flow shift, applied on model selection. Distinct from
+   *  the `flow_shift` boolean above, which only says whether to show the
+   *  control. */
+  default_flow_shift?: number | null
+  /** The model's declared temporal grid (mirrors align_model_frame_count).
+   *  modulus 0 means the model declares none and frame counts are left alone. */
+  frame_alignment_modulus?: number
+  frame_alignment_remainder?: number
+  frame_alignment_mode?: string
+  frames_maximum?: number | null
   default_guidance_scale: number | null
   hide_resolution_presets: boolean
   input_video_strength_label: string
