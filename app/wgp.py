@@ -6096,7 +6096,32 @@ class DynamicClass:
         """Alias for assign() - more dict-like"""
         return self.assign(**dict)
 
-def process_prompt_enhancer(model_def, prompt_enhancer, original_prompts,  image_start, original_image_refs, is_image, audio_only, seed, prompt_enhancer_instructions = None ):
+def sample_reference_video_frames(video_path, count = 3):
+    """Evenly spaced stills from a clip, for a prompt enhancer that has to describe it.
+
+    The enhancer is a vision model and can only be shown images, so a reference video reaches it as a few
+    frames across its span rather than as motion. Sampled from the middle of each interval so the very
+    first and last frames -- often a fade or a slate -- are not what the model is asked to describe.
+    """
+    from shared.utils.utils import get_video_info, get_video_frame
+
+    try:
+        _, _, _, frame_count = get_video_info(video_path)
+    except Exception:
+        return []
+    if not frame_count:
+        return []
+    frames = []
+    for index in range(count):
+        frame_no = min(int(frame_count * (index + 0.5) / count), frame_count - 1)
+        try:
+            frames.append(get_video_frame(video_path, frame_no, return_PIL = True))
+        except Exception:
+            pass
+    return frames
+
+
+def process_prompt_enhancer(model_def, prompt_enhancer, original_prompts,  image_start, original_image_refs, is_image, audio_only, seed, prompt_enhancer_instructions = None, reference_video = None ):
     global enhancer_offloadobj
     prompt_enhancer_mode = str(prompt_enhancer or "")
     prompt_enhancer_instructions = model_def.get("image_prompt_enhancer_instructions" if is_image else "video_prompt_enhancer_instructions", None)
@@ -6119,6 +6144,10 @@ def process_prompt_enhancer(model_def, prompt_enhancer, original_prompts,  image
             prompt_images += image_start[:1]
         if original_image_refs != None:
             prompt_images += original_image_refs[:1]
+        # A reference video is conditioning the generation, so the enhancer has to be able to describe it --
+        # otherwise it writes around a clip it cannot see and invents whatever it needs.
+        if reference_video is not None:
+            prompt_images += sample_reference_video_frames(reference_video)
     prompt_images = [Image.open(img) if isinstance(img,str) else img for img in prompt_images]
     if len(original_prompts) == 0 and "T" not in prompt_enhancer_mode:
         return None
@@ -6216,6 +6245,12 @@ def enhance_prompt(state, prompt, prompt_enhancer, multi_images_gen_type, multi_
         download_models()
     model_def = get_model_def(get_state_model_type(state))
     audio_only = model_def.get("audio_only", False)
+    # Shown to the enhancer as sampled frames, so a prompt written against a reference clip describes what
+    # is actually in it rather than what the model imagines is in it.
+    enhancer_reference_video = inputs.get("video_guide")
+    if not (model_def.get("reference_video_source_path", False) and "V" in (video_prompt_type or "")
+            and isinstance(enhancer_reference_video, str)):
+        enhancer_reference_video = None
 
     acquire_GPU_ressources(state, "prompt_enhancer", "Prompt Enhancer")
 
@@ -6238,7 +6273,7 @@ def enhance_prompt(state, prompt, prompt_enhancer, multi_images_gen_type, multi_
         progress((i , num_prompts), desc=status, total= num_prompts)
 
         try:
-            enhanced_prompt = process_prompt_enhancer(model_def, prompt_enhancer, [one_prompt],  start_images, original_image_refs, is_image, audio_only, seed)    
+            enhanced_prompt = process_prompt_enhancer(model_def, prompt_enhancer, [one_prompt],  start_images, original_image_refs, is_image, audio_only, seed, reference_video = enhancer_reference_video)    
         except Exception as e:
             unload_prompt_enhancer_runtime()
             enhancer_offloadobj.unload_all()
@@ -7970,7 +8005,7 @@ def generate_video(
         start_time = time.time()
         if prompt_enhancer_image_caption_model != None and prompt_enhancer !=None and len(prompt_enhancer)>0 and enhancer_mode == 0:
             send_cmd("progress", [0, get_latest_status(state, "Enhancing Prompt")])
-            enhanced_prompts = process_prompt_enhancer(model_def, prompt_enhancer, original_prompts,  image_start if image_start is not None else image_end , original_image_refs, is_image, audio_only, seed )
+            enhanced_prompts = process_prompt_enhancer(model_def, prompt_enhancer, original_prompts,  image_start if image_start is not None else image_end , original_image_refs, is_image, audio_only, seed, reference_video = video_guide if model_def.get("reference_video_source_path", False) and "V" in (video_prompt_type or "") and isinstance(video_guide, str) else None )
             unload_prompt_enhancer_runtime()
             if enhanced_prompts is not None:
                 print(f"Enhanced prompts: {enhanced_prompts}" )
