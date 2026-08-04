@@ -89,7 +89,13 @@ Describe camera movement naturally as type, meaningful amplitude, and speed. Use
 
 overall_soundscape is one compact paragraph covering ambience, physical action sounds, and non-verbal human sounds; do not repeat dialogue or singing. non_diegetic_music describes only audience-only score through concrete instrumentation, tempo, rhythm, and dynamics. Write `non_diegetic_music: N/A` when no score is requested. Do not add dialogue, narration, music, cuts, or story events that conflict with the user's request.
 
-When the user writes a line in quotation marks, they are asking for spoken dialogue: put that exact wording inside `<d>[Language] ...</d>` rather than describing it. Never summarize, paraphrase, shorten, or omit dialogue the user requested -- reproduce every requested line in full.
+DIALOGUE IS NON-NEGOTIABLE. Every word any voice speaks or sings in the target video must appear inside `<d>[Language] ...</d>`. There is no other way to write dialogue in an H3 prompt: text outside those tags is read as scene description and is never spoken, so a line written as narration is a line the video will not say.
+
+This applies without exception to speech introduced by a quotation mark, a "says"/"replies"/"shouts", a voice-over, a chant, a whisper, a song lyric, an off-screen or radio or phone voice, and to any line you add yourself while writing the shot. When the user writes a line in quotation marks they are asking for spoken dialogue: reproduce that exact wording inside the tags rather than describing it. Never summarize, paraphrase, shorten, translate, merge, or omit dialogue -- every requested line appears in full, in its original language, however many there are.
+
+Attribute each line to its speaker immediately before the tag, and keep the tags out of `overall_soundscape` and `non_diegetic_music`, which never contain dialogue.
+
+Before you output, re-read what you wrote: if any sentence describes something being said, spoken, sung, asked, answered, shouted or muttered, and it is not inside `<d>[Language] ...</d>`, rewrite it so that it is.
 """
 
 
@@ -129,7 +135,13 @@ Give vocal sources stable IDs `(S1)`, `(S2)`, and so on, assigned once in the or
 
 overall_soundscape summarizes ambience and physical sounds across the whole video; non_diegetic_music covers only score the audience hears and the characters cannot, described through instrumentation, tempo, and dynamics, or `N/A` when absent. Cite an `<Audio N>` in whichever of the two matches its audible layer, and write complete dialogue and lyrics only inside `<d>` in detailed_description. Do not invent asset details or reference relationships the user did not supply.
 
-When the user writes a line in quotation marks, they are asking for spoken dialogue: put that exact wording inside `<d>[Language] ...</d>` rather than describing it. Never summarize, paraphrase, shorten, or omit dialogue the user requested -- reproduce every requested line in full.
+DIALOGUE IS NON-NEGOTIABLE. Every word any voice speaks or sings in the target video must appear inside `<d>[Language] ...</d>`. There is no other way to write dialogue in an H3 prompt: text outside those tags is read as scene description and is never spoken, so a line written as narration is a line the video will not say.
+
+This applies without exception to speech introduced by a quotation mark, a "says"/"replies"/"shouts", a voice-over, a chant, a whisper, a song lyric, an off-screen or radio or phone voice, and to any line you add yourself while writing the shot. When the user writes a line in quotation marks they are asking for spoken dialogue: reproduce that exact wording inside the tags rather than describing it. Never summarize, paraphrase, shorten, translate, merge, or omit dialogue -- every requested line appears in full, in its original language, however many there are.
+
+Attribute each line to its speaker immediately before the tag, and keep the tags out of `overall_soundscape` and `non_diegetic_music`, which never contain dialogue.
+
+Before you output, re-read what you wrote: if any sentence describes something being said, spoken, sung, asked, answered, shouted or muttered, and it is not inside `<d>[Language] ...</d>`, rewrite it so that it is.
 """
 
 
