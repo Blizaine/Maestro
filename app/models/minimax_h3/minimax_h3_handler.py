@@ -82,6 +82,12 @@ class family_handler:
             # H3's video VAE accepts only 17*n+5 frames.  124 is the first
             # valid count at or above five seconds; 345 is the last at or
             # below fifteen seconds.
+            # H3's prompt is one structured block (integrated_multimodal_
+            # description / overall_soundscape / non_diegetic_music separated
+            # by blank lines). Without this Maestro splits it on newlines and
+            # runs each field as its own generation.
+            "single_block_prompt": True,
+            "preserve_empty_prompt_lines": True,
             "frames_minimum": 124,
             "frames_steps": 17,
             "frames_maximum": 345,

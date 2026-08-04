@@ -794,8 +794,15 @@ def validate_settings(state, model_type, single_prompt, inputs):
         return ret()
 
     multi_prompts_gen_type = inputs["multi_prompts_gen_type"]
-    if single_prompt or multi_prompts_gen_type == 2:
-        prompts = [prompt] 
+    # Some models take a structured, inherently multi-line prompt (MiniMax H3's
+    # integrated_multimodal_description / overall_soundscape /
+    # non_diegetic_music block). Splitting that on newlines turns one prompt
+    # into several unrelated generations, so those models opt out.
+    # gen_type 3 is excluded because there the newlines ARE clip boundaries.
+    if single_prompt or multi_prompts_gen_type == 2 or (
+        multi_prompts_gen_type != 3 and model_def.get("single_block_prompt", False)
+    ):
+        prompts = [prompt]
     else:
         prompts = [one_line.strip() for one_line in prompt.split("\n") if len(one_line.strip()) > 0]
 
@@ -7433,7 +7440,9 @@ def generate_video(
     trans2 = get_transformer_model(wan_model, 2)
     audio_sampling_rate = 16000
 
-    if multi_prompts_gen_type == 2:
+    if multi_prompts_gen_type == 2 or model_def.get("single_block_prompt", False):
+        # See validate_settings: a structured multi-line prompt must reach the
+        # model whole.
         prompts = [prompt]
     else:
         prompts = prompt.split("\n")
