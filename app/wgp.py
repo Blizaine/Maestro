@@ -6913,6 +6913,21 @@ def custom_preprocess_video_with_mask(model_handler, base_model_type, pre_video_
 def _video_tensor_to_uint8_chunk_inplace(sample, value_range=(-1, 1)):
     if sample.dtype == torch.uint8:
         return sample
+    # A model whose generate() runs under torch.inference_mode() hands back an
+    # "inference tensor", and PyTorch refuses to mutate one in place once that
+    # scope has been left:
+    #
+    #   RuntimeError: Inplace update to inference tensor outside InferenceMode
+    #   is not allowed.
+    #
+    # MiniMax H3 decorates generate() that way, so saving its output raised
+    # here. Take one copy for such tensors only, so every other model keeps the
+    # zero-copy path this helper exists for. The clone must happen inside
+    # inference_mode(False): a clone taken while still inside inference mode
+    # inherits the flag.
+    if torch.is_inference(sample):
+        with torch.inference_mode(False):
+            sample = sample.clone()
     min_val, max_val = value_range
     sample = sample.clamp_(min_val, max_val)
     sample = sample.sub_(min_val).mul_(255.0 / (max_val - min_val)).to(torch.uint8)
