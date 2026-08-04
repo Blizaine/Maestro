@@ -38,13 +38,16 @@ from .packing import (
     MINIMAX_H3_MIN_DURATION,
     MINIMAX_H3_PIXEL_MEAN,
     MINIMAX_H3_PIXEL_STD,
+    MiniMaxH3PreparedReference,
     align_num_frames,
     audio_latent_num_frames,
     build_packed_sequence,
+    build_ref2va_packed_sequence,
     build_row_timesteps,
     keyframe_condition_noise,
     patchify_video_latents,
     prepare_keyframe_image,
+    resolve_canvas_size,
     unpack_audio_tokens,
     unpatchify_video_tokens,
     video_latent_num_frames,
@@ -352,6 +355,29 @@ class MiniMaxH3Model:
     def patch_size(self) -> tuple[int, int, int]:
         return tuple(self.transformer.config.patch_size)
 
+    def _condition_normalization(self):
+        """The pixel and latent normalization constants every conditioning still is encoded through."""
+        means, stds = _keyframe_latent_stats_cpu()
+        pixel_mean = torch.tensor(MINIMAX_H3_PIXEL_MEAN, device=self.device).view(1, -1, 1, 1, 1)
+        pixel_std = torch.tensor(MINIMAX_H3_PIXEL_STD, device=self.device).view(1, -1, 1, 1, 1)
+        return means, stds, pixel_mean, pixel_std
+
+    def _encode_condition_still(self, image: Image.Image, normalization) -> tuple[torch.Tensor, tuple[int, int]]:
+        """Encode one still into normalized, patchified latent rows, and report the latent size it encoded to.
+
+        The posterior is sampled under a fixed seed rather than off the request's generator, and the sample is
+        rounded through float16 before it is normalized on CPU — both are part of the reference contract.
+        """
+        means, stds, pixel_mean, pixel_std = normalization
+        pixels = torch.from_numpy(np.array(image, dtype=np.uint8)).to(self.device)
+        pixels = pixels.permute(2, 0, 1)[None, :, None]
+        pixels = (pixels.float().div(255.0) - pixel_mean) / pixel_std
+        moments = self.vae._encode_clip(pixels)
+        posterior = DiagonalGaussianDistribution(moments)
+        encoded = posterior.sample(generator=torch.Generator().manual_seed(MINIMAX_H3_KEYFRAME_ENCODE_SEED))
+        encoded = encoded.to(torch.float16).float().cpu()
+        return patchify_video_latents((encoded - means) / stds, self.patch_size), tuple(encoded.shape[-2:])
+
     def _encode_keyframes(
         self,
         images: list[Image.Image],
@@ -362,22 +388,13 @@ class MiniMaxH3Model:
         if not images:
             return None
 
-        means, stds = _keyframe_latent_stats_cpu()
-        pixel_mean = torch.tensor(MINIMAX_H3_PIXEL_MEAN, device=self.device).view(1, -1, 1, 1, 1)
-        pixel_std = torch.tensor(MINIMAX_H3_PIXEL_STD, device=self.device).view(1, -1, 1, 1, 1)
-
+        normalization = self._condition_normalization()
         rows = []
         for image in images:
             if self._interrupt:
                 return None
-            pixels = torch.from_numpy(np.array(image, dtype=np.uint8)).to(self.device)
-            pixels = pixels.permute(2, 0, 1)[None, :, None]
-            pixels = (pixels.float().div(255.0) - pixel_mean) / pixel_std
-            moments = self.vae._encode_clip(pixels)
-            posterior = DiagonalGaussianDistribution(moments)
-            encoded = posterior.sample(generator=torch.Generator().manual_seed(MINIMAX_H3_KEYFRAME_ENCODE_SEED))
-            encoded = encoded.to(torch.float16).float().cpu()
-            rows.append(patchify_video_latents((encoded - means) / stds, self.patch_size))
+            frame_rows, _ = self._encode_condition_still(image, normalization)
+            rows.append(frame_rows)
 
         clean_rows = torch.cat(rows).to(self.device)
         noise = keyframe_condition_noise(
