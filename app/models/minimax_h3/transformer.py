@@ -28,6 +28,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from shared.attention import pay_attention
+
 
 MODALITY_VIDEO = 0
 MODALITY_TEXT = 1
@@ -191,21 +193,21 @@ class MiniMaxH3Attention(nn.Module):
                 value[:, start:end].copy_(v_chunk)
             assert query is not None and key is not None and value is not None
             qkv = q_chunk = k_chunk = v_chunk = None
-        query = query.transpose(1, 2)
-        key = key.transpose(1, 2)
-        value = value.transpose(1, 2)
         if attention_mask is not None:
             attention_mask = attention_mask[None, None].to(device=query.device)
-        attended = F.scaled_dot_product_attention(
-            query,
-            key,
-            value,
-            attn_mask=attention_mask,
-            dropout_p=0.0,
-            is_causal=False,
-        )
+        # Maestro's dispatcher rather than SDPA directly. It routes to whichever backend is installed --
+        # SageAttention or FlashAttention where available -- which for a packed H3 sequence is the
+        # difference between fitting and not: this sequence runs to tens of thousands of rows across 56
+        # heads, and PyTorch's fallback materializes far more of it at once.
+        #
+        # It also takes q/k/v in [batch, tokens, heads, head_dim], which is the layout they are already in,
+        # so the three transposes here are gone; and it clears `qkv_list`, so the references drop as it
+        # consumes them instead of all three staying live across the call. `recycle_q` lets it reuse the
+        # query's storage for the result.
+        qkv_list = [query, key, value]
         query = key = value = qkv = None
-        attended = attended.transpose(1, 2).reshape(batch, length, self.heads * self.head_dim)
+        attended = pay_attention(qkv_list, attention_mask=attention_mask, recycle_q=True)
+        attended = attended.reshape(batch, length, self.heads * self.head_dim)
         return self.out_proj(attended)
 
 
