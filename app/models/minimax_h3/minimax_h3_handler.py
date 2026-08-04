@@ -1,12 +1,16 @@
 """Maestro family handler for MiniMax H3 Base.
 
 Two checkpoints are exposed.  FL2VA is the unified one: text-to-video,
-image-to-video, and first/last-frame video with native stereo audio.  Ref2VA
-conditions on material that is not a frame of the output -- reference stills
-carrying an identity or a subject, and audio references carrying a voice.
+image-to-video, first/last-frame video, and continuation, all with native
+stereo audio.  Ref2VA conditions on material that is not a frame of the
+output -- reference stills carrying an identity or a subject, a reference
+clip carrying a look or a motion, and audio references carrying a voice,
+including the reference clip's own soundtrack.
 
-Reference *videos* are not advertised yet: the text encoder's processor is
-image-only, so a video reference has no way to be presented to it.
+One reference clip, not two.  H3 accepts a second, but Maestro has a single
+``video_guide`` input and no ``video_guide2``; adding one means new
+attachment plumbing shared by every model, so the second slot is left unbuilt
+rather than offered as a control that cannot receive a file.
 """
 
 from __future__ import annotations
