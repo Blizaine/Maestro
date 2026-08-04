@@ -77,6 +77,34 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.5.5 (2026-08-04)
+
+**MiniMax H3 local audio-video generation**
+- Added native local MiniMax H3 Base FL2VA support with text-to-video, image-to-video, and first/last-frame video generation.
+- H3 generates synchronized 32 kHz stereo audio together with the video instead of requiring a separate audio pass.
+- Added approximately 5-15 second generation at 24 FPS with landscape, portrait, square, native 768p, and lower-VRAM resolution options.
+- Added automatic, revision-pinned provisioning for the compact scaled-FP8 transformer, NVFP4 Qwen3-VL conditioner, video VAE, audio VAE, tokenizer, and processor assets.
+- The initial integration focuses on H3 Base FL2VA; H3 Ref2VA reference-video/audio conditioning and hosted 2K regeneration are not yet included.
+
+**H3 prompting and dialogue**
+- Added an H3-specific Context-IR Prompt Enhance workflow using the model's native multimodal description, soundscape, music, speaker-ID, and dialogue-tag structure.
+- Vague requests such as two characters discussing a subject can now be expanded into concise, meaningful dialogue sized to the selected duration.
+- User-supplied dialogue is preserved verbatim, and remaining time is assigned to silent visible action to reduce invented speech and gibberish.
+- Start-frame prompts now receive the correct H3 image-alignment instruction while raw prompting remains available by simply not using Prompt Enhance.
+- H3 enhancement bypasses the incompatible generic cinematic enhancer and remains one native timeline instead of being divided into false sliding-window paragraphs.
+
+**H3 compatibility, memory, and reliability**
+- Corrected compact Qwen3-VL prompt conditioning so H3 follows the requested subject instead of producing unrelated repeated scenes.
+- Added native row-scaled INT8 embedding support and corrected NVFP4 pre-quantization and combined-scale handling for Comfy-format checkpoints.
+- Fixed mixed-dtype model profiling, keyframe CPU/CUDA device mismatches, and first-frame generation failures.
+- Added activation chunking, explicit transformer working-memory reservation, and MMGP-friendly dtype locks so H3 can stream on consumer GPUs without starving the first denoising step.
+- Added regression coverage for prompt conditioning, quantized checkpoint loading, keyframes, scheduler behavior, audio output, activation chunking, and H3 prompt structure.
+
+**Multi-character Recast continuity**
+- Improved SCAIL-2 Recast when a mapped character enters later within an otherwise continuous camera shot.
+- Added hidden identity pre-roll conditioning so late-arriving characters can be introduced without publishing an artificial visible cut.
+- Recast assembly now validates that all generated segments are present and that the final output retains the exact source timeline length.
+
 ### v1.5.0 (2026-08-02)
 
 **SCAIL-2 Recast and multi-character replacement**

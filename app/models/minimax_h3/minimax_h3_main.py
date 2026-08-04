@@ -23,7 +23,11 @@ from mmgp import offload
 from shared.utils import files_locator as fl
 
 from .audio_vae import AutoencoderKLMiniMaxH3Audio
-from .checkpoint import preprocess_audio_vae_state_dict, preprocess_video_vae_state_dict
+from .checkpoint import (
+    preprocess_audio_vae_state_dict,
+    preprocess_conditioner_state_dict,
+    preprocess_video_vae_state_dict,
+)
 from .conditioner import MiniMaxH3Conditioner, MiniMaxH3Qwen3VL, build_h3_processor, load_h3_qwen_config
 from .packing import (
     MINIMAX_H3_AUDIO_CHANNELS,
@@ -172,6 +176,27 @@ AUDIO_LATENTS_STD = (
 )
 
 
+def _keyframe_latent_stats_cpu() -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the official FL2VA keyframe normalization tensors on CPU.
+
+    H3 rounds encoded keyframes to float16, promotes them back to float32,
+    and normalizes them on CPU before returning the packed rows to the GPU.
+    Maestro sets a CUDA default device globally, so an omitted ``device``
+    here would silently put these constants on CUDA and break that contract.
+    """
+    means = torch.tensor(
+        VIDEO_LATENTS_MEAN,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    ).view(1, -1, 1, 1, 1)
+    stds = torch.tensor(
+        VIDEO_LATENTS_STD,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    ).view(1, -1, 1, 1, 1)
+    return means, stds
+
+
 def _first_path(value):
     if isinstance(value, (list, tuple)):
         return value[0]
@@ -217,21 +242,29 @@ def _load_conditioner(filename: str, assets_root: str, dtype: torch.dtype) -> Mi
     processor_path = fl.locate_folder(os.path.join(assets_root, "processor"))
     config = load_h3_qwen_config(config_path)
     tokenizer, processor = build_h3_processor(processor_path)
-    with init_empty_weights(include_buffers=True):
-        qwen = MiniMaxH3Qwen3VL(config)
+    # Qwen keeps rotary-frequency tables as computed, non-persistent buffers,
+    # so they are intentionally absent from the checkpoint.  Keep those small
+    # buffers materialized while Accelerate places the 32B parameters on meta.
+    with init_empty_weights(include_buffers=False):
+        qwen = MiniMaxH3Qwen3VL(config, dtype=dtype)
     offload.load_model_data(
         qwen,
         filename,
         writable_tensors=False,
+        preprocess_sd=preprocess_conditioner_state_dict,
         default_dtype=dtype,
     )
     qwen._model_dtype = dtype
     qwen.eval().requires_grad_(False)
-    return MiniMaxH3Conditioner(qwen, tokenizer, processor).eval().requires_grad_(False)
+    conditioner = MiniMaxH3Conditioner(qwen, tokenizer, processor).eval().requires_grad_(False)
+    conditioner._model_dtype = dtype
+    return conditioner
 
 
 def _load_video_vae(filename: str) -> AutoencoderKLMiniMaxH3:
-    with init_empty_weights(include_buffers=True):
+    # Rotary tables are computed, non-persistent buffers and therefore are
+    # not present in the compact checkpoint.
+    with init_empty_weights(include_buffers=False):
         vae = AutoencoderKLMiniMaxH3(
             latents_mean=VIDEO_LATENTS_MEAN,
             latents_std=VIDEO_LATENTS_STD,
@@ -248,7 +281,9 @@ def _load_video_vae(filename: str) -> AutoencoderKLMiniMaxH3:
 
 
 def _load_audio_vae(filename: str) -> AutoencoderKLMiniMaxH3Audio:
-    with init_empty_weights(include_buffers=True):
+    # Preserve any computed codec buffers while keeping all learned
+    # parameters empty until MMGP streams the checkpoint.
+    with init_empty_weights(include_buffers=False):
         vae = AutoencoderKLMiniMaxH3Audio(
             latents_mean=AUDIO_LATENTS_MEAN,
             latents_std=AUDIO_LATENTS_STD,
@@ -327,8 +362,7 @@ class MiniMaxH3Model:
         if not images:
             return None
 
-        means = torch.tensor(VIDEO_LATENTS_MEAN).view(1, -1, 1, 1, 1)
-        stds = torch.tensor(VIDEO_LATENTS_STD).view(1, -1, 1, 1, 1)
+        means, stds = _keyframe_latent_stats_cpu()
         pixel_mean = torch.tensor(MINIMAX_H3_PIXEL_MEAN, device=self.device).view(1, -1, 1, 1, 1)
         pixel_std = torch.tensor(MINIMAX_H3_PIXEL_STD, device=self.device).view(1, -1, 1, 1, 1)
 

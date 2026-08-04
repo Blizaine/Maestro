@@ -18,6 +18,47 @@ IMAGE_TOKEN_ID = 151655
 TEXT_ENCODER_LAYERS = 50
 
 
+class MiniMaxH3Int8Embedding(nn.Module):
+    """Row-scaled INT8 embedding used by the Comfy MiniMax H3 checkpoint.
+
+    The checkpoint keeps the Qwen vocabulary table quantized and stores one
+    floating-point scale per vocabulary row.  Looking up the INT8 rows before
+    dequantizing them avoids materializing the full 1.5 GB BF16 table.
+    """
+
+    def __init__(
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        padding_idx: int | None,
+        output_dtype: torch.dtype,
+    ):
+        super().__init__()
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+        self.padding_idx = padding_idx
+        self.output_dtype = output_dtype
+        # MMGP normally requires every unquantized parameter in a model to
+        # share its execution dtype.  This module deliberately keeps mixed
+        # INT8 weights and FP32 row scales while producing BF16/FP16 output.
+        # Locking the storage dtype prevents profiling and later dtype-change
+        # passes from converting either checkpoint tensor.
+        self._lock_dtype = output_dtype
+        self.weight = nn.Parameter(
+            torch.empty((num_embeddings, embedding_dim), dtype=torch.int8),
+            requires_grad=False,
+        )
+        self.weight_scale = nn.Parameter(
+            torch.empty((num_embeddings, 1), dtype=torch.float32),
+            requires_grad=False,
+        )
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        quantized_rows = F.embedding(input_ids, self.weight, self.padding_idx)
+        row_scales = F.embedding(input_ids, self.weight_scale, self.padding_idx)
+        return quantized_rows.to(self.output_dtype) * row_scales.to(self.output_dtype)
+
+
 class MiniMaxH3PreScaledLinear(nn.Linear):
     """AWQ/NVFP4 linear with the checkpoint's input smoothing scale."""
 
@@ -39,11 +80,18 @@ class MiniMaxH3Qwen3VL(nn.Module):
     an identity module.
     """
 
-    def __init__(self, config: Qwen3VLConfig):
+    def __init__(self, config: Qwen3VLConfig, dtype: torch.dtype | None = None):
         super().__init__()
         self.config = config
         self.visual = Qwen3VLVisionModel._from_config(config.vision_config)
         self.model = Qwen3VLTextModel(config.text_config)
+        source_embedding = self.model.embed_tokens
+        self.model.embed_tokens = MiniMaxH3Int8Embedding(
+            source_embedding.num_embeddings,
+            source_embedding.embedding_dim,
+            source_embedding.padding_idx,
+            output_dtype=dtype or source_embedding.weight.dtype,
+        )
         self.model.norm = nn.Identity()
         for layer in self.model.layers:
             down = layer.mlp.down_proj
@@ -120,10 +168,11 @@ class MiniMaxH3Conditioner(nn.Module):
             return_tensors="pt",
         )
         input_ids = encoded["input_ids"].to(device)
-        attention_mask = encoded["attention_mask"].to(device).bool()
-        position_ids = attention_mask.long().cumsum(-1) - 1
-        position_ids.masked_fill_(~attention_mask, 1)
-        return input_ids, attention_mask, position_ids, None
+        # Match the MiniMax/Diffusers presentation exactly: there is no chat
+        # template or padding, but Qwen still receives the all-live tokenizer
+        # mask and applies its native causal attention internally.
+        attention_mask = encoded["attention_mask"].to(device=device, dtype=torch.bool)
+        return input_ids, attention_mask, None, encoded
 
     def _vision_inputs(self, prompt: str, images: list, device: torch.device):
         presentation = "".join(

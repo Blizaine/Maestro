@@ -99,10 +99,11 @@ export function PromptInput() {
   const overlapSec = slidingWindowOverlap / fps
   const discardSec = discardFrames / fps
   const stride = slidingWindowSeconds - discardSec - overlapSec
-  const windowCount = stride > 0 && durationSeconds > slidingWindowSeconds
+  const supportsSlidingWindows = modelOptions?.sliding_window === true
+  const windowCount = supportsSlidingWindows && stride > 0 && durationSeconds > slidingWindowSeconds
     ? 1 + Math.ceil((durationSeconds - slidingWindowSeconds + discardSec) / stride)
     : 1
-  const usesWindows = generationMode === 'video' && windowCount > 1 && imageMode !== 2
+  const usesWindows = generationMode === 'video' && supportsSlidingWindows && windowCount > 1 && imageMode !== 2
   const modePlaceholder = generationMode === 'avatar' && editSubMode === 'recast'
     ? 'Describe the finished video and replacement characters...'
     : generationMode === 'avatar' && editSubMode === 'restyle'

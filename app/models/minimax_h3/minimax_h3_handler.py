@@ -25,6 +25,14 @@ _TEXT_ENCODER = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
 _VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
 _AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
 
+# H3 packs video, audio, and text into one unusually long transformer
+# sequence.  At 480p / 10 seconds the token-wise activations alone need
+# several gigabytes, so MMGP must not treat its model-weight safety cap as
+# the entire available VRAM budget.  ``workingVRAM`` reserves this amount
+# independently of the user's card size; MMGP streams more transformer
+# blocks on smaller cards instead of starving the first denoising step.
+_TRANSFORMER_WORKING_VRAM_MB = 10 * 1024
+
 
 def _hf_url(repo_id: str, revision: str, *parts: str) -> str:
     path = "/".join(part.strip("/\\") for part in parts if part)
@@ -175,7 +183,12 @@ class family_handler:
             "vae": model.vae,
             "audio_vae": model.audio_vae,
         }
-        return model, pipe
+        return model, {
+            "pipe": pipe,
+            "workingVRAM": {
+                "transformer": _TRANSFORMER_WORKING_VRAM_MB,
+            },
+        }
 
     @staticmethod
     def update_default_settings(base_model_type, model_def, ui_defaults):

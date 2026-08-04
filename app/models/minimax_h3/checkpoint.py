@@ -22,11 +22,63 @@ pair at load time, avoiding a duplicate 605 MB audio checkpoint.
 
 from __future__ import annotations
 
+import json
+
 import torch
 
 
 VIDEO_VAE_HEADS = 32
 VIDEO_VAE_HEAD_DIM = 64
+
+
+def preprocess_conditioner_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Validate and expose Comfy's row-scaled INT8 Qwen embedding.
+
+    MMGP handles the checkpoint's NVFP4 linear layers separately.  The token
+    table is the sole ``int8_tensorwise`` layer and is consumed directly by
+    :class:`MiniMaxH3Int8Embedding`, so its Comfy metadata marker must not be
+    passed to PyTorch as a model parameter.
+    """
+
+    prefix = "model.embed_tokens"
+    marker = state_dict.pop(f"{prefix}.comfy_quant", None)
+    weight = state_dict.get(f"{prefix}.weight")
+    scale_key = f"{prefix}.weight_scale"
+    scale = state_dict.get(scale_key)
+
+    if marker is None:
+        if weight is not None and torch.is_floating_point(weight) and scale is None:
+            state_dict[scale_key] = torch.ones(
+                (weight.shape[0], 1),
+                dtype=torch.float32,
+                device=weight.device,
+            )
+        return state_dict
+
+    try:
+        raw_marker = bytes(marker.detach().to("cpu").tolist()).rstrip(b"\0")
+        descriptor = json.loads(raw_marker.decode("utf-8"))
+    except (TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise ValueError("MiniMax H3 Qwen embedding has invalid quantization metadata.") from exc
+
+    if descriptor.get("format") != "int8_tensorwise":
+        raise ValueError(
+            "MiniMax H3 Qwen embedding uses unsupported quantization format "
+            f"{descriptor.get('format')!r}; expected 'int8_tensorwise'."
+        )
+    if weight is None or weight.dtype != torch.int8 or weight.ndim != 2:
+        raise ValueError("MiniMax H3 Qwen embedding must be a two-dimensional INT8 tensor.")
+    if scale is None or not torch.is_floating_point(scale):
+        raise ValueError("MiniMax H3 Qwen embedding is missing its floating-point row scales.")
+    if scale.ndim == 1 and scale.shape[0] == weight.shape[0]:
+        scale = scale.unsqueeze(-1)
+        state_dict[scale_key] = scale
+    if tuple(scale.shape) != (weight.shape[0], 1):
+        raise ValueError(
+            "MiniMax H3 Qwen embedding row scales have shape "
+            f"{tuple(scale.shape)}; expected {(weight.shape[0], 1)}."
+        )
+    return state_dict
 
 
 def _reorder_interleaved_qkv(weight: torch.Tensor) -> torch.Tensor:

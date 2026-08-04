@@ -5632,7 +5632,8 @@ export const useStore = create<AppState>((set, get) => ({
       const overlapSec = state.slidingWindowOverlap / fps
       const discardSec = discardFrames / fps
       const stride = state.slidingWindowSeconds - discardSec - overlapSec
-      const windowCount = stride > 0 && state.durationSeconds > state.slidingWindowSeconds
+      const supportsSlidingWindows = state.modelOptions?.sliding_window === true
+      const windowCount = supportsSlidingWindows && stride > 0 && state.durationSeconds > state.slidingWindowSeconds
         ? 1 + Math.ceil((state.durationSeconds - state.slidingWindowSeconds + discardSec) / stride)
         : 1
 

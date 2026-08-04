@@ -6818,19 +6818,30 @@ async def llm_enhance_prompt(request: Request):
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
 
+    model_type = str(body.get("model_type", "") or "")
+    generation_mode = str(body.get("mode", "video") or "video")
+    needs_h3_context_ir = (
+        model_type.lower().startswith("minimax_h3")
+        and generation_mode in ("video", "avatar")
+    )
     enhancer_enabled = int(wgp.server_config.get("enhancer_enabled", 0) or 0)
 
-    # Route to Wan2GP enhancer if enabled
-    if enhancer_enabled > 0:
+    # The generic Wan2GP cinematic enhancer cannot produce MiniMax H3's
+    # required Context-IR fields, speaker IDs, or <d> dialogue tags. Route H3
+    # through Maestro's model-specific guide even when the legacy enhancer is
+    # enabled; all other model families retain the configured behavior.
+    if enhancer_enabled > 0 and not needs_h3_context_ir:
         try:
             # Support both single image_path and array image_paths
             image_paths = body.get("image_paths") or []
             if not image_paths and body.get("image_path"):
                 image_paths = [body["image_path"]]
-            return await _enhance_with_wangp(prompt, body.get("mode", "video"), enhancer_enabled, image_paths=image_paths)
+            return await _enhance_with_wangp(prompt, generation_mode, enhancer_enabled, image_paths=image_paths)
         except Exception as e:
             print(f"[Enhance] Wan2GP enhancer failed, falling back to LLM: {e}")
             # Fall through to LLM
+    elif enhancer_enabled > 0 and needs_h3_context_ir:
+        print("[Enhance] MiniMax H3 requires structured Context-IR; using Maestro's model-specific LLM guide")
 
     # Use our local LLM service
     from services import llm_service
@@ -6883,7 +6894,6 @@ async def llm_enhance_prompt(request: Request):
     # Load LoRA info for activated LoRAs — extract ONLY trigger words and key tips
     lora_hint_text = ""
     activated_loras = body.get("activated_loras") or []
-    model_type = body.get("model_type", "")
     print(f"[Enhance] LoRA check: activated_loras={activated_loras}, model_type={model_type}")
     if activated_loras and model_type:
         try:

@@ -588,15 +588,17 @@ def _dequantize_nvfp4_weight(
         )
     if scale.shape[0] != out.shape[0]:
         scale = scale[:out.shape[0]]
-    out = out.view(out.shape[0], scale.shape[1], block_size)
-    out.mul_(scale.unsqueeze(-1))
-    out = out.view(out.shape[0], -1)
-
     if layout == _NVFP4_LAYOUT_TENSORCORE:
-        scale_factor = alpha.to(dtype)
+        # Comfy-kitchen's eager NVFP4 reference combines the tensor and block
+        # scales first, then performs one multiply with the decoded FP4 data.
+        # The order matters for BF16/FP16 fallback because rounding between
+        # two multiplies is otherwise repeated in every Qwen linear layer.
+        combined_scale = scale * alpha.to(dtype)
     else:
-        scale_factor = alpha.to(dtype) * input_global_scale.to(dtype)
-    out.mul_(scale_factor)
+        combined_scale = scale * (alpha.to(dtype) * input_global_scale.to(dtype))
+    out = out.view(out.shape[0], scale.shape[1], block_size)
+    out.mul_(combined_scale.unsqueeze(-1))
+    out = out.view(out.shape[0], -1)
     return out
 
 
@@ -1046,6 +1048,12 @@ class QLinearNVFP4(QModuleMixin, torch.nn.Linear):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         pre_quant_scale = getattr(self, "pre_quant_scale", None)
+        if not torch.is_tensor(pre_quant_scale):
+            # MMGP loads quantized weights through a temporary handler module,
+            # then copies its ordinary attributes into QLinearQuantoRouter.
+            # Registered buffers are deliberately excluded from that copy, so
+            # keep a plain-attribute mirror for the routed module to retain.
+            pre_quant_scale = getattr(self, "_nvfp4_pre_quant_scale", None)
         if torch.is_tensor(pre_quant_scale):
             input = input * pre_quant_scale.to(device=input.device, dtype=input.dtype)
         return torch.nn.functional.linear(input, self.qweight, bias=self.bias)
@@ -1179,6 +1187,10 @@ class QLinearNVFP4(QModuleMixin, torch.nn.Linear):
                 self.pre_quant_scale = loaded_scale
             else:
                 self.register_buffer("pre_quant_scale", loaded_scale, persistent=True)
+            # QLinearQuantoRouter copies values from this temporary module's
+            # ``__dict__`` but not its ``_buffers``. Without this mirror the
+            # AWQ input scale vanishes even though the checkpoint loaded it.
+            self._nvfp4_pre_quant_scale = loaded_scale
 
         return
 

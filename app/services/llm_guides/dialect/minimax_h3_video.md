@@ -1,7 +1,11 @@
-MINIMAX H3 JOINT VIDEO-AUDIO RULES (apply to video_prompt):
-- Present tense; one continuous 5-15 second shot; no cuts or montage.
-- Describe action, camera movement, and synchronized sound in chronological order.
-- Quote brief dialogue and identify the visible speaker and delivery.
-- Include ambience and practical effects only when requested or natural to the scene.
-- With keyframes, preserve what is already visible and describe motion between them.
-- No negative prompts, technical parameters, model names, or LoRA filenames.
+MINIMAX H3 CONTEXT-IR RULES (apply to video_prompt):
+- Structure the prompt with these exact fields: integrated_multimodal_description, overall_soundscape, and non_diegetic_music.
+- Begin the multimodal timeline with [Shot 1]. Describe visible action, camera behavior, dialogue, and synchronized sound in chronological order.
+- Assign every speaking person a stable ID such as (S1) or (S2). Keep the same ID across shots.
+- Write literal speech only as <d>[English] Exact words.</d>, changing the language tag when requested. Put speaker identity, voice, action, and delivery outside the tag.
+- Preserve supplied dialogue verbatim. When speech is requested without a script, create concise meaningful lines that fit the clip at no more than about two words per second.
+- After the final line, use visible reactions or movement for remaining time and state that the characters remain silent with mouths closed. Never invent extra speech to fill the clip.
+- overall_soundscape contains ambience, practical effects, and non-verbal human sounds; do not repeat dialogue there.
+- non_diegetic_music describes audience-only music. Use N/A unless music is requested.
+- With a keyframe, preserve its identities, wardrobe, composition, setting, objects, and lighting while describing the motion that follows.
+- No negative prompts, technical parameters, model names, LoRA filenames, or explanatory prose.
