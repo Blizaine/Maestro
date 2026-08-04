@@ -58,6 +58,12 @@ _AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
 _TRANSFORMER_WORKING_VRAM_MB = 16 * 1024
 
 
+# The shortest edge that still counts as "meant to be native". 640 is a canvas H3 lists in its own right
+# (1152x640), so the band starts above it: a request for 640 is a request for 640, while 704 or 720 is a
+# generic preset aiming at the same scale as native and falling short.
+_NATIVE_LIFT_FLOOR = 672
+
+
 def _snap_resolution(resolution):
     """Snap a requested canvas onto the grid H3 can actually sample, keeping its size and aspect.
 
@@ -78,7 +84,7 @@ def _snap_resolution(resolution):
     `auto_720p`, which are resolved downstream from the source material -- replacing one with a fixed canvas
     would be the same bug wearing a different hat.
     """
-    from .packing import MINIMAX_H3_CANVAS_MULTIPLE
+    from .packing import MINIMAX_H3_CANVAS_MULTIPLE, MINIMAX_H3_SHORT_EDGE
 
     multiple = MINIMAX_H3_CANVAS_MULTIPLE
     try:
@@ -87,6 +93,20 @@ def _snap_resolution(resolution):
         return resolution
     if raw_width <= 0 or raw_height <= 0:
         return resolution
+
+    # A request that lands just under H3's native scale is lifted onto it, keeping its aspect ratio. The
+    # model's short edge is 768 -- `resolve_canvas_size` targets it and upstream's own list calls 1344x768
+    # "16:9 native" -- and a generic 720p preset rounds to 704, close enough to native to be clearly meant
+    # as it, but under the scale the model was trained at, which costs sharpness for nothing.
+    #
+    # Deliberately narrow, so smaller presets stay where they were put. The long edge must already reach
+    # native, which is what separates "a wide canvas falling short on its short edge" from "a small square":
+    # 540p's 736x736 and 480p's 672x672 have short edges inside the band but are simply small requests, and
+    # a plain short-edge test would inflate both.
+    short_edge, long_edge = min(raw_width, raw_height), max(raw_width, raw_height)
+    if _NATIVE_LIFT_FLOOR <= short_edge < MINIMAX_H3_SHORT_EDGE and long_edge >= MINIMAX_H3_SHORT_EDGE:
+        scale = MINIMAX_H3_SHORT_EDGE / short_edge
+        raw_width, raw_height = raw_width * scale, raw_height * scale
 
     width = max(multiple, int(round(raw_width / multiple)) * multiple)
     height = max(multiple, int(round(raw_height / multiple)) * multiple)
