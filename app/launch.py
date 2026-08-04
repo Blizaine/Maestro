@@ -5079,6 +5079,13 @@ def get_model_options(model_type: str):
         # Read ONLY from ui_defaults: model_def's "flow_shift" is a boolean
         # capability flag (whether to show the control), not a value.
         "default_flow_shift": _ui_defaults.get("flow_shift"),
+        # The model's declared temporal grid, so the UI can mirror
+        # align_model_frame_count instead of guessing. Absent (modulus 0) for
+        # models that declare none, and the UI then leaves frame counts alone.
+        "frame_alignment_modulus": int(md.get("frame_alignment_modulus", 0) or 0),
+        "frame_alignment_remainder": int(md.get("frame_alignment_remainder", 1)),
+        "frame_alignment_mode": str(md.get("frame_alignment_mode", "floor")).lower(),
+        "frames_maximum": md.get("frames_maximum"),
         "hide_resolution_presets": md.get("hide_resolution_presets", False),
 
         # Image/video conditioning strength

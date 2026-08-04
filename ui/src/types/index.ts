@@ -251,6 +251,12 @@ export interface ModelOptions {
    *  the `flow_shift` boolean above, which only says whether to show the
    *  control. */
   default_flow_shift?: number | null
+  /** The model's declared temporal grid (mirrors align_model_frame_count).
+   *  modulus 0 means the model declares none and frame counts are left alone. */
+  frame_alignment_modulus?: number
+  frame_alignment_remainder?: number
+  frame_alignment_mode?: string
+  frames_maximum?: number | null
   default_guidance_scale: number | null
   hide_resolution_presets: boolean
   input_video_strength_label: string

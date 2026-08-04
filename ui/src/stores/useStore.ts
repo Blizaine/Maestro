@@ -461,6 +461,38 @@ function _applyModelDefaults(
   }).catch(() => { /* fetch failure shouldn't break model switch */ })
 }
 
+/** Mirror of the backend's align_model_frame_count.
+ *
+ *  Only models that declare a temporal grid (frame_alignment_modulus > 0) are
+ *  aligned here; every other model keeps the plain round(seconds * fps) it has
+ *  always used. Without this the slider can promise a duration the model
+ *  cannot produce: MiniMax H3 accepts 17n + 5 frames, so a 5s request (120)
+ *  becomes 124 and the clip is 5.17s, not 5.00s.
+ */
+export function alignFrameCount(
+  frames: number,
+  o: { frame_alignment_modulus?: number; frame_alignment_remainder?: number;
+       frame_alignment_mode?: string; frames_minimum?: number; frames_maximum?: number | null } | null | undefined,
+): number {
+  const modulus = o?.frame_alignment_modulus ?? 0
+  if (!modulus || modulus <= 0) return frames
+  const remainder = (o?.frame_alignment_remainder ?? 1) % modulus
+  const minimum = o?.frames_minimum ?? 1
+  const maximum = o?.frames_maximum ?? null
+  let n = Math.max(minimum, Math.round(frames))
+  if (maximum != null) n = Math.min(maximum, n)
+  const delta = ((n - remainder) % modulus + modulus) % modulus
+  if (delta) {
+    const mode = (o?.frame_alignment_mode ?? 'floor').toLowerCase()
+    if (mode === 'ceil') n += modulus - delta
+    else if (mode === 'nearest') n += delta >= modulus / 2 ? modulus - delta : -delta
+    else n -= delta
+  }
+  if (maximum != null && n > maximum) n -= modulus
+  while (n < minimum) n += modulus
+  return n
+}
+
 // Family → generation mode mapping
 const familyModeMap: Record<string, GenerationMode> = {
   flux: 'image',
@@ -3261,8 +3293,9 @@ export const useStore = create<AppState>((set, get) => ({
 
   durationSeconds: 5,
   setDurationSeconds: (s) => {
-    const fps = get().modelOptions?.fps ?? 16
-    const frames = Math.round(s * fps)
+    const o = get().modelOptions
+    const fps = o?.fps ?? 16
+    const frames = alignFrameCount(Math.round(s * fps), o)
     set(state => ({
       durationSeconds: s,
       params: { ...state.params, video_length: frames },
@@ -5392,9 +5425,13 @@ export const useStore = create<AppState>((set, get) => ({
       const swDefaults = (options as unknown as Record<string, unknown>).sliding_window_defaults as Record<string, number> | undefined
       const overlapDefault = swDefaults?.overlap_default ?? 5
       const discardDefault = swDefaults?.discard_last_frames ?? 0
+      // Same lattice snap as setDurationSeconds. This runs on every model
+      // switch and would otherwise overwrite the snapped value with an
+      // unaligned one, which the backend then floors.
+      const _snapFrames = (seconds: number) => alignFrameCount(Math.round(seconds * fps), options)
       const paramUpdates: Record<string, unknown> = {
         guidance_phases: options.guidance_max_phases,
-        video_length: Math.round(durationSeconds * fps),
+        video_length: _snapFrames(durationSeconds),
         sliding_window_size: Math.round(slidingWindowSeconds * fps),
         sliding_window_overlap: overlapDefault,
         sliding_window_discard_last_frames: discardDefault,
