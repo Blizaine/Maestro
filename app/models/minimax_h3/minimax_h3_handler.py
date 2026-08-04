@@ -171,6 +171,19 @@ class family_handler:
                         "default": "",
                         "label": "Reference Images",
                     },
+                    # A reference clip is decoded by the model from its source path, not taken from the
+                    # guide pipeline -- see `reference_video_source_path` and `_decode_reference_video`.
+                    "reference_video_source_path": True,
+                    "guide_custom_choices": {
+                        "choices": [
+                            ("Generate without a Reference Video", ""),
+                            ("Use One Reference Video", "V"),
+                        ],
+                        "letters_filter": "V",
+                        "default": "",
+                        "label": "Reference Video",
+                    },
+                    "video_guide_label": "Reference Video",
                     "any_audio_prompt": True,
                     "audio_prompt_choices": True,
                     "audio_guide_label": "Audio Reference 1",
@@ -313,6 +326,20 @@ class family_handler:
 
         if len(inputs.get("image_refs") or []) > 9:
             return "MiniMax H3 Ref2VA accepts at most 9 reference images"
+
+        if "V" in (inputs.get("video_prompt_type") or ""):
+            reference_video = inputs.get("video_guide")
+            if reference_video is None:
+                return "A Reference Video is selected but no file was provided"
+            from shared.utils.utils import get_video_info
+
+            try:
+                fps, _, _, frames = get_video_info(reference_video)
+                duration = frames / fps
+            except Exception as error:
+                return f"Unable to read the Reference Video: {error}"
+            if not 2.0 <= duration <= 15.0:
+                return f"The Reference Video must be between 2 and 15 seconds long (found {duration:.2f}s)"
 
         audio_prompt_type = inputs.get("audio_prompt_type") or ""
         references = [inputs.get("audio_guide")] if "A" in audio_prompt_type else []
