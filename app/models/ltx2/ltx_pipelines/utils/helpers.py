@@ -174,6 +174,7 @@ def video_conditionings_by_reference_latent(
     device: torch.device,
     downscale_factor: int = 1,
     tiling_config: TilingConfig | None = None,
+    generation_mask: torch.Tensor | None = None,
 ) -> list[ConditioningItem]:
     scale = max(1, int(downscale_factor))
     if scale > 1 and (height % scale != 0 or width % scale != 0):
@@ -199,12 +200,52 @@ def video_conditionings_by_reference_latent(
             device=device,
         )
         encoded_video = vae_encode_video(video, video_encoder, tiling_config)
+        reference_cross_mask = None
+        if generation_mask is not None:
+            # Keep the full pixel mask on its existing device and dtype. The
+            # dedicated reducer works in bounded frame chunks, then transfers
+            # only the tiny latent mask to the model device. This matters for
+            # 10-20 second portrait canvases where a float32 pixel mask alone
+            # could otherwise consume more than a gigabyte of VRAM.
+            mask = _coerce_mask_tensor(generation_mask)
+            if mask.shape[2] < video.shape[2]:
+                pad_frames = video.shape[2] - mask.shape[2]
+                tail = mask[:, :, -1:].expand(
+                    mask.shape[0],
+                    mask.shape[1],
+                    pad_frames,
+                    mask.shape[3],
+                    mask.shape[4],
+                )
+                mask = torch.cat([mask, tail], dim=2)
+            elif mask.shape[2] > video.shape[2]:
+                mask = mask[:, :, : video.shape[2]]
+            source_latents = _outpaint_source_attention_to_latents(
+                mask,
+                encoded_video.shape[2],
+                encoded_video.shape[3],
+                encoded_video.shape[4],
+            )
+            # The official pipeline retains the complete reference canvas and
+            # masks only noisy↔reference attention in generated regions.
+            # Keeping the margin tokens is essential: their positions define
+            # the spatial canvas that the in/outpainting IC-LoRA must fill.
+            # Preserve the fractional area weights at source boundaries. A
+            # hard threshold can discard an entire latent row when the source
+            # rectangle begins or ends near the middle of a VAE cell, leaving
+            # the IC-LoRA with materially less source context than the final
+            # compositor restores.
+            reference_cross_mask = source_latents.to(
+                device=encoded_video.device,
+                dtype=torch.float32,
+            )
         conditionings.append(
             VideoConditionByReferenceLatent(
                 latent=encoded_video,
                 frame_idx=frame_idx,
                 strength=strength,
                 downscale_factor=scale,
+                reference_cross_mask=reference_cross_mask,
             )
         )
     return conditionings
@@ -306,6 +347,81 @@ def _mask_to_latents(mask: torch.Tensor, target_frames: int, target_h: int, targ
         )
     else:
         rest = F.interpolate(rest, size=(target_frames - 1, target_h, target_w), mode="nearest")
+    return torch.cat([first, rest], dim=2)
+
+
+def _outpaint_source_attention_to_latents(
+    generation_mask: torch.Tensor,
+    target_frames: int,
+    target_h: int,
+    target_w: int,
+) -> torch.Tensor:
+    """Map an Outpaint generation mask to LTX reference-token visibility.
+
+    ``generation_mask`` uses 1 for new margins and 0 for protected source,
+    while IC-LoRA attention uses the inverse convention. Spatial reduction
+    follows LTX's area interpolation. Temporal reduction preserves the causal
+    first frame and averages each following VAE stride group.
+    """
+    mask = _coerce_mask_tensor(generation_mask)
+    if target_frames <= 0 or mask.shape[2] == 0:
+        raise ValueError("Outpaint attention mask has no frames to encode.")
+
+    batch, _, pixel_frames, pixel_h, pixel_w = mask.shape
+    spatial_chunks = []
+    for frame_start in range(0, pixel_frames, 32):
+        frame_stop = min(pixel_frames, frame_start + 32)
+        source_attention = 1.0 - _normalize_mask_values(
+            mask[:, :, frame_start:frame_stop]
+        )
+        chunk_frames = int(source_attention.shape[2])
+        spatial_chunk = source_attention.permute(
+            0, 2, 1, 3, 4
+        ).reshape(
+            batch * chunk_frames,
+            1,
+            pixel_h,
+            pixel_w,
+        )
+        spatial_chunk = F.interpolate(
+            spatial_chunk,
+            size=(int(target_h), int(target_w)),
+            mode="area",
+        )
+        spatial_chunks.append(
+            spatial_chunk.reshape(
+                batch,
+                chunk_frames,
+                1,
+                int(target_h),
+                int(target_w),
+            ).permute(0, 2, 1, 3, 4)
+        )
+    spatial = torch.cat(spatial_chunks, dim=2)
+
+    first = spatial[:, :, :1]
+    if target_frames == 1:
+        return first
+    if pixel_frames == 1:
+        return first.expand(-1, -1, target_frames, -1, -1)
+
+    remaining_pixel_frames = pixel_frames - 1
+    remaining_latent_frames = target_frames - 1
+    if remaining_pixel_frames % remaining_latent_frames != 0:
+        raise ValueError(
+            "Outpaint attention frames do not match LTX's causal VAE "
+            f"layout: {pixel_frames} pixel frames cannot map to "
+            f"{target_frames} latent frames."
+        )
+    temporal_stride = remaining_pixel_frames // remaining_latent_frames
+    rest = spatial[:, :, 1:].reshape(
+        batch,
+        1,
+        remaining_latent_frames,
+        temporal_stride,
+        int(target_h),
+        int(target_w),
+    ).mean(dim=3)
     return torch.cat([first, rest], dim=2)
 
 

@@ -84,8 +84,6 @@ class LatentTools(Protocol):
         to "repeat themselves from earlier lines" in multi-speaker
         dialogue.
         """
-        latent_state = latent_state.clone()
-
         num_tokens = self.patchifier.get_token_count(self.target_shape)
         start_token = 0
         positions = latent_state.positions
@@ -105,11 +103,15 @@ class LatentTools(Protocol):
         denoise_mask = torch.ones_like(latent_state.denoise_mask[:, start_token:stop_token])
         positions = latent_state.positions[:, :, start_token:stop_token]
 
-        attention_mask = None
-        if latent_state.attention_mask is not None:
-            attention_mask = latent_state.attention_mask[:, start_token:stop_token, start_token:stop_token]
-
-        return LatentState(latent=latent, denoise_mask=denoise_mask, positions=positions, clean_latent=clean_latent, attention_mask=attention_mask)
+        # Conditioning attention is only meaningful while the appended
+        # reference tokens are present. Dropping it here also avoids cloning
+        # a potentially hundreds-of-MiB outpaint mask for every preview.
+        return LatentState(
+            latent=latent,
+            denoise_mask=denoise_mask,
+            positions=positions,
+            clean_latent=clean_latent,
+        )
 
 
 @dataclass(frozen=True)
@@ -239,8 +241,6 @@ class AudioLatentTools(LatentTools):
         tokens) and start the slice AFTER them. Falls through to
         standard front-slice behavior when no ref tokens are detected.
         """
-        latent_state = latent_state.clone()
-
         num_tokens = self.patchifier.get_token_count(self.target_shape)
         start_token = 0
         positions = latent_state.positions
@@ -260,8 +260,9 @@ class AudioLatentTools(LatentTools):
         denoise_mask = torch.ones_like(latent_state.denoise_mask[:, start_token:stop_token])
         positions = latent_state.positions[:, :, start_token:stop_token]
 
-        attention_mask = None
-        if latent_state.attention_mask is not None:
-            attention_mask = latent_state.attention_mask[:, start_token:stop_token, start_token:stop_token]
-
-        return LatentState(latent=latent, denoise_mask=denoise_mask, positions=positions, clean_latent=clean_latent, attention_mask=attention_mask)
+        return LatentState(
+            latent=latent,
+            denoise_mask=denoise_mask,
+            positions=positions,
+            clean_latent=clean_latent,
+        )

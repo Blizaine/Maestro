@@ -35,6 +35,23 @@ from .ltx_core.text_encoders.gemma import (
 from .ltx_core.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorProjLinear
 from .ltx_core.model.video_vae import SpatialTilingConfig, TemporalTilingConfig, TilingConfig
 from .ltx_core.types import AudioLatentShape, VideoPixelShape
+from .inpainting import (
+    _apply_ltx2_mask_blend,
+    _build_outpainting_mask_cthw,
+    _edge_extend_ltx2_masked_control_video,
+    _get_outpainting_inner_rect,
+    _merge_ltx2_masks,
+    _normalize_outpainting_dims,
+    _pad_ltx2_masked_control_video_tail,
+    _paint_ltx2_inpaint_control_video,
+    _paint_ltx2_masked_control_video,
+)
+from .ltx2_runtime import (
+    LTX2_OUTPAINTING_LAPLACIAN_BLEND,
+    LTX2_OUTPAINTING_LAPLACIAN_MASK_LOW_RES_DILATION,
+    LTX2_OUTPAINTING_MARKER_RESIDUE_CLEANUP,
+    LTX2_OUTPAINTING_SOURCE_FEATHER_PIXELS,
+)
 from .ltx_pipelines.distilled import DistilledPipeline
 from .ltx_pipelines.ti2vid_two_stages import TI2VidTwoStagesPipeline
 from .ltx_pipelines.utils.constants import AUDIO_SAMPLE_RATE, DEFAULT_NEGATIVE_PROMPT
@@ -74,6 +91,63 @@ def _decord_frame_to_numpy(frame):
     # Already a numpy array (paranoid fallback — shouldn't happen with
     # decord but cheap to support).
     return frame
+
+
+def _resolve_retake_pipeline_models(pipeline):
+    """Return the model container used by the native Retake pipeline.
+
+    DistilledPipeline exposes ``models`` directly. The LTX-2 Dev and
+    reference workflows use TI2VidTwoStagesPipeline, whose equivalent
+    container is ``stage_1_models``. Retake is a single-stage diffusion pass,
+    so the first-stage container is the correct source for either workflow.
+    """
+    models = getattr(pipeline, "models", None)
+    if models is None:
+        models = getattr(pipeline, "stage_1_models", None)
+    if models is None:
+        raise RuntimeError(
+            "The loaded LTX-2 pipeline does not expose models for Retake."
+        )
+    return models
+
+
+def _uses_distilled_pipeline_dispatch(
+    active_pipeline,
+    active_official_outpaint=None,
+) -> bool:
+    """Recognize distilled dispatch, including an explicit Outpaint adapter.
+
+    The canonical path uses the baked distilled pipeline. Retain explicit
+    adapter support for compatible Dev checkpoints and runtime wrappers so
+    the source-attention arguments always reach DistilledPipeline.
+    """
+    return bool(
+        active_official_outpaint is not None
+        or isinstance(active_pipeline, DistilledPipeline)
+    )
+
+
+def _uses_native_two_stage_dispatch(
+    base_pipeline,
+    active_official_outpaint=None,
+) -> bool:
+    """Return whether the original Dev two-stage pipeline should run."""
+    return bool(
+        active_official_outpaint is None
+        and isinstance(base_pipeline, TI2VidTwoStagesPipeline)
+    )
+
+
+def _select_video_conditioning_generation_mask(
+    official_outpaint_pipeline,
+    input_frames,
+    input_masks,
+    input_masks2,
+):
+    """Select the source-preservation mask forwarded to DistilledPipeline."""
+    if not official_outpaint_pipeline:
+        return None
+    return input_masks if input_frames is not None else input_masks2
 
 
 def _normalize_config(config_value):
@@ -476,34 +550,6 @@ def _infer_ic_lora_downscale_factor(loras_selected) -> int | None:
     return unique_factors[0]
 
 
-def _normalize_outpainting_dims(outpainting_dims) -> list[float] | None:
-    if outpainting_dims is None:
-        return None
-    if isinstance(outpainting_dims, str):
-        outpainting_dims = outpainting_dims.strip()
-        if not outpainting_dims or outpainting_dims.startswith("#"):
-            return None
-        outpainting_dims = outpainting_dims.split()
-    if not isinstance(outpainting_dims, (list, tuple)) or len(outpainting_dims) != 4:
-        return None
-    dims = [max(0.0, float(v)) for v in outpainting_dims]
-    return dims if any(dims) else None
-
-
-def _get_outpainting_inner_rect(height: int, width: int, outpainting_dims) -> tuple[int, int, int, int] | None:
-    dims = _normalize_outpainting_dims(outpainting_dims)
-    if dims is None or height <= 0 or width <= 0:
-        return None
-    from shared.utils.utils import get_outpainting_frame_location
-
-    inner_height, inner_width, margin_top, margin_left = get_outpainting_frame_location(int(height), int(width), dims, 1)
-    top = max(0, min(int(margin_top), int(height)))
-    left = max(0, min(int(margin_left), int(width)))
-    bottom = max(top, min(top + int(inner_height), int(height)))
-    right = max(left, min(left + int(inner_width), int(width)))
-    return (top, bottom, left, right) if bottom > top and right > left else None
-
-
 def _apply_gamma_to_media(media_tensor: torch.Tensor | None, gamma: float) -> bool:
     if media_tensor is None or not torch.is_tensor(media_tensor) or media_tensor.dim() < 2 or gamma <= 0 or media_tensor.numel() == 0:
         return False
@@ -821,6 +867,72 @@ class LTX2:
         loras_mult = []
         video_prompt_type = video_prompt_type or ""
         resolved_base_model_type = base_model_type or self.base_model_type
+        official_outpaint_stack = bool(
+            kwargs.get("outpaint_official_stack", False)
+        )
+
+        def _ensure_lora_dir_file(filename, repo_id):
+            """Resolve or download a transformer LoRA in LTX's LoRA folder."""
+            import sys
+
+            wgp_module = sys.modules.get("wgp") or sys.modules.get("app.wgp")
+            if (
+                wgp_module is not None
+                and hasattr(wgp_module, "resolve_lora_path")
+            ):
+                target_path = wgp_module.resolve_lora_path(
+                    model_type,
+                    filename,
+                )
+            else:
+                target_path = os.path.join("loras", "ltx2", filename)
+            if os.path.isfile(target_path):
+                return target_path
+
+            try:
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                from huggingface_hub import hf_hub_download
+
+                print(
+                    f"[LTX2] Official Outpaint dependency not found - "
+                    f"downloading {filename}..."
+                )
+                return hf_hub_download(
+                    repo_id=repo_id,
+                    filename=filename,
+                    local_dir=os.path.dirname(target_path),
+                )
+            except Exception as error:
+                print(
+                    f"[LTX2] Failed to download {filename}: {error}"
+                )
+                return None
+
+        if (
+            official_outpaint_stack
+            and model_def.get("ltx2_pipeline", "two_stage")
+            != "distilled"
+        ):
+            distilled_filename = (
+                "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
+            )
+            distilled_path = _ensure_lora_dir_file(
+                distilled_filename,
+                "Lightricks/LTX-2.3",
+            )
+            if distilled_path and os.path.isfile(distilled_path):
+                loras.append(distilled_path)
+                loras_mult.append("0.5;0.5")
+                print(
+                    "[LTX2] Official Outpaint stack: loaded Distilled "
+                    f"1.1 LoRA {distilled_path} "
+                    "(strength=0.5 in both passes)."
+                )
+            else:
+                raise FileNotFoundError(
+                    "The official LTX-2.3 Outpaint workflow requires "
+                    f"{distilled_filename}."
+                )
 
         # ID-LoRA: voice-identity LoRA — auto-load when the caller provided a
         # voice_reference. Lives BEFORE the distilled-only early return so it
@@ -910,8 +1022,28 @@ class LTX2:
                 else:
                     print(f"[LTX2] WARNING: ID-LoRA unavailable — voice-reference will produce noise without it")
 
-        if model_def.get("ltx2_pipeline","two_stage") != "distilled":
-            # Dev path: only ID-LoRA (above) auto-loads; nothing else.
+        pending_outpaint = str(
+            kwargs.get("video_guide_outpainting") or ""
+        ).strip()
+        dev_outpaint_active = False
+        if pending_outpaint and not pending_outpaint.startswith("#"):
+            try:
+                pending_dims = [
+                    float(value)
+                    for value in pending_outpaint.split()
+                ]
+                dev_outpaint_active = (
+                    len(pending_dims) == 4
+                    and any(value > 0 for value in pending_dims)
+                )
+            except (TypeError, ValueError):
+                dev_outpaint_active = False
+        if (
+            model_def.get("ltx2_pipeline", "two_stage") != "distilled"
+            and not dev_outpaint_active
+        ):
+            # Keep Dev's existing auto-LoRA behavior, except that Outpaint
+            # must load its official system LoRA on both LTX-2.3 pipelines.
             return loras, loras_mult
         preload_urls = get_model_recursive_prop(model_type, "preload_URLs") or []
 
@@ -932,6 +1064,9 @@ class LTX2:
                 return False
             return len(parts) == 4 and any(p > 0 for p in parts)
 
+        mask_preserving_outpaint = bool(
+            kwargs.get("outpaint_mask_preserve", False)
+        )
         if resolved_base_model_type == "ltx2_22B":
             if any(letter in video_prompt_type for letter in control_map):
                 for file_name in preload_urls:
@@ -942,38 +1077,95 @@ class LTX2:
             if _outpaint_dims_active():
                 from . import ltx2_handler
                 spec = ltx2_handler._get_arch_spec(resolved_base_model_type)
-                outpaint_filename = spec.get("outpaint_ic_lora", "")
+                if mask_preserving_outpaint:
+                    outpaint_filename = spec.get("inpaint_ic_lora", "")
+                    outpaint_repo = (
+                        "Lightricks/"
+                        "LTX-2.3-22b-IC-LoRA-In-Outpainting"
+                    )
+                    outpaint_label = "mask-preserving in/outpainting"
+                    outpaint_multiplier = 1.0
+                else:
+                    outpaint_filename = spec.get("outpaint_ic_lora", "")
+                    outpaint_repo = (
+                        "oumoumad/LTX-2.3-22b-IC-LoRA-Outpaint"
+                    )
+                    outpaint_label = "legacy outpaint"
+                    try:
+                        outpaint_multiplier = float(
+                            kwargs.get("outpaint_lora_strength", 1.0)
+                            or 1.0
+                        )
+                    except (TypeError, ValueError):
+                        outpaint_multiplier = 1.0
+                    outpaint_multiplier = max(
+                        0.0,
+                        min(2.0, outpaint_multiplier),
+                    )
                 if outpaint_filename:
                     outpaint_path = fl.locate_file(outpaint_filename, error_if_none=False)
                     if not outpaint_path:
                         dest_dir = fl.get_download_location()
-                        print(f"[LTX2] Outpaint IC-LoRA not found locally — downloading {outpaint_filename}...")
-                        try:
-                            from huggingface_hub import hf_hub_download
-                            downloaded = hf_hub_download(
-                                repo_id="oumoumad/LTX-2.3-22b-IC-LoRA-Outpaint",
-                                filename=outpaint_filename,
-                                local_dir=dest_dir,
-                            )
-                            outpaint_path = downloaded
-                            print(f"[LTX2] Downloaded outpaint IC-LoRA: {os.path.basename(downloaded)}")
-                        except Exception as e:
-                            print(f"[LTX2] Failed to download outpaint IC-LoRA: {e}")
+                        print(
+                            f"[LTX2] {outpaint_label.title()} IC-LoRA "
+                            f"not found locally — downloading "
+                            f"{outpaint_filename}..."
+                        )
+                        from huggingface_hub import hf_hub_download
+
+                        download_repos = [outpaint_repo]
+                        if mask_preserving_outpaint:
+                            # Wan2GP mirrors the official file here. This
+                            # keeps first-use installation resilient if the
+                            # upstream model page requires a fresh consent.
+                            download_repos.append("DeepBeepMeep/LTX-2")
+                        for download_repo in download_repos:
+                            try:
+                                downloaded = hf_hub_download(
+                                    repo_id=download_repo,
+                                    filename=outpaint_filename,
+                                    local_dir=dest_dir,
+                                )
+                                outpaint_path = downloaded
+                                print(
+                                    f"[LTX2] Downloaded "
+                                    f"{outpaint_label} IC-LoRA: "
+                                    f"{os.path.basename(downloaded)}"
+                                )
+                                break
+                            except Exception as error:
+                                print(
+                                    f"[LTX2] Could not download "
+                                    f"{outpaint_label} IC-LoRA from "
+                                    f"{download_repo}: {error}"
+                                )
                     if outpaint_path and os.path.isfile(outpaint_path):
-                        # Outpaint LoRA strength can be adjusted per-generation via
-                        # kwargs (flows through wgp.generate_video's signature). 1.0
-                        # matches upstream-trained strength. Lower values reduce the
-                        # LoRA's pull on both padded regions AND bleed into source.
-                        try:
-                            _op_mult = float(kwargs.get("outpaint_lora_strength", 1.0) or 1.0)
-                        except (TypeError, ValueError):
-                            _op_mult = 1.0
-                        _op_mult = max(0.0, min(2.0, _op_mult))
+                        _op_mult = (
+                            # Lightricks' current two-stage graph keeps the
+                            # In/Outpaint IC-LoRA on the transformer while
+                            # refining the decoded-pixel handoff. Guide tokens
+                            # are cropped before pass two; the adapter remains.
+                            "1;1"
+                            if official_outpaint_stack
+                            else outpaint_multiplier
+                        )
                         loras.append(outpaint_path)
                         loras_mult.append(_op_mult)
-                        print(f"[LTX2] Loaded outpaint IC-LoRA: {outpaint_path} (strength={_op_mult})")
+                        print(
+                            f"[LTX2] Loaded {outpaint_label} IC-LoRA: "
+                            f"{outpaint_path} (strength={_op_mult})"
+                        )
                     else:
-                        print(f"[LTX2] WARNING: Outpaint IC-LoRA unavailable — generation will proceed without it")
+                        message = (
+                            f"{outpaint_label.title()} IC-LoRA "
+                            f"{outpaint_filename} is unavailable."
+                        )
+                        if official_outpaint_stack:
+                            raise FileNotFoundError(message)
+                        print(
+                            f"[LTX2] WARNING: {message} "
+                            "Generation will proceed without it."
+                        )
         else:
             for letter, signature in control_map.items():
                 if letter in video_prompt_type:
@@ -1038,6 +1230,8 @@ class LTX2:
         injection_strength: float | None = None,
         masking_source: dict | None = None,
         outpainting_dims: list[float] | None = None,
+        outpaint_mask_preserve: bool = False,
+        outpaint_official_stack: bool = False,
         frame_num: int = 121,
         height: int = 1024,
         width: int = 1536,
@@ -1093,13 +1287,118 @@ class LTX2:
         prefix_frames_count = int(prefix_frames_count or 0)
         video_prompt_type = video_prompt_type or ""
         outpainting_dims = _normalize_outpainting_dims(outpainting_dims)
+        mask_preserving_outpaint = bool(
+            outpaint_mask_preserve
+            and self.base_model_type == "ltx2_22B"
+            and outpainting_dims is not None
+            and "V" in video_prompt_type
+        )
+        single_stage_masked_outpaint = bool(
+            mask_preserving_outpaint
+            and kwargs.get("single_stage_pipeline", False)
+        )
+        full_resolution_outpaint_refine = bool(
+            mask_preserving_outpaint
+            and kwargs.get("outpaint_full_resolution_refine", False)
+        )
+        official_outpaint_pipeline = bool(
+            mask_preserving_outpaint
+            and outpaint_official_stack
+        )
+        if mask_preserving_outpaint:
+            input_masks = _merge_ltx2_masks(
+                input_masks,
+                _build_outpainting_mask_cthw(
+                    input_frames,
+                    outpainting_dims,
+                ),
+            )
+            input_masks2 = _merge_ltx2_masks(
+                input_masks2,
+                _build_outpainting_mask_cthw(
+                    input_frames2,
+                    outpainting_dims,
+                ),
+            )
+            if (
+                single_stage_masked_outpaint
+                and not full_resolution_outpaint_refine
+            ):
+                # Give the one-pass fallback clean boundary pixels; the
+                # normal Diffusers path uses a neutral reference canvas and
+                # a spatial source-attention mask.
+                input_frames = _edge_extend_ltx2_masked_control_video(
+                    input_frames,
+                    input_masks,
+                )
+                input_frames2 = _edge_extend_ltx2_masked_control_video(
+                    input_frames2,
+                    input_masks2,
+                )
+            elif full_resolution_outpaint_refine:
+                # Current Lightricks In/Outpainting graph: the IC-LoRA was
+                # trained on this exact missing-region marker.
+                input_frames = _paint_ltx2_inpaint_control_video(
+                    input_frames,
+                    input_masks,
+                )
+                input_frames2 = _paint_ltx2_inpaint_control_video(
+                    input_frames2,
+                    input_masks2,
+                )
+            else:
+                input_frames = _paint_ltx2_masked_control_video(
+                    input_frames,
+                    input_masks,
+                )
+                input_frames2 = _paint_ltx2_masked_control_video(
+                    input_frames2,
+                    input_masks2,
+                )
+            masking_strength = 0.0
+            print(
+                "[LTX2] Using mask-preserving Outpaint conditioning "
+                "(protected source + generated canvas)."
+            )
+            if official_outpaint_pipeline:
+                if full_resolution_outpaint_refine:
+                    print(
+                        "[LTX2] Official Lightricks Outpaint: "
+                        "#66FF00 mask guide + full reference attention; "
+                        "IC-LoRA active for coarse generation and "
+                        "refinement."
+                    )
+                    print(
+                        "[LTX2] Using decoded-pixel Lanczos handoff instead "
+                        "of learned latent upscaling."
+                    )
+                else:
+                    print(
+                        "[LTX2] Diffusers-reference Outpaint: neutral "
+                        "canvas + source-region reference attention; "
+                        "stage-one IC-LoRA + learned latent x2 upscale + "
+                        "bare distilled refinement."
+                    )
+            elif single_stage_masked_outpaint:
+                print(
+                    "[LTX2] Outpaint is running at full target resolution "
+                    "in one diffusion stage; stage-2 spatial upscaling is "
+                    "disabled."
+                )
+                print(
+                    "[LTX2] Generated-canvas reference tokens are "
+                    "masked out (one-pass fallback)."
+                )
         self_refiner_max_plans = int(self.model_def.get("self_refiner_max_plans", 1))
         # Per upstream WanGP commit 5da7f23 ("unlocked ltx2 dev"), the gamma
         # roundtrip preprocessing (used by the IC-LoRA Outpaint pipeline) is
         # no longer gated on the distilled pipeline. It applies whenever the
         # 22B family is asked to outpaint via the "G" video_prompt_type letter.
         requested_outpaint_gamma_roundtrip = bool(
-            self.base_model_type == "ltx2_22B" and outpainting_dims is not None and "G" in video_prompt_type
+            self.base_model_type == "ltx2_22B"
+            and outpainting_dims is not None
+            and "G" in video_prompt_type
+            and not mask_preserving_outpaint
         )
         use_outpaint_gamma_roundtrip = False
 
@@ -1189,6 +1488,31 @@ class LTX2:
             input_frames2, frames_len2 = _maybe_trim_control(input_frames2, expected_guide_frames)
             input_masks, _ = _maybe_trim_control(input_masks, expected_guide_frames)
             input_masks2, _ = _maybe_trim_control(input_masks2, expected_guide_frames)
+            if mask_preserving_outpaint:
+                input_frames, input_masks = (
+                    _pad_ltx2_masked_control_video_tail(
+                        input_frames,
+                        input_masks,
+                        expected_guide_frames,
+                        repeat_last_frame=(
+                            single_stage_masked_outpaint
+                            or official_outpaint_pipeline
+                        ),
+                        pad_rgb=None,
+                    )
+                )
+                input_frames2, input_masks2 = (
+                    _pad_ltx2_masked_control_video_tail(
+                        input_frames2,
+                        input_masks2,
+                        expected_guide_frames,
+                        repeat_last_frame=(
+                            single_stage_masked_outpaint
+                            or official_outpaint_pipeline
+                        ),
+                        pad_rgb=None,
+                    )
+                )
             if requested_outpaint_gamma_roundtrip:
                 control_tensor = input_frames if input_frames is not None else input_frames2
                 control_rect = None if control_tensor is None else _get_outpainting_inner_rect(control_tensor.shape[-2], control_tensor.shape[-1], outpainting_dims)
@@ -1197,7 +1521,11 @@ class LTX2:
                     use_outpaint_gamma_roundtrip = True
 
             control_strength = 1.0
-            if denoising_strength is not None and "G" in video_prompt_type:
+            if (
+                not mask_preserving_outpaint
+                and denoising_strength is not None
+                and "G" in video_prompt_type
+            ):
                 try:
                     control_strength = float(denoising_strength)
                 except (TypeError, ValueError):
@@ -1234,6 +1562,7 @@ class LTX2:
             import decord
             from .ltx_pipelines.retake import RetakePipeline
 
+            retake_models = _resolve_retake_pipeline_models(self.pipeline)
             vr = decord.VideoReader(retake_video)
             total_frames = len(vr)
             retake_fps = vr.get_avg_fps()
@@ -1401,7 +1730,7 @@ class LTX2:
                   f"res={aligned_w}x{aligned_h}, fps={retake_fps:.1f}, audio={'yes' if audio_clip_path else 'no'}")
 
             retake_pipeline = RetakePipeline(
-                models=self.pipeline.models,
+                models=retake_models,
                 device=self.device,
                 dtype=torch.bfloat16,
             )
@@ -1653,7 +1982,36 @@ class LTX2:
         # End frame index: replace mode needs latent-space index, additive needs pixel-space
         _end_frame_idx = _to_latent_index(int(frame_num - 1), latent_stride) if keyframe_conditioning_mode == "replace" else int(frame_num - 1)
 
-        if isinstance(self.pipeline, TI2VidTwoStagesPipeline):
+        active_official_outpaint = None
+        if official_outpaint_pipeline:
+            if isinstance(self.pipeline, DistilledPipeline):
+                active_official_outpaint = self.pipeline
+            elif isinstance(self.pipeline, TI2VidTwoStagesPipeline):
+                if not hasattr(self, "_official_outpaint_pipeline"):
+                    self._official_outpaint_pipeline = DistilledPipeline(
+                        device=self.device,
+                        models=self.pipeline.stage_1_models,
+                    )
+                    self._official_outpaint_pipeline.text_encoder_cache = (
+                        self.pipeline.text_encoder_cache
+                    )
+                    print(
+                        "[LTX2] Initialized official Outpaint sampler over "
+                        "the loaded Dev transformer."
+                    )
+                active_official_outpaint = (
+                    self._official_outpaint_pipeline
+                )
+            else:
+                raise RuntimeError(
+                    "Official LTX-2.3 Outpaint requires a Dev or "
+                    "distilled-compatible LTX pipeline."
+                )
+
+        if _uses_native_two_stage_dispatch(
+            self.pipeline,
+            active_official_outpaint,
+        ):
             _append_prefix_entries(images, images_stage2)
 
             if has_suffix_frames:
@@ -1928,7 +2286,10 @@ class LTX2:
             else:
                 latent_conditioning_stage2 = latent_conditioning_stage2.to(device=self.device, dtype=self.dtype)
 
-        if isinstance(self.pipeline, TI2VidTwoStagesPipeline):
+        if _uses_native_two_stage_dispatch(
+            self.pipeline,
+            active_official_outpaint,
+        ):
             negative_prompt = n_prompt if n_prompt else DEFAULT_NEGATIVE_PROMPT
             # Reference-workflow variant (Advanced Settings toggle). A lazily
             # created sibling pipeline that shares the standard pipeline's
@@ -2006,10 +2367,9 @@ class LTX2:
             )
         else:
             # Select pipeline: progressive 3-stage or standard distilled 2-stage
-            active_pipeline = self.pipeline
+            active_pipeline = active_official_outpaint or self.pipeline
             _progressive_pad = None
-            if progressive_pipeline:
-                from .ltx_pipelines.distilled import DistilledPipeline
+            if progressive_pipeline and active_official_outpaint is None:
                 if isinstance(self.pipeline, DistilledPipeline):
                     if not hasattr(self, '_progressive_pipeline'):
                         from .ltx_pipelines.progressive import ProgressivePipeline
@@ -2055,16 +2415,51 @@ class LTX2:
                 keyframe_conditioning_mode=keyframe_conditioning_mode,
                 keyframe_inject_mode=keyframe_inject_mode,
             )
-            if active_pipeline is self.pipeline:
+            if _uses_distilled_pipeline_dispatch(
+                active_pipeline,
+                active_official_outpaint,
+            ):
                 # DistilledPipeline-only kwargs. ProgressivePipeline doesn't
                 # accept NAG, negative_prompt, or single_stage — passing any
                 # of these to it raises TypeError. Gate them here.
+                video_conditioning_generation_mask = (
+                    _select_video_conditioning_generation_mask(
+                        official_outpaint_pipeline,
+                        input_frames,
+                        input_masks,
+                        input_masks2,
+                    )
+                )
+                if active_official_outpaint is not None:
+                    print(
+                        "[LTX2] Official Outpaint dispatch: "
+                        f"{type(active_pipeline).__module__}."
+                        f"{type(active_pipeline).__name__}; "
+                        "production_pixel_handoff="
+                        f"{full_resolution_outpaint_refine}; "
+                        "generation_mask="
+                        f"{video_conditioning_generation_mask is not None}; "
+                        "reference_attention="
+                        f"{'full' if full_resolution_outpaint_refine else 'source-masked'}; "
+                        "learned_latent_upscale="
+                        f"{not full_resolution_outpaint_refine}."
+                    )
                 _pipeline_kwargs.update(
-                    negative_prompt=(n_prompt if n_prompt else DEFAULT_NEGATIVE_PROMPT),
+                    negative_prompt=(
+                        ""
+                        if active_official_outpaint is not None
+                        else (n_prompt if n_prompt else DEFAULT_NEGATIVE_PROMPT)
+                    ),
                     NAG_scale=float(NAG_scale),
                     NAG_tau=float(NAG_tau),
                     NAG_alpha=float(NAG_alpha),
                     single_stage=bool(kwargs.get("single_stage_pipeline", False)),
+                    full_resolution_refine=(
+                        full_resolution_outpaint_refine
+                    ),
+                    video_conditioning_generation_mask=(
+                        video_conditioning_generation_mask
+                    ),
                 )
             else:
                 # Progressive params only for the progressive pipeline
@@ -2119,6 +2514,79 @@ class LTX2:
             else:
                 corrected = video_tensor.to(dtype=torch.float32).add_(1.0).mul_(0.5).clamp_(0.0, 1.0).pow_(exponent)
                 video_tensor.copy_(corrected.mul_(2.0).sub_(1.0).to(dtype=video_tensor.dtype))
+        if (
+            mask_preserving_outpaint
+            and LTX2_OUTPAINTING_LAPLACIAN_BLEND
+        ):
+            blend_source = (
+                input_frames
+                if input_frames is not None
+                else input_frames2
+            )
+            blend_mask = (
+                input_masks
+                if input_masks is not None
+                else input_masks2
+            )
+            production_outpaint_blend = bool(
+                official_outpaint_pipeline
+                and full_resolution_outpaint_refine
+            )
+            video_tensor = _apply_ltx2_mask_blend(
+                video_tensor,
+                blend_source,
+                blend_mask,
+                frame_num,
+                height,
+                width,
+                mask_low_res_dilation=(
+                    # The published LTX-2.3 two-stage graph uses dilation 5
+                    # for the half-resolution handoff and 2 for the final
+                    # full-resolution Laplacian blend.
+                    2
+                    if production_outpaint_blend
+                    else LTX2_OUTPAINTING_LAPLACIAN_MASK_LOW_RES_DILATION
+                ),
+                source_feather_pixels=(
+                    LTX2_OUTPAINTING_SOURCE_FEATHER_PIXELS
+                ),
+                # The official path owns the generated margins. Post color
+                # correction is deliberately disabled; only source pixels in
+                # the narrow boundary feather are restored below.
+                match_generated_canvas=not bool(
+                    kwargs.get("single_stage_pipeline", False)
+                    or official_outpaint_pipeline
+                ),
+                blend_mode=(
+                    "gaussian"
+                    if (
+                        official_outpaint_pipeline
+                        and not production_outpaint_blend
+                    )
+                    else "laplacian"
+                ),
+                # Lightricks applies the complete Laplacian result after both
+                # passes. With the official dilation 2 and Kornia-equivalent
+                # pyramid geometry, low-frequency color crosses the seam
+                # while source high-frequency detail remains anchored.
+                full_frame_laplacian=production_outpaint_blend,
+                correct_marker_residue=bool(
+                    production_outpaint_blend
+                    and LTX2_OUTPAINTING_MARKER_RESIDUE_CLEANUP
+                ),
+            )
+            if production_outpaint_blend:
+                seam_label = "the marker-safe official Laplacian blend "
+            elif official_outpaint_pipeline:
+                seam_label = "the Diffusers-reference Gaussian seam "
+            else:
+                seam_label = "a bounded Laplacian seam "
+            print(
+                f"[LTX2] Restored protected source with "
+                f"{seam_label}"
+                f"({LTX2_OUTPAINTING_SOURCE_FEATHER_PIXELS}px source "
+                "feather; generated canvas left ungraded)."
+            )
         audio_np = audio.detach().float().cpu().numpy() if audio is not None else None
         if audio_np is not None and audio_np.ndim == 2:
             if audio_np.shape[0] in (1, 2) and audio_np.shape[1] > audio_np.shape[0]:

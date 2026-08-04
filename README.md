@@ -23,8 +23,8 @@ Detects your GPU, VRAM, and RAM on first launch and picks the right profile, qua
 
 ### 🎨 Studio Mode — full manual control
 Direct access to every model and every knob:
-- **Video** — LTX-2.3, Wan1/2, Hunyuan, and many more.
-- **Image** — Flux 2 Klein 9B (default), Qwen Image Edit, and many more
+- **Video** — MiniMax H3 with native synchronized audio, LTX-2.3, Wan1/2, Hunyuan, and many more.
+- **Image** — Flux 2 Klein 9B, Krea 2 RAW/Turbo and Identity Edit, Qwen Image Edit, and many more
 - **Audio** — TTS: Kugelaudio, Qwen3 TTS. Music: ACE-Step. SFX: MMAudio
 - **Multi-clip generation** with per-clip prompts, seamless overlapping (sliding window) transitions, and shared LoRAs
 - **Blend video Mode** Remember Sora 1 blend mode, where you could overlap two videos, and use AI to blend them together? 
@@ -56,10 +56,12 @@ Three theme families, each with a dark and a light variant, switchable in Settin
 
 Appearance mode is **Dark / Light / Auto** — Auto follows your system's appearance and switches live when it changes.
 
-### 🛠️ Edit Mode *(experimental)*
+### 🛠️ Edit Mode
 - **Retake** — re-roll a section of an existing video with a new prompt
-- **Outpaint** — extend a video's frame in any direction
-- **Edit Anything** — allows users to modify, add, or remove elements from existing videos using text prompts and In-Context LoRA (IC-LoRA) models
+- **Edit Anything** — modify, add, or remove elements from existing videos using text prompts and In-Context LoRA models
+- **Outpaint** — extend a video's frame in any direction while preserving its original action, timing, and audio
+- **Repaint** — use SCAIL-2 to repaint characters, objects, or scenes while retaining the source motion and camera work
+- **Recast** — map one or more people in a video to replacement characters, including multi-shot scenes and group shots
 
 ### 📂 Workspaces
 Multiple isolated output directories with a quick switcher in the sidebar. Useful for separating client projects, NSFW vs SFW, or experiments. Pinned and favorited outputs are tracked per workspace.
@@ -74,6 +76,88 @@ View all past Director runs with their full state — clip plans, generated imag
 ## Updates
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
+
+### v1.5.5 (2026-08-04)
+
+**MiniMax H3 local audio-video generation**
+- Added native local MiniMax H3 Base FL2VA support with text-to-video, image-to-video, and first/last-frame video generation.
+- H3 generates synchronized 32 kHz stereo audio together with the video instead of requiring a separate audio pass.
+- Added approximately 5-15 second generation at 24 FPS with landscape, portrait, square, native 768p, and lower-VRAM resolution options.
+- Added automatic, revision-pinned provisioning for the compact scaled-FP8 transformer, NVFP4 Qwen3-VL conditioner, video VAE, audio VAE, tokenizer, and processor assets.
+- The initial integration focuses on H3 Base FL2VA; H3 Ref2VA reference-video/audio conditioning and hosted 2K regeneration are not yet included.
+
+**H3 prompting and dialogue**
+- Added an H3-specific Context-IR Prompt Enhance workflow using the model's native multimodal description, soundscape, music, speaker-ID, and dialogue-tag structure.
+- Vague requests such as two characters discussing a subject can now be expanded into concise, meaningful dialogue sized to the selected duration.
+- User-supplied dialogue is preserved verbatim, and remaining time is assigned to silent visible action to reduce invented speech and gibberish.
+- Start-frame prompts now receive the correct H3 image-alignment instruction while raw prompting remains available by simply not using Prompt Enhance.
+- H3 enhancement bypasses the incompatible generic cinematic enhancer and remains one native timeline instead of being divided into false sliding-window paragraphs.
+
+**H3 compatibility, memory, and reliability**
+- Corrected compact Qwen3-VL prompt conditioning so H3 follows the requested subject instead of producing unrelated repeated scenes.
+- Added native row-scaled INT8 embedding support and corrected NVFP4 pre-quantization and combined-scale handling for Comfy-format checkpoints.
+- Fixed mixed-dtype model profiling, keyframe CPU/CUDA device mismatches, and first-frame generation failures.
+- Added activation chunking, explicit transformer working-memory reservation, and MMGP-friendly dtype locks so H3 can stream on consumer GPUs without starving the first denoising step.
+- Added regression coverage for prompt conditioning, quantized checkpoint loading, keyframes, scheduler behavior, audio output, activation chunking, and H3 prompt structure.
+
+**Multi-character Recast continuity**
+- Improved SCAIL-2 Recast when a mapped character enters later within an otherwise continuous camera shot.
+- Added hidden identity pre-roll conditioning so late-arriving characters can be introduced without publishing an artificial visible cut.
+- Recast assembly now validates that all generated segments are present and that the final output retains the exact source timeline length.
+
+### v1.5.0 (2026-08-02)
+
+**SCAIL-2 Recast and multi-character replacement**
+- Rebuilt Recast around SCAIL-2's native replacement conditioning for substantially stronger identity transfer and motion tracking.
+- Added color-mapped character cards for replacing up to five people in one run.
+- Added camera-shot detection and per-shot processing so characters remain correctly mapped when a video cuts between close-ups, wide shots, and group shots.
+- Improved two-person and multi-person shots by conditioning each shot only on the characters visible in it.
+- Added automatic reacquisition when a person first appears later, leaves the frame, or returns after a camera cut.
+- Other people in the scene are now preserved automatically when bystanders are detected.
+- References are automatically isolated from their backgrounds, aligned to the target, and supplemented with a face-detail view when useful.
+- Added optional lighting and shadow matching using Z.ai's official SCAIL-2 Relighting LoRA, downloaded, verified, and converted automatically on first use.
+- Added 480p, 512p, and 704p quality profiles with VRAM-aware window sizing; model steps remain independently adjustable.
+- Fixed reference-image backgrounds, white bars, halos, false gray scenes, blurry identity starts, and reference stills appearing at the beginning of output videos.
+- Fixed mismatched reference and control-video aspect ratios causing tensor errors or allowing the character image to control the output canvas.
+
+**SCAIL-2 Repaint**
+- Added Repaint as a first-class Edit mode for changing characters, objects, or the visual treatment of a video while retaining its motion and camera path.
+- Repaint detects camera cuts, processes each shot independently, and rejoins the exact source timeline with one continuous audio track.
+- Added multi-region and multi-character mapping with stable colors across shots.
+- Repaint now shares Recast's 480p, 512p, and 704p resolution profiles and adaptive VRAM windows.
+- Wired inference steps and applicable guidance controls to the generation pipeline while hiding advanced settings SCAIL-2 does not use.
+- Simplified the Repaint and Recast interfaces, moved detailed guidance into tooltips, and ordered Edit modes as Retake, Edit Anything, Outpaint, Repaint, and Recast.
+
+**LTX-2.3 Outpaint and Retake**
+- Rebuilt Outpaint around LTX-2.3's official In/Outpainting IC-LoRA workflow with mask-preserving source conditioning.
+- Added shot-aware Outpaint: multi-scene videos are split at camera cuts, processed independently, and reassembled at the exact original frame count with the source audio restored.
+- Improved seams, detail, color-temperature matching, and removal of green/yellow marker spill without grading the protected source region.
+- Source pixels remain protected while the full source frame stays available as visual context for newly generated areas.
+- Output canvas dimensions now follow the selected quality preset and display the actual aligned pixel size before generation.
+- Fixed Outpaint ignoring visible inference-step settings, using invalid schedules, or failing immediately on supported LTX models.
+- Fixed Retake failing on LTX-2.3 distilled and two-stage pipelines.
+
+**Krea 2 image generation and editing**
+- Added Krea 2 RAW Identity Edit and Krea 2 Turbo Identity Edit using the current Krea 2 vision-conditioning pipeline and Identity Edit v1.2 LoRA.
+- Added identity-preserving instruction edits, inpainting, outpainting, background removal, and support for up to two total reference images.
+- Added automatic Qwen3-VL vision-encoder provisioning and accurate installed/readiness checks.
+- Added compatibility with current Diffusers, Kohya, and GGUF Krea 2 weight formats.
+- Added a dedicated Krea 2 filter to the CivitAI browser and My LoRAs view, with downloads routed to the correct Krea 2 library.
+- Krea 2 RAW, Turbo, RAW Identity Edit, and Turbo Identity Edit are now enabled by default in Image mode for new and existing installations.
+
+**Studio, models, and control video**
+- Enabled-model choices now persist server-side across Maestro restarts and changing Pinokio ports.
+- Newly downloaded CivitAI checkpoints appear in model selectors immediately without restarting Maestro.
+- Control video and audio behavior are now independent in Frames mode: keep source audio, generate audio from the prompt, or use an uploaded soundtrack.
+- Missing Temporal Depth assets for LTX control-video workflows are downloaded with progress, resume support, hash verification, and atomic installation.
+- Voice Reference is now a standard feature, enabled by default and no longer hidden behind the in-development feature switch.
+- Cleaned up Recast and Repaint Advanced Settings so only controls used by the selected SCAIL-2 pipeline are shown.
+
+**Reliability and fixes**
+- Director no longer creates a duplicate combined file when a run contains only one finished clip.
+- Fixed SCAIL-2 relighting and user LoRAs failing validation when stale multi-phase weights were present.
+- Fixed installed Maestro apps being hidden or blocked by an early Pinokio NVIDIA detection failure.
+- Added broad regression coverage for SCAIL-2, Repaint, Outpaint, Retake, model visibility, temporal-depth downloads, and Krea 2 editing.
 
 ### v1.4 (2026-07-20)
 
@@ -165,7 +249,7 @@ The version you are running is shown next to the Maestro title in the UI. To upd
 
 ### v1.3.0 (2026-07-17)
 
-**New: SCAIL-2 character animation.** Z.ai's follow-up to SCAIL Preview, integrated end to end. It transfers a performance from any video onto any character with no skeleton extraction, and it comes in two flavors: **SCAIL-2 14B** (the full 40-step model) and **SCAIL-2 14B Fast** (bundled lightx2v distill, 6 steps, no CFG, roughly 13x faster at near-identical quality). Both are enabled by default. About 16.6 GB downloads on first use, plus a small detector model.
+**New: SCAIL-2 character animation.** Z.ai's follow-up to SCAIL Preview, integrated end to end. It transfers a performance from any video onto any character with no skeleton extraction, and it comes in two flavors: **SCAIL-2 14B** (the full native 40-step model) and **SCAIL-2 14B Fast** (bundled lightx2v distill, 6 steps, and no CFG for rapid animation). Fast is the recommended starting point for Recast, though results can vary by seed. Both are enabled by default. About 16.6 GB downloads on first use, plus a small detector model.
 
 - **Animate (Video tab).** Pick SCAIL-2 in Frames mode, drop a character image as the Start Image and a performance clip on the new Control Video tile, generate. The character performs the clip's motion in their own scene. Output follows the source clip's frame rate (capped at 30fps) and keeps its audio.
 - **Recast (Edit tab).** The headline: replace a person in an existing video with your character. Drop a video, type who to replace ("woman", "man in red"), preview the selection with the eye button, drop the character image, generate. Masking is fully automatic (SAM3 keyword tracking), and the scene, camera, and audio are preserved. The prompt is optional; describing the new character helps identity.
@@ -358,6 +442,7 @@ Maestro is built on top of, and indebted to, the following projects:
 
 - [**Wan2GP / WanGP**](https://github.com/deepbeepmeep/Wan2GP) by [@deepbeepmeep](https://github.com/deepbeepmeep) — the entire generation pipeline. Maestro inherits WanGP's non-commercial license.
 - [**LTX-Video**](https://github.com/Lightricks/LTX-Video) by Lightricks — LTX-2 and LTX-2.3 distilled models.
+- [**MiniMax H3**](https://huggingface.co/MiniMaxAI/MiniMax-H3) by MiniMax — joint video-and-audio generation with text, first-frame, and first/last-frame conditioning.
 - [**Wan 2.1 / 2.2**](https://github.com/Wan-Video/Wan2.1) by Alibaba — text-to-video and image-to-video.
 - [**Flux**](https://github.com/black-forest-labs/flux) by Black Forest Labs — image generation.
 - [**Qwen**](https://github.com/QwenLM/Qwen) by Alibaba — image generation and LLMs.
@@ -375,7 +460,7 @@ Maestro is released under the **WanGP Non-Commercial Evaluation License 1.1**, i
 
 **TL;DR**: free to use and modify for non-commercial purposes; the *outputs* you generate are yours to use commercially (with attribution); commercial use of the *software itself* (including hosted services and APIs) requires a separate commercial license from the WanGP licensor.
 
-Third-party models, weights, and components keep their own licenses — review them before redistributing. Notably, the [seed-vc](https://github.com/Plachta/seed-vc) voice-conversion component is **GPL-3.0**, so it is distributed from its own repository ([Blizaine/maestro-seedvc](https://github.com/Blizaine/maestro-seedvc)) and cloned into `app/postprocessing/seedvc/` at install time rather than shipped in this tree. Other vendored components include BigVGAN (MIT), FlashVSR sparse-sage (Apache-2.0), and IndexTTS2 (bilibili model license).
+Third-party models, weights, and components keep their own licenses — review them before redistributing. MiniMax H3 weights remain subject to MiniMax's separate model terms and any authorization or waiver required for the user's location. Notably, the [seed-vc](https://github.com/Plachta/seed-vc) voice-conversion component is **GPL-3.0**, so it is distributed from its own repository ([Blizaine/maestro-seedvc](https://github.com/Blizaine/maestro-seedvc)) and cloned into `app/postprocessing/seedvc/` at install time rather than shipped in this tree. Other vendored components include BigVGAN (MIT), FlashVSR sparse-sage (Apache-2.0), and IndexTTS2 (bilibili model license).
 
 ## Issues
 

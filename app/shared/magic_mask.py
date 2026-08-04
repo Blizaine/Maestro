@@ -108,7 +108,17 @@ def _ensure_sam3_assets():
     wgp.process_files_def(**query_download_def())
 
 
-def _run_sam3(video: np.ndarray, keywords: list, batch_size, no_hole, progress_callback=None, colorize_objects=False, color_palette=None, max_colored_objects=None) -> np.ndarray:
+def _run_sam3(
+    video: np.ndarray,
+    keywords: list,
+    batch_size,
+    no_hole,
+    progress_callback=None,
+    colorize_objects=False,
+    color_palette=None,
+    max_colored_objects=None,
+    tracking_segments=None,
+) -> np.ndarray:
     _ensure_sam3_assets()
     from preprocessing.sam3.preprocessor import run_sam3_video
 
@@ -125,6 +135,7 @@ def _run_sam3(video: np.ndarray, keywords: list, batch_size, no_hole, progress_c
             color_palette=color_palette,
             max_colored_objects=max_colored_objects,
             progress_callback=progress_callback,
+            tracking_segments=tracking_segments,
         )
 
 
@@ -141,11 +152,32 @@ def prepare_video_mask_input(video_path, max_time_seconds=None):
     return video_path, video, fps
 
 
-def generate_keyword_masks(video: np.ndarray, keyword_text, *, batch_size=None, no_hole=True, progress_callback=None, colorize_objects=False, color_palette=None, max_colored_objects=None) -> np.ndarray:
+def generate_keyword_masks(
+    video: np.ndarray,
+    keyword_text,
+    *,
+    batch_size=None,
+    no_hole=True,
+    progress_callback=None,
+    colorize_objects=False,
+    color_palette=None,
+    max_colored_objects=None,
+    tracking_segments=None,
+) -> np.ndarray:
     keywords = parse_keywords(keyword_text)
     if len(keywords) == 0:
         return np.zeros((*video.shape[:3], 3), dtype=np.uint8) if colorize_objects else np.zeros(video.shape[:3], dtype=np.bool_)
-    return _run_sam3(video, keywords, batch_size, no_hole, progress_callback=progress_callback, colorize_objects=colorize_objects, color_palette=color_palette, max_colored_objects=max_colored_objects)
+    return _run_sam3(
+        video,
+        keywords,
+        batch_size,
+        no_hole,
+        progress_callback=progress_callback,
+        colorize_objects=colorize_objects,
+        color_palette=color_palette,
+        max_colored_objects=max_colored_objects,
+        tracking_segments=tracking_segments,
+    )
 
 
 def merge_keyword_masks(current_mask, keyword_mask: np.ndarray) -> np.ndarray:

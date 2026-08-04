@@ -588,15 +588,17 @@ def _dequantize_nvfp4_weight(
         )
     if scale.shape[0] != out.shape[0]:
         scale = scale[:out.shape[0]]
-    out = out.view(out.shape[0], scale.shape[1], block_size)
-    out.mul_(scale.unsqueeze(-1))
-    out = out.view(out.shape[0], -1)
-
     if layout == _NVFP4_LAYOUT_TENSORCORE:
-        scale_factor = alpha.to(dtype)
+        # Comfy-kitchen's eager NVFP4 reference combines the tensor and block
+        # scales first, then performs one multiply with the decoded FP4 data.
+        # The order matters for BF16/FP16 fallback because rounding between
+        # two multiplies is otherwise repeated in every Qwen linear layer.
+        combined_scale = scale * alpha.to(dtype)
     else:
-        scale_factor = alpha.to(dtype) * input_global_scale.to(dtype)
-    out.mul_(scale_factor)
+        combined_scale = scale * (alpha.to(dtype) * input_global_scale.to(dtype))
+    out = out.view(out.shape[0], scale.shape[1], block_size)
+    out.mul_(combined_scale.unsqueeze(-1))
+    out = out.view(out.shape[0], -1)
     return out
 
 
@@ -1006,7 +1008,7 @@ class QLinearNVFP4(QModuleMixin, torch.nn.Linear):
             weight_dtype = module.bias.dtype
         else:
             weight_dtype = torch.float16
-        return cls(
+        qmodule = cls(
             module.in_features,
             module.out_features,
             module.bias is not None,
@@ -1017,6 +1019,23 @@ class QLinearNVFP4(QModuleMixin, torch.nn.Linear):
             optimizer=optimizer,
             quantize_input=True,
         )
+        # AWQ-style NVFP4 checkpoints can carry a per-input-channel
+        # smoothing scale (Comfy calls this ``pre_quant_scale``). Quanto
+        # replaces the original Linear with this class before loading the
+        # state dict, so mirror the optional buffer here or the scale would
+        # become an unexpected key and silently disappear.
+        pre_quant_scale = getattr(module, "pre_quant_scale", None)
+        if torch.is_tensor(pre_quant_scale):
+            qmodule.register_buffer(
+                "pre_quant_scale",
+                torch.empty(
+                    pre_quant_scale.shape,
+                    dtype=pre_quant_scale.dtype,
+                    device=device,
+                ),
+                persistent=True,
+            )
+        return qmodule
 
     def set_default_dtype(self, dtype):
         self._nvfp4_default_dtype = dtype
@@ -1028,6 +1047,15 @@ class QLinearNVFP4(QModuleMixin, torch.nn.Linear):
         return super().qweight
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        pre_quant_scale = getattr(self, "pre_quant_scale", None)
+        if not torch.is_tensor(pre_quant_scale):
+            # MMGP loads quantized weights through a temporary handler module,
+            # then copies its ordinary attributes into QLinearQuantoRouter.
+            # Registered buffers are deliberately excluded from that copy, so
+            # keep a plain-attribute mirror for the routed module to retain.
+            pre_quant_scale = getattr(self, "_nvfp4_pre_quant_scale", None)
+        if torch.is_tensor(pre_quant_scale):
+            input = input * pre_quant_scale.to(device=input.device, dtype=input.dtype)
         return torch.nn.functional.linear(input, self.qweight, bias=self.bias)
 
     def _load_from_state_dict(
@@ -1048,6 +1076,7 @@ class QLinearNVFP4(QModuleMixin, torch.nn.Linear):
         bias_key = prefix + "bias"
         input_scale_key = prefix + "input_scale"
         output_scale_key = prefix + "output_scale"
+        pre_quant_scale_key = prefix + "pre_quant_scale"
 
         weight_u8 = state_dict.pop(weight_key, None)
         weight_scale = state_dict.pop(scale_key, None)
@@ -1059,6 +1088,7 @@ class QLinearNVFP4(QModuleMixin, torch.nn.Linear):
         bias = state_dict.pop(bias_key, None)
         input_scale = state_dict.pop(input_scale_key, None)
         output_scale = state_dict.pop(output_scale_key, None)
+        pre_quant_scale = state_dict.pop(pre_quant_scale_key, None)
 
         if weight_u8 is None:
             missing_keys.append(weight_key)
@@ -1148,6 +1178,19 @@ class QLinearNVFP4(QModuleMixin, torch.nn.Linear):
             if not hasattr(self, "output_scale") or self.output_scale.is_meta:
                 scale_dtype = self.output_scale.dtype if hasattr(self, "output_scale") else torch.float32
                 self.output_scale = torch.ones((), dtype=scale_dtype, device=scale_device)
+
+        if pre_quant_scale is not None:
+            existing_scale = getattr(self, "pre_quant_scale", None)
+            scale_dtype = existing_scale.dtype if torch.is_tensor(existing_scale) else target_dtype
+            loaded_scale = pre_quant_scale.to(device=scale_device, dtype=scale_dtype)
+            if torch.is_tensor(existing_scale):
+                self.pre_quant_scale = loaded_scale
+            else:
+                self.register_buffer("pre_quant_scale", loaded_scale, persistent=True)
+            # QLinearQuantoRouter copies values from this temporary module's
+            # ``__dict__`` but not its ``_buffers``. Without this mirror the
+            # AWQ input scale vanishes even though the checkpoint loaded it.
+            self._nvfp4_pre_quant_scale = loaded_scale
 
         return
 

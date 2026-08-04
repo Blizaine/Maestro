@@ -4,7 +4,12 @@ import time
 from collections.abc import Callable, Iterator
 
 import torch
+import torch.nn.functional as F
 
+from ..inpainting import (
+    _apply_ltx2_mask_blend,
+    _edge_extend_ltx2_masked_control_video,
+)
 from ..ltx_core.components.diffusion_steps import EulerDiffusionStep, EulerAncestralDiffusionStep, DPMSolverPlusPlus2MDiffusionStep
 from ..ltx_core.components.noisers import GaussianNoiser
 from ..ltx_core.components.protocols import DiffusionStepProtocol
@@ -13,6 +18,7 @@ from ..ltx_core.model.audio_vae import decode_audio as vae_decode_audio
 from ..ltx_core.model.upsampler import upsample_video
 from ..ltx_core.model.video_vae import TilingConfig, get_video_chunks_number
 from ..ltx_core.model.video_vae import decode_video_to_tensor as vae_decode_video_to_tensor
+from ..ltx_core.model.video_vae import encode_video as vae_encode_video
 from ..ltx_core.text_encoders.gemma import encode_text, postprocess_text_embeddings, resolve_text_connectors
 from ..ltx_core.tools import VideoLatentTools
 from ..ltx_core.types import LatentState, VideoPixelShape
@@ -21,6 +27,8 @@ from .utils.args import default_2_stage_distilled_arg_parser
 from .utils.constants import (
     AUDIO_SAMPLE_RATE,
     DISTILLED_SIGMA_VALUES,
+    OUTPAINT_ATTENTION_STAGE_2_SIGMA_VALUES,
+    OUTPAINT_FULL_RES_REFINE_SIGMA_VALUES,
     STAGE_2_DISTILLED_SIGMA_VALUES,
 )
 from .utils.helpers import (
@@ -39,7 +47,7 @@ from .utils.helpers import (
     video_conditionings_by_keyframe,
     video_conditionings_by_reference_latent,
 )
-from .utils.media_io import encode_video
+from .utils.media_io import encode_video, load_video_conditioning
 from .utils.types import PipelineComponents
 from shared.utils.loras_mutipliers import update_loras_slists
 from shared.utils.self_refiner import create_self_refiner_handler, normalize_self_refiner_plan
@@ -52,6 +60,16 @@ _BENCH_TRANSFORMER_ENV = "WAN2GP_LTX2_BENCH_TRANSFORMER"
 def _env_flag(name: str, default: str = "0") -> bool:
     val = os.environ.get(name, default)
     return str(val).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _select_reference_attention_generation_mask(
+    full_resolution_refine: bool,
+    generation_mask: torch.Tensor | None,
+) -> torch.Tensor | None:
+    """Select official full attention or compatibility source attention."""
+    if full_resolution_refine:
+        return None
+    return generation_mask
 
 
 def _align_seq_len(tensor: torch.Tensor | None, target_len: int) -> torch.Tensor | None:
@@ -69,6 +87,315 @@ def _align_seq_len(tensor: torch.Tensor | None, target_len: int) -> torch.Tensor
         pad = tensor[:, -1:, :].repeat(1, pad_len, 1)
         return torch.cat([tensor, pad], dim=1)
     return tensor.narrow(seq_dim, 0, target_len)
+
+
+def _coerce_refinement_source_cthw(
+    video_conditioning: list[tuple] | None,
+    *,
+    height: int,
+    width: int,
+    num_frames: int,
+    generation_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Recover the first IC-LoRA reference as normalized CTHW pixels."""
+    if not video_conditioning:
+        raise ValueError(
+            "Pixel-refined Outpaint requires video conditioning."
+        )
+    entry = video_conditioning[0]
+    if not isinstance(entry, (tuple, list)) or not entry:
+        raise ValueError("Invalid Outpaint video-conditioning entry.")
+    source_input = entry[0]
+
+    if torch.is_tensor(source_input):
+        source = source_input.detach()
+        if source.dim() == 5:
+            if int(source.shape[0]) != 1:
+                raise ValueError(
+                    "Outpaint refinement supports one conditioning batch."
+                )
+            source = source[0]
+        if source.dim() == 4:
+            if int(source.shape[0]) in (1, 3, 4):
+                source = source[:3]
+            elif int(source.shape[-1]) in (1, 3, 4):
+                source = source[..., :3].permute(3, 0, 1, 2)
+            else:
+                source = None
+            if source is not None:
+                source = _fit_refinement_frames_cthw(
+                    source,
+                    int(num_frames),
+                )
+                if generation_mask is not None:
+                    # Extend real boundary pixels over the neutral/marker
+                    # canvas before area downsampling. Otherwise an odd source
+                    # coordinate averages padding into the half-res edge.
+                    source_mask = _coerce_refinement_mask_cthw(
+                        generation_mask,
+                        height=int(source.shape[-2]),
+                        width=int(source.shape[-1]),
+                        num_frames=int(num_frames),
+                    )
+                    source = _edge_extend_ltx2_masked_control_video(
+                        source,
+                        source_mask,
+                    )
+                return _resize_refinement_video_cthw(
+                    source,
+                    height=int(height),
+                    width=int(width),
+                    mode="area",
+                )
+
+    # The Outpaint path normally supplies an already prepared CTHW tensor.
+    # Retain support for file-backed conditioning and unexpected layouts so
+    # the refinement path remains compatible with the generic LTX pipeline.
+    loaded = load_video_conditioning(
+        video_path=source_input,
+        height=int(height),
+        width=int(width),
+        frame_cap=int(num_frames),
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+    return _fit_refinement_frames_cthw(
+        loaded[0, :3],
+        int(num_frames),
+    )
+
+
+def _fit_refinement_frames_cthw(
+    video: torch.Tensor,
+    num_frames: int,
+) -> torch.Tensor:
+    """Trim or tail-pad a CTHW tensor to the requested frame count."""
+    if video.dim() != 4 or int(video.shape[1]) <= 0:
+        raise ValueError("Outpaint refinement video must contain frames.")
+    num_frames = max(1, int(num_frames))
+    if int(video.shape[1]) >= num_frames:
+        return video[:, :num_frames]
+    missing = num_frames - int(video.shape[1])
+    return torch.cat(
+        [video, video[:, -1:].expand(-1, missing, -1, -1)],
+        dim=1,
+    )
+
+
+def _resize_refinement_video_cthw(
+    video: torch.Tensor,
+    *,
+    height: int,
+    width: int,
+    mode: str,
+) -> torch.Tensor:
+    """Resize CTHW pixels in bounded CPU chunks without latent upscaling."""
+    height = int(height)
+    width = int(width)
+    if tuple(video.shape[-2:]) == (height, width):
+        return video
+
+    source = video.detach().cpu()
+    output = torch.empty(
+        (
+            int(source.shape[0]),
+            int(source.shape[1]),
+            height,
+            width,
+        ),
+        dtype=source.dtype,
+        device="cpu",
+    )
+    pixels_per_frame = max(1, height * width)
+    chunk_frames = max(1, min(16, 8_000_000 // pixels_per_frame))
+    for start in range(0, int(source.shape[1]), chunk_frames):
+        end = min(int(source.shape[1]), start + chunk_frames)
+        frames = (
+            source[:, start:end]
+            .permute(1, 0, 2, 3)
+            .to(dtype=torch.float32)
+        )
+        if mode == "lanczos":
+            # Lightricks' published LTX-2.3 Outpaint graph uses Lanczos for
+            # the decoded pass-one -> pass-two pixel handoff. PyTorch does
+            # not expose Lanczos through F.interpolate, so use OpenCV's
+            # float-preserving implementation in the same bounded chunks.
+            import cv2
+
+            resized_frames = []
+            for frame in frames:
+                frame_hwc = (
+                    frame.permute(1, 2, 0)
+                    .contiguous()
+                    .numpy()
+                )
+                resized_hwc = cv2.resize(
+                    frame_hwc,
+                    (width, height),
+                    interpolation=cv2.INTER_LANCZOS4,
+                )
+                if resized_hwc.ndim == 2:
+                    resized_hwc = resized_hwc[..., None]
+                resized_frames.append(
+                    torch.from_numpy(resized_hwc).permute(2, 0, 1)
+                )
+            resized = torch.stack(resized_frames)
+        elif mode == "nearest":
+            resized = F.interpolate(
+                frames,
+                size=(height, width),
+                mode="nearest",
+            )
+        elif mode == "area":
+            resized = F.interpolate(
+                frames,
+                size=(height, width),
+                mode="area",
+            )
+        else:
+            resized = F.interpolate(
+                frames,
+                size=(height, width),
+                mode=mode,
+                align_corners=False,
+                antialias=True,
+            )
+        if source.dtype == torch.uint8:
+            resized = resized.round().clamp(0.0, 255.0)
+        elif source.is_floating_point():
+            source_min = float(frames.amin())
+            source_max = float(frames.amax())
+            resized = resized.clamp(source_min, source_max)
+        output[:, start:end] = (
+            resized.to(dtype=source.dtype)
+            .permute(1, 0, 2, 3)
+        )
+    return output
+
+
+def _coerce_refinement_mask_cthw(
+    generation_mask: torch.Tensor | None,
+    *,
+    height: int,
+    width: int,
+    num_frames: int,
+) -> torch.Tensor:
+    """Normalize an Outpaint generation mask to 1xTxHxW."""
+    if generation_mask is None or not torch.is_tensor(generation_mask):
+        raise ValueError(
+            "Pixel-refined Outpaint requires a generation mask."
+        )
+    mask = generation_mask.detach()
+    if mask.dim() == 5:
+        if int(mask.shape[0]) != 1:
+            raise ValueError("Outpaint refinement supports one mask batch.")
+        mask = mask[0]
+    if mask.dim() == 3:
+        mask = mask.unsqueeze(0)
+    elif mask.dim() == 4 and int(mask.shape[-1]) == 1:
+        mask = mask.permute(3, 0, 1, 2)
+    if mask.dim() != 4 or int(mask.shape[0]) != 1:
+        raise ValueError(
+            "Outpaint refinement mask must have shape 1xTxHxW."
+        )
+    mask = _fit_refinement_frames_cthw(mask, int(num_frames))
+    mask = mask.to(device="cpu", dtype=torch.float32)
+    if mask.numel() and float(mask.max()) > 1.0:
+        mask = mask.div(255.0)
+    mask = mask.clamp(0.0, 1.0)
+    return _resize_refinement_video_cthw(
+        mask,
+        height=int(height),
+        width=int(width),
+        # The official graph uses area sampling. This matters when a source
+        # rectangle begins on an odd full-resolution row: its half-resolution
+        # boundary is 0.5, not a one-pixel nearest-neighbor shift.
+        mode="area",
+    )
+
+
+def _decode_blend_reencode_outpaint(
+    *,
+    latent: torch.Tensor,
+    source: torch.Tensor,
+    generation_mask: torch.Tensor,
+    video_decoder,
+    video_encoder,
+    tiling_config: TilingConfig | None,
+    num_frames: int,
+    height: int,
+    width: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    target_height: int | None = None,
+    target_width: int | None = None,
+    interrupt_check: Callable[[], bool] | None = None,
+) -> torch.Tensor | None:
+    """Build the official pixel-space handoff for Outpaint pass two.
+
+    LTX's two-stage workflow decodes pass one, restores the protected source,
+    resizes the cleaned pixels, then VAE-encodes them before adding pass-two
+    noise. Passing the first latent through a generic learned spatial upscaler
+    distorts Outpaint geometry; denoising pass one at target resolution causes
+    the green missing-canvas sentinel to dominate the generated area.
+    """
+    decoded_fhwc = vae_decode_video_to_tensor(
+        latent,
+        video_decoder,
+        tiling_config,
+        expected_frames=int(num_frames),
+        expected_height=int(height),
+        expected_width=int(width),
+        interrupt_check=interrupt_check,
+    )
+    if decoded_fhwc is None:
+        return None
+    if interrupt_check is not None and interrupt_check():
+        return None
+
+    decoded_cthw = decoded_fhwc.permute(3, 0, 1, 2)
+    blended_cthw = _apply_ltx2_mask_blend(
+        decoded_cthw,
+        source,
+        generation_mask,
+        int(num_frames),
+        int(height),
+        int(width),
+        # Lightricks uses dilation 5 and a full-frame Laplacian blend on the
+        # intermediate handoff.
+        mask_low_res_dilation=5,
+        source_feather_pixels=24,
+        match_generated_canvas=False,
+        full_frame_laplacian=True,
+    )
+    del decoded_fhwc
+    del decoded_cthw
+    if interrupt_check is not None and interrupt_check():
+        return None
+
+    target_height = int(target_height or height)
+    target_width = int(target_width or width)
+    blended_cthw = _resize_refinement_video_cthw(
+        blended_cthw,
+        height=target_height,
+        width=target_width,
+        mode="lanczos",
+    )
+    if interrupt_check is not None and interrupt_check():
+        return None
+
+    refinement_video = blended_cthw.unsqueeze(0).to(
+        device=device,
+        dtype=dtype,
+    )
+    if blended_cthw.dtype == torch.uint8:
+        refinement_video.div_(127.5).sub_(1.0)
+    encoded = vae_encode_video(
+        refinement_video,
+        video_encoder,
+        tiling_config,
+    )
+    return encoded
 
 
 class _TransformerBenchWrapper:
@@ -192,6 +519,7 @@ class DistilledPipeline:
         alt_guidance_scale: float = 1.0,
         video_conditioning: list[tuple[str, float]] | None = None,
         video_conditioning_downscale_factor: int = 1,
+        video_conditioning_generation_mask: torch.Tensor | None = None,
         latent_conditioning_stage2: torch.Tensor | None = None,
         tiling_config: TilingConfig | None = None,
         enhance_prompt: bool = False,
@@ -210,11 +538,17 @@ class DistilledPipeline:
         self_refiner_max_plans: int = 1,
         stage2_steps: int = 0,
         single_stage: bool = False,
+        full_resolution_refine: bool = False,
         keyframe_conditioning_mode: str = "replace",
         keyframe_inject_mode: str = "additive",
     ) -> tuple[Iterator[torch.Tensor], torch.Tensor]:
         assert_resolution(height=height, width=width, is_two_stage=True)
         alt_guidance_scale = 1.0
+        full_resolution_refine = bool(full_resolution_refine)
+        attention_masked_outpaint = bool(
+            video_conditioning_generation_mask is not None
+            and not full_resolution_refine
+        )
         # Single-stage mode: run the distilled denoise at FULL target
         # resolution and skip the stage-2 upscale+refine entirely. Trades
         # more VRAM/time (stage 1 at 4x the pixels) for no upscale artifacts
@@ -236,18 +570,41 @@ class DistilledPipeline:
         # and previous denoised predictions. Matches ComfyUI's 'dpmpp_2m' in
         # spirit; closer in behavior to the ClownSampler 'res_2s' that the
         # reference single-stage workflow uses than plain euler would be.
-        # Standard 2-stage still uses Euler for stage 1 (faster + matches
-        # ComfyUI's 2-stage workflow).
-        if single_stage:
+        # Standard non-Outpaint 2-stage generation uses Euler for its first
+        # pass. Maestro intentionally keeps Outpaint deterministic too: the
+        # published graph's ancestral first pass can diffuse the #66FF00 mask
+        # sentinel into the generated canvas with this MMGP/FP8 runtime. That
+        # produces a broad green cast which final edge cleanup cannot remove.
+        if full_resolution_refine:
+            # Compatibility override for Maestro's quantized/streamed path.
+            # Keep the official sigma schedule and pixel-space handoff, but
+            # avoid injecting ancestral noise into marker-conditioned pixels.
+            stepper = EulerDiffusionStep()
+            print(
+                "[LTX2] Outpaint sampling: marker-safe deterministic Euler "
+                "first pass and full-resolution refinement; "
+                "official 5/2 Laplacian blend schedule."
+            )
+        elif single_stage:
             stepper = DPMSolverPlusPlus2MDiffusionStep()
         else:
             stepper = EulerDiffusionStep()
-        # Stage 2 uses ancestral sampling with low eta — matches ComfyUI's
-        # euler_ancestral_cfg_pp (at CFG=1) and the ClownSampler eta=0.25
-        # setting in the reference distilled 2-stage workflow. The noise
-        # injection between refine steps gives livelier, cleaner detail than
-        # deterministic euler alone.
-        stepper_stage2 = EulerAncestralDiffusionStep(generator=ancestral_generator, eta=0.25)
+        # Standard stage 2 uses ancestral sampling with low eta. Official
+        # Outpaint is the exception and uses deterministic Euler here.
+        if full_resolution_refine:
+            # Lightricks' published graph uses deterministic euler_cfg_pp for
+            # its two-step full-resolution refinement pass.
+            stepper_stage2 = EulerDiffusionStep()
+        elif attention_masked_outpaint:
+            # Keep the older source-attention compatibility path
+            # deterministic; unlike the pixel-handoff workflow it was tuned
+            # around a three-step refinement schedule.
+            stepper_stage2 = EulerDiffusionStep()
+        else:
+            stepper_stage2 = EulerAncestralDiffusionStep(
+                generator=ancestral_generator,
+                eta=0.25,
+            )
         self_refiner_handler = None
         self_refiner_handler_audio = None
         self_refiner_handler_stage2 = None
@@ -368,9 +725,13 @@ class DistilledPipeline:
             # the moment pass 2 kicks in. Stage 2's sigma length is determined
             # here (mirroring the logic at stage 2 setup below) so the total
             # is known at the very first callback.
-            if single_stage:
+            if single_stage and not full_resolution_refine:
                 # No stage 2 — the progress bar should only account for stage 1.
                 _stage_2_len = 0
+            elif full_resolution_refine:
+                _stage_2_len = (
+                    len(OUTPAINT_FULL_RES_REFINE_SIGMA_VALUES) - 1
+                )
             elif stage2_steps > 0:
                 from .utils.constants import build_stage2_sigmas
                 _stage_2_len = len(build_stage2_sigmas(stage2_steps)) - 1
@@ -456,7 +817,39 @@ class DistilledPipeline:
                 tiling_config=tiling_config,
             )
         if video_conditioning:
-            if int(video_conditioning_downscale_factor or 1) > 1:
+            if (
+                full_resolution_refine
+                or video_conditioning_generation_mask is not None
+            ):
+                reference_attention_generation_mask = (
+                    _select_reference_attention_generation_mask(
+                        full_resolution_refine,
+                        video_conditioning_generation_mask,
+                    )
+                )
+                if full_resolution_refine:
+                    print(
+                        "[LTX2] Applying full-reference IC-LoRA attention "
+                        "for Lightricks' official Outpaint mask guide."
+                    )
+                else:
+                    print(
+                        "[LTX2] Applying source-region reference "
+                        "attention (complete canvas retained)."
+                    )
+                stage_1_conditionings += video_conditionings_by_reference_latent(
+                    video_conditioning=video_conditioning,
+                    height=stage_1_output_shape.height,
+                    width=stage_1_output_shape.width,
+                    num_frames=num_frames,
+                    video_encoder=video_encoder,
+                    dtype=dtype,
+                    device=self.device,
+                    downscale_factor=video_conditioning_downscale_factor,
+                    tiling_config=tiling_config,
+                    generation_mask=reference_attention_generation_mask,
+                )
+            elif int(video_conditioning_downscale_factor or 1) > 1:
                 stage_1_conditionings += video_conditionings_by_reference_latent(
                     video_conditioning=video_conditioning,
                     height=stage_1_output_shape.height,
@@ -521,7 +914,7 @@ class DistilledPipeline:
         # Single-stage: decode the stage-1 latent directly and return — no
         # upscale, no stage-2 refine. stage_1_output_shape already has the
         # target resolution in this branch.
-        if single_stage:
+        if single_stage and not full_resolution_refine:
             torch.cuda.synchronize()
             del transformer
             del video_encoder
@@ -546,17 +939,107 @@ class DistilledPipeline:
                 return decoded_video, decoded_audio, latent_slice
             return decoded_video, decoded_audio
 
-        # Stage 2: Upsample and refine the video at higher resolution with distilled LORA.
-        upscaled_video_latent = upsample_video(
-            latent=video_state.latent[:1],
-            video_encoder=video_encoder,
-            upsampler=self._get_model("spatial_upsampler"),
-        )
+        # Stage 1 conditionings are no longer needed and can retain a sizable
+        # encoded reference video during the pixel-space handoff.
+        del stage_1_conditionings
+        mask_context = None
+
+        # Standard stage 2 spatially upscales the latent. Official Outpaint
+        # instead decodes pass one, Laplacian-blends the protected source,
+        # resizes those pixels with Lanczos, and re-encodes for refinement.
+        if full_resolution_refine:
+            print(
+                "[LTX2] Decoding and source-blending the half-resolution "
+                "Outpaint pass before pixel resize."
+            )
+            refinement_source = _coerce_refinement_source_cthw(
+                video_conditioning,
+                height=stage_1_output_shape.height,
+                width=stage_1_output_shape.width,
+                num_frames=stage_1_output_shape.frames,
+                generation_mask=video_conditioning_generation_mask,
+            )
+            refinement_mask = _coerce_refinement_mask_cthw(
+                video_conditioning_generation_mask,
+                height=stage_1_output_shape.height,
+                width=stage_1_output_shape.width,
+                num_frames=stage_1_output_shape.frames,
+            )
+            first_pass_shape = tuple(video_state.latent[:1].shape)
+            upscaled_video_latent = _decode_blend_reencode_outpaint(
+                latent=video_state.latent[:1],
+                source=refinement_source,
+                generation_mask=refinement_mask,
+                video_decoder=self._get_model("video_decoder"),
+                video_encoder=video_encoder,
+                tiling_config=tiling_config,
+                num_frames=stage_1_output_shape.frames,
+                height=stage_1_output_shape.height,
+                width=stage_1_output_shape.width,
+                target_height=height,
+                target_width=width,
+                device=self.device,
+                dtype=dtype,
+                interrupt_check=interrupt_check,
+            )
+            if upscaled_video_latent is None:
+                return None, None
+            expected_refinement_shape = (
+                first_pass_shape[0],
+                first_pass_shape[1],
+                first_pass_shape[2],
+                int(height) // 32,
+                int(width) // 32,
+            )
+            if (
+                tuple(upscaled_video_latent.shape)
+                != expected_refinement_shape
+            ):
+                raise RuntimeError(
+                    "Outpaint pixel handoff produced latent shape "
+                    f"{tuple(upscaled_video_latent.shape)}; expected "
+                    f"{expected_refinement_shape} after resizing pass one "
+                    f"from {first_pass_shape}."
+                )
+            del refinement_source
+            del refinement_mask
+            del video_state
+            refinement_steps = (
+                len(OUTPAINT_FULL_RES_REFINE_SIGMA_VALUES) - 1
+            )
+            print(
+                "[LTX2] Decoded, source-blended with an area/Lanczos "
+                "handoff, and re-encoded pass one at target resolution; "
+                f"running {refinement_steps}-step pixel refinement."
+            )
+        else:
+            upscaled_video_latent = upsample_video(
+                latent=video_state.latent[:1],
+                video_encoder=video_encoder,
+                upsampler=self._get_model("spatial_upsampler"),
+            )
 
         torch.cuda.synchronize()
         cleanup_memory()
 
-        if stage2_steps > 0:
+        if full_resolution_refine:
+            stage_2_sigmas = torch.Tensor(
+                OUTPAINT_FULL_RES_REFINE_SIGMA_VALUES
+            ).to(self.device)
+            print(
+                "[LTX2] Outpaint refinement sigmas: "
+                f"{OUTPAINT_FULL_RES_REFINE_SIGMA_VALUES} "
+                f"({len(OUTPAINT_FULL_RES_REFINE_SIGMA_VALUES) - 1} steps)."
+            )
+        elif attention_masked_outpaint:
+            stage_2_sigmas = torch.Tensor(
+                OUTPAINT_ATTENTION_STAGE_2_SIGMA_VALUES
+            ).to(self.device)
+            print(
+                "[LTX2] Official Outpaint stage-2 sigmas: "
+                f"{OUTPAINT_ATTENTION_STAGE_2_SIGMA_VALUES}."
+            )
+        elif stage2_steps > 0:
             from .utils.constants import build_stage2_sigmas
             stage_2_sigmas = torch.Tensor(build_stage2_sigmas(stage2_steps)).to(self.device)
         else:
@@ -660,6 +1143,9 @@ class DistilledPipeline:
         # Detection: any positive identity_guidance_scale on components
         # signals an ID-LoRA run.
         _id_active = float(getattr(self.pipeline_components, 'identity_guidance_scale', 0.0) or 0.0) > 0.0
+        _freeze_stage2_audio = bool(
+            _id_active or full_resolution_refine
+        )
         # Stage 2 audio conditionings: when ID-LoRA active, drop the ref
         # token conditioning (AudioConditionByReferenceLatent) from stage
         # 1. Stage 2 is frozen-audio anyway, so re-prepending ref tokens
@@ -668,7 +1154,12 @@ class DistilledPipeline:
         # We use the AudioConditionByReferenceLatent type-check rather than
         # an indirect signal so this stays robust if other conditionings
         # ever get added to the list.
-        if _id_active:
+        if full_resolution_refine:
+            # The initial audio latent already contains stage 1's source-aware
+            # result. The official Outpaint refinement freezes it rather than
+            # reapplying audio guides during the visual cleanup pass.
+            stage_2_audio_conditionings = []
+        elif _id_active:
             from ..ltx_core.conditioning import AudioConditionByReferenceLatent
             stage_2_audio_conditionings = [
                 c for c in (audio_conditionings or [])
@@ -691,11 +1182,11 @@ class DistilledPipeline:
             # When ID-LoRA active: skip noising audio, freeze it across
             # the loop. Initial audio latent (stage 1's voice-cloned
             # output) flows through unchanged.
-            audio_noise_scale=0.0 if _id_active else None,
+            audio_noise_scale=0.0 if _freeze_stage2_audio else None,
             initial_video_latent=upscaled_video_latent,
             initial_audio_latent=audio_state.latent,
             mask_context=mask_context,
-            freeze_audio=_id_active,
+            freeze_audio=_freeze_stage2_audio,
         )
         if bench_transformer:
             stage2_transformer_ms, stage2_transformer_calls = transformer.consume()

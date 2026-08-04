@@ -50,7 +50,11 @@ from shared.utils.text_encoder_cache import TextEncoderCache
 from shared.utils.self_refiner import PnPHandler, create_self_refiner_handler
 from mmgp import safetensors2
 from shared.utils import files_locator as fl
-from .scail2 import prepare_scail2_conditioning, test_scail2_replace 
+from .scail2 import (
+    get_scail2_seed_generator,
+    prepare_scail2_conditioning,
+    test_scail2_replace,
+)
 
 WAN_USE_FP32_ROPE_FREQS = True
 
@@ -173,10 +177,33 @@ class WanAny2V:
         source2 = model_def.get("source2", None)
         module_source =  model_def.get("module_source", None)
         module_source2 =  model_def.get("module_source2", None)
+        dedicated_scail2_requested = (
+            model_def.get("scail2", False)
+            and os.environ.get(
+                "MAESTRO_SCAIL2_DEDICATED_MODEL", "1",
+            ).strip().lower() not in {"0", "false", "no", "off"}
+        )
+        if dedicated_scail2_requested:
+            from .modules.model_scail2 import SCAIL2Model
+            transformer_model_class = SCAIL2Model
+            print(
+                "[SCAIL-2] Using the dedicated upstream transformer path. "
+                "Set MAESTRO_SCAIL2_DEDICATED_MODEL=0 and restart to use "
+                "the legacy generalized Wan path."
+            )
+        else:
+            transformer_model_class = WanModel
+            if model_def.get("scail2", False):
+                print(
+                    "[SCAIL-2] Dedicated transformer disabled; using the "
+                    "legacy generalized Wan path."
+                )
+        self._dedicated_scail2_model = dedicated_scail2_requested
+
         def preprocess_sd(sd):
-            return WanModel.preprocess_sd_with_dtype(dtype, sd)
-        kwargs= { "modelClass": WanModel,"do_quantize": quantizeTransformer and not save_quantized, "defaultConfigPath": base_config_file , "ignore_unused_weights": ignore_unused_weights, "writable_tensors": False, "default_dtype": dtype, "preprocess_sd": preprocess_sd, "forcedConfigPath": forcedConfigPath, }
-        kwargs_light= { "modelClass": WanModel,"writable_tensors": False, "preprocess_sd": preprocess_sd , "forcedConfigPath" : base_config_file}
+            return transformer_model_class.preprocess_sd_with_dtype(dtype, sd)
+        kwargs= { "modelClass": transformer_model_class,"do_quantize": quantizeTransformer and not save_quantized, "defaultConfigPath": base_config_file , "ignore_unused_weights": ignore_unused_weights, "writable_tensors": False, "default_dtype": dtype, "preprocess_sd": preprocess_sd, "forcedConfigPath": forcedConfigPath, }
+        kwargs_light= { "modelClass": transformer_model_class,"writable_tensors": False, "preprocess_sd": preprocess_sd , "forcedConfigPath" : base_config_file}
         if module_source is not None:
             self.model = offload.fast_load_transformers_model(model_filename[:1] + [fl.locate_file(module_source)], **kwargs)
         if module_source2 is not None:
@@ -210,11 +237,17 @@ class WanAny2V:
         
 
         if self.model is not None:
-            self.model.lock_layers_dtypes(torch.float32 if mixed_precision_transformer else dtype)
+            if self._dedicated_scail2_model:
+                self.model.lock_layers_dtypes(torch.float32)
+            else:
+                self.model.lock_layers_dtypes(torch.float32 if mixed_precision_transformer else dtype)
             offload.change_dtype(self.model, dtype, True)
             self.model.eval().requires_grad_(False)
         if self.model2 is not None:
-            self.model2.lock_layers_dtypes(torch.float32 if mixed_precision_transformer else dtype)
+            if self._dedicated_scail2_model:
+                self.model2.lock_layers_dtypes(torch.float32)
+            else:
+                self.model2.lock_layers_dtypes(torch.float32 if mixed_precision_transformer else dtype)
             offload.change_dtype(self.model2, dtype, True)
             self.model2.eval().requires_grad_(False)
 
@@ -535,8 +568,17 @@ class WanAny2V:
             raise NotImplementedError(f"Unsupported Scheduler {sample_solver}")
         original_timesteps = timesteps
 
-        seed_g = torch.Generator(device=self.device)
-        seed_g.manual_seed(seed)
+        # The official SCAIL-2 pipeline creates one seeded generator outside
+        # its segment loop, allowing the random stream to advance between
+        # windows.  Wan2GP calls this method separately for every window, so
+        # use the pipeline-held stream instead of replaying identical noise.
+        if model_def.get("scail2", False) or model_type in [
+            "scail2_14B", "scail2_1.3B",
+        ]:
+            seed_g = get_scail2_seed_generator(self, seed, window_no)
+        else:
+            seed_g = torch.Generator(device=self.device)
+            seed_g.manual_seed(seed)
         image_outputs = image_mode == 1
         kwargs = {'pipeline': self, 'callback': callback}
         color_reference_frame = None
@@ -879,7 +921,7 @@ class WanAny2V:
 
         # SCAIL-2 - reference-driven character animation with mask-token conditioning
         if scail2:
-            scail2_conditioning = prepare_scail2_conditioning(self, input_frames=input_frames, input_masks=input_masks, input_ref_images=input_ref_images, input_ref_masks=input_ref_masks, input_video=input_video, pre_video_frame=pre_video_frame, prefix_frames_count=prefix_frames_count, overlapped_latents=overlapped_latents, height=height, width=width, VAE_tile_size=VAE_tile_size, enable_RIFLEx=enable_RIFLEx, video_prompt_type=video_prompt_type, custom_settings=custom_settings, model_def=model_def, ps_t=ps_t, ps_h=ps_h, ps_w=ps_w, save_masks=save_masks)
+            scail2_conditioning = prepare_scail2_conditioning(self, input_frames=input_frames, input_masks=input_masks, input_ref_images=input_ref_images, input_ref_masks=input_ref_masks, input_video=input_video, pre_video_frame=pre_video_frame, prefix_frames_count=prefix_frames_count, overlapped_latents=overlapped_latents, height=height, width=width, VAE_tile_size=VAE_tile_size, enable_RIFLEx=enable_RIFLEx, video_prompt_type=video_prompt_type, custom_settings=custom_settings, model_def=model_def, ps_t=ps_t, ps_h=ps_h, ps_w=ps_w, save_masks=save_masks, dedicated_model=self._dedicated_scail2_model)
             kwargs.update(scail2_conditioning["kwargs"])
             freqs = scail2_conditioning["freqs"]
             clip_image_start = scail2_conditioning["clip_image_start"]
@@ -889,6 +931,10 @@ class WanAny2V:
             ref_images_before = False
             ref_images_count = 0
             lat_frames = scail2_conditioning["lat_frames"]
+            post_decode_pre_trim = max(
+                post_decode_pre_trim,
+                int(scail2_conditioning.get("post_decode_pre_trim", 0) or 0),
+            )
 
         # Clip image
         if hasattr(self, "clip") and clip_image_start is not None:                                   

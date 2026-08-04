@@ -10,7 +10,7 @@ from typing import Optional
 import numpy as np
 import torch
 import torch.nn.functional as F
-from PIL import Image
+from PIL import Image, ImageOps
 
 from shared.utils.utils import calculate_new_dimensions, convert_image_to_tensor, convert_tensor_to_image, expand_or_shrink_mask, to_rgb_tensor
 from ..modules.posemb_layers import get_nd_rotary_pos_embed
@@ -375,25 +375,194 @@ def _prepare_scail2_mask_cthw(mask, target_h, target_w, model_def, replace_mode,
     return _float_cthw_from_frames(mask, frame_count, process_frame, target_h, target_w, max_workers=max_workers)
 
 
-def normalize_single_color_mask(mask_cthw: torch.Tensor, model_def) -> torch.Tensor:
+def _expected_reference_color(custom_settings, index, model_def):
+    if not isinstance(custom_settings, dict):
+        return None
+    colors = custom_settings.get("scail2_reference_expected_colors")
+    if not isinstance(colors, (list, tuple)) or index >= len(colors):
+        return None
+    color = colors[index]
+    if not isinstance(color, (list, tuple)) or len(color) != 3:
+        return None
+    try:
+        normalized = tuple(min(255, max(0, int(channel))) for channel in color)
+    except (TypeError, ValueError):
+        return None
+    object_colors = (model_def or {}).get("magic_mask_object_colors", [])
+    return normalized if not object_colors or normalized in [tuple(item) for item in object_colors] else None
+
+
+def _active_scail2_reference_colors(
+    mask_cthw, expected_colors, minimum_area_ratio=0.0001,
+):
+    """Return semantic reference colors visibly active in one model window."""
+    if mask_cthw is None or not torch.is_tensor(mask_cthw):
+        return []
+    mask = mask_cthw[0] if mask_cthw.ndim == 5 else mask_cthw
+    if mask.ndim != 4 or mask.shape[0] < 3:
+        return []
+    mask = mask[:3].detach()
+    if mask.numel() == 0:
+        return []
+    if mask.dtype == torch.uint8 or float(mask.max()) > 1.0:
+        threshold = 127.5
+    elif float(mask.min()) < 0.0:
+        threshold = 0.0
+    else:
+        threshold = 0.5
+    high = mask > threshold
+    frame_area = int(mask.shape[-2] * mask.shape[-1])
+    minimum_pixels = max(
+        16,
+        int(round(frame_area * max(0.0, float(minimum_area_ratio)))),
+    )
+
+    active_colors = []
+    seen = set()
+    for raw_color in expected_colors or []:
+        if raw_color is None:
+            continue
+        try:
+            color = tuple(
+                min(255, max(0, int(channel)))
+                for channel in raw_color
+            )
+        except (TypeError, ValueError):
+            continue
+        if len(color) != 3 or color in seen:
+            continue
+        seen.add(color)
+        bits = tuple(channel >= 128 for channel in color)
+        selector = torch.ones(
+            mask.shape[1:],
+            device=mask.device,
+            dtype=torch.bool,
+        )
+        for channel_index, bit in enumerate(bits):
+            selector &= (
+                high[channel_index]
+                if bit
+                else ~high[channel_index]
+            )
+        per_frame_area = selector.flatten(1).sum(dim=1)
+        if (
+            per_frame_area.numel()
+            and int(per_frame_area.max().item()) >= minimum_pixels
+        ):
+            active_colors.append(color)
+    return active_colors
+
+
+def _select_scail2_window_reference_indices(
+    expected_colors, active_colors,
+):
+    """Choose reference pairs whose semantic colors occur in this window."""
+    colors = []
+    for raw_color in expected_colors or []:
+        if raw_color is None:
+            colors.append(None)
+            continue
+        try:
+            color = tuple(int(channel) for channel in raw_color)
+        except (TypeError, ValueError):
+            return list(range(len(expected_colors or [])))
+        if len(color) != 3:
+            return list(range(len(expected_colors or [])))
+        colors.append(color)
+    all_indices = list(range(len(colors)))
+    distinct_colors = {color for color in colors if color is not None}
+    if len(distinct_colors) < 2:
+        return all_indices
+
+    active = set()
+    for raw_color in active_colors or []:
+        try:
+            color = tuple(int(channel) for channel in raw_color)
+        except (TypeError, ValueError):
+            continue
+        if len(color) == 3:
+            active.add(color)
+    if not active:
+        uncolored_indices = [
+            index for index, color in enumerate(colors)
+            if color is None
+        ]
+        return uncolored_indices or all_indices
+    if len(active) == 1:
+        # A shared cast is the trained path when several mapped people occur
+        # together, but it still contains every identity. In a solo-character
+        # window that lets a visually stronger inactive cast member leak into
+        # the active mask. Promote the matching character's own full reference
+        # to primary and omit every uncolored/group reference for that window.
+        matching_indices = [
+            index
+            for index, color in enumerate(colors)
+            if color in active
+        ]
+        if matching_indices:
+            return matching_indices
+    if len(active) >= 2:
+        # The native multi-person path is the single color-mapped cast
+        # reference. SCAIL-2's additional-reference path is explicitly
+        # experimental; stacking full/detail views for every active character
+        # can make the final (or visually strongest) identity take over every
+        # semantic color. Keep the shared cast as primary and let the separate
+        # timeline scene anchor preserve the surroundings.
+        group_indices = [
+            index
+            for index, color in enumerate(colors)
+            if color is None
+        ]
+        if group_indices:
+            return group_indices
+
+    selected = [
+        index
+        for index, color in enumerate(colors)
+        if color is None or color in active
+    ]
+    return selected or all_indices
+
+
+def normalize_single_color_mask(mask_cthw: torch.Tensor, model_def, target_color=None) -> torch.Tensor:
     if mask_cthw is None:
         return mask_cthw
     object_colors = (model_def or {}).get("magic_mask_object_colors", [])
     if not object_colors:
         return mask_cthw
-    target_color = torch.as_tensor(object_colors[0], device=mask_cthw.device, dtype=mask_cthw.dtype).view(3, 1, 1, 1) / 127.5 - 1.0
     mask = mask_cthw if mask_cthw.shape[0] == 3 else mask_cthw[:1].expand(3, -1, -1, -1)
     on_threshold = (225.0 - 127.5) / 127.5
+    off_threshold = (30.0 - 127.5) / 127.5
     active = mask.float().permute(1, 0, 2, 3)
     r = active[:, 0:1] > on_threshold
     g = active[:, 1:2] > on_threshold
     b = active[:, 2:3] > on_threshold
+    black = (
+        (active[:, 0:1] < off_threshold)
+        & (active[:, 1:2] < off_threshold)
+        & (active[:, 2:3] < off_threshold)
+    )
+    white = r & g & b
+    # SCAIL-2 multi-reference uses a binary semantic mask for clean scene
+    # evidence: white pixels are visible background and black pixels are
+    # intentionally hidden. Do not reinterpret that white region as the
+    # primary character color.
+    binary_background = black | white
+    if (
+        bool(black.any())
+        and bool(white.any())
+        and bool(binary_background.all())
+    ):
+        return mask_cthw
+
+    target_rgb = object_colors[0] if target_color is None else target_color
+    target_color = torch.as_tensor(target_rgb, device=mask_cthw.device, dtype=mask_cthw.dtype).view(3, 1, 1, 1) / 127.5 - 1.0
     nr, ng, nb = ~r, ~g, ~b
     color_masks = torch.cat([r & g & b, r & ng & nb, nr & g & nb, nr & ng & b, r & g & nb, r & ng & b, nr & g & b], dim=1)
     present = color_masks.flatten(2).any(dim=2).any(dim=0)
     if int(present.sum().item()) != 1:
         return mask_cthw
-    target_on = (torch.as_tensor(object_colors[0], device=mask_cthw.device) >= 128).tolist()
+    target_on = (torch.as_tensor(target_rgb, device=mask_cthw.device) >= 128).tolist()
     color_bits = [(True, True, True), (True, False, False), (False, True, False), (False, False, True), (True, True, False), (True, False, True), (False, True, True)]
     target_idx = color_bits.index(tuple(bool(v) for v in target_on)) if tuple(bool(v) for v in target_on) in color_bits else -1
     source_idx = int(torch.nonzero(present, as_tuple=False)[0].item())
@@ -460,15 +629,22 @@ def custom_preprocess_scail2(video_guide, video_mask, pre_video_guide=None, max_
     if not isinstance(custom_settings, dict):
         custom_settings = {}
     replace_mode = test_scail2_replace(video_prompt_type) or pre_video_guide is None
-    ref_image = _first_frame_to_image(video_guide) if replace_mode else convert_tensor_to_image(pre_video_guide[:, 0])
+    ref_image = (
+        _first_frame_to_image(video_guide)
+        if replace_mode or pre_video_guide is None
+        else convert_tensor_to_image(pre_video_guide[:, 0])
+    )
     target_w, target_h = int(kwargs.get("width", ref_image.width)), int(kwargs.get("height", ref_image.height))
+    fit_crop = kwargs.get("fit_crop", False)
+    fit_canvas = kwargs.get("fit_canvas", None)
+    source_h, source_w = _video_hw(video_guide)
+    if fit_canvas is not None and not fit_crop:
+        target_h, target_w = calculate_new_dimensions(
+            target_h, target_w, source_h, source_w,
+            fit_canvas, kwargs.get("block_size", 16),
+        )
 
     if replace_mode:
-        fit_crop = kwargs.get("fit_crop", False)
-        fit_canvas = kwargs.get("fit_canvas", None)
-        source_h, source_w = _video_hw(video_guide)
-        if fit_canvas is not None and not fit_crop:
-            target_h, target_w = calculate_new_dimensions(target_h, target_w, source_h, source_w, fit_canvas, kwargs.get("block_size", 16))
         frame_count = _shared_frame_count(video_guide, video_mask)
         frames = _resize_video_cthw_float(video_guide, target_h, target_w, crop=fit_crop, max_workers=max_workers, frame_count=frame_count)
         video_guide = None
@@ -479,7 +655,6 @@ def custom_preprocess_scail2(video_guide, video_mask, pre_video_guide=None, max_
     frame_count = _shared_frame_count(video_guide, video_mask, pose_mask)
     animate_preprocessing = custom_settings.get("scail2_animate_preprocessing", SCAIL2_ANIMATE_PREPROCESSING_RAW)
     if animate_preprocessing != SCAIL2_ANIMATE_PREPROCESSING_POSE:
-        fit_crop = kwargs.get("fit_crop", False)
         frames = _resize_video_cthw_float(video_guide, target_h, target_w, crop=fit_crop, max_workers=max_workers, frame_count=frame_count)
         video_guide = None
         video_mask = _prepare_scail2_mask_cthw(video_mask, target_h, target_w, model_def, replace_mode=False, expand_scale=expand_scale, crop=fit_crop, max_workers=max_workers, frame_count=frame_count)
@@ -543,24 +718,537 @@ def _resize_ref_image(image_ref, height, width):
     return F.interpolate(image_ref.permute(1, 0, 2, 3), size=(height, width), mode="bilinear", align_corners=False).permute(1, 0, 2, 3)
 
 
-def _fit_ref_image_into_canvas(image_ref, height, width, model_def):
+def _center_crop_ref_image_to_canvas(image_ref, height, width):
+    """Scale a reference to fill the control canvas, then center-crop it.
+
+    SCAIL-2's native replacement preprocessing uses a centered rectangle
+    crop for reference images. Letterboxing a portrait into a wide video
+    canvas makes the person much smaller and weakens the identity signal.
+    The control video still owns ``height`` and ``width``; the reference
+    never changes the output aspect ratio.
+    """
     ref_h, ref_w = image_ref.shape[-2:]
-    scale = min(height / ref_h, width / ref_w)
-    new_h, new_w = max(1, int(ref_h * scale)), max(1, int(ref_w * scale))
+    scale = max(height / ref_h, width / ref_w)
+    new_h = max(height, int(round(ref_h * scale)))
+    new_w = max(width, int(round(ref_w * scale)))
     resized = _resize_ref_image(image_ref, new_h, new_w)
-    color = to_rgb_tensor((model_def or {}).get("background_removal_color", [255, 255, 255]), device=image_ref.device, dtype=image_ref.dtype).view(3, 1, 1, 1) / 127.5 - 1.0
-    canvas = color.expand(3, image_ref.shape[1], height, width).clone()
-    top, left = (height - new_h) // 2, (width - new_w) // 2
-    canvas[:, :, top:top + new_h, left:left + new_w] = resized
-    return canvas
+    top, left = (new_h - height) // 2, (new_w - width) // 2
+    return resized[:, :, top:top + height, left:left + width].contiguous()
+
+
+def _center_crop_ref_mask_to_canvas(ref_mask, height, width):
+    """Apply the reference image's centered fill-and-crop to its mask."""
+    ref_h, ref_w = ref_mask.shape[-2:]
+    scale = max(height / ref_h, width / ref_w)
+    new_h = max(height, int(round(ref_h * scale)))
+    new_w = max(width, int(round(ref_w * scale)))
+    if (new_h, new_w) != (ref_h, ref_w):
+        ref_mask = F.interpolate(
+            ref_mask.permute(1, 0, 2, 3),
+            size=(new_h, new_w),
+            mode="nearest",
+        ).permute(1, 0, 2, 3)
+    top, left = (new_h - height) // 2, (new_w - width) // 2
+    return ref_mask[:, :, top:top + height, left:left + width].contiguous()
+
+
+def _center_crop_ref_alpha_to_canvas(alpha_mask, height, width):
+    """Apply the reference crop to a soft alpha matte."""
+    ref_h, ref_w = alpha_mask.shape[-2:]
+    scale = max(height / ref_h, width / ref_w)
+    new_h = max(height, int(round(ref_h * scale)))
+    new_w = max(width, int(round(ref_w * scale)))
+    if (new_h, new_w) != (ref_h, ref_w):
+        alpha_mask = F.interpolate(
+            alpha_mask.permute(1, 0, 2, 3),
+            size=(new_h, new_w),
+            mode="bilinear",
+            align_corners=False,
+        ).permute(1, 0, 2, 3)
+    top, left = (new_h - height) // 2, (new_w - width) // 2
+    return alpha_mask[:, :, top:top + height, left:left + width].contiguous()
+
+
+def _load_reference_alpha(custom_settings, height, width, device, dtype):
+    """Recover meaningful PNG alpha before WanGP's normal RGB conversion.
+
+    Reference attachments are intentionally normalized to RGB by the shared
+    loader. Recast still keeps the original upload path so a user-supplied
+    cutout can retain its soft hair/clothing edges for SCAIL conditioning.
+    """
+    if not isinstance(custom_settings, dict):
+        return None
+    raw_path = custom_settings.get("scail2_reference_alpha_path")
+    if not raw_path:
+        return None
+    alpha_path = Path(str(raw_path))
+    if not alpha_path.is_file():
+        return None
+    try:
+        with Image.open(alpha_path) as source_image:
+            rgba = ImageOps.exif_transpose(source_image).convert("RGBA")
+            alpha = np.asarray(rgba.getchannel("A"), dtype=np.uint8)
+    except Exception as exc:
+        logging.warning(f"Could not read SCAIL-2 reference alpha: {exc}")
+        return None
+    transparent_fraction = (
+        float(np.count_nonzero(alpha < 250)) / float(alpha.size)
+        if alpha.size else 0.0
+    )
+    if (
+        alpha.size == 0
+        or transparent_fraction < 0.02
+        or int(alpha.max()) <= 5
+    ):
+        return None
+    alpha_tensor = torch.from_numpy(np.array(alpha, copy=True)).to(
+        device=device, dtype=dtype,
+    ).div_(255.0).unsqueeze(0).unsqueeze(1)
+    if alpha_tensor.shape[-2:] != (height, width):
+        alpha_tensor = F.interpolate(
+            alpha_tensor.permute(1, 0, 2, 3),
+            size=(height, width),
+            mode="bilinear",
+            align_corners=False,
+        ).permute(1, 0, 2, 3)
+    return alpha_tensor.clamp_(0.0, 1.0)
+
+
+def _load_clip_identity_reference(custom_settings, height, width, device, dtype):
+    """Load Recast's original-background primary image for CLIP identity.
+
+    The regular prepared reference remains the VAE/spatial condition. Keeping
+    this channel separate lets Maestro neutralize background leakage without
+    weakening the face and clothing signal CLIP receives.
+    """
+    if not isinstance(custom_settings, dict):
+        return None
+    raw_path = custom_settings.get("scail2_clip_reference_path")
+    if not raw_path:
+        return None
+    identity_path = Path(str(raw_path))
+    if not identity_path.is_file():
+        logging.warning(
+            "SCAIL-2 CLIP identity reference not found; using the spatial "
+            f"reference instead: {identity_path}"
+        )
+        return None
+    try:
+        with Image.open(identity_path) as source_image:
+            identity_image = ImageOps.exif_transpose(source_image).convert("RGB")
+            identity_ref = convert_image_to_tensor(identity_image).unsqueeze(1)
+    except Exception as exc:
+        logging.warning(
+            "Could not read SCAIL-2 CLIP identity reference; using the "
+            f"spatial reference instead: {exc}"
+        )
+        return None
+    identity_ref = identity_ref.to(device=device, dtype=dtype)
+    return _center_crop_ref_image_to_canvas(
+        identity_ref, int(height), int(width),
+    )
+
+
+def _load_static_source_scene_reference(
+    custom_settings, height, width, device, dtype,
+):
+    """Load Recast's stable scene/mask pair for upstream-style segmentation."""
+
+    if not isinstance(custom_settings, dict):
+        return None
+    raw_image_path = custom_settings.get(
+        "scail2_source_scene_reference_path",
+    )
+    raw_mask_path = custom_settings.get("scail2_source_scene_mask_path")
+    if not raw_image_path and not raw_mask_path:
+        return None
+    if not raw_image_path or not raw_mask_path:
+        raise ValueError(
+            "SCAIL-2 source-scene conditioning requires both its image and "
+            "mask paths."
+        )
+    image_path = Path(str(raw_image_path))
+    mask_path = Path(str(raw_mask_path))
+    if not image_path.is_file():
+        raise ValueError(
+            f"SCAIL-2 source-scene reference not found: {image_path}"
+        )
+    if not mask_path.is_file():
+        raise ValueError(
+            f"SCAIL-2 source-scene mask not found: {mask_path}"
+        )
+    with Image.open(image_path) as source_image:
+        image = convert_image_to_tensor(
+            ImageOps.exif_transpose(source_image).convert("RGB"),
+        ).unsqueeze(1)
+    with Image.open(mask_path) as source_mask:
+        mask = convert_image_to_tensor(
+            ImageOps.exif_transpose(source_mask).convert("RGB"),
+        ).unsqueeze(1)
+    image = image.to(device=device, dtype=dtype)
+    mask = mask.to(device=device, dtype=dtype)
+    return {
+        "image": _center_crop_ref_image_to_canvas(
+            image, int(height), int(width),
+        ),
+        "mask": _center_crop_ref_mask_to_canvas(
+            mask, int(height), int(width),
+        ),
+        "frame_index": 0,
+        "hidden_fraction": float((mask < 0).float().mean().item()),
+        "expansion_pixels": 0,
+        "stable": True,
+    }
+
+
+def _get_scail2_recast_warmup_frames(custom_settings):
+    """Read the trusted internal warm-up without accepting unbounded values."""
+    if not isinstance(custom_settings, dict):
+        return 0
+    try:
+        return min(
+            32,
+            max(
+                0,
+                int(custom_settings.get("scail2_recast_warmup_frames", 0) or 0),
+            ),
+        )
+    except (TypeError, ValueError):
+        return 0
+
+
+def _use_scail2_primary_only_continuation_refs(
+    custom_settings, prefix_frames_count,
+):
+    """Limit long Recast continuations to one stable SCAIL-2 reference.
+
+    Supporting face/detail and scene references are useful for establishing
+    the first window, but SCAIL-2's multi-reference path is experimental.
+    Reapplying those independent reference streams to every sliding window can
+    progressively over-condition the continuation.  Once clean generated
+    history exists, retain only the primary reference and that history.
+    """
+    if (
+        not isinstance(custom_settings, dict)
+        or custom_settings.get(
+            "scail2_primary_only_continuations",
+        ) is not True
+    ):
+        return False
+    try:
+        return int(prefix_frames_count or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _get_scail2_identity_latent_reference_index(custom_settings):
+    """Select which prepared reference receives the original identity latent."""
+    if not isinstance(custom_settings, dict):
+        return 0
+    try:
+        return max(
+            0,
+            int(
+                custom_settings.get(
+                    "scail2_identity_latent_reference_index", 0,
+                )
+                or 0
+            ),
+        )
+    except (TypeError, ValueError):
+        return 0
+
+
+def _semantic_reference_alpha(ref_mask):
+    """Convert a colored SCAIL reference mask into foreground opacity."""
+    mask = ref_mask if ref_mask.shape[0] == 3 else ref_mask[:1].expand(3, -1, -1, -1)
+    off_threshold = (30.0 - 127.5) / 127.5
+    rgb = mask.float().permute(1, 0, 2, 3)
+    black = (
+        (rgb[:, 0:1] < off_threshold)
+        & (rgb[:, 1:2] < off_threshold)
+        & (rgb[:, 2:3] < off_threshold)
+    )
+    return (~black).to(dtype=ref_mask.dtype).permute(1, 0, 2, 3)
+
+
+def _blend_scail2_identity_latents(
+    identity_latents, isolated_latents, ref_mask, margin=2,
+):
+    """Keep the original VAE identity features only around the subject.
+
+    Encoding a pixel-matted reference changes VAE features inside the subject
+    as well as outside it, which weakens identity even when CLIP receives the
+    untouched image. Encode both versions first, then use the semantic mask in
+    latent space: original-reference features stay on the person and the
+    neutralized reference remains everywhere else.
+    """
+    if identity_latents.shape != isolated_latents.shape:
+        raise ValueError(
+            "SCAIL-2 identity and isolated reference latents must have the "
+            f"same shape, got {tuple(identity_latents.shape)} and "
+            f"{tuple(isolated_latents.shape)}."
+        )
+    alpha_frames = _semantic_reference_alpha(ref_mask).permute(1, 0, 2, 3)
+    alpha_frames = F.interpolate(
+        alpha_frames,
+        size=identity_latents.shape[-2:],
+        mode="nearest",
+    )
+    margin = max(0, int(margin or 0))
+    if margin > 0:
+        kernel = margin * 2 + 1
+        alpha_frames = F.max_pool2d(
+            alpha_frames, kernel_size=kernel, stride=1, padding=margin,
+        )
+    latent_frames = int(identity_latents.shape[1])
+    if alpha_frames.shape[0] == 1 and latent_frames > 1:
+        alpha_frames = alpha_frames.expand(latent_frames, -1, -1, -1)
+    elif alpha_frames.shape[0] != latent_frames:
+        alpha_frames = alpha_frames[:latent_frames]
+    alpha = alpha_frames.permute(1, 0, 2, 3).to(
+        device=identity_latents.device,
+        dtype=identity_latents.dtype,
+    )
+    return (
+        identity_latents * alpha
+        + isolated_latents * (1.0 - alpha)
+    )
+
+
+def _isolate_scail2_reference(image_ref, ref_mask, model_def, alpha_mask=None):
+    """Neutralize RGB outside the semantic reference subject.
+
+    SCAIL-2 receives the reference RGB latent and semantic mask as separate
+    conditions. Keeping an unrelated room or landscape in the RGB latent can
+    therefore leak its color, lighting, or geometry into a replacement even
+    when the semantic mask itself is correct.
+    """
+    opacity = alpha_mask
+    if opacity is None:
+        opacity = _semantic_reference_alpha(ref_mask)
+    opacity = opacity.to(device=image_ref.device, dtype=image_ref.dtype)
+    if opacity.shape[1] != image_ref.shape[1]:
+        if opacity.shape[1] == 1:
+            opacity = opacity.expand(-1, image_ref.shape[1], -1, -1)
+        else:
+            opacity = opacity[:, :image_ref.shape[1]]
+    if opacity.shape[-2:] != image_ref.shape[-2:]:
+        opacity = F.interpolate(
+            opacity.permute(1, 0, 2, 3),
+            size=image_ref.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        ).permute(1, 0, 2, 3)
+    opacity = opacity.clamp(0.0, 1.0)
+    matte_color = (model_def or {}).get(
+        "ref_matte_background_color", [127, 127, 127],
+    )
+    neutral = to_rgb_tensor(
+        matte_color, device=image_ref.device, dtype=image_ref.dtype,
+    ).view(3, 1, 1, 1).div(127.5).sub(1.0)
+    return image_ref * opacity + neutral * (1.0 - opacity)
+
+
+def _build_dynamic_source_scene_reference(
+    pose_pixels, driving_mask_video, frame_index, model_def,
+    inpaint_hidden=False,
+):
+    """Build one clean-background reference from the current control window.
+
+    Recast driving masks use white for the source scene and semantic colors for
+    replacement targets. Preserve the current source frame only where its mask
+    is white, then hide the old target with a small safety margin. Timeline
+    mode inpaints that hole from the surrounding shot; the compatibility path
+    retains the historical neutral fill. Refreshing the pair for every sliding
+    window prevents a static first-frame background from fighting later cuts.
+    """
+    if pose_pixels is None or driving_mask_video is None:
+        raise ValueError(
+            "Dynamic SCAIL-2 scene anchoring needs control frames and masks."
+        )
+    if pose_pixels.ndim != 4 or driving_mask_video.ndim != 4:
+        raise ValueError(
+            "Dynamic SCAIL-2 scene anchoring expects C/T/H/W tensors."
+        )
+    frame_count = min(
+        int(pose_pixels.shape[1]),
+        int(driving_mask_video.shape[1]),
+    )
+    if frame_count <= 0:
+        raise ValueError(
+            "Dynamic SCAIL-2 scene anchoring received no control frames."
+        )
+    requested_frame_index = min(
+        frame_count - 1, max(0, int(frame_index or 0)),
+    )
+    if pose_pixels.shape[-2:] != driving_mask_video.shape[-2:]:
+        raise ValueError(
+            "Dynamic SCAIL-2 scene frame and mask dimensions do not match."
+        )
+
+    on_threshold = (225.0 - 127.5) / 127.5
+    visible_video = (driving_mask_video > on_threshold).all(dim=0)
+    flat_visible = visible_video.flatten(1)
+    valid_frames = (
+        flat_visible.any(dim=1)
+        & (~flat_visible).any(dim=1)
+    )
+    valid_indices = torch.nonzero(
+        valid_frames, as_tuple=False,
+    ).flatten().tolist()
+    if not valid_indices:
+        logging.warning(
+            "[SCAIL-2] Skipping this window's dynamic source-scene anchor "
+            "because no frame contains both the target and visible surroundings."
+        )
+        return None
+    frame_index = min(
+        valid_indices,
+        key=lambda index: (
+            abs(index - requested_frame_index),
+            index < requested_frame_index,
+            index,
+        ),
+    )
+    scene_frame = pose_pixels[:, frame_index:frame_index + 1]
+    visible = visible_video[
+        frame_index:frame_index + 1
+    ].unsqueeze(0)
+    hidden = ~visible
+
+    height, width = scene_frame.shape[-2:]
+    expansion = max(2, min(16, int(round(min(height, width) * 0.01))))
+    hidden = F.max_pool2d(
+        hidden.to(dtype=torch.float32),
+        kernel_size=expansion * 2 + 1,
+        stride=1,
+        padding=expansion,
+    ) > 0.5
+    visible = (~hidden).to(
+        device=scene_frame.device,
+        dtype=scene_frame.dtype,
+    )
+    if not bool(visible.any()):
+        logging.warning(
+            "[SCAIL-2] Skipping this window's dynamic source-scene anchor "
+            "because the replacement fills the usable frame."
+        )
+        return None
+    scene_reference = None
+    if inpaint_hidden:
+        try:
+            import cv2
+
+            source_rgb = (
+                scene_frame[:, 0]
+                .detach()
+                .float()
+                .permute(1, 2, 0)
+                .clamp(-1.0, 1.0)
+                .add(1.0)
+                .mul(127.5)
+                .round()
+                .byte()
+                .cpu()
+                .numpy()
+            )
+            inpaint_mask = (
+                hidden[0, 0]
+                .detach()
+                .byte()
+                .mul(255)
+                .cpu()
+                .numpy()
+            )
+            inpainted_rgb = cv2.inpaint(
+                np.ascontiguousarray(source_rgb),
+                np.ascontiguousarray(inpaint_mask),
+                max(3, expansion * 2),
+                cv2.INPAINT_TELEA,
+            )
+            scene_reference = (
+                torch.from_numpy(np.ascontiguousarray(inpainted_rgb))
+                .permute(2, 0, 1)
+                .unsqueeze(1)
+                .to(device=scene_frame.device, dtype=scene_frame.dtype)
+                .div(127.5)
+                .sub(1.0)
+            )
+        except Exception as exc:
+            logging.warning(
+                "[SCAIL-2] Could not inpaint this timeline scene anchor; "
+                f"using the neutral fallback: {exc}"
+            )
+    if scene_reference is None:
+        matte_color = (model_def or {}).get(
+            "ref_matte_background_color", [127, 127, 127],
+        )
+        neutral = to_rgb_tensor(
+            matte_color,
+            device=scene_frame.device,
+            dtype=scene_frame.dtype,
+        ).view(3, 1, 1, 1).div(127.5).sub(1.0)
+        scene_reference = (
+            scene_frame * visible
+            + neutral * (1.0 - visible)
+        )
+    binary_mask = torch.where(
+        visible.bool().expand(3, -1, -1, -1),
+        torch.ones_like(scene_reference),
+        -torch.ones_like(scene_reference),
+    )
+    return {
+        "image": scene_reference,
+        "mask": binary_mask,
+        "frame_index": frame_index,
+        "hidden_fraction": float(hidden.float().mean().item()),
+        "expansion_pixels": expansion,
+    }
+
+
+def _load_aligned_ref_mask(custom_settings, height, width, device, dtype):
+    """Load Maestro's exact first-frame target mask for an aligned edit."""
+    if not isinstance(custom_settings, dict):
+        return None
+    raw_path = custom_settings.get("scail2_reference_mask_path")
+    if not raw_path:
+        return None
+    mask_path = Path(str(raw_path))
+    if not mask_path.is_file():
+        raise ValueError(f"SCAIL-2 aligned reference mask not found: {mask_path}")
+    with Image.open(mask_path) as mask_image:
+        mask_tensor = convert_image_to_tensor(mask_image.convert("RGB")).unsqueeze(1)
+    mask_tensor = mask_tensor.to(device=device, dtype=dtype)
+    return _center_crop_ref_mask_to_canvas(mask_tensor, height, width)
+
+
+def _load_additional_ref_mask(custom_settings, index, height, width, device, dtype):
+    """Load one explicit SCAIL-2 additional-reference semantic mask."""
+    if not isinstance(custom_settings, dict):
+        return None
+    raw_paths = custom_settings.get("scail2_additional_reference_mask_paths")
+    if not isinstance(raw_paths, (list, tuple)) or index >= len(raw_paths):
+        return None
+    raw_path = raw_paths[index]
+    if not raw_path:
+        return None
+    mask_path = Path(str(raw_path))
+    if not mask_path.is_file():
+        raise ValueError(
+            f"SCAIL-2 additional reference mask #{index + 1} not found: {mask_path}"
+        )
+    with Image.open(mask_path) as mask_image:
+        mask_tensor = convert_image_to_tensor(mask_image.convert("RGB")).unsqueeze(1)
+    mask_tensor = mask_tensor.to(device=device, dtype=dtype)
+    return _center_crop_ref_mask_to_canvas(mask_tensor, height, width)
 
 
 def _resize_ref_image_for_mode(image_ref, height, width, video_prompt_type, model_def):
-    ref_h, ref_w = image_ref.shape[-2:]
-    if test_scail2_replace(video_prompt_type):
-        return _fit_ref_image_into_canvas(image_ref, height, width, model_def)
-    new_h, new_w = calculate_new_dimensions(height, width, ref_h, ref_w, 0)
-    return _resize_ref_image(image_ref, new_h, new_w)
+    # In both Animate and Replace, the reference supplies identity while
+    # the control video owns the output framing. Match SCAIL-2's native
+    # centered rectangle crop instead of shrinking portraits with padding.
+    return _center_crop_ref_image_to_canvas(image_ref, height, width)
 
 
 def _save_debug_ref_mask(ref_mask, save_masks=False):
@@ -655,12 +1343,6 @@ def _auto_ref_mask(image_ref, custom_settings, model_def, height, width, device,
     return prepare_scail2_mask(convert_image_to_tensor(mask_image).unsqueeze(1), 1, height, width, device, dtype)
 
 
-def _matte_ref_image(image_ref, ref_mask, model_def):
-    foreground = ref_mask[:, :1].amax(dim=0, keepdim=True) > 0
-    background = to_rgb_tensor((model_def or {}).get("ref_matte_background_color", (model_def or {}).get("background_removal_color", [0, 0, 0])), device=image_ref.device, dtype=image_ref.dtype).view(3, 1, 1, 1) / 127.5 - 1.0
-    return torch.where(foreground.expand_as(image_ref), image_ref, background.expand_as(image_ref))
-
-
 def _set_black_mask_background(mask_cthw, color):
     mask = mask_cthw if mask_cthw.shape[0] == 3 else mask_cthw[:1].expand(3, -1, -1, -1)
     off_threshold = (30.0 - 127.5) / 127.5
@@ -687,37 +1369,144 @@ def custom_image_ref_postprocessor_scail2(
     if send_cmd is not None:
         send_cmd("progress", [0, "Building SCAIL-2 Image Reference Masks" if additional_ref_sources else "Building SCAIL-2 Image Reference Mask"])
 
-    image_ref = _resize_ref_image_for_mode(_tensor_or_image_to_cthw(ref_source, "cpu", torch.float32), height, width, video_prompt_type, model_def)
+    raw_image_ref = _tensor_or_image_to_cthw(ref_source, "cpu", torch.float32)
+    raw_ref_h, raw_ref_w = raw_image_ref.shape[-2:]
+    image_ref = _resize_ref_image_for_mode(
+        raw_image_ref, height, width, video_prompt_type, model_def,
+    )
     ref_h, ref_w = image_ref.shape[-2:]
 
-    ref_mask = _auto_ref_mask(
-        image_ref, custom_settings, model_def, ref_h, ref_w, image_ref.device, image_ref.dtype,
-        max_people=_extract_max_people(video_prompt_type),
+    ref_mask = _load_aligned_ref_mask(
+        custom_settings, ref_h, ref_w, image_ref.device, image_ref.dtype,
     )
+    if ref_mask is None:
+        primary_reference_people = _extract_max_people(video_prompt_type)
+        if isinstance(custom_settings, dict):
+            try:
+                primary_reference_people = min(
+                    5,
+                    max(
+                        1,
+                        int(custom_settings.get(
+                            "scail2_primary_reference_people",
+                            primary_reference_people,
+                        )),
+                    ),
+                )
+            except (TypeError, ValueError):
+                pass
+        ref_mask = _auto_ref_mask(
+            image_ref, custom_settings, model_def, ref_h, ref_w, image_ref.device, image_ref.dtype,
+            max_people=primary_reference_people,
+        )
+    else:
+        logging.info("[SCAIL-2] Using Maestro's aligned first-frame target mask for the primary reference.")
     if ref_mask is None or float(ref_mask.max()) <= 0:
         raise ValueError("SCAIL-2 could not extract the image reference mask. Check Image Ref Keyword content.")
 
-    ref_mask = normalize_single_color_mask(ref_mask, model_def)
-    if test_scail2_replace(video_prompt_type):
-        image_ref = _matte_ref_image(image_ref, ref_mask, model_def)
-    else:
+    ref_mask = normalize_single_color_mask(
+        ref_mask,
+        model_def,
+        _expected_reference_color(custom_settings, 0, model_def),
+    )
+    replace_conditioning = test_scail2_replace(video_prompt_type)
+    if not replace_conditioning:
         ref_mask = _set_black_mask_background(ref_mask, [255, 255, 255])
+
+    isolate_reference = (
+        isinstance(custom_settings, dict)
+        and custom_settings.get("scail2_isolate_reference_background") is True
+    )
+    if isolate_reference:
+        reference_alpha = _load_reference_alpha(
+            custom_settings, raw_ref_h, raw_ref_w,
+            image_ref.device, image_ref.dtype,
+        )
+        if reference_alpha is not None:
+            reference_alpha = _center_crop_ref_alpha_to_canvas(
+                reference_alpha, ref_h, ref_w,
+            )
+        image_ref = _isolate_scail2_reference(
+            image_ref, ref_mask, model_def, alpha_mask=reference_alpha,
+        )
+        logging.info(
+            "[SCAIL-2] Isolated primary reference from its background using "
+            + ("the source PNG alpha." if reference_alpha is not None else "its semantic subject mask.")
+        )
 
     prepared_refs = [image_ref, ref_mask]
     for idx, additional_ref_source in enumerate(additional_ref_sources):
-        additional_ref = _fit_ref_image_into_canvas(_tensor_or_image_to_cthw(additional_ref_source, "cpu", torch.float32), height, width, model_def)
+        additional_ref = _center_crop_ref_image_to_canvas(_tensor_or_image_to_cthw(additional_ref_source, "cpu", torch.float32), height, width)
         additional_h, additional_w = additional_ref.shape[-2:]
-        additional_mask = _auto_ref_mask(
-            additional_ref, custom_settings, model_def, additional_h, additional_w, additional_ref.device, additional_ref.dtype,
-            max_people=_extract_max_people(video_prompt_type),
+        additional_mask = _load_additional_ref_mask(
+            custom_settings, idx, additional_h, additional_w,
+            additional_ref.device, additional_ref.dtype,
         )
+        if additional_mask is None:
+            additional_mask = _auto_ref_mask(
+                additional_ref, custom_settings, model_def, additional_h, additional_w, additional_ref.device, additional_ref.dtype,
+                max_people=_extract_max_people(video_prompt_type),
+            )
+        else:
+            logging.info(
+                f"[SCAIL-2] Using explicit semantic mask for additional reference #{idx + 1}."
+            )
         if additional_mask is None or float(additional_mask.max()) <= 0:
             raise ValueError(f"SCAIL-2 could not extract additional image reference mask #{idx + 1}. Check Image Ref Keyword content.")
-        additional_mask = normalize_single_color_mask(additional_mask, model_def)
-        if test_scail2_replace(video_prompt_type):
-            additional_ref = _matte_ref_image(additional_ref, additional_mask, model_def)
+        additional_mask = normalize_single_color_mask(
+            additional_mask,
+            model_def,
+            _expected_reference_color(custom_settings, idx + 1, model_def),
+        )
+        if not replace_conditioning:
+            additional_mask = _set_black_mask_background(additional_mask, [255, 255, 255])
+        if isolate_reference:
+            additional_ref = _isolate_scail2_reference(
+                additional_ref, additional_mask, model_def,
+            )
         prepared_refs += [additional_ref, additional_mask]
     return prepared_refs, None
+
+
+def get_scail2_seed_generator(pipeline, seed, window_no):
+    """Keep one deterministic noise stream across a SCAIL-2 window sequence.
+
+    Official SCAIL-2 creates one ``torch.Generator`` before its segment loop.
+    Wan2GP invokes the model once per sliding window, so recreating and seeding
+    the generator inside every invocation would replay the first segment's
+    noise field for every continuation.  Store the stream on the loaded
+    pipeline and reset it only when a new first window begins (or the seed or
+    device changes).
+    """
+    seed_value = int(seed)
+    device_key = str(pipeline.device)
+    stream = getattr(pipeline, "_scail2_seed_stream", None)
+    reset_stream = (
+        int(window_no or 0) <= 1
+        or not isinstance(stream, dict)
+        or stream.get("seed") != seed_value
+        or stream.get("device") != device_key
+        or stream.get("generator") is None
+    )
+    if reset_stream:
+        generator = torch.Generator(device=pipeline.device)
+        generator.manual_seed(seed_value)
+        stream = {
+            "seed": seed_value,
+            "device": device_key,
+            "generator": generator,
+        }
+        pipeline._scail2_seed_stream = stream
+        print(
+            "[SCAIL-2] Initialized continuous segment noise stream "
+            f"(seed={seed_value})."
+        )
+    else:
+        print(
+            "[SCAIL-2] Continuing segment noise stream for window "
+            f"{int(window_no)}."
+        )
+    return stream["generator"]
 
 
 def prepare_scail2_conditioning(
@@ -742,28 +1531,237 @@ def prepare_scail2_conditioning(
     ps_h,
     ps_w,
     save_masks=False,
+    dedicated_model=False,
 ):
     enable_RIFLEx = False
+    replace_conditioning = test_scail2_replace(video_prompt_type)
     pose_pixels = input_frames.to(device=pipeline.device, dtype=pipeline.VAE_dtype)
     if input_ref_images is None or len(input_ref_images) < 2:
         raise ValueError("SCAIL-2 expected the prepared image reference and its colored mask as the first two image references.")
+    if len(input_ref_images) % 2 != 0:
+        raise ValueError(
+            "SCAIL-2 expected every image reference to have a paired "
+            "semantic mask."
+        )
+
+    lat_h, lat_w = (
+        height // pipeline.vae_stride[1],
+        width // pipeline.vae_stride[2],
+    )
+    pose_frames = pose_pixels.shape[1]
+    lat_t = int((pose_frames - 1) // pipeline.vae_stride[0]) + 1
+    driving_mask_video = prepare_scail2_mask(
+        input_masks,
+        pose_frames,
+        height,
+        width,
+        pipeline.device,
+        pipeline.VAE_dtype,
+    )
+
+    # Distinct characters belong in one color-mapped primary cast reference.
+    # Their full/detail views remain useful supporting evidence, but feeding
+    # every identity into every segment lets SCAIL-2's experimental extra-ref
+    # path collapse a solo shot toward the last character. Route those views
+    # by the semantic colors actually present in the current control window.
+    reference_pair_count = len(input_ref_images) // 2
+    raw_reference_colors = (
+        custom_settings.get("scail2_reference_expected_colors")
+        if isinstance(custom_settings, dict)
+        else None
+    )
+    valid_reference_colors = (
+        isinstance(raw_reference_colors, (list, tuple))
+        and len(raw_reference_colors) == reference_pair_count
+    )
+    reference_colors = []
+    if valid_reference_colors:
+        for reference_index, raw_color in enumerate(raw_reference_colors):
+            if raw_color is None:
+                reference_colors.append(None)
+                continue
+            normalized_color = _expected_reference_color(
+                custom_settings,
+                reference_index,
+                model_def,
+            )
+            if normalized_color is None:
+                valid_reference_colors = False
+                break
+            reference_colors.append(normalized_color)
+    if (
+        dedicated_model
+        and valid_reference_colors
+        and len({
+            color for color in reference_colors
+            if color is not None
+        }) >= 2
+    ):
+        active_reference_colors = _active_scail2_reference_colors(
+            driving_mask_video,
+            reference_colors,
+        )
+        selected_reference_indices = (
+            _select_scail2_window_reference_indices(
+                reference_colors,
+                active_reference_colors,
+            )
+        )
+        if selected_reference_indices != list(range(reference_pair_count)):
+            routed_ref_images = []
+            for reference_index in selected_reference_indices:
+                pair_start = reference_index * 2
+                routed_ref_images.extend(
+                    input_ref_images[pair_start:pair_start + 2],
+                )
+            input_ref_images = routed_ref_images
+            custom_settings = dict(custom_settings)
+            custom_settings["scail2_reference_expected_colors"] = [
+                raw_reference_colors[index]
+                for index in selected_reference_indices
+            ]
+            active_summary = ", ".join(
+                f"rgb{tuple(color)}"
+                for color in active_reference_colors
+            ) or "no mapped character"
+            print(
+                "[SCAIL-2] Routed this window's character references "
+                f"({active_summary}): kept "
+                f"{len(selected_reference_indices)}/"
+                f"{reference_pair_count} pair(s), slots "
+                + ", ".join(
+                    str(index + 1)
+                    for index in selected_reference_indices
+                )
+                + "."
+            )
+
     image_ref = _tensor_or_image_to_cthw(input_ref_images[0], pipeline.device, pipeline.VAE_dtype)
+    # The generalized WanModel needed an unmasked CLIP image plus localized
+    # VAE-latent restoration to retain identity after Maestro neutralized a
+    # reference background.  The official SCAIL-2 transformer already
+    # separates primary/additional mask-token regions; applying those legacy
+    # reinforcements over-conditions it and compounds contrast across long
+    # segments. Keep them only on the legacy fallback path.
+    clip_identity_ref = (
+        None
+        if dedicated_model
+        else _load_clip_identity_reference(
+            custom_settings,
+            height,
+            width,
+            pipeline.device,
+            pipeline.VAE_dtype,
+        )
+    )
+    identity_reference_loaded = clip_identity_ref is not None
+    if clip_identity_ref is None:
+        clip_identity_ref = image_ref
+    if (
+        dedicated_model
+        and isinstance(custom_settings, dict)
+        and (
+            custom_settings.get("scail2_clip_reference_path")
+            or custom_settings.get("scail2_identity_latent_isolation") is True
+        )
+    ):
+        logging.info(
+            "[SCAIL-2] Dedicated transformer is using upstream reference "
+            "conditioning; legacy CLIP/VAE identity reinforcement is "
+            "reserved for the generalized-model fallback."
+        )
     ref_mask = _tensor_or_image_to_cthw(input_ref_images[1], pipeline.device, pipeline.VAE_dtype)
     additional_ref_pairs = input_ref_images[2:]
     if len(additional_ref_pairs) % 2 != 0:
         raise ValueError("SCAIL-2 expected additional image references to be prepared as image/mask pairs.")
-
-    lat_h, lat_w = height // pipeline.vae_stride[1], width // pipeline.vae_stride[2]
-    pose_frames = pose_pixels.shape[1]
-    lat_t = int((pose_frames - 1) // pipeline.vae_stride[0]) + 1
+    has_continuation_history = (
+        overlapped_latents is not None or input_video is not None
+    )
+    primary_only_continuation = (
+        not dedicated_model
+        and
+        _use_scail2_primary_only_continuation_refs(
+            custom_settings, prefix_frames_count,
+        )
+        and has_continuation_history
+    )
+    supporting_reference_count = len(additional_ref_pairs) // 2
+    dynamic_scene_reference_requested = (
+        isinstance(custom_settings, dict)
+        and custom_settings.get(
+            "scail2_dynamic_source_scene_reference",
+        ) is True
+    )
+    timeline_scene_reference = (
+        isinstance(custom_settings, dict)
+        and custom_settings.get(
+            "scail2_timeline_source_scene_reference",
+        ) is True
+    )
+    if primary_only_continuation:
+        additional_ref_pairs = []
+        skipped_parts = []
+        if supporting_reference_count:
+            skipped_parts.append(
+                f"{supporting_reference_count} supporting reference(s)"
+            )
+        if dynamic_scene_reference_requested:
+            skipped_parts.append("the dynamic scene anchor")
+        skipped_summary = (
+            " and ".join(skipped_parts)
+            if skipped_parts
+            else "experimental supporting references"
+        )
+        logging.info(
+            "[SCAIL-2] Continuation window is using the primary reference "
+            f"plus clean generated history; skipping {skipped_summary}."
+        )
 
     ref_mask = prepare_scail2_mask(ref_mask, 1, height, width, pipeline.device, pipeline.VAE_dtype)
-    ref_mask = normalize_single_color_mask(ref_mask, model_def)
+    ref_mask = normalize_single_color_mask(
+        ref_mask,
+        model_def,
+        _expected_reference_color(custom_settings, 0, model_def),
+    )
     _save_debug_ref_mask(ref_mask, save_masks=save_masks)
 
     _save_debug_ref_image(image_ref, SCAIL2_DEBUG_MATTED_REF_PATH, save_masks=save_masks)
 
-    ref_latents = pipeline.vae.encode([image_ref], VAE_tile_size)[0].unsqueeze(0)
+    isolated_ref_latents = pipeline.vae.encode([image_ref], VAE_tile_size)[0]
+    use_identity_latent_isolation = (
+        not dedicated_model
+        and
+        identity_reference_loaded
+        and isinstance(custom_settings, dict)
+        and custom_settings.get("scail2_identity_latent_isolation") is True
+    )
+    identity_latent_reference_index = (
+        _get_scail2_identity_latent_reference_index(custom_settings)
+    )
+    identity_ref_latents = None
+
+    def _identity_latents():
+        nonlocal identity_ref_latents
+        if identity_ref_latents is None:
+            identity_ref_latents = pipeline.vae.encode(
+                [clip_identity_ref], VAE_tile_size,
+            )[0]
+        return identity_ref_latents
+
+    if (
+        use_identity_latent_isolation
+        and identity_latent_reference_index == 0
+    ):
+        isolated_ref_latents = _blend_scail2_identity_latents(
+            _identity_latents(),
+            isolated_ref_latents,
+            ref_mask,
+        )
+        logging.info(
+            "[SCAIL-2] Preserving original VAE identity features inside "
+            "reference slot 0 while neutralizing its surroundings."
+        )
+    ref_latents = isolated_ref_latents.unsqueeze(0)
     additional_ref_count = 0
     additional_ref_latents = []
     additional_ref_mask_latents = []
@@ -771,17 +1769,163 @@ def prepare_scail2_conditioning(
         additional_ref = _tensor_or_image_to_cthw(additional_ref_pairs[idx], pipeline.device, pipeline.VAE_dtype)
         additional_mask = _tensor_or_image_to_cthw(additional_ref_pairs[idx + 1], pipeline.device, pipeline.VAE_dtype)
         additional_mask = prepare_scail2_mask(additional_mask, 1, height, width, pipeline.device, pipeline.VAE_dtype)
-        additional_mask = normalize_single_color_mask(additional_mask, model_def)
-        additional_ref_latents.append(pipeline.vae.encode([additional_ref], VAE_tile_size)[0])
+        additional_mask = normalize_single_color_mask(
+            additional_mask,
+            model_def,
+            _expected_reference_color(
+                custom_settings, idx // 2 + 1, model_def,
+            ),
+        )
+        additional_latents = pipeline.vae.encode(
+            [additional_ref], VAE_tile_size,
+        )[0]
+        reference_index = idx // 2 + 1
+        if (
+            use_identity_latent_isolation
+            and identity_latent_reference_index == reference_index
+        ):
+            additional_latents = _blend_scail2_identity_latents(
+                _identity_latents(),
+                additional_latents,
+                additional_mask,
+            )
+            logging.info(
+                "[SCAIL-2] Preserving original VAE identity features inside "
+                f"reference slot {reference_index} while neutralizing its "
+                "surroundings."
+            )
+        additional_ref_latents.append(additional_latents)
         additional_ref_mask_latents.append(extract_and_compress_mask_to_latent(additional_mask, additional_spatial_downsample=1, label=f"additional ref mask {idx // 2 + 1}").to(device=pipeline.device, dtype=pipeline.VAE_dtype))
+    dynamic_scene_reference = (
+        dynamic_scene_reference_requested
+        and not primary_only_continuation
+    )
+    if dynamic_scene_reference:
+        scene_reference = None
+        if dedicated_model and not timeline_scene_reference:
+            scene_reference = _load_static_source_scene_reference(
+                custom_settings,
+                height,
+                width,
+                pipeline.device,
+                pipeline.VAE_dtype,
+            )
+        if scene_reference is None:
+            # Compatibility fallback for older saved jobs that predate the
+            # persisted scene paths. Cache the first usable pair so the
+            # dedicated reference stack remains invariant across segments.
+            cache_name = "_scail2_dedicated_source_scene_reference"
+            if (
+                dedicated_model
+                and not timeline_scene_reference
+                and prefix_frames_count == 0
+            ):
+                setattr(pipeline, cache_name, None)
+            cached_scene_reference = (
+                getattr(pipeline, cache_name, None)
+                if (
+                    dedicated_model
+                    and not timeline_scene_reference
+                    and prefix_frames_count > 0
+                )
+                else None
+            )
+            if isinstance(cached_scene_reference, dict):
+                scene_reference = {
+                    key: (
+                        value.to(
+                            device=pipeline.device,
+                            dtype=pipeline.VAE_dtype,
+                        )
+                        if torch.is_tensor(value)
+                        else value
+                    )
+                    for key, value in cached_scene_reference.items()
+                }
+            else:
+                # Window one contains the disposable reverse-motion pre-roll.
+                # Later guide tensors begin at the current control boundary.
+                scene_frame_index = (
+                    _get_scail2_recast_warmup_frames(custom_settings)
+                    if prefix_frames_count == 0
+                    else 0
+                )
+                scene_reference = _build_dynamic_source_scene_reference(
+                    pose_pixels,
+                    driving_mask_video,
+                    scene_frame_index,
+                    model_def,
+                    inpaint_hidden=timeline_scene_reference,
+                )
+                if (
+                    dedicated_model
+                    and not timeline_scene_reference
+                    and scene_reference is not None
+                ):
+                    setattr(
+                        pipeline,
+                        cache_name,
+                        {
+                            key: (
+                                value.detach().cpu()
+                                if torch.is_tensor(value)
+                                else value
+                            )
+                            for key, value in scene_reference.items()
+                        },
+                    )
+        if scene_reference is not None:
+            scene_latents = pipeline.vae.encode(
+                [scene_reference["image"]], VAE_tile_size,
+            )[0]
+            scene_mask_latents = extract_and_compress_mask_to_latent(
+                scene_reference["mask"],
+                additional_spatial_downsample=1,
+                label="dynamic scene ref mask",
+            ).to(device=pipeline.device, dtype=pipeline.VAE_dtype)
+            additional_ref_latents.insert(0, scene_latents)
+            additional_ref_mask_latents.insert(0, scene_mask_latents)
+            if dedicated_model and not timeline_scene_reference:
+                logging.info(
+                    "[SCAIL-2] Reused stable source-scene reference "
+                    f"(hidden={scene_reference['hidden_fraction']:.1%})."
+                )
+            else:
+                logging.info(
+                    "[SCAIL-2] Refreshed timeline source-scene anchor from control "
+                    f"frame {scene_reference['frame_index']} "
+                    f"(hidden={scene_reference['hidden_fraction']:.1%}, "
+                    f"margin={scene_reference['expansion_pixels']}px)."
+                )
     if additional_ref_latents:
         additional_ref_count = sum(latent.shape[1] for latent in additional_ref_latents)
-        ref_latents = torch.cat(additional_ref_latents + [ref_latents[0]], dim=1).unsqueeze(0)
+        if not dedicated_model:
+            ref_latents = torch.cat(
+                additional_ref_latents + [ref_latents[0]], dim=1,
+            ).unsqueeze(0)
 
     history_latents = None
     expected_history_lat_t = int((prefix_frames_count - 1) // pipeline.vae_stride[0]) + 1 if prefix_frames_count > 0 else 0
-    if overlapped_latents is not None and (expected_history_lat_t == 0 or overlapped_latents.shape[2] >= expected_history_lat_t):
+    if dedicated_model and prefix_frames_count > 0 and input_video is not None:
+        # Match upstream SCAIL-2's segment handoff exactly: retain the last
+        # rendered pixel frames, then VAE-encode them again for the next
+        # segment.  Reusing the previous segment's raw denoised latent slice
+        # looks equivalent, but compounds high-frequency artifacts over long
+        # sliding-window generations.
+        history_frames = input_video[:, :prefix_frames_count].to(device=pipeline.device, dtype=pipeline.VAE_dtype)
+        history_latents = pipeline.vae.encode([history_frames], VAE_tile_size)[0].unsqueeze(0)
+        print(
+            "[SCAIL-2] Dedicated continuation re-encoded "
+            f"{history_frames.shape[1]} rendered history frames as "
+            f"{history_latents.shape[2]} latent frames."
+        )
+    elif overlapped_latents is not None and (expected_history_lat_t == 0 or overlapped_latents.shape[2] >= expected_history_lat_t):
         history_latents = overlapped_latents.to(device=pipeline.device, dtype=ref_latents.dtype)
+        if dedicated_model:
+            print(
+                "[SCAIL-2] Dedicated continuation did not receive rendered "
+                "history frames; using the legacy latent-slice fallback."
+            )
     elif prefix_frames_count > 0 and input_video is not None:
         history_frames = input_video[:, :prefix_frames_count].to(device=pipeline.device, dtype=pipeline.VAE_dtype)
         history_latents = pipeline.vae.encode([history_frames], VAE_tile_size)[0].unsqueeze(0)
@@ -801,12 +1945,30 @@ def prepare_scail2_conditioning(
     pose_pixels_ds = F.interpolate(pose_pixels_ds, size=(max(1, height // 2), max(1, width // 2)), mode="bilinear", align_corners=False).permute(1, 0, 2, 3)
     pose_latents = pipeline.vae.encode([pose_pixels_ds], VAE_tile_size)[0].unsqueeze(0)
 
-    driving_mask_video = prepare_scail2_mask(input_masks, pose_frames, height, width, pipeline.device, pipeline.VAE_dtype)
     driving_mask_video = F.interpolate(driving_mask_video.permute(1, 0, 2, 3), size=(max(1, height // 2), max(1, width // 2)), mode="bilinear", align_corners=False).permute(1, 0, 2, 3)
     driving_masks = extract_and_compress_mask_to_latent(driving_mask_video, additional_spatial_downsample=1, label="driving mask").to(device=pipeline.device, dtype=pipeline.VAE_dtype).unsqueeze(0)
 
     ref_mask_latent_28ch = extract_and_compress_mask_to_latent(ref_mask, additional_spatial_downsample=1, label="ref mask").to(device=pipeline.device, dtype=pipeline.VAE_dtype)
-    ref_mask_latents = torch.cat(additional_ref_mask_latents + [ref_mask_latent_28ch], dim=1) if additional_ref_mask_latents else ref_mask_latent_28ch
+    dedicated_additional_ref_latents = None
+    dedicated_additional_ref_masks = None
+    if dedicated_model and additional_ref_latents:
+        dedicated_additional_ref_latents = torch.cat(
+            additional_ref_latents, dim=1,
+        ).unsqueeze(0)
+        dedicated_additional_ref_masks = torch.cat(
+            additional_ref_mask_latents, dim=1,
+        ).unsqueeze(0)
+    if dedicated_model:
+        ref_mask_latents = ref_mask_latent_28ch
+    else:
+        ref_mask_latents = (
+            torch.cat(
+                additional_ref_mask_latents + [ref_mask_latent_28ch],
+                dim=1,
+            )
+            if additional_ref_mask_latents
+            else ref_mask_latent_28ch
+        )
     null_noisy_mask = torch.zeros(ref_mask_latents.shape[0], lat_t, lat_h, lat_w, device=pipeline.device, dtype=ref_mask_latents.dtype)
     ref_masks = torch.cat([ref_mask_latents, null_noisy_mask], dim=1).unsqueeze(0)
 
@@ -814,7 +1976,7 @@ def prepare_scail2_conditioning(
     main_grid_w = lat_w // ps_w
     pose_grid_t = pose_latents.shape[2] // ps_t
     if additional_ref_count:
-        if test_scail2_replace(video_prompt_type):
+        if replace_conditioning:
             ref_freqs_cos, ref_freqs_sin = get_nd_rotary_pos_embed((0, 120, 0), (additional_ref_count + 1, 120 + main_grid_h, main_grid_w), (additional_ref_count + 1, main_grid_h, main_grid_w), L_test=lat_t, enable_riflex=enable_RIFLEx)
             video_freqs_cos, video_freqs_sin = get_nd_rotary_pos_embed((additional_ref_count, 0, 0), (additional_ref_count + lat_t, main_grid_h, main_grid_w), (lat_t, main_grid_h, main_grid_w), L_test=lat_t, enable_riflex=enable_RIFLEx)
             main_freqs_cos, main_freqs_sin = torch.cat([ref_freqs_cos, video_freqs_cos]), torch.cat([ref_freqs_sin, video_freqs_sin])
@@ -826,7 +1988,7 @@ def prepare_scail2_conditioning(
             pose_freqs_cos, pose_freqs_sin = get_nd_rotary_pos_embed((pose_start_t, 0, 120), (pose_start_t + pose_grid_t, main_grid_h, 120 + main_grid_w), (pose_grid_t, main_grid_h, main_grid_w), L_test=lat_t, enable_riflex=enable_RIFLEx)
     else:
         main_grid_t = 1 + lat_t
-        if test_scail2_replace(video_prompt_type):
+        if replace_conditioning:
             ref_freqs_cos, ref_freqs_sin = get_nd_rotary_pos_embed((0, 120, 0), (1, 120 + main_grid_h, main_grid_w), (1, main_grid_h, main_grid_w), L_test=lat_t, enable_riflex=enable_RIFLEx)
             video_freqs_cos, video_freqs_sin = get_nd_rotary_pos_embed((0, 0, 0), (lat_t, main_grid_h, main_grid_w), (lat_t, main_grid_h, main_grid_w), L_test=lat_t, enable_riflex=enable_RIFLEx)
             main_freqs_cos, main_freqs_sin = torch.cat([ref_freqs_cos, video_freqs_cos]), torch.cat([ref_freqs_sin, video_freqs_sin])
@@ -836,11 +1998,45 @@ def prepare_scail2_conditioning(
             pose_freqs_cos, pose_freqs_sin = get_nd_rotary_pos_embed((1, 0, 120), (1 + pose_grid_t, main_grid_h, 120 + main_grid_w), (pose_grid_t, main_grid_h, main_grid_w), L_test=lat_t, enable_riflex=enable_RIFLEx)
     pose_freqs_cos, pose_freqs_sin = _downsample_pose_freqs(pose_freqs_cos, pose_freqs_sin, pose_grid_t, main_grid_h, main_grid_w)
 
+    if dedicated_model:
+        model_kwargs = {
+            "scail2_ref_latents": ref_latents,
+            "scail2_pose_latents": pose_latents,
+            "scail2_driving_masks": driving_masks,
+            "scail2_ref_masks": ref_masks,
+            "scail2_history_mask": (
+                history_mask.unsqueeze(0) if history_lat_t > 0 else None
+            ),
+            "scail2_additional_ref_latents": (
+                dedicated_additional_ref_latents
+            ),
+            "scail2_additional_ref_masks": dedicated_additional_ref_masks,
+            "scail2_replace_flag": replace_conditioning,
+        }
+        model_freqs = None
+    else:
+        model_kwargs = {
+            "y": history_mask,
+            "scail2_ref_latents": ref_latents,
+            "scail2_pose_latents": pose_latents,
+            "scail2_driving_masks": driving_masks,
+            "scail2_ref_masks": ref_masks,
+        }
+        model_freqs = (
+            torch.cat([main_freqs_cos, pose_freqs_cos]),
+            torch.cat([main_freqs_sin, pose_freqs_sin]),
+        )
+
     return {
-        "kwargs": {"y": history_mask, "scail2_ref_latents": ref_latents, "scail2_pose_latents": pose_latents, "scail2_driving_masks": driving_masks, "scail2_ref_masks": ref_masks},
-        "freqs": (torch.cat([main_freqs_cos, pose_freqs_cos]), torch.cat([main_freqs_sin, pose_freqs_sin])),
-        "clip_image_start": image_ref.squeeze(1),
+        "kwargs": model_kwargs,
+        "freqs": model_freqs,
+        "clip_image_start": clip_identity_ref.squeeze(1),
         "extended_overlapped_latents": extended_overlapped_latents,
         "color_reference_frame": color_reference_frame,
         "lat_frames": lat_t,
+        "post_decode_pre_trim": (
+            _get_scail2_recast_warmup_frames(custom_settings)
+            if prefix_frames_count == 0
+            else 0
+        ),
     }

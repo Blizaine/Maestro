@@ -88,9 +88,7 @@ app/postprocessing/seedvc/
 
 # Local build/archive outputs (formerly supplement-pack zips) — never tracked.
 dist/
-
-# Cloned dependency repos (re-clone on install)
-app/preprocessing/video_depth_anything/
+.codex-tmp/
 
 # Cloned upstream plugins (re-downloaded by WanGP plugin manager)
 app/plugins/wan2gp-gallery/

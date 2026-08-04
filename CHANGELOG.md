@@ -3,6 +3,72 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [1.5.5] - 2026-08-04
+
+MiniMax H3: added native local H3 Base FL2VA generation for text, first-frame,
+and first/last-frame video with synchronized 32 kHz stereo audio. The initial
+integration supports approximately 5-15 second output at 24 FPS across native,
+portrait, square, and lower-VRAM resolutions, with revision-pinned automatic
+provisioning of the compact scaled-FP8 transformer, NVFP4 Qwen3-VL conditioner,
+video/audio VAEs, tokenizer, and processor assets. Ref2VA reference-video/audio
+conditioning and hosted 2K regeneration remain outside this initial release.
+
+H3 prompting: added a model-specific local Context-IR Prompt Enhance workflow
+with the required multimodal-description, soundscape, music, stable speaker-ID,
+and dialogue-tag syntax. Vague discussion requests can be converted into short,
+duration-aware scripts; supplied dialogue remains verbatim; and unused time is
+assigned to silent visible action to reduce invented speech. H3 enhancement now
+bypasses the generic cinematic enhancer and remains one native timeline rather
+than receiving sliding-window paragraph instructions.
+
+H3 runtime reliability: corrected compact Qwen3-VL prompt conditioning,
+row-scaled INT8 embedding loading, NVFP4 scale application, and causal attention.
+Fixed mixed-dtype MMGP profiling and start-frame CPU/CUDA mismatches. Added
+bounded activation chunking, explicit transformer working-memory reservation,
+and dtype locks so the large packed audio/video sequence can stream on consumer
+GPUs without exhausting memory before denoising. Expanded model-free and runtime
+regressions for prompt conditioning, quantization, keyframes, scheduling, native
+audio, activation memory, and Context-IR formatting.
+
+SCAIL-2 Recast: improved continuous multi-character shots by detecting cast
+transitions and supplying late-arriving identities through hidden pre-roll
+conditioning instead of publishing artificial visible cuts. Recast assembly
+now verifies every generation segment and preserves the exact source timeline.
+
+## [1.5.0] - 2026-08-02
+
+SCAIL-2 editing: rebuilt Recast around native replacement conditioning with
+automatic reference isolation, face-detail conditioning, optional official
+relighting, bystander preservation, and VRAM-aware 480p/512p/704p profiles.
+Added stable color-mapped replacement for up to five people and shot-aware
+SAM3 tracking so identities are reacquired and correctly routed across camera
+cuts, close-ups, wide shots, and group shots. Added Repaint as a first-class,
+shot-aware Edit mode that preserves the source timeline and audio while
+changing characters, objects, or scene styling.
+
+LTX-2.3 editing: rebuilt Outpaint around the official In/Outpainting IC-LoRA
+and mask-preserving source conditioning, including bounded seam blending,
+marker-spill cleanup, accurate canvas geometry, and model-correct sampling.
+Multi-scene sources are now split at camera cuts, processed independently,
+and reassembled at the exact original length with source audio. Retake now
+supports distilled and two-stage LTX-2.3 pipelines. This resolves #28 and #37.
+
+Krea 2: added RAW and Turbo Identity Edit v1.2 models with Qwen3-VL vision
+conditioning, instruction editing, inpainting/outpainting, background removal,
+and multi-reference support. Added current Diffusers/Kohya LoRA and GGUF
+compatibility, a dedicated CivitAI/My LoRAs Krea 2 filter, accurate companion-
+weight readiness checks, and default visibility for all four Krea 2 models.
+This resolves #35 and #43.
+
+Studio and reliability: model visibility now persists server-side across
+Pinokio ports and restarts; newly installed CivitAI checkpoints appear without
+a restart; control-video motion is independent of generated, uploaded, or
+source audio; Temporal Depth assets are provisioned and verified on demand;
+and Voice Reference is enabled independently of experimental features.
+Director no longer duplicates single-clip outputs, SCAIL-2 LoRA phases are
+normalized correctly, and installed apps survive early GPU-detection failures.
+This resolves #19, #36, and #40.
+
 ## [1.4.0] - 2026-07-20
 
 Storage and library management: added the Storage Manager with usage

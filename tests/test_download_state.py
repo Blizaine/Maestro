@@ -16,6 +16,10 @@ import zipfile
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 _LAUNCH_PATH = os.path.join(_ROOT, "app", "launch.py")
+_UI_STORE_PATH = os.path.join(_ROOT, "ui", "src", "stores", "useStore.ts")
+_MODEL_DETAIL_PATH = os.path.join(
+    _ROOT, "ui", "src", "components", "LoraBrowser", "ModelDetail.tsx",
+)
 
 
 def _parse_launch() -> tuple[ast.Module, str]:
@@ -95,6 +99,7 @@ class TestDownloadState(unittest.TestCase):
                 "bytes_downloaded": "12",
                 "bytes_total": object(),
                 "error": RuntimeError("network failed"),
+                "model_type": "civitai_example_checkpoint",
                 "warnings": "not-a-list",
                 "_internal": object(),
             },
@@ -106,8 +111,21 @@ class TestDownloadState(unittest.TestCase):
         self.assertEqual(public["bytes_downloaded"], 12)
         self.assertEqual(public["bytes_total"], 0)
         self.assertEqual(public["error"], "network failed")
+        self.assertEqual(public["model_type"], "civitai_example_checkpoint")
         self.assertNotIn("_internal", public)
         json.dumps(public)
+
+    def test_checkpoint_completion_refresh_is_global_and_filename_independent(self):
+        with open(_UI_STORE_PATH, "r", encoding="utf-8") as handle:
+            store_source = handle.read()
+        with open(_MODEL_DETAIL_PATH, "r", encoding="utf-8") as handle:
+            detail_source = handle.read()
+
+        self.assertIn("download.status === 'completed'", store_source)
+        self.assertIn("!!download.model_type", store_source)
+        self.assertIn("await api.reloadModels()", store_source)
+        self.assertIn("await get().loadModels()", store_source)
+        self.assertNotIn("reloadModels", detail_source)
 
     def test_terminal_helpers_set_completed_at_under_registry_lock(self):
         helpers = _load_helpers(

@@ -1010,6 +1010,7 @@ def sanitize_image_prompt(
 
 # Map architecture prefixes to guide filenames (mirrors enhance_guides.py)
 _VIDEO_ARCH_MAP = {
+    "minimax_h3": "minimax_h3_video",
     "ltx2": "ltx2_video",
     "ltxv": "ltx2_video",
     "t2v": "wan_video",
