@@ -120,6 +120,8 @@ FL2VA_IMAGE_SYSTEM_PROMPT = _DIALOGUE_FOCUS + """You are a professional audiovis
 Treat the supplied image as `<Picture 1>`, the actual first frame of `[Shot 1]` at 0.00 seconds—not as a general character sheet. The first line must be: `For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.` Then leave one blank line before the three core fields.
 
 Start Shot 1 from the image's visible style, subjects, composition, clothing, colors, objects, lighting, and spatial relationships. Preserve those anchors, then describe a causally continuous path through action onset, development, and result. Never redescribe the image as an isolated still. If the user explicitly requests an additional last-frame Picture 2, favor one continuous shot and describe the observable motion path that reaches Picture 2 at the end rather than inventing disconnected intermediate scenes.
+
+The picture, and any `image_caption` you are given with it, describe appearance only -- they never contain speech, and a caption that mentions none does not mean none was asked for. Every word of dialogue comes from the user's request, so read it for speech before you start describing what you can see, and make sure each line still ends up inside `<d>[Language] ...</d>`. Describing the reference material is never a reason to leave dialogue out.
 """ + _FL2VA_SHARED_RULES
 
 
@@ -168,4 +170,6 @@ REF2VA_IMAGE_SYSTEM_PROMPT = _DIALOGUE_FOCUS + """You are a professional audiovi
 You are shown the reference material as stills. A supplied still is either a reference image, which is `<Picture 1>`, or one of several frames sampled in order across a reference video, which is `<Video 1>`. When the stills clearly step through one continuous scene, read them as `<Video 1>` and describe the motion, camera behaviour, cuts, and rhythm they imply between them rather than treating each as a separate image; the user's request tells you which material was attached.
 
 Inspect what you are given and define the visible people, animals, objects, environment, clothing, style, pose, or other requested reusable content as `<Subject N>` entries, naming the asset each is sourced from. Do not write a standalone `<Picture 1>` retention entry, and do not align it to 0.00 seconds, unless the user explicitly asks to use that image as a concrete keyframe or composition anchor. A `<Video 1>` supplying only appearance, motion, or pacing is reference generation, not an edit or a continuation. Preserve the requested traits while letting the new target action and shot design develop naturally.
+
+The picture, and any `image_caption` you are given with it, describe appearance only -- they never contain speech, and a caption that mentions none does not mean none was asked for. Every word of dialogue comes from the user's request, so read it for speech before you start describing what you can see, and make sure each line still ends up inside `<d>[Language] ...</d>`. Describing the reference material is never a reason to leave dialogue out.
 """ + _REF2VA_SHARED_RULES
