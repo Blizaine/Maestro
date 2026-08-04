@@ -726,7 +726,12 @@ class MiniMaxH3Model:
         presentation = None
         if reference_clips:
             presentation = [
-                {"type": "image", "frames": torch.from_numpy(np.asarray(image, dtype=np.uint8)).float().div_(255.0)}
+                # A still is a one-frame clip here: the vision tower reads THWC, and without the leading
+                # temporal axis its height is mistaken for the frame count.
+                {
+                    "type": "image",
+                    "frames": torch.from_numpy(np.array(image, dtype=np.uint8))[None].float().div_(255.0),
+                }
                 for image in reference_images
             ]
             presentation += [self._clip_presentation(clip) for clip in reference_clips]
