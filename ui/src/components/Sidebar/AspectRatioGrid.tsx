@@ -2,6 +2,7 @@ import { useStore } from '../../stores/useStore'
 import type { AspectRatio } from '../../types'
 
 const standardRatios: { value: AspectRatio; icon: string }[] = [
+  { value: '21:9', icon: '▭' },
   { value: '16:9', icon: '▬' },
   { value: '9:16', icon: '▮' },
   { value: '1:1', icon: '◼' },

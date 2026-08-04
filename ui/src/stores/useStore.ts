@@ -1668,6 +1668,7 @@ const BLANK_VIDEO_INPUT_PARAMS: Partial<GenerateParams> = {
 const resolutionMap: Record<ResolutionPreset, Record<AspectRatio, string>> = {
   'auto': {
     'auto': 'auto',
+    '21:9': 'auto',
     '16:9': 'auto',
     '9:16': 'auto',
     '1:1': 'auto',
@@ -1676,6 +1677,7 @@ const resolutionMap: Record<ResolutionPreset, Record<AspectRatio, string>> = {
   },
   '480p': {
     'auto': 'auto_480p',
+    '21:9': '1120x480',
     '16:9': '848x480',
     '9:16': '480x848',
     '1:1': '672x672',
@@ -1684,6 +1686,7 @@ const resolutionMap: Record<ResolutionPreset, Record<AspectRatio, string>> = {
   },
   '540p': {
     'auto': 'auto_540p',
+    '21:9': '1280x544',
     '16:9': '960x544',
     '9:16': '544x960',
     '1:1': '736x736',
@@ -1692,6 +1695,7 @@ const resolutionMap: Record<ResolutionPreset, Record<AspectRatio, string>> = {
   },
   '720p': {
     'auto': 'auto_720p',
+    '21:9': '1664x704',
     '16:9': '1280x720',
     '9:16': '720x1280',
     '1:1': '1024x1024',
@@ -1700,6 +1704,7 @@ const resolutionMap: Record<ResolutionPreset, Record<AspectRatio, string>> = {
   },
   '1080p': {
     'auto': 'auto_1080p',
+    '21:9': '2560x1088',
     '16:9': '1920x1088',
     '9:16': '1088x1920',
     '1:1': '1024x1024',
