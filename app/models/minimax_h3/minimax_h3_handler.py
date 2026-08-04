@@ -271,6 +271,36 @@ class family_handler:
             ui_defaults.setdefault("audio_prompt_type", "")
 
     @staticmethod
+    def validate_generative_settings(base_model_type, model_def, inputs):
+        # Ref2VA's limits are cheap to check here and expensive to discover after a model has been loaded and a
+        # generation has started, which is where an over-long reference otherwise surfaces.
+        if base_model_type != _MODEL_TYPE_REF2VA:
+            return None
+
+        if len(inputs.get("image_refs") or []) > 9:
+            return "MiniMax H3 Ref2VA accepts at most 9 reference images"
+
+        audio_prompt_type = inputs.get("audio_prompt_type") or ""
+        references = [inputs.get("audio_guide")] if "A" in audio_prompt_type else []
+        if "B" in audio_prompt_type:
+            references.append(inputs.get("audio_guide2"))
+
+        import librosa
+
+        for index, reference in enumerate(references, 1):
+            if reference is None:
+                return f"Audio Reference {index} is selected but no file was provided"
+            try:
+                duration = float(librosa.get_duration(path=os.fspath(reference)))
+            except Exception as error:
+                return f"Unable to read Audio Reference {index}: {error}"
+            if not 2.0 <= duration <= 15.0:
+                return (
+                    f"Audio Reference {index} must be between 2 and 15 seconds long (found {duration:.2f}s)"
+                )
+        return None
+
+    @staticmethod
     def fix_settings(base_model_type, settings_version, model_def, ui_defaults):
         # Saved settings created before this family existed cannot need a
         # migration, but imported presets still need valid H3 geometry.
