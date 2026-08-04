@@ -47,6 +47,41 @@ _AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
 _TRANSFORMER_WORKING_VRAM_MB = 10 * 1024
 
 
+def _snap_resolution(resolution):
+    """Snap a requested canvas onto the grid H3 can actually sample, keeping its size and aspect.
+
+    H3 needs both axes on a multiple of 32. The UI offers generic presets -- 848x480, 1280x720, 1920x1080 --
+    and none of those are multiples of 32 on both axes, so a membership test against a curated list rejects
+    almost all of them.
+
+    Rejecting used to mean falling back to 864x480, which is why every preset except 540p silently produced
+    a 480p render. Snapping keeps the resolution that was asked for: 1280x720 becomes 1280x704, 1920x1080
+    becomes 1920x1088.
+
+    Only the 32px grid is enforced, because that is the only thing `generate` actually requires. H3 defines
+    a 768*1344 figure, but it belongs to `resolve_canvas_size`, which resolves an aspect ratio into a
+    default canvas for reference material -- it is not a ceiling on the output, and imposing it here would
+    cap 1080p for no reason. What limits resolution in practice is VRAM.
+
+    Anything that is not a concrete WxH is returned untouched. The "auto" aspect resolves to sentinels like
+    `auto_720p`, which are resolved downstream from the source material -- replacing one with a fixed canvas
+    would be the same bug wearing a different hat.
+    """
+    from .packing import MINIMAX_H3_CANVAS_MULTIPLE
+
+    multiple = MINIMAX_H3_CANVAS_MULTIPLE
+    try:
+        raw_width, raw_height = (int(part) for part in str(resolution).lower().split("x", 1))
+    except (TypeError, ValueError):
+        return resolution
+    if raw_width <= 0 or raw_height <= 0:
+        return resolution
+
+    width = max(multiple, int(round(raw_width / multiple)) * multiple)
+    height = max(multiple, int(round(raw_height / multiple)) * multiple)
+    return f"{width}x{height}"
+
+
 def _hf_url(repo_id: str, revision: str, *parts: str) -> str:
     path = "/".join(part.strip("/\\") for part in parts if part)
     return f"https://huggingface.co/{repo_id}/resolve/{revision}/{path}"
@@ -323,6 +358,12 @@ class family_handler:
 
     @staticmethod
     def validate_generative_settings(base_model_type, model_def, inputs):
+        # The UI's resolution presets are generic and mostly land off H3's 32px grid, so snap here as well
+        # as in fix_settings: this is the path a resolution takes when it is chosen rather than loaded.
+        resolution = inputs.get("resolution")
+        if resolution:
+            inputs["resolution"] = _snap_resolution(resolution)
+
         # Ref2VA's limits are cheap to check here and expensive to discover after a model has been loaded and a
         # generation has started, which is where an over-long reference otherwise surfaces.
         if base_model_type != _MODEL_TYPE_REF2VA:
@@ -377,7 +418,5 @@ class family_handler:
             requested_frames = 124
         aligned_frames = align_num_frames(max(1, requested_frames))
         ui_defaults["video_length"] = min(345, max(124, aligned_frames))
-        resolution = str(ui_defaults.get("resolution", "864x480"))
-        if resolution not in {value for _, value in _RESOLUTIONS}:
-            ui_defaults["resolution"] = "864x480"
+        ui_defaults["resolution"] = _snap_resolution(ui_defaults.get("resolution", "864x480"))
         ui_defaults["guidance_scale"] = 1.0
