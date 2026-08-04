@@ -122,6 +122,14 @@ class family_handler:
         )
 
     @staticmethod
+    def get_rgb_factors(base_model_type):
+        # Without this wgp's preview helper returns None and the progress
+        # pane stays empty for the whole generation.
+        from shared.RGB_factors import get_rgb_factors
+
+        return get_rgb_factors("minimax_h3")
+
+    @staticmethod
     def get_lora_dir(base_model_type, args, lora_root):
         return getattr(args, "lora_dir_minimax_h3", None) or os.path.join(lora_root, "minimax_h3")
 
