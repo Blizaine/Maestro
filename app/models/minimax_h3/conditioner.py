@@ -174,11 +174,24 @@ class MiniMaxH3Conditioner(nn.Module):
         attention_mask = encoded["attention_mask"].to(device=device, dtype=torch.bool)
         return input_ids, attention_mask, None, encoded
 
-    def _vision_inputs(self, prompt: str, images: list, device: torch.device):
-        presentation = "".join(
-            f"<Picture {index + 1}>: <|vision_start|><|image_pad|><|vision_end|>"
-            for index in range(len(images))
-        ) + prompt
+    @staticmethod
+    def _presentation(prompt: str, num_images: int, num_audio_references: int) -> str:
+        """Announce the conditioning material ahead of the prompt, the way MiniMax-H3 was trained to read it.
+
+        Every visual gets a numbered `<Picture N>` header followed by its vision block. An audio reference is
+        announced by a bare `<Audio N>` header: the waveform itself never reaches the text encoder, it is conditioned
+        on through the packed sequence, so the marker exists only to tell the prompt which references it may refer
+        to. Headers are numbered per modality, and audio follows the pictures.
+        """
+        return (
+            "".join(
+                f"<Picture {index + 1}>: <|vision_start|><|image_pad|><|vision_end|>" for index in range(num_images)
+            )
+            + "".join(f"<Audio {index + 1}>: " for index in range(num_audio_references))
+            + prompt
+        )
+
+    def _vision_inputs(self, presentation: str, images: list, device: torch.device):
         encoded = self.processor(
             text=[presentation],
             images=images,
@@ -193,13 +206,22 @@ class MiniMaxH3Conditioner(nn.Module):
         return input_ids, attention_mask, None, encoded
 
     @torch.inference_mode()
-    def forward(self, prompt: str, device: torch.device, images: list | None = None):
+    def forward(
+        self,
+        prompt: str,
+        device: torch.device,
+        images: list | None = None,
+        num_audio_references: int = 0,
+    ):
         self.qwen.model._interrupt = self._interrupt
         self.qwen.visual._interrupt = self._interrupt
         if self._interrupt:
             return None, None
+        presentation = self._presentation(prompt, len(images or ()), num_audio_references)
         if images:
-            input_ids, attention_mask, position_ids, processor_inputs = self._vision_inputs(prompt, images, device)
+            input_ids, attention_mask, position_ids, processor_inputs = self._vision_inputs(
+                presentation, images, device
+            )
             grid = processor_inputs["image_grid_thw"]
             pixels = processor_inputs["pixel_values"].to(device=device, dtype=torch.float32)
             image_embeds, deepstack = self.qwen.visual(pixels, grid_thw=grid)
@@ -217,7 +239,7 @@ class MiniMaxH3Conditioner(nn.Module):
                 attention_mask=attention_mask,
             )
         else:
-            input_ids, attention_mask, position_ids, _ = self._plain_inputs(prompt, device)
+            input_ids, attention_mask, position_ids, _ = self._plain_inputs(presentation, device)
             inputs_embeds = visual_mask = deepstack = None
 
         outputs = self.qwen.model(
