@@ -32,8 +32,10 @@ from .conditioner import MiniMaxH3Conditioner, MiniMaxH3Qwen3VL, build_h3_proces
 from .packing import (
     MINIMAX_H3_AUDIO_CHANNELS,
     MINIMAX_H3_FPS,
+    MINIMAX_H3_FRAMES_PER_CHUNK,
     MINIMAX_H3_KEYFRAME_ENCODE_SEED,
     MINIMAX_H3_KEYFRAME_NOISE_AUG,
+    MINIMAX_H3_LATENTS_PER_CHUNK,
     MINIMAX_H3_MAX_DURATION,
     MINIMAX_H3_MIN_DURATION,
     MINIMAX_H3_PIXEL_MEAN,
@@ -494,6 +496,102 @@ class MiniMaxH3Model:
 
         return torch.cat(rows).to(self.device), references
 
+    def _decode_reference_video(self, source, max_frames: int) -> torch.Tensor | None:
+        """Decode a reference clip at H3's frame rate, onto a canvas of its own.
+
+        Deliberately not the guide pipeline's frames. Those are already fitted to the output canvas and
+        length, so reusing them would resample a second time and force the reference onto the target's
+        aspect ratio -- while a reference is not on the timeline and keeps its own framing. Decoding from
+        the source keeps the clip to a single resampling step, and that step is Lanczos.
+        """
+        from wgp import get_resampled_video
+
+        frames = get_resampled_video(source, 0, max_frames, MINIMAX_H3_FPS)
+        if not torch.is_tensor(frames):
+            frames = torch.from_numpy(np.asarray(frames))
+        frames = frames[:max_frames]
+        if frames.shape[0] < MINIMAX_H3_LATENTS_PER_CHUNK:
+            return None
+        # The video VAE consumes 17n + 5 frames; trim rather than pad, so no invented frames get encoded.
+        chunks = (frames.shape[0] - MINIMAX_H3_LATENTS_PER_CHUNK) // MINIMAX_H3_FRAMES_PER_CHUNK
+        frames = frames[: chunks * MINIMAX_H3_FRAMES_PER_CHUNK + MINIMAX_H3_LATENTS_PER_CHUNK]
+
+        height, width = resolve_canvas_size(frames.shape[2], frames.shape[1])
+        if (int(frames.shape[1]), int(frames.shape[2])) != (height, width):
+            frames = torch.stack(
+                [
+                    torch.from_numpy(
+                        np.asarray(
+                            Image.fromarray(frame.cpu().numpy().astype(np.uint8))
+                            .convert("RGB")
+                            .resize((width, height), Image.Resampling.LANCZOS)
+                        )
+                    )
+                    for frame in frames
+                ]
+            )
+        return frames.float().div_(255.0).clamp_(0.0, 1.0)
+
+    def _encode_reference_videos(
+        self,
+        clips: list[torch.Tensor],
+        generator: torch.Generator,
+    ) -> tuple[torch.Tensor | None, list[MiniMaxH3PreparedReference]]:
+        """Encode `ref2va` reference clips into their conditioning rows.
+
+        A clip goes through the VAE's chunked `_encode` -- the method its own docstring names as the one
+        MiniMax-H3 encodes a video reference through -- rather than the single-clip path a still uses. Like
+        every visual condition it is noise-augmented at 0.999, and each clip reports its own latent shape,
+        which unlike a still includes a temporal extent for the layout to place on the rotary clock.
+        """
+        if not clips:
+            return None, []
+
+        means, stds, pixel_mean, pixel_std = self._condition_normalization()
+        rows, references = [], []
+        for clip in clips:
+            if self._interrupt:
+                return None, []
+            pixels = clip.permute(3, 0, 1, 2)[None].to(self.device)
+            pixels = (pixels - pixel_mean) / pixel_std
+            moments = self.vae._encode(pixels)
+            posterior = DiagonalGaussianDistribution(moments)
+            encoded = posterior.sample(generator=torch.Generator().manual_seed(MINIMAX_H3_KEYFRAME_ENCODE_SEED))
+            encoded = encoded.to(torch.float16).float().cpu()
+            rows.append(patchify_video_latents((encoded - means) / stds, self.patch_size))
+            references.append(
+                MiniMaxH3PreparedReference(
+                    kind="video",
+                    num_latent_frames=encoded.shape[2],
+                    latent_height=encoded.shape[3],
+                    latent_width=encoded.shape[4],
+                )
+            )
+
+        clean_rows = torch.cat(rows).to(self.device)
+        noise = keyframe_condition_noise(
+            tuple(
+                (reference.num_latent_frames, reference.latent_height, reference.latent_width)
+                for reference in references
+            ),
+            self.patch_size,
+            24,
+            generator=generator,
+            device=self.device,
+        )
+        return self.scheduler.scale_noise(clean_rows, MINIMAX_H3_KEYFRAME_NOISE_AUG, noise), references
+
+    @staticmethod
+    def _clip_presentation(clip: torch.Tensor) -> dict:
+        """Sample a clip at 2 fps for the text encoder, with the timestamps Qwen3-VL reads it by."""
+        stride = MINIMAX_H3_FPS // 2
+        indices = list(range(0, clip.shape[0], stride))
+        return {
+            "type": "video",
+            "frames": clip[indices].clone(),
+            "timestamps": [index / MINIMAX_H3_FPS for index in indices],
+        }
+
     @torch.inference_mode()
     def generate(
         self,
@@ -503,6 +601,8 @@ class MiniMaxH3Model:
         input_ref_images=None,
         audio_guide=None,
         audio_guide2=None,
+        video_guide_path=None,
+        video_prompt_type: str = "",
         frame_num: int = 124,
         height: int = 480,
         width: int = 864,
@@ -549,7 +649,14 @@ class MiniMaxH3Model:
             for waveform in (self._load_reference_waveform(source) for source in (audio_guide, audio_guide2))
             if waveform is not None
         ]
-        if (reference_images or reference_waveforms) and keyframes:
+        reference_clips = []
+        if "V" in (video_prompt_type or "") and video_guide_path:
+            clip = self._decode_reference_video(
+                video_guide_path, int(MINIMAX_H3_MAX_DURATION * MINIMAX_H3_FPS)
+            )
+            if clip is not None:
+                reference_clips.append(clip)
+        if (reference_images or reference_waveforms or reference_clips) and keyframes:
             raise ValueError(
                 "MiniMax H3 conditions on either keyframes or references, not both: a keyframe is a frame of the "
                 "output, a reference is material that precedes it, and they occupy the same conditioning rows."
@@ -562,11 +669,23 @@ class MiniMaxH3Model:
         latent_width = width // self.vae.spatial_compression_ratio
         num_audio_latents = audio_latent_num_frames(frame_num)
 
+        # A clip cannot be announced through the processor, so any reference set containing one is presented
+        # in full by the conditioner's hand-assembled path. Still-only sets keep the processor path.
+        presentation = None
+        if reference_clips:
+            presentation = [
+                {"type": "image", "frames": torch.from_numpy(np.asarray(image, dtype=np.uint8)).float().div_(255.0)}
+                for image in reference_images
+            ]
+            presentation += [self._clip_presentation(clip) for clip in reference_clips]
+            presentation += [{"type": "audio"}] * len(reference_waveforms)
+
         prompt_embeds, text_tags = self.conditioner(
             input_prompt,
             self.device,
             (keyframes or reference_images) or None,
             len(reference_waveforms),
+            references=presentation,
         )
         if prompt_embeds is None or self._interrupt:
             return None
@@ -575,14 +694,18 @@ class MiniMaxH3Model:
         # it landed on and the layout needs it. Their noise is drawn first either way, which is what the request's
         # generator reproduces.
         audio_condition_rows = None
-        if reference_images or reference_waveforms:
-            condition_rows, references = self._encode_reference_images(reference_images, generator)
+        if reference_images or reference_waveforms or reference_clips:
+            # Packed order matches the order the conditioner announced them in: stills, clips, then audio.
+            image_rows, references = self._encode_reference_images(reference_images, generator)
+            clip_rows, clip_references = self._encode_reference_videos(reference_clips, generator)
             audio_condition_rows, audio_references = self._encode_reference_audio(reference_waveforms)
             if self._interrupt:
                 return None
+            visual_rows = [rows for rows in (image_rows, clip_rows) if rows is not None]
+            condition_rows = torch.cat(visual_rows) if visual_rows else None
             layout = build_ref2va_packed_sequence(
                 text_tags,
-                tuple(references + audio_references),
+                tuple(references + clip_references + audio_references),
                 num_latent_frames,
                 latent_height,
                 latent_width,
