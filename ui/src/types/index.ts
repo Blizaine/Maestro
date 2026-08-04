@@ -247,6 +247,10 @@ export interface ModelOptions {
   frames_minimum: number
   frames_steps: number
   default_num_inference_steps: number | null
+  /** Model's preferred flow shift, applied on model selection. Distinct from
+   *  the `flow_shift` boolean above, which only says whether to show the
+   *  control. */
+  default_flow_shift?: number | null
   default_guidance_scale: number | null
   hide_resolution_presets: boolean
   input_video_strength_label: string

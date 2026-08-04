@@ -5076,6 +5076,9 @@ def get_model_options(model_type: str):
         # Check model def first, then fall back to ui_defaults from the handler
         "default_num_inference_steps": md.get("num_inference_steps") or _ui_defaults.get("num_inference_steps"),
         "default_guidance_scale": md.get("guidance_scale") or _ui_defaults.get("guidance_scale"),
+        # Read ONLY from ui_defaults: model_def's "flow_shift" is a boolean
+        # capability flag (whether to show the control), not a value.
+        "default_flow_shift": _ui_defaults.get("flow_shift"),
         "hide_resolution_presets": md.get("hide_resolution_presets", False),
 
         # Image/video conditioning strength

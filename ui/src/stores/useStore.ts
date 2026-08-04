@@ -5406,6 +5406,11 @@ export const useStore = create<AppState>((set, get) => ({
       if (options.default_guidance_scale != null) {
         paramUpdates.guidance_scale = options.default_guidance_scale
       }
+      // Flow shift is model-specific but was never applied on model switch,
+      // so it carried over from whichever model was selected before.
+      if (options.default_flow_shift != null) {
+        paramUpdates.flow_shift = options.default_flow_shift
+      }
       // TTS default duration. Prefer the model's declared `default` (DramaBox
       // uses 0 = auto-derive from prompt); fall back to `max` (legacy behavior
       // for older TTS models that didn't declare a default), then 600.
