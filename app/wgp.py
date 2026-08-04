@@ -4625,7 +4625,9 @@ def refresh_gallery(state): #, msg
             enhanced = True
             prompt = prompt[len("!enhanced!\n"):]
         prompt = html.escape(prompt)
-        if multi_prompts_gen_type == 2:
+        # A structured multi-line prompt is one generation, so render it as one
+        # block rather than splitting it into per-window lines and bolding one.
+        if multi_prompts_gen_type == 2 or model_def.get("single_block_prompt", False):
             prompt = prompt.replace("\n", "<BR>")
         elif "\n" in prompt :
             prompts = prompt.split("\n")
