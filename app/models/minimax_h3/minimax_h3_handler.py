@@ -17,8 +17,10 @@ import torch
 
 from .prompt_enhancer import (
     FL2VA_IMAGE_SYSTEM_PROMPT,
+    FL2VA_PROMPT_INFOS,
     FL2VA_TEXT_SYSTEM_PROMPT,
     REF2VA_IMAGE_SYSTEM_PROMPT,
+    REF2VA_PROMPT_INFOS,
     REF2VA_TEXT_SYSTEM_PROMPT,
 )
 
@@ -126,6 +128,7 @@ class family_handler:
             # H3 does not read a free-form prompt: it reads a structured, field-by-field block with its own
             # dialogue markup. A generic enhancer rewrites that into prose the model cannot parse, so the two
             # tasks get their own instructions. Ref2VA's are longer because its prompt has six sections, not three.
+            "prompt_infos": REF2VA_PROMPT_INFOS if reference_mode else FL2VA_PROMPT_INFOS,
             "prompt_enhancer_button_label": "Write H3 Prompt",
             "prompt_enhancer_def": {
                 "selection": ["T", "TI"],
