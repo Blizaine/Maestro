@@ -31,6 +31,7 @@ from .checkpoint import (
 from .conditioner import MiniMaxH3Conditioner, MiniMaxH3Qwen3VL, build_h3_processor, load_h3_qwen_config
 from .packing import (
     MINIMAX_H3_AUDIO_CHANNELS,
+    MINIMAX_H3_CANVAS_MULTIPLE,
     MINIMAX_H3_FPS,
     MINIMAX_H3_FRAMES_PER_CHUNK,
     MINIMAX_H3_KEYFRAME_ENCODE_SEED,
@@ -179,6 +180,38 @@ AUDIO_LATENTS_STD = (
     1.8661226051202384,
     1.5613768203168363,
 )
+
+
+# How many conditioning rows one reference clip may contribute. A reference is packed into the same
+# sequence as the shot being generated, and attention over that sequence is quadratic, so an unbounded
+# reference does not merely cost more -- it decides whether the generation runs at all. At the generation
+# canvas a 15s clip produces ~103k rows against a 5s 480p target's ~15k, which is a ~59x attention blowup
+# and a guaranteed out-of-memory.
+#
+# This budget is an engineering choice, not a MiniMax-published figure: it keeps a reference's cost roughly
+# level with the target's regardless of clip length, by trading resolution for duration. A reference exists
+# to carry identity, motion and look, all of which survive downscaling far better than they survive not
+# fitting in VRAM.
+MINIMAX_H3_REFERENCE_ROW_BUDGET = 12000
+
+
+def _reference_canvas_size(source_width: int, source_height: int, num_frames: int) -> tuple[int, int]:
+    """Resolve a reference clip's canvas: its own aspect ratio, at whatever size fits the row budget.
+
+    Rows scale as `latent_frames * (height * width) / 1024` -- the 16x VAE compression and the 2x2 patchify
+    together divide each axis by 32 -- so the pixel budget falls as the clip gets longer. Never larger than
+    the generation canvas would be, and never below one 32px block per axis.
+    """
+    height, width = resolve_canvas_size(source_width, source_height)
+    latent_frames = max(1, video_latent_num_frames(num_frames))
+    max_pixels = (MINIMAX_H3_REFERENCE_ROW_BUDGET * 1024) / latent_frames
+    area = float(height * width)
+    if area > max_pixels:
+        scale = (max_pixels / area) ** 0.5
+        multiple = MINIMAX_H3_CANVAS_MULTIPLE
+        height = max(multiple, int(height * scale) // multiple * multiple)
+        width = max(multiple, int(width * scale) // multiple * multiple)
+    return height, width
 
 
 def _keyframe_latent_stats_cpu() -> tuple[torch.Tensor, torch.Tensor]:
@@ -516,12 +549,14 @@ class MiniMaxH3Model:
         chunks = (frames.shape[0] - MINIMAX_H3_LATENTS_PER_CHUNK) // MINIMAX_H3_FRAMES_PER_CHUNK
         frames = frames[: chunks * MINIMAX_H3_FRAMES_PER_CHUNK + MINIMAX_H3_LATENTS_PER_CHUNK]
 
-        height, width = resolve_canvas_size(frames.shape[2], frames.shape[1])
+        height, width = _reference_canvas_size(frames.shape[2], frames.shape[1], frames.shape[0])
         if (int(frames.shape[1]), int(frames.shape[2])) != (height, width):
             frames = torch.stack(
                 [
+                    # np.array rather than np.asarray: PIL hands back a read-only buffer, and torch warns
+                    # (rightly) about wrapping one in a tensor.
                     torch.from_numpy(
-                        np.asarray(
+                        np.array(
                             Image.fromarray(frame.cpu().numpy().astype(np.uint8))
                             .convert("RGB")
                             .resize((width, height), Image.Resampling.LANCZOS)
