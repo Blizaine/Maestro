@@ -458,7 +458,7 @@ def list_models():
             "guidance_max_phases": md.get("guidance_max_phases", 1),
             "fps": md.get("fps", 16),
             "supports_end_frame": "E" in md.get("image_prompt_types_allowed", ""),
-            "supports_audio": bool(md.get("any_audio_prompt", False)),
+            "supports_audio": bool(md.get("any_audio_prompt", False) or md.get("returns_audio", False)),
             "supports_ref_images": bool(md.get("image_ref_choices")),
             "is_downloaded": _check_model_downloaded(mt),
             # When True, the UI hides this model unless Mature Mode is
@@ -6818,19 +6818,30 @@ async def llm_enhance_prompt(request: Request):
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
 
+    model_type = str(body.get("model_type", "") or "")
+    generation_mode = str(body.get("mode", "video") or "video")
+    needs_h3_context_ir = (
+        model_type.lower().startswith("minimax_h3")
+        and generation_mode in ("video", "avatar")
+    )
     enhancer_enabled = int(wgp.server_config.get("enhancer_enabled", 0) or 0)
 
-    # Route to Wan2GP enhancer if enabled
-    if enhancer_enabled > 0:
+    # The generic Wan2GP cinematic enhancer cannot produce MiniMax H3's
+    # required Context-IR fields, speaker IDs, or <d> dialogue tags. Route H3
+    # through Maestro's model-specific guide even when the legacy enhancer is
+    # enabled; all other model families retain the configured behavior.
+    if enhancer_enabled > 0 and not needs_h3_context_ir:
         try:
             # Support both single image_path and array image_paths
             image_paths = body.get("image_paths") or []
             if not image_paths and body.get("image_path"):
                 image_paths = [body["image_path"]]
-            return await _enhance_with_wangp(prompt, body.get("mode", "video"), enhancer_enabled, image_paths=image_paths)
+            return await _enhance_with_wangp(prompt, generation_mode, enhancer_enabled, image_paths=image_paths)
         except Exception as e:
             print(f"[Enhance] Wan2GP enhancer failed, falling back to LLM: {e}")
             # Fall through to LLM
+    elif enhancer_enabled > 0 and needs_h3_context_ir:
+        print("[Enhance] MiniMax H3 requires structured Context-IR; using Maestro's model-specific LLM guide")
 
     # Use our local LLM service
     from services import llm_service
@@ -6883,7 +6894,6 @@ async def llm_enhance_prompt(request: Request):
     # Load LoRA info for activated LoRAs — extract ONLY trigger words and key tips
     lora_hint_text = ""
     activated_loras = body.get("activated_loras") or []
-    model_type = body.get("model_type", "")
     print(f"[Enhance] LoRA check: activated_loras={activated_loras}, model_type={model_type}")
     if activated_loras and model_type:
         try:
@@ -11264,13 +11274,21 @@ def _build_recast_character_mask(
 
 
 def _plan_recast_shot_segments(
-    mapping_masks, shot_ranges, min_area_ratio=0.0001,
+    mapping_masks, shot_ranges, min_area_ratio=0.0001, *,
+    split_cast_transitions=False, min_cast_run_frames=4,
 ):
-    """Resolve active mappings and the best composition anchor per shot.
+    """Resolve active mappings and the best composition anchor per segment.
 
     Presence is evaluated inside each detected camera shot rather than across
     a diffusion window. This prevents two characters in adjacent
     shot/reverse-shot frames from being mistaken for a simultaneous cast.
+
+    Recast can additionally divide one camera shot when its stable set of
+    mapped characters changes. SCAIL-2 then starts every generated segment
+    with the same semantic colors represented by its primary reference,
+    instead of asking it to introduce a second identity partway through a
+    window. Short presence/dropout runs are absorbed into their neighbors so
+    detector flicker and momentary occlusion do not create tiny jobs.
     """
     import numpy as np
 
@@ -11302,6 +11320,120 @@ def _plan_recast_shot_segments(
         16,
         int(round(frame_area * max(0.0, float(min_area_ratio)))),
     )
+    try:
+        minimum_cast_run = max(1, int(min_cast_run_frames))
+    except (TypeError, ValueError):
+        minimum_cast_run = 4
+
+    def _runs(values):
+        values = np.asarray(values, dtype=bool)
+        if not len(values):
+            return []
+        result = []
+        run_start = 0
+        run_value = bool(values[0])
+        for index in range(1, len(values)):
+            value = bool(values[index])
+            if value == run_value:
+                continue
+            result.append((run_start, index, run_value))
+            run_start, run_value = index, value
+        result.append((run_start, len(values), run_value))
+        return result
+
+    def _stabilize_presence(values):
+        stable = np.asarray(values, dtype=bool).copy()
+        if minimum_cast_run <= 1 or len(stable) <= 1:
+            return stable
+        while True:
+            presence_runs = _runs(stable)
+            if len(presence_runs) <= 1:
+                return stable
+            short = [
+                (end - start, run_index, start, end)
+                for run_index, (start, end, _value) in enumerate(
+                    presence_runs
+                )
+                if end - start < minimum_cast_run
+            ]
+            if not short:
+                return stable
+            _length, run_index, start, end = min(short)
+            if run_index == 0:
+                replacement = presence_runs[1][2]
+            elif run_index == len(presence_runs) - 1:
+                replacement = presence_runs[-2][2]
+            else:
+                # Boolean runs alternate, so both neighbors normally agree.
+                # The duration tie-break keeps this safe if the representation
+                # ever expands beyond a single presence bit.
+                left = presence_runs[run_index - 1]
+                right = presence_runs[run_index + 1]
+                replacement = (
+                    left[2]
+                    if (
+                        left[2] == right[2]
+                        or left[1] - left[0] >= right[1] - right[0]
+                    )
+                    else right[2]
+                )
+            stable[start:end] = replacement
+
+    def _signature_runs(stable_presence):
+        if stable_presence.shape[1] <= 0:
+            return []
+        signatures = [
+            tuple(np.flatnonzero(stable_presence[:, frame_index]).tolist())
+            for frame_index in range(stable_presence.shape[1])
+        ]
+        result = []
+        run_start = 0
+        run_signature = signatures[0]
+        for frame_index in range(1, len(signatures)):
+            signature = signatures[frame_index]
+            if signature == run_signature:
+                continue
+            result.append([run_start, frame_index, run_signature])
+            run_start, run_signature = frame_index, signature
+        result.append([run_start, len(signatures), run_signature])
+
+        # Two long tracks can overlap or hand off for only a frame or two even
+        # after each individual presence timeline is stable. Fold that brief
+        # combined signature into the most compatible neighboring segment.
+        while len(result) > 1:
+            short = [
+                (end - start, run_index)
+                for run_index, (start, end, _signature) in enumerate(result)
+                if end - start < minimum_cast_run
+            ]
+            if not short:
+                break
+            _length, run_index = min(short)
+            current = set(result[run_index][2])
+            neighbor_indices = [
+                index
+                for index in (run_index - 1, run_index + 1)
+                if 0 <= index < len(result)
+            ]
+            replacement_index = max(
+                neighbor_indices,
+                key=lambda index: (
+                    len(current.intersection(result[index][2])),
+                    -len(current.symmetric_difference(result[index][2])),
+                    result[index][1] - result[index][0],
+                    -abs(index - run_index),
+                ),
+            )
+            result[run_index][2] = result[replacement_index][2]
+            merged = []
+            for start, end, signature in result:
+                if merged and merged[-1][2] == signature:
+                    merged[-1][1] = end
+                else:
+                    merged.append([start, end, signature])
+            result = merged
+        return result
+
     normalized_ranges = []
     for raw_start, raw_end in shot_ranges or [(0, frame_count)]:
         start = max(0, min(frame_count, int(raw_start)))
@@ -11312,61 +11444,102 @@ def _plan_recast_shot_segments(
         normalized_ranges = [(0, frame_count)]
 
     plans = []
-    for shot_index, (start, end) in enumerate(normalized_ranges):
+    for camera_shot_index, (shot_start, shot_end) in enumerate(
+        normalized_ranges
+    ):
         shot_areas = np.stack(
-            [area[start:end] for area in areas],
+            [area[shot_start:shot_end] for area in areas],
             axis=0,
         )
-        active_indices = [
-            index
-            for index in range(len(masks))
-            if int(shot_areas[index].max(initial=0)) >= minimum_pixels
-        ]
-        if active_indices:
-            active_areas = shot_areas[active_indices]
-            visible = active_areas >= minimum_pixels
-            common = np.all(visible, axis=0)
-            if bool(common.any()):
-                candidates = np.flatnonzero(common)
-                # Favor a frame where the least-visible active character is
-                # still large, then use total subject area as the tie-breaker.
-                minimum_area = active_areas[:, candidates].min(axis=0)
-                total_area = active_areas[:, candidates].sum(axis=0)
-                local_anchor = int(
-                    candidates[
-                        np.lexsort((total_area, minimum_area))[-1]
-                    ]
-                )
-                cooccurring = True
-            else:
-                visible_count = visible.sum(axis=0)
-                total_area = active_areas.sum(axis=0)
-                local_anchor = int(
-                    np.lexsort((total_area, visible_count))[-1]
-                )
-                cooccurring = False
-            anchor = start + local_anchor
+        if split_cast_transitions:
+            stable_presence = np.stack([
+                _stabilize_presence(mapping_area >= minimum_pixels)
+                for mapping_area in shot_areas
+            ])
+            local_segments = _signature_runs(stable_presence)
         else:
-            anchor = start
-            cooccurring = False
+            active = tuple(
+                index
+                for index in range(len(masks))
+                if int(shot_areas[index].max(initial=0)) >= minimum_pixels
+            )
+            local_segments = [[0, shot_end - shot_start, active]]
 
-        active_count = len(active_indices)
-        plans.append({
-            "shot_index": shot_index,
-            "start_frame": start,
-            "end_frame": end,
-            "frame_count": end - start,
-            "anchor_frame_index": anchor,
-            "active_mapping_indices": active_indices,
-            "cooccurring": cooccurring,
-            "mode": (
-                "passthrough"
-                if active_count == 0
-                else "solo"
-                if active_count == 1
-                else "group"
-            ),
-        })
+        for cast_segment_index, (
+            local_start, local_end, active_signature,
+        ) in enumerate(local_segments):
+            start = shot_start + int(local_start)
+            end = shot_start + int(local_end)
+            active_indices = [int(index) for index in active_signature]
+            segment_areas = np.stack(
+                [area[start:end] for area in areas],
+                axis=0,
+            )
+            if active_indices:
+                active_areas = segment_areas[active_indices]
+                visible = active_areas >= minimum_pixels
+                common = np.all(visible, axis=0)
+                if bool(common.any()):
+                    candidates = np.flatnonzero(common)
+                    first_all_active = start + int(candidates[0])
+                    # Favor a frame where the least-visible active character
+                    # is still large, then total area as the tie-breaker.
+                    minimum_area = active_areas[:, candidates].min(axis=0)
+                    total_area = active_areas[:, candidates].sum(axis=0)
+                    local_anchor = int(
+                        candidates[
+                            np.lexsort((total_area, minimum_area))[-1]
+                        ]
+                    )
+                    cooccurring = True
+                else:
+                    first_all_active = None
+                    visible_count = visible.sum(axis=0)
+                    total_area = active_areas.sum(axis=0)
+                    local_anchor = int(
+                        np.lexsort((total_area, visible_count))[-1]
+                    )
+                    cooccurring = False
+                anchor = start + local_anchor
+            else:
+                anchor = start
+                first_all_active = None
+                cooccurring = False
+
+            initial_active = [
+                index
+                for index in active_indices
+                if int(areas[index][start]) >= minimum_pixels
+            ]
+            active_count = len(active_indices)
+            plans.append({
+                "shot_index": len(plans),
+                "camera_shot_index": camera_shot_index,
+                "cast_segment_index": cast_segment_index,
+                "segment_reason": (
+                    "camera_shot"
+                    if cast_segment_index == 0
+                    else "cast_change"
+                ),
+                "start_frame": start,
+                "end_frame": end,
+                "frame_count": end - start,
+                "anchor_frame_index": anchor,
+                "first_all_active_frame_index": first_all_active,
+                "active_mapping_indices": active_indices,
+                "initial_active_mapping_indices": initial_active,
+                "starts_with_all_active_mappings": (
+                    initial_active == active_indices
+                ),
+                "cooccurring": cooccurring,
+                "mode": (
+                    "passthrough"
+                    if active_count == 0
+                    else "solo"
+                    if active_count == 1
+                    else "group"
+                ),
+            })
     return plans
 
 
@@ -13112,7 +13285,31 @@ def _build_recast_shot_manifest(
             target_frame_count,
         )
     )
-    plans = _plan_recast_shot_segments(mapping_masks, shot_ranges)
+    cast_transition_hold_frames = max(
+        4,
+        min(12, int(round(max(1.0, float(generation_fps)) * 0.2))),
+    )
+    transition_plans = _plan_recast_shot_segments(
+        mapping_masks,
+        shot_ranges,
+        split_cast_transitions=True,
+        min_cast_run_frames=cast_transition_hold_frames,
+    )
+    plans = _plan_recast_shot_segments(
+        mapping_masks,
+        shot_ranges,
+        # Keep every camera shot continuous. Splitting at a cast entrance
+        # created tiny independent clips that could leave the source actor
+        # untouched and made SCAIL-2 relearn color/identity correspondence at
+        # the join. A hidden identity-aware pre-roll below gives late entrants
+        # an initialization frame without publishing a new boundary.
+        split_cast_transitions=False,
+        min_cast_run_frames=cast_transition_hold_frames,
+    )
+    cast_transition_count = max(
+        0,
+        len(transition_plans) - len(shot_ranges),
+    )
 
     global_semantic = np.empty(
         (*source_frames.shape[:-1], 3),
@@ -13231,6 +13428,64 @@ def _build_recast_shot_manifest(
         custom_settings = copy.deepcopy(
             base_params.get("custom_settings") or {},
         )
+        try:
+            requested_warmup = max(
+                0,
+                int(custom_settings.get(
+                    "scail2_recast_warmup_frames",
+                    8,
+                ) or 0),
+            )
+        except (TypeError, ValueError):
+            requested_warmup = 8
+        identity_warmup_anchor = None
+        if (
+            len(active) > 1
+            and bool(plan.get("cooccurring"))
+            and not bool(plan.get("starts_with_all_active_mappings"))
+        ):
+            first_all_active = plan.get("first_all_active_frame_index")
+            if first_all_active is not None:
+                latent = max(1, int(latent_size))
+                # Keep the normal hidden-frame budget whenever possible. The
+                # remote anchor supplies the missing identity; increasing the
+                # budget from 8 to 16 can needlessly create another diffusion
+                # window on common 5-second shots.
+                desired_warmup = min(
+                    16,
+                    max(latent, requested_warmup or 8),
+                )
+                desired_warmup = min(
+                    16,
+                    max(
+                        latent,
+                        (
+                            (desired_warmup + latent - 1)
+                            // latent
+                        ) * latent,
+                    ),
+                )
+                identity_warmup_anchor = max(
+                    1,
+                    int(plan["anchor_frame_index"]) - start,
+                )
+                custom_settings["scail2_recast_warmup_frames"] = (
+                    desired_warmup
+                )
+                custom_settings[
+                    "scail2_recast_warmup_anchor_offset"
+                ] = identity_warmup_anchor
+                published["identity_warmup_frames"] = desired_warmup
+                published["identity_warmup_anchor_frame_index"] = int(
+                    plan["anchor_frame_index"]
+                )
+                print(
+                    f"[Recast] Shot {shot_index + 1} stays continuous; "
+                    f"a hidden {desired_warmup}-frame identity pre-roll "
+                    f"starts from mapped frame "
+                    f"{int(plan['anchor_frame_index'])} before returning "
+                    "to the shot boundary."
+                )
         custom_settings.update({
             "scail2_reference_mask_path": shot_refs["primary_mask"],
             "scail2_additional_reference_mask_paths": list(
@@ -13295,6 +13550,8 @@ def _build_recast_shot_manifest(
         "published_shots": published_plans,
         "frame_count": int(target_frame_count),
         "fps": float(generation_fps),
+        "camera_shot_count": len(shot_ranges),
+        "cast_transition_count": cast_transition_count,
     }
 
 
@@ -15328,6 +15585,8 @@ async def recast_endpoint(request: Request):
                 native_reference_frame_index = 0
                 scene_anchor_frame = probe_frame
                 scene_anchor_mask = None
+                shot_aware_recast_required = False
+                cast_transition_count = 0
                 if explicit_character_mappings:
                     tracking_progress = {"bucket": -1}
 
@@ -15381,6 +15640,30 @@ async def recast_endpoint(request: Request):
                     except InterruptedError:
                         return
 
+                    tracking_fps = float(
+                        mapped_tracking.get("fps") or fps or 25.0
+                    )
+                    cast_transition_hold_frames = max(
+                        4,
+                        min(
+                            12,
+                            int(round(max(1.0, tracking_fps) * 0.2)),
+                        ),
+                    )
+                    cast_preview = _plan_recast_shot_segments(
+                        mapped_tracking["mapping_masks"],
+                        mapped_tracking["shot_ranges"],
+                        split_cast_transitions=True,
+                        min_cast_run_frames=cast_transition_hold_frames,
+                    )
+                    cast_transition_count = max(
+                        0,
+                        len(cast_preview) - int(mapped_tracking["shot_count"]),
+                    )
+                    shot_aware_recast_required = (
+                        int(mapped_tracking["shot_count"]) > 1
+                        or cast_transition_count > 0
+                    )
                     common_index = mapped_tracking["common_frame_index"]
                     scene_index = mapped_tracking["scene_anchor_index"]
                     native_reference_frame_index = (
@@ -15436,6 +15719,9 @@ async def recast_endpoint(request: Request):
                     job["params"]["edit_recast_timeline_aware"] = (
                         mapped_tracking["timeline_aware"]
                     )
+                    job["params"]["edit_recast_cast_transition_count"] = (
+                        cast_transition_count
+                    )
                     print(
                         "[Recast] Timeline discovery mapped "
                         f"{person_count} character"
@@ -15448,6 +15734,15 @@ async def recast_endpoint(request: Request):
                             else "no shared frame; using per-character anchors."
                         )
                     )
+                    if cast_transition_count:
+                        print(
+                            "[Recast] Found "
+                            f"{cast_transition_count} stable cast change"
+                            f"{'s' if cast_transition_count != 1 else ''} "
+                            "inside a camera shot; hidden identity pre-rolls "
+                            "will initialize late entrants without splitting "
+                            "the visible shot."
+                        )
                     matched_people = person_count
                 else:
                     probe_mask = magic_mask.generate_keyword_masks(
@@ -15476,7 +15771,8 @@ async def recast_endpoint(request: Request):
                 native_group_supported = (
                     not explicit_character_mappings
                     or (
-                        mapped_tracking["shot_count"] == 1
+                        not shot_aware_recast_required
+                        and mapped_tracking["shot_count"] == 1
                         and mapped_tracking["common_frame_index"] is not None
                     )
                 )
@@ -15822,13 +16118,14 @@ async def recast_endpoint(request: Request):
 
                 if (
                     explicit_character_mappings
-                    and mapped_tracking["shot_count"] > 1
+                    and shot_aware_recast_required
                 ):
                     if not update_job(
                         job,
-                        phase="Preparing camera shots",
+                        phase="Preparing cast-aware segments",
                         message=(
-                            "Preparing shot-specific character references..."
+                            "Preparing shot and cast-specific character "
+                            "references..."
                         ),
                     ):
                         return
@@ -15898,6 +16195,12 @@ async def recast_endpoint(request: Request):
                             ],
                             "frame_count": shot_manifest["frame_count"],
                             "fps": shot_manifest["fps"],
+                            "camera_shot_count": shot_manifest[
+                                "camera_shot_count"
+                            ],
+                            "cast_transition_count": shot_manifest[
+                                "cast_transition_count"
+                            ],
                             "resolved_seed": resolved_seed,
                         },
                         "edit_recast_shot_aware": True,
@@ -15924,7 +16227,13 @@ async def recast_endpoint(request: Request):
                     )
                     print(
                         "[Recast] Shot-aware plan prepared "
-                        f"{len(shot_manifest['shots'])} camera shots "
+                        f"{len(shot_manifest['shots'])} generation segments "
+                        f"from {shot_manifest['camera_shot_count']} camera "
+                        "shot"
+                        f"{'s' if shot_manifest['camera_shot_count'] != 1 else ''} "
+                        f"with {shot_manifest['cast_transition_count']} stable "
+                        "cast transition"
+                        f"{'s' if shot_manifest['cast_transition_count'] != 1 else ''} "
                         f"({generated_count} generated, "
                         f"{passthrough_count} source passthrough), "
                         f"{shot_manifest['frame_count']} exact output frames "
@@ -21135,7 +21444,7 @@ def _write_recast_shot_aware_sidecar(
 
 
 def _run_recast_shot_generation(job_id):
-    """Generate camera shots independently, then restore one source track."""
+    """Generate cast-aware segments independently, then restore source audio."""
     import shutil
 
     job = _jobs[job_id]
@@ -21165,8 +21474,8 @@ def _run_recast_shot_generation(job_id):
             progress=99,
             step=0,
             total_steps=0,
-            phase="Joining camera shots",
-            message="Joining camera shots and restoring source audio...",
+            phase="Joining Recast segments",
+            message="Joining cast-aware segments and restoring source audio...",
         ):
             return
 
@@ -21187,7 +21496,7 @@ def _run_recast_shot_generation(job_id):
                 )
             if not clip_path or not os.path.isfile(clip_path):
                 raise RuntimeError(
-                    "Recast shot assembly is missing camera shot "
+                    "Recast assembly is missing generation segment "
                     f"{int(shot.get('shot_index', 0)) + 1}."
                 )
             ordered_paths.append(clip_path)
@@ -21235,7 +21544,7 @@ def _run_recast_shot_generation(job_id):
                     pass
             return
         if not assembled or not os.path.isfile(final_path):
-            raise RuntimeError("Recast camera-shot assembly failed.")
+            raise RuntimeError("Recast cast-aware assembly failed.")
 
         expected_frames = int(shot_bundle["frame_count"])
         actual_frames = _recast_video_frame_count(final_path)
@@ -21245,7 +21554,7 @@ def _run_recast_shot_generation(job_id):
             except OSError:
                 pass
             raise RuntimeError(
-                "Recast camera-shot assembly changed the timeline length "
+                "Recast cast-aware assembly changed the timeline length "
                 f"({actual_frames}/{expected_frames} frames)."
             )
 
@@ -21273,7 +21582,7 @@ def _run_recast_shot_generation(job_id):
             return
         print(
             "[Recast] Shot-aware assembly completed: "
-            f"{len(ordered_paths)} shots, {actual_frames} frames, "
+            f"{len(ordered_paths)} segments, {actual_frames} frames, "
             f"{'continuous source audio' if source_audio else 'video only'}."
         )
     except Exception as error:

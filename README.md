@@ -23,7 +23,7 @@ Detects your GPU, VRAM, and RAM on first launch and picks the right profile, qua
 
 ### 🎨 Studio Mode — full manual control
 Direct access to every model and every knob:
-- **Video** — LTX-2.3, Wan1/2, Hunyuan, and many more.
+- **Video** — MiniMax H3 with native synchronized audio, LTX-2.3, Wan1/2, Hunyuan, and many more.
 - **Image** — Flux 2 Klein 9B, Krea 2 RAW/Turbo and Identity Edit, Qwen Image Edit, and many more
 - **Audio** — TTS: Kugelaudio, Qwen3 TTS. Music: ACE-Step. SFX: MMAudio
 - **Multi-clip generation** with per-clip prompts, seamless overlapping (sliding window) transitions, and shared LoRAs
@@ -76,6 +76,34 @@ View all past Director runs with their full state — clip plans, generated imag
 ## Updates
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
+
+### v1.5.5 (2026-08-04)
+
+**MiniMax H3 local audio-video generation**
+- Added native local MiniMax H3 Base FL2VA support with text-to-video, image-to-video, and first/last-frame video generation.
+- H3 generates synchronized 32 kHz stereo audio together with the video instead of requiring a separate audio pass.
+- Added approximately 5-15 second generation at 24 FPS with landscape, portrait, square, native 768p, and lower-VRAM resolution options.
+- Added automatic, revision-pinned provisioning for the compact scaled-FP8 transformer, NVFP4 Qwen3-VL conditioner, video VAE, audio VAE, tokenizer, and processor assets.
+- The initial integration focuses on H3 Base FL2VA; H3 Ref2VA reference-video/audio conditioning and hosted 2K regeneration are not yet included.
+
+**H3 prompting and dialogue**
+- Added an H3-specific Context-IR Prompt Enhance workflow using the model's native multimodal description, soundscape, music, speaker-ID, and dialogue-tag structure.
+- Vague requests such as two characters discussing a subject can now be expanded into concise, meaningful dialogue sized to the selected duration.
+- User-supplied dialogue is preserved verbatim, and remaining time is assigned to silent visible action to reduce invented speech and gibberish.
+- Start-frame prompts now receive the correct H3 image-alignment instruction while raw prompting remains available by simply not using Prompt Enhance.
+- H3 enhancement bypasses the incompatible generic cinematic enhancer and remains one native timeline instead of being divided into false sliding-window paragraphs.
+
+**H3 compatibility, memory, and reliability**
+- Corrected compact Qwen3-VL prompt conditioning so H3 follows the requested subject instead of producing unrelated repeated scenes.
+- Added native row-scaled INT8 embedding support and corrected NVFP4 pre-quantization and combined-scale handling for Comfy-format checkpoints.
+- Fixed mixed-dtype model profiling, keyframe CPU/CUDA device mismatches, and first-frame generation failures.
+- Added activation chunking, explicit transformer working-memory reservation, and MMGP-friendly dtype locks so H3 can stream on consumer GPUs without starving the first denoising step.
+- Added regression coverage for prompt conditioning, quantized checkpoint loading, keyframes, scheduler behavior, audio output, activation chunking, and H3 prompt structure.
+
+**Multi-character Recast continuity**
+- Improved SCAIL-2 Recast when a mapped character enters later within an otherwise continuous camera shot.
+- Added hidden identity pre-roll conditioning so late-arriving characters can be introduced without publishing an artificial visible cut.
+- Recast assembly now validates that all generated segments are present and that the final output retains the exact source timeline length.
 
 ### v1.5.0 (2026-08-02)
 
@@ -414,6 +442,7 @@ Maestro is built on top of, and indebted to, the following projects:
 
 - [**Wan2GP / WanGP**](https://github.com/deepbeepmeep/Wan2GP) by [@deepbeepmeep](https://github.com/deepbeepmeep) — the entire generation pipeline. Maestro inherits WanGP's non-commercial license.
 - [**LTX-Video**](https://github.com/Lightricks/LTX-Video) by Lightricks — LTX-2 and LTX-2.3 distilled models.
+- [**MiniMax H3**](https://huggingface.co/MiniMaxAI/MiniMax-H3) by MiniMax — joint video-and-audio generation with text, first-frame, and first/last-frame conditioning.
 - [**Wan 2.1 / 2.2**](https://github.com/Wan-Video/Wan2.1) by Alibaba — text-to-video and image-to-video.
 - [**Flux**](https://github.com/black-forest-labs/flux) by Black Forest Labs — image generation.
 - [**Qwen**](https://github.com/QwenLM/Qwen) by Alibaba — image generation and LLMs.
@@ -431,7 +460,7 @@ Maestro is released under the **WanGP Non-Commercial Evaluation License 1.1**, i
 
 **TL;DR**: free to use and modify for non-commercial purposes; the *outputs* you generate are yours to use commercially (with attribution); commercial use of the *software itself* (including hosted services and APIs) requires a separate commercial license from the WanGP licensor.
 
-Third-party models, weights, and components keep their own licenses — review them before redistributing. Notably, the [seed-vc](https://github.com/Plachta/seed-vc) voice-conversion component is **GPL-3.0**, so it is distributed from its own repository ([Blizaine/maestro-seedvc](https://github.com/Blizaine/maestro-seedvc)) and cloned into `app/postprocessing/seedvc/` at install time rather than shipped in this tree. Other vendored components include BigVGAN (MIT), FlashVSR sparse-sage (Apache-2.0), and IndexTTS2 (bilibili model license).
+Third-party models, weights, and components keep their own licenses — review them before redistributing. MiniMax H3 weights remain subject to MiniMax's separate model terms and any authorization or waiver required for the user's location. Notably, the [seed-vc](https://github.com/Plachta/seed-vc) voice-conversion component is **GPL-3.0**, so it is distributed from its own repository ([Blizaine/maestro-seedvc](https://github.com/Blizaine/maestro-seedvc)) and cloned into `app/postprocessing/seedvc/` at install time rather than shipped in this tree. Other vendored components include BigVGAN (MIT), FlashVSR sparse-sage (Apache-2.0), and IndexTTS2 (bilibili model license).
 
 ## Issues
 

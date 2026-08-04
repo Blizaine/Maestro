@@ -3,6 +3,38 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [1.5.5] - 2026-08-04
+
+MiniMax H3: added native local H3 Base FL2VA generation for text, first-frame,
+and first/last-frame video with synchronized 32 kHz stereo audio. The initial
+integration supports approximately 5-15 second output at 24 FPS across native,
+portrait, square, and lower-VRAM resolutions, with revision-pinned automatic
+provisioning of the compact scaled-FP8 transformer, NVFP4 Qwen3-VL conditioner,
+video/audio VAEs, tokenizer, and processor assets. Ref2VA reference-video/audio
+conditioning and hosted 2K regeneration remain outside this initial release.
+
+H3 prompting: added a model-specific local Context-IR Prompt Enhance workflow
+with the required multimodal-description, soundscape, music, stable speaker-ID,
+and dialogue-tag syntax. Vague discussion requests can be converted into short,
+duration-aware scripts; supplied dialogue remains verbatim; and unused time is
+assigned to silent visible action to reduce invented speech. H3 enhancement now
+bypasses the generic cinematic enhancer and remains one native timeline rather
+than receiving sliding-window paragraph instructions.
+
+H3 runtime reliability: corrected compact Qwen3-VL prompt conditioning,
+row-scaled INT8 embedding loading, NVFP4 scale application, and causal attention.
+Fixed mixed-dtype MMGP profiling and start-frame CPU/CUDA mismatches. Added
+bounded activation chunking, explicit transformer working-memory reservation,
+and dtype locks so the large packed audio/video sequence can stream on consumer
+GPUs without exhausting memory before denoising. Expanded model-free and runtime
+regressions for prompt conditioning, quantization, keyframes, scheduling, native
+audio, activation memory, and Context-IR formatting.
+
+SCAIL-2 Recast: improved continuous multi-character shots by detecting cast
+transitions and supplying late-arriving identities through hidden pre-roll
+conditioning instead of publishing artificial visible cuts. Recast assembly
+now verifies every generation segment and preserves the exact source timeline.
+
 ## [1.5.0] - 2026-08-02
 
 SCAIL-2 editing: rebuilt Recast around native replacement conditioning with

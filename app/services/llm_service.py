@@ -2117,6 +2117,10 @@ def enhance_prompt(
     lora_system_hint: str = "",
     raw_enhancer_mode: bool = False,
 ) -> str:
+    is_h3_context_ir = (
+        mode in ("video", "avatar")
+        and (model_type or "").lower().startswith("minimax_h3")
+    )
     # If caller provides a system prompt override, use it directly (e.g., Director third-pass)
     if system_override:
         # Do NOT append the full model-specific enhance guide — the override is self-contained.
@@ -2324,7 +2328,11 @@ def enhance_prompt(
     # who anyone is). Appended for video so EVERY path gets it: per-model guides
     # (Sulphur, 10Eros) that don't include the generic LTX video guide, plus the
     # generic guide itself. Mirrors the Director-mode character-reference rule.
-    if mode in ("video", "avatar"):
+    # H3's guide already carries its own identity, pacing, and silence rules.
+    # The generic appendix says to remove all character names and to write one
+    # paragraph per sliding window, both of which conflict with H3's
+    # knowledge-aware Context-IR format and single native timeline.
+    if mode in ("video", "avatar") and not is_h3_context_ir:
         from services.guide_loader import load_guide as _load_vid_guide
         vid_block = _load_vid_guide("enhance", "video_shared")
         if vid_block:
@@ -2356,13 +2364,35 @@ def enhance_prompt(
             '\n- NEVER include LoRA names or filenames in the output.'
         )
 
-    # Reinforce output constraint — prevents verbose models from adding explanations
-    system += "\n\nCRITICAL: Output ONLY the enhanced prompt text. No headers, no labels, no markdown, no explanation, no \"Enhancement Logic\", no \"Edit Prompt:\". No LoRA filenames (.safetensors). Just the raw prompt text."
+    # Reinforce the output constraint. MiniMax H3 is intentionally different:
+    # its field labels and <d> blocks are part of the model input, not prose
+    # headers to strip. The generic "no labels" rule previously contradicted
+    # the H3 guide and encouraged ordinary quote-mark dialogue.
+    if is_h3_context_ir:
+        system += (
+            "\n\nCRITICAL MINIMAX H3 OUTPUT CONTRACT: Output ONLY the structured "
+            "H3 prompt, with the exact field labels "
+            "integrated_multimodal_description:, overall_soundscape:, and "
+            "non_diegetic_music:. These labels are required model syntax, not "
+            "explanatory headers. Every spoken line must have a stable (S1), "
+            "(S2), etc. speaker ID and use <d>[Language] literal words</d>. "
+            "When the user requests a discussion without supplying lines, write "
+            "short meaningful dialogue that fits the supplied Duration. Once the "
+            "last line ends, describe silent visible action and closed mouths; do "
+            "not invent more speech. No markdown, explanation, or LoRA filenames."
+        )
+    else:
+        system += "\n\nCRITICAL: Output ONLY the enhanced prompt text. No headers, no labels, no markdown, no explanation, no \"Enhancement Logic\", no \"Edit Prompt:\". No LoRA filenames (.safetensors). Just the raw prompt text."
 
     # Scale max tokens for multi-window video prompts
     effective_max_tokens = max_new_tokens
     if window_count and window_count > 1:
         effective_max_tokens = max(max_new_tokens, window_count * 300 + 256)
+    if is_h3_context_ir:
+        # Leave enough room for the three required fields plus a compact timed
+        # dialogue. Most H3 prompts finish well below this ceiling, but 512 can
+        # truncate a vision-assisted 15-second rewrite before its sound fields.
+        effective_max_tokens = max(effective_max_tokens, 768)
 
     # TTS: thinking mode for creative dialogue, disabled for fast mode
     is_tts = bool(tts_enhance_mode)
