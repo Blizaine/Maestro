@@ -230,6 +230,7 @@ export interface ModelOptions {
   /** Which conditioning letters the model accepts: T(ext), S(tart), E(nd), V(ideo), L(ast). */
   image_prompt_types_allowed?: string
   video_continuation?: boolean
+  video_guide_label?: string | null
   guide_preprocessing: ChoiceConfig | null
   guide_custom_choices: ChoiceConfig | null
   image_ref_choices: ChoiceConfig | null

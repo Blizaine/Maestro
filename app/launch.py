@@ -5050,6 +5050,9 @@ def get_model_options(model_type: str):
         # Choice configs
         "guide_preprocessing": extract_choice("guide_preprocessing"),
         "guide_custom_choices": extract_choice("guide_custom_choices"),
+        # What the guide video *is* to this model. A control video and a reference clip are different
+        # things and the handler names it; without this the UI calls every one of them a Control Video.
+        "video_guide_label": md.get("video_guide_label"),
         "image_ref_choices": extract_choice("image_ref_choices"),
         "audio_prompt_type_sources": extract_choice("audio_prompt_type_sources"),
 

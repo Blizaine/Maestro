@@ -198,17 +198,45 @@ export function InputsPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [imageRefs.length])
 
+  // Some models take a reference *video* alongside reference images (MiniMax H3 Ref2VA borrows a subject or
+  // a motion from a clip). That input otherwise lives behind a dropdown in Advanced Settings, which is the
+  // last place anyone looks, so the Reference tile accepts a clip too and turns the option on itself.
+  const refVideoValue = guideValues.find(value => value === 'V')
+  const supportsRefVideo = !!guideCfg && !modelOptions?.guide_preprocessing && !supportsControlVid && !!refVideoValue
+
+  const attachReferenceVideo = async (file: File) => {
+    if (!file.type.startsWith('video/')) return
+    try {
+      const result = await api.uploadImage(file)
+      setParam('video_guide', result.path)
+      const current = (params.video_prompt_type as string) || ''
+      if (!current.includes('V')) setParam('video_prompt_type', current + refVideoValue)
+    } catch (e) {
+      console.error('Reference video upload failed:', e)
+    }
+  }
+
   const pickReferences = () => {
     const input = document.createElement('input')
     input.type = 'file'
-    input.accept = '.png,.jpg,.jpeg,.webp,.bmp'
+    input.accept = '.png,.jpg,.jpeg,.webp,.bmp' + (supportsRefVideo ? ',.mp4,.mov,.webm,.mkv,.avi,.m4v' : '')
     input.multiple = true
     input.onchange = () => {
       const files = Array.from(input.files || [])
-      const room = maxRefs == null ? files.length : Math.max(0, maxRefs - imageRefs.length)
-      files.slice(0, room).forEach(addImageRef)
+      // A clip is not a reference image: route it to the reference-video input instead of the ref list,
+      // where it would be uploaded as a still and then ignored at generation time.
+      const clips = supportsRefVideo ? files.filter(f => f.type.startsWith('video/')) : []
+      const stills = files.filter(f => !clips.includes(f))
+      if (clips.length > 0) void attachReferenceVideo(clips[0])
+      const room = maxRefs == null ? stills.length : Math.max(0, maxRefs - imageRefs.length)
+      stills.slice(0, room).forEach(addImageRef)
     }
     input.click()
+  }
+
+  const dropOnReferenceTile = (file: File) => {
+    if (supportsRefVideo && file.type.startsWith('video/')) void attachReferenceVideo(file)
+    else addImageRef(file)
   }
 
   // Extend mode: the source video to continue from.
@@ -645,7 +673,7 @@ export function InputsPanel() {
             </div>
           </div>
         ))}
-        {supportsRefs && canAddRef && <AddTile label="Reference" icon={<Plus size={18} />} onClick={pickReferences} onDropFile={addImageRef} dropAccept="image" />}
+        {supportsRefs && canAddRef && <AddTile label="Reference" icon={<Plus size={18} />} onClick={pickReferences} onDropFile={dropOnReferenceTile} dropAccept={supportsRefVideo ? ['image', 'video'] : 'image'} />}
       </div>
 
       {/* Option strip — Frame: position picker (routes start / end / inject
@@ -808,13 +836,16 @@ function Row({ label, value }: { label: string; value: string }) {
 
 function AddTile({ label, icon, onClick, onDropFile, dropAccept }: {
   label: string; icon?: React.ReactNode; onClick: () => void
-  onDropFile?: (f: File) => void; dropAccept?: 'image' | 'audio' | 'video'
+  // A tile can take more than one kind: the Reference tile accepts stills and, on models that support one,
+  // a reference clip, and decides which input the file belongs to in its drop handler.
+  onDropFile?: (f: File) => void; dropAccept?: 'image' | 'audio' | 'video' | ('image' | 'audio' | 'video')[]
 }) {
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault()
     const f = e.dataTransfer.files[0]
     if (!f || !onDropFile) return
-    if (dropAccept && !f.type.startsWith(`${dropAccept}/`)) return
+    const accepted = dropAccept == null ? null : (Array.isArray(dropAccept) ? dropAccept : [dropAccept])
+    if (accepted && !accepted.some(kind => f.type.startsWith(`${kind}/`))) return
     onDropFile(f)
   }
   return (
