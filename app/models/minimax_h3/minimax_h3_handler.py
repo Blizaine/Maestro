@@ -255,13 +255,14 @@ class family_handler:
                     "audio_guide_label": "Audio Reference 1",
                     "audio_guide2_label": "Audio Reference 2",
                     "audio_prompt_type_sources": {
-                        "selection": ["", "A", "AB"],
+                        "selection": ["", "A", "AB", "K"],
                         "labels": {
                             "": "Generate without an Audio Reference",
                             "A": "Use One Audio Reference",
                             "AB": "Use Two Audio References",
+                            "K": "Use the Reference Video's Soundtrack",
                         },
-                        "letters_filter": "AB",
+                        "letters_filter": "ABK",
                         "label": "Audio References",
                         "show_label": True,
                         "default": "",
@@ -418,6 +419,20 @@ class family_handler:
                 return f"The Reference Video must be between 2 and 15 seconds long (found {duration:.2f}s)"
 
         audio_prompt_type = inputs.get("audio_prompt_type") or ""
+        if "K" in audio_prompt_type:
+            # Caught here because the alternative is discovering it after the model has loaded: a clip with
+            # no audio track would simply contribute no reference, and the generation would look like the
+            # soundtrack option had been ignored.
+            if "V" not in (inputs.get("video_prompt_type") or "") or not inputs.get("video_guide"):
+                return "Using the Reference Video's soundtrack requires a Reference Video"
+            from shared.utils.audio_video import extract_audio_tracks
+
+            try:
+                if extract_audio_tracks(inputs["video_guide"], query_only=True) == 0:
+                    return "The Reference Video has no audio track to use as a soundtrack reference"
+            except Exception as error:
+                return f"Unable to inspect the Reference Video's soundtrack: {error}"
+
         references = [inputs.get("audio_guide")] if "A" in audio_prompt_type else []
         if "B" in audio_prompt_type:
             references.append(inputs.get("audio_guide2"))

@@ -490,6 +490,28 @@ class MiniMaxH3Model:
         )
         return self.scheduler.scale_noise(clean_rows, MINIMAX_H3_KEYFRAME_NOISE_AUG, noise), references
 
+    def _reference_video_soundtrack(self, video_path) -> torch.Tensor | None:
+        """Pull a reference clip's own audio out as a waveform, for conditioning on how the clip sounds.
+
+        Extracted to a temporary wav rather than decoded in place, because the loader wants a file and
+        ffmpeg is already the thing that knows how to demux one. A clip with no audio track is not an error:
+        it simply contributes no audio reference.
+        """
+        import tempfile
+
+        from shared.utils.audio_video import extract_audio_track_to_wav
+
+        if not video_path:
+            return None
+        with tempfile.TemporaryDirectory() as workspace:
+            target = os.path.join(workspace, "reference_soundtrack.wav")
+            try:
+                if extract_audio_track_to_wav(video_path, target) is None:
+                    return None
+            except Exception:
+                return None
+            return self._load_reference_waveform(target)
+
     def _load_reference_waveform(self, source) -> torch.Tensor | None:
         """Load one audio reference as the stereo waveform the audio VAE expects, at the VAE's own sample rate."""
         if source is None:
@@ -638,6 +660,7 @@ class MiniMaxH3Model:
         audio_guide2=None,
         video_guide_path=None,
         video_prompt_type: str = "",
+        audio_prompt_type: str = "",
         input_video=None,
         prefix_frames_count: int = 0,
         frame_num: int = 124,
@@ -700,6 +723,12 @@ class MiniMaxH3Model:
             )
             if clip is not None:
                 reference_clips.append(clip)
+            # "K": condition on how the clip sounds as well as how it looks. Appended after any uploaded
+            # audio references so the packed order still matches the order they are announced in.
+            if "K" in (audio_prompt_type or ""):
+                soundtrack = self._reference_video_soundtrack(video_guide_path)
+                if soundtrack is not None:
+                    reference_waveforms.append(soundtrack)
         # Say out loud what conditioning actually arrived. A reference that silently fails to reach the
         # model looks identical to one the model ignored, and the two have completely different fixes.
         print(
