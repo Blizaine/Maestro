@@ -44,7 +44,18 @@ _AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
 # the entire available VRAM budget.  ``workingVRAM`` reserves this amount
 # independently of the user's card size; MMGP streams more transformer
 # blocks on smaller cards instead of starving the first denoising step.
-_TRANSFORMER_WORKING_VRAM_MB = 10 * 1024
+#
+# Sized for the largest canvas the model will accept rather than for 480p.
+# Attention holds query, key and value for the whole packed sequence at
+# once, each of them ``rows * heads * head_dim`` -- about 1 GB apiece per
+# 80k rows -- and the residual stream alongside them.  A 480p-sized
+# reservation left MMGP holding ~26 GB of weights on a 31 GB card, which is
+# short by roughly one of those tensors, so the first block of the first
+# step died allocating ``value``.  This is a worst-case figure because
+# ``load_model`` is per-model, not per-generation: it cannot know the
+# resolution, so it must cover the largest.  The cost is more block
+# streaming at small canvases, which is slower but does not fail.
+_TRANSFORMER_WORKING_VRAM_MB = 16 * 1024
 
 
 def _snap_resolution(resolution):
