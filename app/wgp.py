@@ -8352,7 +8352,12 @@ def generate_video(
                 )
 
             frames_to_inject_parsed = frames_to_inject[ window_start_frame if extract_guide_from_window_start else guide_start_frame: guide_end_frame]
-            if video_guide is not None or len(frames_to_inject_parsed) > 0 or model_def.get("forced_guide_mask_inputs", False): 
+            # A model that treats the guide as a *reference* decodes it from source itself, so preparing it
+            # as a control video is pure waste: it decodes and resizes the clip onto the output canvas, then
+            # trims it to the latent grid ("N frames will be lost"), and hands over a tensor the model does
+            # not read -- while holding a full-length copy of it in memory that the generation then needs.
+            reference_video_only = model_def.get("reference_video_source_path", False) and len(frames_to_inject_parsed) == 0
+            if not reference_video_only and (video_guide is not None or len(frames_to_inject_parsed) > 0 or model_def.get("forced_guide_mask_inputs", False)):
                 any_mask = video_mask is not None or model_def.get("forced_guide_mask_inputs", False)
                 any_guide_padding = model_def.get("pad_guide_video", False)
                 dont_cat_preguide = extract_guide_from_window_start or model_def.get("dont_cat_preguide", False) or sparse_video_image is not None 
