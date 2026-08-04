@@ -5041,6 +5041,11 @@ def get_model_options(model_type: str):
         "t2v_class": md.get("t2v_class", False),
         "image_outputs": md.get("image_outputs", False),
         "supports_end_frame": "E" in md.get("image_prompt_types_allowed", ""),
+        # The raw letters, alongside the single derived flag above: the Studio sub-mode tabs each need a different
+        # subset of them ("S" for Multi-Shot, "S"+"E" for Blend, "V" or video_continuation for Extend), so a model
+        # that only accepts "T" can be shown Frames alone instead of tabs that would fail at generation time.
+        "image_prompt_types_allowed": md.get("image_prompt_types_allowed", ""),
+        "video_continuation": md.get("video_continuation", False),
 
         # Choice configs
         "guide_preprocessing": extract_choice("guide_preprocessing"),

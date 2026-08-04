@@ -227,6 +227,9 @@ export interface ModelOptions {
   t2v_class: boolean
   image_outputs: boolean
   supports_end_frame: boolean
+  /** Which conditioning letters the model accepts: T(ext), S(tart), E(nd), V(ideo), L(ast). */
+  image_prompt_types_allowed?: string
+  video_continuation?: boolean
   guide_preprocessing: ChoiceConfig | null
   guide_custom_choices: ChoiceConfig | null
   image_ref_choices: ChoiceConfig | null
