@@ -341,6 +341,23 @@ def _spatial_position_grid(dim: int, patch: int, sqrt_area: float) -> torch.Tens
     return torch.from_numpy(grid).to(torch.float64)
 
 
+def _frame_position_grid(
+    latent_height: int, latent_width: int, patch_h: int, patch_w: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    r"""
+    The `(h, w)` coordinates of the `(latent_height // patch_h) * (latent_width // patch_w)` rows of one latent frame,
+    in row-major order, together with the width axis they were built from (audio rows are pinned to its two extremes).
+
+    Both axes are normalized by the same `sqrt(area)`, so the grid depends on the frame's aspect ratio rather than on
+    its absolute size. That is what lets a reference of arbitrary resolution be packed alongside the target.
+    """
+    sqrt_area = np.sqrt(latent_height * latent_width)
+    height_grid = _spatial_position_grid(latent_height, patch_h, sqrt_area)
+    width_grid = _spatial_position_grid(latent_width, patch_w, sqrt_area)
+    frame_grid = torch.stack([grid.reshape(-1) for grid in torch.meshgrid(height_grid, width_grid, indexing="ij")], -1)
+    return frame_grid, width_grid
+
+
 def _temporal_position_grid(num_latent_frames: int, origin: float) -> torch.Tensor:
     r"""The rotary time of every latent frame, starting at `origin`. Spacing is non-uniform: `5/3 * (1, 4, 4, 4, 4)`."""
     spans = torch.tensor(
@@ -412,10 +429,7 @@ def build_packed_sequence(
     position_ids = torch.zeros(sequence_length, 3, dtype=torch.float64)
     position_ids[:num_text_tokens, 0] = torch.arange(num_text_tokens, dtype=torch.float64)
 
-    sqrt_area = np.sqrt(latent_height * latent_width)
-    height_grid = _spatial_position_grid(latent_height, patch_h, sqrt_area)
-    width_grid = _spatial_position_grid(latent_width, patch_w, sqrt_area)
-    frame_grid = torch.stack([grid.reshape(-1) for grid in torch.meshgrid(height_grid, width_grid, indexing="ij")], -1)
+    frame_grid, width_grid = _frame_position_grid(latent_height, latent_width, patch_h, patch_w)
 
     for index, anchor in enumerate(keyframe_anchors):
         if anchor == "first":
