@@ -412,7 +412,16 @@ export function InputsPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startImage, endImage, injectedFrames, params.image_start, params.image_end, isExtend, supportsEndFrame, lastWindow])
 
-  const canAddFrame = isExtend ? supportsInject : (!hasStart || (supportsEndFrame && !hasEnd) || supportsInject)
+  // Whether the model takes a start frame at all. Some take none: MiniMax H3 Ref2VA allows only "T",
+  // conditioning on reference material rather than on timeline positions, so offering a Frame tile invites
+  // the user to attach an image that is then silently dropped at generation time. A backend that sends no
+  // letters is read as "everything allowed", so this can only hide a tile already known to be unusable.
+  const allowedImagePrompts = modelOptions?.image_prompt_types_allowed ?? 'TSEVL'
+  const supportsStartFrame = allowedImagePrompts.includes('S')
+  const supportsAnyFrame = supportsStartFrame || supportsEndFrame || supportsInject
+  const canAddFrame = isExtend
+    ? supportsInject
+    : ((supportsStartFrame && !hasStart) || (supportsEndFrame && !hasEnd) || supportsInject)
 
   // "+ Frame": smart default — 1st image = start, 2nd = end (where supported),
   // the rest injected keyframes that walk forward through the windows: in a
@@ -614,7 +623,9 @@ export function InputsPanel() {
         {/* Unified "Frame" tiles — start / end / injected keyframes, one concept,
             sorted by timeline position and draggable to reposition. The per-tile
             position strip below routes each to its pipeline. */}
-        {frameTiles.map(tile => (
+        {/* Frames carried over from a model that took them are hidden on one that does not, rather than
+            shown as attached input the generation will drop. */}
+        {(supportsAnyFrame ? frameTiles : []).map(tile => (
           <div key={tile.key} draggable
             onDragStart={e => { setFrameDragKey(tile.key); e.dataTransfer.setData('frame-key', tile.key); e.dataTransfer.effectAllowed = 'move' }}
             onDragEnd={() => { setFrameDragKey(null); setFrameDragOverKey(null) }}
