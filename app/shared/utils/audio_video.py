@@ -339,6 +339,24 @@ def extract_audio_tracks(source_video, verbose=False, query_only=False, codec_ke
     return file_paths, metadata
 
 
+def get_audio_file_channels(audio_path):
+    """Channel count of a file's first audio stream.
+
+    Returns 0 when it cannot be determined (missing file, no audio stream,
+    ffprobe failure). Callers treat 0 as "assume mono", which is the behaviour
+    the muxer had before stereo support, so an unreadable probe degrades
+    instead of failing the whole generation.
+    """
+    try:
+        probe = ffmpeg.probe(os.fspath(audio_path))
+    except Exception:
+        return 0
+    audio_stream = next((stream for stream in probe.get("streams", []) if stream.get("codec_type") == "audio"), None)
+    if audio_stream is None or not audio_stream.get("channels"):
+        return 0
+    return int(audio_stream["channels"])
+
+
 
 def combine_and_concatenate_video_with_audio_tracks(
     save_path_tmp, video_path,
@@ -360,31 +378,41 @@ def combine_and_concatenate_video_with_audio_tracks(
     duplicate_source = len(sources) == 1 and len(news) > 1
     N = len(news) if source_audio_duration == 0 else max(len(sources), len(news)) or 1
 
+    output_channels = 1
     for i in range(N):
         s = (sources[i] if i < len(sources)
              else sources[0] if duplicate_source else None)
         n = news[i] if len(news) == N else (news[0] if news else None)
+        # Use the widest layout across the source and the new track. Forcing
+        # mono here silently discarded half the field of any model that
+        # generates stereo (MiniMax H3 outputs 32 kHz stereo).
+        meta = source_audio_metadata[i] if source_audio_metadata and i < len(source_audio_metadata) else {}
+        source_channels = int(meta.get('channels', 0) or 0) if s else 0
+        if s and source_channels == 0:
+            source_channels = get_audio_file_channels(s)
+        new_channels = get_audio_file_channels(n) if n else 0
+        channel_layout = 'stereo' if max(source_channels, new_channels) >= 2 else 'mono'
+        output_channels = max(output_channels, 2 if channel_layout == 'stereo' else 1)
 
         if source_audio_duration == 0:
             if n:
                 inputs += ['-i', n]
-                filters.append(f'[{idx}:a]apad=pad_dur=100[aout{i}]')
+                filters.append(f'[{idx}:a]aformat=channel_layouts={channel_layout},apad=pad_dur=100[aout{i}]')
                 idx += 1
             else:
-                filters.append(f'anullsrc=r={audio_sampling_rate}:cl=mono,apad=pad_dur=100[aout{i}]')
+                filters.append(f'anullsrc=r={audio_sampling_rate}:cl={channel_layout},apad=pad_dur=100[aout{i}]')
         else:
             if s:
                 inputs += ['-i', s]
-                meta = source_audio_metadata[i] if source_audio_metadata and i < len(source_audio_metadata) else {}
                 needs_filter = (
                     meta.get('codec') != audio_codec or
                     meta.get('sample_rate') != audio_sampling_rate or
-                    meta.get('channels') != 1 or
+                    source_channels != (2 if channel_layout == 'stereo' else 1) or
                     meta.get('duration', 0) < source_audio_duration
                 )
                 if needs_filter:
                     filters.append(
-                        f'[{idx}:a]aresample={audio_sampling_rate},aformat=channel_layouts=mono,'
+                        f'[{idx}:a]aresample={audio_sampling_rate},aformat=channel_layouts={channel_layout},'
                         f'apad=pad_dur={source_audio_duration},atrim=0:{source_audio_duration},asetpts=PTS-STARTPTS[s{i}]')
                 else:
                     filters.append(
@@ -394,13 +422,13 @@ def combine_and_concatenate_video_with_audio_tracks(
                 idx += 1
             else:
                 filters.append(
-                    f'anullsrc=r={audio_sampling_rate}:cl=mono,atrim=0:{source_audio_duration},asetpts=PTS-STARTPTS[s{i}]')
+                    f'anullsrc=r={audio_sampling_rate}:cl={channel_layout},atrim=0:{source_audio_duration},asetpts=PTS-STARTPTS[s{i}]')
 
             if n:
                 inputs += ['-i', n]
                 start = '0' if new_audio_from_start else source_audio_duration
                 filters.append(
-                    f'[{idx}:a]aresample={audio_sampling_rate},aformat=channel_layouts=mono,'
+                    f'[{idx}:a]aresample={audio_sampling_rate},aformat=channel_layouts={channel_layout},'
                     f'atrim=start={start},asetpts=PTS-STARTPTS[n{i}]')
                 filters.append(f'[s{i}][n{i}]concat=n=2:v=0:a=1[aout{i}]')
                 idx += 1
@@ -415,7 +443,7 @@ def combine_and_concatenate_video_with_audio_tracks(
            '-c:v', 'copy',
            '-c:a', audio_codec,
            '-ar', str(audio_sampling_rate),
-           '-ac', '1',
+           '-ac', str(output_channels),
            '-shortest', save_path_tmp]
     if audio_bitrate:
         cmd[-6:-6] = ['-b:a', audio_bitrate]
