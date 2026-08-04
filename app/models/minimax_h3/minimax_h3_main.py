@@ -603,6 +603,8 @@ class MiniMaxH3Model:
         audio_guide2=None,
         video_guide_path=None,
         video_prompt_type: str = "",
+        input_video=None,
+        prefix_frames_count: int = 0,
         frame_num: int = 124,
         height: int = 480,
         width: int = 864,
@@ -626,6 +628,13 @@ class MiniMaxH3Model:
             )
         if int(sampling_steps) < 2:
             raise ValueError("MiniMax H3 needs at least two scheduler grid points.")
+
+        # Studio's Extend hands back the clip being continued. H3 cannot carry latents across a 15s boundary,
+        # so a continuation starts a fresh generation anchored on the last frame of the requested overlap --
+        # the same frame the viewer just saw, which is what makes the seam read as continuous.
+        if image_start is None and input_video is not None and int(prefix_frames_count or 0) > 0:
+            available = input_video.shape[1]
+            image_start = input_video[:, min(int(prefix_frames_count), available) - 1][:, None]
 
         keyframes = [item for item in (_tensor_to_pil(image_start), _tensor_to_pil(image_end)) if item is not None]
         anchors = tuple(

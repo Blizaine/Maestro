@@ -206,7 +206,11 @@ class family_handler:
         else:
             definition.update(
                 {
-                    "image_prompt_types_allowed": "TSE",
+                    # "V" enables Studio's Extend: H3 cannot generate past 15s in one pass, so a continuation
+                    # starts a fresh clip from the last frame of the previous one rather than sliding a window
+                    # over shared latents.
+                    "image_prompt_types_allowed": "TSEV",
+                    "video_continuation": True,
                     "end_frames_always_enabled": True,
                 }
             )
