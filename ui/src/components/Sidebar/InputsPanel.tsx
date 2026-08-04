@@ -3,6 +3,11 @@ import { X, Upload, Plus, Music, Film, Mic } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
 
+// A reference clip has to be long enough to carry a subject or a motion, and short enough that its
+// conditioning rows don't dwarf the shot being generated. Mirrors the backend validator.
+const REFERENCE_CLIP_MIN_SECONDS = 2
+const REFERENCE_CLIP_MAX_SECONDS = 15
+
 // Unified, media-driven "Inputs" panel for Studio Frames mode (image_mode 0).
 //
 // Goal: a single image-forward tile surface where the media you add auto-selects
@@ -204,8 +209,35 @@ export function InputsPanel() {
   const refVideoValue = guideValues.find(value => value === 'V')
   const supportsRefVideo = !!guideCfg && !modelOptions?.guide_preprocessing && !supportsControlVid && !!refVideoValue
 
+  // Read a clip's duration without decoding it: metadata is enough, and it keeps an over-long file from
+  // being uploaded at all.
+  const probeClipDuration = (file: File) =>
+    new Promise<number>(resolve => {
+      const url = URL.createObjectURL(file)
+      const probe = document.createElement('video')
+      probe.preload = 'metadata'
+      const finish = (seconds: number) => {
+        URL.revokeObjectURL(url)
+        resolve(seconds)
+      }
+      probe.onloadedmetadata = () => finish(Number.isFinite(probe.duration) ? probe.duration : 0)
+      probe.onerror = () => finish(0)
+      probe.src = url
+    })
+
   const attachReferenceVideo = async (file: File) => {
     if (!file.type.startsWith('video/')) return
+    // Rejected here rather than at generation time: the backend validator would catch it too, but only
+    // after the user had queued a job and waited for the model to load.
+    const duration = await probeClipDuration(file)
+    if (duration > 0 && (duration < REFERENCE_CLIP_MIN_SECONDS || duration > REFERENCE_CLIP_MAX_SECONDS)) {
+      window.alert(
+        `A reference video must be between ${REFERENCE_CLIP_MIN_SECONDS} and ${REFERENCE_CLIP_MAX_SECONDS} ` +
+        `seconds long.\n\n"${file.name}" is ${duration.toFixed(1)}s.\n\nPick a different clip, or trim this one.`
+      )
+      pickReferences()
+      return
+    }
     try {
       const result = await api.uploadImage(file)
       setParam('video_guide', result.path)
