@@ -15,8 +15,20 @@ Environment variables:
 
 import gc
 import sys
-import torch
+
+# Before torch, because the caching allocator reads this when it initializes and ignores it afterwards.
+#
+# Video models allocate a handful of very large, short-lived activation tensors per block, which leaves the
+# default allocator holding gigabytes of reserved-but-unallocated blocks too fragmented to reuse -- enough
+# that a generation can fail to find room for a tensor while nominally having the memory free. Expandable
+# segments let those regions grow and be reused instead of stranding them.
+#
+# `setdefault`, so anyone already tuning the allocator keeps their setting.
 import os
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+import torch
 import glob
 import json
 import math
