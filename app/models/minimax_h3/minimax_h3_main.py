@@ -406,12 +406,103 @@ class MiniMaxH3Model:
         )
         return self.scheduler.scale_noise(clean_rows, MINIMAX_H3_KEYFRAME_NOISE_AUG, noise)
 
+    def _prepare_reference_image(self, image) -> Image.Image | None:
+        """Fit one `ref2va` reference still onto a canvas of its own.
+
+        A keyframe is stretched or cropped onto the target's canvas because it *is* a frame of the output. A
+        reference is not on the timeline, so it keeps its own framing and its canvas is resolved from its own aspect
+        ratio -- landing, as always, on the multiple of 32 that the VAE's 16x compression and the 2x2 patchify need.
+        """
+        image = _tensor_to_pil(image)
+        if image is None:
+            return None
+        height, width = resolve_canvas_size(image.width, image.height)
+        if image.size != (width, height):
+            image = image.resize((width, height), Image.Resampling.LANCZOS)
+        return image
+
+    def _encode_reference_images(
+        self,
+        images: list[Image.Image],
+        generator: torch.Generator,
+    ) -> tuple[torch.Tensor | None, list[MiniMaxH3PreparedReference]]:
+        """Encode `ref2va` reference stills into their conditioning rows.
+
+        Same encode and the same noise augmentation as a keyframe -- what differs is that each still reports the
+        latent size it landed on, because the layout can no longer assume the target's.
+        """
+        if not images:
+            return None, []
+
+        normalization = self._condition_normalization()
+        rows, references = [], []
+        for image in images:
+            if self._interrupt:
+                return None, []
+            still_rows, (latent_height, latent_width) = self._encode_condition_still(image, normalization)
+            rows.append(still_rows)
+            references.append(
+                MiniMaxH3PreparedReference(kind="image", latent_height=latent_height, latent_width=latent_width)
+            )
+
+        clean_rows = torch.cat(rows).to(self.device)
+        noise = keyframe_condition_noise(
+            tuple((1, reference.latent_height, reference.latent_width) for reference in references),
+            self.patch_size,
+            24,
+            generator=generator,
+            device=self.device,
+        )
+        return self.scheduler.scale_noise(clean_rows, MINIMAX_H3_KEYFRAME_NOISE_AUG, noise), references
+
+    def _load_reference_waveform(self, source) -> torch.Tensor | None:
+        """Load one audio reference as the stereo waveform the audio VAE expects, at the VAE's own sample rate."""
+        if source is None:
+            return None
+        import librosa
+
+        waveform, _ = librosa.load(source, sr=self.audio_vae.config.sampling_rate, mono=False)
+        waveform = torch.as_tensor(np.asarray(waveform), dtype=torch.float32)
+        if waveform.ndim == 1:
+            waveform = waveform[None]
+        if waveform.shape[0] < MINIMAX_H3_AUDIO_CHANNELS:
+            waveform = waveform.repeat(MINIMAX_H3_AUDIO_CHANNELS, 1)
+        return waveform[:MINIMAX_H3_AUDIO_CHANNELS]
+
+    def _encode_reference_audio(
+        self,
+        waveforms: list[torch.Tensor],
+    ) -> tuple[torch.Tensor | None, list[MiniMaxH3PreparedReference]]:
+        """Encode `ref2va` audio references into their conditioning rows.
+
+        Two differences from the visual conditions. The audio VAE takes the stereo channels as the batch, so one
+        reference encodes as `[2, 1, samples]`. And the rows are packed clean: audio references carry no noise
+        augmentation, they sit at a conditioning timestep of their own.
+        """
+        if not waveforms:
+            return None, []
+
+        rows, references = [], []
+        for waveform in waveforms:
+            if self._interrupt:
+                return None, []
+            sample = waveform.to(device=self.device, dtype=torch.float32).unsqueeze(1)
+            latents = self.audio_vae.encode(sample, return_dict=False)[0].mode().float()
+            # Inverse of `unpack_audio_tokens`: [C, D, T] -> [C, T, D] -> channel-major rows.
+            rows.append(latents.permute(0, 2, 1).reshape(-1, latents.shape[1]))
+            references.append(MiniMaxH3PreparedReference(kind="audio", num_audio_latents=latents.shape[-1]))
+
+        return torch.cat(rows).to(self.device), references
+
     @torch.inference_mode()
     def generate(
         self,
         input_prompt: str,
         image_start=None,
         image_end=None,
+        input_ref_images=None,
+        audio_guide=None,
+        audio_guide2=None,
         frame_num: int = 124,
         height: int = 480,
         width: int = 864,
@@ -447,6 +538,23 @@ class MiniMaxH3Model:
             for index, image in enumerate(keyframes)
         ]
 
+        # `ref2va` references, in the order MiniMax-H3 packs them: stills first, then audio.
+        reference_images = [
+            prepared
+            for prepared in (self._prepare_reference_image(image) for image in input_ref_images or ())
+            if prepared is not None
+        ]
+        reference_waveforms = [
+            waveform
+            for waveform in (self._load_reference_waveform(source) for source in (audio_guide, audio_guide2))
+            if waveform is not None
+        ]
+        if (reference_images or reference_waveforms) and keyframes:
+            raise ValueError(
+                "MiniMax H3 conditions on either keyframes or references, not both: a keyframe is a frame of the "
+                "output, a reference is material that precedes it, and they occupy the same conditioning rows."
+            )
+
         request_seed = int(torch.seed() if seed is None else seed)
         generator = torch.Generator(device=self.device).manual_seed(request_seed)
         num_latent_frames = video_latent_num_frames(frame_num)
@@ -454,27 +562,51 @@ class MiniMaxH3Model:
         latent_width = width // self.vae.spatial_compression_ratio
         num_audio_latents = audio_latent_num_frames(frame_num)
 
-        prompt_embeds, text_tags = self.conditioner(input_prompt, self.device, keyframes or None)
+        prompt_embeds, text_tags = self.conditioner(
+            input_prompt,
+            self.device,
+            (keyframes or reference_images) or None,
+            len(reference_waveforms),
+        )
         if prompt_embeds is None or self._interrupt:
             return None
-        layout = build_packed_sequence(
-            text_tags,
-            num_latent_frames,
-            latent_height,
-            latent_width,
-            num_audio_latents,
-            self.patch_size,
-            anchors,
-        )
 
-        condition_rows = self._encode_keyframes(
-            keyframes,
-            latent_height,
-            latent_width,
-            generator,
-        )
-        if self._interrupt:
-            return None
+        # The conditioning rows are encoded before the layout is built, because a reference reports the latent size
+        # it landed on and the layout needs it. Their noise is drawn first either way, which is what the request's
+        # generator reproduces.
+        audio_condition_rows = None
+        if reference_images or reference_waveforms:
+            condition_rows, references = self._encode_reference_images(reference_images, generator)
+            audio_condition_rows, audio_references = self._encode_reference_audio(reference_waveforms)
+            if self._interrupt:
+                return None
+            layout = build_ref2va_packed_sequence(
+                text_tags,
+                tuple(references + audio_references),
+                num_latent_frames,
+                latent_height,
+                latent_width,
+                num_audio_latents,
+                self.patch_size,
+            )
+        else:
+            condition_rows = self._encode_keyframes(
+                keyframes,
+                latent_height,
+                latent_width,
+                generator,
+            )
+            if self._interrupt:
+                return None
+            layout = build_packed_sequence(
+                text_tags,
+                num_latent_frames,
+                latent_height,
+                latent_width,
+                num_audio_latents,
+                self.patch_size,
+                anchors,
+            )
 
         video_noise = randn_tensor(
             (1, 24, num_latent_frames, latent_height, latent_width),
@@ -491,6 +623,8 @@ class MiniMaxH3Model:
         )
         if condition_rows is not None:
             video_rows = torch.cat([condition_rows, video_rows])
+        if audio_condition_rows is not None:
+            audio_rows = torch.cat([audio_condition_rows, audio_rows])
 
         self.scheduler.set_timesteps(int(sampling_steps), device=self.device)
         self.audio_scheduler.set_timesteps(int(sampling_steps), device=self.device)
