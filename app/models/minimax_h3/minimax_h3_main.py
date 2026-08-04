@@ -700,6 +700,14 @@ class MiniMaxH3Model:
             )
             if clip is not None:
                 reference_clips.append(clip)
+        # Say out loud what conditioning actually arrived. A reference that silently fails to reach the
+        # model looks identical to one the model ignored, and the two have completely different fixes.
+        print(
+            f"MiniMax H3: {len(reference_images)} reference image(s), "
+            f"{len(reference_clips)} reference clip(s), {len(reference_waveforms)} audio reference(s), "
+            f"{len(keyframes)} keyframe(s) "
+            f"[video_prompt_type={video_prompt_type!r}, video_guide_path={'set' if video_guide_path else 'None'}]"
+        )
         if (reference_images or reference_waveforms or reference_clips) and keyframes:
             raise ValueError(
                 "MiniMax H3 conditions on either keyframes or references, not both: a keyframe is a frame of the "
