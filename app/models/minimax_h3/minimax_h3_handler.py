@@ -1,9 +1,12 @@
 """Maestro family handler for MiniMax H3 Base.
 
-This first integration exposes the unified FL2VA checkpoint: text-to-video,
-image-to-video, and first/last-frame video with native stereo audio.  The
-separate Ref2VA/edit checkpoint is intentionally not advertised until its
-reference-video/audio packing path is implemented as well.
+Two checkpoints are exposed.  FL2VA is the unified one: text-to-video,
+image-to-video, and first/last-frame video with native stereo audio.  Ref2VA
+conditions on material that is not a frame of the output -- reference stills
+carrying an identity or a subject, and audio references carrying a voice.
+
+Reference *videos* are not advertised yet: the text encoder's processor is
+image-only, so a video reference has no way to be presented to it.
 """
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ import torch
 
 
 _MODEL_TYPE = "minimax_h3"
+_MODEL_TYPE_REF2VA = "minimax_h3_ref2va"
 _COMFY_REPO = "Comfy-Org/MiniMax-H3"
 _COMFY_REVISION = "0543966fbdce5ba05709a8f2031c94bdba629b4a"
 _OFFICIAL_REPO = "MiniMaxAI/MiniMax-H3"
@@ -60,7 +64,7 @@ _RESOLUTIONS = [
 class family_handler:
     @staticmethod
     def query_supported_types():
-        return [_MODEL_TYPE]
+        return [_MODEL_TYPE, _MODEL_TYPE_REF2VA]
 
     @staticmethod
     def query_family_maps():
@@ -76,7 +80,8 @@ class family_handler:
 
     @staticmethod
     def query_model_def(base_model_type, model_def):
-        return {
+        reference_mode = base_model_type == _MODEL_TYPE_REF2VA
+        definition = {
             "dtype": "bf16",
             "fps": 24,
             # H3's video VAE accepts only 17*n+5 frames.  124 is the first
@@ -97,9 +102,7 @@ class family_handler:
             "frame_alignment_mode": "ceil",
             "sliding_window": False,
             "t2v_class": True,
-            "i2v_class": True,
-            "image_prompt_types_allowed": "TSE",
-            "end_frames_always_enabled": True,
+            "i2v_class": not reference_mode,
             "returns_audio": True,
             "no_negative_prompt": True,
             "guidance_max_phases": 0,
@@ -114,6 +117,53 @@ class family_handler:
                 _hf_url(_COMFY_REPO, _COMFY_REVISION, "text_encoders", _TEXT_ENCODER)
             ],
         }
+        if reference_mode:
+            # Ref2VA conditions on material that is not on the output timeline, so it takes no start/end frame.
+            # Reference stills are passed as image refs and left alone: no background removal, no resizing onto the
+            # target canvas -- each keeps its own framing, which is the whole point of a reference.
+            definition.update(
+                {
+                    "image_prompt_types_allowed": "T",
+                    "reference_image_enabled": True,
+                    "return_image_refs_tensor": False,
+                    "no_background_removal": True,
+                    "no_processing_on_last_images_refs": 9,
+                    "image_ref_choices": {
+                        "choices": [
+                            ("Generate without Reference Images", ""),
+                            ("Use Reference Images", "I"),
+                        ],
+                        "letters_filter": "I",
+                        "default": "",
+                        "label": "Reference Images",
+                    },
+                    "any_audio_prompt": True,
+                    "audio_prompt_choices": True,
+                    "audio_guide_label": "Audio Reference 1",
+                    "audio_guide2_label": "Audio Reference 2",
+                    "audio_prompt_type_sources": {
+                        "selection": ["", "A", "AB"],
+                        "labels": {
+                            "": "Generate without an Audio Reference",
+                            "A": "Use One Audio Reference",
+                            "AB": "Use Two Audio References",
+                        },
+                        "letters_filter": "AB",
+                        "label": "Audio References",
+                        "show_label": True,
+                        "default": "",
+                    },
+                    "video_length_not_limited_by_audio": True,
+                }
+            )
+        else:
+            definition.update(
+                {
+                    "image_prompt_types_allowed": "TSE",
+                    "end_frames_always_enabled": True,
+                }
+            )
+        return definition
 
     @staticmethod
     def register_lora_cli_args(parser, lora_root):
@@ -215,6 +265,10 @@ class family_handler:
                 "image_prompt_type": "",
             }
         )
+        if base_model_type == _MODEL_TYPE_REF2VA:
+            # Both selectors start empty: Ref2VA generates from the prompt alone until references are added.
+            ui_defaults.setdefault("video_prompt_type", "")
+            ui_defaults.setdefault("audio_prompt_type", "")
 
     @staticmethod
     def fix_settings(base_model_type, settings_version, model_def, ui_defaults):

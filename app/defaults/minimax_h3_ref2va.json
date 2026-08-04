@@ -1,0 +1,18 @@
+{
+    "model": {
+        "name": "MiniMax H3 Base (Ref2VA)",
+        "architecture": "minimax_h3_ref2va",
+        "description": "MiniMax H3 Base conditioned on references rather than keyframes: reference images to carry an identity or a subject into the shot, and audio references to carry a voice. Generates native synchronized stereo audio. Uses the consumer-friendly scaled-FP8 Ref2VA transformer and NVFP4 Qwen3-VL conditioner.",
+        "URLs": [
+            "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/0543966fbdce5ba05709a8f2031c94bdba629b4a/diffusion_models/minimax_h3_ref2va_pruned_fp8_scaled.safetensors"
+        ]
+    },
+    "prompt": "A cinematic medium shot of the woman from the reference image walking through a rain-slicked night market, neon signs reflecting off the wet pavement. The camera tracks alongside her. Rain patters on awnings and distant chatter fills the street, and she says, \"I know this place.\"",
+    "num_inference_steps": 20,
+    "video_length": 124,
+    "resolution": "864x480",
+    "guidance_scale": 1.0,
+    "image_prompt_type": "",
+    "video_prompt_type": "",
+    "audio_prompt_type": ""
+}
