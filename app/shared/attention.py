@@ -266,6 +266,17 @@ def pay_attention(
         q = q.to(torch.float16)
         k = k.to(torch.float16)
         v = v.to(torch.float16)
+    # SageAttention 3's Triton kernels index the head dimension with
+    # tl.arange(0, D), which requires D to be a power of two. Qwen3-VL's vision
+    # tower (used by MiniMax H3's conditioner and by Krea 2 Edit) has head_dim
+    # 72 = 1152 / 16, so selecting sage3 globally aborts prompt encoding with
+    # "arange's range must be a power of 2" even though every other block in
+    # the model is a supported 128. Degrade just those calls instead of making
+    # sage3 unusable for any model that embeds such a tower.
+    if attn == "sage3":
+        head_dim = q.size(-1)
+        if head_dim & (head_dim - 1):
+            attn = "sdpa"
     final_padding = 0
     b, lq, lk = q.size(0), q.size(1), k.size(1)
 
