@@ -8622,6 +8622,15 @@ def generate_video(
                         "input_video_end": suffix_video_tensor,
                         "suffix_frames_count": suffix_frames_count,
                     }),
+                    # The guide's source path, for models that treat a video as a *reference* rather than a
+                    # control signal. Those have to decode it themselves: the guide pipeline fits frames onto
+                    # the output canvas and length, which is correct for a control video and wrong for a
+                    # reference that keeps its own framing and duration. Passed only when the model asks for
+                    # it, since most handlers' generate() take no **kwargs and would raise on an extra one.
+                    **({} if not model_def.get("reference_video_source_path", False)
+                       or not isinstance(video_guide, str) else {
+                        "video_guide_path": video_guide,
+                    }),
                 )
                 if gen.get("abort", False):
                     abort = True
