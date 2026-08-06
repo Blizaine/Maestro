@@ -14,6 +14,7 @@ _GUIDES_DIR = os.path.join(os.path.dirname(__file__), "llm_guides", "enhance")
 # Values can be a string (single guide) or a tuple (with_images_guide, without_images_guide)
 _ARCHITECTURE_MAP = {
     # MiniMax H3 joint audio-video models
+    "minimax_h3_ref2va": "minimax_h3_ref2va_video.md",
     "minimax_h3": "minimax_h3_video.md",
 
     # LTX-2 video models

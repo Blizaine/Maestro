@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoTokenizer, Qwen2VLImageProcessorFast
+from transformers import AutoTokenizer, Qwen2VLImageProcessorFast, Qwen3VLVideoProcessor
 
 from models.ideogram4.qwen3_vl_configuration import Qwen3VLConfig, register_qwen3_vl_config
 from models.ideogram4.qwen3_vl_transformers import Qwen3VLModel, Qwen3VLTextModel, Qwen3VLVisionModel
@@ -15,6 +16,7 @@ from models.krea2.krea2_main import Krea2Qwen3VLProcessor
 VISION_START_TOKEN_ID = 151652
 VISION_END_TOKEN_ID = 151653
 IMAGE_TOKEN_ID = 151655
+VIDEO_TOKEN_ID = 151656
 TEXT_ENCODER_LAYERS = 50
 
 
@@ -80,34 +82,42 @@ class MiniMaxH3Qwen3VL(nn.Module):
     an identity module.
     """
 
-    def __init__(self, config: Qwen3VLConfig, dtype: torch.dtype | None = None):
+    def __init__(
+        self,
+        config: Qwen3VLConfig,
+        dtype: torch.dtype | None = None,
+        *,
+        consumer_quantized: bool = True,
+    ):
         super().__init__()
         self.config = config
         self.visual = Qwen3VLVisionModel._from_config(config.vision_config)
         self.model = Qwen3VLTextModel(config.text_config)
-        source_embedding = self.model.embed_tokens
-        self.model.embed_tokens = MiniMaxH3Int8Embedding(
-            source_embedding.num_embeddings,
-            source_embedding.embedding_dim,
-            source_embedding.padding_idx,
-            output_dtype=dtype or source_embedding.weight.dtype,
-        )
+        if consumer_quantized:
+            source_embedding = self.model.embed_tokens
+            self.model.embed_tokens = MiniMaxH3Int8Embedding(
+                source_embedding.num_embeddings,
+                source_embedding.embedding_dim,
+                source_embedding.padding_idx,
+                output_dtype=dtype or source_embedding.weight.dtype,
+            )
         self.model.norm = nn.Identity()
-        for layer in self.model.layers:
-            down = layer.mlp.down_proj
-            layer.mlp.down_proj = MiniMaxH3PreScaledLinear(
-                down.in_features,
-                down.out_features,
-                down.bias is not None,
-                down.weight.dtype,
-            )
-            out = layer.self_attn.o_proj
-            layer.self_attn.o_proj = MiniMaxH3PreScaledLinear(
-                out.in_features,
-                out.out_features,
-                out.bias is not None,
-                out.weight.dtype,
-            )
+        if consumer_quantized:
+            for layer in self.model.layers:
+                down = layer.mlp.down_proj
+                layer.mlp.down_proj = MiniMaxH3PreScaledLinear(
+                    down.in_features,
+                    down.out_features,
+                    down.bias is not None,
+                    down.weight.dtype,
+                )
+                out = layer.self_attn.o_proj
+                layer.self_attn.o_proj = MiniMaxH3PreScaledLinear(
+                    out.in_features,
+                    out.out_features,
+                    out.bias is not None,
+                    out.weight.dtype,
+                )
 
     get_rope_index = Qwen3VLModel.get_rope_index
 
@@ -122,7 +132,11 @@ def load_h3_qwen_config(config_path: str) -> Qwen3VLConfig:
 def build_h3_processor(config_dir: str):
     tokenizer = AutoTokenizer.from_pretrained(config_dir, trust_remote_code=False)
     image_processor = Qwen2VLImageProcessorFast.from_pretrained(config_dir)
-    return tokenizer, Krea2Qwen3VLProcessor(image_processor, tokenizer)
+    processor = Krea2Qwen3VLProcessor(image_processor, tokenizer)
+    # Ref2VA uses Qwen's dedicated temporal processor. Keep it attached to
+    # the existing lightweight processor wrapper so FL2VA remains unchanged.
+    processor.video_processor = Qwen3VLVideoProcessor.from_pretrained(config_dir)
+    return tokenizer, processor
 
 
 def _tag_vision_spans(input_ids: torch.Tensor) -> torch.Tensor:
@@ -191,6 +205,140 @@ class MiniMaxH3Conditioner(nn.Module):
         input_ids = encoded["input_ids"]
         attention_mask = encoded["attention_mask"].bool()
         return input_ids, attention_mask, None, encoded
+
+    @staticmethod
+    def _merge_deepstack(
+        image_mask: torch.Tensor | None,
+        video_mask: torch.Tensor | None,
+        image_deepstack: list[torch.Tensor] | None,
+        video_deepstack: list[torch.Tensor] | None,
+    ) -> tuple[torch.Tensor | None, list[torch.Tensor] | None]:
+        if image_mask is not None and video_mask is not None:
+            visual_mask = image_mask | video_mask
+            image_joint = image_mask[visual_mask]
+            video_joint = video_mask[visual_mask]
+            deepstack = []
+            for image_embed, video_embed in zip(image_deepstack or [], video_deepstack or []):
+                joint = image_embed.new_zeros(
+                    (int(visual_mask.sum().item()), image_embed.shape[-1]),
+                    device=image_embed.device,
+                )
+                joint[image_joint] = image_embed
+                joint[video_joint] = video_embed
+                deepstack.append(joint)
+            return visual_mask, deepstack
+        if image_mask is not None:
+            return image_mask, image_deepstack
+        if video_mask is not None:
+            return video_mask, video_deepstack
+        return None, None
+
+    @torch.inference_mode()
+    def forward_ref2va(self, prompt: str, device: torch.device, references: list):
+        """Encode the official ordered Ref2VA media presentation."""
+
+        from .ref2va import build_ref2va_presentation, sample_reference_video_frames
+
+        self.qwen.model._interrupt = self._interrupt
+        self.qwen.visual._interrupt = self._interrupt
+        if self._interrupt:
+            return None, None
+
+        merge_size = self.processor.image_processor.merge_size**2
+        pixel_values = image_grid_thw = None
+        image_token_counts: list[int] = []
+        images = [reference.image for reference in references if reference.kind == "image"]
+        if images:
+            vision = self.processor.image_processor(images=images, return_tensors="pt")
+            pixel_values = vision["pixel_values"]
+            image_grid_thw = vision["image_grid_thw"]
+            image_token_counts = [int(grid.prod()) // merge_size for grid in image_grid_thw]
+
+        pixel_values_videos = video_grid_thw = None
+        video_block_token_counts: list[int] = []
+        videos = [reference for reference in references if reference.kind == "video"]
+        if videos:
+            sampled = [sample_reference_video_frames(reference.frames) for reference in videos]
+            for reference, (_, timestamps) in zip(videos, sampled):
+                reference.block_timestamps = timestamps
+            vision = self.processor.video_processor(
+                videos=[np.stack(frames) for frames, _ in sampled],
+                do_sample_frames=False,
+                return_tensors="pt",
+            )
+            pixel_values_videos = vision["pixel_values_videos"]
+            video_grid_thw = vision["video_grid_thw"]
+            video_block_token_counts = [int(grid[1]) * int(grid[2]) // merge_size for grid in video_grid_thw]
+            for reference, grid in zip(videos, video_grid_thw):
+                if int(grid[0]) != len(reference.block_timestamps):
+                    raise ValueError(
+                        f"The Qwen processor created {int(grid[0])} video blocks, but MiniMax H3 labels "
+                        f"{len(reference.block_timestamps)} blocks for that reference."
+                    )
+
+        token_ids, token_tags = build_ref2va_presentation(
+            self.tokenizer,
+            prompt,
+            references,
+            image_token_counts,
+            video_block_token_counts,
+        )
+        input_ids = torch.tensor([token_ids], dtype=torch.long, device=device)
+        attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
+        inputs_embeds = self.qwen.model.embed_tokens(input_ids)
+
+        image_mask = video_mask = None
+        image_deepstack = video_deepstack = None
+        if pixel_values is not None:
+            image_embeds, image_deepstack = self.qwen.visual(
+                pixel_values.to(device=device, dtype=torch.float32),
+                grid_thw=image_grid_thw.to(device),
+            )
+            if image_embeds is None or self._interrupt:
+                return None, None
+            image_mask = input_ids == IMAGE_TOKEN_ID
+            inputs_embeds = inputs_embeds.masked_scatter(
+                image_mask.unsqueeze(-1).expand_as(inputs_embeds),
+                image_embeds.to(inputs_embeds.dtype),
+            )
+        if pixel_values_videos is not None:
+            video_embeds, video_deepstack = self.qwen.visual(
+                pixel_values_videos.to(device=device, dtype=torch.float32),
+                grid_thw=video_grid_thw.to(device),
+            )
+            if video_embeds is None or self._interrupt:
+                return None, None
+            video_mask = input_ids == VIDEO_TOKEN_ID
+            inputs_embeds = inputs_embeds.masked_scatter(
+                video_mask.unsqueeze(-1).expand_as(inputs_embeds),
+                video_embeds.to(inputs_embeds.dtype),
+            )
+
+        visual_mask, deepstack = self._merge_deepstack(
+            image_mask,
+            video_mask,
+            image_deepstack,
+            video_deepstack,
+        )
+        position_ids, _ = self.qwen.get_rope_index(
+            input_ids,
+            image_grid_thw=None if image_grid_thw is None else image_grid_thw.to(device),
+            video_grid_thw=None if video_grid_thw is None else video_grid_thw.to(device),
+            attention_mask=attention_mask,
+        )
+        outputs = self.qwen.model(
+            input_ids=None,
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            use_cache=False,
+            visual_pos_masks=visual_mask,
+            deepstack_visual_embeds=deepstack,
+            return_mid_results_layers=[TEXT_ENCODER_LAYERS - 1],
+        )
+        if outputs.last_hidden_state is None or not outputs.mid_results:
+            return None, None
+        return outputs.mid_results[0], torch.tensor(token_tags, dtype=torch.long)
 
     @torch.inference_mode()
     def forward(self, prompt: str, device: torch.device, images: list | None = None):

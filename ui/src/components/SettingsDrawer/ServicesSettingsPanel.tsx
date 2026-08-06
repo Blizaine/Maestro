@@ -548,7 +548,7 @@ export function ServicesSettingsPanel() {
             onChange={e => updateConfig({ director_prompt_polish: e.target.value as 'off' | 'full_guide' | 'light_guide' | 'third_pass' })}
             className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
           >
-            <option value="third_pass">Third Pass (Enhance Pipeline) — recommended</option>
+            <option value="third_pass">Third Pass (Model-aware) — recommended</option>
             <option value="light_guide">Lightweight Guide Inject (legacy)</option>
             <option value="full_guide">Full Guide Inject (legacy)</option>
             <option value="off">Off</option>
@@ -560,7 +560,7 @@ export function ServicesSettingsPanel() {
               ? 'Legacy: injects a lightweight dialect cheat sheet (~200 tokens) into the Director planner.'
               : servicesConfig.director_prompt_polish === 'off'
               ? 'Director uses its built-in prompting rules only. No model-specific optimization.'
-              : 'Default. Runs each Director prompt through the model\'s enhance pipeline after planning, so video and image prompts are dialect-correct for LTX-2, Flux, etc.'}
+              : 'Default and model-aware. H3 keeps its native video prompts while generated image prompts may still be polished; other models use their dialect-specific enhance pipeline.'}
           </p>
         </div>
 

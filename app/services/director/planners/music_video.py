@@ -63,6 +63,102 @@ _SECTION_VISUAL_STRATEGY = {
 }
 
 
+_MUSIC_IMAGE_FIELDS = frozenset({
+    "image_source",
+    "image_prompt",
+    "visual_changes",
+    "keyframe_prompts",
+})
+
+_MUSIC_SHOT_PROPERTIES = {
+    "scene_goal": {"type": "string"},
+    "scene_type": {"type": "string"},
+    "subjects_on_screen": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "character_id": {"type": "string"},
+                "speaker_name": {"type": "string"},
+                "visual_description": {"type": "string"},
+                "position_or_relation": {"type": "string"},
+            },
+            "required": ["visual_description"],
+            "additionalProperties": False,
+        },
+    },
+    "spatial_setup": {"type": "string"},
+    "environment": {"type": "string"},
+    "visual_style": {"type": "string"},
+    "lighting": {"type": "string"},
+    "mood": {"type": "string"},
+    "action_beats": {"type": "array", "items": {"type": "string"}},
+    "camera_plan": {
+        "type": "object",
+        "properties": {
+            "framing": {"type": "string"},
+            "angle": {"type": "string"},
+            "movement": {"type": "string"},
+            "movement_intensity": {"type": "string"},
+            "lens_feel": {"type": "string"},
+        },
+        "required": ["framing"],
+        "additionalProperties": False,
+    },
+    "ending_beat": {"type": "string"},
+    "image_source": {"type": "string"},
+    "image_prompt": {"type": "string"},
+    "visual_changes": {"type": "array", "items": {"type": "string"}},
+    "video_prompt": {"type": "string"},
+    "keyframe_prompts": {"type": "array", "items": {"type": "string"}},
+    "window_prompts": {"type": "array", "items": {"type": "string"}},
+}
+
+
+def _music_shot_schema(count: int, *, include_image_fields: bool) -> dict:
+    properties = {
+        key: value
+        for key, value in _MUSIC_SHOT_PROPERTIES.items()
+        if include_image_fields or key not in _MUSIC_IMAGE_FIELDS
+    }
+    required = [
+        "scene_goal",
+        "scene_type",
+        "subjects_on_screen",
+        "environment",
+        "visual_style",
+        "lighting",
+        "mood",
+        "action_beats",
+        "camera_plan",
+        "ending_beat",
+        "image_source",
+        "image_prompt",
+        "visual_changes",
+        "video_prompt",
+        "window_prompts",
+    ]
+    return {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": properties,
+            "required": [field for field in required if field in properties],
+            "additionalProperties": False,
+        },
+        "minItems": max(1, count),
+        "maxItems": max(1, count),
+    }
+
+
+def _discard_unused_image_fields(shot_dicts: list[dict]) -> list[dict]:
+    for shot in shot_dicts:
+        if isinstance(shot, dict):
+            for field in _MUSIC_IMAGE_FIELDS:
+                shot.pop(field, None)
+    return shot_dicts
+
+
 # ── Performer Map Parsing ────────────────────────────────────────────
 
 _PRONOUN_MAP = {
@@ -138,6 +234,16 @@ class MusicVideoPlanner(BasePlanner):
             characters: List of character dicts [{name, description}].
         """
         has_reference = bool(reference_image_path)
+        video_model = str(kwargs.get("video_model") or "")
+        shot_image_policy = str(kwargs.get("shot_image_policy") or "")
+        self._uses_generated_shot_images = shot_image_policy not in {
+            "prompt_only",
+            "direct_references",
+        }
+        self._preserve_video_character_names = (
+            video_model.lower().startswith("minimax_h3")
+            and shot_image_policy in {"prompt_only", "direct_references"}
+        )
         performer_map = _parse_performer_map(scene_description)
 
         # Normalize speaker_mappings: frontend sends list, we need dict
@@ -444,23 +550,96 @@ class MusicVideoPlanner(BasePlanner):
         """Call LLM to generate structured shot plans."""
         from ..nsfw_guidance import inject_nsfw_if_enabled
 
-        char_rules = build_character_rules_block(has_reference, char_profiles if char_profiles else None)
+        num_character_refs = len(kwargs.get("character_ref_paths", []) or [])
+        num_location_refs = len(kwargs.get("location_ref_paths", []) or [])
+        has_asset_references = bool(
+            has_reference or num_character_refs or num_location_refs
+        )
+        preserve_names = bool(
+            getattr(self, "_preserve_video_character_names", False)
+        )
+        uses_generated_images = bool(
+            getattr(self, "_uses_generated_shot_images", True)
+        )
+        char_rules = build_character_rules_block(
+            has_reference or bool(num_character_refs),
+            char_profiles if char_profiles else None,
+            preserve_names=preserve_names,
+        )
         camera_block = build_camera_style_block()
         # video_guide now merged into ltx2_music_video_rules.md — no separate load needed
 
-        from ..image_prompt_rules import get_image_prompt_rules
-        image_prompt_rules = get_image_prompt_rules(
-            has_reference,
-            num_character_refs=len(kwargs.get("character_ref_paths", []) or []),
-            num_location_refs=len(kwargs.get("location_ref_paths", []) or []),
-            character_ref_labels=kwargs.get("character_ref_labels"),
-            location_ref_labels=kwargs.get("location_ref_labels"),
-            seamless=kwargs.get("seamless", True),
-            image_model=kwargs.get("image_model", ""),
-        )
+        image_prompt_rules = ""
+        if uses_generated_images:
+            from ..image_prompt_rules import get_image_prompt_rules
+            image_prompt_rules = get_image_prompt_rules(
+                has_reference,
+                num_character_refs=num_character_refs,
+                num_location_refs=num_location_refs,
+                character_ref_labels=kwargs.get("character_ref_labels"),
+                location_ref_labels=kwargs.get("location_ref_labels"),
+                seamless=kwargs.get("seamless", True),
+                image_model=kwargs.get("image_model", ""),
+            )
 
         from ..guide_loader import load_guide
-        music_video_rules = load_guide("ltx2_music_video_rules.md")
+        video_model = str(kwargs.get("video_model") or "")
+        music_video_rules = load_guide(
+            "minimax_h3_shot_breakdown.md"
+            if video_model.lower().startswith("minimax_h3")
+            else "ltx2_music_video_rules.md"
+        )
+        h3_direct_rules = (
+            "H3 DIRECT-REFERENCE MUSIC VIDEO:\n"
+            "- No generated start frame will be supplied. Make each video_prompt "
+            "self-contained with setting, composition, named identities plus "
+            "visible traits, wardrobe, performance, camera, lighting, ambience, "
+            "effects, and music.\n"
+            "- The per-shot source-audio slice is mapped as driving audio. "
+            "Describe visible singing, lip movement, dance, action, and camera "
+            "that synchronize to it; do not invent or transcribe lyrics.\n"
+            "- Character/location references are soft guidance, not fixed first "
+            "frames. Describe the finished target shot.\n"
+            "- Do not create image_prompt, image_source, visual_changes, or "
+            "keyframe_prompts. Those fields are intentionally absent from the "
+            "video-only output schema."
+            if not uses_generated_images else ""
+        )
+        reference_aesthetic_rules = (
+            """VISUAL AESTHETIC — the reference photo defines the visual style for the entire music video.
+Match its aesthetic (color grading, film texture, era, tone) in every image_prompt unless the
+scene concept explicitly calls for a style change. End each image_prompt with
+"Use lighting and color temp from reference image." to preserve the look."""
+            if uses_generated_images and has_reference else ""
+        )
+        image_output_fields = (
+            '''    "image_source": "original or previous",
+    "image_prompt": "FIRST FRAME BEFORE action — initial state, static pose, environment. No motion verbs.",
+    "visual_changes": ["what transforms during the clip — e.g. 'performer jumps off stage', 'lights shift to red'"],
+'''
+            if uses_generated_images else ""
+        )
+        keyframe_output_field = (
+            '    "keyframe_prompts": [],\n'
+            if uses_generated_images else ""
+        )
+        image_workflow_notes = (
+            """- image_source: "original" = user's reference photo (default). "previous" = previous scene's output for same-location continuity.
+- FIELD ORDER: Write image_prompt FIRST (starting state), then visual_changes, then video_prompt.
+- visual_changes: If the performer jumps off stage, image_prompt shows them still ON stage.
+- keyframe_prompts: DEFAULT IS EMPTY. Add one only for a specific visual state the video model cannot infer from the start image and prompt; never for ordinary movement, camera, expression, lighting, or energy changes.
+"""
+            if uses_generated_images else ""
+        )
+        if uses_generated_images and has_reference:
+            scene_anchoring_rules = """SCENE-ANCHORING (avoid off-topic content):
+The user's main reference is visual ground truth. Every image_prompt and video_prompt must match its identity, setting, and aesthetic plus the Scene Concept. Do not invent unrelated worlds."""
+        elif has_asset_references:
+            scene_anchoring_rules = """SCENE-ANCHORING (avoid off-topic content):
+Character references define identity and location references define the setting. Follow their labels and the Scene Concept in every self-contained video prompt; do not invent conflicting identities or settings."""
+        else:
+            scene_anchoring_rules = """SCENE-ANCHORING (avoid off-topic content):
+No visual reference was provided. Invent one consistent performer and setting that fit the Scene Concept, then reuse the same artist and world across every clip. Show the performer delivering vocals on lyric clips and do not drift off-concept."""
 
         system_prompt = f"""You are a music video director. Plan each clip AND write its prompts. Output ONLY the JSON array.
 
@@ -470,10 +649,7 @@ class MusicVideoPlanner(BasePlanner):
 
 {camera_block}
 
-{'''VISUAL AESTHETIC — the reference photo defines the visual style for the entire music video.
-Match its aesthetic (color grading, film texture, era, tone) in every image_prompt unless the
-scene concept explicitly calls for a style change. End each image_prompt with
-"Use lighting and color temp from reference image." to preserve the look.''' if has_reference else ''}
+{reference_aesthetic_rules}
 
 MUSIC VIDEO RULES:
 - Chorus = high energy, bold framing. Verse = intimate, character focus.
@@ -481,6 +657,8 @@ MUSIC VIDEO RULES:
 - Vary visuals across clips. Performer must be visible when assigned.
 
 {music_video_rules}
+
+{h3_direct_rules}
 
 {image_prompt_rules}
 
@@ -498,55 +676,27 @@ OUTPUT — respond with ONLY a JSON array:
     "action_beats": ["Action 1", "Action 2"],
     "camera_plan": {{"framing": "medium shot", "movement": "slow dolly in", "movement_intensity": "subtle"}},
     "ending_beat": "Final image",
-    "image_source": "original or previous",
-    "image_prompt": "FIRST FRAME BEFORE action — initial state, static pose, environment. No motion verbs.",
-    "visual_changes": ["what transforms during the clip — e.g. 'performer jumps off stage', 'lights shift to red'"],
-    "video_prompt": "Short energetic prompt describing action AFTER the start frame. Keywords. Vibes. Camera. 15-40 words.",
-    "keyframe_prompts": [],
-    "window_prompts": []
+{image_output_fields}    "video_prompt": "Energetic prompt describing the visible performance, action, sound, and camera.",
+{keyframe_output_field}    "window_prompts": []
   }}
 ]
 
 Notes:
-- image_source: "original" = user's reference photo (default). "previous" = previous scene's output (same-location continuity).
-- FIELD ORDER: Write image_prompt FIRST (starting state), then visual_changes, then video_prompt.
-- visual_changes: If it says "performer jumps off stage", image_prompt shows them still ON stage.
-- keyframe_prompts: DEFAULT IS EMPTY ([]). Music videos almost NEVER need keyframes.
-  Music videos are performance-driven — the music carries energy, the video model
-  animates motion, camera, expressions, gestures, crowd reactions on its own. Use
-  keyframes ONLY when a specific visual change CANNOT be inferred from start image +
-  prompt (e.g. a costume change mid-clip that needs a new reference frame).
-  FORBIDDEN keyframe content for music videos:
-    * Performer's pose / gesture changes (model animates these)
-    * Camera angle changes (covered by video_prompt's camera movement)
-    * Expression / mood shifts (model animates these from prompt)
-    * Lighting shifts (prompt them in video_prompt's atmospheric beats)
-    * "Energy" or "intensity" beats (model picks up from music + prompt)
+{image_workflow_notes}
 - window_prompts: empty ([]) unless the scene needs >26s continuous video.
 
-{'''SCENE-ANCHORING (avoid off-topic content):
-The user uploaded a REFERENCE IMAGE showing the performer in a SPECIFIC setting
-(stage, microphone, crowd, lighting, etc.). EVERY image_prompt and video_prompt
-MUST match that setting plus the concept (Scene Concept below). Do NOT invent
-unrelated scenes — no "knight in armor", no "moss-covered castle", no "ancient
-ruins" unless those appear in the reference image or concept text. The reference
-image is the visual ground truth; deviations beyond it are hallucinations.''' if has_reference else '''SCENE-ANCHORING (avoid off-topic content):
-No reference image was provided. INVENT a single consistent performer (the
-vocalist/artist) and a setting that fit the Scene Concept below, then REUSE the
-same artist and world across EVERY clip so it reads as one cohesive music video.
-Show the performer delivering the vocals on lyric clips. Stay on-concept — do NOT
-drift into unrelated scenes the concept doesn't imply.'''}
+{scene_anchoring_rules}
 
 KEEP MUSIC-VIDEO PROMPTS SIMPLE:
 For each scene, the music drives the pacing and energy. You only need to identify:
-  - WHO is in frame (the performer, by descriptor — never by name)
+  - WHO is in frame ({"preserve user-supplied proper names and pair them with useful visible traits" if preserve_names else "the performer, by descriptor — never by name"})
   - CAMERA MOVEMENT (push-in, pull-back, orbit, handheld, low angle, etc.)
   - ATMOSPHERIC ELEMENTS (smoke, pyro, crowd cheering, lighting flashes, etc.)
   - The performer's BODY MOVEMENT in broad strokes (head bob, arms raised,
     walking forward, etc.) — but don't over-specify; the model interpolates.
-Keep video_prompt 15-40 words. Anything longer is over-described for music video.
+{"Use the H3 Context-IR fields above. Be concise but complete; do not enforce the legacy 15-40 word LTX limit." if preserve_names else "Keep video_prompt 15-40 words. Anything longer is over-described for music video."}
 
-Most scenes should use a single video_prompt with empty keyframe_prompts.
+{"Most scenes should use a single video_prompt with empty keyframe_prompts." if uses_generated_images else "Every scene should use video_prompt/window_prompts only; omit all still-image fields."}
 Output exactly {len(clips)} objects. Go:"""
 
         # Inject model-specific prompt polish guide if provided
@@ -555,7 +705,11 @@ Output exactly {len(clips)} objects. Go:"""
             system_prompt = f"{system_prompt}\n\n{polish_block}"
 
         # Inject content guidance (NSFW or safety guardrails)
-        system_prompt = inject_nsfw_if_enabled(system_prompt, nsfw, "both")
+        system_prompt = inject_nsfw_if_enabled(
+            system_prompt,
+            nsfw,
+            "both" if uses_generated_images else "video",
+        )
 
         user_prompt = f"""Scene Concept: {scene_description}
 Song tempo: {bpm:.0f} BPM
@@ -577,15 +731,22 @@ Write {len(clips)} structured shot plans. Go:"""
                 image_paths.append(lp)
         if not image_paths:
             image_paths = None
-        max_tokens = max(4096, len(clips) * 700 + 1024)
-
-        return self._call_llm_json(
+        per_clip_tokens = 700 if uses_generated_images else 520
+        max_tokens = max(4096, len(clips) * per_clip_tokens + 1024)
+        shot_dicts = self._call_llm_json(
             user_prompt=user_prompt,
             system_prompt=system_prompt,
             max_tokens=max_tokens,
             thinking_budget=4096,
             image_paths=image_paths,
+            json_schema=_music_shot_schema(
+                len(clips),
+                include_image_fields=uses_generated_images,
+            ),
         )
+        if not uses_generated_images:
+            _discard_unused_image_fields(shot_dicts)
+        return shot_dicts
 
     # ── Convert LLM Output to ShotPlans ──────────────────────────────
 
