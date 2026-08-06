@@ -13,8 +13,16 @@ export function GenerateButton() {
   // SCAIL-2 against a source video + reference image, no start image).
   const generationMode = useStore(s => s.generationMode)
   const isI2vOnly = useStore(s => s.modelOptions?.i2v_class && !s.modelOptions?.t2v_class)
+  const isOmniReference = useStore(s => s.modelOptions?.omni_reference === true)
+  const hasOmniVisualReference = useStore(s =>
+    s.params.minimax_h3_references?.some(
+      reference => reference.type === 'image' || reference.type === 'video',
+    ) === true,
+  )
   const hasStartImage = useStore(s => !!(s.startImage || s.params.image_start))
-  const needsImage = generationMode === 'video' && isI2vOnly && !hasStartImage
+  const needsImage = generationMode === 'video' && isI2vOnly && !isOmniReference && !hasStartImage
+  const needsReference = generationMode === 'video' && isOmniReference
+    && !hasOmniVisualReference
   const editSubMode = useStore(s => s.editSubMode)
   const editVideoPath = useStore(s => s.editVideoPath)
   const outpaintVideoBox = useStore(s => s.outpaintVideoBox)
@@ -27,7 +35,7 @@ export function GenerateButton() {
     || outpaintVideoBox.y + outpaintVideoBox.h < 0.9995
   )
   const needsOutpaintArea = isOutpaint && !!editVideoPath && !hasOutpaintArea
-  const blocked = needsImage || needsOutpaintSource || needsOutpaintArea
+  const blocked = needsImage || needsReference || needsOutpaintSource || needsOutpaintArea
 
   // Brief gray flash after clicking
   useEffect(() => {
@@ -48,12 +56,16 @@ export function GenerateButton() {
   if (blocked) {
     const label = needsImage
       ? 'Need image'
+      : needsReference
+        ? 'Need reference'
       : needsOutpaintSource
         ? 'Need source'
         : 'Choose canvas'
     const title = needsOutpaintArea
       ? 'Choose a larger output aspect or resize the source to create an area for Outpaint to generate.'
-      : undefined
+      : needsReference
+        ? 'Add at least one image or video reference. Audio cannot be the only reference.'
+        : undefined
     return (
       <button
         disabled

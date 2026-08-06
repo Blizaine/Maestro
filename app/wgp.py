@@ -135,6 +135,7 @@ _HANDLER_MODULES = [
     "shared.qtypes.nvfp4",
     "shared.qtypes.nunchaku_int4",
     "shared.qtypes.nunchaku_fp4",
+    "shared.qtypes.int8_convrot",
     "shared.qtypes.gguf",
 ]
 quant_router.unregister_handler(".fp8_quanto_bridge")
@@ -1192,7 +1193,11 @@ def validate_settings(state, model_type, single_prompt, inputs):
 
     if test_any_sliding_window(model_type) and image_mode == 0:
         if video_length > sliding_window_size:
-            if test_class_t2v(model_type) and not "G" in video_prompt_type :
+            if (
+                test_class_t2v(model_type)
+                and not model_def.get("video_continuation", False)
+                and not "G" in video_prompt_type
+            ):
                 gr.Info(f"You have requested to Generate Sliding Windows with a Text to Video model. Unless you use the Video to Video feature this is useless as a t2v model doesn't see past frames and it will generate the same video in each new window.") 
                 return ret()
             full_video_length = video_length if video_source is None else video_length +  sliding_window_overlap -1
@@ -2866,14 +2871,23 @@ def get_model_min_frames_and_step(model_type):
     latent_size = model_def.get("latent_size", frames_steps)
     return frames_minimum, frames_steps, latent_size 
 
-def align_model_frame_count(frame_count, model_def, for_generation=False):
+def align_model_frame_count(
+    frame_count,
+    model_def,
+    for_generation=False,
+    clamp_maximum=True,
+):
     """Align a requested frame count to a model's native temporal grid."""
     frame_count = int(frame_count)
     modulus = int(model_def.get("frame_alignment_modulus", 0) or 0)
     if modulus > 0:
         remainder = int(model_def.get("frame_alignment_remainder", 1)) % modulus
         minimum = int(model_def.get("frames_minimum", 1))
-        maximum = model_def.get("frames_maximum", None)
+        maximum = (
+            model_def.get("frames_maximum", None)
+            if clamp_maximum
+            else None
+        )
         frame_count = max(minimum, frame_count)
         if maximum is not None:
             frame_count = min(int(maximum), frame_count)
@@ -2898,6 +2912,20 @@ def align_model_frame_count(frame_count, model_def, for_generation=False):
     if for_generation:
         return (frame_count // latent_size) * latent_size + 1
     return (frame_count - 1) // latent_size * latent_size + 1
+
+
+def normalize_model_total_frame_count(frame_count, model_def):
+    """Normalize an output timeline without treating a window cap as total."""
+
+    frame_count = int(frame_count)
+    maximum = model_def.get("frames_maximum", None)
+    if (
+        model_def.get("sliding_window_exact_total_frames", False)
+        and maximum is not None
+        and frame_count > int(maximum)
+    ):
+        return max(int(model_def.get("frames_minimum", 1)), frame_count)
+    return align_model_frame_count(frame_count, model_def)
     
 def get_model_fps(model_type):
     model_def = get_model_def(model_type)
@@ -4194,7 +4222,21 @@ def load_models(model_type, override_profile = -1, output_type="video", **model_
 
 
     model_type_handler = model_types_handlers[base_model_type]
-    text_encoder_URLs= get_model_recursive_prop(model_type, "text_encoder_URLs", return_list= True)
+    text_encoder_variants = model_def.get("minimax_h3_text_encoder_variants", {}) if model_def else {}
+    requested_text_encoder_variant = str(
+        model_kwargs.get("minimax_h3_text_encoder")
+        or (model_def or {}).get("minimax_h3_text_encoder_default", "")
+    )
+    if text_encoder_variants:
+        text_encoder_spec = text_encoder_variants.get(requested_text_encoder_variant)
+        if text_encoder_spec is None:
+            raise ValueError(
+                f"Unknown MiniMax H3 text encoder '{requested_text_encoder_variant}'. "
+                f"Choose one of: {', '.join(text_encoder_variants)}."
+            )
+        text_encoder_URLs = text_encoder_spec.get("URLs", [])
+    else:
+        text_encoder_URLs= get_model_recursive_prop(model_type, "text_encoder_URLs", return_list= True)
     if text_encoder_URLs is not None:
         # Per-model override: a model_def can force a specific text encoder
         # quantization regardless of the user's global setting. Used by
@@ -4272,6 +4314,14 @@ def load_models(model_type, override_profile = -1, output_type="video", **model_
         print("Pytorch compilation is not supported for this Model")
     # kwargs["pinnedMemory"] = "text_encoder"
     offloadobj = offload.profile(pipe, profile_no= mmgp_profile, compile = compile_modules, quantizeTransformer = False, loras = loras_transformer, perc_reserved_mem_max = perc_reserved_mem_max , vram_safety_coefficient = vram_safety_coefficient , convertWeightsFloatTo = transformer_dtype, **kwargs)  
+    # Let the job-level memory planner tell whether a resident model was
+    # profiled with enough activation headroom for a later, heavier request
+    # (notably H3 Ref2VA with a video reference).  A lower coefficient remains
+    # safe for lighter jobs and does not force an unnecessary reload.
+    try:
+        wan_model._maestro_profile_vram_coefficient = float(vram_safety_coefficient)
+    except Exception:
+        pass
     if len(args.gpu) > 0:
         torch.set_default_device(args.gpu)
     transformer_type = model_type
@@ -7109,6 +7159,11 @@ def generate_video(
     outpaint_full_resolution_refine=False,
     # Use Maestro's managed In/Outpaint IC-LoRA stack.
     outpaint_official_stack=False,
+    # MiniMax H3 Ref2VA's ordered image/video/audio manifest and reference
+    # preparation policy. Other model runtimes ignore these kwargs.
+    minimax_h3_references=None,
+    minimax_h3_reference_detail="match",
+    minimax_h3_text_encoder="nvfp4_awq",
 ):
 
 
@@ -7188,6 +7243,23 @@ def generate_video(
             time.sleep(1)
     vae_upsampling = model_def.get("vae_upsampler", None)
     model_kwargs = {}
+    if str(model_def.get("architecture") or "").startswith("minimax_h3"):
+        requested_h3_text_encoder = str(
+            minimax_h3_text_encoder
+            or model_def.get("minimax_h3_text_encoder_default", "nvfp4_awq")
+        )
+        model_kwargs["minimax_h3_text_encoder"] = requested_h3_text_encoder
+        loaded_h3_text_encoder = getattr(wan_model, "text_encoder_variant", None)
+        if (
+            wan_model is not None
+            and loaded_h3_text_encoder != requested_h3_text_encoder
+        ):
+            print(
+                "[MiniMax H3] Text encoder changed "
+                f"{loaded_h3_text_encoder or 'unknown'} -> {requested_h3_text_encoder}; "
+                "reloading the model profile."
+            )
+            reload_needed = True
     if vae_upsampling is not None:
         new_vae_upsampling = None if image_mode not in vae_upsampling or "vae" not in spatial_upsampling else spatial_upsampling
         # Read back the currently-applied setting to decide whether a reload
@@ -7273,37 +7345,61 @@ def generate_video(
     # Auto resolution: compute from reference image aspect ratio
     if _auto_aspect:
         _auto_resolved = False
+        _resolution_hint = str(resolution or "auto")
+        _h3_auto_budgets = model_def.get("auto_resolution_budgets") or {}
+        _h3_auto_fallbacks = model_def.get("auto_resolution_fallbacks") or {}
         # Determine pixel budget from resolution hint
-        if "1080" in str(resolution):
+        if _resolution_hint in _h3_auto_budgets:
+            _auto_budget = int(_h3_auto_budgets[_resolution_hint])
+        elif "1080" in _resolution_hint:
             _auto_budget = 1920 * 1088
-        elif "480" in str(resolution):
+        elif "480" in _resolution_hint:
             _auto_budget = 848 * 480
         else:
             _auto_budget = 1280 * 720  # default 720p
-        # Check for reference images (image gen) or start image (video gen)
+        # Check for reference images (image gen), an FL2VA start image, or
+        # the first visual Ref2VA reference. Audio-only references cannot
+        # establish an output aspect ratio.
         _auto_ref = None
+        _auto_ref_kind = "image"
         if is_image and image_refs:
             _auto_ref = image_refs[0] if isinstance(image_refs, list) else image_refs
         elif image_start:
             _auto_ref = image_start
+        elif minimax_h3_references:
+            for _reference in minimax_h3_references:
+                if not isinstance(_reference, dict):
+                    continue
+                _reference_kind = str(
+                    _reference.get("type") or _reference.get("kind") or ""
+                ).strip().lower()
+                _reference_path = _reference.get("path")
+                if _reference_kind in {"image", "video"} and _reference_path:
+                    _auto_ref = _reference_path
+                    _auto_ref_kind = _reference_kind
+                    break
+        if isinstance(_auto_ref, (list, tuple)):
+            _auto_ref = _auto_ref[0] if _auto_ref else None
         # Get dimensions — ref could be a file path or PIL Image
         from PIL import Image as _PILImg
         _rw, _rh = None, None
         if isinstance(_auto_ref, _PILImg.Image):
             _rw, _rh = _auto_ref.size
         elif isinstance(_auto_ref, str) and os.path.isfile(_auto_ref):
-            _ri = _PILImg.open(_auto_ref)
-            _rw, _rh = _ri.size
-            _ri.close()
+            if _auto_ref_kind == "video":
+                _, _rw, _rh, _ = get_video_info(_auto_ref)
+            else:
+                with _PILImg.open(_auto_ref) as _ri:
+                    _rw, _rh = _ri.size
         if _rw and _rh:
             _scale = (_auto_budget / (_rw * _rh)) ** 0.5
-            _aw = int(round(_rw * _scale / block_size)) * block_size
-            _ah = int(round(_rh * _scale / block_size)) * block_size
+            _aw = max(block_size, int(round(_rw * _scale / block_size)) * block_size)
+            _ah = max(block_size, int(round(_rh * _scale / block_size)) * block_size)
             resolution = f"{_aw}x{_ah}"
             print(f"[Auto Resolution] {_rw}x{_rh} source → {_aw}x{_ah} output (budget={'1080p' if _auto_budget > 1000000 else '720p'})")
             _auto_resolved = True
         if not _auto_resolved:
-            resolution = "1280x720"  # fallback
+            resolution = _h3_auto_fallbacks.get(_resolution_hint, "1280x720")
 
     width, height = resolution.split("x")
     width, height = int(width) // block_size *  block_size, int(height) // block_size *  block_size
@@ -7466,6 +7562,9 @@ def generate_video(
     else:
         print(f"[LoRA] No LoRAs activated for this generation (model_type={model_type})")
 
+    if hasattr(wan_model, "validate_loras"):
+        wan_model.validate_loras(loras_selected)
+
     if hasattr(wan_model, "get_trans_lora"):
         trans_lora, trans2_lora = wan_model.get_trans_lora()
     else:     
@@ -7491,13 +7590,15 @@ def generate_video(
             raise gr.Error("Error while loading Loras: " + ", ".join(error_files))
         if trans2_lora is not None: 
             offload.sync_models_loras(trans_lora, trans2_lora)
+        if hasattr(wan_model, "finalize_loras"):
+            wan_model.finalize_loras()
         
     seed = None if seed == -1 else seed
     # negative_prompt = "" # not applicable in the inference
     model_filename = get_model_filename(base_model_type)  
 
     _, _, latent_size = get_model_min_frames_and_step(model_type)
-    video_length = align_model_frame_count(video_length, model_def)
+    video_length = normalize_model_total_frame_count(video_length, model_def)
     published_video_length = video_length
     recast_warmup_frames = _resolve_scail2_recast_warmup_frames(
         custom_settings, model_def, video_prompt_type, latent_size,
@@ -7510,7 +7611,11 @@ def generate_video(
             f"({published_video_length} published, {video_length} generated)."
         )
     if sliding_window_size !=0:
-        sliding_window_size = (sliding_window_size -1) // latent_size * latent_size + 1
+        sliding_window_size = align_model_frame_count(
+            sliding_window_size,
+            model_def,
+            for_generation=True,
+        )
     # Requantize audio_frame_offset to match the actual quantized video_length per clip.
     # Only recalculate for uniform-duration clips (multi_prompts_gen_type==3).
     # Clips dispatched from the manifest path (launch.py) already carry correct
@@ -7959,9 +8064,35 @@ def generate_video(
             sliding_window = sliding_window  or extra_windows > 0
             if sliding_window and window_no > 0:
                 # num_frames_generated -= reuse_frames
-                if (requested_frames_to_generate - num_frames_generated) <  latent_size:
+                remaining_output_frames = (
+                    requested_frames_to_generate - num_frames_generated
+                )
+                if remaining_output_frames <= 0:
                     break
-                current_video_length = min(sliding_window_size, ((requested_frames_to_generate - num_frames_generated + reuse_frames + discard_last_frames) // latent_size) * latent_size + 1 )
+                if (
+                    remaining_output_frames < latent_size
+                    and not model_def.get(
+                        "sliding_window_exact_total_frames",
+                        False,
+                    )
+                ):
+                    break
+                remaining_with_context = (
+                    remaining_output_frames
+                    + reuse_frames
+                    + discard_last_frames
+                )
+                if model_def.get("sliding_window_exact_total_frames", False):
+                    current_video_length = align_model_frame_count(
+                        remaining_with_context,
+                        model_def,
+                        for_generation=True,
+                    )
+                else:
+                    current_video_length = min(
+                        sliding_window_size,
+                        (remaining_with_context // latent_size) * latent_size + 1,
+                    )
 
             total_windows = initial_total_windows + extra_windows
             gen["total_windows"] = total_windows
@@ -8006,9 +8137,19 @@ def generate_video(
                     source_video_overlap_frames_count = source_video_frames_count = guide_start_frame = 0
             if image_end is not None:
                 image_end_list=  image_end if isinstance(image_end, list) else [image_end]
-                if len(image_end_list) >= window_no:
+                image_end_for_window = None
+                if (
+                    model_def.get("sliding_window_end_image_at_final", False)
+                    and sliding_window
+                    and len(image_end_list) == 1
+                ):
+                    if window_no == total_windows:
+                        image_end_for_window = image_end_list[0]
+                elif len(image_end_list) >= window_no:
+                    image_end_for_window = image_end_list[window_no - 1]
+                if image_end_for_window is not None:
                     new_height, new_width = image_size                    
-                    image_end_tensor, _, _ = calculate_dimensions_and_resize_image(image_end_list[window_no-1], new_height, new_width, sample_fit_canvas, fit_crop, block_size = block_size)
+                    image_end_tensor, _, _ = calculate_dimensions_and_resize_image(image_end_for_window, new_height, new_width, sample_fit_canvas, fit_crop, block_size = block_size)
                     # image_end_tensor =image_end_list[window_no-1].resize((new_width, new_height), resample=Image.Resampling.LANCZOS) 
                     refresh_preview["image_end"] = image_end_tensor 
                     image_end_tensor = convert_image_to_tensor(image_end_tensor)
@@ -8581,6 +8722,10 @@ def generate_video(
                     progressive_stage3_sigma=progressive_stage3_sigma,
                     progressive_stage1_image_weight=progressive_stage1_image_weight,
                     progressive_stage3_image_weight=progressive_stage3_image_weight,
+                    **({} if not model_def.get("omni_reference", False) else {
+                        "minimax_h3_references": minimax_h3_references,
+                        "minimax_h3_reference_detail": minimax_h3_reference_detail,
+                    }),
                     # Motion suffix: only passed when the loaded suffix video
                     # is available. Other model handlers (Wan / Flux / Qwen /
                     # Hunyuan) don't accept these kwargs, so we omit them
@@ -8739,6 +8884,38 @@ def generate_video(
                     guide_start_frame -= reuse_frames 
                     if generated_audio is not None:
                         generated_audio = truncate_audio( generated_audio, reuse_frames, 0, fps, output_audio_sampling_rate,)
+
+                if (
+                    sliding_window
+                    and model_def.get("sliding_window_trim_to_requested", False)
+                ):
+                    # H3's individual passes must lie on a 17*n+5 grid, but
+                    # the joined Studio duration can be any frame count. The
+                    # final pass may therefore decode a few extra frames (or
+                    # a minimum-size continuation for a very short tail).
+                    # Trim that tail only after removing the shared boundary
+                    # frame so video and native audio keep the exact requested
+                    # joined duration.
+                    remaining_output_frames = max(
+                        0,
+                        requested_frames_to_generate
+                        - frames_already_processed_count,
+                    )
+                    excess_output_frames = max(
+                        0,
+                        int(sample.shape[1]) - remaining_output_frames,
+                    )
+                    if excess_output_frames > 0:
+                        sample = sample[:, :-excess_output_frames]
+                        guide_start_frame -= excess_output_frames
+                        if generated_audio is not None:
+                            generated_audio = truncate_audio(
+                                generated_audio,
+                                0,
+                                excess_output_frames,
+                                fps,
+                                output_audio_sampling_rate,
+                            )
 
                 num_frames_generated = guide_start_frame - (source_video_frames_count - source_video_overlap_frames_count)
                 if generated_audio is not None:
@@ -9277,7 +9454,11 @@ def generate_video(
                     if len(group) == multi_clip_info["total"]:
                         # All clips in this group are done — concatenate
                         clip_paths = [group[i]["path"] for i in range(multi_clip_info["total"])]
-                        concat_audio = original_audio_guide or audio_source
+                        concat_audio = (
+                            multi_clip_info.get("concat_audio_path")
+                            or original_audio_guide
+                            or audio_source
+                        )
                         concat_ext = os.path.splitext(clip_path)[1]
                         concat_name = f"{time_flag}_seed{seed}_multiclip{concat_ext}"
                         concat_path = os.path.join(save_path, concat_name)

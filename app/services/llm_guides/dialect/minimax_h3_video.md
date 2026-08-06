@@ -4,6 +4,7 @@ MINIMAX H3 CONTEXT-IR RULES (apply to video_prompt):
 - Assign every speaking person a stable ID such as (S1) or (S2). Keep the same ID across shots.
 - Write literal speech only as <d>[English] Exact words.</d>, changing the language tag when requested. Put speaker identity, voice, action, and delivery outside the tag.
 - Preserve supplied dialogue verbatim. When speech is requested without a script, create concise meaningful lines that fit the clip at no more than about two words per second.
+- Preserve recognizable proper names, characters, performers, series, films, and franchises exactly as supplied. Never replace a trained identity such as "Dwight from The Office" with a generic descriptor.
 - After the final line, use visible reactions or movement for remaining time and state that the characters remain silent with mouths closed. Never invent extra speech to fill the clip.
 - overall_soundscape contains ambience, practical effects, and non-verbal human sounds; do not repeat dialogue there.
 - non_diegetic_music describes audience-only music. Use N/A unless music is requested.

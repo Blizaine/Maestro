@@ -2116,11 +2116,18 @@ def enhance_prompt(
     tts_voice_count: int = 2,
     lora_system_hint: str = "",
     raw_enhancer_mode: bool = False,
+    reference_context: Optional[str] = None,
 ) -> str:
+    is_h3_ref2va = (
+        mode in ("video", "avatar")
+        and (model_type or "").lower().startswith("minimax_h3_ref2va")
+    )
     is_h3_context_ir = (
         mode in ("video", "avatar")
         and (model_type or "").lower().startswith("minimax_h3")
+        and not is_h3_ref2va
     )
+    is_h3_structured = is_h3_context_ir or is_h3_ref2va
     # If caller provides a system prompt override, use it directly (e.g., Director third-pass)
     if system_override:
         # Do NOT append the full model-specific enhance guide — the override is self-contained.
@@ -2332,7 +2339,7 @@ def enhance_prompt(
     # The generic appendix says to remove all character names and to write one
     # paragraph per sliding window, both of which conflict with H3's
     # knowledge-aware Context-IR format and single native timeline.
-    if mode in ("video", "avatar") and not is_h3_context_ir:
+    if mode in ("video", "avatar") and not is_h3_structured:
         from services.guide_loader import load_guide as _load_vid_guide
         vid_block = _load_vid_guide("enhance", "video_shared")
         if vid_block:
@@ -2344,11 +2351,20 @@ def enhance_prompt(
 
     # Add image context
     if image_paths:
-        if mode == "image":
+        if is_h3_ref2va:
+            user_prompt = (
+                "I have attached the image references from an ordered MiniMax H3 Omni-reference request. "
+                "Use what you can see together with the exact label map below; references are identity/style/motion "
+                "evidence and are not automatically an opening frame.\n\n"
+                f"{reference_context or 'Use the supplied ordered reference labels.'}\n\n{user_prompt}"
+            )
+        elif mode == "image":
             user_prompt = f"I have attached a reference image. Enhance this prompt based on what you see in the image:\n\n{user_prompt}"
         else:
             user_prompt = f"I have attached a start frame image. Enhance this video prompt to match what you see in the image and describe what should happen:\n\n{user_prompt}"
         print(f"[Enhance] Sending {len(image_paths)} image(s) to vision LLM")
+    elif is_h3_ref2va and reference_context:
+        user_prompt = f"Ordered Omni-reference label map:\n{reference_context}\n\n{user_prompt}"
 
     # Inject LoRA hints into system prompt (NOT user prompt) so LLM treats them as instructions
     if lora_system_hint:
@@ -2368,7 +2384,18 @@ def enhance_prompt(
     # its field labels and <d> blocks are part of the model input, not prose
     # headers to strip. The generic "no labels" rule previously contradicted
     # the H3 guide and encouraged ordinary quote-mark dialogue.
-    if is_h3_context_ir:
+    if is_h3_ref2va:
+        system += (
+            "\n\nCRITICAL MINIMAX H3 REF2VA OUTPUT CONTRACT: Output ONLY the six required fields, "
+            "in order: subject_definitions:, summary:, retention_analysis:, detailed_description:, "
+            "overall_soundscape:, and non_diegetic_music:. Use only the supplied <Picture n>, <Video n>, "
+            "and <Audio n> labels. These labels and fields are model syntax, not explanatory headings. "
+            "Every VOICE REFERENCE must be bound inside subject_definitions to its matching <Subject n> "
+            "and stable (S1), (S2), etc. speaker ID. Spoken lines require that same ID and <d>[Language] literal "
+            "words</d>. No markdown, "
+            "explanation, filenames, or LoRA names."
+        )
+    elif is_h3_context_ir:
         system += (
             "\n\nCRITICAL MINIMAX H3 OUTPUT CONTRACT: Output ONLY the structured "
             "H3 prompt, with the exact field labels "
@@ -2384,11 +2411,20 @@ def enhance_prompt(
     else:
         system += "\n\nCRITICAL: Output ONLY the enhanced prompt text. No headers, no labels, no markdown, no explanation, no \"Enhancement Logic\", no \"Edit Prompt:\". No LoRA filenames (.safetensors). Just the raw prompt text."
 
+    if is_h3_structured:
+        dialogue_requirement = _build_h3_dialogue_requirement(prompt, duration_seconds)
+        if dialogue_requirement:
+            # Keep this adjacent to the output contract so a long vision guide
+            # cannot demote literal dialogue into a vague "speaks" action.
+            system += f"\n\n{dialogue_requirement}"
+
     # Scale max tokens for multi-window video prompts
     effective_max_tokens = max_new_tokens
     if window_count and window_count > 1:
         effective_max_tokens = max(max_new_tokens, window_count * 300 + 256)
-    if is_h3_context_ir:
+    if is_h3_ref2va:
+        effective_max_tokens = max(effective_max_tokens, 1200)
+    elif is_h3_context_ir:
         # Leave enough room for the three required fields plus a compact timed
         # dialogue. Most H3 prompts finish well below this ceiling, but 512 can
         # truncate a vision-assisted 15-second rewrite before its sound fields.
@@ -2411,19 +2447,632 @@ def enhance_prompt(
         presence_penalty=0.1,   # encourage variety
     )
 
-    # Post-process: strip any markdown headers, labels, or explanation the model added
+    # Post-process ordinary prose aggressively, but preserve H3's required field
+    # labels and media tags. The old substring-loop cleaner could truncate a
+    # valid Context-IR response at its first repeated <Picture>/<Audio> mapping.
     if result:
-        result = _clean_enhance_output(result)
+        result = _clean_enhance_output(result, preserve_structure=is_h3_structured)
+
+    structure_is_valid = (
+        _has_complete_h3_ref2va_structure(result)
+        if is_h3_ref2va
+        else _has_complete_h3_context_structure(result)
+    ) if is_h3_structured else True
+    dialogue_is_valid = _h3_dialogue_contract_satisfied(prompt, result) if is_h3_structured else True
+    timed_silence_is_valid = (
+        _h3_timed_silence_contract_satisfied(prompt, result, duration_seconds)
+        if is_h3_structured
+        else True
+    )
+    voice_binding_is_valid = (
+        _h3_voice_binding_contract_satisfied(result, reference_context)
+        if is_h3_ref2va
+        else True
+    )
+
+    # Small local LLMs can either repeat the first Ref2VA mapping or summarize
+    # quoted dialogue as the word "speaks". Retry malformed H3 output once with
+    # the immutable dialogue contract adjacent to the shape constraint.
+    if is_h3_structured and not (
+        structure_is_valid
+        and dialogue_is_valid
+        and timed_silence_is_valid
+        and voice_binding_is_valid
+    ):
+        failures = []
+        if not structure_is_valid:
+            failures.append("structure")
+        if not dialogue_is_valid:
+            failures.append("dialogue")
+        if not timed_silence_is_valid:
+            failures.append("timed silence")
+        if not voice_binding_is_valid:
+            failures.append("voice binding")
+        print(f"[Enhance] Invalid MiniMax H3 {'/'.join(failures)}; retrying once.")
+        field_requirement = (
+            "Emit each of the six required field labels exactly once, in order."
+            if is_h3_ref2va
+            else "Emit each of the three required field labels exactly once, in order."
+        )
+        retry = generate(
+            prompt=user_prompt,
+            system_prompt=(
+                system
+                + f"\n\nRETRY REQUIREMENT: Be concise. {field_requirement} "
+                "Do not repeat a subject definition or reference mapping. Never replace a requested "
+                "spoken line with the words 'speaks', 'talks', or 'dialogue'; write the actual <d> block."
+            ),
+            max_new_tokens=effective_max_tokens,
+            temperature=min(float(temperature), 0.35),
+            image_paths=image_paths,
+            enable_thinking=False,
+            thinking_budget=4096,
+            frequency_penalty=0.6,
+            presence_penalty=0.15,
+        )
+        retry = _clean_enhance_output(retry, preserve_structure=True) if retry else ""
+        retry_structure_is_valid = (
+            _has_complete_h3_ref2va_structure(retry)
+            if is_h3_ref2va
+            else _has_complete_h3_context_structure(retry)
+        )
+        retry_dialogue_is_valid = _h3_dialogue_contract_satisfied(prompt, retry)
+        retry_timed_silence_is_valid = _h3_timed_silence_contract_satisfied(
+            prompt,
+            retry,
+            duration_seconds,
+        )
+        retry_voice_binding_is_valid = (
+            _h3_voice_binding_contract_satisfied(retry, reference_context)
+            if is_h3_ref2va
+            else True
+        )
+        if (
+            retry_structure_is_valid
+            and retry_dialogue_is_valid
+            and retry_timed_silence_is_valid
+            and retry_voice_binding_is_valid
+        ):
+            result = retry
+        else:
+            print("[Enhance] H3 retry was incomplete; using deterministic structured fallback.")
+            result = (
+                _build_h3_ref2va_tagged_fallback(
+                    prompt,
+                    reference_context,
+                    duration_seconds=duration_seconds,
+                )
+                if is_h3_ref2va
+                else _build_h3_context_fallback(
+                    prompt,
+                    has_start_image=bool(image_paths),
+                    duration_seconds=duration_seconds,
+                )
+            )
+
+    # If two full rewrites still summarize a vague request as "they discuss",
+    # ask the local LLM for only the missing exchange. This rare focused pass is
+    # cheaper and more reliable than accepting a prompt that makes H3 improvise.
+    if (
+        is_h3_structured
+        and _h3_requests_speech(prompt)
+        and not _extract_h3_quoted_dialogue(prompt)
+        and not _h3_dialogue_contract_satisfied(prompt, result)
+    ):
+        word_budget = max(4, int(duration_seconds or 8))
+        print("[Enhance] H3 discussion still has no dialogue; generating a focused exchange.")
+        dialogue_fragment = generate(
+            prompt=(
+                f"Duration: {duration_seconds or 8} seconds. Total dialogue budget: at most "
+                f"{word_budget} spoken words. Request: {prompt}"
+            ),
+            system_prompt=(
+                "Write only the concise dialogue requested by the user. Output one to three lines in "
+                "the exact form 'Speaker description (S1): <d>[English] Literal words.</d>', using "
+                "stable sequential speaker IDs. Communicate the requested topic. No narration, "
+                "markdown, quotation marks, headings, or dialogue beyond the word budget."
+            ),
+            max_new_tokens=min(320, effective_max_tokens),
+            temperature=min(float(temperature), 0.5),
+            image_paths=None,
+            enable_thinking=False,
+            thinking_budget=2048,
+            frequency_penalty=0.4,
+            presence_penalty=0.1,
+        )
+        dialogue_fragment = (
+            _clean_enhance_output(dialogue_fragment, preserve_structure=True)
+            if dialogue_fragment
+            else ""
+        )
+        if _extract_h3_dialogue_blocks(dialogue_fragment):
+            result = _inject_h3_generated_dialogue(
+                result,
+                dialogue_fragment,
+                ref2va=is_h3_ref2va,
+            )
+        else:
+            print("[Enhance] Focused H3 dialogue pass returned no valid <d> block.")
+
+    # Explicit user dialogue is immutable. Even if both LLM attempts omit it,
+    # compile every quoted line into H3 syntax before returning the prompt.
+    if is_h3_structured and not _h3_dialogue_contract_satisfied(prompt, result):
+        result = _inject_missing_h3_dialogue(result, prompt, ref2va=is_h3_ref2va)
+    if is_h3_structured:
+        result = _strip_h3_untagged_dialogue_duplicates(result, prompt)
+        result = _enforce_h3_soundscape_silence(result, prompt)
+        result = _enforce_h3_music_request(result, prompt, reference_context)
     return result
 
 
-def _clean_enhance_output(text: str) -> str:
+_H3_REF2VA_FIELDS = (
+    "subject_definitions",
+    "summary",
+    "retention_analysis",
+    "detailed_description",
+    "overall_soundscape",
+    "non_diegetic_music",
+)
+_H3_CONTEXT_FIELDS = (
+    "integrated_multimodal_description",
+    "overall_soundscape",
+    "non_diegetic_music",
+)
+
+
+def _extract_h3_quoted_dialogue(text: str) -> list[str]:
+    """Extract explicit straight- or curly-quoted speech in source order."""
+    import re
+    matches = []
+    for match in re.finditer(r'"([^"\r\n]{1,500})"|“([^”\r\n]{1,500})”', str(text or "")):
+        value = (match.group(1) or match.group(2) or "").strip()
+        if value:
+            matches.append(value)
+    return matches
+
+
+def _h3_requests_speech(text: str) -> bool:
+    import re
+    return bool(
+        _extract_h3_quoted_dialogue(text)
+        or re.search(
+            r"\b(?:say|says|speak|speaks|talk|talks|discuss|discusses|discussion|"
+            r"argue|argues|announce|announces|ask|asks|reply|replies|tell|tells|"
+            r"conversation|dialogue)\b",
+            str(text or ""),
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _extract_h3_dialogue_blocks(text: str) -> list[str]:
+    import re
+    return [
+        match.strip()
+        for match in re.findall(
+            r"<d>\s*\[[^\]]+\]\s*(.*?)\s*</d>",
+            str(text or ""),
+            flags=re.DOTALL,
+        )
+        if match.strip()
+    ]
+
+
+def _h3_dialogue_schedule(prompt: str, duration_seconds: Optional[float]) -> tuple[float, float, float]:
+    """Choose an early bounded speech interval and leave useful silent action around it."""
+    duration = max(2.0, float(duration_seconds or 8.0))
+    quotes = _extract_h3_quoted_dialogue(prompt)
+    if quotes:
+        word_count = sum(len(line.split()) for line in quotes)
+    else:
+        # Vague discussion requests still need room for reactions and action.
+        word_count = max(4, int(duration))
+    speech_duration = max(1.0, word_count / 2.0)
+    speech_duration = min(speech_duration, max(1.0, duration * 0.55))
+    start = max(0.5, duration * 0.2)
+    start = min(start, max(0.25, duration - speech_duration - 0.75))
+    end = min(duration - 0.25, start + speech_duration)
+    return duration, start, end
+
+
+def _build_h3_timed_silence_clause(prompt: str, duration_seconds: Optional[float]) -> str:
+    if not _h3_requests_speech(prompt):
+        return ""
+    duration, start, end = _h3_dialogue_schedule(prompt, duration_seconds)
+    return (
+        f"From 0.00 to {start:.2f} seconds, show active scene-appropriate nonverbal action rather "
+        "than idle staring; every mouth stays completely closed and the audio contains no human "
+        "voice. Begin the first tagged line at approximately "
+        f"{start:.2f} seconds and finish all <d> dialogue by approximately {end:.2f} seconds. "
+        f"From {end:.2f} to {duration:.2f} seconds, fill the remaining timeline with concrete "
+        "nonverbal action, reactions, camera development, ambience, and synchronized practical "
+        "effects. Outside the tagged interval there are no voices, whispers, grunts, audible "
+        "breathing, or speech-like vocalizations, and every mouth remains closed."
+    )
+
+
+def _build_h3_dialogue_requirement(
+    prompt: str,
+    duration_seconds: Optional[float] = None,
+) -> str:
+    quotes = _extract_h3_quoted_dialogue(prompt)
+    timed_clause = _build_h3_timed_silence_clause(prompt, duration_seconds)
+    if quotes:
+        required = "\n".join(
+            f"- REQUIRED VERBATIM: <d>[English] {line}</d>" for line in quotes
+        )
+        return (
+            "IMMUTABLE H3 DIALOGUE CONTRACT: The user supplied the spoken lines below. "
+            "Every line must appear verbatim inside a <d> block in the output; do not summarize, "
+            "paraphrase, censor, omit, or add speech. Give each line a stable (S1), (S2), etc. "
+            f"speaker outside its tag. Never repeat these words as ordinary quoted text in summary "
+            f"or any other field.\n{required}\n{timed_clause}"
+        )
+    if _h3_requests_speech(prompt):
+        return (
+            "MANDATORY H3 DIALOGUE CONTRACT: The user explicitly requests speech but supplied no "
+            "script. Write concise, meaningful dialogue that communicates the requested subject, "
+            "using stable speaker IDs and one or more <d>[English] literal words</d> blocks. "
+            "Writing only 'speaks', 'talks', or 'they discuss' makes the output invalid. "
+            f"{timed_clause}"
+        )
+    return ""
+
+
+def _h3_dialogue_contract_satisfied(prompt: str, result: str) -> bool:
+    import re
+    quotes = _extract_h3_quoted_dialogue(prompt)
+    blocks = _extract_h3_dialogue_blocks(result)
+    has_speaker_id = bool(re.search(r"\(S\d+\)", str(result or "")))
+    if quotes:
+        return has_speaker_id and all(line in blocks for line in quotes)
+    if _h3_requests_speech(prompt):
+        return has_speaker_id and bool(blocks)
+    return True
+
+
+def _h3_timed_silence_contract_satisfied(
+    prompt: str,
+    result: str,
+    duration_seconds: Optional[float],
+) -> bool:
+    """Require explicit non-vocal time allocation around requested speech."""
+    if not _h3_requests_speech(prompt):
+        return True
+    import re
+    text = str(result or "")
+    has_opening_interval = bool(re.search(r"(?i)\bfrom\s+0(?:\.0+)?\s+(?:to|until)", text))
+    has_closed_mouths = bool(re.search(r"(?i)\bmouths?\b.{0,50}\bclosed\b", text))
+    has_no_voice = bool(
+        re.search(r"(?i)\b(?:no|without)\s+(?:human\s+)?(?:voices?|speech|vocal)", text)
+    )
+    has_remaining_interval = bool(
+        re.search(r"(?i)\bfrom\s+\d+(?:\.\d+)?\s+(?:to|until)\s+\d+(?:\.\d+)?\s+seconds", text)
+    )
+    return has_opening_interval and has_closed_mouths and has_no_voice and has_remaining_interval
+
+
+def _h3_voice_binding_contract_satisfied(
+    result: str,
+    reference_context: Optional[str],
+) -> bool:
+    """Require every Omni voice reference inside the subject/speaker mapping."""
+    import re
+    voice_labels = re.findall(
+        r"(?mi)^(<Audio\s+\d+>).*?intent=VOICE REFERENCE.*$",
+        str(reference_context or ""),
+    )
+    if not voice_labels:
+        return True
+    match = re.search(
+        r"(?ms)^\s*subject_definitions\s*:(.*?)(?=^\s*summary\s*:)",
+        str(result or ""),
+    )
+    if not match:
+        return False
+    definitions = match.group(1)
+    return all(label in definitions for label in voice_labels) and bool(
+        re.search(r"\(S\d+\)", definitions)
+    )
+
+
+def _has_complete_h3_ref2va_structure(text: str) -> bool:
+    """Return true only for one complete, ordered six-field Ref2VA prompt."""
+    if not text:
+        return False
+    import re
+    positions = []
+    for field in _H3_REF2VA_FIELDS:
+        matches = list(re.finditer(rf"(?mi)^\s*{re.escape(field)}\s*:", text))
+        if len(matches) != 1:
+            return False
+        positions.append(matches[0].start())
+    return positions == sorted(positions)
+
+
+def _has_complete_h3_context_structure(text: str) -> bool:
+    """Return true only for one complete, ordered three-field H3 prompt."""
+    if not text:
+        return False
+    import re
+    positions = []
+    for field in _H3_CONTEXT_FIELDS:
+        matches = list(re.finditer(rf"(?mi)^\s*{re.escape(field)}\s*:", text))
+        if len(matches) != 1:
+            return False
+        positions.append(matches[0].start())
+    return positions == sorted(positions)
+
+
+def _compile_h3_explicit_dialogue(prompt: str) -> str:
+    """Replace user quotation marks with literal H3 dialogue blocks."""
+    import re
+    counter = 0
+
+    def replace(match):
+        nonlocal counter
+        counter += 1
+        value = (match.group(1) or match.group(2) or "").strip()
+        return f"(S{counter}) <d>[English] {value}</d>"
+
+    return re.sub(
+        r'"([^"\r\n]{1,500})"|“([^”\r\n]{1,500})”',
+        replace,
+        str(prompt or ""),
+    )
+
+
+def _inject_missing_h3_dialogue(result: str, prompt: str, *, ref2va: bool) -> str:
+    """Deterministically append omitted literal dialogue to the correct H3 field."""
+    quotes = _extract_h3_quoted_dialogue(prompt)
+    if not quotes:
+        return result
+    existing = set(_extract_h3_dialogue_blocks(result))
+    missing = [line for line in quotes if line not in existing]
+    if not missing:
+        return result
+    additions = " ".join(
+        f"The intended speaker (S{index}) says exactly once: <d>[English] {line}</d>."
+        for index, line in enumerate(missing, start=1)
+    )
+    additions += (
+        " These are the only spoken words in the video; before and after them, everyone remains "
+        "silent with mouths closed, with no other voices or speech-like vocalization."
+    )
+    field = "detailed_description" if ref2va else "integrated_multimodal_description"
+    next_field = "overall_soundscape"
+    import re
+    pattern = re.compile(
+        rf"(?ms)(^\s*{re.escape(field)}\s*:.*?)(?=^\s*{re.escape(next_field)}\s*:)",
+    )
+    if pattern.search(result or ""):
+        return pattern.sub(
+            lambda match: match.group(1).rstrip() + " " + additions + "\n",
+            result,
+            count=1,
+        )
+    return f"{result or ''}\n{field}: {additions}".strip()
+
+
+def _inject_h3_generated_dialogue(result: str, fragment: str, *, ref2va: bool) -> str:
+    """Insert a focused generated exchange while discarding non-dialogue prose."""
+    valid_lines = [
+        line.strip()
+        for line in str(fragment or "").splitlines()
+        if "<d>" in line and "</d>" in line
+    ][:3]
+    if not valid_lines:
+        return result
+    addition = (
+        " The complete requested exchange is: "
+        + " ".join(valid_lines)
+        + " No other words are spoken; afterward everyone remains silent with mouths closed."
+    )
+    field = "detailed_description" if ref2va else "integrated_multimodal_description"
+    import re
+    pattern = re.compile(
+        rf"(?ms)(^\s*{re.escape(field)}\s*:.*?)(?=^\s*overall_soundscape\s*:)",
+    )
+    if pattern.search(result or ""):
+        return pattern.sub(
+            lambda match: match.group(1).rstrip() + addition + "\n",
+            result,
+            count=1,
+        )
+    return f"{result or ''}\n{field}:{addition}".strip()
+
+
+def _strip_h3_untagged_dialogue_duplicates(result: str, prompt: str) -> str:
+    """Remove summary/narration copies of dialogue that already belongs in <d>."""
+    source_lines = _extract_h3_quoted_dialogue(prompt)
+    if not source_lines:
+        return result
+    import re
+
+    def normalized(value: str) -> str:
+        return " ".join(value.strip().rstrip(".,!?;:").casefold().split())
+
+    source_values = {normalized(line) for line in source_lines}
+    protected: list[str] = []
+
+    def stash(match):
+        protected.append(match.group(0))
+        return f"@@MAESTRO_H3_DIALOGUE_{len(protected) - 1}@@"
+
+    text = re.sub(r"<d>.*?</d>", stash, str(result or ""), flags=re.DOTALL)
+
+    def replace_quote(match):
+        value = match.group(1) or match.group(2) or ""
+        return "the scripted line" if normalized(value) in source_values else match.group(0)
+
+    text = re.sub(
+        r'"([^"\r\n]{1,500})"|\u201c([^\u201d\r\n]{1,500})\u201d',
+        replace_quote,
+        text,
+    )
+    for index, block in enumerate(protected):
+        text = text.replace(f"@@MAESTRO_H3_DIALOGUE_{index}@@", block)
+    return text
+
+
+def _enforce_h3_soundscape_silence(result: str, prompt: str) -> str:
+    """Keep the model from filling dialogue gaps with invented human noises."""
+    if not _h3_requests_speech(prompt):
+        return result
+    import re
+    if re.search(
+        r"(?i)\b(?:grunt|gasp|scream|laugh|sob|cry|audible breathing|nonverbal vocal)\w*\b",
+        str(prompt or ""),
+    ):
+        return result
+
+    pattern = re.compile(
+        r"(?ms)(^\s*overall_soundscape\s*:)(.*?)(?=^\s*non_diegetic_music\s*:)",
+    )
+    match = pattern.search(str(result or ""))
+    if not match:
+        return result
+    content = match.group(2).strip()
+    sentences = re.split(r"(?<=[.!?])\s+", content)
+    kept = []
+    for sentence in sentences:
+        has_negation = re.search(r"(?i)\b(?:no|not|without|never)\b", sentence)
+        if has_negation:
+            kept.append(sentence.strip())
+            continue
+        # Remove only comma/semicolon clauses that introduce vocal filler so a
+        # mixed sentence keeps its impacts, ambience, and debris sounds.
+        safe_segments = [
+            segment.strip()
+            for segment in re.split(r"[,;]", sentence)
+            if segment.strip()
+            and not re.search(
+                r"(?i)\b(?:grunt|gasp|whisper|scream|laugh|breath|voice|speech-like)\w*\b",
+                segment,
+            )
+        ]
+        if safe_segments:
+            kept.append(", ".join(safe_segments))
+    kept.append(
+        "Outside the tagged dialogue, no human voices, whispers, grunts, audible breathing, "
+        "or speech-like vocalizations occur"
+    )
+    replacement = match.group(1) + " " + ". ".join(kept).rstrip(".") + ".\n"
+    return result[:match.start()] + replacement + result[match.end():]
+
+
+def _enforce_h3_music_request(
+    result: str,
+    prompt: str,
+    reference_context: Optional[str],
+) -> str:
+    """Do not turn visual words such as 'cinematic' into an invented score."""
+    import re
+    requests_music = bool(
+        re.search(
+            r"(?i)\b(?:music|song|score|soundtrack|orchestra|orchestral|instrumental|melody|theme)\b",
+            str(prompt or ""),
+        )
+    )
+    mapped_music = bool(
+        re.search(
+            r"(?i)(?:AUDIO REUSE / PERFORMANCE DRIVER|Sound / music style|intent=AUDIO REFERENCE)",
+            str(reference_context or ""),
+        )
+    )
+    if requests_music or mapped_music:
+        return result
+    return re.sub(
+        r"(?ms)^\s*non_diegetic_music\s*:.*\Z",
+        "non_diegetic_music: N/A",
+        str(result or ""),
+    )
+
+
+def _build_h3_ref2va_tagged_fallback(
+    prompt: str,
+    reference_context: Optional[str],
+    *,
+    duration_seconds: Optional[float] = None,
+) -> str:
+    """Create a deterministic six-field fallback when the local LLM loops."""
+    raw_mapping = reference_context or "Use the supplied ordered references according to their roles."
+    mapping = " ".join(raw_mapping.split())
+    import re
+    picture_labels = re.findall(r"<Picture\s+\d+>", raw_mapping)
+    voice_labels = re.findall(
+        r"(?mi)^(<Audio\s+\d+>).*?intent=VOICE REFERENCE.*$",
+        raw_mapping,
+    )
+    subject_bindings = []
+    for index, picture_label in enumerate(picture_labels, start=1):
+        subject_bindings.append(
+            f"<Subject {index}> (S{index}) takes visual identity from {picture_label}."
+        )
+    for index, audio_label in enumerate(voice_labels, start=1):
+        subject_index = min(index, max(1, len(picture_labels)))
+        subject_bindings.append(
+            f"{audio_label} is the voice-timbre reference for <Subject {subject_index}> (S{subject_index})."
+        )
+    subject_mapping = " ".join(subject_bindings + [mapping])
+    request = _compile_h3_explicit_dialogue(prompt)
+    timed_clause = _build_h3_timed_silence_clause(prompt, duration_seconds)
+    return (
+        f"subject_definitions: {subject_mapping}\n"
+        "summary: A finished video matching the requested action, identity, setting, and explicitly "
+        "tagged dialogue.\n"
+        f"retention_analysis: Preserve the mapped identity, motion, and audio roles exactly: {mapping}\n"
+        f"detailed_description: The finished target video follows this request: {request} "
+        "Reference pictures provide identity and appearance only, never their original background, "
+        "framing, pose, or an opening still. The scripted dialogue is the only speech; all mouths "
+        f"remain closed before and after it. {timed_clause}\n"
+        "overall_soundscape: Continuous scene-appropriate stereo ambience and synchronized practical "
+        "sound effects begin at the first frame and continue naturally underneath dialogue. Outside "
+        "tagged dialogue there are no human voices, whispers, grunts, audible breathing, or "
+        "speech-like vocalizations.\n"
+        "non_diegetic_music: N/A"
+    )
+
+
+def _build_h3_context_fallback(
+    prompt: str,
+    *,
+    has_start_image: bool,
+    duration_seconds: Optional[float] = None,
+) -> str:
+    """Create a deterministic three-field fallback for ordinary H3 Base."""
+    alignment = (
+        "For the target video, at 0.00 seconds into the target video, <Picture 1> "
+        "(from [Shot 1]) is fully referenced.\n\n"
+        if has_start_image
+        else ""
+    )
+    request = _compile_h3_explicit_dialogue(prompt)
+    timed_clause = _build_h3_timed_silence_clause(prompt, duration_seconds)
+    return (
+        f"{alignment}integrated_multimodal_description: [Shot 1] {request} The scripted dialogue "
+        f"is the only speech; all mouths remain closed before and after it. {timed_clause}\n\n"
+        "overall_soundscape: Continuous scene-appropriate ambience and synchronized practical "
+        "sound effects begin at the first frame and continue naturally underneath dialogue. Outside "
+        "tagged dialogue there are no human voices, whispers, grunts, audible breathing, or "
+        "speech-like vocalizations.\n\n"
+        "non_diegetic_music: N/A"
+    )
+
+
+def _clean_enhance_output(text: str, preserve_structure: bool = False) -> str:
     """Strip markdown formatting, headers, explanation, and repetition loops from enhance output."""
     import re
     # Remove markdown bold/headers
-    text = re.sub(r'\*\*.*?\*\*:?\s*', '', text)
+    if preserve_structure:
+        text = text.replace('**', '')
+    else:
+        text = re.sub(r'\*\*.*?\*\*:?\s*', '', text)
     # Remove markdown headers
-    text = re.sub(r'^#{1,4}\s+.*$', '', text, flags=re.MULTILINE)
+    if preserve_structure:
+        text = re.sub(r'^\s*#{1,4}\s*', '', text, flags=re.MULTILINE)
+    else:
+        text = re.sub(r'^#{1,4}\s+.*$', '', text, flags=re.MULTILINE)
     # Remove horizontal rules
     text = re.sub(r'^---+\s*$', '', text, flags=re.MULTILINE)
     # Remove common label prefixes the model adds
@@ -2435,8 +3084,14 @@ def _clean_enhance_output(text: str) -> str:
     # Collapse excessive blank lines
     text = re.sub(r'\n{3,}', '\n\n', text)
 
-    # Detect and truncate repetition loops: if any 20+ char substring repeats 3+ times, keep only the first occurrence
+    # H3 Context-IR legitimately repeats subject and reference labels across
+    # sections. Structure validation/retry handles malformed H3 output without
+    # destroying those mappings.
     cleaned = text.strip()
+    if preserve_structure:
+        return cleaned
+
+    # Detect and truncate repetition loops: if any 20+ char substring repeats 3+ times, keep only the first occurrence
     for chunk_len in range(30, 15, -1):
         if len(cleaned) < chunk_len * 3:
             continue

@@ -35,6 +35,9 @@ VISUAL TIMELINE
 - Synchronize physical sounds with their visible causes.
 
 SPEAKERS AND DIALOGUE
+- Before writing anything else, copy every user-supplied quoted line into an
+  immutable dialogue list. The output is invalid if even one literal line is
+  missing from a <d> block.
 - Give every person who speaks a stable ID such as (S1), (S2), or (S3). Put
   the person's identifying description, speaker ID, action, vocal character,
   and delivery outside the dialogue tag.
@@ -42,6 +45,10 @@ SPEAKERS AND DIALOGUE
   <d>[English] Exact words spoken.</d>
 - If the user supplies dialogue, preserve every word and punctuation mark
   verbatim. Do not paraphrase, translate, or add another spoken line.
+- Put those words only inside their <d> blocks. Never duplicate them as
+  ordinary quotation-mark text elsewhere in the prompt.
+- Never replace requested words with "speaks," "talks," "they discuss," or
+  another summary. A speech verb must be followed by the actual <d> block.
 - If the request clearly asks people to discuss, explain, argue, announce, or
   otherwise speak but supplies no script, write concise, natural dialogue that
   actually communicates the requested subject. Give distinct lines to the
@@ -58,6 +65,22 @@ SPEAKERS AND DIALOGUE
   from inventing extra speech-like gibberish.
 - If nobody is asked to speak, do not invent dialogue or speaker IDs.
 
+TIMED SILENCE AROUND DIALOGUE
+- When dialogue occupies only a small part of the target Duration, explicitly
+  allocate the entire remaining timeline. Begin the first line around 20% into
+  the clip unless the story requires a different moment.
+- Before the first line, write a precise interval beginning at 0.00 seconds.
+  Fill it with active nonverbal behavior appropriate to the scene—movement,
+  work, fighting, reactions, or camera development—rather than idle staring.
+  State that every mouth is closed and the audio contains no human voice.
+- Give the dialogue interval an approximate start and end time based on about
+  two spoken words per second. Immediately after the final word, close the
+  speaker's mouth.
+- Give the remaining interval through the exact target Duration concrete
+  nonverbal action, ambience, and synchronized practical effects. Outside <d>
+  intervals there are no voices, whispers, grunts, audible breathing, or
+  speech-like vocalizations unless the user explicitly requests one.
+
 SOUND FIELDS
 - overall_soundscape is one compact paragraph describing only ambience,
   practical effects, and non-verbal human sounds. Do not repeat dialogue or
@@ -65,7 +88,8 @@ SOUND FIELDS
   requests complete silence.
 - non_diegetic_music describes audience-only background music. Use N/A unless
   the user requests music or it is essential to the stated concept. Do not add
-  music automatically.
+  music automatically. Words such as cinematic, dramatic, epic, or emotional
+  describe the visuals and do not by themselves authorize a musical score.
 
 AVOID
 - Negative prompts, model names, LoRA filenames, inference settings, or

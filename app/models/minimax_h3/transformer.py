@@ -10,9 +10,9 @@
 """MMGP-native MiniMax H3 transformer for the compact consumer checkpoints.
 
 The released Comfy-Org checkpoints replace H3's large timestep MLP and AdaLN
-inputs with a sampled eight-dimensional curve.  This implementation keeps the
-checkpoint's fused QKV and SwiGLU projections intact so Maestro's FP8 loader can
-stream them without first expanding or dequantizing the 21 GB transformer.
+inputs with a sampled eight-dimensional curve.  This implementation keeps its
+grouped QKV and SwiGLU projections fused; full head-interleaved checkpoints can
+be split into independent streamable weights without expanding the transformer.
 
 Packing, modality tags, schedules, and rotary coordinates follow the official
 Diffusers MiniMax H3 implementation pinned in ``UPSTREAM.md``.
@@ -28,7 +28,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 MODALITY_VIDEO = 0
 MODALITY_TEXT = 1
 MODALITY_AUDIO = 2
@@ -40,6 +39,62 @@ MODALITY_COUNT = 3
 # token-wise, so bounded chunks are mathematically equivalent and leave room
 # for attention plus MMGP's streamed transformer blocks on consumer GPUs.
 MINIMAX_H3_ACTIVATION_CHUNK_TOKENS = 8192
+
+
+def _split_contiguous_qkv(src, dim, split_sizes, _context):
+    """Split grouped ``[Q, K, V]`` rows without aliasing their storage.
+
+    ``torch.split`` returns views.  MMGP's residency profiler correctly treats
+    parameters sharing storage as tied weights, so passing those views through
+    makes the independently streamed Q, K, and V projections alias one
+    another.  Clone each slice because these projections are distinct model
+    weights even though they originated in one fused checkpoint tensor.
+    """
+
+    return [
+        part.clone(memory_format=torch.contiguous_format)
+        for part in torch.split(src, split_sizes, dim=dim)
+    ]
+
+
+def _split_interleaved_qkv(src, dim, split_sizes, context):
+    """Split official ``[head, qkv, channel]`` H3 rows into Q, K, and V."""
+
+    info = context["info"]
+    heads = int(info["num_attention_heads"])
+    head_dim = int(info["attention_head_dim"])
+    grouped = src.reshape(heads, 3, head_dim, *src.shape[1:])
+    return [
+        grouped[:, index]
+        .reshape(split_sizes[index], *src.shape[1:])
+        .clone(memory_format=torch.contiguous_format)
+        for index in range(3)
+    ]
+
+
+def get_linear_split_map(
+    inner_size: int,
+    *,
+    interleaved: bool = False,
+    num_attention_heads: int = 56,
+    attention_head_dim: int = 128,
+) -> dict[str, dict[str, object]]:
+    """Map H3's fused QKV checkpoint rows to independently streamed modules."""
+
+    info: dict[str, object] = {
+        "mapped_modules": ["q_proj", "k_proj", "v_proj"],
+        "split_sizes": [inner_size, inner_size, inner_size],
+    }
+    split_handler = _split_interleaved_qkv if interleaved else _split_contiguous_qkv
+    info["split_handlers"] = {"weight": split_handler}
+    if interleaved:
+        info.update(
+            {
+                "num_attention_heads": num_attention_heads,
+                "attention_head_dim": attention_head_dim,
+            }
+        )
+    return {"qkv_proj": info}
 
 
 @dataclass
@@ -133,6 +188,35 @@ class MiniMaxH3RotaryEmbedding(nn.Module):
         return angles.cos(), angles.sin()
 
 
+class MiniMaxH3TimeEmbedder(nn.Module):
+    """Full-33B H3 timestep MLP (replaced by curves in pruned checkpoints)."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        output_dim: int,
+        dtype: torch.dtype,
+    ):
+        super().__init__()
+        self.input_dim = input_dim
+        self.proj_in = nn.Linear(input_dim, hidden_dim, bias=True, dtype=dtype)
+        self.proj_out = nn.Linear(hidden_dim, output_dim, bias=True, dtype=dtype)
+        self.proj_in._lock_dtype = dtype
+        self.proj_out._lock_dtype = dtype
+
+    def forward(self, timestep: torch.Tensor) -> torch.Tensor:
+        half = self.input_dim // 2
+        frequencies = torch.exp(
+            -math.log(10000.0)
+            * torch.arange(half, dtype=torch.float32, device=timestep.device)
+            / half
+        )
+        angles = timestep.to(torch.float32).unsqueeze(1) * frequencies.unsqueeze(0)
+        embedding = torch.cat((angles.cos(), angles.sin()), dim=-1)
+        return self.proj_out(F.silu(self.proj_in(embedding)))
+
+
 class MiniMaxH3Attention(nn.Module):
     def __init__(self, hidden_size: int, heads: int, head_dim: int, eps: float, dtype: torch.dtype):
         super().__init__()
@@ -152,7 +236,35 @@ class MiniMaxH3Attention(nn.Module):
     ) -> torch.Tensor:
         batch, length, _ = hidden_states.shape
         chunk_size = max(1, int(MINIMAX_H3_ACTIVATION_CHUNK_TOKENS))
-        if length <= chunk_size:
+        if hasattr(self, "q_proj"):
+            # MMGP can now stream Q, K, and V independently instead of
+            # materializing the checkpoint's 3x fused projection.  Preserve
+            # the existing token chunk bound as well; the three final tensors
+            # are required by attention, but no fused 3x temporary survives.
+            shape = (batch, length, self.heads, self.head_dim)
+
+            def project_rows(projection, normalization=None, rope=None):
+                output = None
+                for start in range(0, length, chunk_size):
+                    end = min(length, start + chunk_size)
+                    rows = projection(hidden_states[:, start:end]).view(
+                        batch, end - start, self.heads, self.head_dim
+                    )
+                    if normalization is not None:
+                        rows = normalization(rows)
+                    if rope is not None:
+                        cos, sin = rope
+                        rows = _apply_rope(rows, cos[start:end], sin[start:end])
+                    if output is None:
+                        output = torch.empty(shape, device=rows.device, dtype=rows.dtype)
+                    output[:, start:end].copy_(rows)
+                return output
+
+            query = project_rows(self.q_proj, self.q_norm, rotary)
+            key = project_rows(self.k_proj, self.k_norm, rotary)
+            value = project_rows(self.v_proj)
+            qkv = None
+        elif length <= chunk_size:
             qkv = self.qkv_proj(hidden_states)
             query, key, value = qkv.chunk(3, dim=-1)
             query = self.q_norm(query.view(batch, length, self.heads, self.head_dim))
@@ -247,11 +359,13 @@ class MiniMaxH3AdaLNProjection(nn.Module):
         outputs: int,
         modalities: int,
         dtype: torch.dtype,
+        apply_silu: bool = False,
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.outputs = outputs
         self.modalities = modalities
+        self.apply_silu = apply_silu
         self.linear = nn.Linear(curve_dim, outputs * modalities * hidden_size, bias=True, dtype=dtype)
         # The compact curve checkpoint stores these projections in FP16, but
         # Comfy's reference curve path evaluates them in FP32.  Preserve the
@@ -261,11 +375,30 @@ class MiniMaxH3AdaLNProjection(nn.Module):
         self.linear._lock_dtype = dtype
 
     def forward(self, curve: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        weight = self.linear.weight.to(device=curve.device, dtype=torch.float32)
-        bias = self.linear.bias
-        if bias is not None:
-            bias = bias.to(device=curve.device, dtype=torch.float32)
-        projected = F.linear(curve.to(dtype=torch.float32), weight, bias)
+        if self.apply_silu:
+            curve = F.silu(curve)
+        if self.apply_silu:
+            # The full 33B checkpoint has a 2,688-wide timestep embedding.
+            # Upcasting each enormous AdaLN projection to FP32 would create a
+            # roughly 1 GB temporary in every transformer block.  Evaluate
+            # that path in the checkpoint's native BF16/FP16 dtype.  Calling
+            # the module is essential: the full INT8 ConvRot checkpoint
+            # replaces this Linear with QLinearInt8ConvRot, whose forward
+            # rotates the activation before applying its grouped weights.
+            # Bypassing it with F.linear silently corrupts every block's
+            # modulation values and produces colored video/audio noise.
+            projected = self.linear(
+                curve.to(
+                    device=curve.device,
+                    dtype=_weight_dtype(self.linear, curve.dtype),
+                )
+            )
+        else:
+            weight = self.linear.weight.to(device=curve.device, dtype=torch.float32)
+            bias = self.linear.bias
+            if bias is not None:
+                bias = bias.to(device=curve.device, dtype=torch.float32)
+            projected = F.linear(curve.to(dtype=torch.float32), weight, bias)
         projected = projected.view(curve.shape[0] * self.modalities, self.outputs * self.hidden_size)
         return projected.chunk(self.outputs, dim=-1)
 
@@ -316,13 +449,22 @@ class MiniMaxH3Block(nn.Module):
         curve_dim: int,
         eps: float,
         dtype: torch.dtype,
+        *,
+        compressed_modulation: bool,
     ):
         super().__init__()
         self.norm1 = nn.RMSNorm(hidden_size, eps=eps, dtype=dtype)
         self.norm2 = nn.RMSNorm(hidden_size, eps=eps, dtype=dtype)
         self.attn = MiniMaxH3Attention(hidden_size, heads, head_dim, eps, dtype)
         self.mlp = MiniMaxH3MLP(hidden_size, ffn_dim, dtype)
-        self.adaln_proj = MiniMaxH3AdaLNProjection(curve_dim, hidden_size, 6, MODALITY_COUNT, torch.float16)
+        self.adaln_proj = MiniMaxH3AdaLNProjection(
+            curve_dim,
+            hidden_size,
+            6,
+            MODALITY_COUNT,
+            torch.float16 if compressed_modulation else dtype,
+            apply_silu=not compressed_modulation,
+        )
 
     def forward(
         self,
@@ -349,10 +491,27 @@ class MiniMaxH3Block(nn.Module):
 
 
 class MiniMaxH3FinalLayer(nn.Module):
-    def __init__(self, hidden_size: int, curve_dim: int, video_dim: int, audio_dim: int, eps: float, dtype: torch.dtype):
+    def __init__(
+        self,
+        hidden_size: int,
+        curve_dim: int,
+        video_dim: int,
+        audio_dim: int,
+        eps: float,
+        dtype: torch.dtype,
+        *,
+        compressed_modulation: bool,
+    ):
         super().__init__()
         self.norm = nn.RMSNorm(hidden_size, eps=eps, dtype=dtype)
-        self.adaln_proj = MiniMaxH3AdaLNProjection(curve_dim, hidden_size, 2, 1, torch.float16)
+        self.adaln_proj = MiniMaxH3AdaLNProjection(
+            curve_dim,
+            hidden_size,
+            2,
+            1,
+            torch.float16 if compressed_modulation else dtype,
+            apply_silu=not compressed_modulation,
+        )
         self.video_out = nn.Linear(hidden_size, video_dim, bias=True, dtype=torch.float32)
         self.audio_out = nn.Linear(hidden_size, audio_dim, bias=True, dtype=torch.float32)
         # The output heads are the checkpoint's FP32 precision island.
@@ -371,7 +530,7 @@ class MiniMaxH3FinalLayer(nn.Module):
 
 
 class MiniMaxH3Transformer(nn.Module):
-    """Compact-curve MiniMax H3 FL2VA transformer."""
+    """MiniMax H3 transformer supporting both full and pruned checkpoints."""
 
     def __init__(
         self,
@@ -385,17 +544,22 @@ class MiniMaxH3Transformer(nn.Module):
         audio_channels: int = 32,
         patch_size: tuple[int, int, int] = (1, 2, 2),
         text_dim: int = 5120,
-        curve_grid: int = 1025,
+        curve_grid: int | None = 1025,
         curve_dim: int = 8,
+        timestep_input_dim: int = 256,
+        time_embed_hidden_size: int = 5376,
         rope_freq_dim: int = 16,
         eps: float = 1e-5,
         dtype: torch.dtype = torch.bfloat16,
     ):
         super().__init__()
         video_patch_dim = video_channels * math.prod(patch_size)
+        self.use_adaln_curves = curve_grid is not None
         self.config = SimpleNamespace(
             hidden_size=hidden_size,
             num_layers=num_layers,
+            num_attention_heads=num_attention_heads,
+            attention_head_dim=attention_head_dim,
             patch_size=patch_size,
             in_channels=video_channels,
             audio_in_channels=audio_channels,
@@ -409,7 +573,19 @@ class MiniMaxH3Transformer(nn.Module):
         self.video_patch_proj._lock_dtype = torch.float32
         self.audio_patch_proj._lock_dtype = torch.float32
         self.condition_proj = nn.Linear(text_dim, hidden_size, bias=True, dtype=dtype)
-        self.register_buffer("adaln_t_table", torch.empty(curve_grid, curve_dim, dtype=torch.float32), persistent=True)
+        if self.use_adaln_curves:
+            self.register_buffer(
+                "adaln_t_table",
+                torch.empty(curve_grid, curve_dim, dtype=torch.float32),
+                persistent=True,
+            )
+        else:
+            self.time_embedder = MiniMaxH3TimeEmbedder(
+                timestep_input_dim,
+                time_embed_hidden_size,
+                curve_dim,
+                torch.float32,
+            )
         self.rope = MiniMaxH3RotaryEmbedding(rope_freq_dim)
         self.token_refiner = MiniMaxH3TokenRefiner(
             token_refiner_layers,
@@ -430,6 +606,7 @@ class MiniMaxH3Transformer(nn.Module):
                     curve_dim,
                     eps,
                     dtype,
+                    compressed_modulation=self.use_adaln_curves,
                 )
                 for _ in range(num_layers)
             ]
@@ -441,10 +618,25 @@ class MiniMaxH3Transformer(nn.Module):
             audio_channels,
             eps,
             dtype,
+            compressed_modulation=self.use_adaln_curves,
         )
         self._interrupt = False
 
+    def preprocess_loras(self, _model_type: str, state_dict: dict) -> dict:
+        """Keep H3 adapters in their logical grouped ``[Q, K, V]`` layout.
+
+        Raw full-model checkpoints may need a head-interleaved-to-split loader,
+        but LoRAs target the already-instantiated H3 module used for training.
+        Its fused projection is consumed with ``qkv.chunk(3)``, so adapter B
+        rows are already grouped and MMGP's contiguous Q/K/V split is correct.
+        Reordering those rows here corrupts all attention adapters.
+        """
+
+        return state_dict
+
     def _curve_at(self, timestep: torch.Tensor, device: torch.device) -> torch.Tensor:
+        if not self.use_adaln_curves:
+            return self.time_embedder(timestep.to(device=device, dtype=torch.float32))
         table = self.adaln_t_table.to(device=device, dtype=torch.float32)
         position = timestep.to(device=device, dtype=torch.float32).clamp_(0.0, 1.0) * (table.shape[0] - 1)
         lower = position.floor().long().clamp_(max=table.shape[0] - 2)

@@ -3,6 +3,101 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [Unreleased]
+
+## [1.6.0] - 2026-08-06
+
+MiniMax H3 in Director: added model-aware bounded-shot workflows for both H3
+families. FL2VA now powers story-generated short films with native 5-15 second
+shot planning and start/end continuity when a scene is divided into multiple
+parts. Ref2VA now supports music videos, uploaded-dialogue films, and
+story-generated films using per-shot composition, character, location,
+soundtrack, and voice-reference manifests. Dashboard repair and regeneration
+rebuild the same inputs, while audio-driven projects condition each shot on its
+exact source segment and retain one clean continuous soundtrack for the final
+join.
+
+MiniMax H3 Omni Reference: added the separate H3 Base Ref2VA checkpoint and an
+ordered Studio reference workflow for images, videos, embedded video audio,
+and standalone audio. References receive exact Picture/Video/Audio labels,
+can be reordered by drag and drop, and retain optional role notes for Prompt
+Enhance. The runtime follows the official reference packing, VAE conditioning,
+shared audio/video timing, and target-only denoising path while sharing the
+existing H3 conditioner and VAEs. Output-matched reference detail is the
+consumer-GPU default, with the official maximum-detail preparation available.
+
+H3 Omni prompting: added a dedicated six-section Prompt Enhance guide that
+maps ordered reference labels to subjects, motion, voices, retained details,
+dialogue, soundscape, and music without changing the working FL2VA Context-IR
+workflow. Standalone audio can be explicitly used as a voice reference,
+performance-driving/reused audio, or a sound and music style reference. Raw
+prompts now receive automatic media relationships, voice references no longer
+copy source speech by default, scene ambience and effects begin at the first
+frame, and malformed local-LLM enhancements retry or fall back safely instead
+of being truncated into an unusable prompt. Standard H3 and Omni Prompt
+Enhance now validate that every user-written line survives verbatim inside an
+H3 dialogue block and that vague discussion requests receive actual scripted
+dialogue. Raw Omni prompts are compiled into full six-field Context-IR and
+identity pictures are prevented from introducing their source background,
+framing, pose, or an opening still. Both H3 enhancers now allocate short
+dialogue inside duration-aware speech intervals, fill the opening and remainder
+with active nonverbal action, and explicitly suppress voices, grunts, breathing,
+and speech-like filler outside dialogue tags. Dialogue is no longer duplicated
+as ordinary quoted text, and visual terms such as cinematic or epic no longer
+cause an unrequested musical score.
+
+MiniMax H3 model and memory options: the existing FL2VA and Ref2VA entries are
+now clearly labeled as the recommended Pruned 20B variants, with optional Full
+33B entries for both workflows. Advanced settings can select the recommended
+NVFP4-AWQ Qwen3-VL encoder or lower-RAM GGUF Q2/Q4, Quanto INT8, and BF16
+alternatives. H3 now probes full versus pruned checkpoints at load time,
+restores ConvRot layouts where needed, splits fused Q/K/V projections for
+streaming, and profiles the Qwen language and vision towers independently.
+
+MiniMax H3 Turbo LoRA: added the optional LarryVRH low-step adapter for Full
+33B FL2VA/Ref2VA models with true 4/6/8-evaluation sampling and independent
+video/audio schedules. Fixed active LoRAs bypassing the Full model's ConvRot
+activation math and corrected fused-QKV adapter splitting, which previously
+produced colorful tiled noise even though the same Full model worked without
+the adapter. Incompatible Pruned 20B selections are rejected before loading.
+
+H3 Omni video-reference memory: fixed Match Output references being silently
+expanded to a 768-pixel short edge even for 480p/544p output. Reference video
+area is now bounded to the requested canvas, long packed projections are
+chunked, and video-reference jobs reserve dedicated attention workspace and
+reload an already-resident profile when it was loaded with too much transformer
+weight on the GPU. This substantially reduces first-denoise VRAM peaks while
+keeping Maximum Detail available as an explicit high-memory option.
+
+H3 Studio timing and continuation: Ref2VA/Omni is now limited to its native
+single-shot maximum of 345 frames (14.375 seconds at 24 FPS), with incompatible
+sliding-window controls hidden and rejected by the backend. FL2VA/First & Last
+uses the same 345-frame native window but can continue longer Studio timelines
+by feeding each completed window's final frame into the next. One-frame overlap
+is removed during assembly, the optional end image is reserved for the final
+window, and joined video and audio are trimmed to the exact requested duration.
+Portrait, landscape, square, and automatic aspect-ratio selections now remain
+native throughout the H3 pipeline.
+
+Director planning and dialogue reliability: model selection is now filtered by
+the capabilities required by each Director workflow, preventing image-only,
+control-only, fixed-length, or native-audio-output models from being routed into
+incompatible jobs. H3 story planning can omit unnecessary image generation,
+retains project/world, wardrobe, blocking, and location context in every
+independent shot, and compiles locked screenplay dialogue into stable speaker
+IDs and native H3 dialogue blocks. Duration-aware shot coalescing permits
+multi-speaker exchanges and internal camera changes while preserving complete
+lines, and deterministic repair paths recover incomplete local-LLM plans without
+silently changing, moving, duplicating, or truncating scripted dialogue.
+
+Interface and diagnostics: simplified H3 model names distinguish First & Last
+from Omni while explaining recommended Pruned 20B versus optional Full 33B
+weights. Native audio-output badges are no longer presented as audio-input
+support, Turbo LoRA compatibility is identified before generation, and
+successful high-frequency system-stat polling is filtered from the console
+without hiding errors or meaningful API activity. Saved Director jobs whose
+process disappeared are now reported as interrupted instead of missing.
+
 ## [1.5.5] - 2026-08-04
 
 MiniMax H3: added native local H3 Base FL2VA generation for text, first-frame,

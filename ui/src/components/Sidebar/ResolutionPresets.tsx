@@ -5,13 +5,17 @@ export function ResolutionPresets() {
   const resolutionPreset = useStore(s => s.resolutionPreset)
   const setResolutionPreset = useStore(s => s.setResolutionPreset)
   const generationMode = useStore(s => s.generationMode)
+  const modelOptions = useStore(s => s.modelOptions)
   const isEdit = generationMode === 'avatar'
 
   const isImage = generationMode === 'image'
-  // Edit and Image modes get Auto option
-  const presets: ResolutionPreset[] = (isEdit || isImage)
-    ? ['auto', '480p', '540p', '720p', '1080p']
-    : ['480p', '540p', '720p', '1080p']
+  // Model-specific lists take precedence. H3, for example, exposes its
+  // native 768px tier and intentionally hides unsupported 1080p.
+  const presets: ResolutionPreset[] = modelOptions?.resolution_preset_order?.length
+    ? modelOptions.resolution_preset_order
+    : (isEdit || isImage)
+      ? ['auto', '480p', '540p', '720p', '1080p']
+      : ['480p', '540p', '720p', '1080p']
 
   return (
     <div>
@@ -27,7 +31,9 @@ export function ResolutionPresets() {
                 : 'text-text-secondary hover:text-text-primary'
             }`}
           >
-            {p === 'auto' ? 'Auto' : p}
+            {p === 'auto'
+              ? 'Auto'
+              : modelOptions?.resolution_presets?.[p]?.label || p}
           </button>
         ))}
       </div>

@@ -77,6 +77,45 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.6.0 (2026-08-06)
+
+**MiniMax H3 Omni Reference**
+- Added MiniMax H3 Omni for generating new video and synchronized audio from ordered image, video, voice, motion, and sound references.
+- References can be reordered, labeled with their intended role, and used for identity, appearance, scene, motion, voice, performance, ambience, or music conditioning.
+- Added both recommended Pruned 20B and optional Full 33B Omni models.
+- Added Match Output reference preparation for consumer GPUs and an optional Maximum Detail mode for higher-memory systems.
+- Improved reference-video memory use with output-aware sizing, chunked projections, dedicated attention workspace, and safer model re-profiling.
+
+**Expanded H3 models and performance options**
+- Simplified the model choices to First & Last and Omni, with clear Pruned 20B and Full 33B variants and concise explanations in the selector.
+- Added Full 33B support for both workflows, including ConvRot checkpoint loading, fused projection handling, and memory-efficient streaming.
+- Added selectable NVFP4-AWQ, GGUF Q2/Q4, Quanto INT8, and BF16 Qwen3-VL text encoders with hardware-aware recommendations.
+- Added support for the MiniMax H3 Turbo LoRA on compatible Full 33B models with true 4, 6, and 8-evaluation schedules.
+- Incompatible Turbo LoRA and Pruned-model combinations are rejected before loading instead of failing after a long generation.
+
+**H3 Studio workflow and prompting**
+- Omni generations are limited to the native 345-frame maximum: 14.375 seconds at 24 FPS, displayed as 14.4 seconds, with sliding-window controls automatically hidden.
+- First & Last uses the same native 14.4-second maximum per window and can now generate longer videos by continuing each window from the preceding final frame.
+- Long First & Last runs preserve the requested duration, remove continuation overlap, keep synchronized audio aligned, and apply an optional end image only to the final window.
+- Fixed portrait and other selected aspect ratios being forced or decoded as 16:9.
+- Improved H3 Prompt Enhance for exact dialogue retention, stable speaker IDs, voice-reference intent, opening ambience, silent intervals, and reduced gibberish or invented speech.
+
+**MiniMax H3 in Director**
+- Added model-aware Director workflows for both First & Last and Omni models.
+- First & Last can create prompt-only shots or use optional generated start/end frames, while Omni can condition shots on character, location, voice, video, soundtrack, and other project references.
+- Director no longer spends time writing or generating unused start images for H3 prompt-only workflows.
+- H3 shot prompts now carry the project world, location, wardrobe, character blocking, screen position, dialogue, soundscape, and continuity needed by independently generated clips.
+- Added stable project-wide speaker mapping, locked screenplay dialogue, duration-aware pacing, and multi-speaker exchanges with camera changes inside a single H3 clip.
+- Incomplete or altered local-LLM shot plans are repaired deterministically without silently truncating, moving, duplicating, or rewriting approved dialogue.
+- Dashboard repair and regeneration recreate the same H3 references and timing, including exact per-shot audio conditioning and one clean final soundtrack.
+
+**Compatibility and reliability**
+- Director model lists now show only image and video models that support the selected automated workflow.
+- Native audio generation is distinguished from audio-reference input so incompatible models are no longer offered for audio-driven jobs.
+- Reduced console noise by hiding successful system-stat polling while retaining failures and meaningful API requests.
+- Interrupted saved Director jobs are now reported as interrupted instead of disappearing as missing projects.
+- Expanded automated coverage for H3 checkpoints, quantization, Omni reference packing, Turbo LoRA, Studio continuation, Director compatibility, dialogue planning, memory behavior, and UI contracts.
+
 ### v1.5.5 (2026-08-04)
 
 **MiniMax H3 local audio-video generation**

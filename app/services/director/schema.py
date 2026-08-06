@@ -125,6 +125,9 @@ class SubjectRef:
     visual_description: str
     character_id: Optional[str] = None
     position_or_relation: Optional[str] = None
+    # Shot-specific head-to-toe clothing. Kept separate from identity so
+    # prompt-only video workflows can repeat wardrobe exactly across cuts.
+    wardrobe: Optional[str] = None
     # The personal NAME the screenplay uses for this character in this
     # shot (e.g. "Nancy", "Blaine"). Often invented by the screenplay
     # LLM when the user-supplied character profile is generic. Carried
@@ -138,6 +141,8 @@ class SubjectRef:
             d["character_id"] = self.character_id
         if self.position_or_relation:
             d["position_or_relation"] = self.position_or_relation
+        if self.wardrobe:
+            d["wardrobe"] = self.wardrobe
         if self.speaker_name:
             d["speaker_name"] = self.speaker_name
         return d
@@ -148,6 +153,7 @@ class SubjectRef:
             visual_description=d["visual_description"],
             character_id=d.get("character_id"),
             position_or_relation=d.get("position_or_relation"),
+            wardrobe=d.get("wardrobe"),
             speaker_name=d.get("speaker_name"),
         )
 

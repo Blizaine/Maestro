@@ -341,6 +341,19 @@ _COEFFICIENT_FLOOR = 0.40
 # faster generation but we cap the upside conservatively.
 _COEFFICIENT_CEILING = 0.92
 
+# MiniMax H3 attention uses one packed text + audio + video sequence.  Its
+# peak therefore needs substantially more free activation VRAM than the
+# generic pixels x frames curve reserves.  The 960x544 / 345-frame baseline
+# is the released 540p near-15-second workload.  A clean 24 GB run needs
+# roughly 7 GB left outside the streamed transformer; every Ref2VA video adds
+# another full packed media sequence and needs about 10 GB at that baseline.
+_H3_BASELINE_PIXELS = 960 * 544
+_H3_BASELINE_FRAMES = 345
+_H3_MIN_ACTIVATION_RESERVE_GB = 5.0
+_H3_MAX_WEIGHT_BUDGET_GB = 18.0
+_H3_MIN_WEIGHT_BUDGET_GB = 3.5
+_H3_VIDEO_REFERENCE_RESERVE_GB = 10.0
+
 
 def _parse_resolution(resolution) -> Optional[tuple]:
     """Parse a resolution string like "1280x720" or "1920x1080" → (w, h).
@@ -365,6 +378,79 @@ def _parse_resolution(resolution) -> Optional[tuple]:
         return int(parts[0]), int(parts[1])
     except ValueError:
         return None
+
+
+def compute_h3_weight_budget(
+    total_vram_gb: float,
+    resolution: Optional[str],
+    video_length_frames: Optional[int],
+    video_reference_count: int = 0,
+) -> dict:
+    """Reserve packed-sequence activation memory for a MiniMax H3 job.
+
+    This is intentionally separate from ``compute_per_job_coefficient``:
+    H3 is a single-stage pipeline, but treating it like an ordinary
+    single-stage video model lets the light-job bonus keep too many weights
+    resident.  On a 24 GB RTX 4090, 960x544 x 336 frames then raised the
+    model cap to 19.3 GB and the process exited during its first denoising
+    step.  The same class of jobs had worked under the old incidental
+    two-stage reserve at roughly a 17.5 GB cap.
+
+    Returns the maximum resident-weight budget and the activation reserve
+    used to derive it.  MMGP streams weights that do not fit the budget.
+    """
+
+    try:
+        total_vram_gb = float(total_vram_gb)
+    except (TypeError, ValueError):
+        total_vram_gb = 0.0
+    if total_vram_gb <= 0:
+        return {
+            "weight_budget_gb": 0.0,
+            "activation_reserve_gb": 0.0,
+            "compute_ratio": 1.0,
+            "video_reference_count": max(0, int(video_reference_count or 0)),
+        }
+
+    parsed = _parse_resolution(resolution)
+    if parsed:
+        width, height = parsed
+        pixels = max(1, width * height)
+    else:
+        pixels = _H3_BASELINE_PIXELS
+    try:
+        frames = max(1, int(video_length_frames or _H3_BASELINE_FRAMES))
+    except (TypeError, ValueError):
+        frames = _H3_BASELINE_FRAMES
+
+    compute_ratio = (
+        (pixels / float(_H3_BASELINE_PIXELS))
+        * (frames / float(_H3_BASELINE_FRAMES))
+    )
+    # A fixed floor covers Q/K/V, packed hidden states, the audio branch,
+    # allocator fragmentation, and VAE handoff.  The square-root term grows
+    # the reserve for H3's larger native 768p canvas without over-penalizing
+    # short 480p previews.
+    base_reserve_gb = _H3_MIN_ACTIVATION_RESERVE_GB + 2.0 * (compute_ratio ** 0.5)
+    reference_count = max(0, int(video_reference_count or 0))
+    reference_reserve_gb = (
+        _H3_VIDEO_REFERENCE_RESERVE_GB * reference_count * compute_ratio
+    )
+    requested_reserve_gb = base_reserve_gb + reference_reserve_gb
+
+    # Always leave enough room to stream at least a small transformer slice.
+    max_reserve_gb = max(0.0, total_vram_gb - _H3_MIN_WEIGHT_BUDGET_GB)
+    activation_reserve_gb = min(requested_reserve_gb, max_reserve_gb)
+    weight_budget_gb = min(
+        _H3_MAX_WEIGHT_BUDGET_GB,
+        max(_H3_MIN_WEIGHT_BUDGET_GB, total_vram_gb - activation_reserve_gb),
+    )
+    return {
+        "weight_budget_gb": weight_budget_gb,
+        "activation_reserve_gb": activation_reserve_gb,
+        "compute_ratio": compute_ratio,
+        "video_reference_count": reference_count,
+    }
 
 
 def compute_per_job_coefficient(

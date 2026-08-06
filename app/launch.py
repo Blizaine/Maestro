@@ -169,16 +169,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
-import logging
+from services.access_log_filter import install_quiet_access_filter
 
-# Suppress noisy polling endpoints from uvicorn access log
-class _QuietAccessFilter(logging.Filter):
-    _quiet_paths = {"/api/v1/llm/status", "/api/v1/outputs", "/health"}
-    def filter(self, record):
-        msg = record.getMessage()
-        return not any(p in msg for p in self._quiet_paths)
-
-logging.getLogger("uvicorn.access").addFilter(_QuietAccessFilter())
+# Uvicorn's logging configuration replaces handlers but retains logger-level
+# filters. Install early, then idempotently confirm it again before startup.
+install_quiet_access_filter()
 
 api = FastAPI(title="Maestro API", version="1.0.0")
 
@@ -433,6 +428,8 @@ def _check_model_downloaded(model_type: str) -> bool:
 @api.get("/api/v1/models")
 def list_models():
     """List available model families and model types."""
+    from services.director_model_compat import assess_director_model
+
     # Families
     families = []
     for fid, (order, label) in wgp.families_infos.items():
@@ -448,18 +445,34 @@ def list_models():
         if md is None:
             continue
         family = wgp.get_model_family(mt, for_ui=True)
+        architecture = wgp.get_base_model_type(mt)
+        director_compat = assess_director_model(
+            mt,
+            md,
+            family=family,
+            architecture=architecture,
+        )
         models.append({
             "model_type": mt,
             "name": md.get("name", mt),
+            "description": md.get("description", ""),
+            "selector_help": md.get("selector_help", ""),
+            "lora_compatibility_note": md.get("lora_compatibility_note", ""),
             "family": family,
-            "architecture": wgp.get_base_model_type(mt),
+            "architecture": architecture,
             "is_i2v": wgp.test_class_i2v(mt),
             "is_t2v": wgp.test_class_t2v(mt),
             "guidance_max_phases": md.get("guidance_max_phases", 1),
             "fps": md.get("fps", 16),
             "supports_end_frame": "E" in md.get("image_prompt_types_allowed", ""),
             "supports_audio": bool(md.get("any_audio_prompt", False) or md.get("returns_audio", False)),
-            "supports_ref_images": bool(md.get("image_ref_choices")),
+            "supports_audio_input": bool(
+                md.get("any_audio_prompt", False)
+                or md.get("supports_reference_audio", False)
+            ),
+            "generates_audio": bool(md.get("returns_audio", False)),
+            "supports_ref_images": bool(md.get("image_ref_choices") or md.get("omni_reference")),
+            "director": director_compat,
             "is_downloaded": _check_model_downloaded(mt),
             # When True, the UI hides this model unless Mature Mode is
             # enabled. Set in the model JSON's "model" block (e.g.
@@ -1485,6 +1498,20 @@ def delete_lora_file(directory: str, filename: str):
     return {"status": "ok", "deleted": filename, "deferred": bool(result.get("deferred")), "extras_removed": extras_removed}
 
 
+def _lora_is_compatible_with_model(model_def: dict, path: str) -> bool:
+    """Keep special adapters out of model selectors that cannot run them."""
+
+    architecture = str((model_def or {}).get("architecture") or "")
+    if architecture.startswith("minimax_h3") and not bool(
+        (model_def or {}).get("minimax_h3_full_checkpoint", False)
+    ):
+        from models.minimax_h3.turbo import is_minimax_h3_turbo_lora
+
+        if is_minimax_h3_turbo_lora(path):
+            return False
+    return True
+
+
 @api.get("/api/v1/loras/{model_type}")
 def list_loras(model_type: str):
     """List available LoRA files for a model type."""
@@ -1507,6 +1534,8 @@ def list_loras(model_type: str):
     names = set()
     for search_dir in wgp.get_lora_search_dirs(model_type):
         for f in glob.glob(os.path.join(search_dir, "*.safetensors")) + glob.glob(os.path.join(search_dir, "*.sft")):
+            if not _lora_is_compatible_with_model(md, f):
+                continue
             names.add(os.path.basename(f))
     loras = sorted(names)
 
@@ -1538,6 +1567,8 @@ def list_loras_details(model_type: str):
             glob.glob(os.path.join(_search_dir, "*.safetensors"))
             + glob.glob(os.path.join(_search_dir, "*.sft"))
         ):
+            if not _lora_is_compatible_with_model(md, f):
+                continue
             _b = os.path.basename(f)
             if _b in _seen_names:
                 continue
@@ -4968,6 +4999,23 @@ async def scan_and_generate_guides(request: Request):
 
 
 
+def _recommended_minimax_h3_encoder(model_type: str, model_def: dict) -> str:
+    """Resolve H3's default encoder from actual kernel support and RAM."""
+
+    variants = model_def.get("minimax_h3_text_encoder_variants") or {}
+    fallback = str(model_def.get("minimax_h3_text_encoder_default") or "nvfp4_awq")
+    if not variants:
+        return fallback
+    try:
+        handler = wgp.get_model_handler(wgp.get_base_model_type(model_type))
+        selected = handler.recommend_text_encoder(_get_cached_hardware(), model_def)
+        if selected in variants:
+            return selected
+    except Exception as error:
+        print(f"[MiniMax H3] Hardware-aware encoder recommendation failed: {error}")
+    return fallback if fallback in variants else next(iter(variants))
+
+
 @api.get("/api/v1/model-options/{model_type}")
 def get_model_options(model_type: str):
     """Return UI-relevant model options for dynamic rendering."""
@@ -5020,6 +5068,13 @@ def get_model_options(model_type: str):
     else:
         solvers = None
 
+    _h3_encoder_variants = md.get("minimax_h3_text_encoder_variants") or {}
+    _h3_encoder_default = (
+        _recommended_minimax_h3_encoder(model_type, md)
+        if _h3_encoder_variants
+        else None
+    )
+
     return {
         "model_type": model_type,
         "architecture": md.get("architecture", model_type),
@@ -5028,6 +5083,7 @@ def get_model_options(model_type: str):
 
         # Boolean flags
         "sliding_window": md.get("sliding_window", False),
+        "video_continuation": md.get("video_continuation", False),
         "motion_amplitude": md.get("motion_amplitude", False),
         "flow_shift": bool(md.get("flow_shift", False)),
         "tea_cache": md.get("tea_cache", False),
@@ -5041,6 +5097,27 @@ def get_model_options(model_type: str):
         "t2v_class": md.get("t2v_class", False),
         "image_outputs": md.get("image_outputs", False),
         "supports_end_frame": "E" in md.get("image_prompt_types_allowed", ""),
+        "omni_reference": md.get("omni_reference", False),
+        "omni_reference_limits": md.get("omni_reference_limits"),
+        "omni_reference_detail_choices": md.get("omni_reference_detail_choices"),
+        "omni_reference_detail_default": md.get("omni_reference_detail_default", "match"),
+        "minimax_h3_text_encoder_choices": [
+            {
+                "value": key,
+                "label": (
+                    f"{value.get('name', key)} (Recommended)"
+                    if key == _h3_encoder_default
+                    else value.get("name", key)
+                ),
+                "size_hint": value.get("size_hint", ""),
+                "recommended": key == _h3_encoder_default,
+            }
+            for key, value in _h3_encoder_variants.items()
+        ] or None,
+        "minimax_h3_text_encoder_default": _h3_encoder_default,
+        "resolution_presets": md.get("resolution_presets"),
+        "resolution_preset_order": md.get("resolution_preset_order"),
+        "supports_auto_aspect": md.get("supports_auto_aspect", False),
 
         # Choice configs
         "guide_preprocessing": extract_choice("guide_preprocessing"),
@@ -5071,6 +5148,7 @@ def get_model_options(model_type: str):
         "fps": md.get("fps", 16),
         "frames_minimum": md.get("frames_minimum", 5),
         "frames_steps": md.get("frames_steps", 4),
+        "frames_maximum": md.get("frames_maximum"),
 
         # Model defaults (sent to frontend so UI can apply them on model selection)
         # Check model def first, then fall back to ui_defaults from the handler
@@ -5855,10 +5933,10 @@ def get_services_config():
         "use_director_v2": services.get("use_director_v2", True),
         "nsfw_mode": nsfw,
         "nsfw_accepted_at": services.get("nsfw_accepted_at", None),
-        # Default flipped from "off" to "third_pass" — Pass 3 polish runs
-        # each generated prompt through a model-specific dialect pass after
-        # planning, which produces materially better LTX-2 / Flux output
-        # than relying on Pass 2 alone with a single hardcoded dialect.
+        # Default flipped from "off" to model-aware "third_pass". Models
+        # such as LTX-2 / Flux retain dialect polishing, while native H3
+        # video prompts bypass creative rewriting and keep deterministic
+        # continuity/dialogue preflight.
         "director_prompt_polish": services.get("director_prompt_polish", "third_pass"),
         "civitai_api_key": _mask_key(services.get("civitai_api_key", "")),
         "civitai_api_key_set": bool(services.get("civitai_api_key", "")),
@@ -6974,6 +7052,7 @@ async def llm_enhance_prompt(request: Request):
             tts_enhance_mode=body.get("tts_enhance_mode"),
             tts_voice_count=body.get("tts_voice_count", 2),
             raw_enhancer_mode=raw_enhancer_mode,
+            reference_context=body.get("reference_context"),
         )
         return {"original": prompt, "enhanced": result}
     except Exception as e:
@@ -7080,6 +7159,17 @@ async def llm_describe_image(request: Request):
 # ============================================================================
 # API Routes: Audio Analysis
 # ============================================================================
+
+def _probe_audio_duration(filepath: str) -> float | None:
+    try:
+        import soundfile as sf
+
+        info = sf.info(filepath)
+        if info.samplerate and info.frames:
+            return round(float(info.frames) / float(info.samplerate), 3)
+    except Exception:
+        pass
+    return None
 
 @api.post("/api/v1/upload-audio")
 async def upload_audio(request: Request, file: UploadFile = File(...)):
@@ -7202,6 +7292,7 @@ async def upload_audio(request: Request, file: UploadFile = File(...)):
         "filename": unique_name,
         "path": filepath,
         "url": f"/api/v1/uploads/audio/{unique_name}",
+        "duration_seconds": _probe_audio_duration(filepath),
     }
 
 
@@ -7707,15 +7798,19 @@ async def director_pipeline_start(request: Request):
     _init_pipeline()
     from services.director_pipeline import start_pipeline
     body = await request.json()
-    pid = start_pipeline(body)
+    try:
+        pid = start_pipeline(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"pipeline_id": pid}
 
 
 @api.get("/api/v1/director/pipeline/{pid}")
 def director_pipeline_status(pid: str):
     """Get current pipeline status with rich progress info."""
-    from services.director_pipeline import get_pipeline
-    p = get_pipeline(pid)
+    from services.director_pipeline import get_pipeline_status
+    base = wgp.server_config.get("save_path", "outputs")
+    p = get_pipeline_status(pid, base)
     if not p:
         raise HTTPException(status_code=404, detail="Pipeline not found")
     # Don't leak full params back to client
@@ -8011,8 +8106,8 @@ async def director_v2_plan(request: Request):
         planner_kwargs["nsfw"] = services.get("nsfw_mode", False) and provider not in _PUBLIC_LLM_PROVIDERS
 
         # Prompt polish mode: off | full_guide | light_guide | third_pass.
-        # Default flipped from "off" to "third_pass" — see /api/v1/services
-        # GET endpoint for full rationale.
+        # The default third pass is model-aware — see /api/v1/services GET
+        # for the current routing behavior.
         polish_mode = services.get("director_prompt_polish", "third_pass")
         video_model = body.get("video_model", "")
         image_model = body.get("image_model", "")
@@ -8082,6 +8177,52 @@ async def generate(request: Request):
     # SFX virtual models (mmaudio_*) are frontend-only; skip backend model validation
     if not is_sfx and wgp.get_model_def(body["model_type"]) is None:
         raise HTTPException(status_code=400, detail=f"Unknown model: {body['model_type']}")
+
+    try:
+        _base_model_type = wgp.get_base_model_type(body["model_type"])
+    except Exception:
+        _base_model_type = body.get("model_type")
+    _generation_model_def = wgp.get_model_def(body["model_type"]) or {}
+    if _generation_model_def.get("omni_reference"):
+        from models.minimax_h3.ref2va import validate_reference_manifest
+
+        try:
+            per_clip_references = body.get("per_clip_minimax_h3_references")
+            if per_clip_references is not None:
+                if not isinstance(per_clip_references, list) or not per_clip_references:
+                    raise ValueError(
+                        "Per-clip MiniMax H3 references must contain one manifest per shot."
+                    )
+                body["per_clip_minimax_h3_references"] = [
+                    validate_reference_manifest(manifest, require_files=True)
+                    for manifest in per_clip_references
+                ]
+            else:
+                body["minimax_h3_references"] = validate_reference_manifest(
+                    body.get("minimax_h3_references"),
+                    require_files=True,
+                )
+            detail = str(body.get("minimax_h3_reference_detail") or "match").strip().lower()
+            if detail not in {"match", "max"}:
+                raise ValueError("Reference detail must be 'match' or 'max'.")
+            body["minimax_h3_reference_detail"] = detail
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+    if str(_generation_model_def.get("architecture") or "").startswith("minimax_h3"):
+        variants = _generation_model_def.get("minimax_h3_text_encoder_variants") or {}
+        selected_encoder = str(
+            body.get("minimax_h3_text_encoder")
+            or _recommended_minimax_h3_encoder(body["model_type"], _generation_model_def)
+        )
+        if selected_encoder not in variants:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Unknown MiniMax H3 text encoder '{selected_encoder}'. "
+                    f"Choose one of: {', '.join(variants)}."
+                ),
+            )
+        body["minimax_h3_text_encoder"] = selected_encoder
 
     # Defense: normalize video_prompt_type so flags whose required input
     # is missing get stripped before wgp.py's validation rejects the job.
@@ -8206,7 +8347,15 @@ async def generate(request: Request):
             # that's the actual quantize-boundary danger zone. For
             # legitimate sliding-window gens (sliding much smaller than
             # video) leave the values alone.
-            if (_video_length - _latent) <= _sliding_window <= (_video_length + _latent):
+            if (
+                not _generation_model_def.get(
+                    "sliding_window_exact_total_frames",
+                    False,
+                )
+                and (_video_length - _latent)
+                <= _sliding_window
+                <= (_video_length + _latent)
+            ):
                 _new_sw = _video_length + _latent + 1
                 print(
                     f"[generate] Sliding-window safety bump: "
@@ -18925,7 +19074,10 @@ def _apply_per_job_coefficient(job: dict) -> None:
       }
     """
     try:
-        from services.perf_recommend import compute_per_job_coefficient
+        from services.perf_recommend import (
+            compute_h3_weight_budget,
+            compute_per_job_coefficient,
+        )
 
         params = job.get("params") or {}
 
@@ -19010,6 +19162,29 @@ def _apply_per_job_coefficient(job: dict) -> None:
             _base_mt = wgp.get_base_model_type(model_type) if model_type else None
         except Exception:
             _base_mt = None
+        try:
+            _job_model_def = wgp.get_model_def(model_type) if model_type else {}
+        except Exception:
+            _job_model_def = {}
+        _h3_references = list(params.get("minimax_h3_references") or [])
+        _h3_video_reference_count = sum(
+            1
+            for reference in _h3_references
+            if isinstance(reference, dict)
+            and str(reference.get("type") or reference.get("kind") or "").lower() == "video"
+        )
+        _is_h3 = str(_job_model_def.get("architecture") or "").startswith(
+            "minimax_h3"
+        )
+        _h3_omni_video = bool(
+            _job_model_def.get("omni_reference")
+            and _h3_video_reference_count
+        )
+        # H3 itself is a single denoising pipeline. Treating the ordinary
+        # two-stage UI default as a second H3 stage double-counts model memory.
+        if _is_h3:
+            stage_count = 1
+
         if _base_mt in ("scail2_14B", "scail2_1.3B"):
             _ref_pixels, _ref_frames = 848 * 480, 81
             _pixels = _ref_pixels
@@ -19021,6 +19196,32 @@ def _apply_per_job_coefficient(job: dict) -> None:
                     pass
             _frames = effective_frames or _ref_frames
             model_activation_gb = 6.0 * (_pixels / _ref_pixels) * (_frames / _ref_frames)
+
+        if _h3_omni_video:
+            # Every Ref2VA video is appended as full spatiotemporal attention
+            # context. With Match Output detail, one 15-second 960x544 video
+            # contributes roughly another complete target-video token set.
+            # Reserve 8 GB per baseline-sized video for packed hidden states,
+            # Q/K/V, attention output, and allocator slack. The transformer is
+            # streamed more aggressively below, matching WanGP's low-VRAM H3
+            # strategy instead of letting weights occupy activation space.
+            _ref_pixels = 960 * 544
+            _ref_frames = 345
+            _pixels = _ref_pixels
+            if isinstance(resolution, str) and "x" in resolution:
+                try:
+                    _w, _h = resolution.lower().split("x")
+                    _pixels = int(_w) * int(_h)
+                except (ValueError, TypeError):
+                    pass
+            _frames = min(effective_frames or _ref_frames, _ref_frames)
+            h3_reference_activation_gb = (
+                8.0
+                * _h3_video_reference_count
+                * (_pixels / _ref_pixels)
+                * (_frames / _ref_frames)
+            )
+            model_activation_gb += h3_reference_activation_gb
 
         adjustment = compute_per_job_coefficient(
             base_coef=base_coef,
@@ -19064,11 +19265,49 @@ def _apply_per_job_coefficient(job: dict) -> None:
             adjustment["dedicated_scail2_budget_gb"] = (
                 dedicated_weight_budget_gb
             )
+        if _is_h3:
+            # H3 is one pipeline stage, but its packed text + stereo audio +
+            # video attention needs explicit workspace.  Without this cap,
+            # the generic light-job bonus raised a 960x544 x 336-frame job
+            # to 19.3 GB of resident weights on a 24 GB 4090 and the process
+            # exited on denoising step zero.  The budget also scales down for
+            # lower-VRAM cards and adds reference-video attention headroom.
+            h3_budget = compute_h3_weight_budget(
+                total_vram_gb,
+                resolution,
+                effective_frames,
+                _h3_video_reference_count if _h3_omni_video else 0,
+            )
+            h3_weight_budget_gb = h3_budget["weight_budget_gb"]
+            h3_coefficient_cap = h3_weight_budget_gb / total_vram_gb
+            if adjustment["effective_coef"] > h3_coefficient_cap:
+                adjustment["effective_coef"] = h3_coefficient_cap
+                adjustment["floored"] = False
+                adjustment["reasons"].append(
+                    f"- MiniMax H3 transformer residency "
+                    f"capped at {h3_weight_budget_gb:.1f} GB to preserve "
+                    f"{h3_budget['activation_reserve_gb']:.1f} GB of packed-sequence workspace"
+                )
+            adjustment["h3_weight_budget_gb"] = h3_weight_budget_gb
+            adjustment["h3_activation_reserve_gb"] = h3_budget[
+                "activation_reserve_gb"
+            ]
         job["vram_adjustment"] = adjustment
 
         effective = adjustment["effective_coef"]
         if abs(effective - base_coef) > 1e-6:
             wgp.args.vram_safety_coefficient = effective
+            if _is_h3 and getattr(wgp, "wan_model", None) is not None:
+                loaded_coefficient = getattr(
+                    wgp.wan_model,
+                    "_maestro_profile_vram_coefficient",
+                    None,
+                )
+                if loaded_coefficient is None or float(loaded_coefficient) > effective + 1e-6:
+                    wgp.reload_needed = True
+                    adjustment["reasons"].append(
+                        "- resident H3 profile will reload with packed-sequence headroom"
+                    )
             cap_gb = effective * total_vram_gb
             base_cap_gb = base_coef * total_vram_gb
             # Log the frame-clamp explicitly when it fired so a future
@@ -20213,9 +20452,24 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                 sw_size = raw_params.get("sliding_window_size", raw_params.get("video_length", 121))
                 per_clip_frames = raw_params.pop("per_clip_frames", None)  # optional per-clip durations
                 per_clip_keyframes = raw_params.pop("per_clip_keyframes", None)  # optional keyframe injection per clip
+                per_clip_h3_references = raw_params.pop(
+                    "per_clip_minimax_h3_references", None,
+                )
+                per_clip_continuations = raw_params.pop(
+                    "per_clip_continue_from_previous", None,
+                )
+                multi_clip_concat_audio = raw_params.pop(
+                    "multi_clip_concat_audio", None,
+                )
                 multi_clip_audio_start_sec = raw_params.pop("multi_clip_audio_start_sec", 0.0)
                 group_id = f"mc_{int(time.time())}_{raw_params.get('seed', 0)}"
-                clip_count = max(len(prompt_lines), len(image_starts), 1)
+                clip_count = max(
+                    len(prompt_lines),
+                    len(image_starts),
+                    len(per_clip_h3_references or []),
+                    len(per_clip_continuations or []),
+                    1,
+                )
 
                 # Get model latent_size for frame quantization — wgp.py quantizes
                 # video_length to (n-1)//latent_size*latent_size+1, so we must match
@@ -20225,6 +20479,16 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     _mc_min_f, _mc_fs, _mc_latent = wgp.get_model_min_frames_and_step(_mc_model_type)
                 except Exception:
                     _mc_min_f, _mc_fs, _mc_latent = 17, 8, 8
+                try:
+                    _mc_model_def = wgp.get_model_def(_mc_model_type) or {}
+                except Exception:
+                    _mc_model_def = {}
+                _mc_bounded_director = str(
+                    _mc_model_def.get("director_video_strategy") or "rolling_window"
+                ) in {"bounded_start_end", "omni_reference"}
+                _mc_trim_end_frames = bool(
+                    _mc_model_def.get("director_trim_end_frames", True)
+                )
 
                 manifest = []
                 # Director timelines can begin after a silent intro. Preserve
@@ -20249,6 +20513,14 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     clip_params["image_start"] = image_starts[i] if i < len(image_starts) else None
                     clip_end = image_ends[i] if i < len(image_ends) else None
                     clip_params["image_end"] = clip_end if clip_end else None
+                    if per_clip_h3_references is not None:
+                        if i >= len(per_clip_h3_references):
+                            raise ValueError(
+                                f"Missing MiniMax H3 reference manifest for clip {i + 1}."
+                            )
+                        clip_params["minimax_h3_references"] = (
+                            per_clip_h3_references[i]
+                        )
                     # Set per-clip image_prompt_type based on which images are present
                     has_start = bool(clip_params.get("image_start"))
                     has_end = bool(clip_end)
@@ -20258,17 +20530,44 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                         clip_params["image_prompt_type"] = "S"
                     elif has_end:
                         clip_params["image_prompt_type"] = "E"
-                    # Mark clips without start image for continuation from previous clip
+                    # Rolling-window multi-clip keeps its historic automatic
+                    # continuation. Bounded models opt in per clip: Director
+                    # uses this for duration-split FL2VA segments or an
+                    # explicitly planned literal continuation, never across
+                    # an ordinary editorial cut.
                     if not has_start and i > 0:
-                        clip_params["_continuation"] = True
+                        bounded_continuation = bool(
+                            per_clip_continuations
+                            and i < len(per_clip_continuations)
+                            and per_clip_continuations[i]
+                        )
+                        if not _mc_bounded_director or bounded_continuation:
+                            clip_params["_continuation"] = True
+                            if bounded_continuation:
+                                clip_params["_continuation_tail_skip"] = 0
                     clip_frames = per_clip_frames[i] if per_clip_frames and i < len(per_clip_frames) else sw_size
-                    # Quantize to valid frame count (same formula as wgp.py line 6280)
-                    clip_frames = (clip_frames - 1) // _mc_latent * _mc_latent + 1
-                    clip_frames = max(clip_frames, _mc_min_f)
+                    if _mc_bounded_director:
+                        clip_frames = int(clip_frames)
+                        _mc_max_f = int(
+                            _mc_model_def.get("frames_maximum") or clip_frames
+                        )
+                        if not (
+                            _mc_min_f <= clip_frames <= _mc_max_f
+                            and (clip_frames - _mc_min_f) % max(1, _mc_fs) == 0
+                        ):
+                            raise ValueError(
+                                f"Clip {i + 1} has {clip_frames} frames, outside "
+                                f"the selected model's {_mc_min_f}-{_mc_max_f} "
+                                f"frame lattice (step {_mc_fs})."
+                            )
+                    else:
+                        # Quantize to valid frame count (same formula as wgp.py)
+                        clip_frames = (clip_frames - 1) // _mc_latent * _mc_latent + 1
+                        clip_frames = max(clip_frames, _mc_min_f)
                     # SE mode: mark tail frames for trimming (removes end-frame
                     # conditioning distortion at tensor level before saving)
                     trim_tail = 0
-                    if has_end:
+                    if has_end and _mc_trim_end_frames:
                         trim_tail = _mc_fs
                         last_se_clip_end_image = clip_end
                     clip_params["video_length"] = clip_frames
@@ -20282,6 +20581,7 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                         "total": clip_count,
                         "cumulative_offset": True,
                         "audio_start_sec": multi_clip_audio_start_sec,
+                        "concat_audio_path": multi_clip_concat_audio,
                     }
                     # If the clip prompt has newlines (window_prompts), use mode 1 (per-window)
                     # Otherwise mode 0 (single task)
@@ -20306,7 +20606,7 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                 # Compensation tail clip: if SE trimming removed frames, generate a
                 # short extra clip (start-frame only, no SE distortion) to fill the gap
                 # so the final video matches the full audio duration.
-                if total_trimmed_frames > 0:
+                if total_trimmed_frames > 0 and _mc_trim_end_frames:
                     # Snap to valid frame count for the model
                     model_type = raw_params.get("model_type", "")
                     try:
@@ -20334,6 +20634,7 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                         "total": clip_count + 1,
                         "cumulative_offset": True,
                         "audio_start_sec": multi_clip_audio_start_sec,
+                        "concat_audio_path": multi_clip_concat_audio,
                     }
                     tail_params["multi_prompts_gen_type"] = 0
 
@@ -20352,7 +20653,17 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                 # SE trim: if end image is set, mark tail frames for trimming
                 # (removes distorted frames from end-frame conditioning)
                 has_end_image = raw_params.get("image_end") not in (None, "", [])
-                if has_end_image and raw_params.get("video_length"):
+                try:
+                    _single_model_def = wgp.get_model_def(
+                        raw_params.get("model_type", "")
+                    ) or {}
+                except Exception:
+                    _single_model_def = {}
+                if (
+                    has_end_image
+                    and raw_params.get("video_length")
+                    and bool(_single_model_def.get("director_trim_end_frames", True))
+                ):
                     model_type = raw_params.get("model_type", "")
                     try:
                         _, fs, _ = wgp.get_model_min_frames_and_step(model_type)
@@ -20710,6 +21021,15 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                         next_task = queue[task_idx + 1]
                         next_params = next_task.get('params', {})
                         if next_params.pop("_continuation", False):
+                            try:
+                                continuation_tail_skip = max(
+                                    0,
+                                    int(next_params.pop(
+                                        "_continuation_tail_skip", 8,
+                                    )),
+                                )
+                            except (TypeError, ValueError):
+                                continuation_tail_skip = 8
                             # Find the latest video explicitly registered by
                             # this task; a shared-folder diff can pick up a
                             # concurrent dashboard operation's media.
@@ -20736,8 +21056,13 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                                     from PIL import Image as PILImage
                                     import decord
                                     vr = decord.VideoReader(latest_video)
-                                    # Skip last 8 frames (LTX-2 end-of-clip distortion)
-                                    safe_idx = max(0, len(vr) - 9)
+                                    # LTX-2 skips its distortion-prone tail;
+                                    # bounded H3 continuations use the true
+                                    # final frame (the model does not trim one).
+                                    safe_idx = max(
+                                        0,
+                                        len(vr) - continuation_tail_skip - 1,
+                                    )
                                     last_frame = vr[safe_idx].asnumpy()
                                     del vr
                                     frame_img = PILImage.fromarray(last_frame)
@@ -22576,7 +22901,7 @@ def rejoin_clips(body: dict):
             }
             # Get audio from first clip's params
             if mci["index"] == 0 and not audio_path:
-                ag = params.get("audio_guide", "")
+                ag = mci.get("concat_audio_path") or params.get("audio_guide", "")
                 if ag and os.path.isfile(ag):
                     audio_path = ag
                     try:
@@ -22887,6 +23212,14 @@ async def upload_image(request: Request, file: UploadFile = File(...)):
             if _fps:
                 result["fps"] = float(_fps)
                 result["frame_count"] = int(_frame_count or 0)
+                result["duration_seconds"] = round(float(_frame_count or 0) / float(_fps), 3)
+            try:
+                import av as _av
+
+                with _av.open(filepath) as _container:
+                    result["has_audio"] = bool(_container.streams.audio)
+            except Exception:
+                result["has_audio"] = False
         except Exception:
             pass
     return result
@@ -23054,24 +23387,8 @@ if __name__ == "__main__":
         print(f"  (Bound to {host} — LAN-accessible via this machine's IP)")
     print(f"{'='*50}\n")
 
-    # Suppress noisy UI-polling access logs (downloads/active + status/<id>)
-    # — these fire 1-2× per second whenever the UI is open and drown out
-    # actual model-generation log output. Errors and non-polling endpoints
-    # still log normally.
-    import logging as _logging
-    _UVICORN_POLL_NOISE = (
-        "/api/v1/downloads/active",
-        "/api/v1/status/",
-        "/api/v1/jobs",  # job list polled by Studio sidebar
-    )
-    class _SilencePollingAccessLog(_logging.Filter):
-        def filter(self, record):
-            try:
-                msg = record.getMessage()
-            except Exception:
-                return True
-            return not any(noisy in msg for noisy in _UVICORN_POLL_NOISE)
-    _logging.getLogger("uvicorn.access").addFilter(_SilencePollingAccessLog())
+    # Confirm the polling filter immediately before Uvicorn configures logging.
+    install_quiet_access_filter()
 
     try:
         uvicorn.run(api, host=host, port=port)

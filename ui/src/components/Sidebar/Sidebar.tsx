@@ -3,6 +3,7 @@ import { useStore } from '../../stores/useStore'
 import { useIsMobile } from '../../lib/useIsMobile'
 import { GenerationModeSelector } from './GenerationModeSelector'
 import { InputsPanel } from './InputsPanel'
+import { OmniReferenceSection } from './OmniReferenceSection'
 import { PromptInput } from './PromptInput'
 import { ImageRefSection } from './ImageRefSection'
 import { AudioModeSection } from './AudioModeSection'
@@ -57,9 +58,10 @@ export function Sidebar() {
   const isOutpaint = isEdit && editSubMode === 'outpaint'
   const isEditAnything = isEdit && editSubMode === 'edit_anything'
   const isRecast = isEdit && editSubMode === 'recast'
-  const isMultiClip = isVideo && imageMode === 2
-  const isContinue = isVideo && imageMode === 3
-  const isBlend = isVideo && imageMode === 4
+  const isOmniReference = isVideo && modelOptions?.omni_reference === true
+  const isMultiClip = isVideo && !isOmniReference && imageMode === 2
+  const isContinue = isVideo && !isOmniReference && imageMode === 3
+  const isBlend = isVideo && !isOmniReference && imageMode === 4
   const isDirector = sidebarMode === 'director'
   const isI2vOnly = modelOptions?.i2v_class && !modelOptions?.t2v_class
 
@@ -157,7 +159,7 @@ export function Sidebar() {
         {isEdit && editControls}
 
         {/* Video mode */}
-        {isVideo && <ModeToggle />}
+        {isVideo && !isOmniReference && <ModeToggle />}
         {/* Blend mode manages its own duration (overlap_sec) and its own
             start/end anchors — so the generic Duration slider and
             start/end ImageUpload don't apply there. */}
@@ -165,7 +167,7 @@ export function Sidebar() {
         {/* Frames (image_mode 0) AND Extend (image_mode 3) both use the unified
             InputsPanel. In Extend mode its first tile is the source video to
             continue from; otherwise it's the start frame. */}
-        {isVideo && !isMultiClip && !isBlend && (
+        {isVideo && !isOmniReference && !isMultiClip && !isBlend && (
           <div>
             {isI2vOnly && !isContinue && (
               <div className="text-[10px] text-indicator-warning bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-1.5 mb-2">
@@ -175,6 +177,7 @@ export function Sidebar() {
             <InputsPanel />
           </div>
         )}
+        {isOmniReference && <OmniReferenceSection />}
         {isBlend && <BlendControls />}
 
         {/* Image mode: reference images */}
@@ -198,7 +201,7 @@ export function Sidebar() {
 
         {/* Video: reference images below prompt. In Frames mode the InputsPanel
             renders them as ordered tiles instead. */}
-        {isVideo && imageMode !== 0 && imageMode !== 3 && modelOptions?.image_ref_choices && <ImageRefSection />}
+        {isVideo && !isOmniReference && imageMode !== 0 && imageMode !== 3 && modelOptions?.image_ref_choices && <ImageRefSection />}
 
         {/* Voice Reference (ID-LoRA) — gated by Settings → Services
             toggle (`voice_reference_enabled`). VoiceRefSection internally
@@ -206,7 +209,7 @@ export function Sidebar() {
             mode (basic, multi-clip, continue, blend) — it's the same
             generation path that consumes `directorVoiceRef` server-side.
             Director mode renders its own copy in DirectorChat. */}
-        {isVideo && !isDirector && imageMode !== 0 && imageMode !== 3 && <VoiceRefSection />}
+        {isVideo && !isDirector && !isOmniReference && imageMode !== 0 && imageMode !== 3 && <VoiceRefSection />}
         </>
         )}
       </div>
