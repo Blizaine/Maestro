@@ -5,6 +5,16 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-08-06
+
+MiniMax H3 Turbo: added the pinned Turbo adapter to the Full FL2VA and Ref2VA
+LoRA catalogs as a managed first-use download. Full H3 models now expose an
+experimental one-click Turbo mode that selects the adapter, sets six inference
+steps, and starts at strength 0.70. The adapter remains visible in Advanced so
+its strength can be tuned per generation, and the backend preserves that
+user-selected value while preventing duplicate Turbo adapters. Turbo remains
+hidden and rejected for incompatible Pruned H3 checkpoints.
+
 ## [1.6.0] - 2026-08-06
 
 MiniMax H3 in Director: added model-aware bounded-shot workflows for both H3

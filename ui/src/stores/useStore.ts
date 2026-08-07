@@ -5289,6 +5289,10 @@ export const useStore = create<AppState>((set, get) => ({
     // the shared Wan model family advertises support for up to three phases.
     const recastSinglePhase = generationMode === 'avatar' && editSubMode === 'recast'
     const phases = recastSinglePhase ? 1 : Math.max(1, modelOptions?.guidance_max_phases ?? 1)
+    const removedTurboPreset = (
+      idx >= 0
+      && filename === modelOptions?.minimax_h3_turbo?.filename
+    )
 
     if (idx >= 0) {
       current.splice(idx, 1)
@@ -5313,6 +5317,7 @@ export const useStore = create<AppState>((set, get) => ({
         ...s.params,
         activated_loras: current,
         loras_multipliers: multipliers,
+        ...(removedTurboPreset ? { minimax_h3_turbo_mode: false } : {}),
       },
     }))
     // Persist LoRA state
@@ -5322,8 +5327,20 @@ export const useStore = create<AppState>((set, get) => ({
       ...s.savedLoraPerMode,
       [mode]: { activated_loras: current, loras_multipliers: multipliers, loraWeights: newWeights, availableLoras: s.availableLoras },
     }
-    set({ savedLoraPerMode: updatedLoraPerMode })
-    _saveSettings({ generationMode: mode, selectedModelPerMode: s.selectedModelPerMode, savedParamsPerMode: s.savedParamsPerMode, savedLoraPerMode: updatedLoraPerMode, savedPromptPerMode: s.savedPromptPerMode }, s.loraIdByFilename)
+    const updatedParamsPerMode = removedTurboPreset
+      ? {
+          ...s.savedParamsPerMode,
+          [mode]: {
+            ...(s.savedParamsPerMode[mode] || {}),
+            minimax_h3_turbo_mode: false,
+          },
+        }
+      : s.savedParamsPerMode
+    set({
+      savedLoraPerMode: updatedLoraPerMode,
+      savedParamsPerMode: updatedParamsPerMode,
+    })
+    _saveSettings({ generationMode: mode, selectedModelPerMode: s.selectedModelPerMode, savedParamsPerMode: updatedParamsPerMode, savedLoraPerMode: updatedLoraPerMode, savedPromptPerMode: s.savedPromptPerMode }, s.loraIdByFilename)
   },
 
   ensureTransitionLoraForBlend: async () => {
@@ -5641,6 +5658,18 @@ export const useStore = create<AppState>((set, get) => ({
             || options.minimax_h3_text_encoder_choices[0].value
           )
         }
+      }
+      if (options.minimax_h3_turbo) {
+        // A restored Turbo preset always displays the same step count the
+        // backend will enforce. This also closes a race where model defaults
+        // (20 steps) arrive after the user checks Turbo (6 steps).
+        if (get().params.minimax_h3_turbo_mode === true) {
+          paramUpdates.num_inference_steps = options.minimax_h3_turbo.steps
+        }
+      } else {
+        // Model switches preserve most Studio params. Never carry the Full-H3
+        // Turbo flag invisibly into a Pruned H3 or unrelated model.
+        paramUpdates.minimax_h3_turbo_mode = false
       }
       // TTS default duration. Prefer the model's declared `default` (DramaBox
       // uses 0 = auto-derive from prompt); fall back to `max` (legacy behavior
@@ -7326,6 +7355,7 @@ export const useStore = create<AppState>((set, get) => ({
         model_type: modelType,
         activated_loras: [],
         loras_multipliers: '',
+        minimax_h3_turbo_mode: false,
       },
       selectedModelPerMode: { ...s.selectedModelPerMode, [currentMode]: modelType },
       loraWeights: {},

@@ -58,6 +58,17 @@ treated as actual model evaluations. Pruned-base time-embedding reinjection
 remains unsupported, so Maestro rejects that combination before loading the
 adapter.
 
+The one-click experimental Turbo preset pins the Maestro-validated
+`minimax_h3_turbo_4step_ckpt500.safetensors` file at repository revision
+`7a44622816e16032cb0b6d044d8820da39a1dfdc` (SHA-256
+`82d0acff583b04ad9a4238a7440b584b56094bfb7c4fdb2981f67c7a4784b62d`).
+It uses six model evaluations and starts at adapter strength 0.70. The managed
+adapter is also activated in Advanced so users can tune its strength for a
+specific prompt while Turbo mode continues to own the six-step schedule. The
+file is listed for Full H3 checkpoints before installation and is downloaded,
+verified, and atomically published on first use; it is not distributed in the
+Maestro repo.
+
 Those model weights are downloaded at runtime and are not distributed in the
 Maestro repository. They remain governed by their respective model terms and
 any authorization or waiver required for the user's location.

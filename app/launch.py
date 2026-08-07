@@ -88,6 +88,13 @@ if _hf_token_path:
 # Now safe to import wgp - all module-level code will run with patched argv
 print("[Maestro] Importing WanGP engine...")
 import wgp
+from models.minimax_h3.turbo import (
+    MINIMAX_H3_TURBO_LORA_FILENAME,
+    MINIMAX_H3_TURBO_LORA_REPO_ID,
+    MINIMAX_H3_TURBO_LORA_REVISION,
+    MINIMAX_H3_TURBO_LORA_SHA256,
+    MINIMAX_H3_TURBO_LORA_SIZE,
+)
 print(f"[Maestro] WanGP loaded: {len(wgp.displayed_model_types)} models available")
 # Base save path always comes from server_config["save_path"] (never from wgp.save_path which gets workspace-modified)
 
@@ -991,6 +998,9 @@ _SYSTEM_MANAGED_LORA_PATTERNS = (
     # Official SCAIL-2 Relighting LoRA, downloaded and converted on first
     # Recast use. It is pinned to the upstream checkpoint hash below.
     _re_sys_lora.compile(r"scail2[-_]relighting[-_]lora", _re_sys_lora.IGNORECASE),
+    # MiniMax H3 Turbo accelerator, exposed as a managed experimental preset
+    # for Full H3 checkpoints and downloaded on first use.
+    _re_sys_lora.compile(r"minimax[-_]h3[-_]turbo", _re_sys_lora.IGNORECASE),
     # LTX-2.3 Transition LoRA (auto-downloaded by ensureTransitionLoraForBlend).
     _re_sys_lora.compile(r"transition", _re_sys_lora.IGNORECASE),
 )
@@ -1512,6 +1522,36 @@ def _lora_is_compatible_with_model(model_def: dict, path: str) -> bool:
     return True
 
 
+def _minimax_h3_turbo_option(model_def: dict) -> dict | None:
+    """Return the managed Turbo preset exposed by a compatible H3 model."""
+
+    architecture = str((model_def or {}).get("architecture") or "")
+    if not architecture.startswith("minimax_h3") or not bool(
+        (model_def or {}).get("minimax_h3_full_checkpoint", False)
+    ):
+        return None
+
+    from models.minimax_h3.turbo import (
+        MINIMAX_H3_TURBO_LORA_FILENAME,
+        MINIMAX_H3_TURBO_PRESET_STEPS,
+        MINIMAX_H3_TURBO_PRESET_WEIGHT,
+    )
+
+    return {
+        "filename": MINIMAX_H3_TURBO_LORA_FILENAME,
+        "label": "Turbo mode",
+        "experimental": True,
+        "steps": MINIMAX_H3_TURBO_PRESET_STEPS,
+        "weight": MINIMAX_H3_TURBO_PRESET_WEIGHT,
+        "guide": (
+            "Experimental MiniMax H3 accelerator for Full checkpoints. "
+            "Maestro's one-click Turbo preset uses 6 steps and starts at "
+            "strength 0.70. Adjust its active LoRA strength in Advanced; "
+            "the managed adapter downloads automatically on first use."
+        ),
+    }
+
+
 @api.get("/api/v1/loras/{model_type}")
 def list_loras(model_type: str):
     """List available LoRA files for a model type."""
@@ -1524,7 +1564,8 @@ def list_loras(model_type: str):
     except Exception:
         return {"loras": [], "guidance_max_phases": md.get("guidance_max_phases", 1)}
 
-    if lora_dir is None or not os.path.isdir(lora_dir):
+    turbo_option = _minimax_h3_turbo_option(md)
+    if lora_dir is None:
         return {"loras": [], "guidance_max_phases": md.get("guidance_max_phases", 1)}
 
     # Merge the primary dir with linked read-only dirs (Linked Model
@@ -1532,11 +1573,17 @@ def list_loras(model_type: str):
     # existing Wan2GP install show up in the Studio selector without
     # copying them.
     names = set()
-    for search_dir in wgp.get_lora_search_dirs(model_type):
-        for f in glob.glob(os.path.join(search_dir, "*.safetensors")) + glob.glob(os.path.join(search_dir, "*.sft")):
-            if not _lora_is_compatible_with_model(md, f):
-                continue
-            names.add(os.path.basename(f))
+    if os.path.isdir(lora_dir):
+        for search_dir in wgp.get_lora_search_dirs(model_type):
+            for f in glob.glob(os.path.join(search_dir, "*.safetensors")) + glob.glob(os.path.join(search_dir, "*.sft")):
+                if not _lora_is_compatible_with_model(md, f):
+                    continue
+                names.add(os.path.basename(f))
+    # Managed choices are virtual until first use. Keeping the pinned Turbo
+    # filename in the catalog makes it discoverable on a fresh install; the
+    # generation preflight below performs the verified one-time download.
+    if turbo_option:
+        names.add(turbo_option["filename"])
     loras = sorted(names)
 
     return {
@@ -1555,25 +1602,27 @@ def list_loras_details(model_type: str):
         lora_dir = wgp.get_lora_dir(model_type)
     except Exception:
         return {"loras": [], "guidance_max_phases": md.get("guidance_max_phases", 1)}
-    if lora_dir is None or not os.path.isdir(lora_dir):
+    turbo_option = _minimax_h3_turbo_option(md)
+    if lora_dir is None:
         return {"loras": [], "guidance_max_phases": md.get("guidance_max_phases", 1)}
 
     # Merge across the primary dir and linked read-only dirs (same set as
     # the plain listing endpoint), primary copy wins per filename.
     _seen_names = set()
     files = []
-    for _search_dir in wgp.get_lora_search_dirs(model_type):
-        for f in sorted(
-            glob.glob(os.path.join(_search_dir, "*.safetensors"))
-            + glob.glob(os.path.join(_search_dir, "*.sft"))
-        ):
-            if not _lora_is_compatible_with_model(md, f):
-                continue
-            _b = os.path.basename(f)
-            if _b in _seen_names:
-                continue
-            _seen_names.add(_b)
-            files.append(f)
+    if os.path.isdir(lora_dir):
+        for _search_dir in wgp.get_lora_search_dirs(model_type):
+            for f in sorted(
+                glob.glob(os.path.join(_search_dir, "*.safetensors"))
+                + glob.glob(os.path.join(_search_dir, "*.sft"))
+            ):
+                if not _lora_is_compatible_with_model(md, f):
+                    continue
+                _b = os.path.basename(f)
+                if _b in _seen_names:
+                    continue
+                _seen_names.add(_b)
+                files.append(f)
     files.sort(key=lambda p: os.path.basename(p))
 
     # Read the cached update manifest once per request so each row can
@@ -1692,6 +1741,37 @@ def list_loras_details(model_type: str):
             filename=basename,
         ))
         loras.append(info)
+
+    if turbo_option:
+        filename = turbo_option["filename"]
+        info = next((item for item in loras if item["filename"] == filename), None)
+        if info is None:
+            info = {
+                "filename": filename,
+                "trained_words": [],
+                "preview_url": None,
+                "civitai_model_id": None,
+                "recommended_weights": None,
+                "has_guide": False,
+                "nsfw": False,
+                "downloaded_at": None,
+                "released_at": None,
+                "lora_id": f"managed:{filename}",
+            }
+            loras.append(info)
+        info.update({
+            "managed": True,
+            "recommended_weights": {
+                "source": "default",
+                "default": turbo_option["weight"],
+                "min": 0.50,
+                "max": 1.00,
+            },
+            "has_guide": True,
+            "guide": turbo_option["guide"],
+            "update_status": "current",
+        })
+        loras.sort(key=lambda item: item["filename"])
     return {
         "loras": loras,
         "guidance_max_phases": md.get("guidance_max_phases", 1),
@@ -5115,6 +5195,7 @@ def get_model_options(model_type: str):
             for key, value in _h3_encoder_variants.items()
         ] or None,
         "minimax_h3_text_encoder_default": _h3_encoder_default,
+        "minimax_h3_turbo": _minimax_h3_turbo_option(md),
         "resolution_presets": md.get("resolution_presets"),
         "resolution_preset_order": md.get("resolution_preset_order"),
         "supports_auto_aspect": md.get("supports_auto_aspect", False),
@@ -8223,6 +8304,26 @@ async def generate(request: Request):
                 ),
             )
         body["minimax_h3_text_encoder"] = selected_encoder
+        try:
+            from models.minimax_h3.turbo import (
+                normalize_minimax_h3_turbo_request,
+            )
+
+            if normalize_minimax_h3_turbo_request(
+                body,
+                full_checkpoint=bool(
+                    _generation_model_def.get(
+                        "minimax_h3_full_checkpoint", False
+                    )
+                ),
+            ):
+                print(
+                    "[MiniMax H3 Turbo] Experimental preset enabled: "
+                    f"{body['num_inference_steps']} steps, "
+                    f"LoRA strength {body['loras_multipliers'].split()[-1]}."
+                )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
     # Defense: normalize video_prompt_type so flags whose required input
     # is missing get stripped before wgp.py's validation rejects the job.
@@ -8685,6 +8786,18 @@ _MANAGED_LORAS = {
         "converter": "scail2_sat_lora",
         "label": "SCAIL-2 Relighting",
         "support_url": "https://huggingface.co/zai-org/SCAIL-2/blob/main/model/relighting-lora.pt",
+    },
+    MINIMAX_H3_TURBO_LORA_FILENAME: {
+        "repo_id": MINIMAX_H3_TURBO_LORA_REPO_ID,
+        "revision": MINIMAX_H3_TURBO_LORA_REVISION,
+        "remote_path": MINIMAX_H3_TURBO_LORA_FILENAME,
+        "sha256": MINIMAX_H3_TURBO_LORA_SHA256,
+        "size": MINIMAX_H3_TURBO_LORA_SIZE,
+        "label": "MiniMax H3 Turbo (Experimental)",
+        "support_url": (
+            "https://huggingface.co/"
+            f"{MINIMAX_H3_TURBO_LORA_REPO_ID}"
+        ),
     },
 }
 
