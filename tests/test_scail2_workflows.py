@@ -4005,7 +4005,7 @@ class TestMultiPersonRecast(unittest.TestCase):
             advanced,
         )
         self.assertIn(
-            "(isAvatar && !isScailEdit)) && <WindowSettings />",
+            "&& modelOptions?.sliding_window",
             advanced,
         )
         self.assertIn(

@@ -124,6 +124,7 @@ export function useAdvancedActiveItems(): string[] {
 
   const items: string[] = []
   if (params.seed !== -1) items.push(`Seed ${params.seed}`)
+  if (params.minimax_h3_turbo_mode) items.push('H3 Turbo')
   if (
     (params.negative_prompt?.length ?? 0) > 0
     && (!isScailEdit || isScailHq)
@@ -132,6 +133,16 @@ export function useAdvancedActiveItems(): string[] {
   if (!isScailEdit && spatialUpsampling) items.push(`Upscaling (${spatialUpsampling})`)
   if (!isScailEdit && filmGrainIntensity > 0) items.push('Film grain')
   if (!isScailEdit && (params.self_refiner_setting ?? 0) > 0) items.push('Self refiner')
+  if (
+    modelOptions?.minimax_h3_text_encoder_choices?.length
+    && params.minimax_h3_text_encoder
+    && params.minimax_h3_text_encoder !== modelOptions.minimax_h3_text_encoder_default
+  ) {
+    const selected = modelOptions.minimax_h3_text_encoder_choices.find(
+      choice => choice.value === params.minimax_h3_text_encoder
+    )
+    items.push(`H3 encoder: ${selected?.label || params.minimax_h3_text_encoder}`)
+  }
   // injection_strength only matters when injected frames actually exist.
   // The persisted snapshot strips image_refs (file paths are ephemeral)
   // but kept the strength value — counting it alone produced a ghost
@@ -194,6 +205,10 @@ export function AdvancedSettings() {
     )
   )
   const isScailHq = isScailEdit && scailModelType === 'scail2_14B'
+  const h3TurboMode = (
+    params.minimax_h3_turbo_mode === true
+    && modelOptions?.minimax_h3_turbo != null
+  )
   const showInferenceSteps = (
     !isAudioOnly
     && (isScailEdit || !modelOptions?.lock_inference_steps)
@@ -281,8 +296,36 @@ export function AdvancedSettings() {
                 </>
               )}
 
+              {/* The Qwen conditioner is shared by every H3 transformer.
+                  Expose it once here instead of multiplying model entries. */}
+              {modelOptions?.minimax_h3_text_encoder_choices?.length ? (
+                <div>
+                  <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">
+                    H3 Text Encoder
+                  </label>
+                  <select
+                    value={params.minimax_h3_text_encoder || modelOptions.minimax_h3_text_encoder_default || modelOptions.minimax_h3_text_encoder_choices[0]?.value}
+                    onChange={e => setParam('minimax_h3_text_encoder', e.target.value as any)}
+                    className="w-full bg-bg-tertiary border border-border rounded px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent-blue"
+                  >
+                    {modelOptions.minimax_h3_text_encoder_choices.map(choice => (
+                      <option key={choice.value} value={choice.value}>
+                        {choice.label}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[9px] text-text-muted mt-1">
+                    {modelOptions.minimax_h3_text_encoder_choices.find(
+                      choice => choice.value === (params.minimax_h3_text_encoder || modelOptions.minimax_h3_text_encoder_default)
+                    )?.size_hint || 'Changing this reloads the H3 model.'}
+                  </p>
+                </div>
+              ) : null}
+
               {/* Window Settings */}
-              {(isVideo || (isAvatar && !isScailEdit)) && <WindowSettings />}
+              {(isVideo || (isAvatar && !isScailEdit))
+                && modelOptions?.sliding_window
+                && <WindowSettings />}
 
               {/* TTS Settings */}
               {isAudioOnly && (
@@ -651,16 +694,23 @@ export function AdvancedSettings() {
                     <input
                       type="number"
                       value={params.num_inference_steps}
+                      disabled={h3TurboMode}
                       onChange={e => setParam('num_inference_steps', Number(e.target.value))}
-                      className="w-16 bg-bg-tertiary border border-border rounded px-2 py-0.5 text-xs text-text-primary text-center focus:outline-none focus:border-accent-blue"
+                      className="w-16 bg-bg-tertiary border border-border rounded px-2 py-0.5 text-xs text-text-primary text-center focus:outline-none focus:border-accent-blue disabled:cursor-not-allowed disabled:opacity-50"
                     />
                   </div>
                   <input
                     type="range" min={1} max={50} step={1}
                     value={params.num_inference_steps}
+                    disabled={h3TurboMode}
                     onChange={e => setParam('num_inference_steps', Number(e.target.value))}
-                    className="w-full"
+                    className="w-full disabled:cursor-not-allowed disabled:opacity-50"
                   />
+                  {h3TurboMode && (
+                    <p className="text-[9px] text-text-muted mt-0.5">
+                      Turbo mode locks this preset to {modelOptions?.minimax_h3_turbo?.steps} steps.
+                    </p>
+                  )}
                   {isScailFast && (
                     <p className="text-[9px] text-text-muted mt-0.5">
                       Fast keeps its distilled CFG 1 recipe; guidance and

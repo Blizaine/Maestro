@@ -25,7 +25,10 @@ _APP_DIR = os.path.abspath(os.path.join(_HERE, "..", "app"))
 if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
-from services.perf_recommend import compute_per_job_coefficient  # noqa: E402
+from services.perf_recommend import (  # noqa: E402
+    compute_h3_weight_budget,
+    compute_per_job_coefficient,
+)
 
 
 class TestPassOverheadResolutionScaling(unittest.TestCase):
@@ -173,6 +176,33 @@ class TestPassOverheadResolutionScaling(unittest.TestCase):
         )
         joined = " ".join(result["reasons"])
         self.assertNotIn("resolution scale", joined)
+
+
+class TestMiniMaxH3ActivationBudget(unittest.TestCase):
+    def test_long_540p_job_restores_known_good_4090_headroom(self):
+        budget = compute_h3_weight_budget(24.0, "960x544", 336)
+        self.assertLessEqual(budget["weight_budget_gb"], 17.1)
+        self.assertGreaterEqual(budget["activation_reserve_gb"], 6.9)
+
+    def test_portrait_and_landscape_have_the_same_budget(self):
+        landscape = compute_h3_weight_budget(24.0, "960x544", 336)
+        portrait = compute_h3_weight_budget(24.0, "544x960", 336)
+        self.assertEqual(landscape, portrait)
+
+    def test_short_480p_job_keeps_more_weights_but_never_exceeds_cap(self):
+        budget = compute_h3_weight_budget(24.0, "864x480", 124)
+        self.assertGreater(budget["weight_budget_gb"], 17.5)
+        self.assertLessEqual(budget["weight_budget_gb"], 18.0)
+
+    def test_video_reference_adds_full_attention_reserve(self):
+        budget = compute_h3_weight_budget(24.0, "960x544", 345, 1)
+        self.assertAlmostEqual(budget["activation_reserve_gb"], 17.0, places=2)
+        self.assertAlmostEqual(budget["weight_budget_gb"], 7.0, places=2)
+
+    def test_lower_vram_card_streams_more_transformer_weights(self):
+        budget = compute_h3_weight_budget(16.0, "960x544", 345)
+        self.assertAlmostEqual(budget["activation_reserve_gb"], 7.0, places=2)
+        self.assertAlmostEqual(budget["weight_budget_gb"], 9.0, places=2)
 
 
 if __name__ == "__main__":

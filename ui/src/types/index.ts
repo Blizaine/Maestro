@@ -4,9 +4,39 @@ export interface ModelFamily {
   order: number
 }
 
+export type DirectorPipelineType = 'music_video' | 'short_film_audio' | 'short_film_story'
+export type DirectorShotImageGuidance = 'auto' | 'prompt_only' | 'generate'
+export type DirectorShotImagePolicy = 'generate' | 'prompt_only' | 'direct_references'
+
+export interface DirectorCapabilityResult {
+  compatible: boolean
+  reason: string
+}
+
+export interface DirectorModelCompatibility {
+  image: DirectorCapabilityResult
+  video: Record<DirectorPipelineType | 'seamless', DirectorCapabilityResult>
+  supports_audio_input: boolean
+  generates_audio: boolean
+  supports_voice_reference: boolean
+  voice_reference_mode?: 'none' | 'id_lora' | 'native_reference'
+  video_strategy?: 'rolling_window' | 'bounded_start_end' | 'omni_reference'
+  audio_input_mode?: 'none' | 'generic_audio_guide' | 'reference_manifest'
+  reference_mode?: 'none' | 'start_frame' | 'start_end' | 'omni_manifest'
+  shot_image_support?: 'required' | 'optional' | 'direct_references'
+  supports_endpoint_continuity?: boolean
+  clip_min_frames?: number | null
+  clip_max_frames?: number | null
+  clip_frame_step?: number | null
+  max_image_refs: number | null
+}
+
 export interface ModelDef {
   model_type: string
   name: string
+  description?: string
+  selector_help?: string
+  lora_compatibility_note?: string
   family: string
   architecture: string
   is_i2v: boolean
@@ -14,8 +44,12 @@ export interface ModelDef {
   guidance_max_phases: number
   fps: number
   supports_end_frame?: boolean
+  /** Legacy broad flag: accepts input audio OR generates output audio. */
   supports_audio?: boolean
+  supports_audio_input?: boolean
+  generates_audio?: boolean
   supports_ref_images?: boolean
+  director?: DirectorModelCompatibility
   is_downloaded?: boolean
   // True when this model is only available with Mature Mode enabled.
   // Backend always returns the entry; UI filters it out when
@@ -115,6 +149,31 @@ export interface GenerateParams {
   tts_comp_release?: number
   tts_comp_makeup?: number
   tts_voice_count?: number
+  // MiniMax H3 Ref2VA ordered Omni-reference manifest.
+  minimax_h3_references?: MiniMaxH3Reference[]
+  minimax_h3_reference_detail?: 'match' | 'max'
+  minimax_h3_text_encoder?: 'nvfp4_awq' | 'gguf_q2_k' | 'gguf_q4_k_m' | 'int8' | 'bf16'
+  /** One-click managed H3 Turbo recipe. Full H3 checkpoints only. */
+  minimax_h3_turbo_mode?: boolean
+}
+
+export type MiniMaxH3ReferenceType = 'image' | 'video' | 'audio'
+export type MiniMaxH3AudioIntent = 'voice' | 'drive' | 'style'
+
+export interface MiniMaxH3Reference {
+  id: string
+  type: MiniMaxH3ReferenceType
+  path: string
+  filename: string
+  url?: string
+  role?: string
+  audio_intent?: MiniMaxH3AudioIntent
+  include_audio?: boolean
+  has_audio?: boolean
+  audio_path?: string
+  audio_filename?: string
+  audio_duration_seconds?: number | null
+  duration_seconds?: number | null
 }
 
 /** OOM (out-of-VRAM) failure metadata. Set on jobs and pipelines that
@@ -214,6 +273,7 @@ export interface ModelOptions {
   guidance_max_phases: number
   lock_guidance_phases: boolean
   sliding_window: boolean
+  video_continuation?: boolean
   motion_amplitude: boolean
   flow_shift: boolean
   tea_cache: boolean
@@ -227,6 +287,36 @@ export interface ModelOptions {
   t2v_class: boolean
   image_outputs: boolean
   supports_end_frame: boolean
+  omni_reference?: boolean
+  omni_reference_limits?: {
+    image: number
+    video: number
+    audio: number
+    total: number
+  } | null
+  omni_reference_detail_choices?: [string, 'match' | 'max'][] | null
+  omni_reference_detail_default?: 'match' | 'max'
+  minimax_h3_text_encoder_choices?: {
+    value: string
+    label: string
+    size_hint: string
+    recommended?: boolean
+  }[] | null
+  minimax_h3_text_encoder_default?: string
+  minimax_h3_turbo?: {
+    filename: string
+    label: string
+    experimental: boolean
+    steps: number
+    weight: number
+    guide: string
+  } | null
+  resolution_presets?: Partial<Record<ResolutionPreset, {
+    label: string
+    values: Partial<Record<AspectRatio, string>>
+  }>> | null
+  resolution_preset_order?: ResolutionPreset[] | null
+  supports_auto_aspect?: boolean
   guide_preprocessing: ChoiceConfig | null
   guide_custom_choices: ChoiceConfig | null
   image_ref_choices: ChoiceConfig | null
@@ -246,6 +336,7 @@ export interface ModelOptions {
   fps: number
   frames_minimum: number
   frames_steps: number
+  frames_maximum?: number | null
   default_num_inference_steps: number | null
   default_guidance_scale: number | null
   hide_resolution_presets: boolean
@@ -521,6 +612,8 @@ export interface LoraInfo {
   preview_url: string | null
   civitai_model_id: number | null
   recommended_weights: LoraRecommendedWeights | null
+  /** Managed choices may be listed before their first-use download. */
+  managed?: boolean
   has_guide: boolean
   guide?: string | null
   /** NSFW flag from the .civitai.json sidecar (or inferred from filename/tags).
@@ -875,6 +968,9 @@ export interface SavedPipelineState {
   seamless: boolean
   image_model: string
   video_model: string
+  /** Effective saved behavior. Missing on legacy projects, which require images. */
+  shot_image_policy?: DirectorShotImagePolicy
+  shot_image_guidance?: DirectorShotImageGuidance
   llm_log: PipelineLlmLog | null
   clips: PipelineClipState[]
   output_files: string[]

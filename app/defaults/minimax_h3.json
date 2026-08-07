@@ -1,8 +1,8 @@
 {
     "model": {
-        "name": "MiniMax H3 Base (FL2VA)",
+        "name": "H3 First / Last — Pruned",
         "architecture": "minimax_h3",
-        "description": "MiniMax H3 Base for text-to-video, image-to-video, and first/last-frame video generation with native synchronized stereo audio. Uses the consumer-friendly scaled-FP8 FL2VA transformer and NVFP4 Qwen3-VL conditioner.",
+        "description": "Recommended lighter MiniMax H3 First / Last model. Creates video from text alone or with a first frame, last frame, or both, and generates synchronized stereo audio. Longer Studio clips continue through native 14.4-second windows. It does not accept reference audio. Turbo / distilled H3 LoRAs require the Full model.",
         "URLs": [
             "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/0543966fbdce5ba05709a8f2031c94bdba629b4a/diffusion_models/minimax_h3_fl2va_pruned_fp8_scaled.safetensors"
         ]
@@ -10,6 +10,9 @@
     "prompt": "A cinematic medium shot of a traveler standing on a windswept overlook at sunrise. The camera slowly arcs around them as their coat moves naturally in the breeze. Distant birds and soft wind are audible, and the traveler says, \"We made it.\"",
     "num_inference_steps": 20,
     "video_length": 124,
+    "sliding_window_size": 345,
+    "sliding_window_overlap": 1,
+    "sliding_window_discard_last_frames": 0,
     "resolution": "864x480",
     "guidance_scale": 1.0,
     "image_prompt_type": ""

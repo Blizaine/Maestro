@@ -184,7 +184,7 @@ function LlmLogPanel({ pipeline }: { pipeline: SavedPipelineState }) {
   )
 }
 
-function ClipCard({ clip, pipeline: _pipeline, busy = false, onTag, onRerunImage, onRerunVideo, onSavePrompt }: {
+function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVideo, onSavePrompt }: {
   clip: PipelineClipState
   pipeline: SavedPipelineState
   busy?: boolean
@@ -201,6 +201,8 @@ function ClipCard({ clip, pipeline: _pipeline, busy = false, onTag, onRerunImage
   const [editWindowPrompts, setEditWindowPrompts] = useState<string[]>(clip.window_prompts || [])
   const [editImagePrompt, setEditImagePrompt] = useState(clip.image_prompt || '')
   const [editVideoPrompt, setEditVideoPrompt] = useState(clip.video_prompt || '')
+  const requiresShotImage = !pipeline.shot_image_policy
+    || pipeline.shot_image_policy === 'generate'
 
   // hasPolish is true if ANY of the four polish snapshots was captured.
   // Window-prompt polish only fires for ≥21s shots; keyframe polish
@@ -260,6 +262,15 @@ function ClipCard({ clip, pipeline: _pipeline, busy = false, onTag, onRerunImage
             {clip.start_image_filename ? (
               <img src={getFileUrl(clip.start_image_filename)} alt={`Shot ${clip.index + 1}`}
                 className="w-full h-full object-cover" loading="lazy" />
+            ) : clip.video_filename ? (
+              <video
+                src={`${getFileUrl(clip.video_filename)}#t=0.1`}
+                className="w-full h-full object-cover"
+                muted
+                playsInline
+                preload="metadata"
+                aria-label={`Shot ${clip.index + 1} video preview`}
+              />
             ) : (
               <div className="w-full h-full flex items-center justify-center text-text-muted">
                 <ImageIcon size={16} />
@@ -269,8 +280,10 @@ function ClipCard({ clip, pipeline: _pipeline, busy = false, onTag, onRerunImage
           {/* Image prompt */}
           <div className="flex-1 min-w-0">
             <div className="flex items-center justify-between mb-0.5">
-              <span className="text-[9px] text-text-muted uppercase tracking-wider">Image Prompt</span>
-              <div className="flex items-center gap-1">
+              <span className="text-[9px] text-text-muted uppercase tracking-wider">
+                {requiresShotImage ? 'Image Prompt' : 'Planned Visual'}
+              </span>
+              {requiresShotImage && <div className="flex items-center gap-1">
                 <button onClick={() => {
                   if (editingImage && editImagePrompt !== (clip.image_prompt || '')) {
                     onSavePrompt(clip.index, 'image_prompt', editImagePrompt)
@@ -288,7 +301,7 @@ function ClipCard({ clip, pipeline: _pipeline, busy = false, onTag, onRerunImage
                   title="Re-generate start image">
                   <Camera size={10} />
                 </button>
-              </div>
+              </div>}
             </div>
             {editingImage ? (
               <textarea
@@ -367,9 +380,13 @@ function ClipCard({ clip, pipeline: _pipeline, busy = false, onTag, onRerunImage
                   onRerunVideo(clip.index, editingVideo ? editVideoPrompt : undefined)
                 }
               }}
-                disabled={busy || !clip.start_image_filename}
+                disabled={busy || (requiresShotImage && !clip.start_image_filename)}
                 className="p-0.5 rounded text-text-muted hover:text-indicator-success transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                title={busy ? 'Wait for pipeline repair to finish' : clip.start_image_filename ? 'Re-generate video clip' : 'Generate the start image first'}>
+                title={busy
+                  ? 'Wait for pipeline repair to finish'
+                  : requiresShotImage && !clip.start_image_filename
+                    ? 'Generate the start image first'
+                    : 'Re-generate video clip'}>
                 <Film size={10} />
               </button>
             </div>
@@ -568,13 +585,24 @@ function DirectorDashboardInner() {
   const goodCount = selectedPipeline?.clips.filter(c => c.tag === 'good').length || 0
   const needsWorkCount = selectedPipeline?.clips.filter(c => c.tag === 'needs_work').length || 0
   const totalClips = selectedPipeline?.clips.length || 0
-  const missingImages = selectedPipeline?.clips.filter(c => !c.start_image_filename).length || 0
+  // Legacy projects predate this field and retain the original required-image
+  // contract. New H3 prompt/direct-reference projects intentionally have no
+  // image artifacts, so repair must judge only their videos.
+  const requiresShotImages = !selectedPipeline?.shot_image_policy
+    || selectedPipeline.shot_image_policy === 'generate'
+  const missingImages = requiresShotImages
+    ? selectedPipeline?.clips.filter(c => !c.start_image_filename).length || 0
+    : 0
   // A video beside a missing/replaced start image is stale even if its file
   // still exists: it was generated from different visual conditioning.
   const missingVideos = selectedPipeline?.clips.filter(c =>
-    !c.video_filename || c.video_stale || !c.start_image_filename).length || 0
+    !c.video_filename
+    || c.video_stale
+    || (requiresShotImages && !c.start_image_filename)).length || 0
   const incompleteClips = selectedPipeline?.clips.filter(c =>
-    !c.start_image_filename || !c.video_filename || c.video_stale).length || 0
+    (requiresShotImages && !c.start_image_filename)
+    || !c.video_filename
+    || c.video_stale).length || 0
   const hasMissing = missingImages > 0 || missingVideos > 0
   const repair = selectedPipeline?.repair
   const repairActive = repair?.status === 'queued'
@@ -695,7 +723,9 @@ function DirectorDashboardInner() {
                 disabled={loading || repairBusy}
                 className="flex items-center gap-1 px-2 py-1 text-[10px] bg-orange-500/10 border border-orange-500/30 rounded text-chip-orange hover:bg-orange-500/20 disabled:opacity-40 transition-colors"
                 title={hasMissing
-                  ? `Repair ${missingImages} missing images + ${missingVideos} missing or stale videos, then join when possible`
+                  ? requiresShotImages
+                    ? `Repair ${missingImages} missing images + ${missingVideos} missing or stale videos, then join when possible`
+                    : `Repair ${missingVideos} missing or stale videos, then join when possible`
                   : 'Check saved clip files and repair anything missing or invalid, then join when possible'}
               >
                 {repairStarting ? <Loader2 size={10} className="animate-spin" /> : <Play size={10} />}

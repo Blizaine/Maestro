@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineRepairState, SavedPipelineState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping } from '../types'
+import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, DirectorShotImageGuidance, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineRepairState, SavedPipelineState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping } from '../types'
 import * as api from '../api/client'
 import { applyThemePrefs, getStoredPrefs, type FamilyId, type ThemeMode, type ThemePrefs } from '../lib/theme'
 
@@ -566,6 +566,10 @@ const DEFAULT_ENABLED_MODELS = new Set([
   'scail2_14B_recast_fast',
   // MiniMax H3 Base: text, first/last-frame video, and native stereo audio.
   'minimax_h3',
+  'minimax_h3_full',
+  // MiniMax H3 Ref2VA: ordered image, video, and audio references.
+  'minimax_h3_ref2va',
+  'minimax_h3_ref2va_full',
   // Audio — Speech
   'kugelaudio_0_open',
   'qwen3_tts_base',
@@ -593,7 +597,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
  * a user who then disables them stays disabled forever. (This is
  * deliberately narrower than auto-enabling every unknown model — only
  * the curated list's own additions are pushed.) */
-const DEFAULTS_VERSION = 6
+const DEFAULTS_VERSION = 8
 const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   // v1.2.0: the ACE-Step XL SFT pair; LM_4B becomes the music default.
   2: ['ace_step_v1_5_xl_sft', 'ace_step_v1_5_xl_sft_lm_4b'],
@@ -605,6 +609,10 @@ const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   5: ['krea2_raw', 'krea2_turbo', 'krea2_raw_edit', 'krea2_turbo_edit'],
   // MiniMax H3 Base native audio-video generation.
   6: ['minimax_h3'],
+  // MiniMax H3 Base Omni Reference (Ref2VA).
+  7: ['minimax_h3_ref2va'],
+  // Full 33B H3 variants alongside the recommended Pruned 20B entries.
+  8: ['minimax_h3_full', 'minimax_h3_ref2va_full'],
 }
 const DEFAULTS_VERSION_KEY = 'maestro_defaults_version'
 
@@ -1464,6 +1472,7 @@ interface AppState {
   directorSpeakerMappings: SpeakerMapping[]
   directorAutoMode: boolean
   directorSeamless: boolean
+  directorShotImageGuidance: DirectorShotImageGuidance
   /** Completed LLM stream outputs, kept so the thinking/output boxes stay
    *  in the chat history after each stage finishes instead of vanishing. */
   directorLlmLog: { stage: string; text: string }[]
@@ -1471,11 +1480,17 @@ interface AppState {
   directorSkill: DirectorSkill | null
   directorResolution: ResolutionPreset
   directorAspectRatio: AspectRatio
+  /** Director-owned inference-step choices, keyed by video model. Keeping
+   *  these separate from Studio prevents one surface from silently changing
+   *  the other and lets each Director model retain its own valid recipe. */
+  directorVideoInferenceStepsByModel: Record<string, number>
   setDirectorAutoMode: (v: boolean) => void
   setDirectorSeamless: (v: boolean) => void
+  setDirectorShotImageGuidance: (v: DirectorShotImageGuidance) => void
   setDirectorSkill: (skill: DirectorSkill) => void
   setDirectorResolution: (preset: ResolutionPreset) => void
   setDirectorAspectRatio: (ratio: AspectRatio) => void
+  setDirectorVideoInferenceSteps: (modelType: string, steps: number | null) => void
   selectDirectorImageModel: (modelType: string) => void
   selectDirectorVideoModel: (modelType: string) => void
   directorSetLora: (mode: 'image' | 'video', activated_loras: string[], loras_multipliers: string, loraWeights: Record<string, number[]>, availableLoras: string[]) => void
@@ -1675,6 +1690,44 @@ const resolutionMap: Record<ResolutionPreset, Record<AspectRatio, string>> = {
     '4:3': '1920x1088',
     '3:4': '1088x1920',
   },
+}
+
+function resolveResolution(
+  modelOptions: ModelOptions | null,
+  preset: ResolutionPreset,
+  ratio: AspectRatio,
+): string {
+  const modelValues = modelOptions?.resolution_presets?.[preset]?.values
+  return modelValues?.[ratio]
+    || modelValues?.['16:9']
+    || resolutionMap[preset]?.[ratio]
+    || resolutionMap[preset]?.['16:9']
+    || '1280x720'
+}
+
+function findResolutionSelection(
+  resolution: string,
+  modelOptions: ModelOptions | null,
+): { preset: ResolutionPreset; ratio: AspectRatio } | null {
+  const maps: Array<Partial<Record<ResolutionPreset, { values: Partial<Record<AspectRatio, string>> }>>> = []
+  if (modelOptions?.resolution_presets) maps.push(modelOptions.resolution_presets)
+  maps.push(Object.fromEntries(
+    Object.entries(resolutionMap).map(([preset, values]) => [preset, { values }]),
+  ) as Partial<Record<ResolutionPreset, { values: Partial<Record<AspectRatio, string>> }>>)
+
+  for (const presetMap of maps) {
+    for (const [preset, config] of Object.entries(presetMap)) {
+      for (const [ratio, value] of Object.entries(config?.values || {})) {
+        if (value === resolution) {
+          return {
+            preset: preset as ResolutionPreset,
+            ratio: ratio as AspectRatio,
+          }
+        }
+      }
+    }
+  }
+  return null
 }
 
 // Memoization cache for filteredOutputs — ensures stable references
@@ -2710,7 +2763,13 @@ export const useStore = create<AppState>((set, get) => ({
     // Kick the crashed pipeline back into running server-side, then close
     // the Dashboard and reconnect the Director view to it so progress shows.
     await api.resumePipeline(pid)
-    set({ dashboardOpen: false, pipelineId: pid })
+    set({
+      dashboardOpen: false,
+      pipelineId: pid,
+      pipelineStatus: null,
+      pipelinePolling: true,
+      directorLoading: true,
+    })
     get().pollPipelineStatus()
   },
 
@@ -2837,6 +2896,7 @@ export const useStore = create<AppState>((set, get) => ({
         directorStep: 'review_video',
         directorAutoMode: pipeline.auto_mode,
         directorSeamless: pipeline.seamless,
+        directorShotImageGuidance: pipeline.shot_image_guidance || 'auto',
         dashboardOpen: true,
         dashboardSelectedPipeline: pipeline,
       })
@@ -3061,13 +3121,12 @@ export const useStore = create<AppState>((set, get) => ({
           : Promise.resolve(null),
       ])
       const families = data.families
-      const backendModels = data.models.map(m => ({
-        model_type: m.model_type,
-        name: m.name,
-        family: m.family,
-        architecture: m.architecture,
-        is_i2v: m.is_i2v,
-        is_t2v: m.is_t2v,
+      // Keep the complete backend capability record. Director publishes a
+      // stricter per-workflow contract than Studio; rebuilding model objects
+      // field-by-field used to discard that metadata and leave both Director
+      // selectors empty even though compatible models were enabled.
+      const backendModels: ModelDef[] = data.models.map(m => ({
+        ...m,
         guidance_max_phases: m.guidance_max_phases ?? 1,
         fps: m.fps ?? 16,
         is_downloaded: m.is_downloaded ?? false,
@@ -3268,7 +3327,7 @@ export const useStore = create<AppState>((set, get) => ({
   resolutionPreset: '720p',
   setResolutionPreset: (preset) => {
     const ratio = get().aspectRatio
-    const resolution = resolutionMap[preset]?.[ratio] || resolutionMap[preset]['16:9']
+    const resolution = resolveResolution(get().modelOptions, preset, ratio)
     set(s => ({
       resolutionPreset: preset,
       params: { ...s.params, resolution },
@@ -3278,7 +3337,7 @@ export const useStore = create<AppState>((set, get) => ({
   aspectRatio: '16:9',
   setAspectRatio: (ratio) => {
     const preset = get().resolutionPreset
-    const resolution = resolutionMap[preset]?.[ratio] || resolutionMap[preset]['16:9']
+    const resolution = resolveResolution(get().modelOptions, preset, ratio)
     set(s => ({
       aspectRatio: ratio,
       params: { ...s.params, resolution },
@@ -3287,10 +3346,26 @@ export const useStore = create<AppState>((set, get) => ({
 
   durationSeconds: 5,
   setDurationSeconds: (s) => {
-    const fps = get().modelOptions?.fps ?? 16
-    const frames = Math.round(s * fps)
+    const options = get().modelOptions
+    const fps = options?.fps ?? 16
+    const minimum = Math.max(1, (options?.frames_minimum || fps) / fps)
+    const nativeMaximum = options?.frames_maximum
+      ? options.frames_maximum / fps
+      : null
+    const maximum = options?.sliding_window || nativeMaximum == null
+      ? Number.POSITIVE_INFINITY
+      : nativeMaximum
+    let seconds = Math.min(maximum, Math.max(minimum, s))
+    if (
+      options?.sliding_window
+      && nativeMaximum
+      && seconds <= Math.round(nativeMaximum * 10) / 10
+    ) {
+      seconds = Math.min(seconds, nativeMaximum)
+    }
+    const frames = Math.round(seconds * fps)
     set(state => ({
-      durationSeconds: s,
+      durationSeconds: seconds,
       params: { ...state.params, video_length: frames },
     }))
     get().syncClipCount()
@@ -3301,10 +3376,20 @@ export const useStore = create<AppState>((set, get) => ({
 
   slidingWindowSeconds: 5,
   setSlidingWindowSeconds: (s) => {
-    const fps = get().modelOptions?.fps ?? 16
-    const frames = Math.round(s * fps)
+    const options = get().modelOptions
+    const fps = options?.fps ?? 16
+    const swDefaults = options?.sliding_window_defaults
+    let frames = Math.round(s * fps)
+    if (swDefaults) {
+      const minimum = swDefaults.window_min ?? 1
+      const maximum = swDefaults.window_max ?? frames
+      const step = Math.max(1, swDefaults.window_step ?? 1)
+      frames = minimum + Math.round((frames - minimum) / step) * step
+      frames = Math.max(minimum, Math.min(maximum, frames))
+    }
+    const seconds = frames / fps
     set(state => ({
-      slidingWindowSeconds: s,
+      slidingWindowSeconds: seconds,
       params: { ...state.params, sliding_window_size: frames },
     }))
     get().syncClipCount()
@@ -3731,11 +3816,21 @@ export const useStore = create<AppState>((set, get) => ({
     // own branches (Recast runs the i2v-only SCAIL-2 against a source
     // video + reference image; this guard silently ate its clicks).
     const isI2vOnly = state.modelOptions?.i2v_class && !state.modelOptions?.t2v_class
+    const isOmniReference = state.modelOptions?.omni_reference === true
     const hasStartImage = state.startImage || state.params.image_start
     const hasMultiClipImages = state.clips.some(c => c.startImage || c.startImagePath)
-    if (state.generationMode === 'video' && isI2vOnly && !hasStartImage && !hasMultiClipImages) {
+    if (state.generationMode === 'video' && isI2vOnly && !isOmniReference && !hasStartImage && !hasMultiClipImages) {
       console.error('This model requires a start image')
       // Could show a toast/notification here in the future
+      return
+    }
+    const omniReferences = state.params.minimax_h3_references ?? []
+    if (
+      state.generationMode === 'video'
+      && isOmniReference
+      && !omniReferences.some(reference => reference.type === 'image' || reference.type === 'video')
+    ) {
+      console.error('MiniMax H3 Omni Reference needs at least one image or video reference')
       return
     }
 
@@ -4338,6 +4433,69 @@ export const useStore = create<AppState>((set, get) => ({
 
     const params: Record<string, unknown> = { ...state.params, generation_mode: state.generationMode, workspace: state.activeWorkspace }
 
+    if (state.generationMode === 'video') {
+      const fps = state.modelOptions?.fps ?? 16
+      const supportsSlidingWindows = state.modelOptions?.sliding_window === true
+      const minimumFrames = state.modelOptions?.frames_minimum ?? 1
+      const maximumFrames = state.modelOptions?.frames_maximum ?? null
+      let requestedFrames = Math.max(
+        minimumFrames,
+        Math.round(state.durationSeconds * fps),
+      )
+      if (!supportsSlidingWindows && maximumFrames != null) {
+        requestedFrames = Math.min(maximumFrames, requestedFrames)
+      } else if (
+        supportsSlidingWindows
+        && maximumFrames != null
+        && requestedFrames <= maximumFrames + 1
+      ) {
+        requestedFrames = Math.min(maximumFrames, requestedFrames)
+      }
+      params.video_length = requestedFrames
+
+      if (supportsSlidingWindows) {
+        const swDefaults = state.modelOptions?.sliding_window_defaults
+        let windowFrames = Math.round(state.slidingWindowSeconds * fps)
+        if (swDefaults) {
+          const windowMinimum = swDefaults.window_min ?? 1
+          const windowMaximum = swDefaults.window_max ?? windowFrames
+          const windowStep = Math.max(1, swDefaults.window_step ?? 1)
+          windowFrames = windowMinimum
+            + Math.round((windowFrames - windowMinimum) / windowStep) * windowStep
+          windowFrames = Math.max(
+            windowMinimum,
+            Math.min(windowMaximum, windowFrames),
+          )
+        }
+        params.sliding_window_size = windowFrames
+        params.sliding_window_overlap = swDefaults?.overlap_default
+          ?? state.slidingWindowOverlap
+        params.sliding_window_discard_last_frames = swDefaults?.discard_last_frames ?? 0
+      } else {
+        delete params.sliding_window_size
+        delete params.sliding_window_overlap
+        delete params.sliding_window_discard_last_frames
+      }
+    }
+
+    if (isOmniReference) {
+      // Ref2VA has its own ordered media manifest. Do not let a saved Frames,
+      // Multi-Shot, Extend, or Blend state silently enter those pipelines.
+      params.image_mode = 0
+      params.image_prompt_type = ''
+      delete params.image_start
+      delete params.image_end
+      delete params.video_source
+    } else {
+      // Keep Omni references in the model's in-memory working set, but do not
+      // leak them into unrelated model requests or their saved sidecars.
+      delete params.minimax_h3_references
+      delete params.minimax_h3_reference_detail
+    }
+    if (!state.modelOptions?.minimax_h3_text_encoder_choices?.length) {
+      delete params.minimax_h3_text_encoder
+    }
+
     // STG (Spatio-Temporal Guidance) wiring. The backend only runs STG when
     // perturbation_switch === 2 (skip-self-attention) — stg_scale alone is
     // inert. Derive the switch from the slider so an untouched slider keeps
@@ -4414,9 +4572,10 @@ export const useStore = create<AppState>((set, get) => ({
     // When there's no sliding window (single window), send all lines as ONE prompt
     // with newlines preserved (LTX uses newlines as temporal markers within the clip).
     // When there IS sliding window, each line becomes a window prompt (mode 1).
-    if (state.generationMode === 'video' && state.params.image_mode !== 2) {
+    if (state.generationMode === 'video' && (isOmniReference || state.params.image_mode !== 2)) {
       const prompt = (params.prompt as string) || ''
-      const hasSlidingWindow = state.durationSeconds > state.slidingWindowSeconds
+      const hasSlidingWindow = state.modelOptions?.sliding_window === true
+        && state.durationSeconds > state.slidingWindowSeconds
       if (hasSlidingWindow && prompt.includes('\n')) {
         // Sliding window: each line = one window prompt (rolling generation)
         params.multi_prompts_gen_type = 1
@@ -4602,7 +4761,7 @@ export const useStore = create<AppState>((set, get) => ({
     }
 
     // Multi-clip path
-    if (state.params.image_mode === 2) {
+    if (!isOmniReference && state.params.image_mode === 2) {
       const clips = state.clips
       const imagePaths: string[] = []
       const endImagePaths: string[] = []
@@ -4661,7 +4820,7 @@ export const useStore = create<AppState>((set, get) => ({
     }
     // Single I2V path: Upload images if present (new File upload takes priority)
     // Skip in image mode — startImage is for video I2V, not image generation
-    else if (state.startImage && state.generationMode !== 'image') {
+    else if (!isOmniReference && state.startImage && state.generationMode !== 'image') {
       try {
         const result = await api.uploadImage(state.startImage)
         params.image_start = result.path
@@ -4672,14 +4831,14 @@ export const useStore = create<AppState>((set, get) => ({
       } catch (e) {
         console.error('Failed to upload start image:', e)
       }
-    } else if (params.image_start && state.generationMode !== 'image') {
+    } else if (!isOmniReference && params.image_start && state.generationMode !== 'image') {
       // Re-roll case: image_start is already an absolute path from sidecar metadata
       params.image_mode = 0
       const ipt = (params.image_prompt_type as string) || ''
       if (!ipt.includes('S')) params.image_prompt_type = 'S' + ipt
       if (params.input_video_strength == null) params.input_video_strength = _defaultIVS
     }
-    if (state.endImage) {
+    if (!isOmniReference && state.endImage) {
       try {
         const result = await api.uploadImage(state.endImage)
         params.image_end = result.path
@@ -4694,7 +4853,7 @@ export const useStore = create<AppState>((set, get) => ({
     }
 
     // Continue mode: set video_source and image_prompt_type="V"
-    if (state.generationMode === 'video' && params.image_mode === 3 && state.continueVideoPath) {
+    if (!isOmniReference && state.generationMode === 'video' && params.image_mode === 3 && state.continueVideoPath) {
       params.video_source = state.continueVideoPath
       params.image_prompt_type = 'V'
       params.image_mode = 0
@@ -5156,6 +5315,10 @@ export const useStore = create<AppState>((set, get) => ({
     // the shared Wan model family advertises support for up to three phases.
     const recastSinglePhase = generationMode === 'avatar' && editSubMode === 'recast'
     const phases = recastSinglePhase ? 1 : Math.max(1, modelOptions?.guidance_max_phases ?? 1)
+    const removedTurboPreset = (
+      idx >= 0
+      && filename === modelOptions?.minimax_h3_turbo?.filename
+    )
 
     if (idx >= 0) {
       current.splice(idx, 1)
@@ -5180,6 +5343,7 @@ export const useStore = create<AppState>((set, get) => ({
         ...s.params,
         activated_loras: current,
         loras_multipliers: multipliers,
+        ...(removedTurboPreset ? { minimax_h3_turbo_mode: false } : {}),
       },
     }))
     // Persist LoRA state
@@ -5189,8 +5353,20 @@ export const useStore = create<AppState>((set, get) => ({
       ...s.savedLoraPerMode,
       [mode]: { activated_loras: current, loras_multipliers: multipliers, loraWeights: newWeights, availableLoras: s.availableLoras },
     }
-    set({ savedLoraPerMode: updatedLoraPerMode })
-    _saveSettings({ generationMode: mode, selectedModelPerMode: s.selectedModelPerMode, savedParamsPerMode: s.savedParamsPerMode, savedLoraPerMode: updatedLoraPerMode, savedPromptPerMode: s.savedPromptPerMode }, s.loraIdByFilename)
+    const updatedParamsPerMode = removedTurboPreset
+      ? {
+          ...s.savedParamsPerMode,
+          [mode]: {
+            ...(s.savedParamsPerMode[mode] || {}),
+            minimax_h3_turbo_mode: false,
+          },
+        }
+      : s.savedParamsPerMode
+    set({
+      savedLoraPerMode: updatedLoraPerMode,
+      savedParamsPerMode: updatedParamsPerMode,
+    })
+    _saveSettings({ generationMode: mode, selectedModelPerMode: s.selectedModelPerMode, savedParamsPerMode: updatedParamsPerMode, savedLoraPerMode: updatedLoraPerMode, savedPromptPerMode: s.savedPromptPerMode }, s.loraIdByFilename)
   },
 
   ensureTransitionLoraForBlend: async () => {
@@ -5412,18 +5588,83 @@ export const useStore = create<AppState>((set, get) => ({
       // params (default steps/guidance) and modelOptions with the WRONG
       // model's values — last requested wins.
       if (seq !== _modelOptionsSeq) return
-      const { durationSeconds, slidingWindowSeconds } = get()
+      const activeState = get()
+      const { durationSeconds, slidingWindowSeconds } = activeState
       const fps = options.fps || 16
       // Set overlap from model defaults
       const swDefaults = (options as unknown as Record<string, unknown>).sliding_window_defaults as Record<string, number> | undefined
       const overlapDefault = swDefaults?.overlap_default ?? 5
       const discardDefault = swDefaults?.discard_last_frames ?? 0
+      const minimumDuration = Math.max(1, (options.frames_minimum || fps) / fps)
+      const nativeMaximumDuration = options.frames_maximum
+        ? options.frames_maximum / fps
+        : null
+      const maximumDuration = !options.sliding_window && nativeMaximumDuration
+        ? nativeMaximumDuration
+        : Number.POSITIVE_INFINITY
+      let nextDurationSeconds = Math.min(
+        maximumDuration,
+        Math.max(minimumDuration, durationSeconds),
+      )
+      if (
+        options.sliding_window
+        && nativeMaximumDuration
+        && nextDurationSeconds <= Math.round(nativeMaximumDuration * 10) / 10
+      ) {
+        // H3's native ceiling is 14.375s but the UI displays one decimal.
+        // Treat displayed 14.4s as that same one-window endpoint instead of
+        // scheduling a second minimum-size pass for one rounded frame.
+        nextDurationSeconds = Math.min(
+          nextDurationSeconds,
+          nativeMaximumDuration,
+        )
+      }
+      let nextWindowFrames = Math.round(slidingWindowSeconds * fps)
+      if (options.sliding_window && swDefaults?.window_default != null) {
+        nextWindowFrames = swDefaults.window_default
+      }
+      if (options.sliding_window && swDefaults) {
+        nextWindowFrames = Math.max(
+          swDefaults.window_min ?? 1,
+          Math.min(swDefaults.window_max ?? nextWindowFrames, nextWindowFrames),
+        )
+      } else if (!options.sliding_window) {
+        nextWindowFrames = Math.round(nextDurationSeconds * fps)
+      }
+      const nextWindowSeconds = nextWindowFrames / fps
       const paramUpdates: Record<string, unknown> = {
         guidance_phases: options.guidance_max_phases,
-        video_length: Math.round(durationSeconds * fps),
-        sliding_window_size: Math.round(slidingWindowSeconds * fps),
+        video_length: Math.round(nextDurationSeconds * fps),
+        sliding_window_size: nextWindowFrames,
         sliding_window_overlap: overlapDefault,
         sliding_window_discard_last_frames: discardDefault,
+      }
+      let nextResolutionPreset = activeState.resolutionPreset
+      let nextAspectRatio = activeState.aspectRatio
+      const modelPresetOrder = options.resolution_preset_order || []
+      if (modelPresetOrder.length > 0) {
+        if (!modelPresetOrder.includes(nextResolutionPreset)) {
+          nextResolutionPreset = modelPresetOrder[modelPresetOrder.length - 1]
+        }
+        if (nextAspectRatio === 'auto' && !options.supports_auto_aspect) {
+          nextAspectRatio = '16:9'
+        }
+        paramUpdates.resolution = resolveResolution(
+          options,
+          nextResolutionPreset,
+          nextAspectRatio,
+        )
+      } else if (
+        nextAspectRatio === 'auto'
+        && activeState.generationMode !== 'image'
+        && !options.supports_auto_aspect
+      ) {
+        nextAspectRatio = '16:9'
+        paramUpdates.resolution = resolveResolution(
+          options,
+          nextResolutionPreset,
+          nextAspectRatio,
+        )
       }
       // Apply model defaults for inference steps and guidance scale
       if (options.default_num_inference_steps != null) {
@@ -5431,6 +5672,30 @@ export const useStore = create<AppState>((set, get) => ({
       }
       if (options.default_guidance_scale != null) {
         paramUpdates.guidance_scale = options.default_guidance_scale
+      }
+      if (options.minimax_h3_text_encoder_choices?.length) {
+        const currentEncoder = get().params.minimax_h3_text_encoder
+        const valid = options.minimax_h3_text_encoder_choices.some(
+          choice => choice.value === currentEncoder
+        )
+        if (!valid) {
+          paramUpdates.minimax_h3_text_encoder = (
+            options.minimax_h3_text_encoder_default
+            || options.minimax_h3_text_encoder_choices[0].value
+          )
+        }
+      }
+      if (options.minimax_h3_turbo) {
+        // A restored Turbo preset always displays the same step count the
+        // backend will enforce. This also closes a race where model defaults
+        // (20 steps) arrive after the user checks Turbo (6 steps).
+        if (get().params.minimax_h3_turbo_mode === true) {
+          paramUpdates.num_inference_steps = options.minimax_h3_turbo.steps
+        }
+      } else {
+        // Model switches preserve most Studio params. Never carry the Full-H3
+        // Turbo flag invisibly into a Pruned H3 or unrelated model.
+        paramUpdates.minimax_h3_turbo_mode = false
       }
       // TTS default duration. Prefer the model's declared `default` (DramaBox
       // uses 0 = auto-derive from prompt); fall back to `max` (legacy behavior
@@ -5460,7 +5725,16 @@ export const useStore = create<AppState>((set, get) => ({
         ...ttsDefaults,
         modelOptions: options,
         modelOptionsLoading: false,
+        durationSeconds: (
+          typeof ttsDefaults.durationSeconds === 'number'
+            ? ttsDefaults.durationSeconds
+            : nextDurationSeconds
+        ),
+        slidingWindowSeconds: nextWindowSeconds,
         slidingWindowOverlap: overlapDefault,
+        slidingWindowLocked: false,
+        resolutionPreset: nextResolutionPreset,
+        aspectRatio: nextAspectRatio,
         params: {
           ...s.params,
           ...paramUpdates,
@@ -5623,14 +5897,46 @@ export const useStore = create<AppState>((set, get) => ({
   // Prompt enhancement
   isEnhancing: false,
   enhancePrompt: async (ttsMode?: string) => {
-    const { params, generationMode, startImage, imageRefs } = get()
+    const state = get()
+    const { params, generationMode, startImage, imageRefs } = state
     if (!params.prompt.trim()) return
     set({ isEnhancing: true })
     try {
       // Collect images relevant to the CURRENT mode only
       const imagePaths: string[] = []
+      let referenceContext: string | undefined
+      const isOmniReference = state.modelOptions?.omni_reference === true
 
-      if (generationMode === 'image') {
+      if (isOmniReference) {
+        let pictureIndex = 0
+        let videoIndex = 0
+        let audioIndex = 0
+        const labelLines: string[] = []
+        for (const reference of params.minimax_h3_references ?? []) {
+          const note = (reference.role || reference.filename || 'reference').trim()
+          if (reference.type === 'audio') {
+            const intent = reference.audio_intent ?? 'voice'
+            if (intent === 'drive') {
+              labelLines.push(`<Audio ${++audioIndex}>: ${note}; intent=AUDIO REUSE / PERFORMANCE DRIVER; retention=partially_copy; preserve its audible timeline and synchronize action to it`)
+            } else if (intent === 'style') {
+              labelLines.push(`<Audio ${++audioIndex}>: ${note}; intent=AUDIO REFERENCE; retention=weak_reference; borrow only rhythm/style/texture and do not copy the source signal or words`)
+            } else {
+              labelLines.push(`<Audio ${++audioIndex}>: ${note}; intent=VOICE REFERENCE; retention=reference; use timbre/emotion/delivery for new scripted dialogue without copying source words, timing, or waveform`)
+            }
+          } else if (reference.type === 'image') {
+            labelLines.push(`<Picture ${++pictureIndex}>: visual identity/appearance reference for ${note}; retention=reference for identity only; do not reproduce its background, framing, composition, or pose`)
+            if (reference.path) imagePaths.push(reference.path)
+          } else {
+            const nextVideoIndex = videoIndex + 1
+            if ((reference.has_audio || reference.audio_path) && reference.include_audio !== false) {
+              labelLines.push(`<Audio ${++audioIndex}>: soundtrack paired with <Video ${nextVideoIndex}>; intent=AUDIO REUSE / PERFORMANCE DRIVER; retention=partially_copy; preserve its audible timeline and synchronize action to it`)
+            }
+            videoIndex = nextVideoIndex
+            labelLines.push(`<Video ${videoIndex}>: motion/camera/scene/timing reference for ${note}`)
+          }
+        }
+        referenceContext = labelLines.join('\n')
+      } else if (generationMode === 'image') {
         // Image mode: send reference images only
         for (const ref of imageRefs) {
           try {
@@ -5651,7 +5957,6 @@ export const useStore = create<AppState>((set, get) => ({
       }
 
       // Include duration/window info for video models
-      const state = get()
       const fps = state.modelOptions?.fps ?? 16
       const swDefaults = (state.modelOptions as Record<string, unknown> | null)?.sliding_window_defaults as Record<string, number> | undefined
       const discardFrames = swDefaults?.discard_last_frames ?? 0
@@ -5678,6 +5983,7 @@ export const useStore = create<AppState>((set, get) => ({
         activated_loras: params.activated_loras.length > 0 ? params.activated_loras : undefined,
         tts_enhance_mode: ttsMode || undefined,
         tts_voice_count: state.ttsVoiceCount || undefined,
+        reference_context: referenceContext,
       })
       set(s => ({
         params: { ...s.params, prompt: result.enhanced },
@@ -5739,6 +6045,7 @@ export const useStore = create<AppState>((set, get) => ({
   // to retake/review than one rolling-window render).
   directorAutoMode: true,
   directorSeamless: false,
+  directorShotImageGuidance: 'auto' as DirectorShotImageGuidance,
   directorLlmLog: [],
   directorSkill: null,
   directorMusicSource: null,
@@ -5756,6 +6063,7 @@ export const useStore = create<AppState>((set, get) => ({
   setDirectorSongDuration: (v) => set({ directorSongDuration: v }),
   directorResolution: '720p' as ResolutionPreset,
   directorAspectRatio: '16:9' as AspectRatio,
+  directorVideoInferenceStepsByModel: {},
   shortFilmCharacters: [],
   shortFilmPath: null,
   shortFilmTargetDuration: 30,
@@ -5767,6 +6075,7 @@ export const useStore = create<AppState>((set, get) => ({
   pipelinePolling: false,
   setDirectorAutoMode: (v) => set({ directorAutoMode: v }),
   setDirectorSeamless: (v) => set({ directorSeamless: v }),
+  setDirectorShotImageGuidance: (v) => set({ directorShotImageGuidance: v }),
   directorAppendLlmLog: (stage, text) => set(s => {
     const t = (text || '').trim()
     if (!t) return {}
@@ -5798,6 +6107,15 @@ export const useStore = create<AppState>((set, get) => ({
   },
   setDirectorResolution: (preset) => set({ directorResolution: preset }),
   setDirectorAspectRatio: (ratio) => set({ directorAspectRatio: ratio }),
+  setDirectorVideoInferenceSteps: (modelType, steps) => set(s => {
+    const next = { ...s.directorVideoInferenceStepsByModel }
+    if (steps == null || !Number.isFinite(steps)) {
+      delete next[modelType]
+    } else {
+      next[modelType] = Math.max(1, Math.min(50, Math.round(steps)))
+    }
+    return { directorVideoInferenceStepsByModel: next }
+  }),
 
   selectDirectorImageModel: (modelType) => {
     set(s => ({
@@ -6522,6 +6840,10 @@ export const useStore = create<AppState>((set, get) => ({
     // Use saved video-mode settings if available
     const videoModel = selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
     const videoParams = savedParamsPerMode.video
+      ? { ...savedParamsPerMode.video }
+      : {}
+    const directorSteps = get().directorVideoInferenceStepsByModel[videoModel]
+    if (directorSteps != null) videoParams.num_inference_steps = directorSteps
     const videoLora = savedLoraPerMode.video
 
     const fps = get().modelOptions?.fps ?? 16
@@ -6594,6 +6916,8 @@ export const useStore = create<AppState>((set, get) => ({
     const videoModel = selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
     const directorRes = resolutionMap[directorResolution]?.[directorAspectRatio] || resolutionMap[directorResolution]['16:9']
     const videoParams = savedParamsPerMode.video ? { ...savedParamsPerMode.video, resolution: directorRes } : { num_inference_steps: 8, guidance_scale: 1, resolution: directorRes }
+    const directorSteps = get().directorVideoInferenceStepsByModel[videoModel]
+    if (directorSteps != null) videoParams.num_inference_steps = directorSteps
     const videoLora = savedLoraPerMode.video
 
     const fps = get().modelOptions?.fps ?? 16
@@ -6693,6 +7017,7 @@ export const useStore = create<AppState>((set, get) => ({
       directorSpeakerMappings: [],
       directorAutoMode: true,
       directorSeamless: false,
+      directorShotImageGuidance: 'auto' as DirectorShotImageGuidance,
       directorLlmLog: [],
       directorSkill: null,
       directorMusicSource: null,
@@ -7056,6 +7381,7 @@ export const useStore = create<AppState>((set, get) => ({
         model_type: modelType,
         activated_loras: [],
         loras_multipliers: '',
+        minimax_h3_turbo_mode: false,
       },
       selectedModelPerMode: { ...s.selectedModelPerMode, [currentMode]: modelType },
       loraWeights: {},
@@ -7739,15 +8065,12 @@ export const useStore = create<AppState>((set, get) => ({
 
     // Derive resolution preset and aspect ratio
     const res = newParams.resolution || '1280x720'
-    for (const [preset, ratioMap] of Object.entries(resolutionMap)) {
-      for (const [ratio, value] of Object.entries(ratioMap)) {
-        if (value === res) {
-          set({
-            resolutionPreset: preset as ResolutionPreset,
-            aspectRatio: ratio as AspectRatio,
-          })
-        }
-      }
+    const resolutionSelection = findResolutionSelection(res, get().modelOptions)
+    if (resolutionSelection) {
+      set({
+        resolutionPreset: resolutionSelection.preset,
+        aspectRatio: resolutionSelection.ratio,
+      })
     }
 
     // Restore start/end images from upload URLs as File objects. Prefer
@@ -8130,17 +8453,58 @@ export const useStore = create<AppState>((set, get) => ({
     const state = get()
     const { directorPlannedClips, directorSceneDescription,
             directorAudioPath, directorAnalysis, directorReferenceImagePath,
-            directorAutoMode, directorSeamless, directorResolution, directorAspectRatio,
+            directorAutoMode, directorSeamless, directorShotImageGuidance,
+            directorResolution, directorAspectRatio,
             selectedModelPerMode, savedParamsPerMode, savedLoraPerMode,
             directorSpeakerMappings, directorImageSpatialUpsampling,
             directorImageFilmGrainIntensity, directorImageFilmGrainSaturation,
             directorVideoSpatialUpsampling, directorVideoFilmGrainIntensity,
             directorVideoFilmGrainSaturation, directorVideoSelfRefiner,
             shortFilmPath, shortFilmCharacters, shortFilmTargetDuration,
-            shortFilmNarrative, modelOptions } = state
+            shortFilmNarrative } = state
 
-    const fps = modelOptions?.fps ?? 16
     const directorRes = resolutionMap[directorResolution]?.[directorAspectRatio] || resolutionMap[directorResolution]['16:9']
+    const selectedImageModel = selectedModelPerMode.image || 'flux2_klein_9b'
+    const selectedVideoModel = selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+
+    // Director model choices are independent from whichever Studio model was
+    // edited most recently. Hydrate each selected model's own tuned defaults,
+    // then reuse saved Studio overrides only when they explicitly belong to
+    // that same model. This prevents a distilled model's settings from
+    // leaking into a full model (or vice versa) after a Director-only switch.
+    const [imageModelDefaults, videoModelDefaults, fetchedVideoOptions] = await Promise.all([
+      api.fetchDefaults(selectedImageModel).catch(() => ({})),
+      api.fetchDefaults(selectedVideoModel).catch(() => ({})),
+      api.fetchModelOptions(selectedVideoModel).catch(() => null),
+    ])
+    const cachedVideoOptions = state.modelOptions?.model_type === selectedVideoModel
+      ? state.modelOptions
+      : null
+    const directorVideoOptions = fetchedVideoOptions || cachedVideoOptions
+    const fps = directorVideoOptions?.fps ?? 16
+    const savedImageParams = savedParamsPerMode.image || {}
+    const savedVideoParams = savedParamsPerMode.video || {}
+    const matchingImageParams = savedImageParams.model_type === selectedImageModel
+      ? savedImageParams
+      : {}
+    const matchingVideoParams = savedVideoParams.model_type === selectedVideoModel
+      ? savedVideoParams
+      : {}
+    const rawDefaultVideoSteps = (
+      directorVideoOptions?.default_num_inference_steps
+      ?? (videoModelDefaults as Record<string, unknown>).num_inference_steps
+      ?? 8
+    )
+    const parsedDefaultVideoSteps = Number(rawDefaultVideoSteps)
+    const defaultVideoSteps = Number.isFinite(parsedDefaultVideoSteps) && parsedDefaultVideoSteps > 0
+      ? Math.max(1, Math.min(50, Math.round(parsedDefaultVideoSteps)))
+      : 8
+    const configuredVideoSteps = state.directorVideoInferenceStepsByModel[selectedVideoModel]
+    // A model may publish a fixed distilled recipe. In that case the model
+    // default wins even if an older adjustable build left an override behind.
+    const directorVideoSteps = directorVideoOptions?.lock_inference_steps
+      ? defaultVideoSteps
+      : (configuredVideoSteps ?? defaultVideoSteps)
 
     // Upload all reference images (main + character + location) if not already uploaded
     let refImagePath = directorReferenceImagePath
@@ -8175,9 +8539,21 @@ export const useStore = create<AppState>((set, get) => ({
     if (locPaths.length > state.directorLocationRefPaths.length) {
       set({ directorLocationRefPaths: locPaths })
     }
-    // Upload voice reference if not already uploaded
+    const selectedVideoDefinition = state.models.find(
+      model => model.model_type === selectedVideoModel,
+    )
+    const supportsVoiceReference = (
+      selectedVideoDefinition?.director?.supports_voice_reference === true
+    )
+    const voiceReferenceMode = (
+      selectedVideoDefinition?.director?.voice_reference_mode ?? 'none'
+    )
+
+    // Voice Reference is an LTX-2 ID-LoRA or a native H3 Omni audio
+    // reference. Keep the local selection across model switches, but only
+    // upload and submit it when the selected Director model can consume it.
     let voiceRefPath = state.directorVoiceRefPath
-    if (!voiceRefPath && state.directorVoiceRef) {
+    if (supportsVoiceReference && !voiceRefPath && state.directorVoiceRef) {
       try {
         const uploaded = await api.uploadAudio(state.directorVoiceRef)
         voiceRefPath = uploaded.path
@@ -8203,9 +8579,10 @@ export const useStore = create<AppState>((set, get) => ({
       location_ref_labels: state.directorLocationRefLabels.length > 0 ? state.directorLocationRefLabels : undefined,
       planned_clips: directorPlannedClips,
       seamless: directorSeamless,
+      shot_image_guidance: directorShotImageGuidance,
       fps,
-      frames_steps: modelOptions?.frames_steps || 8,
-      frames_minimum: modelOptions?.frames_minimum || 41,
+      frames_steps: directorVideoOptions?.frames_steps ?? 4,
+      frames_minimum: directorVideoOptions?.frames_minimum ?? 5,
 
       // Director v2 flag — see prior callsites: ?? not || so explicit
       // user toggle-off is respected (legacy v1), only fall back to
@@ -8224,20 +8601,27 @@ export const useStore = create<AppState>((set, get) => ({
       narrative_mode: shortFilmNarrative,
 
       // Image gen settings
-      image_model: selectedModelPerMode.image || 'flux2_klein_9b',
-      // Default image steps = 4 to match the Director image_model
-      // fallback (flux2_klein_9b is step-distilled to 4). User overrides
-      // via Studio image-mode settings still win — they live in
-      // savedParamsPerMode.image and replace the fallback dict entirely.
-      image_params: { ...(savedParamsPerMode.image || { num_inference_steps: 4, guidance_scale: 1 }), resolution: directorRes },
+      image_model: selectedImageModel,
+      image_params: {
+        ...imageModelDefaults,
+        ...matchingImageParams,
+        resolution: directorRes,
+      },
       image_loras: savedLoraPerMode.image || {},
       image_spatial_upsampling: directorImageSpatialUpsampling,
       image_film_grain_intensity: directorImageFilmGrainIntensity,
       image_film_grain_saturation: directorImageFilmGrainSaturation,
 
       // Video gen settings
-      video_model: selectedModelPerMode.video || 'ltx2_22B_distilled_1_1',
-      video_params: { ...(savedParamsPerMode.video || { num_inference_steps: 8, guidance_scale: 1 }), resolution: directorRes },
+      video_model: selectedVideoModel,
+      video_params: {
+        ...videoModelDefaults,
+        ...matchingVideoParams,
+        // Director owns this value. Studio's Advanced step count is separate
+        // state and must not leak into a new Director project.
+        num_inference_steps: directorVideoSteps,
+        resolution: directorRes,
+      },
       video_loras: savedLoraPerMode.video || {},
       video_spatial_upsampling: directorVideoSpatialUpsampling,
       video_film_grain_intensity: directorVideoFilmGrainIntensity,
@@ -8245,12 +8629,13 @@ export const useStore = create<AppState>((set, get) => ({
       video_self_refiner: directorVideoSelfRefiner,
       audio_scale: get().directorAudioScale,
 
-      // Voice identity (ID-LoRA). The CelebVHQ ID-LoRA auto-loads
-      // for both dev and distilled pipelines when voice_reference is
-      // set (see ltx2.get_loras_transformer).
-      ...(voiceRefPath ? {
+      // Voice identity: LTX uses the CelebVHQ ID-LoRA; H3 Omni maps the
+      // same upload into each shot's native Ref2VA manifest.
+      ...(supportsVoiceReference && voiceRefPath ? {
         voice_reference: voiceRefPath,
-        identity_guidance_scale: state.directorIdentityGuidanceScale,
+        ...(voiceReferenceMode === 'id_lora' ? {
+          identity_guidance_scale: state.directorIdentityGuidanceScale,
+        } : {}),
       } : {}),
     }
 
@@ -8354,6 +8739,13 @@ export const useStore = create<AppState>((set, get) => ({
           })
           // Refresh media feed to show new images as they're generated
           get().refreshOutputs()
+        } else if (status.phase === 'preparing_video') {
+          // H3 prompt-only/direct-reference projects intentionally skip the
+          // image review stage and proceed straight to video rendering.
+          set({
+            directorStep: 'review_video',
+            directorImageGenProgress: null,
+          })
         } else if (status.phase === 'generating_video') {
           set({ directorStep: 'review_video' })
           // Refresh media feed to show new video clips as they complete
