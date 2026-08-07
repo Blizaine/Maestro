@@ -113,6 +113,36 @@ def _load_source_function(path: Path, name: str, *, include_private_assignments:
     return namespace[name]
 
 
+def _literal_assignment(path: Path, name: str):
+    tree = ast.parse(_read(path), filename=str(path))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name for target in node.targets
+        ):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"Could not find literal assignment {name}")
+
+
+def _load_minimax_h3_lora_routing_helpers():
+    tree = ast.parse(_read(_LAUNCH_PATH), filename=str(_LAUNCH_PATH))
+    selected = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "CIVIT_TO_LOCAL_ARCH"
+            for target in node.targets
+        ):
+            selected.append(node)
+        elif isinstance(node, ast.FunctionDef) and node.name in {
+            "_is_minimax_h3_identity",
+            "_civitai_lora_arch",
+        }:
+            selected.append(node)
+    namespace = {}
+    module = ast.Module(body=selected, type_ignores=[])
+    exec(compile(ast.fix_missing_locations(module), str(_LAUNCH_PATH), "exec"), namespace)
+    return namespace
+
+
 def _load_frame_aligner():
     tree = ast.parse(_read(_WGP_PATH), filename=str(_WGP_PATH))
     function = next(
@@ -976,6 +1006,54 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
         self.assertIn("4ed4c744a396e43294f851f35cab769e11a89f2d", provenance)
         self.assertIn("b382d0940cdbab29cff5d33301b34b337ad5517e", provenance)
         self.assertIn("Apache-2.0", provenance)
+
+
+class TestMiniMaxH3LoraBrowserRouting(unittest.TestCase):
+    def test_civitai_filter_and_base_mapping_target_shared_h3_directory(self):
+        civit_map = _literal_assignment(_LAUNCH_PATH, "CIVIT_TO_LOCAL_ARCH")
+        hf_map = _literal_assignment(_LAUNCH_PATH, "HF_BASE_TO_LOCAL_DIR")
+        filters = _literal_assignment(_LAUNCH_PATH, "CIVITAI_MODEL_FILTERS")
+
+        self.assertEqual(civit_map["MiniMax H3"], "minimax_h3")
+        self.assertEqual(hf_map["MiniMaxAI/MiniMax-H3"], "minimax_h3")
+        self.assertEqual(hf_map["Comfy-Org/MiniMax-H3"], "minimax_h3")
+        self.assertIn(
+            {
+                "label": "MiniMax H3",
+                "civitai_base": "MiniMax H3",
+                "default_dir": "minimax_h3",
+            },
+            filters,
+        )
+
+    def test_h3_identity_detection_accepts_current_metadata_variants_only(self):
+        helpers = _load_minimax_h3_lora_routing_helpers()
+        is_h3 = helpers["_is_minimax_h3_identity"]
+        civit_arch = helpers["_civitai_lora_arch"]
+
+        for value in (
+            "MiniMax H3",
+            "MiniMaxAI/MiniMax-H3",
+            "base_model:adapter:Comfy-Org/MiniMax-H3",
+            "minimax-h3",
+            "minimax_h3",
+        ):
+            with self.subTest(value=value):
+                self.assertTrue(is_h3(value))
+                self.assertEqual(civit_arch(value), "minimax_h3")
+
+        for value in ("H3", "MiniMax M3", "Hunyuan Video", "LTX-2.3"):
+            with self.subTest(value=value):
+                self.assertFalse(is_h3(value))
+        self.assertEqual(civit_arch("LTXV 2.3"), "ltx2")
+
+    def test_browser_and_pasted_url_flows_use_canonical_h3_routing(self):
+        launch = _read(_LAUNCH_PATH)
+        self.assertIn("arch = _civitai_lora_arch(base)", launch)
+        self.assertIn("inferred_target_arch = _civitai_lora_arch(base_model)", launch)
+        self.assertIn("target_arch = _civitai_lora_arch(base_model)", launch)
+        self.assertIn("if _is_minimax_h3_identity(_identity_blob):", launch)
+        self.assertIn('hf_base_label = "MiniMax H3 (detected from repo name/tags)"', launch)
 
 
 _RUNTIME_AVAILABLE = all(

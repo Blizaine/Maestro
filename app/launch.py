@@ -2097,6 +2097,16 @@ def _fix_civitai_images(data: dict):
 # this map in sync with what creators actually pick — entries missing
 # here become invisible to our browser even though they show up in
 # CivitAI's UI and 3rd-party clients (civarchive et al).
+# MiniMax H3 LoRA metadata is not fully standardized yet. CivitAI currently
+# uses "MiniMax H3", while Hugging Face cards variously use the official repo,
+# Comfy's repack, or only a ``minimax-h3`` tag. Match the unambiguous combined
+# model name, but never a generic "H3" token on its own.
+def _is_minimax_h3_identity(*values) -> bool:
+    identity = " ".join(str(value) for value in values if value).casefold()
+    compact = "".join(char for char in identity if char.isalnum())
+    return "minimaxh3" in compact
+
+
 CIVIT_TO_LOCAL_ARCH = {
     # Wan Video
     "Wan Video 14B t2v": "t2v",
@@ -2132,6 +2142,8 @@ CIVIT_TO_LOCAL_ARCH = {
     "LTXV": "ltxv",
     "LTXV2": "ltx2",
     "LTXV 2.3": "ltx2",
+    # MiniMax H3 (shared by First/Last, Omni, pruned, and full models)
+    "MiniMax H3": "minimax_h3",
     # Qwen Image
     "Qwen": "qwen_image_20B",
     # Krea 2
@@ -2141,6 +2153,18 @@ CIVIT_TO_LOCAL_ARCH = {
     "Mochi": "mocha",
     "CogVideoX": "cogvideox",
 }
+
+
+def _civitai_lora_arch(base_model: str) -> str:
+    """Return the canonical local LoRA directory key for a CivitAI base."""
+    mapped = CIVIT_TO_LOCAL_ARCH.get(base_model, "")
+    if mapped:
+        return mapped
+    # Keep pasted URLs working if CivitAI changes punctuation or casing while
+    # retaining the recognizable MiniMax H3 model identity.
+    if _is_minimax_h3_identity(base_model):
+        return "minimax_h3"
+    return ""
 
 # Generic placeholder filenames that HF authors commonly use when
 # uploading a single LoRA file. The on-disk name "lora_weights.safetensors"
@@ -2196,6 +2220,8 @@ def _hf_disk_filename(repo_id: str, lora_filename: str, user_specified: bool) ->
 
 # HuggingFace base_model repo IDs → local LoRA directory
 HF_BASE_TO_LOCAL_DIR = {
+    "MiniMaxAI/MiniMax-H3": "minimax_h3",
+    "Comfy-Org/MiniMax-H3": "minimax_h3",
     "Lightricks/LTX-2.3": "ltx2",
     "Lightricks/LTX-Video-2-0.9.8-distilled": "ltxv",
     "Lightricks/LTX-Video": "ltxv",
@@ -2222,6 +2248,7 @@ HF_BASE_TO_LOCAL_DIR = {
 # Virtual entries (search_query set) let us create sub-filters CivitAI doesn't have.
 CIVITAI_MODEL_FILTERS = [
     # --- Video ---
+    {"label": "MiniMax H3", "civitai_base": "MiniMax H3", "default_dir": "minimax_h3"},
     # LTX — CivitAI now exposes three distinct baseModel values:
     # LTXV (LTX 1), LTXV2 (LTX-2), LTXV 2.3 (LTX-2.3). The previous
     # search_query workarounds bucketed everything under "LTXV" and
@@ -3280,7 +3307,7 @@ def civitai_model_detail(model_id: int):
     # Enrich versions with local arch mapping and fix image URLs
     for version in data.get("modelVersions", []):
         base = version.get("baseModel", "")
-        arch = CIVIT_TO_LOCAL_ARCH.get(base)
+        arch = _civitai_lora_arch(base)
         version["localArch"] = arch
         for img in version.get("images", []):
             url = img.get("url", "")
@@ -3337,6 +3364,13 @@ async def civitai_download(request: Request):
     kind = (body.get("kind") or "lora").lower()  # "lora" (default) | "checkpoint"
     target_architecture = body.get("target_architecture", "")  # required for checkpoint imports
     auto_quantize = bool(body.get("auto_quantize", False))  # checkpoint: load-time int8
+
+    # Trust the version's base-model identity over a stale browser mapping.
+    # An explicit directory choice remains authoritative.
+    if kind == "lora" and not target_dir_name:
+        inferred_target_arch = _civitai_lora_arch(base_model)
+        if inferred_target_arch:
+            target_arch = inferred_target_arch
 
     if not url:
         raise HTTPException(status_code=400, detail="download_url is required")
@@ -3805,7 +3839,7 @@ def _import_civitai_lora_by_url(url: str, target_dir_override: str = "") -> JSON
         #  2. CIVIT_TO_LOCAL_ARCH lookup by version's baseModel
         #  3. fallback to lora_root (no arch subdir)
         base_model = chosen.get("baseModel", "") or ""
-        target_arch = CIVIT_TO_LOCAL_ARCH.get(base_model, "")
+        target_arch = _civitai_lora_arch(base_model)
 
         lora_root = wgp.server_config.get("loras_root", "loras") if hasattr(wgp, "server_config") else "loras"
         if not os.path.isabs(lora_root):
@@ -3966,7 +4000,10 @@ async def hf_import_lora(request: Request):
                 " ".join(str(b) for b in base_models),
                 " ".join(str(t) for t in repo.get("tags", []) or []),
             ]).lower()
-            if "ltx-2.3" in _identity_blob or "ltx2.3" in _identity_blob or "ltx_2_3" in _identity_blob:
+            if _is_minimax_h3_identity(_identity_blob):
+                target_dir = "minimax_h3"
+                hf_base_label = "MiniMax H3 (detected from repo name/tags)"
+            elif "ltx-2.3" in _identity_blob or "ltx2.3" in _identity_blob or "ltx_2_3" in _identity_blob:
                 target_dir = "ltx2"
                 hf_base_label = "LTX-2.3 (detected from repo name/tags)"
             elif "ltx-2" in _identity_blob or "ltx2" in _identity_blob:
