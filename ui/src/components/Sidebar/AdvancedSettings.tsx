@@ -124,6 +124,7 @@ export function useAdvancedActiveItems(): string[] {
 
   const items: string[] = []
   if (params.seed !== -1) items.push(`Seed ${params.seed}`)
+  if (params.minimax_h3_turbo_mode) items.push('H3 Turbo')
   if (
     (params.negative_prompt?.length ?? 0) > 0
     && (!isScailEdit || isScailHq)
@@ -204,6 +205,10 @@ export function AdvancedSettings() {
     )
   )
   const isScailHq = isScailEdit && scailModelType === 'scail2_14B'
+  const h3TurboMode = (
+    params.minimax_h3_turbo_mode === true
+    && modelOptions?.minimax_h3_turbo != null
+  )
   const showInferenceSteps = (
     !isAudioOnly
     && (isScailEdit || !modelOptions?.lock_inference_steps)
@@ -689,16 +694,23 @@ export function AdvancedSettings() {
                     <input
                       type="number"
                       value={params.num_inference_steps}
+                      disabled={h3TurboMode}
                       onChange={e => setParam('num_inference_steps', Number(e.target.value))}
-                      className="w-16 bg-bg-tertiary border border-border rounded px-2 py-0.5 text-xs text-text-primary text-center focus:outline-none focus:border-accent-blue"
+                      className="w-16 bg-bg-tertiary border border-border rounded px-2 py-0.5 text-xs text-text-primary text-center focus:outline-none focus:border-accent-blue disabled:cursor-not-allowed disabled:opacity-50"
                     />
                   </div>
                   <input
                     type="range" min={1} max={50} step={1}
                     value={params.num_inference_steps}
+                    disabled={h3TurboMode}
                     onChange={e => setParam('num_inference_steps', Number(e.target.value))}
-                    className="w-full"
+                    className="w-full disabled:cursor-not-allowed disabled:opacity-50"
                   />
+                  {h3TurboMode && (
+                    <p className="text-[9px] text-text-muted mt-0.5">
+                      Turbo mode locks this preset to {modelOptions?.minimax_h3_turbo?.steps} steps.
+                    </p>
+                  )}
                   {isScailFast && (
                     <p className="text-[9px] text-text-muted mt-0.5">
                       Fast keeps its distilled CFG 1 recipe; guidance and

@@ -153,6 +153,8 @@ export interface GenerateParams {
   minimax_h3_references?: MiniMaxH3Reference[]
   minimax_h3_reference_detail?: 'match' | 'max'
   minimax_h3_text_encoder?: 'nvfp4_awq' | 'gguf_q2_k' | 'gguf_q4_k_m' | 'int8' | 'bf16'
+  /** One-click managed H3 Turbo recipe. Full H3 checkpoints only. */
+  minimax_h3_turbo_mode?: boolean
 }
 
 export type MiniMaxH3ReferenceType = 'image' | 'video' | 'audio'
@@ -301,6 +303,14 @@ export interface ModelOptions {
     recommended?: boolean
   }[] | null
   minimax_h3_text_encoder_default?: string
+  minimax_h3_turbo?: {
+    filename: string
+    label: string
+    experimental: boolean
+    steps: number
+    weight: number
+    guide: string
+  } | null
   resolution_presets?: Partial<Record<ResolutionPreset, {
     label: string
     values: Partial<Record<AspectRatio, string>>
@@ -602,6 +612,8 @@ export interface LoraInfo {
   preview_url: string | null
   civitai_model_id: number | null
   recommended_weights: LoraRecommendedWeights | null
+  /** Managed choices may be listed before their first-use download. */
+  managed?: boolean
   has_guide: boolean
   guide?: string | null
   /** NSFW flag from the .civitai.json sidecar (or inferred from filename/tags).

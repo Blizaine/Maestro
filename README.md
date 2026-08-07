@@ -77,6 +77,15 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.6.1 (2026-08-06)
+
+**MiniMax H3 Turbo mode**
+- Added the H3 Turbo LoRA to the Full H3 model lists as a managed, first-use download.
+- Added an experimental one-click Turbo mode for Full First & Last and Full Omni models.
+- Turbo mode uses six inference steps and starts at LoRA strength 0.70.
+- The active Turbo LoRA is shown in Advanced settings so its strength can be tuned per generation.
+- User-adjusted Turbo strengths are preserved while duplicate Turbo adapters and incompatible Pruned-model combinations remain blocked.
+
 ### v1.6.0 (2026-08-06)
 
 **MiniMax H3 Omni Reference**
