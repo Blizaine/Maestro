@@ -2,7 +2,7 @@
     "model": {
         "name": "H3 First / Last — Full",
         "architecture": "minimax_h3_full",
-        "description": "Full 33B MiniMax H3 First / Last model. Creates video from text alone or with a first frame, last frame, or both, and generates synchronized stereo audio. Longer Studio clips continue through native 14.4-second windows. It does not accept reference audio. This heavier checkpoint is required for Turbo / distilled H3 LoRAs.",
+        "description": "Full 33B MiniMax H3 First / Last model. Creates video from text alone or with a first frame, last frame, or both, and generates synchronized stereo audio. Longer Studio clips continue through native 14.4-second windows. It does not accept reference audio. Turbo works with both Full and Pruned; use Full only when you specifically want its larger checkpoint.",
         "minimax_h3_qkv_layout": "interleaved",
         "URLs": [
             "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/fec7846aef352e58a1cfb699455e3d104281e68b/MiniMax-H3-FL2VA_bf16.safetensors",

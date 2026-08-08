@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, DirectorShotImageGuidance, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineRepairState, SavedPipelineState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping } from '../types'
+import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, DirectorShotImageGuidance, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineRepairState, SavedPipelineState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping, H3WindowPlan } from '../types'
 import * as api from '../api/client'
 import { applyThemePrefs, getStoredPrefs, type FamilyId, type ThemeMode, type ThemePrefs } from '../lib/theme'
 
@@ -451,6 +451,17 @@ function _applyModelDefaults(
     if (active !== modelType) return
     const overrides: Record<string, unknown> = {}
     for (const field of _PRIMARY_MODEL_DEFAULT_FIELDS) {
+      // A one-click Full -> Pruned Turbo recommendation switches models and
+      // then restores the managed 6-step preset. Do not let the asynchronous
+      // base-model defaults response race in afterward and put it back at
+      // 20 steps. loadModelOptions applies the same Turbo contract.
+      if (
+        field === 'num_inference_steps'
+        && modelType.startsWith('minimax_h3')
+        && state.params.minimax_h3_turbo_mode === true
+      ) {
+        continue
+      }
       if ((d as Record<string, unknown>)[field] !== undefined) {
         overrides[field] = (d as Record<string, unknown>)[field]
       }
@@ -1424,6 +1435,9 @@ interface AppState {
   // Prompt enhancement
   isEnhancing: boolean
   enhancePrompt: (ttsMode?: string) => Promise<void>
+  h3WindowPlan: H3WindowPlan | null
+  updateH3WindowPrompt: (index: number, prompt: string) => void
+  clearH3WindowPlan: () => void
 
   // Director (Music Video Director)
   sidebarMode: 'director' | 'studio'
@@ -1484,6 +1498,10 @@ interface AppState {
    *  these separate from Studio prevents one surface from silently changing
    *  the other and lets each Director model retain its own valid recipe. */
   directorVideoInferenceStepsByModel: Record<string, number>
+  /** Optional expert override of Director's hardware-safe native-shot cap. */
+  directorVideoMaxShotFramesByModel: Record<string, number>
+  /** Director-owned H3 Turbo choices, separate from Studio's active mode. */
+  directorH3TurboModeByModel: Record<string, boolean>
   setDirectorAutoMode: (v: boolean) => void
   setDirectorSeamless: (v: boolean) => void
   setDirectorShotImageGuidance: (v: DirectorShotImageGuidance) => void
@@ -1491,6 +1509,8 @@ interface AppState {
   setDirectorResolution: (preset: ResolutionPreset) => void
   setDirectorAspectRatio: (ratio: AspectRatio) => void
   setDirectorVideoInferenceSteps: (modelType: string, steps: number | null) => void
+  setDirectorVideoMaxShotFrames: (modelType: string, frames: number | null) => void
+  setDirectorH3TurboMode: (modelType: string, enabled: boolean) => void
   selectDirectorImageModel: (modelType: string) => void
   selectDirectorVideoModel: (modelType: string) => void
   directorSetLora: (mode: 'image' | 'video', activated_loras: string[], loras_multipliers: string, loraWeights: Record<string, number[]>, availableLoras: string[]) => void
@@ -1578,6 +1598,9 @@ const defaultParams: GenerateParams = {
   repeat_generation: 1,
   activated_loras: [],
   loras_multipliers: '',
+  skip_steps_cache_type: '',
+  skip_steps_multiplier: 0.08,
+  skip_steps_start_step_perc: 25,
   settings_version: 2.52,
 }
 
@@ -1682,6 +1705,14 @@ const resolutionMap: Record<ResolutionPreset, Record<AspectRatio, string>> = {
     '4:3': '1104x832',
     '3:4': '832x1104',
   },
+  '768p': {
+    'auto': 'auto_768p',
+    '16:9': '1344x768',
+    '9:16': '768x1344',
+    '1:1': '768x768',
+    '4:3': '1024x768',
+    '3:4': '768x1024',
+  },
   '1080p': {
     'auto': 'auto_1080p',
     '16:9': '1920x1088',
@@ -1692,7 +1723,7 @@ const resolutionMap: Record<ResolutionPreset, Record<AspectRatio, string>> = {
   },
 }
 
-function resolveResolution(
+export function resolveResolution(
   modelOptions: ModelOptions | null,
   preset: ResolutionPreset,
   ratio: AspectRatio,
@@ -2312,6 +2343,7 @@ export const useStore = create<AppState>((set, get) => ({
         activated_loras: sameModel ? restoredLora.activated_loras : [],
         loras_multipliers: sameModel ? restoredLora.loras_multipliers : '',
       },
+      h3WindowPlan: null,
       loraWeights: sameModel ? restoredLora.loraWeights : {},
       availableLoras: sameModel ? restoredLora.availableLoras : [],
     }))
@@ -2342,7 +2374,14 @@ export const useStore = create<AppState>((set, get) => ({
     // Per-sub-mode isolation: remember the outgoing sub-mode BEFORE the
     // param write flips image_mode (see videoSubModeStash).
     const prevImageMode = key === 'image_mode' ? ((get().params.image_mode as number) ?? 0) : null
-    set(s => ({ params: { ...s.params, [key]: value } }))
+    const invalidatesH3Plan = [
+      'prompt', 'model_type', 'resolution', 'image_start', 'image_end',
+      'image_mode',
+    ].includes(String(key))
+    set(s => ({
+      params: { ...s.params, [key]: value },
+      ...(invalidatesH3Plan ? { h3WindowPlan: null } : {}),
+    }))
     // Auto-parse speaker names from prompt whenever audio mode has at least
     // one voice slot. Previously gated on audio_prompt_type.includes('B')
     // (multi-voice only), but the user expects single-voice ("Peter: hello")
@@ -2832,6 +2871,7 @@ export const useStore = create<AppState>((set, get) => ({
       loraWeights,
       availableLoras: [],
       selectedModelPerMode: { ...s.selectedModelPerMode, [mode]: recipe.model_type },
+      h3WindowPlan: null,
     }))
 
     if (recipe.model_type) {
@@ -3331,6 +3371,7 @@ export const useStore = create<AppState>((set, get) => ({
     set(s => ({
       resolutionPreset: preset,
       params: { ...s.params, resolution },
+      h3WindowPlan: null,
     }))
   },
 
@@ -3341,6 +3382,7 @@ export const useStore = create<AppState>((set, get) => ({
     set(s => ({
       aspectRatio: ratio,
       params: { ...s.params, resolution },
+      h3WindowPlan: null,
     }))
   },
 
@@ -3367,6 +3409,7 @@ export const useStore = create<AppState>((set, get) => ({
     set(state => ({
       durationSeconds: seconds,
       params: { ...state.params, video_length: frames },
+      h3WindowPlan: null,
     }))
     get().syncClipCount()
   },
@@ -3391,6 +3434,7 @@ export const useStore = create<AppState>((set, get) => ({
     set(state => ({
       slidingWindowSeconds: seconds,
       params: { ...state.params, sliding_window_size: frames },
+      h3WindowPlan: null,
     }))
     get().syncClipCount()
   },
@@ -3400,10 +3444,14 @@ export const useStore = create<AppState>((set, get) => ({
     set(state => ({
       slidingWindowOverlap: frames,
       params: { ...state.params, sliding_window_overlap: frames },
+      h3WindowPlan: null,
     }))
   },
   slidingWindowLocked: false,
-  setSlidingWindowLocked: (locked) => set({ slidingWindowLocked: locked }),
+  setSlidingWindowLocked: (locked) => set({
+    slidingWindowLocked: locked,
+    h3WindowPlan: null,
+  }),
 
   outputCount: 1,
   setOutputCount: (n) => set(s => ({
@@ -3416,10 +3464,12 @@ export const useStore = create<AppState>((set, get) => ({
   setStartImage: (f) => set(s => ({
     startImage: f,
     params: f === null ? { ...s.params, image_start: undefined } : s.params,
+    h3WindowPlan: null,
   })),
   setEndImage: (f) => set(s => ({
     endImage: f,
     params: f === null ? { ...s.params, image_end: undefined } : s.params,
+    h3WindowPlan: null,
   })),
 
   // Image references
@@ -4471,10 +4521,16 @@ export const useStore = create<AppState>((set, get) => ({
         params.sliding_window_overlap = swDefaults?.overlap_default
           ?? state.slidingWindowOverlap
         params.sliding_window_discard_last_frames = swDefaults?.discard_last_frames ?? 0
+        if (state.modelOptions?.sliding_window_memory_policy?.manual_override) {
+          params.sliding_window_memory_override = state.slidingWindowLocked
+        } else {
+          delete params.sliding_window_memory_override
+        }
       } else {
         delete params.sliding_window_size
         delete params.sliding_window_overlap
         delete params.sliding_window_discard_last_frames
+        delete params.sliding_window_memory_override
       }
     }
 
@@ -4494,6 +4550,37 @@ export const useStore = create<AppState>((set, get) => ({
     }
     if (!state.modelOptions?.minimax_h3_text_encoder_choices?.length) {
       delete params.minimax_h3_text_encoder
+    }
+    if (state.modelOptions?.first_block_cache) {
+      const allowedThresholds = (
+        state.modelOptions.skip_steps_multiplier_choices || []
+      ).map(choice => choice[1])
+      const requestedThreshold = Number(
+        params.skip_steps_multiplier
+        ?? state.modelOptions.default_skip_steps_multiplier
+        ?? 0.08
+      )
+      params.skip_steps_multiplier = allowedThresholds.includes(requestedThreshold)
+        ? requestedThreshold
+        : (allowedThresholds[0] ?? 0.08)
+      params.skip_steps_start_step_perc = Math.max(
+        0,
+        Math.min(
+          100,
+          Number(
+            params.skip_steps_start_step_perc
+            ?? state.modelOptions.default_skip_steps_start_step_perc
+            ?? 25
+          ),
+        ),
+      )
+      if (params.skip_steps_cache_type !== 'first_block') {
+        params.skip_steps_cache_type = ''
+      }
+    } else {
+      delete params.skip_steps_cache_type
+      delete params.skip_steps_multiplier
+      delete params.skip_steps_start_step_perc
     }
 
     // STG (Spatio-Temporal Guidance) wiring. The backend only runs STG when
@@ -4576,7 +4663,16 @@ export const useStore = create<AppState>((set, get) => ({
       const prompt = (params.prompt as string) || ''
       const hasSlidingWindow = state.modelOptions?.sliding_window === true
         && state.durationSeconds > state.slidingWindowSeconds
-      if (hasSlidingWindow && prompt.includes('\n')) {
+      if (
+        hasSlidingWindow
+        && state.modelOptions?.sliding_window_auto_prompt_pacing === true
+      ) {
+        // H3's structured Context-IR prompt contains semantic line breaks;
+        // they are not one prompt per continuation window. Keep the complete
+        // shot plan intact so the backend can assign its timeline and tagged
+        // dialogue across the automatically sized VRAM-safe passes.
+        params.multi_prompts_gen_type = 2
+      } else if (hasSlidingWindow && prompt.includes('\n')) {
         // Sliding window: each line = one window prompt (rolling generation)
         params.multi_prompts_gen_type = 1
       } else if (!hasSlidingWindow && prompt.includes('\n')) {
@@ -4976,6 +5072,31 @@ export const useStore = create<AppState>((set, get) => ({
       }
     }
 
+    const h3WindowStoryboardActive = (
+      state.generationMode === 'video'
+      && state.modelOptions?.sliding_window_auto_prompt_pacing === true
+      && params.minimax_h3_window_storyboard !== false
+      && state.params.image_mode !== 2
+      && Number(params.video_length || 0) > Number(params.sliding_window_size || 0)
+    )
+    if (state.modelOptions?.sliding_window_auto_prompt_pacing === true) {
+      params.minimax_h3_window_storyboard = h3WindowStoryboardActive
+      if (h3WindowStoryboardActive && state.h3WindowPlan) {
+        params.h3_window_prompts = state.h3WindowPlan.windows.map(window => window.prompt)
+        params.h3_window_plan_signature = state.h3WindowPlan.signature
+        params.h3_window_plan = state.h3WindowPlan
+      } else {
+        delete params.h3_window_prompts
+        delete params.h3_window_plan_signature
+        delete params.h3_window_plan
+      }
+    } else {
+      delete params.minimax_h3_window_storyboard
+      delete params.h3_window_prompts
+      delete params.h3_window_plan_signature
+      delete params.h3_window_plan
+    }
+
     const newJob: GenerationJob = {
       id: '',
       status: 'queued',
@@ -4983,7 +5104,7 @@ export const useStore = create<AppState>((set, get) => ({
       step: 0,
       totalSteps: 0,
       phase: '',
-      message: 'Submitting...',
+      message: h3WindowStoryboardActive ? 'Planning H3 windows...' : 'Submitting...',
       outputFiles: [],
       error: null,
       oomInfo: null,
@@ -4995,11 +5116,28 @@ export const useStore = create<AppState>((set, get) => ({
     }))
 
     try {
-      const { job_id } = await api.submitGeneration(params)
+      const { job_id, h3_window_plan } = await api.submitGeneration(params)
+
+      if (h3_window_plan) {
+        const planFps = state.modelOptions?.fps ?? 24
+        const effectiveWindowFrames = h3_window_plan.effective_window_frames
+          || h3_window_plan.window_frames
+        set(s => ({
+          h3WindowPlan: h3_window_plan,
+          slidingWindowSeconds: effectiveWindowFrames / planFps,
+          params: { ...s.params, sliding_window_size: effectiveWindowFrames },
+        }))
+      }
 
       // Update the job with its server-assigned ID
       set(s => ({
-        jobs: s.jobs.map(j => j === newJob ? { ...j, id: job_id, status: 'running', message: 'Queued...' } : j),
+        jobs: s.jobs.map(j => j === newJob ? {
+          ...j,
+          id: job_id,
+          status: 'running',
+          message: 'Queued...',
+          h3WindowPlan: h3_window_plan ?? null,
+        } : j),
       }))
 
       // Poll for status on this specific job
@@ -5119,6 +5257,7 @@ export const useStore = create<AppState>((set, get) => ({
             outputFiles: j.output_files,
             error: j.error,
             oomInfo: (j as { oom_info?: import('../types').OomInfo | null }).oom_info ?? null,
+            h3WindowPlan: j.h3_window_plan ?? null,
           }))
         if (newJobs.length > 0) {
           set(s => ({
@@ -5644,7 +5783,13 @@ export const useStore = create<AppState>((set, get) => ({
       const modelPresetOrder = options.resolution_preset_order || []
       if (modelPresetOrder.length > 0) {
         if (!modelPresetOrder.includes(nextResolutionPreset)) {
-          nextResolutionPreset = modelPresetOrder[modelPresetOrder.length - 1]
+          // A model-specific list can contain an expensive experimental tier
+          // at the end. Select its ordinary 720p tier when the previous
+          // model's preset is unavailable instead of silently jumping to the
+          // largest canvas.
+          nextResolutionPreset = modelPresetOrder.includes('720p')
+            ? '720p'
+            : modelPresetOrder[0]
         }
         if (nextAspectRatio === 'auto' && !options.supports_auto_aspect) {
           nextAspectRatio = '16:9'
@@ -5896,9 +6041,24 @@ export const useStore = create<AppState>((set, get) => ({
 
   // Prompt enhancement
   isEnhancing: false,
+  h3WindowPlan: null,
+  updateH3WindowPrompt: (index, prompt) => set(s => {
+    if (!s.h3WindowPlan || index < 0 || index >= s.h3WindowPlan.windows.length) return {}
+    const windows = s.h3WindowPlan.windows.map((window, windowIndex) => (
+      windowIndex === index ? { ...window, prompt } : window
+    ))
+    return {
+      h3WindowPlan: {
+        ...s.h3WindowPlan,
+        windows,
+        window_prompts: windows.map(window => window.prompt),
+      },
+    }
+  }),
+  clearH3WindowPlan: () => set({ h3WindowPlan: null }),
   enhancePrompt: async (ttsMode?: string) => {
     const state = get()
-    const { params, generationMode, startImage, imageRefs } = state
+    const { params, generationMode, startImage, endImage, imageRefs } = state
     if (!params.prompt.trim()) return
     set({ isEnhancing: true })
     try {
@@ -5967,6 +6127,57 @@ export const useStore = create<AppState>((set, get) => ({
       const windowCount = supportsSlidingWindows && stride > 0 && state.durationSeconds > state.slidingWindowSeconds
         ? 1 + Math.ceil((state.durationSeconds - state.slidingWindowSeconds + discardSec) / stride)
         : 1
+
+      const shouldPlanH3Windows = (
+        generationMode === 'video'
+        && state.modelOptions?.sliding_window_auto_prompt_pacing === true
+        && params.image_mode !== 2
+        && windowCount > 1
+      )
+      if (shouldPlanH3Windows) {
+        // The ordinary H3 enhancer writes one complete Context-IR timeline.
+        // Multi-window H3 instead needs a structured storyboard whose prompts
+        // contain only their own local actions. Include both endpoint images
+        // so the planner can preserve the requested visual trajectory.
+        if (endImage) {
+          try {
+            const uploaded = await api.uploadImage(endImage)
+            imagePaths.push(uploaded.path)
+          } catch { /* best effort */ }
+        } else if (params.image_end && typeof params.image_end === 'string') {
+          imagePaths.push(params.image_end)
+        }
+        const plan = await api.planH3Windows({
+          prompt: params.prompt,
+          model_type: params.model_type,
+          resolution: params.resolution,
+          total_frames: Math.max(1, Math.round(state.durationSeconds * fps)),
+          window_frames: Math.max(1, Math.round(state.slidingWindowSeconds * fps)),
+          overlap_frames: state.slidingWindowOverlap,
+          discard_frames: discardFrames,
+          sliding_window_memory_override: state.slidingWindowLocked,
+          has_start_image: !!(startImage || params.image_start),
+          has_end_image: !!(endImage || params.image_end),
+          image_paths: imagePaths.length > 0 ? imagePaths : undefined,
+        })
+        const effectiveWindowFrames = plan.effective_window_frames || plan.window_frames
+        set(s => ({
+          h3WindowPlan: plan,
+          slidingWindowSeconds: effectiveWindowFrames / fps,
+          // Clicking Enhance on a multi-window H3 First/Last job is an
+          // explicit request to plan the idea across those windows. Turn the
+          // planner back on even when an old saved setting left legacy mode
+          // disabled; otherwise the ordinary H3 enhancer flattens every
+          // window into one globally timed screenplay.
+          params: {
+            ...s.params,
+            sliding_window_size: effectiveWindowFrames,
+            minimax_h3_window_storyboard: true,
+          },
+          isEnhancing: false,
+        }))
+        return
+      }
 
       // TTS dialogue needs more tokens for longer conversations
       const maxTokens = (generationMode === 'audio' && ttsMode) ? 2048 : undefined
@@ -6064,6 +6275,8 @@ export const useStore = create<AppState>((set, get) => ({
   directorResolution: '720p' as ResolutionPreset,
   directorAspectRatio: '16:9' as AspectRatio,
   directorVideoInferenceStepsByModel: {},
+  directorVideoMaxShotFramesByModel: {},
+  directorH3TurboModeByModel: {},
   shortFilmCharacters: [],
   shortFilmPath: null,
   shortFilmTargetDuration: 30,
@@ -6116,6 +6329,21 @@ export const useStore = create<AppState>((set, get) => ({
     }
     return { directorVideoInferenceStepsByModel: next }
   }),
+  setDirectorVideoMaxShotFrames: (modelType, frames) => set(s => {
+    const next = { ...s.directorVideoMaxShotFramesByModel }
+    if (frames == null || !Number.isFinite(frames) || frames <= 0) {
+      delete next[modelType]
+    } else {
+      next[modelType] = Math.round(frames)
+    }
+    return { directorVideoMaxShotFramesByModel: next }
+  }),
+  setDirectorH3TurboMode: (modelType, enabled) => set(s => ({
+    directorH3TurboModeByModel: {
+      ...s.directorH3TurboModeByModel,
+      [modelType]: enabled,
+    },
+  })),
 
   selectDirectorImageModel: (modelType) => {
     set(s => ({
@@ -6689,7 +6917,12 @@ export const useStore = create<AppState>((set, get) => ({
 
     // Use saved image-mode settings if available, otherwise fall back to defaults
     const imageModel = selectedModelPerMode.image || 'flux2_klein_9b'
-    const directorRes = resolutionMap[directorResolution]?.[directorAspectRatio] || resolutionMap[directorResolution]['16:9']
+    const imageOptions = await api.fetchModelOptions(imageModel).catch(() => null)
+    const directorRes = resolveResolution(
+      imageOptions,
+      directorResolution,
+      directorAspectRatio,
+    )
     // Director's hardcoded image_model fallback is flux2_klein_9b, which is
     // step-distilled to 4 inference steps (per app/defaults/flux2_klein_9b.json).
     const imageParams = savedParamsPerMode.image || { num_inference_steps: 4, guidance_scale: 1, resolution: directorRes }
@@ -6914,7 +7147,14 @@ export const useStore = create<AppState>((set, get) => ({
 
     // Use saved video-mode settings if available, override resolution with director's choice
     const videoModel = selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
-    const directorRes = resolutionMap[directorResolution]?.[directorAspectRatio] || resolutionMap[directorResolution]['16:9']
+    const cachedDirectorVideoOptions = get().modelOptions?.model_type === videoModel
+      ? get().modelOptions
+      : null
+    const directorRes = resolveResolution(
+      cachedDirectorVideoOptions,
+      directorResolution,
+      directorAspectRatio,
+    )
     const videoParams = savedParamsPerMode.video ? { ...savedParamsPerMode.video, resolution: directorRes } : { num_inference_steps: 8, guidance_scale: 1, resolution: directorRes }
     const directorSteps = get().directorVideoInferenceStepsByModel[videoModel]
     if (directorSteps != null) videoParams.num_inference_steps = directorSteps
@@ -7384,6 +7624,7 @@ export const useStore = create<AppState>((set, get) => ({
         minimax_h3_turbo_mode: false,
       },
       selectedModelPerMode: { ...s.selectedModelPerMode, [currentMode]: modelType },
+      h3WindowPlan: null,
       loraWeights: {},
       availableLoras: [],
     }))
@@ -7852,6 +8093,12 @@ export const useStore = create<AppState>((set, get) => ({
     (newParams as Record<string, unknown>).keyframe_inject_mode = (p.keyframe_inject_mode as string) ?? undefined;
     (newParams as Record<string, unknown>).temperature = (p.temperature as number) ?? undefined;
     (newParams as Record<string, unknown>).audio_guidance_scale = (p.audio_guidance_scale as number) ?? undefined
+    newParams.minimax_h3_window_storyboard = (p.minimax_h3_window_storyboard as boolean) ?? undefined
+    const restoredH3WindowPlan = (
+      p.h3_window_plan
+      && typeof p.h3_window_plan === 'object'
+      && Array.isArray((p.h3_window_plan as Record<string, unknown>).windows)
+    ) ? p.h3_window_plan as unknown as H3WindowPlan : null
 
     // Detect multi-clip output and reconstruct clips
     if (p.multi_prompts_gen_type === 3 && Array.isArray(p.image_start)) {
@@ -8003,6 +8250,7 @@ export const useStore = create<AppState>((set, get) => ({
 
     set(s => ({
       params: { ...s.params, ...newParams },
+      h3WindowPlan: restoredH3WindowPlan,
       loraWeights,
       startImage: null,
       endImage: null,
@@ -8455,6 +8703,7 @@ export const useStore = create<AppState>((set, get) => ({
             directorAudioPath, directorAnalysis, directorReferenceImagePath,
             directorAutoMode, directorSeamless, directorShotImageGuidance,
             directorResolution, directorAspectRatio,
+            directorVideoMaxShotFramesByModel, directorH3TurboModeByModel,
             selectedModelPerMode, savedParamsPerMode, savedLoraPerMode,
             directorSpeakerMappings, directorImageSpatialUpsampling,
             directorImageFilmGrainIntensity, directorImageFilmGrainSaturation,
@@ -8463,7 +8712,6 @@ export const useStore = create<AppState>((set, get) => ({
             shortFilmPath, shortFilmCharacters, shortFilmTargetDuration,
             shortFilmNarrative } = state
 
-    const directorRes = resolutionMap[directorResolution]?.[directorAspectRatio] || resolutionMap[directorResolution]['16:9']
     const selectedImageModel = selectedModelPerMode.image || 'flux2_klein_9b'
     const selectedVideoModel = selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
 
@@ -8472,15 +8720,27 @@ export const useStore = create<AppState>((set, get) => ({
     // then reuse saved Studio overrides only when they explicitly belong to
     // that same model. This prevents a distilled model's settings from
     // leaking into a full model (or vice versa) after a Director-only switch.
-    const [imageModelDefaults, videoModelDefaults, fetchedVideoOptions] = await Promise.all([
+    const [imageModelDefaults, videoModelDefaults, fetchedImageOptions, fetchedVideoOptions] = await Promise.all([
       api.fetchDefaults(selectedImageModel).catch(() => ({})),
       api.fetchDefaults(selectedVideoModel).catch(() => ({})),
+      api.fetchModelOptions(selectedImageModel).catch(() => null),
       api.fetchModelOptions(selectedVideoModel).catch(() => null),
     ])
     const cachedVideoOptions = state.modelOptions?.model_type === selectedVideoModel
       ? state.modelOptions
       : null
     const directorVideoOptions = fetchedVideoOptions || cachedVideoOptions
+    const directorImageOptions = fetchedImageOptions
+    const directorImageResolution = resolveResolution(
+      directorImageOptions,
+      directorResolution,
+      directorAspectRatio,
+    )
+    const directorVideoResolution = resolveResolution(
+      directorVideoOptions,
+      directorResolution,
+      directorAspectRatio,
+    )
     const fps = directorVideoOptions?.fps ?? 16
     const savedImageParams = savedParamsPerMode.image || {}
     const savedVideoParams = savedParamsPerMode.video || {}
@@ -8502,9 +8762,18 @@ export const useStore = create<AppState>((set, get) => ({
     const configuredVideoSteps = state.directorVideoInferenceStepsByModel[selectedVideoModel]
     // A model may publish a fixed distilled recipe. In that case the model
     // default wins even if an older adjustable build left an override behind.
-    const directorVideoSteps = directorVideoOptions?.lock_inference_steps
+    let directorVideoSteps = directorVideoOptions?.lock_inference_steps
       ? defaultVideoSteps
       : (configuredVideoSteps ?? defaultVideoSteps)
+    const directorTurboOption = directorVideoOptions?.minimax_h3_turbo
+    const savedDirectorVideoLoras = savedLoraPerMode.video
+    const directorTurboEnabled = Boolean(
+      directorTurboOption
+      && directorH3TurboModeByModel[selectedVideoModel] === true
+      && savedDirectorVideoLoras?.activated_loras?.includes(directorTurboOption.filename)
+    )
+    if (directorTurboEnabled) directorVideoSteps = directorTurboOption!.steps
+    const directorMaxShotFrames = directorVideoMaxShotFramesByModel[selectedVideoModel]
 
     // Upload all reference images (main + character + location) if not already uploaded
     let refImagePath = directorReferenceImagePath
@@ -8580,6 +8849,9 @@ export const useStore = create<AppState>((set, get) => ({
       planned_clips: directorPlannedClips,
       seamless: directorSeamless,
       shot_image_guidance: directorShotImageGuidance,
+      director_resolution_preset: directorResolution,
+      director_aspect_ratio: directorAspectRatio,
+      director_max_shot_frames: directorMaxShotFrames,
       fps,
       frames_steps: directorVideoOptions?.frames_steps ?? 4,
       frames_minimum: directorVideoOptions?.frames_minimum ?? 5,
@@ -8605,7 +8877,7 @@ export const useStore = create<AppState>((set, get) => ({
       image_params: {
         ...imageModelDefaults,
         ...matchingImageParams,
-        resolution: directorRes,
+        resolution: directorImageResolution,
       },
       image_loras: savedLoraPerMode.image || {},
       image_spatial_upsampling: directorImageSpatialUpsampling,
@@ -8620,7 +8892,8 @@ export const useStore = create<AppState>((set, get) => ({
         // Director owns this value. Studio's Advanced step count is separate
         // state and must not leak into a new Director project.
         num_inference_steps: directorVideoSteps,
-        resolution: directorRes,
+        resolution: directorVideoResolution,
+        minimax_h3_turbo_mode: directorTurboEnabled,
       },
       video_loras: savedLoraPerMode.video || {},
       video_spatial_upsampling: directorVideoSpatialUpsampling,

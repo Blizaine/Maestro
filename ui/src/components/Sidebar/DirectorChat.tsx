@@ -1,10 +1,11 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from 'react'
-import { Upload, Loader2, Music, RotateCcw, Check, X, ChevronRight, ChevronDown, ImageIcon, Play, Film, Mic, Sparkles, Send, Users, FileText, Clock } from 'lucide-react'
-import { useStore, getFamiliesForMode, getModelsForFamily } from '../../stores/useStore'
+import { Upload, Loader2, Music, RotateCcw, Check, X, ChevronRight, ChevronDown, ImageIcon, Play, Film, Mic, Sparkles, Send, Users, FileText, Clock, Zap } from 'lucide-react'
+import { useStore, getFamiliesForMode, getModelsForFamily, resolveResolution } from '../../stores/useStore'
 import { fetchModelOptions, getFileUrl } from '../../api/client'
 import { DirectorLoraSelector } from '../SettingsDrawer/DirectorLoraSelector'
 import { DirectorSongSetup } from './DirectorSongSetup'
 import { InfoTooltip } from './InfoTooltip'
+import { formatSeconds, recommendedWindowProfile } from './DurationSlider'
 import type { DirectorPipelineType, DirectorShotImageGuidance, DirectorSkill, ModelOptions, ShortFilmCharacter, ShortFilmPath } from '../../types'
 
 // AUDIO_ACCEPT lists both audio formats AND video formats. When a video
@@ -1235,18 +1236,39 @@ function DirectorAspectRatioSelector() {
 
 function DirectorResolutionSelector() {
   const resolution = useStore(s => s.directorResolution)
+  const aspectRatio = useStore(s => s.directorAspectRatio)
   const setResolution = useStore(s => s.setDirectorResolution)
-  // Just the resolution labels — the previous Fast/Faster/Balanced/
-  // High Quality descriptors were inaccurate (480p was labeled "Fast"
-  // but 540p was "Faster", which is the wrong direction) and added
-  // visual noise without adding info a user couldn't infer from the
-  // resolution number itself.
-  const presets = [
-    { value: '480p' as const, label: '480p' },
-    { value: '540p' as const, label: '540p' },
-    { value: '720p' as const, label: '720p' },
-    { value: '1080p' as const, label: '1080p' },
-  ]
+  const videoModel = useStore(s => s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1')
+  const totalVramGb = useStore(s => s.systemStats?.gpu.vram_total_gb ?? 0)
+  const [options, setOptions] = useState<ModelOptions | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    fetchModelOptions(videoModel)
+      .then(value => { if (!cancelled) setOptions(value) })
+      .catch(() => { if (!cancelled) setOptions(null) })
+    return () => { cancelled = true }
+  }, [videoModel])
+
+  const fallbackOrder = ['480p', '540p', '720p', '1080p'] as const
+  const modelPresetOrder = (options?.resolution_preset_order || []).filter(
+    value => value !== 'auto' && value !== '768p',
+  )
+  const presetOrder = modelPresetOrder.length > 0
+    ? modelPresetOrder
+    : [...fallbackOrder]
+  const presets = presetOrder.map(value => ({
+    value,
+    label: options?.resolution_presets?.[value]?.label || value,
+  }))
+  const resolvedResolution = resolveResolution(options, resolution, aspectRatio)
+  const recommendation = recommendedWindowProfile(
+    options?.director_memory_policy || options?.sliding_window_memory_policy,
+    resolvedResolution,
+    totalVramGb,
+  )
+  const fps = options?.fps || 24
+  const selectedConfig = options?.resolution_presets?.[resolution]
   return (
     <div>
       <label className="text-[10px] text-text-muted uppercase tracking-wider mb-1.5 block">Resolution</label>
@@ -1265,6 +1287,22 @@ function DirectorResolutionSelector() {
           </button>
         ))}
       </div>
+      <div className="mt-1 text-[10px] text-text-muted">
+        {resolvedResolution}
+        {recommendation?.frames != null && totalVramGb > 0 && (
+          <> &middot; Auto max shot {formatSeconds(recommendation.frames / fps)} on {totalVramGb.toFixed(0)} GB</>
+        )}
+      </div>
+      {recommendation?.supported === false && (
+        <div className="mt-1 text-[10px] text-amber-400">
+          Auto recommends {recommendation.fallbackResolution || 'a lower resolution'} on this GPU. An Advanced manual shot-length override is experimental.
+        </div>
+      )}
+      {selectedConfig?.hint && (
+        <div className={`mt-1 text-[10px] ${selectedConfig.experimental ? 'text-amber-400' : 'text-text-muted'}`}>
+          {selectedConfig.hint}
+        </div>
+      )}
     </div>
   )
 }
@@ -1993,6 +2031,15 @@ function DirectorAdvancedAccordion() {
   const videoModel = useStore(s => s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1')
   const videoStepsByModel = useStore(s => s.directorVideoInferenceStepsByModel)
   const setVideoSteps = useStore(s => s.setDirectorVideoInferenceSteps)
+  const maxShotFramesByModel = useStore(s => s.directorVideoMaxShotFramesByModel)
+  const setMaxShotFrames = useStore(s => s.setDirectorVideoMaxShotFrames)
+  const turboModeByModel = useStore(s => s.directorH3TurboModeByModel)
+  const setTurboMode = useStore(s => s.setDirectorH3TurboMode)
+  const savedVideoLoras = useStore(s => s.savedLoraPerMode.video)
+  const directorSetLora = useStore(s => s.directorSetLora)
+  const directorResolution = useStore(s => s.directorResolution)
+  const directorAspectRatio = useStore(s => s.directorAspectRatio)
+  const totalVramGb = useStore(s => s.systemStats?.gpu.vram_total_gb ?? 0)
   const [directorVideoOptions, setDirectorVideoOptions] = useState<ModelOptions | null>(null)
   const shotImageSupport = useStore(s => s.models.find(
     model => model.model_type === videoModel,
@@ -2065,6 +2112,65 @@ function DirectorAdvancedAccordion() {
     ? defaultVideoSteps
     : (configuredVideoSteps ?? defaultVideoSteps)
   const videoStepsLocked = activeDirectorVideoOptions?.lock_inference_steps === true
+  const resolvedVideoResolution = resolveResolution(
+    activeDirectorVideoOptions,
+    directorResolution,
+    directorAspectRatio,
+  )
+  const windowRecommendation = recommendedWindowProfile(
+    activeDirectorVideoOptions?.director_memory_policy
+      || activeDirectorVideoOptions?.sliding_window_memory_policy,
+    resolvedVideoResolution,
+    totalVramGb,
+  )
+  const safeShotFrames = windowRecommendation?.frames ?? null
+  const manualMaxShotFrames = maxShotFramesByModel[videoModel] ?? null
+  const framesMinimum = activeDirectorVideoOptions?.frames_minimum ?? 1
+  const framesMaximum = activeDirectorVideoOptions?.frames_maximum ?? framesMinimum
+  const framesStep = activeDirectorVideoOptions?.frames_steps ?? 1
+  const nativeShotChoices = [124, 175, 243, 345].filter(frames => (
+    frames >= framesMinimum
+    && frames <= framesMaximum
+    && (frames - framesMinimum) % Math.max(1, framesStep) === 0
+  ))
+  const turboOption = activeDirectorVideoOptions?.minimax_h3_turbo
+  const turboSelected = Boolean(
+    turboOption
+    && turboModeByModel[videoModel] === true
+    && savedVideoLoras?.activated_loras?.includes(turboOption.filename)
+  )
+
+  const setDirectorTurbo = (checked: boolean) => {
+    if (!turboOption) return
+    const current = savedVideoLoras || {
+      activated_loras: [],
+      loras_multipliers: '',
+      loraWeights: {},
+      availableLoras: [],
+    }
+    const nextLoras = current.activated_loras.filter(
+      filename => filename !== turboOption.filename,
+    )
+    const nextWeights = { ...current.loraWeights }
+    delete nextWeights[turboOption.filename]
+    if (checked) {
+      nextLoras.push(turboOption.filename)
+      nextWeights[turboOption.filename] = [turboOption.weight]
+    }
+    const nextAvailable = current.availableLoras.includes(turboOption.filename)
+      ? current.availableLoras
+      : [...current.availableLoras, turboOption.filename]
+    const multipliers = nextLoras.map(filename => (
+      (nextWeights[filename] || [1]).map(value => value.toFixed(2)).join(';')
+    )).join(' ')
+    directorSetLora('video', nextLoras, multipliers, nextWeights, nextAvailable)
+    setTurboMode(videoModel, checked)
+    if (checked) {
+      setVideoSteps(videoModel, turboOption.steps)
+    } else if (videoSteps === turboOption.steps && defaultVideoSteps != null) {
+      setVideoSteps(videoModel, defaultVideoSteps)
+    }
+  }
 
   const upsamplingOptions = [
     { value: '', label: 'Off' },
@@ -2163,11 +2269,37 @@ function DirectorAdvancedAccordion() {
           <div className="space-y-2 pt-1 border-t border-border">
             <div className="text-[10px] text-text-muted uppercase tracking-wider pt-2">Video</div>
 
+            {turboOption && (
+              <div className={`rounded-lg border px-2.5 py-2 ${
+                turboSelected
+                  ? 'border-accent-blue/50 bg-accent-blue/10'
+                  : 'border-border bg-bg-tertiary/50'
+              }`}>
+                <label className="flex cursor-pointer items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={turboSelected}
+                    onChange={event => setDirectorTurbo(event.target.checked)}
+                    className="accent-accent-blue"
+                  />
+                  <Zap size={12} className={turboSelected ? 'text-accent-blue' : 'text-text-muted'} />
+                  <span className="text-[11px] font-medium text-text-primary">H3 Turbo</span>
+                  <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[8px] font-medium uppercase tracking-wider text-indicator-warning">
+                    Experimental
+                  </span>
+                  <InfoTooltip label="About Director H3 Turbo" text={turboOption.guide} />
+                </label>
+                <p className="mt-1 text-[10px] text-text-muted">
+                  Enables the managed LoRA at {turboOption.weight.toFixed(2)} and uses {turboOption.steps} steps. Adjust its strength under Video LoRAs.
+                </p>
+              </div>
+            )}
+
             <div title="Applies to every newly generated Director shot and is saved with the project for later repair or regeneration.">
               <div className="flex items-center justify-between mb-1">
                 <label className="text-[11px] text-text-secondary">Inference steps</label>
                 <div className="flex items-center gap-1.5">
-                  {!videoStepsLocked && defaultVideoSteps != null && configuredVideoSteps != null
+                  {!videoStepsLocked && !turboSelected && defaultVideoSteps != null && configuredVideoSteps != null
                     && configuredVideoSteps !== defaultVideoSteps && (
                     <button
                       type="button"
@@ -2183,7 +2315,7 @@ function DirectorAdvancedAccordion() {
                     max={50}
                     step={1}
                     value={videoSteps ?? ''}
-                    disabled={videoSteps == null || videoStepsLocked}
+                    disabled={videoSteps == null || videoStepsLocked || turboSelected}
                     onChange={e => {
                       const value = Number(e.target.value)
                       if (Number.isFinite(value)) setVideoSteps(videoModel, value)
@@ -2198,18 +2330,60 @@ function DirectorAdvancedAccordion() {
                 max={50}
                 step={1}
                 value={videoSteps ?? 1}
-                disabled={videoSteps == null || videoStepsLocked}
+                disabled={videoSteps == null || videoStepsLocked || turboSelected}
                 onChange={e => setVideoSteps(videoModel, Number(e.target.value))}
                 className="w-full disabled:opacity-50"
               />
               <p className="text-[10px] text-text-muted mt-0.5">
-                {videoStepsLocked
+                {turboSelected
+                  ? `H3 Turbo uses its ${turboOption?.steps ?? 6}-step recipe.`
+                  : videoStepsLocked
                   ? 'Fixed by this model.'
                   : videoSteps == null
                     ? 'Loading model default...'
                     : `Director setting for this model${defaultVideoSteps === videoSteps ? ' (default)' : ''}.`}
               </p>
             </div>
+
+            {(activeDirectorVideoOptions?.director_memory_policy
+              || activeDirectorVideoOptions?.sliding_window_memory_policy)
+              && nativeShotChoices.length > 0 && (
+              <div>
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <label className="text-[11px] text-text-secondary">Maximum planned shot</label>
+                  <select
+                    value={manualMaxShotFrames ?? ''}
+                    onChange={event => setMaxShotFrames(
+                      videoModel,
+                      event.target.value ? Number(event.target.value) : null,
+                    )}
+                    className="bg-bg-tertiary border border-border rounded px-1.5 py-0.5 text-[11px] text-text-primary focus:outline-none focus:border-accent-blue"
+                  >
+                    <option value="">Auto</option>
+                    {nativeShotChoices.map(frames => (
+                      <option key={frames} value={frames}>
+                        {formatSeconds(frames / (activeDirectorVideoOptions.fps || 24))}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <p className={`text-[10px] ${
+                  manualMaxShotFrames != null
+                  && safeShotFrames != null
+                  && manualMaxShotFrames > safeShotFrames
+                    ? 'text-amber-400'
+                    : 'text-text-muted'
+                }`}>
+                  {manualMaxShotFrames == null
+                    ? safeShotFrames != null
+                      ? `Auto plans at most ${formatSeconds(safeShotFrames / (activeDirectorVideoOptions.fps || 24))} per shot for ${resolvedVideoResolution} on ${totalVramGb.toFixed(0)} GB.`
+                      : `Auto derives the one-pass limit from the selected canvas and GPU.`
+                    : safeShotFrames != null && manualMaxShotFrames > safeShotFrames
+                      ? `Manual override exceeds Auto's ${formatSeconds(safeShotFrames / (activeDirectorVideoOptions.fps || 24))} recommendation and may run out of VRAM.`
+                      : `Manual native-shot limit. Director will plan dialogue and action to this duration.`}
+                </p>
+              </div>
+            )}
 
             <div>
               <label className="text-[11px] text-text-secondary block mb-1">Upsampling</label>
@@ -2255,7 +2429,7 @@ function DirectorAdvancedAccordion() {
               )}
             </div>
 
-            <div>
+            {activeDirectorVideoOptions?.self_refiner === true && <div>
               <div className="flex items-center justify-between mb-1">
                 <label className="text-[11px] text-text-secondary">Self refiner</label>
                 <span className="text-[9px] uppercase tracking-wider text-text-muted bg-bg-tertiary border border-border rounded px-1 py-px">
@@ -2274,7 +2448,7 @@ function DirectorAdvancedAccordion() {
               <p className="text-[10px] text-text-muted mt-0.5">
                 Re-passes the rendered video through the refiner. May improve detail or introduce artifacts.
               </p>
-            </div>
+            </div>}
           </div>
         </div>
       )}

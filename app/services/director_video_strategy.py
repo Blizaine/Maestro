@@ -22,6 +22,8 @@ ROLLING_WINDOW = "rolling_window"
 BOUNDED_START_END = "bounded_start_end"
 OMNI_REFERENCE = "omni_reference"
 
+DIRECTOR_VIDEO_EXECUTION_PROFILE_VERSION = 1
+
 # Model capability: how Director may supply visual guidance for each shot.
 SHOT_IMAGES_REQUIRED = "required"
 SHOT_IMAGES_OPTIONAL = "optional"
@@ -39,6 +41,351 @@ SHOT_IMAGE_POLICIES = {
     SHOT_IMAGE_GENERATE,
     SHOT_IMAGES_DIRECT_REFERENCES,
 }
+
+
+def _normalize_director_h3_resolution(
+    value: Any,
+    model_def: Mapping[str, Any],
+) -> str:
+    """Resolve Auto/legacy canvases using model-published H3 metadata."""
+
+    requested = str(value or "").strip().lower().replace(" ", "")
+    fallbacks = dict(model_def.get("auto_resolution_fallbacks") or {})
+    if requested in fallbacks:
+        return str(fallbacks[requested])
+
+    supported: list[str] = []
+    for item in model_def.get("resolutions") or []:
+        candidate = item[1] if isinstance(item, (list, tuple)) and len(item) > 1 else item
+        candidate = str(candidate or "").strip().lower()
+        if re.fullmatch(r"\d+x\d+", candidate) and candidate not in supported:
+            supported.append(candidate)
+    for preset in (model_def.get("resolution_presets") or {}).values():
+        if not isinstance(preset, Mapping):
+            continue
+        for candidate in (preset.get("values") or {}).values():
+            candidate = str(candidate or "").strip().lower()
+            if re.fullmatch(r"\d+x\d+", candidate) and candidate not in supported:
+                supported.append(candidate)
+
+    if requested in supported or not supported:
+        return requested
+    match = re.fullmatch(r"(\d+)x(\d+)", requested)
+    if not match:
+        return str(fallbacks.get("auto") or supported[0])
+    width, height = (int(part) for part in match.groups())
+    orientation = 0 if width == height else (1 if width > height else -1)
+    candidates: list[tuple[str, int, int]] = []
+    for candidate in supported:
+        candidate_width, candidate_height = (
+            int(part) for part in candidate.split("x", 1)
+        )
+        candidate_orientation = (
+            0 if candidate_width == candidate_height
+            else 1 if candidate_width > candidate_height
+            else -1
+        )
+        if candidate_orientation == orientation:
+            candidates.append((candidate, candidate_width, candidate_height))
+    if not candidates:
+        return supported[0]
+
+    target_aspect = width / max(1, height)
+    target_area = max(1, width * height)
+
+    def score(item: tuple[str, int, int]) -> float:
+        _, candidate_width, candidate_height = item
+        aspect_error = abs(
+            (candidate_width / candidate_height) - target_aspect
+        ) / max(target_aspect, 1e-6)
+        area_error = abs(
+            (candidate_width * candidate_height) - target_area
+        ) / target_area
+        return aspect_error * 8 + area_error
+
+    return min(candidates, key=score)[0]
+
+
+def _recommended_director_h3_profile(
+    total_vram_gb: Any,
+    resolution: Any,
+    model_def: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Evaluate the lightweight memory policy published by the H3 handler."""
+
+    normalized_resolution = _normalize_director_h3_resolution(
+        resolution,
+        model_def,
+    )
+    try:
+        width, height = (
+            int(part) for part in normalized_resolution.split("x", 1)
+        )
+        pixels = max(1, width * height)
+    except (TypeError, ValueError):
+        pixels = 864 * 480
+    try:
+        total_vram_gb = float(total_vram_gb)
+    except (TypeError, ValueError):
+        total_vram_gb = 0.0
+
+    full_checkpoint = bool(model_def.get("minimax_h3_full_checkpoint", False))
+    policy = (
+        model_def.get("director_memory_policy")
+        or model_def.get("sliding_window_memory_policy")
+        or {}
+    )
+    architectural_maximum = int(model_def.get("frames_maximum") or 345)
+    if total_vram_gb <= 0 or not policy:
+        return {
+            "supported": True,
+            "frames": architectural_maximum,
+            "fallback_resolution": None,
+            "gpu_vram_gb": total_vram_gb,
+            "resolution": normalized_resolution,
+            "pixels": pixels,
+            "checkpoint": "full" if full_checkpoint else "pruned",
+        }
+
+    for band in policy.get("resolution_bands") or []:
+        if pixels < int(band.get("min_pixels", 0)):
+            continue
+        for tier in band.get("vram_tiers") or []:
+            maximum_vram = tier.get("max_vram_gb")
+            if maximum_vram is None or total_vram_gb <= float(maximum_vram):
+                frames = tier.get("frames")
+                frames = int(frames) if frames is not None else None
+                return {
+                    "supported": frames is not None and frames > 0,
+                    "frames": frames,
+                    "fallback_resolution": tier.get("fallback_resolution"),
+                    "gpu_vram_gb": total_vram_gb,
+                    "resolution": normalized_resolution,
+                    "pixels": pixels,
+                    "checkpoint": "full" if full_checkpoint else "pruned",
+                }
+        break
+    return {
+        "supported": True,
+        "frames": architectural_maximum,
+        "fallback_resolution": None,
+        "gpu_vram_gb": total_vram_gb,
+        "resolution": normalized_resolution,
+        "pixels": pixels,
+        "checkpoint": "full" if full_checkpoint else "pruned",
+    }
+
+
+def build_director_video_execution_profile(
+    model_type: str,
+    model_def: Mapping[str, Any] | None,
+    video_params: Mapping[str, Any] | None,
+    hardware: Mapping[str, Any] | None,
+    *,
+    manual_max_frames: Any = None,
+    resolution_preset: str = "",
+    aspect_ratio: str = "",
+) -> dict[str, Any]:
+    """Resolve Director's authoritative per-shot generation contract.
+
+    ``frames_maximum`` in a model definition is an architectural limit.  H3's
+    practical one-pass limit can be lower at a large canvas or on a smaller
+    GPU.  Director must know that effective limit before its LLM allocates
+    dialogue and action; allowing the runtime to shrink a shot later causes
+    premature action, repeated dialogue, and avoidable OOM failures.
+
+    The returned object is JSON-safe and is persisted with the project so a
+    Dashboard rerun can reproduce the same timing contract.
+    """
+
+    model_def = dict(model_def or {})
+    video_params = dict(video_params or {})
+    hardware = dict(hardware or {})
+    strategy = video_strategy(model_def)
+    architecture = str(
+        model_def.get("architecture")
+        or model_def.get("base_model_type")
+        or model_type
+        or ""
+    )
+    architecture_lower = architecture.lower()
+    model_type_lower = str(model_type or "").lower()
+    is_h3 = (
+        architecture_lower.startswith("minimax_h3")
+        or model_type_lower.startswith("minimax_h3")
+    )
+
+    try:
+        fps = float(model_def.get("fps") or 24)
+    except (TypeError, ValueError):
+        fps = 24.0
+    if not math.isfinite(fps) or fps <= 0:
+        fps = 24.0
+    try:
+        minimum_frames = max(1, int(model_def.get("frames_minimum") or 1))
+    except (TypeError, ValueError):
+        minimum_frames = 1
+    try:
+        frame_step = max(1, int(model_def.get("frames_steps") or 1))
+    except (TypeError, ValueError):
+        frame_step = 1
+    raw_architectural_maximum = model_def.get("frames_maximum")
+    try:
+        architectural_maximum = (
+            max(minimum_frames, int(raw_architectural_maximum))
+            if raw_architectural_maximum is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        architectural_maximum = None
+
+    requested_resolution = str(video_params.get("resolution") or "").strip()
+    normalized_resolution = requested_resolution
+    recommendation: dict[str, Any] | None = None
+    recommended_maximum = architectural_maximum
+    checkpoint = "full" if model_def.get("minimax_h3_full_checkpoint") else "pruned"
+
+    if is_h3:
+        recommendation = _recommended_director_h3_profile(
+            hardware.get("gpu_vram_gb", 0.0),
+            requested_resolution,
+            model_def,
+        )
+        normalized_resolution = str(
+            recommendation.get("resolution") or requested_resolution
+        )
+        raw_recommended = recommendation.get("frames")
+        recommended_maximum = (
+            int(raw_recommended) if raw_recommended is not None else None
+        )
+
+    override_frames: int | None = None
+    if manual_max_frames not in (None, "", 0, "0"):
+        try:
+            override_frames = int(manual_max_frames)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "Director's manual maximum shot length must be a frame count."
+            ) from exc
+        if architectural_maximum is None:
+            raise ValueError(
+                f"{model_type} does not publish a bounded shot length to override."
+            )
+        if not (
+            minimum_frames <= override_frames <= architectural_maximum
+            and (override_frames - minimum_frames) % frame_step == 0
+        ):
+            raise ValueError(
+                f"Director's manual maximum for {model_type} must be on its "
+                f"{minimum_frames}-{architectural_maximum} frame lattice "
+                f"(step {frame_step})."
+            )
+
+    if is_h3 and recommended_maximum is None and override_frames is None:
+        fallback = (recommendation or {}).get("fallback_resolution")
+        vram = float((recommendation or {}).get("gpu_vram_gb") or 0.0)
+        suffix = f" Choose {fallback}." if fallback else " Choose a lower resolution."
+        raise ValueError(
+            f"H3 has no automatic one-pass profile for {normalized_resolution} "
+            f"on this {vram:g} GB GPU.{suffix} Advanced users can set a manual "
+            "maximum shot length to try this combination experimentally."
+        )
+
+    effective_maximum = (
+        override_frames
+        if override_frames is not None
+        else recommended_maximum
+    )
+    if (
+        architectural_maximum is not None
+        and effective_maximum is not None
+    ):
+        effective_maximum = min(
+            architectural_maximum, int(effective_maximum)
+        )
+
+    try:
+        detected_vram = float(hardware.get("gpu_vram_gb") or 0.0)
+    except (TypeError, ValueError):
+        detected_vram = 0.0
+
+    return {
+        "version": DIRECTOR_VIDEO_EXECUTION_PROFILE_VERSION,
+        "policy_version": DIRECTOR_VIDEO_EXECUTION_PROFILE_VERSION,
+        "model_type": str(model_type or ""),
+        "architecture": architecture,
+        "video_strategy": strategy,
+        "checkpoint": checkpoint if is_h3 else None,
+        "is_minimax_h3": is_h3,
+        "omni_reference": strategy == OMNI_REFERENCE,
+        "requested_resolution": requested_resolution,
+        "normalized_resolution": normalized_resolution,
+        "resolution_preset": str(resolution_preset or ""),
+        "aspect_ratio": str(aspect_ratio or ""),
+        "fps": fps,
+        "frames_minimum": minimum_frames,
+        "frame_step": frame_step,
+        "architectural_max_frames": architectural_maximum,
+        "recommended_max_frames": recommended_maximum,
+        "effective_max_frames": effective_maximum,
+        "effective_max_seconds": (
+            effective_maximum / fps
+            if effective_maximum is not None else None
+        ),
+        "gpu_vram_gb": detected_vram,
+        "manual_override": override_frames is not None,
+        "manual_max_frames": override_frames,
+        "hardware_supported": bool(
+            not is_h3 or (recommendation or {}).get("supported", True)
+        ),
+        "fallback_resolution": (
+            (recommendation or {}).get("fallback_resolution")
+        ),
+        "turbo_mode": bool(video_params.get("minimax_h3_turbo_mode")),
+        "activated_lora_count": len(
+            video_params.get("activated_loras") or []
+        ),
+    }
+
+
+def validate_director_execution_frames(
+    profile: Mapping[str, Any] | None,
+    frames: Any,
+    *,
+    label: str = "Director shot",
+) -> int:
+    """Validate one bounded shot against its persisted execution profile."""
+
+    try:
+        frame_count = int(frames)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} has no valid frame count.") from exc
+    if not profile:
+        return frame_count
+    try:
+        minimum = int(profile.get("frames_minimum") or 1)
+        step = max(1, int(profile.get("frame_step") or 1))
+        maximum = profile.get("effective_max_frames")
+        maximum = int(maximum) if maximum is not None else None
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Director's saved video execution profile is invalid.") from exc
+    if frame_count < minimum or (frame_count - minimum) % step != 0:
+        raise ValueError(
+            f"{label} has {frame_count} frames, outside the saved "
+            f"{minimum}+{step}n timing lattice. Re-plan the project."
+        )
+    if maximum is not None and frame_count > maximum:
+        seconds = profile.get("effective_max_seconds")
+        limit = (
+            f"{float(seconds):.2f} seconds / {maximum} frames"
+            if seconds is not None else f"{maximum} frames"
+        )
+        raise ValueError(
+            f"{label} has {frame_count} frames but this Director execution "
+            f"profile allows one native pass of at most {limit}. Re-plan the "
+            "project for the selected resolution and GPU."
+        )
+    return frame_count
 
 
 _TIMELINE_LABEL_RE = re.compile(

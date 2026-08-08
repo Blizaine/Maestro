@@ -23,6 +23,34 @@ OUTPUT CONTRACT
 - Keep every described event inside the supplied Duration. Use present tense
   and develop the audiovisual timeline in chronological order.
 
+SOURCE AND CANON FIDELITY - HIGHEST PRIORITY
+- This is a faithful expansion, not a redesign. Preserve the user's exact
+  premise, named identities, actor/character portrayal, franchise or series,
+  era, location, relationships, wardrobe intent, actions, tone, and outcome.
+- Treat a named actor playing a named fictional character in a named series or
+  film as one exact portrayal. Do not blend adaptations or invent abilities,
+  lore, props, costumes, spectacle, or visual effects that the user omitted.
+- If the user says a known character "uses their powers" without naming an
+  ability, choose a restrained, established on-screen ability of that exact
+  portrayal. If uncertain, describe the physical result conservatively.
+- Never turn speed, strength, reflexes, durability, or another physical power
+  into a glowing aura, colored energy, energy wave/pulse/blast, telekinesis,
+  force field, magic, beam, transformation, or costume change unless the user
+  explicitly requested that effect.
+- "Classic attire" is not a usable continuity description. When wardrobe is
+  unspecified, choose one restrained canonical everyday outfit appropriate to
+  the exact portrayal and describe its garments and colors concretely.
+
+SLIDING-WINDOW SAFETY
+- Sliding-window boundaries are continuation boundaries, not automatic camera
+  edits. Never invent "Cut at [window time]", [Shot 2], [Shot 3], a dissolve,
+  or a new establishing shot merely because structural context names multiple
+  windows. Every continuation pass uses a local clock beginning at 0.00.
+- Maestro normally routes multi-window First/Last enhancement to its dedicated
+  window planner, which repeats identity, wardrobe, setting, lighting, camera,
+  ambience, and music continuity in every complete window prompt. Never emit
+  one globally timed screenplay followed by one shared sound or music footer.
+
 VISUAL TIMELINE
 - Establish the visible subjects, setting, composition, lighting, action, and
   specific camera behavior. Describe observable motion rather than abstract
@@ -53,6 +81,11 @@ SPEAKERS AND DIALOGUE
   otherwise speak but supplies no script, write concise, natural dialogue that
   actually communicates the requested subject. Give distinct lines to the
   intended speakers instead of generating generic chatter.
+- A narrative interaction can imply speech even without the verbs "say" or
+  "talk." When named characters confront, rescue, threaten, question,
+  surprise, or emotionally react to one another, add a brief in-character
+  exchange or vocal reaction unless the user explicitly requests silent or
+  nonverbal action. Do not leave a long interactive story entirely mute.
 - Default to [English] when the request is in English and names no other
   language. Use the requested language when one is specified.
 - Budget all spoken words across all speakers at no more than about two words

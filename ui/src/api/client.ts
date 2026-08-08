@@ -1,4 +1,4 @@
-import type { DirectorModelCompatibility, ScailResolutionProfile } from '../types'
+import type { DirectorModelCompatibility, H3WindowPlan, ScailResolutionProfile } from '../types'
 
 const BASE = ''  // same origin in production; Vite proxy handles /api in dev
 
@@ -153,7 +153,7 @@ export async function fetchDefaults(modelType: string): Promise<Record<string, u
 
 // --- Generation ---
 
-export async function submitGeneration(params: Record<string, unknown>): Promise<{ job_id: string }> {
+export async function submitGeneration(params: Record<string, unknown>): Promise<{ job_id: string; h3_window_plan?: H3WindowPlan }> {
   const res = await fetch(`${BASE}/api/v1/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -162,6 +162,31 @@ export async function submitGeneration(params: Record<string, unknown>): Promise
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Generation failed' }))
     throw new Error(err.detail || 'Generation failed')
+  }
+  return res.json()
+}
+
+export async function planH3Windows(params: {
+  prompt: string
+  model_type: string
+  resolution: string
+  total_frames: number
+  window_frames: number
+  overlap_frames: number
+  discard_frames: number
+  sliding_window_memory_override?: boolean
+  has_start_image?: boolean
+  has_end_image?: boolean
+  image_paths?: string[]
+}): Promise<H3WindowPlan> {
+  const res = await fetch(`${BASE}/api/v1/llm/plan-h3-windows`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'H3 window planning failed' }))
+    throw new Error(err.detail || 'H3 window planning failed')
   }
   return res.json()
 }
@@ -312,7 +337,7 @@ export async function cancelJob(jobId: string): Promise<void> {
 export async function fetchActiveJobs(): Promise<{ jobs: Array<{
   job_id: string; status: string; progress: number; step: number;
   total_steps: number; phase: string; message: string; output_files: string[];
-  error: string | null; created_at: number;
+  error: string | null; created_at: number; h3_window_plan?: H3WindowPlan | null;
 }> }> {
   const res = await fetch(`${BASE}/api/v1/jobs`)
   if (!res.ok) throw new Error('Failed to fetch jobs')

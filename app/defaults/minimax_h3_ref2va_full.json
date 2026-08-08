@@ -2,7 +2,7 @@
     "model": {
         "name": "H3 Omni — Full",
         "architecture": "minimax_h3_ref2va_full",
-        "description": "Full 33B MiniMax H3 Omni model. Ordered image, video, and audio references can guide identity, appearance, motion, scenes, voices, or sound while H3 generates one synchronized video-and-audio shot up to 14.4 seconds. This heavier checkpoint is required for Turbo / distilled H3 LoRAs.",
+        "description": "Full 33B MiniMax H3 Omni model. Ordered image, video, and audio references can guide identity, appearance, motion, scenes, voices, or sound while H3 generates one synchronized video-and-audio shot up to 14.4 seconds. Turbo works with both Full and Pruned; use Full only when you specifically want its larger checkpoint.",
         "minimax_h3_qkv_layout": "interleaved",
         "URLs": [
             "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/fec7846aef352e58a1cfb699455e3d104281e68b/MiniMax-H3-Ref2VA_bf16.safetensors",

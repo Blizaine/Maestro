@@ -50,7 +50,63 @@ VIDEO_DEPTH_CHECKPOINTS = {
 }
 
 
+# WanGP's affine fit packages let one MiniMax H3 LoRA target both the Full
+# 33B timestep MLP and the compressed AdaLN curve used by Pruned 20B.  They
+# are tiny support tensors rather than generation weights, but pin and verify
+# them exactly like a model so a changed upstream file cannot silently alter
+# an adapter at load time.
+_H3_AFFINE_MAP_REVISION = "1830091bf4b27df2f901920d55b1fb748f33e7eb"
+_H3_AFFINE_MAP_BASE_URL = (
+    "https://raw.githubusercontent.com/deepbeepmeep/Wan2GP/"
+    f"{_H3_AFFINE_MAP_REVISION}/models/minimax_h3/lora_affine_maps"
+)
+MINIMAX_H3_LORA_AFFINE_MAPS = {
+    "fl2va": {
+        8: {
+            "filename": "fl2va_rank8.sft",
+            "size": 130_072,
+            "sha256": "a42778e02ab2708dc70e23837ec4d3061b44f938c940decbc7a5b91f2c27c59e",
+        },
+        64: {
+            "filename": "fl2va_rank64.sft",
+            "size": 955_640,
+            "sha256": "df40361cba88c9d6cf300a90d506ed349b349bd23babb6b94f15ab2df1b00f6e",
+        },
+    },
+    "ref2va": {
+        8: {
+            "filename": "ref2va_rank8.sft",
+            "size": 130_072,
+            "sha256": "7179899e59fce9c36038cd6c0c57edaced0032c769c436cef234b07bf809381f",
+        },
+        64: {
+            "filename": "ref2va_rank64.sft",
+            "size": 955_640,
+            "sha256": "4b661b03438d5d5fcc86be3dad2d9dbbd129720f089f8e94914b369eee198cee",
+        },
+    },
+}
+for _h3_architecture, _h3_width_specs in MINIMAX_H3_LORA_AFFINE_MAPS.items():
+    for _h3_width, _h3_spec in _h3_width_specs.items():
+        _h3_spec.update(
+            {
+                "label": (
+                    f"MiniMax H3 {_h3_architecture.upper()} "
+                    f"rank-{_h3_width} LoRA compatibility"
+                ),
+                "url": f"{_H3_AFFINE_MAP_BASE_URL}/{_h3_spec['filename']}",
+                "source_url": (
+                    "https://github.com/deepbeepmeep/Wan2GP/tree/"
+                    f"{_H3_AFFINE_MAP_REVISION}/models/minimax_h3/"
+                    "lora_affine_maps"
+                ),
+                "license": "WanGP Community License 2.0",
+            }
+        )
+
+
 _video_depth_download_lock = threading.Lock()
+_h3_affine_download_lock = threading.Lock()
 
 
 def uses_temporal_depth(params: dict | None) -> bool:
@@ -120,7 +176,7 @@ def _download_with_resume(
     expected_size = int(spec["size"])
     expected_sha256 = str(spec["sha256"]).casefold()
     filename = str(spec["filename"])
-    url = (
+    url = spec.get("url") or (
         f"https://huggingface.co/{spec['repo_id']}/resolve/"
         f"{spec['revision']}/{filename}"
     )
@@ -225,11 +281,14 @@ def _download_with_resume(
                 os.remove(partial_path)
         except OSError:
             pass
+        source_url = spec.get("source_url") or (
+            f"https://huggingface.co/{spec['repo_id']}"
+        )
         raise RuntimeError(
             f"Could not download the {label} model automatically: {exc}. "
             f"Check your internet connection and retry. You can also place "
             f"the official checkpoint at '{save_path}'. Source: "
-            f"https://huggingface.co/{spec['repo_id']} "
+            f"{source_url} "
             f"({spec['license']})."
         ) from exc
 
@@ -266,3 +325,61 @@ def ensure_video_depth_checkpoint(
         if _is_complete_checkpoint(save_path, spec):
             return save_path
         return _download_with_resume(spec, save_path, progress)
+
+
+def ensure_minimax_h3_lora_affine_maps(
+    architecture: str,
+    widths: tuple[int, ...] = (8, 64),
+    progress: ProgressCallback | None = None,
+) -> list[str]:
+    """Provision the tiny Full/Pruned H3 LoRA compatibility packages."""
+
+    architecture = str(architecture or "").strip().casefold()
+    architecture_specs = MINIMAX_H3_LORA_AFFINE_MAPS.get(architecture)
+    if architecture_specs is None:
+        supported = ", ".join(sorted(MINIMAX_H3_LORA_AFFINE_MAPS))
+        raise RuntimeError(
+            f"Unsupported MiniMax H3 LoRA architecture '{architecture}'. "
+            f"Supported architectures: {supported}."
+        )
+
+    requested = []
+    for width in widths:
+        try:
+            width = int(width)
+        except (TypeError, ValueError) as error:
+            raise RuntimeError(
+                f"Invalid MiniMax H3 LoRA compatibility width '{width}'."
+            ) from error
+        spec = architecture_specs.get(width)
+        if spec is None:
+            supported = ", ".join(str(item) for item in sorted(architecture_specs))
+            raise RuntimeError(
+                f"Unsupported MiniMax H3 {architecture} LoRA compatibility "
+                f"width {width}. Supported widths: {supported}."
+            )
+        relative_path = os.path.join(
+            "minimax_h3",
+            "lora_affine_maps",
+            str(spec["filename"]),
+        )
+        requested.append((relative_path, spec))
+
+    resolved = []
+    with _h3_affine_download_lock:
+        for relative_path, spec in requested:
+            located = fl.locate_file(relative_path, error_if_none=False)
+            if _is_complete_checkpoint(located, spec):
+                resolved.append(str(located))
+                continue
+            if located:
+                print(
+                    f"[ManagedPreprocessor] Ignoring incomplete {spec['label']} "
+                    f"checkpoint at {located}"
+                )
+            save_path = os.path.abspath(fl.get_download_location(relative_path))
+            if _is_complete_checkpoint(save_path, spec):
+                resolved.append(save_path)
+                continue
+            resolved.append(_download_with_resume(spec, save_path, progress))
+    return resolved

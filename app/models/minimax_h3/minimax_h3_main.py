@@ -58,7 +58,12 @@ from .ref2va import (
     trim_reference_num_frames,
 )
 from .scheduler import MiniMaxH3Scheduler
-from .transformer import MiniMaxH3Transformer, get_linear_split_map
+from .first_block_cache import MiniMaxH3FirstBlockCache
+from .transformer import (
+    MiniMaxH3Transformer,
+    _activation_chunk_tokens,
+    get_linear_split_map,
+)
 from .turbo import (
     MINIMAX_H3_TURBO_MIN_STEPS,
     find_minimax_h3_turbo_loras,
@@ -560,13 +565,6 @@ class MiniMaxH3Model:
         turbo_paths = tuple(find_minimax_h3_turbo_loras(loras_selected))
         self._turbo_lora_paths = turbo_paths
         self._turbo_lora_active = bool(turbo_paths)
-        if turbo_paths and self.transformer.use_adaln_curves:
-            names = ", ".join(os.path.basename(path) for path in turbo_paths)
-            raise ValueError(
-                "MiniMax H3 Turbo LoRA currently requires Maestro's Full 33B "
-                f"FL2VA or Ref2VA model; the selected Pruned 20B model uses a different "
-                f"time-conditioning layout. Incompatible LoRA: {names}"
-            )
 
     def finalize_loras(self) -> None:
         """Preserve ConvRot math after MMGP attaches active LoRA hooks."""
@@ -905,44 +903,126 @@ class MiniMaxH3Model:
         audio_indices = layout.audio_indices.to(self.device)
         text_indices = layout.text_indices.to(self.device)
 
+        target_starts = []
+        if audio_indices.numel() > layout.num_condition_audio_rows:
+            target_starts.append(
+                int(audio_indices[layout.num_condition_audio_rows].item())
+            )
+        if video_indices.numel() > layout.num_condition_video_rows:
+            target_starts.append(
+                int(video_indices[layout.num_condition_video_rows].item())
+            )
+        target_start_index = (
+            min(target_starts) if target_starts else layout.sequence_length
+        )
+
+        cache_config = getattr(self.transformer, "cache", None)
+        first_block_cache = (
+            MiniMaxH3FirstBlockCache(cache_config)
+            if cache_config is not None
+            and getattr(cache_config, "cache_type", "") == "first_block"
+            else None
+        )
+        if first_block_cache is not None:
+            # WGP seeds num_steps with the per-window inference count before
+            # generation. Replace that seed on the first H3 window, then
+            # accumulate subsequent windows so the final skipped/total log is
+            # accurate instead of double-counting window one.
+            if not getattr(cache_config, "_h3_count_started", False):
+                cache_config.num_steps = 0
+                cache_config._h3_count_started = True
+            cache_config.num_steps += len(timesteps)
+            if not hasattr(cache_config, "skipped_steps"):
+                cache_config.skipped_steps = 0
+
+        # Emit one concise line with the actual path used. This makes slow
+        # user reports actionable without restoring noisy per-request logs.
+        first_block = self.transformer.blocks[0]
+        qkv_mode = (
+            "split"
+            if hasattr(first_block.attn, "q_proj")
+            else "fused"
+        )
+        qkv_width = (
+            first_block.attn.heads * first_block.attn.head_dim
+            if qkv_mode == "split"
+            else first_block.attn.heads * first_block.attn.head_dim * 3
+        )
+        qkv_chunk = _activation_chunk_tokens(
+            layout.sequence_length,
+            self.transformer.config.hidden_size,
+            qkv_width,
+        )
+        mlp_chunk = _activation_chunk_tokens(
+            layout.sequence_length,
+            first_block.mlp.fc1.in_features,
+            first_block.mlp.fc1.out_features,
+        )
+        attention_backend = str(
+            offload.shared_state.get("_attention", "sdpa")
+        )
+        cache_label = (
+            f"first-block/{first_block_cache.threshold:g}"
+            if first_block_cache is not None
+            else "off"
+        )
+        print(
+            "[MiniMax H3 Perf] "
+            f"{width}x{height}, {frame_num} frames/{duration:.2f}s, "
+            f"{layout.sequence_length:,} packed rows, {len(timesteps)} steps; "
+            f"attention={attention_backend}, qkv={qkv_mode} "
+            f"{(layout.sequence_length + qkv_chunk - 1) // qkv_chunk}x"
+            f"{qkv_chunk:,}, mlp "
+            f"{(layout.sequence_length + mlp_chunk - 1) // mlp_chunk}x"
+            f"{mlp_chunk:,}, cache={cache_label}."
+        )
+
         if callback is not None:
             callback(-1, None, True, override_num_inference_steps=len(timesteps))
-        with tqdm(total=len(timesteps), desc="MiniMax H3 denoising") as progress:
-            for index, (video_timestep, audio_timestep) in enumerate(zip(timesteps, audio_timesteps)):
-                if self._interrupt:
-                    return None
-                unique_timesteps, timestep_indices = row_plan[index]
-                prediction = self.transformer(
-                    hidden_states=video_rows[None],
-                    audio_hidden_states=audio_rows[None],
-                    encoder_hidden_states=prompt_embeds,
-                    timestep=unique_timesteps,
-                    timestep_indices=timestep_indices,
-                    token_tags=token_tags,
-                    position_ids=position_ids,
-                    video_indices=video_indices,
-                    audio_indices=audio_indices,
-                    text_indices=text_indices,
-                    return_dict=False,
-                )
-                if prediction is None or self._interrupt:
-                    return None
-                video_velocity, audio_velocity = prediction
-                video_rows[layout.num_condition_video_rows :] = self.scheduler.step(
-                    video_velocity[0, layout.num_condition_video_rows :].float(),
-                    video_timestep,
-                    video_rows[layout.num_condition_video_rows :],
-                    return_dict=False,
-                )[0]
-                audio_rows[layout.num_condition_audio_rows :] = self.audio_scheduler.step(
-                    audio_velocity[0, layout.num_condition_audio_rows :].float(),
-                    audio_timestep,
-                    audio_rows[layout.num_condition_audio_rows :],
-                    return_dict=False,
-                )[0]
-                if callback is not None:
-                    callback(index, None)
-                progress.update()
+        try:
+            with tqdm(total=len(timesteps), desc="MiniMax H3 denoising") as progress:
+                for index, (video_timestep, audio_timestep) in enumerate(zip(timesteps, audio_timesteps)):
+                    if self._interrupt:
+                        return None
+                    if first_block_cache is not None:
+                        first_block_cache.begin_step(index)
+                    unique_timesteps, timestep_indices = row_plan[index]
+                    prediction = self.transformer(
+                        hidden_states=video_rows[None],
+                        audio_hidden_states=audio_rows[None],
+                        encoder_hidden_states=prompt_embeds,
+                        timestep=unique_timesteps,
+                        timestep_indices=timestep_indices,
+                        token_tags=token_tags,
+                        position_ids=position_ids,
+                        video_indices=video_indices,
+                        audio_indices=audio_indices,
+                        text_indices=text_indices,
+                        return_dict=False,
+                        first_block_cache=first_block_cache,
+                        target_start_index=target_start_index,
+                    )
+                    if prediction is None or self._interrupt:
+                        return None
+                    video_velocity, audio_velocity = prediction
+                    video_rows[layout.num_condition_video_rows :] = self.scheduler.step(
+                        video_velocity[0, layout.num_condition_video_rows :].float(),
+                        video_timestep,
+                        video_rows[layout.num_condition_video_rows :],
+                        return_dict=False,
+                    )[0]
+                    audio_rows[layout.num_condition_audio_rows :] = self.audio_scheduler.step(
+                        audio_velocity[0, layout.num_condition_audio_rows :].float(),
+                        audio_timestep,
+                        audio_rows[layout.num_condition_audio_rows :],
+                        return_dict=False,
+                    )[0]
+                    if callback is not None:
+                        callback(index, None)
+                    progress.update()
+        finally:
+            if first_block_cache is not None:
+                first_block_cache.reset()
 
         if self._interrupt:
             return None

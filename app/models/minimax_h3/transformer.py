@@ -21,6 +21,7 @@ Diffusers MiniMax H3 implementation pinned in ``UPSTREAM.md``.
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -39,6 +40,50 @@ MODALITY_COUNT = 3
 # token-wise, so bounded chunks are mathematically equivalent and leave room
 # for attention plus MMGP's streamed transformer blocks on consumer GPUs.
 MINIMAX_H3_ACTIVATION_CHUNK_TOKENS = 8192
+MINIMAX_H3_ADAPTIVE_CHUNK_MAX_TOKENS = 32768
+MINIMAX_H3_LARGE_SEQUENCE_TOKENS = 80000
+
+
+def _activation_chunk_tokens(
+    length: int,
+    input_width: int,
+    output_width: int,
+) -> int:
+    """Choose a larger, allocation-bounded token chunk for H3 projections.
+
+    The historical fixed 8,192-token chunk is safe but makes a native H3
+    sequence execute each QKV/MLP projection through roughly thirteen small
+    launches. WanGP's current H3 path sizes a chunk so its largest expanded
+    projection is about one packed-hidden-state buffer. Keep the fixed value
+    as a floor and explicit test/user override, then apply the same bounded
+    principle with a conservative 32K ceiling.
+    """
+
+    length = max(1, int(length))
+    configured = max(1, int(MINIMAX_H3_ACTIVATION_CHUNK_TOKENS))
+    # Tests and advanced overrides intentionally replace the historical
+    # constant. Honor those values exactly instead of silently adapting them.
+    if configured != 8192:
+        return min(length, configured)
+    if length <= configured:
+        return length
+    # A measured 1280x704 / 345-frame request packs about 91K rows. Expanding
+    # its fused QKV chunk from 8K to ~23K consumed the last allocator
+    # headroom on a 24 GB RTX 4090 before denoising step zero. Keep the
+    # known-safe chunk for that class of full-duration sequence; shorter
+    # windows still receive the adaptive launch-count optimization below.
+    if length >= MINIMAX_H3_LARGE_SEQUENCE_TOKENS:
+        return min(length, configured)
+    input_width = max(1, int(input_width))
+    output_width = max(1, int(output_width))
+    bounded = max(1, (length * input_width) // output_width)
+    bounded = max(
+        configured,
+        min(MINIMAX_H3_ADAPTIVE_CHUNK_MAX_TOKENS, bounded),
+    )
+    # Stable launch sizes reduce allocator churn between blocks.
+    bounded = max(configured, (bounded // 256) * 256)
+    return min(length, bounded)
 
 
 def _split_contiguous_qkv(src, dim, split_sizes, _context):
@@ -122,6 +167,75 @@ def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.
     sin = sin.to(dtype=x.dtype, device=x.device)[None, :, None]
     rotary = rotary * cos + rotated * sin
     return torch.cat((rotary, passthrough), dim=-1)
+
+
+def _apply_rope_inplace(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> torch.Tensor:
+    """Apply H3 split-half RoPE with one bounded scratch tensor."""
+
+    if torch.is_grad_enabled():
+        return _apply_rope(x, cos, sin)
+    rotary_dim = int(cos.shape[-1])
+    half = rotary_dim // 2
+    if half <= 0:
+        return x
+    cosine = cos.to(dtype=x.dtype, device=x.device)[None, :, None]
+    sine = sin.to(dtype=x.dtype, device=x.device)[None, :, None]
+    first = x[..., :half]
+    second = x[..., half:rotary_dim]
+    scratch = first.clone()
+    first.mul_(cosine[..., :half]).addcmul_(
+        second,
+        sine[..., :half],
+        value=-1,
+    )
+    second.mul_(cosine[..., half:rotary_dim]).addcmul_(
+        scratch,
+        sine[..., half:rotary_dim],
+    )
+    return x
+
+
+def _run_h3_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: torch.Tensor | None,
+) -> torch.Tensor:
+    """Use Maestro's selected fast attention backend when applicable."""
+
+    # Shared Sage/Flash implementations operate on CUDA half/bfloat16. Keep
+    # CPU and FP32 numerical tests on PyTorch SDPA. Packed H3 production
+    # sequences have no padding, so their normal path reaches Sage2; a real
+    # mask intentionally makes the shared wrapper use SDPA.
+    if query.device.type == "cuda" and query.dtype in {
+        torch.float16,
+        torch.bfloat16,
+    }:
+        from shared.attention import pay_attention
+
+        qkv = [query, key, value]
+        return pay_attention(
+            qkv,
+            attention_mask=attention_mask,
+            recycle_q=True,
+        )
+
+    query = query.transpose(1, 2)
+    key = key.transpose(1, 2)
+    value = value.transpose(1, 2)
+    attended = F.scaled_dot_product_attention(
+        query,
+        key,
+        value,
+        attn_mask=attention_mask,
+        dropout_p=0.0,
+        is_causal=False,
+    )
+    return attended.transpose(1, 2)
 
 
 def _index_runs(indices: torch.Tensor) -> tuple[tuple[int, int, int], ...]:
@@ -230,12 +344,30 @@ class MiniMaxH3Attention(nn.Module):
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | list[torch.Tensor],
         rotary: tuple[torch.Tensor, torch.Tensor] | None = None,
         attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # Internal inference callers can transfer ownership in a one-item
+        # list. Popping it lets the normalized packed sequence be released as
+        # soon as Q/K/V are projected instead of retaining another ~1 GB copy
+        # through SDPA on a native 768p full-duration request. Direct tensor
+        # calls remain supported for tests and downstream integrations.
+        if isinstance(hidden_states, list):
+            if len(hidden_states) != 1:
+                raise ValueError("MiniMax H3 attention expects one owned input tensor")
+            hidden_states = hidden_states.pop()
         batch, length, _ = hidden_states.shape
-        chunk_size = max(1, int(MINIMAX_H3_ACTIVATION_CHUNK_TOKENS))
+        projection_width = (
+            self.heads * self.head_dim
+            if hasattr(self, "q_proj")
+            else self.heads * self.head_dim * 3
+        )
+        chunk_size = _activation_chunk_tokens(
+            length,
+            hidden_states.shape[-1],
+            projection_width,
+        )
         if hasattr(self, "q_proj"):
             # MMGP can now stream Q, K, and V independently instead of
             # materializing the checkpoint's 3x fused projection.  Preserve
@@ -254,7 +386,11 @@ class MiniMaxH3Attention(nn.Module):
                         rows = normalization(rows)
                     if rope is not None:
                         cos, sin = rope
-                        rows = _apply_rope(rows, cos[start:end], sin[start:end])
+                        rows = _apply_rope_inplace(
+                            rows,
+                            cos[start:end],
+                            sin[start:end],
+                        )
                     if output is None:
                         output = torch.empty(shape, device=rows.device, dtype=rows.dtype)
                     output[:, start:end].copy_(rows)
@@ -271,8 +407,8 @@ class MiniMaxH3Attention(nn.Module):
             key = self.k_norm(key.view(batch, length, self.heads, self.head_dim))
             value = value.view(batch, length, self.heads, self.head_dim)
             if rotary is not None:
-                query = _apply_rope(query, *rotary)
-                key = _apply_rope(key, *rotary)
+                query = _apply_rope_inplace(query, *rotary)
+                key = _apply_rope_inplace(key, *rotary)
         else:
             # Keep only Q/K/V themselves resident.  The fused projection,
             # normalization, and RoPE temporaries are bounded to one chunk.
@@ -292,8 +428,16 @@ class MiniMaxH3Attention(nn.Module):
                 v_chunk = v_chunk.view(batch, chunk_length, self.heads, self.head_dim)
                 if rotary is not None:
                     cos, sin = rotary
-                    q_chunk = _apply_rope(q_chunk, cos[start:end], sin[start:end])
-                    k_chunk = _apply_rope(k_chunk, cos[start:end], sin[start:end])
+                    q_chunk = _apply_rope_inplace(
+                        q_chunk,
+                        cos[start:end],
+                        sin[start:end],
+                    )
+                    k_chunk = _apply_rope_inplace(
+                        k_chunk,
+                        cos[start:end],
+                        sin[start:end],
+                    )
                 if query is None:
                     query = torch.empty(shape, device=q_chunk.device, dtype=q_chunk.dtype)
                     key = torch.empty(shape, device=k_chunk.device, dtype=k_chunk.dtype)
@@ -303,21 +447,20 @@ class MiniMaxH3Attention(nn.Module):
                 value[:, start:end].copy_(v_chunk)
             assert query is not None and key is not None and value is not None
             qkv = q_chunk = k_chunk = v_chunk = None
-        query = query.transpose(1, 2)
-        key = key.transpose(1, 2)
-        value = value.transpose(1, 2)
+        # All projections are complete. Drop our final input reference before
+        # allocating the attention result; owned callers have already removed
+        # theirs from the transfer list.
+        hidden_states = None
         if attention_mask is not None:
             attention_mask = attention_mask[None, None].to(device=query.device)
-        attended = F.scaled_dot_product_attention(
+        attended = _run_h3_attention(
             query,
             key,
             value,
-            attn_mask=attention_mask,
-            dropout_p=0.0,
-            is_causal=False,
+            attention_mask,
         )
         query = key = value = qkv = None
-        attended = attended.transpose(1, 2).reshape(batch, length, self.heads * self.head_dim)
+        attended = attended.reshape(batch, length, self.heads * self.head_dim)
         return self.out_proj(attended)
 
 
@@ -340,14 +483,29 @@ class MiniMaxH3MLP(nn.Module):
             return self.fc2(value * F.silu(gate))
 
         length = hidden_states.shape[1]
-        chunk_size = max(1, int(MINIMAX_H3_ACTIVATION_CHUNK_TOKENS))
+        chunk_size = _activation_chunk_tokens(
+            length,
+            hidden_states.shape[-1],
+            self.fc1.out_features,
+        )
         if length <= chunk_size:
             return project(hidden_states)
 
-        output = torch.empty_like(hidden_states)
+        # Each token is independent in the MLP. During inference this input is
+        # the freshly normalized/modulated branch, so recycle its storage for
+        # the projected rows just as the current upstream H3 implementation
+        # does. This removes one full sequence x hidden allocation. Preserve
+        # an ordinary output tensor when autograd is active.
+        output = (
+            torch.empty_like(hidden_states)
+            if torch.is_grad_enabled()
+            else hidden_states
+        )
         for start in range(0, length, chunk_size):
             end = min(length, start + chunk_size)
-            output[:, start:end].copy_(project(hidden_states[:, start:end]))
+            projected = project(hidden_states[:, start:end])
+            output[:, start:end].copy_(projected)
+            del projected
         return output
 
 
@@ -473,21 +631,56 @@ class MiniMaxH3Block(nn.Module):
         adaln_runs: tuple[tuple[int, int, int], ...],
         rotary: tuple[torch.Tensor, torch.Tensor],
         attention_mask: torch.Tensor | None,
-    ) -> torch.Tensor:
+        residual_signature_elements: int = 0,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         shift_attn, scale_attn, gate_attn, shift_mlp, scale_mlp, gate_mlp = self.adaln_proj(curve)
-        normed = _modulate_by_runs(self.norm1(hidden_states), shift_attn, scale_attn, adaln_runs)
-        attn_output = _scale_by_runs(self.attn(normed, rotary, attention_mask), gate_attn, adaln_runs)
+        # Transfer the attention input rather than retaining it in this stack
+        # frame through the packed SDPA call. Attention empties the list once
+        # it owns the tensor and releases the storage after Q/K/V projection.
+        attention_input = [
+            _modulate_by_runs(
+                self.norm1(hidden_states),
+                shift_attn,
+                scale_attn,
+                adaln_runs,
+            )
+        ]
+        attn_output = _scale_by_runs(
+            self.attn(attention_input, rotary, attention_mask),
+            gate_attn,
+            adaln_runs,
+        )
+        signature = None
+        signature_stride = 0
+        if residual_signature_elements:
+            signature_stride = max(
+                1,
+                math.ceil(hidden_states.numel() / residual_signature_elements),
+            )
+            signature = attn_output.reshape(-1)[::signature_stride].clone()
         if not torch.is_grad_enabled():
             hidden_states.add_(attn_output)
         else:
             hidden_states = hidden_states + attn_output
-        del normed, attn_output
+        del attention_input, attn_output
         normed = _modulate_by_runs(self.norm2(hidden_states), shift_mlp, scale_mlp, adaln_runs)
         mlp_output = _scale_by_runs(self.mlp(normed), gate_mlp, adaln_runs)
+        if signature is not None:
+            signature.add_(mlp_output.reshape(-1)[::signature_stride])
         if not torch.is_grad_enabled():
             hidden_states.add_(mlp_output)
-            return hidden_states
-        return hidden_states + mlp_output
+            del normed, mlp_output
+            return (
+                (hidden_states, signature)
+                if signature is not None
+                else hidden_states
+            )
+        hidden_states = hidden_states + mlp_output
+        return (
+            (hidden_states, signature)
+            if signature is not None
+            else hidden_states
+        )
 
 
 class MiniMaxH3FinalLayer(nn.Module):
@@ -622,17 +815,44 @@ class MiniMaxH3Transformer(nn.Module):
         )
         self._interrupt = False
 
-    def preprocess_loras(self, _model_type: str, state_dict: dict) -> dict:
-        """Keep H3 adapters in their logical grouped ``[Q, K, V]`` layout.
+    def preprocess_loras(self, model_type: str, state_dict: dict) -> dict:
+        """Adapt AdaLN width while keeping logical grouped ``[Q, K, V]``.
 
         Raw full-model checkpoints may need a head-interleaved-to-split loader,
         but LoRAs target the already-instantiated H3 module used for training.
         Its fused projection is consumed with ``qkv.chunk(3)``, so adapter B
         rows are already grouped and MMGP's contiguous Q/K/V split is correct.
-        Reordering those rows here corrupts all attention adapters.
+        Reordering those rows here corrupts all attention adapters. Full and
+        Pruned checkpoints do use different AdaLN input widths, so convert only
+        that projection with WanGP's revision-pinned affine fit.
         """
 
-        return state_dict
+        from .lora_affine import convert_adaln_loras
+
+        converted = dict(state_dict)
+        started = time.perf_counter()
+        count, architecture, source_width, target_width = convert_adaln_loras(
+            model_type,
+            converted,
+            self.adaln_t_table if self.use_adaln_curves else None,
+        )
+        if count:
+            source = (
+                f"full AdaLN width {source_width}"
+                if source_width == 2688
+                else f"{architecture.upper()} pruned AdaLN width {source_width}"
+            )
+            target = (
+                f"full AdaLN width {target_width}"
+                if target_width == 2688
+                else f"{architecture.upper()} pruned AdaLN width {target_width}"
+            )
+            print(
+                f"[MiniMax H3 LoRA] Converted {count} AdaLN adapter(s) "
+                f"from {source} to {target} in "
+                f"{time.perf_counter() - started:.2f}s."
+            )
+        return converted
 
     def _curve_at(self, timestep: torch.Tensor, device: torch.device) -> torch.Tensor:
         if not self.use_adaln_curves:
@@ -656,6 +876,8 @@ class MiniMaxH3Transformer(nn.Module):
         audio_indices: torch.Tensor,
         text_indices: torch.Tensor,
         return_dict: bool = True,
+        first_block_cache=None,
+        target_start_index: int | None = None,
         **_kwargs,
     ) -> MiniMaxH3TransformerOutput | tuple[torch.Tensor, torch.Tensor] | None:
         if self._interrupt:
@@ -695,16 +917,67 @@ class MiniMaxH3Transformer(nn.Module):
         if bool(padding.any()):
             attention_mask = padding[:, None] == padding[None, :]
 
-        for block in self.blocks:
+        if first_block_cache is None:
+            for block in self.blocks:
+                if self._interrupt:
+                    return None
+                packed = block(
+                    packed,
+                    curve,
+                    adaln_runs,
+                    rotary,
+                    attention_mask,
+                )
+        else:
             if self._interrupt:
                 return None
-            packed = block(
+            packed, signature = self.blocks[0](
                 packed,
                 curve,
                 adaln_runs,
                 rotary,
                 attention_mask,
+                residual_signature_elements=(
+                    first_block_cache.MAX_SIGNATURE_ELEMENTS
+                ),
             )
+            if target_start_index is None:
+                # Backward-compatible direct calls have no reference-row
+                # counts, so fall back to the first media row. Production
+                # callers pass the exact start of generated audio/video.
+                target_starts = []
+                if audio_indices.numel():
+                    target_starts.append(int(audio_indices[0].item()))
+                if video_indices.numel():
+                    target_starts.append(int(video_indices[0].item()))
+                target_start = min(target_starts) if target_starts else 0
+            else:
+                target_start = max(
+                    0,
+                    min(sequence_length, int(target_start_index)),
+                )
+            if first_block_cache.should_compute(signature):
+                head_output = first_block_cache.capture_head_output(
+                    packed[:, target_start:]
+                )
+                for block in self.blocks[1:]:
+                    if self._interrupt:
+                        return None
+                    packed = block(
+                        packed,
+                        curve,
+                        adaln_runs,
+                        rotary,
+                        attention_mask,
+                    )
+                first_block_cache.store_tail_residual(
+                    packed[:, target_start:],
+                    head_output,
+                )
+            else:
+                first_block_cache.apply_tail_residual(
+                    packed[:, target_start:]
+                )
 
         packed = self.final_layer(packed, curve, timestep_runs)
         video_activations = packed.index_select(1, video_indices).to(torch.float32)

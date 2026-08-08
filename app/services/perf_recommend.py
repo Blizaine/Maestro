@@ -353,6 +353,26 @@ _H3_MIN_ACTIVATION_RESERVE_GB = 5.0
 _H3_MAX_WEIGHT_BUDGET_GB = 18.0
 _H3_MIN_WEIGHT_BUDGET_GB = 3.5
 _H3_VIDEO_REFERENCE_RESERVE_GB = 10.0
+# MMGP applies the transformer's fixed ``workingVRAM`` reserve independently,
+# so there is no reason to repeat it for baseline 540p jobs.  Once the packed
+# sequence grows materially beyond that baseline, however, the fixed reserve
+# no longer represents H3's Q/K/V and residual peak. Native 768p x 345 frames
+# is almost 2x the baseline token load and hard-OOMed a 24 GB 4090 while MMGP
+# kept 13.35 GB of weights resident. H3 now routes through the shared
+# allocation-efficient attention backend and bounds projection temporaries.
+# A subsequent 1280x704 x 345-frame measurement still filled 24.0/24.6 GB at
+# a 9.9 GB transformer cap, before denoising step zero. Preserve enough room
+# for that measured full-window peak while shorter recommended windows retain
+# more transformer residency and therefore run faster.
+# Begin dynamic residency before the native packed sequence is 25% above
+# baseline. The measured 720p / 243-frame recommendation is already 1.22x;
+# relying on the generic cap there leaves too little real-world allocator
+# margin on display-attached cards.
+_H3_RUNTIME_SCALING_MIN_RATIO = 1.10
+_H3_LARGE_CANVAS_MIN_PIXELS = 1_400_000
+_H3_NATIVE_RUNTIME_EXCESS_SCALE = 0.70
+_H3_NATIVE_RUNTIME_SAFETY_MARGIN_GB = 1.0
+_H3_LARGE_CANVAS_RUNTIME_SAFETY_MARGIN_GB = 1.0
 
 
 def _parse_resolution(resolution) -> Optional[tuple]:
@@ -385,6 +405,8 @@ def compute_h3_weight_budget(
     resolution: Optional[str],
     video_length_frames: Optional[int],
     video_reference_count: int = 0,
+    runtime_workspace_gb: float = 0.0,
+    additional_reserve_gb: float = 0.0,
 ) -> dict:
     """Reserve packed-sequence activation memory for a MiniMax H3 job.
 
@@ -395,6 +417,14 @@ def compute_h3_weight_budget(
     model cap to 19.3 GB and the process exited during its first denoising
     step.  The same class of jobs had worked under the old incidental
     two-stage reserve at roughly a 17.5 GB cap.
+
+    ``runtime_workspace_gb`` is MMGP's transformer's fixed working-VRAM
+    allowance. It is already supplied to MMGP independently, so baseline jobs
+    do not count it twice. When packed-token load materially exceeds the
+    baseline, the excess is scaled to cover the larger Q/K/V and residual
+    tensors. Native canvases use partial scaling to retain useful model
+    residency; experimental large canvases retain the stricter measured
+    scaling that prevents the observed 1080p OOM.
 
     Returns the maximum resident-weight budget and the activation reserve
     used to derive it.  MMGP streams weights that do not fit the budget.
@@ -410,6 +440,11 @@ def compute_h3_weight_budget(
             "activation_reserve_gb": 0.0,
             "compute_ratio": 1.0,
             "video_reference_count": max(0, int(video_reference_count or 0)),
+            "runtime_workspace_gb": 0.0,
+            "scaled_runtime_workspace_gb": 0.0,
+            "runtime_scaling_active": False,
+            "runtime_safety_margin_gb": 0.0,
+            "additional_reserve_gb": 0.0,
         }
 
     parsed = _parse_resolution(resolution)
@@ -436,7 +471,48 @@ def compute_h3_weight_budget(
     reference_reserve_gb = (
         _H3_VIDEO_REFERENCE_RESERVE_GB * reference_count * compute_ratio
     )
-    requested_reserve_gb = base_reserve_gb + reference_reserve_gb
+    try:
+        runtime_workspace_gb = max(0.0, float(runtime_workspace_gb or 0.0))
+    except (TypeError, ValueError):
+        runtime_workspace_gb = 0.0
+    runtime_scaling_active = (
+        runtime_workspace_gb > 0.0
+        and compute_ratio >= _H3_RUNTIME_SCALING_MIN_RATIO
+    )
+    large_canvas = pixels >= _H3_LARGE_CANVAS_MIN_PIXELS
+    runtime_excess_scale = (
+        1.0 if large_canvas else _H3_NATIVE_RUNTIME_EXCESS_SCALE
+    )
+    scaled_runtime_workspace_gb = (
+        runtime_workspace_gb
+        * (1.0 + (compute_ratio - 1.0) * runtime_excess_scale)
+        if runtime_scaling_active
+        else 0.0
+    )
+    try:
+        additional_reserve_gb = max(0.0, float(additional_reserve_gb or 0.0))
+    except (TypeError, ValueError):
+        additional_reserve_gb = 0.0
+    # MMGP budgets against total device memory. Keep an extra allocator and
+    # Windows display/browser margin once a pass exceeds H3's measured
+    # baseline load. Large experimental canvases retain the full-gigabyte
+    # margin; native canvases use a smaller one to preserve useful residency.
+    runtime_safety_margin_gb = 0.0
+    if scaled_runtime_workspace_gb > 0:
+        runtime_safety_margin_gb = (
+            _H3_LARGE_CANVAS_RUNTIME_SAFETY_MARGIN_GB
+            if large_canvas
+            else _H3_NATIVE_RUNTIME_SAFETY_MARGIN_GB
+        )
+    # The analytical reserve already includes any reference-video surcharge.
+    # Treat the runtime measurement as a lower bound rather than adding it a
+    # second time.  At the ordinary H3 canvas this mirrors MMGP's workingVRAM
+    # cap; at 1080p it tightens model residency in proportion to the larger
+    # packed sequence.
+    requested_reserve_gb = max(
+        base_reserve_gb + reference_reserve_gb,
+        scaled_runtime_workspace_gb,
+    ) + runtime_safety_margin_gb + additional_reserve_gb
 
     # Always leave enough room to stream at least a small transformer slice.
     max_reserve_gb = max(0.0, total_vram_gb - _H3_MIN_WEIGHT_BUDGET_GB)
@@ -450,6 +526,11 @@ def compute_h3_weight_budget(
         "activation_reserve_gb": activation_reserve_gb,
         "compute_ratio": compute_ratio,
         "video_reference_count": reference_count,
+        "runtime_workspace_gb": runtime_workspace_gb,
+        "scaled_runtime_workspace_gb": scaled_runtime_workspace_gb,
+        "runtime_scaling_active": runtime_scaling_active,
+        "runtime_safety_margin_gb": runtime_safety_margin_gb,
+        "additional_reserve_gb": additional_reserve_gb,
     }
 
 

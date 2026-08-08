@@ -116,6 +116,29 @@ class TestTemporalDepthAssetRegistry(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Unsupported.*variant"):
             self.module.ensure_video_depth_checkpoint("vitg")
 
+    def test_h3_lora_affine_packages_are_revision_pinned(self):
+        maps = self.module.MINIMAX_H3_LORA_AFFINE_MAPS
+        self.assertEqual(set(maps), {"fl2va", "ref2va"})
+        expected = {
+            ("fl2va", 8): (
+                130_072,
+                "a42778e02ab2708dc70e23837ec4d3061b44f938c940decbc7a5b91f2c27c59e",
+            ),
+            ("ref2va", 8): (
+                130_072,
+                "7179899e59fce9c36038cd6c0c57edaced0032c769c436cef234b07bf809381f",
+            ),
+        }
+        for key, (size, sha256) in expected.items():
+            architecture, width = key
+            spec = maps[architecture][width]
+            self.assertEqual(spec["size"], size)
+            self.assertEqual(spec["sha256"], sha256)
+            self.assertIn(
+                "1830091bf4b27df2f901920d55b1fb748f33e7eb",
+                spec["url"],
+            )
+
 
 class TestTemporalDepthDownloadSafety(unittest.TestCase):
     @classmethod
@@ -181,6 +204,23 @@ class TestTemporalDepthDownloadSafety(unittest.TestCase):
                 {"Range": f"bytes={split}-"},
             )
 
+    def test_verified_downloader_accepts_a_pinned_direct_source_url(self):
+        payload = b"small-h3-affine-map"
+        spec = self._spec(payload)
+        spec["url"] = "https://raw.example.invalid/pinned/affine.sft"
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = os.path.join(directory, "minimax_h3", "affine.sft")
+            with mock.patch.object(
+                self.module.requests,
+                "get",
+                return_value=_FakeResponse(payload),
+            ) as request:
+                self.module._download_with_resume(spec, target)
+
+            self.assertEqual(request.call_args.args[0], spec["url"])
+            self.assertEqual(Path(target).read_bytes(), payload)
+
     def test_hash_mismatch_never_publishes_checkpoint(self):
         payload = b"expected checkpoint"
         corrupted = b"corrupt! checkpoint"
@@ -221,6 +261,14 @@ class TestTemporalDepthWiring(unittest.TestCase):
         self.assertNotIn(
             'fl.locate_file(f"depth/video_depth_anything_', segment,
         )
+
+    def test_h3_lora_affine_preflight_runs_before_managed_lora_download(self):
+        launch = _LAUNCH_PATH.read_text(encoding="utf-8")
+        affine = launch.index("ensure_minimax_h3_lora_affine_maps(")
+        managed_lora = launch.index(
+            "_ensure_managed_loras_present(", affine,
+        )
+        self.assertLess(affine, managed_lora)
 
     def test_official_inference_source_and_license_are_vendored(self):
         expected = (

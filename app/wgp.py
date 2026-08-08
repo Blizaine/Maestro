@@ -772,7 +772,11 @@ def validate_settings(state, model_type, single_prompt, inputs):
     model_def = get_model_def(model_type)
     model_handler = get_model_handler(model_type)
     image_outputs = inputs["image_mode"] > 0
-    any_steps_skipping = model_def.get("tea_cache", False) or model_def.get("mag_cache", False)
+    any_steps_skipping = (
+        model_def.get("tea_cache", False)
+        or model_def.get("mag_cache", False)
+        or model_def.get("first_block_cache", False)
+    )
     model_type = get_base_model_type(model_type)
 
     model_filename = get_model_filename(model_type)  
@@ -817,6 +821,9 @@ def validate_settings(state, model_type, single_prompt, inputs):
     resolution = inputs["resolution"]
     # Resolve auto resolution early — compute from reference image before validation
     if not resolution or "x" not in resolution or resolution.startswith("auto"):
+        _resolution_hint = str(resolution or "auto")
+        _auto_budgets = model_def.get("auto_resolution_budgets") or {}
+        _auto_fallbacks = model_def.get("auto_resolution_fallbacks") or {}
         _val_refs = inputs.get("image_refs")
         _val_start = inputs.get("image_start")
         _val_ref_path = None
@@ -837,7 +844,14 @@ def validate_settings(state, model_type, single_prompt, inputs):
             _ri.close()
 
         if _rw and _rh:
-            _budget = 1920 * 1088 if "1080" in str(resolution) else (848 * 480 if "480" in str(resolution) else 1280 * 720)
+            if _resolution_hint in _auto_budgets:
+                _budget = int(_auto_budgets[_resolution_hint])
+            elif "1080" in _resolution_hint:
+                _budget = 1920 * 1088
+            elif "480" in _resolution_hint:
+                _budget = 848 * 480
+            else:
+                _budget = 1280 * 720
             _bs = model_def.get("block_size", 16)
             _sc = (_budget / (_rw * _rh)) ** 0.5
             _aw = int(round(_rw * _sc / _bs)) * _bs
@@ -846,7 +860,10 @@ def validate_settings(state, model_type, single_prompt, inputs):
             inputs["resolution"] = resolution
             print(f"[Auto Resolution] {_rw}x{_rh} ref → {_aw}x{_ah} output")
         else:
-            resolution = "1280x720"
+            resolution = _auto_fallbacks.get(
+                _resolution_hint,
+                "1280x720",
+            )
             inputs["resolution"] = resolution
             print(f"[Auto Resolution] No ref image found, using fallback {resolution}")
     width, height = resolution.split("x")
@@ -955,7 +972,36 @@ def validate_settings(state, model_type, single_prompt, inputs):
     else:
         model_switch_phase = 1
         
-    if not any_steps_skipping: skip_steps_cache_type = ""
+    if not any_steps_skipping:
+        skip_steps_cache_type = ""
+    supported_cache_types = {""}
+    if model_def.get("tea_cache", False):
+        supported_cache_types.add("tea")
+    if model_def.get("mag_cache", False):
+        supported_cache_types.add("mag")
+    if model_def.get("first_block_cache", False):
+        supported_cache_types.add("first_block")
+    if skip_steps_cache_type not in supported_cache_types:
+        gr.Info(
+            f"This model does not support step-skipping type "
+            f"'{skip_steps_cache_type}'."
+        )
+        return ret()
+    if skip_steps_cache_type == "first_block":
+        try:
+            cache_threshold = float(inputs.get("skip_steps_multiplier", 0.08))
+        except (TypeError, ValueError):
+            cache_threshold = -1
+        thresholds = {
+            float(value)
+            for value in model_def.get("first_block_cache_thresholds", ())
+        }
+        if cache_threshold not in thresholds:
+            gr.Info(
+                f"Unsupported First Block Cache threshold "
+                f"'{cache_threshold}'."
+            )
+            return ret()
     if not model_def.get("lock_inference_steps", False) and model_type in ["ltxv_13B"] and num_inference_steps < 20:
         gr.Info("The minimum number of steps should be 20") 
         return ret()
@@ -2926,6 +2972,33 @@ def normalize_model_total_frame_count(frame_count, model_def):
     ):
         return max(int(model_def.get("frames_minimum", 1)), frame_count)
     return align_model_frame_count(frame_count, model_def)
+
+
+def compute_next_sliding_window_length(
+    remaining_with_context,
+    sliding_window_size,
+    latent_size,
+    model_def,
+):
+    """Size a continuation pass without ever exceeding its window cap.
+
+    Models such as MiniMax H3 keep the requested joined duration exact while
+    requiring every individual pass to land on a model-native frame grid.  A
+    previous exact-duration branch aligned the *entire remaining timeline*
+    but forgot to reapply ``sliding_window_size``.  The first 1080p H3 pass
+    could therefore use the intended 124 frames while pass two silently grew
+    to 226 frames and exhausted VRAM.
+    """
+
+    if model_def.get("sliding_window_exact_total_frames", False):
+        candidate = align_model_frame_count(
+            remaining_with_context,
+            model_def,
+            for_generation=True,
+        )
+    else:
+        candidate = (remaining_with_context // latent_size) * latent_size + 1
+    return min(int(sliding_window_size), int(candidate))
     
 def get_model_fps(model_type):
     model_def = get_model_def(model_type)
@@ -5249,8 +5322,15 @@ def select_video(state, current_gallery_tab, input_file_list, file_selected, aud
             video_skip_steps_multiplier = configs.get("skip_steps_multiplier", 0)
             video_skip_steps_cache_start_step_perc = configs.get("skip_steps_start_step_perc", 0)
             if len(video_skip_steps_cache_type) > 0:
-                video_skip_steps_cache = "TeaCache" if video_skip_steps_cache_type == "tea" else "MagCache"
-                video_skip_steps_cache += f" x{video_skip_steps_multiplier }"
+                video_skip_steps_cache = {
+                    "tea": "TeaCache",
+                    "mag": "MagCache",
+                    "first_block": "First Block Cache",
+                }.get(video_skip_steps_cache_type, video_skip_steps_cache_type)
+                if video_skip_steps_cache_type == "first_block":
+                    video_skip_steps_cache += f" threshold {video_skip_steps_multiplier}"
+                else:
+                    video_skip_steps_cache += f" x{video_skip_steps_multiplier}"
                 if video_skip_steps_cache_start_step_perc >0:  video_skip_steps_cache += f", Start from {video_skip_steps_cache_start_step_perc}%"
                 values += [ video_skip_steps_cache ]
                 labels += [ "Skip Steps" ]
@@ -7172,6 +7252,10 @@ def generate_video(
     minimax_h3_references=None,
     minimax_h3_reference_detail="match",
     minimax_h3_text_encoder="nvfp4_awq",
+    # Complete Context-IR prompts compiled by Maestro's H3 sliding-window
+    # planner. Kept as a real list so semantic newlines inside each prompt are
+    # never mistaken for prompt boundaries.
+    h3_window_prompts=None,
 ):
 
 
@@ -7522,7 +7606,24 @@ def generate_video(
     trans2 = get_transformer_model(wan_model, 2)
     audio_sampling_rate = 16000
 
-    if multi_prompts_gen_type == 2:
+    if (
+        str(model_def.get("architecture") or "").startswith("minimax_h3")
+        and isinstance(h3_window_prompts, (list, tuple))
+        and h3_window_prompts
+    ):
+        prompts = [
+            str(item).strip()
+            for item in h3_window_prompts
+            if isinstance(item, str) and item.strip()
+        ]
+        if not prompts:
+            prompts = [prompt]
+        else:
+            print(
+                f"[MiniMax H3] Using {len(prompts)} explicit "
+                "window-local Context-IR prompts."
+            )
+    elif multi_prompts_gen_type == 2:
         prompts = [prompt]
     else:
         prompts = prompt.split("\n")
@@ -7767,6 +7868,8 @@ def generate_video(
         elif skip_steps_cache_type == "tea":
             def_tea_coefficients = model_def.get("teacache_coefficients", None) if model_def != None else None
             if def_tea_coefficients is not None: skip_steps_cache.coefficients = def_tea_coefficients
+        elif skip_steps_cache_type == "first_block":
+            pass
         else:
             raise Exception(f"unknown cache type {skip_steps_cache_type}")
     trans.cache = skip_steps_cache
@@ -8090,17 +8193,12 @@ def generate_video(
                     + reuse_frames
                     + discard_last_frames
                 )
-                if model_def.get("sliding_window_exact_total_frames", False):
-                    current_video_length = align_model_frame_count(
-                        remaining_with_context,
-                        model_def,
-                        for_generation=True,
-                    )
-                else:
-                    current_video_length = min(
-                        sliding_window_size,
-                        (remaining_with_context // latent_size) * latent_size + 1,
-                    )
+                current_video_length = compute_next_sliding_window_length(
+                    remaining_with_context,
+                    sliding_window_size,
+                    latent_size,
+                    model_def,
+                )
 
             total_windows = initial_total_windows + extra_windows
             gen["total_windows"] = total_windows
@@ -10579,7 +10677,11 @@ def prepare_inputs_dict(target, inputs, model_type = None, model_filename = None
         pop += ["alt_scale"]
 
 
-    if not (model_def.get("tea_cache", False) or model_def.get("mag_cache", False)) :
+    if not (
+        model_def.get("tea_cache", False)
+        or model_def.get("mag_cache", False)
+        or model_def.get("first_block_cache", False)
+    ):
         pop += ["skip_steps_cache_type", "skip_steps_multiplier", "skip_steps_start_step_perc"]
 
     guidance_max_phases = model_def.get("guidance_max_phases", 0)
@@ -12158,6 +12260,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
             lock_inference_steps = model_def.get("lock_inference_steps", False) or (audio_only and not inference_steps_enabled)
             any_tea_cache = model_def.get("tea_cache", False)
             any_mag_cache = model_def.get("mag_cache", False)
+            any_first_block_cache = model_def.get("first_block_cache", False)
             recammaster = base_model_type in ["recam_1.3B"]
             vace = test_vace_module(base_model_type)
             multitalk = model_def.get("multitalk_class", False)
@@ -12928,31 +13031,46 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                             allow_custom_value= True,
                         )
                         loras_multipliers = gr.Textbox(label="Loras Multipliers (1.0 by default) separated by Space chars or CR, lines that start with # are ignored", value=launch_multis_str)
-                with gr.Tab("Steps Skipping", visible = any_tea_cache or any_mag_cache) as speed_tab:
+                with gr.Tab(
+                    "Steps Skipping",
+                    visible=(
+                        any_tea_cache
+                        or any_mag_cache
+                        or any_first_block_cache
+                    ),
+                ) as speed_tab:
                     with gr.Column():
-                        gr.Markdown("<B>Tea Cache and Mag Cache accelerate the Video Generation by skipping intelligently some steps, the more steps are skipped the lower the quality of the video.</B>")
-                        gr.Markdown("<B>Steps Skipping  consumes also VRAM. It is recommended not to skip at least the first 10% steps.</B>")
+                        gr.Markdown("<B>Step-skipping accelerators avoid selected full transformer evaluations. More skipped evaluations may reduce output quality.</B>")
+                        gr.Markdown("<B>Keep an initial warmup so the accelerator can establish a stable history.</B>")
                         steps_skipping_choices = [("None", "")]
                         if any_tea_cache: steps_skipping_choices += [("Tea Cache", "tea")]
                         if any_mag_cache: steps_skipping_choices += [("Mag Cache", "mag")]
+                        if any_first_block_cache: steps_skipping_choices += [("First Block Cache", "first_block")]
                         skip_steps_cache_type = gr.Dropdown(
                             choices= steps_skipping_choices,
-                            value="" if not (any_tea_cache or any_mag_cache) else ui_get("skip_steps_cache_type"),
+                            value="" if not (any_tea_cache or any_mag_cache or any_first_block_cache) else ui_get("skip_steps_cache_type"),
                             visible=True,
                             label="Skip Steps Cache Type"
                         )
  
-                        skip_steps_multiplier = gr.Dropdown(
-                            choices=[
-                                ("around x1.5 speed up", 1.5), 
-                                ("around x1.75 speed up", 1.75), 
-                                ("around x2 speed up", 2.0), 
-                                ("around x2.25 speed up", 2.25), 
-                                ("around x2.5 speed up", 2.5), 
+                        skip_steps_multiplier_choices = model_def.get(
+                            "skip_steps_multiplier_choices",
+                            [
+                                ("around x1.5 speed up", 1.5),
+                                ("around x1.75 speed up", 1.75),
+                                ("around x2 speed up", 2.0),
+                                ("around x2.25 speed up", 2.25),
+                                ("around x2.5 speed up", 2.5),
                             ],
+                        )
+                        skip_steps_multiplier = gr.Dropdown(
+                            choices=skip_steps_multiplier_choices,
                             value=float(ui_get("skip_steps_multiplier")),
                             visible=True,
-                            label="Skip Steps Cache Global Acceleration"
+                            label=model_def.get(
+                                "skip_steps_multiplier_label",
+                                "Skip Steps Cache Global Acceleration",
+                            ),
                         )
                         skip_steps_start_step_perc = gr.Slider(0, 100, value=ui_get("skip_steps_start_step_perc"), step=1, label="Skip Steps starting moment in % of generation", show_reset_button= False) 
 
