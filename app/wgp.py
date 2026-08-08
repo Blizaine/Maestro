@@ -4018,6 +4018,14 @@ def setup_loras(model_type, transformer,  lora_dir, lora_preselected_preset, spl
     return loras, loras_presets, default_loras_choices, default_loras_multis_str, default_lora_preset_prompt, default_lora_preset
 
 def get_transformer_model(model, submodel_no = 1):
+    if model is None:
+        # The model was released (likely after a prior CUDA error) without
+        # being reloaded.  Signal that a fresh load is needed so the next
+        # caller enters the load_models() path instead of reusing None.
+        global reload_needed
+        reload_needed = True
+        raise Exception("no transformer found (model is None — prior generation error may have released it)")
+
     if submodel_no > 1:
         model_key = f"model{submodel_no}"
         if not hasattr(model, model_key): return None

@@ -21136,7 +21136,16 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     cancelled = True
                     break
 
-                if not task_error:
+                if task_error:
+                    # Force model reload for the next task — a CUDA or other
+                    # runtime error may have left the resident model in an
+                    # inconsistent state (corrupted CUDA context, partially
+                    # unloaded tensors, etc.).  Without this flag the next
+                    # task would skip load_models() and reuse the broken
+                    # model, hitting "no transformer found" or another CUDA
+                    # error.
+                    wgp.reload_needed = True
+                else:
                     completed += 1
                     print(f"\n  Task {task_no} completed")
 
