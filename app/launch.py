@@ -40,6 +40,15 @@ _launch_args = sys.argv[1:]  # Save our own args
 _wgp_argv = ["wgp.py", "--multiple-images"]
 if "--compile" in _launch_args:
     _wgp_argv.append("--compile")
+# Forward the config/settings folder flags so deployments (e.g. Docker)
+# can point wgp_config.json, queue.zip and per-model settings at a
+# persistent volume outside the app directory. Launchers that pass no
+# flags (e.g. Pinokio's start.js) are unaffected.
+for _flag in ("--config", "--settings"):
+    if _flag in _launch_args:
+        _i = _launch_args.index(_flag)
+        if _i + 1 < len(_launch_args):
+            _wgp_argv += [_flag, _launch_args[_i + 1]]
 sys.argv = _wgp_argv
 
 # Install download stall-detection BEFORE wgp imports anything that

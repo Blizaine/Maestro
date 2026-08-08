@@ -492,6 +492,24 @@ The first video is always the slow one: install is ~10–20 min, then the first 
 
 The install (without model downloads) typically takes **10–20 minutes** depending on internet speed. SAM 3.1 (used only for the experimental Inpaint feature) is **not installed by default** — install it on demand via Pinokio menu → "Install Inpaint Support (SAM 3.1)" if you want to use Inpaint.
 
+### Docker (alternative to Pinokio)
+
+Requirements: [Docker](https://docs.docker.com/engine/install/) and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+
+```bash
+git clone https://github.com/fgilde/Maestro.git
+cd Maestro
+docker compose up -d
+```
+
+Then open <http://localhost:7860>. All state (model weights, LoRAs, outputs, settings) lives in named Docker volumes — see [docker-compose.yml](docker-compose.yml).
+
+Notes:
+- The image is compiled for CUDA compute capabilities 8.0/8.6/8.9 (A100, RTX 30xx/40xx) by default — for other cards rebuild with `docker build --build-arg CUDA_ARCHITECTURES="8.6;8.9;12.0" -t maestro .`
+- Building the SageAttention kernels needs ~8 GB RAM per compile job (`MAX_JOBS=2` by default). On machines with limited (WSL2) RAM, build without them — the app falls back to sdpa attention: `docker build --target runtime -t maestro:latest . && docker compose up -d --no-build`
+- SAM 3.1 (experimental Inpaint) is not included in the image.
+- A prebuilt image is published to GHCR by [.github/workflows/docker.yml](.github/workflows/docker.yml) on every push to main.
+
 ### Updating
 
 Click **Update** in the launcher menu. This pulls the latest launcher scripts and app code, reinstalls any new Python dependencies, and rebuilds the React UI.
