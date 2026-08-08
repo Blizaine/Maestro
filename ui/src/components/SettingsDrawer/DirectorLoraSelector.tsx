@@ -217,7 +217,10 @@ export function DirectorLoraSelector({ mode, modelType }: {
       const next = { ...prev }
       if (!next[filename]) return prev
       next[filename] = [...next[filename]]
-      next[filename][phaseIndex] = value
+      // Keep typed values aligned with the slider's supported range and
+      // avoid persisting NaN while a numeric field is temporarily empty.
+      if (!Number.isFinite(value)) return prev
+      next[filename][phaseIndex] = Math.max(0, Math.min(2, Math.round(value * 100) / 100))
       persist(activatedLoras, next)
       return next
     })
@@ -311,24 +314,31 @@ export function DirectorLoraSelector({ mode, modelType }: {
       <div className="max-h-[120px] overflow-y-auto border border-border rounded-lg bg-bg-tertiary">
         {filtered.map(filename => {
           const isActive = activatedLoras.includes(filename)
+          const activeWeights = loraWeights[filename] || Array(phases).fill(1.0)
           return (
-            <button
+            <div
               key={filename}
-              onClick={() => toggleLora(filename)}
-              className={`w-full text-left px-2.5 py-1.5 text-xs flex items-center gap-2 hover:bg-bg-hover transition-colors ${
+              className={`w-full px-2.5 py-1.5 text-xs flex items-center gap-1.5 hover:bg-bg-hover transition-colors ${
                 isActive ? 'text-accent-blue' : 'text-text-secondary'
               }`}
             >
-              <div className={`w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0 ${
-                isActive ? 'bg-accent-blue border-accent-blue' : 'border-border'
-              }`}>
-                {isActive && (
-                  <svg width="8" height="8" viewBox="0 0 8 8" fill="none">
-                    <path d="M1.5 4L3 5.5L6.5 2" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                )}
-              </div>
-              <span className="truncate flex-1">{displayName(filename)}</span>
+              <button
+                type="button"
+                onClick={() => toggleLora(filename)}
+                className="min-w-0 flex-1 flex items-center gap-2 text-left"
+                aria-pressed={isActive}
+              >
+                <div className={`w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0 ${
+                  isActive ? 'bg-accent-blue border-accent-blue' : 'border-border'
+                }`}>
+                  {isActive && (
+                    <svg width="8" height="8" viewBox="0 0 8 8" fill="none">
+                      <path d="M1.5 4L3 5.5L6.5 2" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  )}
+                </div>
+                <span className="truncate flex-1">{displayName(filename)}</span>
+              </button>
               {loraDates[filename] && (
                 <LoraAgeChip
                   released={loraDates[filename].released}
@@ -336,7 +346,7 @@ export function DirectorLoraSelector({ mode, modelType }: {
                 />
               )}
               {guideTexts[filename] && (
-                <span onClick={e => e.stopPropagation()}>
+                <span>
                   <LoraGuideTooltip guide={guideTexts[filename]} />
                 </span>
               )}
@@ -352,7 +362,33 @@ export function DirectorLoraSelector({ mode, modelType }: {
                   title={loraWeightRecs[filename].source === 'civitai' ? 'CivitAI recommended settings' : 'Default settings'}
                 />
               )}
-            </button>
+              {isActive && phases === 1 && (
+                <label
+                  className="flex items-center gap-1 shrink-0 text-[9px] text-text-muted"
+                  title="LoRA strength"
+                >
+                  <span>Strength</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={2}
+                    step={0.05}
+                    value={activeWeights[0] ?? 1}
+                    onChange={e => {
+                      const value = Number.parseFloat(e.target.value)
+                      if (Number.isFinite(value)) updateWeight(filename, 0, value)
+                    }}
+                    className="w-12 rounded border border-border bg-bg-secondary px-1 py-0.5 text-right text-[10px] tabular-nums text-text-primary focus:border-accent-blue focus:outline-none"
+                    aria-label={`${displayName(filename)} LoRA strength`}
+                  />
+                </label>
+              )}
+              {isActive && phases > 1 && (
+                <span className="shrink-0 text-[9px] text-text-muted" title="Adjust each phase below">
+                  {phases} phases
+                </span>
+              )}
+            </div>
           )
         })}
         {filtered.length === 0 && (
@@ -365,7 +401,7 @@ export function DirectorLoraSelector({ mode, modelType }: {
         <div className="mt-2 space-y-1.5">
           <div className="flex items-center justify-between">
             <div className="text-[10px] text-text-muted uppercase tracking-wider">
-              Selected ({activatedLoras.length})
+              LoRA strength ({activatedLoras.length})
             </div>
             <button
               onClick={clearAll}
@@ -428,11 +464,12 @@ export function DirectorLoraSelector({ mode, modelType }: {
 
                   return (
                     <div key={i} className="flex items-center gap-2">
-                      {phases > 1 && (
-                        <span className="text-[10px] text-text-muted w-12 shrink-0" title={phaseRec?.label || ''}>
-                          Phase {i + 1}
-                        </span>
-                      )}
+                      <span
+                        className="text-[10px] text-text-muted w-12 shrink-0"
+                        title={phaseRec?.label || ''}
+                      >
+                        {phases > 1 ? `Phase ${i + 1}` : 'Strength'}
+                      </span>
                       <div className="flex-1 relative">
                         <div
                           className={`absolute top-1/2 -translate-y-1/2 h-2 rounded-full ${zoneColor} pointer-events-none`}
@@ -447,11 +484,22 @@ export function DirectorLoraSelector({ mode, modelType }: {
                           value={w}
                           onChange={e => updateWeight(filename, i, parseFloat(e.target.value))}
                           className="w-full relative z-10"
+                          aria-label={`${displayName(filename)} ${phases > 1 ? `phase ${i + 1}` : ''} LoRA strength`.replace(/\s+/g, ' ').trim()}
                         />
                       </div>
-                      <span className={`text-[10px] w-8 text-right shrink-0 ${valueColor}`}>
-                        {w.toFixed(2)}
-                      </span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={sliderMax}
+                        step={0.05}
+                        value={w}
+                        onChange={e => {
+                          const value = Number.parseFloat(e.target.value)
+                          if (Number.isFinite(value)) updateWeight(filename, i, value)
+                        }}
+                        className={`w-12 shrink-0 rounded border border-border bg-bg-secondary px-1 py-0.5 text-right text-[10px] tabular-nums focus:border-accent-blue focus:outline-none ${valueColor}`}
+                        aria-label={`${displayName(filename)} ${phases > 1 ? `phase ${i + 1}` : ''} LoRA strength value`.replace(/\s+/g, ' ').trim()}
+                      />
                     </div>
                   )
                 })}

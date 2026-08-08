@@ -32,6 +32,7 @@ from services.director.planners.short_film import (  # noqa: E402
     _fit_bounded_frame_schedule,
     _h3_native_structure_issues,
     _h3_planner_token_budget,
+    _h3_preferred_native_durations,
     _normalize_h3_voice_bible,
     _reconcile_h3_dialogue_manifest,
     _restore_h3_dialogue_after_pacing_repair,
@@ -696,6 +697,33 @@ I have classified this as a Level Three problem.
 
 
 class TestH3DirectorDialogueBudget(unittest.TestCase):
+    def test_preferred_durations_obey_hardware_safe_frame_ceiling(self):
+        minimum_only = _h3_preferred_native_durations(
+            fps=24,
+            frames_minimum=124,
+            frames_maximum=124,
+            frames_steps=17,
+        )
+        self.assertEqual(minimum_only, [124 / 24])
+
+        medium = _h3_preferred_native_durations(
+            fps=24,
+            frames_minimum=124,
+            frames_maximum=243,
+            frames_steps=17,
+        )
+        self.assertTrue(all(duration <= 243 / 24 for duration in medium))
+        self.assertIn(192 / 24, medium)
+        self.assertIn(243 / 24, medium)
+
+        full = _h3_preferred_native_durations(
+            fps=24,
+            frames_minimum=124,
+            frames_maximum=345,
+            frames_steps=17,
+        )
+        self.assertIn(345 / 24, full)
+
     def test_reports_over_budget_without_mutating_or_truncating_lines(self):
         spoken = "one two three four five six seven eight nine ten eleven"
         shots = [{

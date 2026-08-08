@@ -1511,14 +1511,9 @@ def delete_lora_file(directory: str, filename: str):
 def _lora_is_compatible_with_model(model_def: dict, path: str) -> bool:
     """Keep special adapters out of model selectors that cannot run them."""
 
-    architecture = str((model_def or {}).get("architecture") or "")
-    if architecture.startswith("minimax_h3") and not bool(
-        (model_def or {}).get("minimax_h3_full_checkpoint", False)
-    ):
-        from models.minimax_h3.turbo import is_minimax_h3_turbo_lora
-
-        if is_minimax_h3_turbo_lora(path):
-            return False
+    del model_def, path
+    # MiniMax H3 Full/Pruned AdaLN conversion happens in the transformer
+    # preprocessor, so H3 adapters no longer need a checkpoint-size filter.
     return True
 
 
@@ -1526,9 +1521,7 @@ def _minimax_h3_turbo_option(model_def: dict) -> dict | None:
     """Return the managed Turbo preset exposed by a compatible H3 model."""
 
     architecture = str((model_def or {}).get("architecture") or "")
-    if not architecture.startswith("minimax_h3") or not bool(
-        (model_def or {}).get("minimax_h3_full_checkpoint", False)
-    ):
+    if not architecture.startswith("minimax_h3"):
         return None
 
     from models.minimax_h3.turbo import (
@@ -1544,10 +1537,11 @@ def _minimax_h3_turbo_option(model_def: dict) -> dict | None:
         "steps": MINIMAX_H3_TURBO_PRESET_STEPS,
         "weight": MINIMAX_H3_TURBO_PRESET_WEIGHT,
         "guide": (
-            "Experimental MiniMax H3 accelerator for Full checkpoints. "
-            "Maestro's one-click Turbo preset uses 6 steps and starts at "
-            "strength 0.70. Adjust its active LoRA strength in Advanced; "
-            "the managed adapter downloads automatically on first use."
+            "Experimental MiniMax H3 accelerator for Full and Pruned "
+            "checkpoints. Maestro's one-click preset uses 6 steps and starts "
+            "at strength 0.50. Adjust its active LoRA strength in Advanced; "
+            "the managed adapter and small compatibility data download "
+            "automatically on first use. Pruned is recommended on 16 GB GPUs."
         ),
     }
 
@@ -5133,6 +5127,22 @@ def _recommended_minimax_h3_encoder(model_type: str, model_def: dict) -> str:
     return fallback if fallback in variants else next(iter(variants))
 
 
+def _minimax_h3_runtime_advisory(model_def: dict) -> dict | None:
+    """Return a non-blocking Full-H3 hardware warning for Studio."""
+
+    if not str((model_def or {}).get("architecture") or "").startswith(
+        "minimax_h3"
+    ):
+        return None
+    try:
+        from models.minimax_h3.minimax_h3_handler import h3_runtime_preflight
+
+        return h3_runtime_preflight(model_def, _get_cached_hardware())
+    except Exception as error:
+        print(f"[MiniMax H3] Runtime preflight unavailable: {error}")
+        return None
+
+
 @api.get("/api/v1/model-options/{model_type}")
 def get_model_options(model_type: str):
     """Return UI-relevant model options for dynamic rendering."""
@@ -5204,6 +5214,24 @@ def get_model_options(model_type: str):
         "motion_amplitude": md.get("motion_amplitude", False),
         "flow_shift": bool(md.get("flow_shift", False)),
         "tea_cache": md.get("tea_cache", False),
+        "first_block_cache": md.get("first_block_cache", False),
+        "skip_steps_multiplier_choices": [
+            [str(choice[0]), float(choice[1])]
+            for choice in md.get("skip_steps_multiplier_choices", [])
+            if isinstance(choice, (list, tuple)) and len(choice) >= 2
+        ] or None,
+        "skip_steps_multiplier_label": md.get(
+            "skip_steps_multiplier_label",
+            "Cache Strength",
+        ),
+        "default_skip_steps_multiplier": _ui_defaults.get(
+            "skip_steps_multiplier",
+            0.08,
+        ),
+        "default_skip_steps_start_step_perc": _ui_defaults.get(
+            "skip_steps_start_step_perc",
+            25,
+        ),
         "returns_audio": md.get("returns_audio", False),
         "any_audio_prompt": md.get("any_audio_prompt", False),
         "audio_scale_name": md.get("audio_scale_name", ""),
@@ -5233,6 +5261,7 @@ def get_model_options(model_type: str):
         ] or None,
         "minimax_h3_text_encoder_default": _h3_encoder_default,
         "minimax_h3_turbo": _minimax_h3_turbo_option(md),
+        "minimax_h3_runtime_advisory": _minimax_h3_runtime_advisory(md),
         "resolution_presets": md.get("resolution_presets"),
         "resolution_preset_order": md.get("resolution_preset_order"),
         "supports_auto_aspect": md.get("supports_auto_aspect", False),
@@ -5261,6 +5290,13 @@ def get_model_options(model_type: str):
 
         # Sliding window
         "sliding_window_defaults": md.get("sliding_window_defaults"),
+        "sliding_window_memory_policy": md.get(
+            "sliding_window_memory_policy"
+        ),
+        "director_memory_policy": md.get("director_memory_policy"),
+        "sliding_window_auto_prompt_pacing": md.get(
+            "sliding_window_auto_prompt_pacing", False
+        ),
 
         # Timing
         "fps": md.get("fps", 16),
@@ -7005,6 +7041,84 @@ async def director_generate_music(request: Request):
     return {"audio_path": audio_path, "filename": filename, "style": style, "lyrics": lyrics}
 
 
+@api.post("/api/v1/llm/plan-h3-windows")
+async def llm_plan_h3_windows(request: Request):
+    """Expand one H3 First/Last concept into exact per-window prompts."""
+
+    body = await request.json()
+    prompt = str(body.get("prompt") or "").strip()
+    model_type = str(body.get("model_type") or "")
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt is required")
+    model_def = wgp.get_model_def(model_type) or {}
+    if not str(model_def.get("architecture") or "").startswith("minimax_h3"):
+        raise HTTPException(status_code=400, detail="H3 window planning requires a MiniMax H3 model.")
+    if model_def.get("omni_reference"):
+        raise HTTPException(status_code=400, detail="MiniMax H3 Omni does not use sliding windows.")
+
+    planning_inputs = {
+        "model_type": model_type,
+        "resolution": body.get("resolution") or "864x480",
+        "video_length": body.get("total_frames") or body.get("video_length") or 124,
+        "sliding_window_size": body.get("window_frames") or body.get("sliding_window_size") or 345,
+        "sliding_window_overlap": body.get("overlap_frames", body.get("sliding_window_overlap", 1)),
+        "sliding_window_discard_last_frames": body.get("discard_frames", body.get("sliding_window_discard_last_frames", 0)),
+        "sliding_window_memory_override": bool(body.get("sliding_window_memory_override", False)),
+    }
+    from models.minimax_h3.minimax_h3_handler import apply_h3_window_memory_policy
+
+    adjustment = apply_h3_window_memory_policy(
+        planning_inputs,
+        model_def,
+        _get_cached_hardware(),
+    )
+    if adjustment and adjustment.get("unsupported"):
+        raise HTTPException(status_code=400, detail=adjustment["message"])
+
+    from services import llm_service
+    from services.h3_window_planner import plan_h3_sliding_windows
+
+    try:
+        _ensure_llm_loaded()
+    except Exception as load_error:
+        # The pure planner has a deterministic no-LLM fallback. Keep H3
+        # usable on installs where the optional local planning model has not
+        # been downloaded yet, and surface that state in planned_by.
+        print(f"[MiniMax H3] Planner LLM unavailable; using fallback: {load_error}")
+    services = wgp.server_config.get("services", {})
+    provider = services.get("llm_provider", "local")
+    nsfw = services.get("nsfw_mode", False) and provider not in _PUBLIC_LLM_PROVIDERS
+    image_paths = [
+        path for path in (body.get("image_paths") or [])
+        if isinstance(path, str) and path and os.path.isfile(path)
+    ]
+    total_frames = int(planning_inputs["video_length"])
+    window_frames = int(planning_inputs["sliding_window_size"])
+    overlap_frames = int(planning_inputs["sliding_window_overlap"] or 0)
+    discard_frames = int(planning_inputs["sliding_window_discard_last_frames"] or 0)
+    try:
+        result = await asyncio.to_thread(
+            plan_h3_sliding_windows,
+            prompt,
+            model_type=model_type,
+            resolution=str(planning_inputs["resolution"]),
+            total_frames=total_frames,
+            window_frames=window_frames,
+            overlap_frames=overlap_frames,
+            discard_frames=discard_frames,
+            fps=float(model_def.get("fps", 24) or 24),
+            has_start_image=bool(body.get("has_start_image")),
+            has_end_image=bool(body.get("has_end_image")),
+            image_paths=image_paths or None,
+            nsfw=bool(nsfw),
+        )
+        result["effective_window_frames"] = window_frames
+        return result
+    except Exception as error:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(error)) from error
+
+
 @api.post("/api/v1/llm/enhance-prompt")
 async def llm_enhance_prompt(request: Request):
     """Enhance a generation prompt. Routes to Wan2GP enhancer or local LLM based on config."""
@@ -8286,6 +8400,7 @@ async def director_v2_plan(request: Request):
 async def generate(request: Request):
     """Submit a generation job. Returns immediately with a job_id."""
     body = await request.json()
+    h3_window_plan_response = None
 
     is_sfx = body.get("sfx_mode")
     if not body.get("model_type"):
@@ -8361,6 +8476,175 @@ async def generate(request: Request):
                 )
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+        from models.minimax_h3.minimax_h3_handler import (
+            apply_h3_window_memory_policy,
+            h3_runtime_preflight,
+        )
+
+        h3_hardware = _get_cached_hardware()
+        h3_runtime_advisory = h3_runtime_preflight(
+            _generation_model_def,
+            h3_hardware,
+        )
+        if h3_runtime_advisory:
+            print(
+                "[MiniMax H3] PERFORMANCE WARNING: "
+                f"{h3_runtime_advisory['message']}"
+            )
+        h3_window_adjustment = apply_h3_window_memory_policy(
+            body,
+            _generation_model_def,
+            h3_hardware,
+        )
+        if h3_window_adjustment:
+            if h3_window_adjustment.get("unsupported"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=h3_window_adjustment["message"],
+                )
+            print(
+                "[MiniMax H3] VRAM-aware FL2VA window: "
+                f"{h3_window_adjustment['checkpoint'].title()} checkpoint, "
+                f"{h3_window_adjustment['gpu_vram_gb']:.1f} GB, "
+                f"{h3_window_adjustment['resolution']}, "
+                f"{h3_window_adjustment['requested_window_frames']} -> "
+                f"{h3_window_adjustment['effective_window_frames']} frames. "
+                "Requested output duration is unchanged."
+            )
+
+        # H3 First/Last continuation passes need genuinely different prompts.
+        # A timing wrapper around one full-shot prompt still lets the model see
+        # (and prematurely perform) every later action.  Plan after the VRAM
+        # policy has finalized the real pass length, then pass an explicit
+        # prompt array to wgp's existing per-window selector.
+        h3_storyboard_enabled = body.get("minimax_h3_window_storyboard", True) is not False
+        h3_is_multi_clip = int(body.get("multi_prompts_gen_type") or 0) == 3
+        try:
+            h3_total_frames = int(body.get("video_length") or 0)
+            h3_window_frames = int(body.get("sliding_window_size") or h3_total_frames or 0)
+            h3_overlap_frames = int(body.get("sliding_window_overlap") or 0)
+            h3_discard_frames = int(body.get("sliding_window_discard_last_frames") or 0)
+        except (TypeError, ValueError):
+            h3_total_frames = h3_window_frames = h3_overlap_frames = h3_discard_frames = 0
+        h3_needs_storyboard = (
+            h3_storyboard_enabled
+            and not _generation_model_def.get("omni_reference")
+            and not h3_is_multi_clip
+            and h3_total_frames > h3_window_frames > 0
+        )
+        if h3_needs_storyboard:
+            from services.h3_window_planner import (
+                compute_h3_window_boundaries,
+                h3_window_plan_signature,
+                plan_h3_sliding_windows,
+            )
+
+            h3_fps = float(_generation_model_def.get("fps", 24) or 24)
+            h3_start_value = body.get("image_start")
+            h3_end_value = body.get("image_end")
+            h3_has_start = bool(h3_start_value)
+            h3_has_end = bool(h3_end_value)
+            h3_expected_signature = h3_window_plan_signature(
+                str(body.get("prompt") or ""),
+                model_type=str(body.get("model_type") or ""),
+                resolution=str(body.get("resolution") or ""),
+                total_frames=h3_total_frames,
+                window_frames=h3_window_frames,
+                overlap_frames=h3_overlap_frames,
+                discard_frames=h3_discard_frames,
+                fps=h3_fps,
+                has_start_image=h3_has_start,
+                has_end_image=h3_has_end,
+            )
+            h3_expected_count = len(
+                compute_h3_window_boundaries(
+                    h3_total_frames,
+                    h3_window_frames,
+                    fps=h3_fps,
+                    overlap_frames=h3_overlap_frames,
+                    discard_frames=h3_discard_frames,
+                )
+            )
+            cached_prompts = body.get("h3_window_prompts")
+            cached_plan = body.get("h3_window_plan")
+            cached_is_valid = (
+                isinstance(cached_prompts, list)
+                and len(cached_prompts) == h3_expected_count
+                and all(isinstance(item, str) and item.strip() for item in cached_prompts)
+                and body.get("h3_window_plan_signature") == h3_expected_signature
+            )
+            if cached_is_valid:
+                print(f"[MiniMax H3] Reusing reviewed {h3_expected_count}-window prompt plan.")
+                if isinstance(cached_plan, dict):
+                    h3_window_plan_response = cached_plan
+            else:
+                from services import llm_service
+
+                llm_was_loaded = llm_service.is_loaded()
+                try:
+                    _ensure_llm_loaded()
+                except Exception as load_error:
+                    print(f"[MiniMax H3] Planner LLM unavailable; using fallback: {load_error}")
+                services = wgp.server_config.get("services", {})
+                provider = services.get("llm_provider", "local")
+                nsfw = services.get("nsfw_mode", False) and provider not in _PUBLIC_LLM_PROVIDERS
+                h3_images = []
+                for value in (h3_start_value, h3_end_value):
+                    if isinstance(value, (list, tuple)):
+                        value = value[0] if value else None
+                    if isinstance(value, str) and value and os.path.isfile(value):
+                        h3_images.append(value)
+                print(
+                    f"[MiniMax H3] Planning {h3_expected_count} window-local prompts "
+                    f"after VRAM-safe geometry ({h3_window_frames} frames/window)."
+                )
+                h3_window_plan_response = await asyncio.to_thread(
+                    plan_h3_sliding_windows,
+                    str(body.get("prompt") or ""),
+                    model_type=str(body.get("model_type") or ""),
+                    resolution=str(body.get("resolution") or ""),
+                    total_frames=h3_total_frames,
+                    window_frames=h3_window_frames,
+                    overlap_frames=h3_overlap_frames,
+                    discard_frames=h3_discard_frames,
+                    fps=h3_fps,
+                    has_start_image=h3_has_start,
+                    has_end_image=h3_has_end,
+                    image_paths=h3_images or None,
+                    nsfw=bool(nsfw),
+                )
+                cached_prompts = h3_window_plan_response["window_prompts"]
+                # A planner loaded only for this request should not compete
+                # with the 20B/33B video model for VRAM or RAM.
+                if not llm_was_loaded and llm_service.is_loaded():
+                    try:
+                        if llm_service.get_status().get("provider") == "local":
+                            llm_service.unload_model()
+                    except Exception as unload_error:
+                        print(f"[MiniMax H3] Planner LLM unload skipped: {unload_error}")
+
+            body["minimax_h3_window_storyboard"] = True
+            body["h3_window_prompts"] = list(cached_prompts)
+            body["h3_window_plan_signature"] = h3_expected_signature
+            if h3_window_plan_response is not None:
+                body["h3_window_plan"] = h3_window_plan_response
+            # An explicitly reviewed plan may have been created moments ago
+            # by the Enhance button, leaving the local planner resident. H3
+            # inference needs that VRAM; the planner is cheap to reload later.
+            try:
+                from services import llm_service as _h3_planner_llm
+
+                if (
+                    _h3_planner_llm.is_loaded()
+                    and _h3_planner_llm.get_status().get("provider") == "local"
+                ):
+                    _h3_planner_llm.unload_model()
+            except Exception as unload_error:
+                print(f"[MiniMax H3] Planner LLM release skipped: {unload_error}")
+        else:
+            body.pop("h3_window_prompts", None)
+            body.pop("h3_window_plan_signature", None)
+            body.pop("h3_window_plan", None)
 
     # Defense: normalize video_prompt_type so flags whose required input
     # is missing get stripped before wgp.py's validation rejects the job.
@@ -8534,7 +8818,10 @@ async def generate(request: Request):
     thread = threading.Thread(target=_run_generation, args=(job_id,), daemon=False)
     thread.start()
 
-    return {"job_id": job_id, "status": "queued"}
+    response = {"job_id": job_id, "status": "queued"}
+    if h3_window_plan_response is not None:
+        response["h3_window_plan"] = h3_window_plan_response
+    return response
 
 
 @api.post("/api/v1/retake")
@@ -19347,6 +19634,7 @@ def _apply_per_job_coefficient(job: dict) -> None:
             _frames = effective_frames or _ref_frames
             model_activation_gb = 6.0 * (_pixels / _ref_pixels) * (_frames / _ref_frames)
 
+        h3_reference_activation_gb = 0.0
         if _h3_omni_video:
             # Every Ref2VA video is appended as full spatiotemporal attention
             # context. With Match Output detail, one 15-second 960x544 video
@@ -19371,7 +19659,10 @@ def _apply_per_job_coefficient(job: dict) -> None:
                 * (_pixels / _ref_pixels)
                 * (_frames / _ref_frames)
             )
-            model_activation_gb += h3_reference_activation_gb
+            # Diagnostic estimate only. The dedicated H3 budget below uses
+            # its own 10 GB/reference reserve; feeding this estimate into the
+            # generic coefficient too would charge every video reference
+            # twice and make low-VRAM Omni jobs needlessly slow.
 
         adjustment = compute_per_job_coefficient(
             base_coef=base_coef,
@@ -19383,6 +19674,10 @@ def _apply_per_job_coefficient(job: dict) -> None:
             video_length_frames=effective_frames,
             model_activation_gb=model_activation_gb,
         )
+        if h3_reference_activation_gb:
+            adjustment["h3_reference_activation_estimate_gb"] = (
+                h3_reference_activation_gb
+            )
         # The dedicated upstream SCAIL-2 transformer uses the official
         # attention/token layout instead of WanGP's generalized fused path.
         # Its measured peak is healthy when transformer residency is held to
@@ -19422,11 +19717,24 @@ def _apply_per_job_coefficient(job: dict) -> None:
             # to 19.3 GB of resident weights on a 24 GB 4090 and the process
             # exited on denoising step zero.  The budget also scales down for
             # lower-VRAM cards and adds reference-video attention headroom.
+            h3_runtime_workspace_gb = float(
+                _job_model_def.get(
+                    "minimax_h3_transformer_working_vram_gb",
+                    0.0,
+                )
+                or 0.0
+            )
             h3_budget = compute_h3_weight_budget(
                 total_vram_gb,
                 resolution,
                 effective_frames,
                 _h3_video_reference_count if _h3_omni_video else 0,
+                runtime_workspace_gb=h3_runtime_workspace_gb,
+                # A LoRA's resident adapter tensors are outside the base
+                # transformer's measured working set. The generic LoRA
+                # coefficient can be superseded by H3's stricter absolute
+                # cap, so carry the bytes into this budget explicitly.
+                additional_reserve_gb=adjustment.get("lora_total_gb", 0.0),
             )
             h3_weight_budget_gb = h3_budget["weight_budget_gb"]
             h3_coefficient_cap = h3_weight_budget_gb / total_vram_gb
@@ -19442,10 +19750,32 @@ def _apply_per_job_coefficient(job: dict) -> None:
             adjustment["h3_activation_reserve_gb"] = h3_budget[
                 "activation_reserve_gb"
             ]
+            adjustment["h3_runtime_workspace_gb"] = h3_runtime_workspace_gb
+            adjustment["h3_scaled_runtime_workspace_gb"] = h3_budget[
+                "scaled_runtime_workspace_gb"
+            ]
+            if h3_budget["runtime_scaling_active"]:
+                adjustment["reasons"].append(
+                    f"- H3's {h3_runtime_workspace_gb:.1f} GB runtime "
+                    "workspace baseline scales to "
+                    f"{h3_budget['scaled_runtime_workspace_gb']:.1f} GB for "
+                    "this high-token window; MMGP streams "
+                    "model weights around that reserve"
+                )
+            if h3_budget["runtime_safety_margin_gb"]:
+                adjustment["reasons"].append(
+                    f"- {h3_budget['runtime_safety_margin_gb']:.1f} GB "
+                    "high-load allocator/display safety margin"
+                )
+            if h3_budget["additional_reserve_gb"]:
+                adjustment["reasons"].append(
+                    f"- {h3_budget['additional_reserve_gb']:.2f} GB reserved "
+                    "inside the H3 cap for active LoRA tensors"
+                )
         job["vram_adjustment"] = adjustment
 
         effective = adjustment["effective_coef"]
-        if abs(effective - base_coef) > 1e-6:
+        if abs(effective - base_coef) > 1e-6 or _is_h3:
             wgp.args.vram_safety_coefficient = effective
             if _is_h3 and getattr(wgp, "wan_model", None) is not None:
                 loaded_coefficient = getattr(
@@ -20437,6 +20767,36 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                         progress=lambda msg: update_job(job, message=msg),
                     )
                     update_job(job, message="Preparing temporal-depth control…")
+            except Exception as e:
+                finish_job(job, "failed", error=str(e), message=str(e))
+                return False
+
+            # H3 Full and Pruned checkpoints use different AdaLN widths. Any
+            # H3 LoRA may therefore need the small revision-pinned affine fit
+            # before MMGP preprocesses it. Provision both known compressed
+            # widths up front; this is a ~2 MB one-time setup and also covers
+            # manually imported/CivitAI adapters, not just managed Turbo.
+            try:
+                _h3_model_def = wgp.get_model_def(
+                    raw_params.get("model_type")
+                ) or {}
+                if (
+                    str(_h3_model_def.get("architecture") or "").startswith(
+                        "minimax_h3"
+                    )
+                    and raw_params.get("activated_loras")
+                ):
+                    from services.managed_preprocessors import (
+                        ensure_minimax_h3_lora_affine_maps,
+                    )
+
+                    ensure_minimax_h3_lora_affine_maps(
+                        "ref2va"
+                        if _h3_model_def.get("omni_reference")
+                        else "fl2va",
+                        progress=lambda msg: update_job(job, message=msg),
+                    )
+                    update_job(job, message="Preparing MiniMax H3 LoRAs…")
             except Exception as e:
                 finish_job(job, "failed", error=str(e), message=str(e))
                 return False
@@ -22671,6 +23031,15 @@ def list_jobs():
                 "error": j["error"],
                 "oom_info": j.get("oom_info"),
                 "created_at": j.get("created_at", 0),
+                # Lets a refreshed browser restore the exact H3 prompts that
+                # are already driving an in-flight sliding-window job. This is
+                # planning metadata only; model paths and unrelated params stay
+                # private.
+                "h3_window_plan": (
+                    (j.get("params") or {}).get("h3_window_plan")
+                    if isinstance(j.get("params"), dict)
+                    else None
+                ),
             })
     active.sort(key=lambda x: x["created_at"])
     return {"jobs": active}

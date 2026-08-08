@@ -5,6 +5,43 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [Unreleased]
 
+## [1.6.5] - 2026-08-08
+
+MiniMax H3 performance and memory: rebalanced transformer residency and
+activation workspace, added bounded QKV/MLP processing, and made Studio and
+Director choose native H3 window lengths from the selected resolution, model,
+and detected GPU memory. The main resolution menu now uses an aligned
+1280x704 consumer 720p tier, exposes 1080p as an experimental option with
+shorter hardware-aware windows, and keeps the former 768p tier available for
+saved settings and API compatibility without presenting it as the default.
+Users can lock a manual window override, and an optional experimental First
+Block Cache offers selectable speed/quality thresholds.
+
+H3 Turbo and LoRAs: Turbo now runs on both Pruned 20B and Full 33B checkpoints
+through automatic AdaLN adapter conversion. The managed preset uses six steps
+and a default strength of 0.50 while remaining editable in Advanced and
+Director settings. Full-model jobs that are unnecessarily expensive receive a
+Pruned recommendation instead of a hard failure. The CivitAI browser now has
+an H3 filter, and both CivitAI downloads and pasted Hugging Face H3 LoRA URLs
+route to the shared MiniMax H3 LoRA folder. Required conversion support assets
+are revision-pinned, verified, and atomically published before generation.
+
+H3 long-form prompting: Studio can turn one long-video idea into a structured,
+window-local storyboard. Each continuation receives its own complete
+Context-IR prompt with stable subject and setting continuity but distinct
+actions, dialogue, camera coverage, ambience, effects, and music. This keeps a
+multi-window story from finishing and repeating in its first pass. Exact
+generated prompts are saved with the job, remain editable before submission,
+show the currently generating window, and expand to their full content without
+nested scrollbars.
+
+Director H3 execution: Director now uses the same model-specific resolution,
+frame-grid, VRAM, and Turbo rules as Studio. It divides long scenes into valid
+native shots before queueing, rejects unsafe runtime shrinkage, preserves one
+native pass for Turbo shots, and supports per-LoRA strength controls. Prompt-
+only independent shots receive self-contained world, cast, wardrobe, blocking,
+dialogue, sound, and continuity anchors rather than rolling-window commands.
+
 ## [1.6.1] - 2026-08-06
 
 MiniMax H3 Turbo: added the pinned Turbo adapter to the Full FL2VA and Ref2VA

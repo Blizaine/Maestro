@@ -77,6 +77,35 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.6.5 (2026-08-08)
+
+**MiniMax H3 performance and lower-VRAM support**
+- H3 Turbo now works with the recommended Pruned 20B models as well as the optional Full 33B models.
+- Turbo now starts at six steps and LoRA strength 0.50, while keeping the LoRA visible and adjustable in Advanced settings.
+- Reworked H3 model residency, activation chunking, and VRAM budgeting to reduce step-zero out-of-memory failures and excessive CPU offloading.
+- Added resolution- and GPU-aware First / Last window recommendations, with clear warnings and a manual override for experimental combinations.
+- Added an optional experimental First Block Cache for faster H3 generations, with selectable quality/speed thresholds.
+
+**H3 resolutions and long-video planning**
+- Added a faster model-aligned 720p tier using 1280x704 landscape output and matching portrait, square, and 4:3 canvases.
+- Restored 1080p H3 generation with an experimental note and hardware-aware shorter-window recommendations.
+- Hid the less efficient 768p preset from the main selector while retaining compatibility with existing saved settings and API requests.
+- Added automatic H3 sliding-window storyboarding: one idea is expanded into a complete, editable prompt for every continuation window.
+- Actions, dialogue, camera coverage, sound effects, ambience, and music are distributed across the timeline instead of being completed and repeated in the first window.
+- Each exact window prompt is visible during generation in its own full-height editor, with the active window highlighted and no nested scrollbars.
+
+**Director H3 workflow improvements**
+- Director now uses the same H3 resolution, VRAM, and native-frame rules as Studio when planning shot lengths and execution profiles.
+- Long scenes are divided before generation to fit the selected model, resolution, GPU, and Turbo configuration instead of being silently shortened at runtime.
+- Added H3 Turbo controls and adjustable per-LoRA strengths directly to Director mode.
+- Improved independent-shot context so recurring characters, wardrobe, locations, blocking, dialogue, and sound remain self-contained across prompt-only H3 shots.
+
+**MiniMax LoRA discovery and compatibility**
+- Added a MiniMax H3 filter to the CivitAI browser and routed downloaded H3 LoRAs into the correct shared H3 folder.
+- Pasted Hugging Face MiniMax H3 LoRA URLs now use the same correct destination instead of defaulting to LTX.
+- Added automatic H3 LoRA architecture conversion where required so compatible adapters can run on both Pruned and Full checkpoints.
+- Added early validation, pinned support assets, and clearer recommendations for combinations that may exceed available VRAM.
+
 ### v1.6.1 (2026-08-06)
 
 **MiniMax H3 Turbo mode**

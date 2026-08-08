@@ -31,7 +31,7 @@ MINIMAX_H3_TURBO_LORA_SHA256 = (
 )
 MINIMAX_H3_TURBO_LORA_SIZE = 779_849_872
 MINIMAX_H3_TURBO_PRESET_STEPS = 6
-MINIMAX_H3_TURBO_PRESET_WEIGHT = 0.70
+MINIMAX_H3_TURBO_PRESET_WEIGHT = 0.50
 _MAX_SAFETENSORS_HEADER_BYTES = 16 * 1024 * 1024
 
 
@@ -110,17 +110,13 @@ def normalize_minimax_h3_turbo_request(
     checked preset can never stack two accelerator adapters accidentally.
 
     Returns ``True`` when the preset was applied and ``False`` when it was not
-    requested.  Pruned H3 checkpoints are rejected because Maestro does not yet
-    implement the publisher's run-time time-conditioning reinjection for them.
+    requested. Full and Pruned H3 checkpoints share the same adapter after
+    Maestro converts its AdaLN input width at load time.
     """
 
     if not isinstance(body, dict) or body.get("minimax_h3_turbo_mode") is not True:
         return False
-    if not full_checkpoint:
-        raise ValueError(
-            "MiniMax H3 Turbo mode is experimental and currently requires "
-            "an H3 Full model. Select H3 First / Last — Full or H3 Omni — Full."
-        )
+    del full_checkpoint  # Retained for request/API compatibility with v1.6.1.
 
     raw_loras = body.get("activated_loras")
     source_loras = (

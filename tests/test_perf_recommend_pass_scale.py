@@ -204,6 +204,105 @@ class TestMiniMaxH3ActivationBudget(unittest.TestCase):
         self.assertAlmostEqual(budget["activation_reserve_gb"], 7.0, places=2)
         self.assertAlmostEqual(budget["weight_budget_gb"], 9.0, places=2)
 
+    def test_fixed_mmgp_workspace_is_not_double_counted_at_native_size(self):
+        budget = compute_h3_weight_budget(
+            24.0,
+            "960x544",
+            345,
+            runtime_workspace_gb=10.0,
+        )
+        self.assertFalse(budget["runtime_scaling_active"])
+        self.assertEqual(budget["scaled_runtime_workspace_gb"], 0.0)
+        self.assertAlmostEqual(budget["activation_reserve_gb"], 7.0, places=2)
+        self.assertAlmostEqual(budget["weight_budget_gb"], 17.0, places=2)
+
+    def test_pruned_768p_full_window_preserves_step_zero_headroom_on_4090(self):
+        budget = compute_h3_weight_budget(
+            24.0,
+            "1344x768",
+            345,
+            runtime_workspace_gb=10.0,
+        )
+        self.assertTrue(budget["runtime_scaling_active"])
+        self.assertGreater(budget["weight_budget_gb"], 6.0)
+        self.assertLess(budget["weight_budget_gb"], 6.5)
+        self.assertGreater(budget["activation_reserve_gb"], 17.5)
+        self.assertEqual(budget["runtime_safety_margin_gb"], 1.0)
+
+    def test_aligned_720p_retains_more_transformer_residency_than_768p(self):
+        aligned_720p = compute_h3_weight_budget(
+            24.0,
+            "1280x704",
+            345,
+            runtime_workspace_gb=10.0,
+        )
+        high_768p = compute_h3_weight_budget(
+            24.0,
+            "1344x768",
+            345,
+            runtime_workspace_gb=10.0,
+        )
+        self.assertGreater(
+            aligned_720p["weight_budget_gb"],
+            high_768p["weight_budget_gb"],
+        )
+        self.assertGreater(aligned_720p["weight_budget_gb"], 7.5)
+        self.assertLess(aligned_720p["weight_budget_gb"], 8.5)
+
+    def test_recommended_720p_window_keeps_allocator_headroom_on_4090(self):
+        budget = compute_h3_weight_budget(
+            24.0,
+            "1280x704",
+            243,
+            runtime_workspace_gb=10.0,
+        )
+        self.assertTrue(budget["runtime_scaling_active"])
+        self.assertGreater(budget["activation_reserve_gb"], 12.0)
+        self.assertGreater(budget["weight_budget_gb"], 11.0)
+        self.assertLess(budget["weight_budget_gb"], 12.0)
+
+    def test_pruned_768p_full_window_reaches_streaming_floor_on_16gb_card(self):
+        budget = compute_h3_weight_budget(
+            16.0,
+            "1344x768",
+            345,
+            runtime_workspace_gb=10.0,
+        )
+        self.assertTrue(budget["runtime_scaling_active"])
+        self.assertEqual(budget["weight_budget_gb"], 3.5)
+        self.assertEqual(budget["activation_reserve_gb"], 12.5)
+
+    def test_pruned_768p_short_window_uses_fixed_mmgp_workspace(self):
+        budget = compute_h3_weight_budget(
+            16.0,
+            "1344x768",
+            124,
+            runtime_workspace_gb=10.0,
+        )
+        self.assertFalse(budget["runtime_scaling_active"])
+        self.assertEqual(budget["scaled_runtime_workspace_gb"], 0.0)
+        self.assertGreater(budget["weight_budget_gb"], 9.0)
+
+    def test_1080p_window_scales_runtime_workspace_on_4090(self):
+        budget = compute_h3_weight_budget(
+            24.0,
+            "1920x1088",
+            124,
+            runtime_workspace_gb=10.0,
+            additional_reserve_gb=0.75,
+        )
+        self.assertTrue(budget["runtime_scaling_active"])
+        self.assertGreater(budget["compute_ratio"], 1.4)
+        self.assertGreater(budget["activation_reserve_gb"], 16.0)
+        self.assertLess(budget["weight_budget_gb"], 8.0)
+        self.assertEqual(budget["runtime_safety_margin_gb"], 1.0)
+        self.assertEqual(budget["additional_reserve_gb"], 0.75)
+        self.assertAlmostEqual(
+            budget["activation_reserve_gb"],
+            budget["scaled_runtime_workspace_gb"] + 1.75,
+            places=6,
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

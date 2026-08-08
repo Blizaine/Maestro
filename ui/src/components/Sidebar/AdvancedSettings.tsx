@@ -125,6 +125,13 @@ export function useAdvancedActiveItems(): string[] {
   const items: string[] = []
   if (params.seed !== -1) items.push(`Seed ${params.seed}`)
   if (params.minimax_h3_turbo_mode) items.push('H3 Turbo')
+  if (params.skip_steps_cache_type === 'first_block') {
+    items.push(`H3 cache ${params.skip_steps_multiplier ?? 0.08}`)
+  }
+  if (
+    modelOptions?.sliding_window_auto_prompt_pacing === true
+    && params.minimax_h3_window_storyboard === false
+  ) items.push('H3 window planning off')
   if (
     (params.negative_prompt?.length ?? 0) > 0
     && (!isScailEdit || isScailHq)
@@ -322,10 +329,97 @@ export function AdvancedSettings() {
                 </div>
               ) : null}
 
+              {modelOptions?.first_block_cache && (
+                <div className="space-y-2 p-2.5 bg-bg-tertiary/40 rounded-lg border border-border/60">
+                  <label className="flex items-center gap-2 cursor-pointer group">
+                    <input
+                      type="checkbox"
+                      checked={params.skip_steps_cache_type === 'first_block'}
+                      onChange={e => {
+                        setParam(
+                          'skip_steps_cache_type',
+                          e.target.checked ? 'first_block' : '',
+                        )
+                        if (e.target.checked && params.skip_steps_multiplier == null) {
+                          setParam(
+                            'skip_steps_multiplier',
+                            modelOptions.default_skip_steps_multiplier ?? 0.08,
+                          )
+                        }
+                      }}
+                      className="accent-accent-blue"
+                    />
+                    <span className="text-[11px] text-text-muted uppercase tracking-wider group-hover:text-text-secondary transition-colors">
+                      First Block Cache
+                    </span>
+                    <span className="text-[9px] text-amber-300/90 border border-amber-400/30 rounded px-1 py-0.5">
+                      Experimental
+                    </span>
+                  </label>
+                  {params.skip_steps_cache_type === 'first_block' && (
+                    <div className="space-y-2 pl-1 border-l border-border ml-1">
+                      <div>
+                        <label className="text-[10px] text-text-muted block mb-1">
+                          {modelOptions.skip_steps_multiplier_label || 'Cache Threshold'}
+                        </label>
+                        <select
+                          value={params.skip_steps_multiplier ?? modelOptions.default_skip_steps_multiplier ?? 0.08}
+                          onChange={e => setParam('skip_steps_multiplier', Number(e.target.value))}
+                          className="w-full bg-bg-tertiary border border-border rounded px-2 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent-blue"
+                        >
+                          {(modelOptions.skip_steps_multiplier_choices || []).map(([label, value]) => (
+                            <option key={value} value={value}>{label}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-[10px] text-text-muted">Warmup</label>
+                          <span className="text-[10px] text-text-secondary">
+                            {params.skip_steps_start_step_perc ?? modelOptions.default_skip_steps_start_step_perc ?? 25}%
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={75}
+                          step={5}
+                          value={params.skip_steps_start_step_perc ?? modelOptions.default_skip_steps_start_step_perc ?? 25}
+                          onChange={e => setParam('skip_steps_start_step_perc', Number(e.target.value))}
+                          className="w-full"
+                        />
+                      </div>
+                    </div>
+                  )}
+                  <p className="text-[9px] text-text-muted">
+                    Reuses stable transformer work after warmup. Best suited to 15-20 step H3 runs; higher thresholds can change motion or fine detail.
+                  </p>
+                </div>
+              )}
+
               {/* Window Settings */}
               {(isVideo || (isAvatar && !isScailEdit))
                 && modelOptions?.sliding_window
                 && <WindowSettings />}
+
+              {isVideo && modelOptions?.sliding_window_auto_prompt_pacing === true && (
+                <div className="space-y-1">
+                  <label className="flex items-center gap-2 cursor-pointer group">
+                    <input
+                      type="checkbox"
+                      checked={params.minimax_h3_window_storyboard !== false}
+                      onChange={e => setParam('minimax_h3_window_storyboard', e.target.checked)}
+                      className="accent-accent-blue"
+                    />
+                    <span className="text-[11px] text-text-muted uppercase tracking-wider group-hover:text-text-secondary transition-colors">
+                      Plan Prompt Across Windows
+                    </span>
+                  </label>
+                  <p className="text-[9px] text-text-muted">
+                    H3 expands one idea into complete window-local visual and audio prompts. Enhance enables this automatically; disable afterward only to supply manual line-per-window prompts.
+                  </p>
+                </div>
+              )}
 
               {/* TTS Settings */}
               {isAudioOnly && (

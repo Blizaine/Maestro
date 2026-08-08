@@ -12,6 +12,7 @@ import tempfile
 import types
 import typing
 import unittest
+from unittest import mock
 
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -78,6 +79,7 @@ def _load_handler_class():
             "_hf_url",
             "_text_encoder_variants",
             "_recommend_text_encoder",
+            "pace_h3_sliding_window_prompt",
         }:
             selected.append(node)
         elif isinstance(node, ast.ClassDef) and node.name == "family_handler":
@@ -111,6 +113,36 @@ def _load_source_function(path: Path, name: str, *, include_private_assignments:
     module = ast.Module(body=body, type_ignores=[])
     exec(compile(ast.fix_missing_locations(module), str(path), "exec"), namespace)
     return namespace[name]
+
+
+def _load_h3_memory_helpers():
+    names = {
+        "_normalize_h3_resolution",
+        "_h3_resolution_pixels",
+        "recommended_h3_window_profile",
+        "recommended_h3_window_frames",
+        "h3_runtime_preflight",
+        "apply_h3_window_memory_policy",
+        "pace_h3_sliding_window_prompt",
+    }
+    tree = ast.parse(_read(_HANDLER_PATH), filename=str(_HANDLER_PATH))
+    selected = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            assigned = [
+                target.id for target in node.targets if isinstance(target, ast.Name)
+            ]
+            if any(name.startswith("_") for name in assigned):
+                selected.append(node)
+        elif isinstance(node, ast.FunctionDef) and node.name in names:
+            selected.append(node)
+    namespace = {}
+    module = ast.Module(body=selected, type_ignores=[])
+    exec(
+        compile(ast.fix_missing_locations(module), str(_HANDLER_PATH), "exec"),
+        namespace,
+    )
+    return namespace
 
 
 def _literal_assignment(path: Path, name: str):
@@ -244,7 +276,24 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertTrue(model_def["no_negative_prompt"])
         self.assertTrue(model_def["sliding_window"])
         self.assertTrue(model_def["video_continuation"])
+        self.assertTrue(model_def["first_block_cache"])
+        self.assertEqual(
+            tuple(model_def["first_block_cache_thresholds"]),
+            (0.06, 0.08, 0.10, 0.12, 0.14),
+        )
+        self.assertEqual(
+            model_def["skip_steps_multiplier_label"],
+            "First Block Cache Threshold",
+        )
         self.assertTrue(model_def["sliding_window_exact_total_frames"])
+        self.assertTrue(model_def["sliding_window_auto_prompt_pacing"])
+        self.assertTrue(
+            model_def["sliding_window_memory_policy"]["manual_override"]
+        )
+        self.assertEqual(
+            model_def["sliding_window_memory_policy"]["checkpoint"],
+            "pruned",
+        )
         self.assertEqual(
             model_def["sliding_window_defaults"],
             {
@@ -264,7 +313,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertEqual(model_def["director_audio_input_mode"], "none")
         self.assertIn("FIRST / LAST", model_def["selector_help"])
         self.assertIn("does not accept reference audio", model_def["selector_help"])
-        self.assertIn("require an H3 Full model", model_def["lora_compatibility_note"])
+        self.assertIn("converts Full adapters", model_def["lora_compatibility_note"])
         self.assertTrue(model_def["director_endpoint_continuity"])
         self.assertFalse(model_def["director_trim_end_frames"])
         self.assertIn("qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", model_def["text_encoder_URLs"][0])
@@ -286,6 +335,17 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             "nvfp4_awq",
         )
         self.assertEqual(
+            recommend(
+                {
+                    "supports_nvfp4": False,
+                    "ram_gb": 64,
+                    "gpu_vram_gb": 16,
+                },
+                model_def,
+            ),
+            "gguf_q2_k",
+        )
+        self.assertEqual(
             recommend({"supports_nvfp4": False, "ram_gb": 32}, model_def),
             "nvfp4_awq",
         )
@@ -300,14 +360,25 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             self.assertTrue(model_def["supports_auto_aspect"])
             self.assertEqual(
                 model_def["resolution_preset_order"],
-                ["480p", "540p", "720p"],
+                ["480p", "540p", "720p", "1080p"],
             )
             presets = model_def["resolution_presets"]
             self.assertEqual(presets["480p"]["values"]["9:16"], "480x864")
             self.assertEqual(presets["540p"]["values"]["9:16"], "544x960")
-            self.assertEqual(presets["720p"]["label"], "768p")
-            self.assertEqual(presets["720p"]["values"]["9:16"], "768x1344")
+            self.assertEqual(presets["720p"]["label"], "720p")
+            self.assertEqual(presets["720p"]["values"]["16:9"], "1280x704")
+            self.assertEqual(presets["720p"]["values"]["9:16"], "704x1280")
             self.assertEqual(presets["720p"]["values"]["auto"], "auto_720p")
+            self.assertEqual(presets["768p"]["label"], "768p High")
+            self.assertEqual(presets["768p"]["values"]["16:9"], "1344x768")
+            self.assertEqual(presets["768p"]["values"]["auto"], "auto_768p")
+            self.assertNotIn("768p", model_def["resolution_preset_order"])
+            self.assertTrue(presets["1080p"]["experimental"])
+            self.assertEqual(presets["1080p"]["label"], "1080p")
+            self.assertEqual(presets["1080p"]["values"]["16:9"], "1920x1088")
+            self.assertEqual(presets["1080p"]["values"]["9:16"], "1088x1920")
+            self.assertEqual(presets["1080p"]["values"]["4:3"], "1440x1088")
+            self.assertEqual(presets["1080p"]["values"]["3:4"], "1088x1440")
 
     def test_old_generic_resolutions_snap_without_changing_orientation(self):
         normalize = _load_source_function(
@@ -315,14 +386,261 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             "_normalize_h3_resolution",
             include_private_assignments=True,
         )
-        self.assertEqual(normalize("1280x720"), "1344x768")
-        self.assertEqual(normalize("720x1280"), "768x1344")
+        self.assertEqual(normalize("1280x720"), "1280x704")
+        self.assertEqual(normalize("1280x704"), "1280x704")
+        self.assertEqual(normalize("720x1280"), "704x1280")
+        self.assertEqual(normalize("704x1280"), "704x1280")
         self.assertEqual(normalize("1104x832"), "1024x768")
         self.assertEqual(normalize("832x1104"), "768x1024")
         self.assertEqual(normalize("1024x1024"), "768x768")
+        self.assertEqual(normalize("1920x1088"), "1920x1088")
+        self.assertEqual(normalize("1088x1920"), "1088x1920")
+        self.assertEqual(normalize("auto_1080p"), "auto_1080p")
+        self.assertEqual(normalize("auto_768p"), "auto_768p")
         self.assertEqual(normalize("auto_540p"), "auto_540p")
         self.assertEqual(normalize("900x1600"), "768x1344")
         self.assertEqual(normalize("not-a-size"), "864x480")
+
+    def test_h3_window_recommendations_are_checkpoint_aware(self):
+        helpers = _load_h3_memory_helpers()
+        recommend = helpers["recommended_h3_window_frames"]
+        profile = helpers["recommended_h3_window_profile"]
+        apply_policy = helpers["apply_h3_window_memory_policy"]
+        pruned = {
+            "architecture": "minimax_h3",
+            "omni_reference": False,
+            "minimax_h3_full_checkpoint": False,
+        }
+        full = {
+            "architecture": "minimax_h3_full",
+            "omni_reference": False,
+            "minimax_h3_full_checkpoint": True,
+        }
+
+        # Pruned carries lower weight-streaming pressure, so it can use fewer
+        # continuation passes than Full on the same GPU and canvas.
+        self.assertEqual(recommend(12, "1344x768", pruned), 124)
+        self.assertEqual(recommend(16, "1344x768", pruned), 124)
+        self.assertEqual(recommend(24, "1344x768", pruned), 243)
+        self.assertEqual(recommend(32, "1344x768", pruned), 345)
+        self.assertEqual(recommend(16, "1344x768", full), 124)
+        self.assertEqual(recommend(24, "1344x768", full), 243)
+        # The aligned 720p tier is deliberately allowed longer windows as
+        # VRAM increases.  It must not collapse every consumer GPU onto the
+        # same conservative five-second recommendation.
+        self.assertEqual(recommend(8, "1280x704", pruned), 124)
+        self.assertEqual(recommend(12, "1280x704", pruned), 124)
+        self.assertEqual(recommend(16, "1280x704", pruned), 243)
+        self.assertEqual(recommend(24, "1280x704", pruned), 243)
+        self.assertEqual(recommend(32, "1280x704", pruned), 345)
+        self.assertEqual(
+            profile(8, "1344x768", pruned)["fallback_resolution"],
+            "480p",
+        )
+        self.assertEqual(recommend(12, "1920x1088", pruned), 0)
+        self.assertEqual(recommend(16, "1920x1088", pruned), 124)
+        self.assertEqual(recommend(24, "1920x1088", pruned), 124)
+        self.assertEqual(recommend(32, "1920x1088", pruned), 243)
+        self.assertEqual(recommend(40, "1920x1088", pruned), 345)
+        self.assertEqual(recommend(32, "auto_1080p", full), 175)
+        self.assertEqual(recommend(12, "960x544", pruned), 243)
+        self.assertEqual(recommend(16, "960x544", pruned), 345)
+        self.assertEqual(recommend(8, "960x544", pruned), 124)
+        self.assertEqual(recommend(8, "864x480", pruned), 243)
+        self.assertEqual(recommend(12, "864x480", pruned), 345)
+        self.assertEqual(recommend(8, "960x544", full), 0)
+        self.assertEqual(recommend(8, "864x480", full), 124)
+        self.assertEqual(recommend(12, "864x480", full), 243)
+        # Recommendations use actual pixel load, so lower-pixel square/4:3
+        # variants within a preset can safely use a longer window than its
+        # 16:9 or 9:16 variant.
+        self.assertEqual(recommend(24, "1024x768", full), 345)
+        self.assertEqual(recommend(24, "1440x1088", full), 243)
+        self.assertEqual(recommend(24, "1088x1920", full), 124)
+        self.assertEqual(recommend(32, "1344x768", full), 345)
+
+        params = {
+            "resolution": "1344x768",
+            "video_length": 345,
+            "sliding_window_size": 345,
+        }
+        adjustment = apply_policy(
+            params,
+            pruned,
+            {"gpu_vram_gb": 12},
+        )
+        self.assertEqual(params["video_length"], 345)
+        self.assertEqual(params["sliding_window_size"], 124)
+        self.assertEqual(adjustment["effective_window_frames"], 124)
+        self.assertEqual(adjustment["checkpoint"], "pruned")
+
+        unsupported = {
+            "resolution": "1920x1088",
+            "video_length": 345,
+            "sliding_window_size": 345,
+        }
+        rejection = apply_policy(
+            unsupported,
+            pruned,
+            {"gpu_vram_gb": 12},
+        )
+        self.assertTrue(rejection["unsupported"])
+        self.assertEqual(unsupported["sliding_window_size"], 345)
+        self.assertIn("720p or lower", rejection["message"])
+        self.assertIn("124-frame", rejection["message"])
+
+        manual = dict(params, sliding_window_size=345)
+        manual["sliding_window_memory_override"] = True
+        self.assertIsNone(
+            apply_policy(
+                manual,
+                pruned,
+                {"gpu_vram_gb": 16},
+            )
+        )
+        self.assertEqual(manual["sliding_window_size"], 345)
+
+        omni = dict(params, sliding_window_size=345)
+        self.assertIsNone(
+            apply_policy(
+                omni,
+                {"omni_reference": True},
+                {"gpu_vram_gb": 16},
+            )
+        )
+        self.assertEqual(omni["sliding_window_size"], 345)
+
+    def test_full_h3_preflight_recommends_pruned_turbo_without_blocking(self):
+        preflight = _load_h3_memory_helpers()["h3_runtime_preflight"]
+        full_first_last = {
+            "architecture": "minimax_h3_full",
+            "omni_reference": False,
+            "minimax_h3_full_checkpoint": True,
+        }
+        full_omni = {
+            "architecture": "minimax_h3_ref2va_full",
+            "omni_reference": True,
+            "minimax_h3_full_checkpoint": True,
+        }
+        pruned = {
+            "architecture": "minimax_h3",
+            "omni_reference": False,
+            "minimax_h3_full_checkpoint": False,
+        }
+
+        warning = preflight(
+            full_first_last,
+            {"supports_triton": False, "ram_gb": 32},
+        )
+        self.assertEqual(warning["level"], "warning")
+        self.assertFalse(warning["blocking"])
+        self.assertTrue(warning["recommended_turbo"])
+        self.assertEqual(warning["recommended_model_type"], "minimax_h3")
+        self.assertEqual(
+            {reason["code"] for reason in warning["reasons"]},
+            {"triton_unavailable", "system_ram_low"},
+        )
+        self.assertIn("54 GB", warning["message"])
+        self.assertEqual(
+            preflight(
+                full_omni,
+                {"supports_triton": False, "ram_gb": 128},
+            )["recommended_model_type"],
+            "minimax_h3_ref2va",
+        )
+        self.assertIsNone(
+            preflight(
+                full_first_last,
+                {"supports_triton": True, "ram_gb": 128},
+            )
+        )
+        self.assertIsNone(
+            preflight(pruned, {"supports_triton": False, "ram_gb": 16})
+        )
+
+    def test_h3_continuation_windows_never_expand_past_the_safe_cap(self):
+        tree = ast.parse(_read(_WGP_PATH), filename=str(_WGP_PATH))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "compute_next_sliding_window_length"
+        )
+        namespace = {
+            "align_model_frame_count": lambda frames, _model_def, **_kwargs: max(
+                124,
+                ((int(frames) - 5 + 16) // 17) * 17 + 5,
+            )
+        }
+        module = ast.Module(body=[function], type_ignores=[])
+        exec(
+            compile(ast.fix_missing_locations(module), str(_WGP_PATH), "exec"),
+            namespace,
+        )
+        size_next = namespace["compute_next_sliding_window_length"]
+        model_def = {"sliding_window_exact_total_frames": True}
+        # After a 124-frame first pass, H3 has 221 output frames left plus
+        # its one-frame continuation context. The aligned remainder is 226,
+        # but pass two must remain at the selected 124-frame safe cap.
+        self.assertEqual(size_next(222, 124, 17, model_def), 124)
+        self.assertEqual(size_next(99, 124, 17, model_def), 124)
+
+    def test_h3_single_prompt_is_paced_and_dialogue_partitioned_per_window(self):
+        pace = _load_h3_memory_helpers()["pace_h3_sliding_window_prompt"]
+        prompt = (
+            "A three-part action unfolds. "
+            "<d>[English] Opening line.</d> "
+            "<d>[English] Middle line.</d> "
+            "<d>[English] Final line.</d>"
+        )
+        first = pace(
+            prompt,
+            1,
+            3,
+            fps=24,
+            current_video_length=124,
+            requested_frames_to_generate=345,
+            num_frames_generated=0,
+            reuse_frames=1,
+        )
+        middle = pace(
+            prompt,
+            2,
+            3,
+            fps=24,
+            current_video_length=124,
+            requested_frames_to_generate=345,
+            num_frames_generated=124,
+            reuse_frames=1,
+        )
+        final = pace(
+            prompt,
+            3,
+            3,
+            fps=24,
+            current_video_length=124,
+            requested_frames_to_generate=345,
+            num_frames_generated=247,
+            reuse_frames=1,
+        )
+        self.assertIn("continuation window 1 of 3", first)
+        self.assertIn("Opening line", first)
+        self.assertNotIn("Middle line", first)
+        self.assertIn("Middle line", middle)
+        self.assertNotIn("Opening line", middle)
+        self.assertIn("Final line", final)
+        self.assertNotIn("Middle line", final)
+
+        self.assertEqual(
+            self.handler.custom_prompt_preprocess(
+                prompt,
+                window_no=1,
+                total_windows=2,
+                prompts=["explicit first", "explicit second"],
+                model_def={"omni_reference": False},
+            ),
+            prompt,
+        )
 
     def test_conditioner_namespaces_cover_wangp_int8_bf16_and_gguf(self):
         normalize = _load_source_function(
@@ -425,6 +743,8 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         )
         self.assertEqual(model_def["director_audio_input_mode"], "reference_manifest")
         self.assertFalse(model_def["director_endpoint_continuity"])
+        self.assertEqual(model_def["director_memory_policy"]["checkpoint"], "pruned")
+        self.assertNotIn("sliding_window_memory_policy", model_def)
         self.assertIn("OMNI REFERENCES", model_def["selector_help"])
         self.assertIn("audio references", model_def["selector_help"])
 
@@ -442,7 +762,11 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         full_fl2va = self.handler.query_model_def("minimax_h3_full", {})
         full_omni = self.handler.query_model_def("minimax_h3_ref2va_full", {})
         self.assertIn("FULL 33B", full_fl2va["selector_help"])
-        self.assertIn("supported by this Full checkpoint", full_omni["lora_compatibility_note"])
+        self.assertEqual(
+            full_fl2va["sliding_window_memory_policy"]["checkpoint"],
+            "full",
+        )
+        self.assertIn("converts Pruned adapters", full_omni["lora_compatibility_note"])
 
         selector = _read(_MODEL_SELECTOR_PATH)
         self.assertIn("Audio Out", selector)
@@ -452,6 +776,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         launch = _read(_LAUNCH_PATH)
         self.assertIn('"selector_help": md.get("selector_help", "")', launch)
         self.assertIn('"lora_compatibility_note": md.get("lora_compatibility_note", "")', launch)
+        self.assertIn('"director_memory_policy": md.get', launch)
 
     def test_h3_reserves_transformer_activation_workspace(self):
         source = _read(_HANDLER_PATH)
@@ -471,6 +796,9 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("_maestro_profile_vram_coefficient", wgp)
         self.assertIn("get_linear_split_map", transformer)
         self.assertIn("MINIMAX_H3_ACTIVATION_CHUNK_TOKENS", transformer)
+        self.assertIn("from shared.attention import pay_attention", transformer)
+        self.assertIn("[MiniMax H3 Perf]", _read(_MAIN_PATH))
+        self.assertIn('"first_block_cache": md.get', launch)
 
     def test_all_auxiliary_downloads_are_revision_pinned(self):
         downloads = self.handler.query_model_files(lambda item: [item], "minimax_h3")
@@ -509,6 +837,15 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("if (!supportsSlidingWindows && maximumFrames != null)", store)
         self.assertIn("delete params.sliding_window_size", store)
         self.assertIn('"frames_maximum": md.get("frames_maximum")', launch)
+        self.assertIn("sliding_window_memory_policy", duration)
+        self.assertIn("s.params.resolution", duration)
+        self.assertIn("safeWindowFrames", duration)
+        self.assertIn("unsupportedAutoResolution", duration)
+        self.assertIn("fallbackResolution", duration)
+        self.assertIn("sliding_window_memory_override", store)
+        self.assertIn("full prompt auto-paced", duration)
+        self.assertIn('"sliding_window_memory_policy": md.get(', launch)
+        self.assertIn('h3_window_adjustment.get("unsupported")', launch)
 
     def test_h3_is_enabled_for_existing_and_fresh_installs(self):
         store = _read(_STORE_PATH)
@@ -798,7 +1135,8 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
         self.assertIn("h3_scheduler_grid_points", main)
         self.assertIn("video shift 12 / audio shift 3 schedules", main)
         self.assertIn("def preprocess_loras", transformer)
-        self.assertIn("logical grouped ``[Q, K, V]`` layout", transformer)
+        self.assertIn("Adapt AdaLN width", transformer)
+        self.assertIn("convert_adaln_loras", transformer)
         self.assertIn("def finalize_loras", main)
         self.assertIn("install_native_lora_forwards", main)
         self.assertIn('hasattr(wan_model, "validate_loras")', wgp)
@@ -892,15 +1230,19 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
                 full_checkpoint=True,
             )
         )
-        self.assertEqual(missing_selection["loras_multipliers"], "0.70")
+        self.assertEqual(missing_selection["loras_multipliers"], "0.50")
 
-        with self.assertRaisesRegex(ValueError, "H3 Full"):
+        pruned = {"minimax_h3_turbo_mode": True}
+        self.assertTrue(
             turbo.normalize_minimax_h3_turbo_request(
-                {"minimax_h3_turbo_mode": True},
+                pruned,
                 full_checkpoint=False,
             )
+        )
+        self.assertEqual(pruned["num_inference_steps"], 6)
+        self.assertEqual(pruned["loras_multipliers"], "0.50")
 
-    def test_managed_turbo_choice_is_discoverable_and_full_model_only(self):
+    def test_managed_turbo_choice_is_discoverable_for_full_and_pruned(self):
         launch = _read(_LAUNCH_PATH)
         toggle = _read(_TURBO_TOGGLE_PATH)
         sidebar = _read(_SIDEBAR_PATH)
@@ -911,24 +1253,27 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
         self.assertIn('names.add(turbo_option["filename"])', launch)
         self.assertIn("MINIMAX_H3_TURBO_LORA_FILENAME: {", launch)
         self.assertIn('"minimax_h3_turbo": _minimax_h3_turbo_option(md)', launch)
+        self.assertIn('"minimax_h3_runtime_advisory":', launch)
+        self.assertIn("_minimax_h3_runtime_advisory", launch)
         self.assertIn("normalize_minimax_h3_turbo_request", launch)
         self.assertIn("<MiniMaxH3TurboToggle />", sidebar)
         self.assertIn("Experimental", toggle)
         self.assertIn("setParam('num_inference_steps', option.steps)", toggle)
         self.assertIn("toggleLora(option.filename)", toggle)
         self.assertIn("setLoraWeight(option.filename, 0, option.weight)", toggle)
+        self.assertIn("Use Pruned Turbo", toggle)
+        self.assertIn("recommended_model_type", toggle)
         self.assertIn("disabled={h3TurboMode}", advanced)
         self.assertIn("minimax_h3_turbo_mode?: boolean", types_source)
+        self.assertIn("minimax_h3_runtime_advisory?:", types_source)
 
         option = _load_source_function(_LAUNCH_PATH, "_minimax_h3_turbo_option")
         sys.path.insert(0, str(_APP))
         try:
-            self.assertIsNone(
-                option({
-                    "architecture": "minimax_h3",
-                    "minimax_h3_full_checkpoint": False,
-                })
-            )
+            pruned = option({
+                "architecture": "minimax_h3",
+                "minimax_h3_full_checkpoint": False,
+            })
             full = option({
                 "architecture": "minimax_h3_full",
                 "minimax_h3_full_checkpoint": True,
@@ -936,8 +1281,10 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
         finally:
             if sys.path and sys.path[0] == str(_APP):
                 sys.path.pop(0)
+        self.assertEqual(pruned["steps"], 6)
+        self.assertEqual(pruned["weight"], 0.50)
         self.assertEqual(full["steps"], 6)
-        self.assertEqual(full["weight"], 0.70)
+        self.assertEqual(full["weight"], 0.50)
         self.assertTrue(full["experimental"])
 
     def test_consumer_checkpoint_shapes_are_kept_native(self):
@@ -1517,15 +1864,75 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
             with self.torch.inference_mode():
                 h3_transformer.MINIMAX_H3_ACTIVATION_CHUNK_TOKENS = 64
                 expected_attention = attention(hidden, rotary)
-                expected_mlp = mlp(hidden)
+                expected_mlp = mlp(hidden.clone())
                 h3_transformer.MINIMAX_H3_ACTIVATION_CHUNK_TOKENS = 2
                 actual_attention = attention(hidden, rotary)
-                actual_mlp = mlp(hidden)
+                chunked_mlp_input = hidden.clone()
+                actual_mlp = mlp(chunked_mlp_input)
         finally:
             h3_transformer.MINIMAX_H3_ACTIVATION_CHUNK_TOKENS = previous
 
         self.assertTrue(self.torch.allclose(actual_attention, expected_attention, atol=1e-5, rtol=1e-5))
         self.assertTrue(self.torch.allclose(actual_mlp, expected_mlp, atol=1e-5, rtol=1e-5))
+        self.assertEqual(actual_mlp.data_ptr(), chunked_mlp_input.data_ptr())
+
+    def test_h3_projection_chunks_expand_only_below_large_sequence_guard(self):
+        from models.minimax_h3.transformer import _activation_chunk_tokens
+
+        qkv_chunk = _activation_chunk_tokens(60_000, 5_376, 21_504)
+        mlp_chunk = _activation_chunk_tokens(60_000, 5_376, 28_672)
+        self.assertGreater(qkv_chunk, 8_192)
+        self.assertGreater(mlp_chunk, 8_192)
+        self.assertLessEqual(qkv_chunk, 32_768)
+        self.assertLessEqual(mlp_chunk, 32_768)
+        self.assertEqual(qkv_chunk % 256, 0)
+        self.assertEqual(mlp_chunk % 256, 0)
+        self.assertEqual(
+            _activation_chunk_tokens(91_278, 5_376, 21_504),
+            8_192,
+        )
+        self.assertEqual(
+            _activation_chunk_tokens(91_278, 5_376, 28_672),
+            8_192,
+        )
+
+    def test_h3_first_block_cache_reuses_only_after_warmup(self):
+        from models.minimax_h3.first_block_cache import MiniMaxH3FirstBlockCache
+
+        config = types.SimpleNamespace(
+            threshold=0.08,
+            start_step=1,
+            skipped_steps=0,
+        )
+        cache = MiniMaxH3FirstBlockCache(config)
+        signature = self.torch.tensor([1.0, 2.0])
+        cache.begin_step(0)
+        self.assertTrue(cache.should_compute(signature.clone()))
+        head = self.torch.tensor([[1.0, 2.0]])
+        captured = cache.capture_head_output(head)
+        cache.store_tail_residual(
+            self.torch.tensor([[4.0, 6.0]]),
+            captured,
+        )
+
+        cache.begin_step(1)
+        self.assertFalse(cache.should_compute(signature.clone()))
+        reused = self.torch.tensor([[10.0, 10.0]])
+        cache.apply_tail_residual(reused)
+        self.assertTrue(
+            self.torch.equal(reused, self.torch.tensor([[13.0, 14.0]]))
+        )
+        self.assertEqual(config.skipped_steps, 1)
+
+    def test_h3_attention_accepts_owned_input_and_releases_the_holder(self):
+        from models.minimax_h3.transformer import MiniMaxH3Attention
+
+        attention = MiniMaxH3Attention(8, 1, 8, 1e-5, self.torch.float32).eval()
+        owned = [self.torch.randn(1, 4, 8)]
+        with self.torch.inference_mode():
+            output = attention(owned)
+        self.assertEqual(owned, [])
+        self.assertEqual(tuple(output.shape), (1, 4, 8))
 
     def test_curve_adaln_uses_fp32_math_with_compact_fp16_storage(self):
         from models.minimax_h3.transformer import MiniMaxH3AdaLNProjection
@@ -1869,6 +2276,7 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
         grouped = self.torch.arange(24, dtype=self.torch.float32).reshape(12, 2)
         stub = types.SimpleNamespace(
             h3_qkv_layout="interleaved",
+            use_adaln_curves=False,
             config=types.SimpleNamespace(
                 num_attention_heads=2,
                 attention_head_dim=2,
@@ -1893,7 +2301,42 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
             lora_a,
         )
 
-    def test_turbo_lora_rejects_pruned_time_conditioning_before_load(self):
+    def test_full_h3_adaln_lora_is_converted_for_pruned_checkpoint(self):
+        from models.minimax_h3 import lora_affine
+
+        canonical_table = self.torch.randn(32, 8)
+        canonical_affine = self.torch.zeros(9, 2688)
+        canonical_affine[:8, :8] = self.torch.eye(8)
+        down = self.torch.randn(2, 2688)
+        up = self.torch.randn(4, 2)
+        prefix = "blocks.0.adaln_proj.linear"
+        state_dict = {
+            f"{prefix}.lora_A.weight": down,
+            f"{prefix}.lora_B.weight": up,
+        }
+
+        with mock.patch.object(
+            lora_affine,
+            "_load_affine_package",
+            return_value=(canonical_table, canonical_affine),
+        ):
+            count, architecture, source_width, target_width = (
+                lora_affine.convert_adaln_loras(
+                    "minimax_h3",
+                    state_dict,
+                    canonical_table.clone(),
+                )
+            )
+
+        self.assertEqual((count, architecture), (1, "fl2va"))
+        self.assertEqual((source_width, target_width), (2688, 8))
+        self.assertEqual(
+            state_dict[f"{prefix}.lora_A.weight"].shape,
+            (2, 8),
+        )
+        self.assertEqual(state_dict[f"{prefix}.diff_b"].shape, (4,))
+
+    def test_turbo_lora_is_validated_for_full_and_pruned_before_load(self):
         from models.minimax_h3.minimax_h3_main import MiniMaxH3Model
 
         turbo_path = "minimax_h3_turbo_4step.safetensors"
@@ -1909,8 +2352,8 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
         pruned = types.SimpleNamespace(
             transformer=types.SimpleNamespace(use_adaln_curves=True)
         )
-        with self.assertRaisesRegex(ValueError, "Full 33B"):
-            MiniMaxH3Model.validate_loras(pruned, [turbo_path])
+        MiniMaxH3Model.validate_loras(pruned, [turbo_path])
+        self.assertTrue(pruned._turbo_lora_active)
 
     def test_row_scaled_int8_embedding_loads_and_dequantizes_selected_rows(self):
         from models.minimax_h3.checkpoint import preprocess_conditioner_state_dict

@@ -2,7 +2,7 @@
     "model": {
         "name": "H3 Omni — Pruned",
         "architecture": "minimax_h3_ref2va",
-        "description": "Recommended lighter MiniMax H3 Omni model. Ordered image, video, and audio references can guide identity, appearance, motion, scenes, voices, or sound while H3 generates one synchronized video-and-audio shot up to 14.4 seconds. Turbo / distilled H3 LoRAs require the Full model.",
+        "description": "Recommended lighter MiniMax H3 Omni model. Ordered image, video, and audio references can guide identity, appearance, motion, scenes, voices, or sound while H3 generates one synchronized video-and-audio shot up to 14.4 seconds. H3 LoRAs, including Turbo, are converted automatically when needed.",
         "URLs": [
             "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/0543966fbdce5ba05709a8f2031c94bdba629b4a/diffusion_models/minimax_h3_ref2va_pruned_fp8_scaled.safetensors"
         ]

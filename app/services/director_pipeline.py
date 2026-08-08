@@ -40,8 +40,10 @@ from services.director_video_strategy import (
     SHOT_IMAGES_DIRECT_REFERENCES,
     adapt_bounded_timeline,
     apply_independent_shot_context,
+    build_director_video_execution_profile,
     resolve_shot_image_policy,
     shot_images_required,
+    validate_director_execution_frames,
     video_strategy,
 )
 
@@ -78,6 +80,207 @@ class PipelineBusyError(RuntimeError):
 
 class DirectorModelCompatibilityError(ValueError):
     """Raised before Director submits work to an incompatible model."""
+
+
+def _director_hardware_snapshot() -> dict:
+    """Read the same cached hardware facts used by Studio's H3 preflight."""
+
+    try:
+        from launch import _get_cached_hardware
+
+        return dict(_get_cached_hardware() or {})
+    except Exception:
+        try:
+            from services.hardware_detect import detect_hardware
+
+            return dict(detect_hardware() or {})
+        except Exception:
+            return {"gpu_vram_gb": 0.0}
+
+
+def _create_director_video_execution_profile(
+    params: dict,
+    *,
+    model_def: Optional[dict] = None,
+    hardware: Optional[dict] = None,
+) -> dict:
+    """Build a trusted profile and normalize the submitted video canvas."""
+
+    video_model = params.get("video_model") or "ltx2_22B_distilled_1_1"
+    if model_def is None:
+        getter = getattr(_wgp, "get_model_def", None)
+        model_def = getter(video_model) if callable(getter) else {}
+    model_def = dict(model_def or {})
+    video_params = dict(params.get("video_params") or {})
+    video_loras = dict(params.get("video_loras") or {})
+    profile_inputs = {
+        **video_params,
+        "activated_loras": video_loras.get("activated_loras", []) or [],
+    }
+    profile = build_director_video_execution_profile(
+        video_model,
+        model_def,
+        profile_inputs,
+        hardware if hardware is not None else _director_hardware_snapshot(),
+        manual_max_frames=params.get("director_max_shot_frames"),
+        resolution_preset=params.get("director_resolution_preset", ""),
+        aspect_ratio=params.get("director_aspect_ratio", ""),
+    )
+    normalized_resolution = profile.get("normalized_resolution")
+    if normalized_resolution:
+        video_params["resolution"] = normalized_resolution
+    if profile.get("turbo_mode"):
+        from models.minimax_h3.turbo import MINIMAX_H3_TURBO_PRESET_STEPS
+
+        video_params["num_inference_steps"] = MINIMAX_H3_TURBO_PRESET_STEPS
+    params["video_params"] = video_params
+    params["_director_video_execution_profile"] = profile
+    return profile
+
+
+def _director_video_execution_profile(params: dict) -> dict:
+    profile = params.get("_director_video_execution_profile")
+    return dict(profile) if isinstance(profile, dict) else {}
+
+
+def _director_effective_max_frames(
+    params: dict,
+    model_def: dict,
+) -> int:
+    profile = _director_video_execution_profile(params)
+    value = profile.get("effective_max_frames")
+    if value is None:
+        value = model_def.get("frames_maximum") or 345
+    return int(value)
+
+
+def _saved_director_video_execution_profile(
+    state: dict,
+    *,
+    model_def: Optional[dict] = None,
+) -> dict:
+    """Read a saved profile, deriving one for projects created before it."""
+
+    saved = state.get("video_execution_profile")
+    snapshot = state.get("_params_snapshot") or {}
+    if not isinstance(saved, dict):
+        saved = snapshot.get("_director_video_execution_profile")
+    if isinstance(saved, dict) and saved.get("effective_max_frames"):
+        return dict(saved)
+
+    params = dict(snapshot)
+    params.setdefault("video_model", state.get("video_model"))
+    params["video_params"] = dict(
+        state.get("video_params") or params.get("video_params") or {}
+    )
+    params["video_loras"] = dict(
+        state.get("video_loras") or params.get("video_loras") or {}
+    )
+    return _create_director_video_execution_profile(
+        params,
+        model_def=model_def,
+    )
+
+
+def _validate_saved_profile_for_current_hardware(
+    state: dict,
+    profile: dict,
+    model_def: dict,
+    frame_values,
+) -> None:
+    """Reject an auto-planned H3 shot that is unsafe on the current GPU.
+
+    The saved profile remains the reproducibility contract when a project is
+    moved to a larger card.  On a smaller card, however, forcing that old pass
+    size would either OOM or invite the generic runtime to split a prompt that
+    Director did not pace as sliding windows.  An explicit manual override is
+    still honored because the user already opted out of Auto's guardrail.
+    """
+
+    if (
+        not profile.get("is_minimax_h3")
+        or profile.get("manual_override")
+    ):
+        return
+
+    snapshot = dict(state.get("_params_snapshot") or {})
+    snapshot["video_model"] = (
+        snapshot.get("video_model")
+        or state.get("video_model")
+        or profile.get("model_type")
+    )
+    snapshot["video_params"] = dict(
+        state.get("video_params") or snapshot.get("video_params") or {}
+    )
+    saved_resolution = profile.get("normalized_resolution")
+    if saved_resolution:
+        snapshot["video_params"]["resolution"] = saved_resolution
+    snapshot["video_loras"] = dict(
+        state.get("video_loras") or snapshot.get("video_loras") or {}
+    )
+    snapshot.pop("director_max_shot_frames", None)
+    snapshot.pop("_director_video_execution_profile", None)
+    current_profile = _create_director_video_execution_profile(
+        snapshot,
+        model_def=model_def,
+    )
+    current_maximum = current_profile.get("effective_max_frames")
+    saved_maximum = profile.get("effective_max_frames")
+    if current_maximum is None or saved_maximum is None:
+        return
+    current_maximum = int(current_maximum)
+    saved_maximum = int(saved_maximum)
+    if current_maximum >= saved_maximum:
+        return
+
+    for index, frames in enumerate(frame_values):
+        if frames is None:
+            continue
+        if int(frames) > current_maximum:
+            fps = float(profile.get("fps") or 24)
+            raise ValueError(
+                f"Saved Director shot {index + 1} requires {int(frames)} "
+                f"frames, but Auto allows one {current_maximum}-frame "
+                f"({current_maximum / fps:.2f}s) H3 pass at "
+                f"{saved_resolution or 'this resolution'} on the current "
+                "GPU. Re-plan at a lower resolution, or explicitly use a "
+                "manual maximum shot override if you want to try it."
+            )
+
+
+def _prepare_director_generation_params(params: dict) -> None:
+    """Apply Director-only H3 guarantees before publishing a child job."""
+
+    model_type = str(params.get("model_type") or "")
+    if not model_type.lower().startswith("minimax_h3"):
+        return
+    profile = params.get("_director_video_execution_profile")
+    if isinstance(profile, dict):
+        frame_values = params.get("per_clip_frames")
+        if not isinstance(frame_values, (list, tuple)):
+            frame_values = [params.get("video_length")]
+        for index, frames in enumerate(frame_values):
+            validate_director_execution_frames(
+                profile,
+                frames,
+                label=f"Director shot {index + 1}",
+            )
+        # Director has already planned every H3 child as one hardware-safe
+        # native pass. Prevent the generic runtime policy from silently
+        # shrinking it into prompt-unaware continuation windows.
+        params["sliding_window_memory_override"] = True
+
+    if params.get("minimax_h3_turbo_mode") is True:
+        from models.minimax_h3.turbo import normalize_minimax_h3_turbo_request
+
+        getter = getattr(_wgp, "get_model_def", None)
+        model_def = getter(model_type) if callable(getter) else {}
+        normalize_minimax_h3_turbo_request(
+            params,
+            full_checkpoint=bool(
+                (model_def or {}).get("minimax_h3_full_checkpoint", False)
+            ),
+        )
 
 
 class _RepairCancelledError(RuntimeError):
@@ -280,6 +483,9 @@ def _director_params_from_saved_state(state: dict) -> dict:
     params["_director_shot_image_policy"] = (
         _saved_pipeline_shot_image_policy(state)
     )
+    profile = state.get("video_execution_profile")
+    if isinstance(profile, dict):
+        params["_director_video_execution_profile"] = profile
     return params
 
 
@@ -699,6 +905,11 @@ def _save_pipeline_state_locked(pid: str) -> bool:
         "video_loras": params.get("video_loras", {}),
         "image_params": params.get("image_params", {}),
         "video_params": params.get("video_params", {}),
+        "director_resolution_preset": params.get("director_resolution_preset"),
+        "director_aspect_ratio": params.get("director_aspect_ratio"),
+        "video_execution_profile": params.get(
+            "_director_video_execution_profile", {}
+        ),
         "llm_log": p.get("_llm_log"),
         "clips": clips,
         "output_files": p.get("output_files", []),
@@ -1751,6 +1962,10 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
     except (TypeError, ValueError):
         fps = 16.0
     director_strategy = video_strategy(model_def)
+    execution_profile = _saved_director_video_execution_profile(
+        state,
+        model_def=model_def,
+    )
     try:
         min_frames, _, latent_size = _wgp.get_model_min_frames_and_step(video_model)
     except Exception:
@@ -1786,7 +2001,11 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
         ))
     if director_strategy in {BOUNDED_START_END, OMNI_REFERENCE}:
         frame_schedule = []
-        maximum_frames = int(model_def.get("frames_maximum") or 345)
+        maximum_frames = int(
+            execution_profile.get("effective_max_frames")
+            or model_def.get("frames_maximum")
+            or 345
+        )
         frame_step = int(model_def.get("frames_steps") or 17)
         for index, saved_clip in enumerate(clips):
             saved_plan = saved_clip.get("planned_clip") or {}
@@ -1800,10 +2019,22 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
             ):
                 raise ValueError(
                     f"Saved shot {index + 1} does not have a valid native "
-                    f"{video_model} duration. Re-plan this older project "
-                    "before rerunning it."
+                    f"{video_model} duration within this project's "
+                    f"{maximum_frames}-frame one-pass limit. Re-plan this "
+                    "older project before rerunning it."
                 )
+            validate_director_execution_frames(
+                execution_profile,
+                frame_count,
+                label=f"Saved Director shot {index + 1}",
+            )
             frame_schedule.append(frame_count)
+        _validate_saved_profile_for_current_hardware(
+            state,
+            execution_profile,
+            model_def,
+            frame_schedule,
+        )
     else:
         frame_schedule = _quantize_clip_frame_schedule(
             requested_frames, min_frames, latent_size,
@@ -1884,7 +2115,10 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
         ),
         "num_inference_steps": video_params.get("num_inference_steps", 8),
         "guidance_scale": video_params.get("guidance_scale", 1),
-        "resolution": video_params.get("resolution", "1280x720"),
+        "resolution": (
+            execution_profile.get("normalized_resolution")
+            or video_params.get("resolution", "1280x720")
+        ),
         "video_length": video_length,
         # Match the full Director run: LTX-2 may use one expanded window for
         # an ordinary shot, while other story models retain their native
@@ -1902,6 +2136,10 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
         ),
         "_director_pipeline_id": pid,
         "_director_detached_operation": True,
+        "_director_video_execution_profile": execution_profile,
+        "minimax_h3_turbo_mode": bool(
+            video_params.get("minimax_h3_turbo_mode")
+        ),
     }
     with _pipeline_lock:
         repair_control = _pipeline_repairs.get(pid)
@@ -2079,6 +2317,16 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
                 s["clips"][clip_index][key] = prompt_plan.get(key)
         if new_filename not in s.get("output_files", []):
             s.setdefault("output_files", []).append(new_filename)
+        s["video_execution_profile"] = execution_profile
+        snapshot_params = s.get("_params_snapshot")
+        if isinstance(snapshot_params, dict):
+            snapshot_params["_director_video_execution_profile"] = (
+                execution_profile
+            )
+            snapshot_video_params = snapshot_params.setdefault(
+                "video_params", {}
+            )
+            snapshot_video_params["resolution"] = gen_params["resolution"]
     _update_saved_pipeline(out_dir, pid, _update)
 
     return {"filename": new_filename, "clip_index": clip_index}
@@ -2780,6 +3028,7 @@ def _submit_and_wait(params: dict, timeout_s: float = 600, workspace: str = None
 
     Returns list of output filenames. Raises on failure/timeout.
     """
+    _prepare_director_generation_params(params)
     job_id = uuid.uuid4().hex[:8]
     job = {
         "id": job_id,
@@ -2995,10 +3244,24 @@ def start_pipeline(params: dict) -> str:
     # pipeline's generated anchor and later influence repair/cleanup behavior.
     params.pop("generated_reference_image_filename", None)
     params.pop("_director_shot_image_policy", None)
+    params.pop("_director_video_execution_profile", None)
     params["_director_shot_image_policy"] = (
         _resolve_fresh_shot_image_policy(params)
     )
     _validate_director_models(params)
+    execution_profile = _create_director_video_execution_profile(params)
+    if execution_profile.get("is_minimax_h3"):
+        print(
+            "[Pipeline] H3 Director execution profile: "
+            f"{execution_profile.get('normalized_resolution')}, "
+            f"{execution_profile.get('gpu_vram_gb', 0):g} GB, "
+            f"one-pass max {execution_profile.get('effective_max_frames')} "
+            f"frames ({execution_profile.get('effective_max_seconds', 0):.2f}s)"
+            + (
+                " [manual override]"
+                if execution_profile.get("manual_override") else ""
+            )
+        )
     pid = uuid.uuid4().hex[:8]
 
     # Capture workspace at submission time — not at execution time
@@ -3201,8 +3464,44 @@ def _resume_pipeline_reserved(pid: str, out_dir: str) -> tuple[bool, str]:
     except DirectorModelCompatibilityError as exc:
         return False, str(exc)
 
+    video_model = params.get("video_model") or data.get("video_model")
+    try:
+        resume_model_def = _wgp.get_model_def(video_model) or {}
+        execution_profile = _saved_director_video_execution_profile(
+            data,
+            model_def=resume_model_def,
+        )
+    except ValueError as exc:
+        return False, str(exc)
+    params["_director_video_execution_profile"] = execution_profile
+    params.setdefault("video_params", {})
+    if execution_profile.get("normalized_resolution"):
+        params["video_params"]["resolution"] = execution_profile[
+            "normalized_resolution"
+        ]
+
     # Rebuild the generation-driving structures from the saved per-clip state.
     saved_clips = data.get("clips", []) or []
+    try:
+        saved_frame_values = []
+        for index, saved_clip in enumerate(saved_clips):
+            planned = saved_clip.get("planned_clip") or {}
+            frames = planned.get("duration_frames")
+            saved_frame_values.append(frames)
+            if frames is not None:
+                validate_director_execution_frames(
+                    execution_profile,
+                    frames,
+                    label=f"Saved Director shot {index + 1}",
+                )
+        _validate_saved_profile_for_current_hardware(
+            data,
+            execution_profile,
+            resume_model_def,
+            saved_frame_values,
+        )
+    except ValueError as exc:
+        return False, str(exc)
     clip_plans = [{
         "image_prompt": c.get("image_prompt", ""),
         "video_prompt": c.get("video_prompt", ""),
@@ -3405,7 +3704,9 @@ def _run_pipeline(pid: str, resume: bool = False):
             if selected_strategy in {BOUNDED_START_END, OMNI_REFERENCE}:
                 model_fps = float(selected_video_def.get("fps") or 24)
                 minimum_frames = int(selected_video_def.get("frames_minimum") or 124)
-                maximum_frames = int(selected_video_def.get("frames_maximum") or 345)
+                maximum_frames = _director_effective_max_frames(
+                    params, selected_video_def,
+                )
                 frame_step = int(selected_video_def.get("frames_steps") or 17)
                 original_count = len(clip_plans)
                 clip_plans, planned_clips = adapt_bounded_timeline(
@@ -3948,6 +4249,16 @@ def _run_planning(pid: str, params: dict, pipeline_type: str):
     # the flag at all. Keeping it consistent with the services-config
     # default here so the legacy path isn't accidentally hit.
     use_v2 = params.get("use_director_v2", True)
+    execution_profile = _director_video_execution_profile(params)
+    if execution_profile.get("is_minimax_h3") and not use_v2:
+        # The legacy planner only understands generic 20-second rolling
+        # windows. H3 needs the native-shot planner so its dialogue and action
+        # are written against the effective one-pass limit.
+        print(
+            f"[Pipeline {pid}] MiniMax H3 requires Director v2 native-shot "
+            "planning; ignoring the legacy Director toggle for this run."
+        )
+        use_v2 = True
 
     if use_v2:
         return _run_planning_v2(pid, params, pipeline_type)
@@ -4019,6 +4330,42 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
     except Exception:
         selected_video_def = {}
     selected_video_strategy = video_strategy(selected_video_def)
+    effective_max_frames = _director_effective_max_frames(
+        params, selected_video_def,
+    )
+
+    # Audio-analysis workflows arrive with a coarse clip timeline before the
+    # LLM writes prompts. For bounded H3, divide that timeline now so the LLM
+    # receives the exact number and duration of native shots. Splitting after
+    # prompt generation forced one long action/dialogue description across
+    # multiple hardware windows and made later windows repeat or improvise.
+    if (
+        pipeline_type != "short_film_story"
+        and selected_video_strategy in {BOUNDED_START_END, OMNI_REFERENCE}
+        and planned_clips
+    ):
+        placeholder_plans = [
+            {"video_prompt": "", "image_prompt": ""}
+            for _ in planned_clips
+        ]
+        original_planning_count = len(planned_clips)
+        _, planned_clips = adapt_bounded_timeline(
+            placeholder_plans,
+            planned_clips,
+            fps=float(selected_video_def.get("fps") or 24),
+            minimum_frames=int(
+                selected_video_def.get("frames_minimum") or 124
+            ),
+            maximum_frames=effective_max_frames,
+            frame_step=int(selected_video_def.get("frames_steps") or 17),
+        )
+        params["planned_clips"] = planned_clips
+        print(
+            f"[Pipeline {pid}] Pre-segmented {original_planning_count} "
+            f"audio timeline item(s) into {len(planned_clips)} "
+            f"hardware-safe native shot(s) before prompt planning "
+            f"(max {effective_max_frames} frames)."
+        )
     # Pass video_model and image_model to every planner so Pass 2 can
     # route its prompt guides correctly. Previously these only flowed
     # into polish_block construction (when polish_mode was on); now the
@@ -4060,7 +4407,7 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
                 if native_bounded else params.get("frames_minimum", 41)
             ),
             "frames_maximum": (
-                selected_video_def.get("frames_maximum", 345)
+                effective_max_frames
                 if native_bounded else None
             ),
         })
@@ -4874,6 +5221,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
     except Exception:
         pass
     director_strategy = video_strategy(model_def)
+    execution_profile = _director_video_execution_profile(params)
     shot_image_policy = _director_effective_shot_image_policy(params)
     uses_shot_images = shot_images_required(shot_image_policy)
     if director_strategy != ROLLING_WINDOW:
@@ -4883,7 +5231,10 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
         f"strategy={director_strategy}, shot_images={shot_image_policy}"
     )
 
-    resolution = video_params.get("resolution", "1280x720")
+    resolution = (
+        execution_profile.get("normalized_resolution")
+        or video_params.get("resolution", "1280x720")
+    )
     steps = video_params.get("num_inference_steps", 8)
     guidance = video_params.get("guidance_scale", 1)
     spatial_upsampling = params.get("video_spatial_upsampling", "")
@@ -5049,7 +5400,11 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                     )
                     clip_frames = round(float(duration or 0) * fps)
                 minimum = int(model_def.get("frames_minimum") or _min_f)
-                maximum = int(model_def.get("frames_maximum") or clip_frames)
+                maximum = int(
+                    execution_profile.get("effective_max_frames")
+                    or model_def.get("frames_maximum")
+                    or clip_frames
+                )
                 step = int(model_def.get("frames_steps") or _fs or 1)
                 if not (
                     minimum <= clip_frames <= maximum
@@ -5060,6 +5415,11 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                         f"{video_model}'s native {minimum}-{maximum} frame lattice "
                         f"(step {step}). Re-plan the project before generation."
                     )
+                validate_director_execution_frames(
+                    execution_profile,
+                    clip_frames,
+                    label=f"Director shot {i + 1}",
+                )
                 per_clip_frames.append(clip_frames)
                 continue
 
@@ -5409,6 +5769,11 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                 print(f"[Pipeline {pid}] Keyframe injection: {[len(p) for p in per_clip_kf_paths]} keyframes per clip")
 
     # Common params
+    if execution_profile.get("is_minimax_h3"):
+        gen_params["_director_video_execution_profile"] = execution_profile
+        gen_params["minimax_h3_turbo_mode"] = bool(
+            video_params.get("minimax_h3_turbo_mode")
+        )
     voice_ref = params.get("voice_reference")
     if voice_ref and director_strategy != OMNI_REFERENCE:
         gen_params["voice_reference"] = voice_ref

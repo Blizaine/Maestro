@@ -163,6 +163,46 @@ _SHOT_IMAGE_FIELDS = frozenset({
 _H3_DIALOGUE_WORDS_PER_SECOND = 2.1
 
 
+def _h3_preferred_native_durations(
+    *,
+    fps: int,
+    frames_minimum: int,
+    frames_maximum: int,
+    frames_steps: int,
+) -> list[float]:
+    """Return a compact set of valid, human-friendly H3 shot lengths."""
+
+    fps = max(1, int(fps or 24))
+    frames_minimum = max(1, int(frames_minimum or 124))
+    frames_maximum = max(frames_minimum, int(frames_maximum or frames_minimum))
+    frames_steps = max(1, int(frames_steps or 17))
+    valid = list(range(frames_minimum, frames_maximum + 1, frames_steps))
+    if not valid:
+        valid = [frames_minimum]
+    targets = [8.0, 10.0, 12.0, 14.0]
+    selected: list[int] = []
+    for target in targets:
+        if target < frames_minimum / fps or target > frames_maximum / fps:
+            continue
+        nearest = min(
+            valid,
+            key=lambda frames: (abs(frames / fps - target), frames),
+        )
+        if nearest not in selected:
+            selected.append(nearest)
+    if not selected:
+        selected.append(valid[-1])
+    elif valid[-1] not in selected:
+        # Always advertise the actual execution ceiling. When four friendly
+        # targets were already selected, replace the longest near-target
+        # instead of hiding the final hardware-safe native duration.
+        if len(selected) >= 4:
+            selected[-1] = valid[-1]
+        else:
+            selected.append(valid[-1])
+    return [frames / fps for frames in sorted(selected)]
+
+
 _H3_VOICE_BIBLE_SCHEMA = {
     "type": "array",
     "items": {
@@ -591,6 +631,7 @@ def _apply_h3_character_table_read(
     *,
     story_description: str,
     max_spoken_words: int,
+    maximum_line_words: int = 30,
 ) -> tuple[list[dict[str, Any]], int]:
     """Install a dialogue-only revision after strict identity/order checks.
 
@@ -657,12 +698,11 @@ def _apply_h3_character_table_read(
         if original_fingerprint in locked:
             candidate = locked[original_fingerprint]
 
-        # One H3 native shot cannot exceed about 30 conversational words.
+        # A line must fit the effective native pass selected for this run.
         # Leave an already-long screenplay line untouched so the established
         # duration allocator can report/handle it instead of accepting a new
         # table-read regression.
-        maximum_line_words = int(14.375 * _H3_DIALOGUE_WORDS_PER_SECOND)
-        if len(candidate.split()) > maximum_line_words:
+        if len(candidate.split()) > max(1, int(maximum_line_words)):
             candidate = original_text
 
         updated = copy.deepcopy(original)
@@ -2546,6 +2586,7 @@ SUPPLIED CHARACTER CARDS:
         manifest: list[dict[str, Any]],
         voice_bible: list[dict[str, str]],
         max_spoken_words: int,
+        maximum_line_words: int,
     ) -> list[dict[str, Any]]:
         """Polish only spoken words before the H3 manifest becomes immutable."""
 
@@ -2568,13 +2609,13 @@ SUPPLIED CHARACTER CARDS:
             "No structured voice bible was available. Infer distinct speech "
             "only from the project concept and screenplay context."
         )
-        system_prompt = """You are the H3 CHARACTER TABLE-READ editor. Improve only the dialogue of an already structured screenplay.
+        system_prompt = f"""You are the H3 CHARACTER TABLE-READ editor. Improve only the dialogue of an already structured screenplay.
 
 Return ONLY one JSON array row for every supplied dialogue turn. Keep the same turn number, speaker, order, intent, plot facts, and conversational response relationship. Do not add or remove turns. original_text must be copied exactly into the corresponding output row.
 
 Make each revised_text sound unmistakably appropriate to that character: established personality, vocabulary, syntax, cadence, comic or dramatic mechanism, and relationship to the person being addressed. Preserve nuance; do not reduce a character to one exaggerated trait. Write fresh dialogue and never copy famous lines or catchphrases.
 
-If user_locked is true, revised_text MUST exactly equal original_text. Otherwise tighten stiff, formal, generic, or AI-like phrasing while preserving meaning. Keep the whole exchange within the stated spoken-word budget and never make an individual turn longer than 30 words.
+If user_locked is true, revised_text MUST exactly equal original_text. Otherwise tighten stiff, formal, generic, or AI-like phrasing while preserving meaning. Keep the whole exchange within the stated spoken-word budget and never make an individual turn longer than {maximum_line_words} words.
 
 delivery is a concise performance direction for that specific line. Describe cadence, energy, pitch/register, hesitation, interruption, or emotional pressure. Do not request an exact actor voice or voice impersonation."""
         user_prompt = f"""Perform a dialogue-only table read for this H3 Director screenplay.
@@ -2609,6 +2650,7 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT:
                 rows,
                 story_description=story_description,
                 max_spoken_words=max_spoken_words,
+                maximum_line_words=maximum_line_words,
             )
             print(
                 "[ShortFilmPlanner] H3 character table read validated "
@@ -3307,6 +3349,13 @@ H3 CHARACTER-AUTHENTICITY RULES:
                         manifest=screenplay_dialogue_manifest,
                         voice_bible=h3_voice_bible,
                         max_spoken_words=max_spoken_words,
+                        maximum_line_words=max(
+                            1,
+                            int(math.floor(
+                                (float(frames_maximum or 345) / max(1, fps))
+                                * _H3_DIALOGUE_WORDS_PER_SECOND
+                            )),
+                        ),
                     )
                 )
                 assert_no_minor_content(
@@ -4885,12 +4934,22 @@ SCREENPLAY:
             shot_count_low,
             math.floor(target_duration / minimum_seconds),
         )
-        # Prefer roughly 8-12 second clips while allowing the screenplay to
-        # choose a tighter cut when the target runtime needs it.
+        # Prefer ordinary editorial-length clips while respecting a smaller
+        # hardware-safe ceiling (for example 5.17s at wide 1080p on 24 GB).
         shot_count_high = max(
             shot_count_low,
             min(maximum_by_runtime, math.ceil(target_duration / 7.5)),
         )
+        preferred_durations = _h3_preferred_native_durations(
+            fps=fps,
+            frames_minimum=frames_minimum,
+            frames_maximum=frames_maximum,
+            frames_steps=frames_steps,
+        )
+        preferred_duration_text = ", ".join(
+            f"{duration:.2f}s" for duration in preferred_durations
+        )
+        example_duration = preferred_durations[-1]
 
         char_rules = build_character_rules_block(
             has_reference or bool(getattr(self, "_num_character_refs", 0)),
@@ -4967,7 +5026,7 @@ H3 NATIVE SHOT CONTRACT — NON-NEGOTIABLE:
 - continuity_group is a short stable ID such as kitchen_morning_1. Reuse it only while place and story time remain uninterrupted; change it for any location or time jump.
 - WORLD CONTINUITY IS REQUIRED: preserve any supplied TV show, film, performer, franchise, historical era, city, named venue, room, or recognizable set. Repeat the relevant world/franchise and full location in EACH video_prompt; never collapse a named series and its recognizable apartment set into a generic kitchen.
 - Each screenplay event and each spoken line appears in exactly one shot. Do not duplicate dialogue across adjacent shots. Preserve scripted dialogue verbatim.
-- CONVERSATION PACKING IS REQUIRED: a change of speaker is not by itself a reason to start another array item. Within the same uninterrupted location and story beat, prefer one 10-14 second clip containing 2-4 alternating dialogue turns when their combined total is no more than {maximum_dialogue_words} words. Keep a brief reaction such as "What?", a gasp, or a one-line reply in the surrounding exchange instead of wasting a separate minimum-length clip.
+- CONVERSATION PACKING IS REQUIRED: a change of speaker is not by itself a reason to start another array item. Within the same uninterrupted location and story beat, prefer one native clip ({preferred_duration_text}) containing 2-4 alternating dialogue turns when their combined total is no more than {maximum_dialogue_words} words. Keep a brief reaction such as "What?", a gasp, or a one-line reply in the surrounding exchange instead of wasting a separate minimum-length clip.
 - INTERNAL CAMERA EDITING IS SUPPORTED: inside one bounded H3 clip, the camera may begin on an ensemble frame, cut or reframe to each current speaker before their tagged line, hold their unobstructed face and mouth through the complete line, capture reactions, and finish on a new composition. Describe that chronological coverage in camera_plan and action_beats. Prefer the lower end of the requested shot-count range for a continuous dialogue scene.
 - DIALOGUE MUST NOT LIVE ONLY IN dialogue_beats. Every dialogue_beats[].spoken_text must also appear exactly once in the same shot's video_prompt as <d>[English] Exact words</d>, with the speaker ID/name, delivery, and physical cue outside the tag. If dialogue_beats is empty, explicitly state that no one speaks, mouths remain closed, and no muttering, gibberish, or speech-like vocalization occurs.
 - SPEAKER VISIBILITY IS REQUIRED: every person who delivers a line must have a complete subjects_on_screen entry and remain visibly framed with an unobstructed face and mouth for the full line. Reframe to the current speaker before speech; reaction framing may follow only after the spoken line is complete.
@@ -4989,7 +5048,7 @@ OUTPUT — one closed object per native shot:
 [
   {{
     "title": "Shot title",
-    "duration_sec": 10,
+    "duration_sec": {example_duration:.2f},
     "scene_goal": "Unique story beat",
     "narrative_role": "setup|rising_action|climax|resolution",
     "scene_type": "dialogue|action|opening|closing",
@@ -5024,7 +5083,7 @@ OUTPUT — one closed object per native shot:
 
 TASK: Convert this {target_duration}-second screenplay into {shot_count_low}-{shot_count_high} self-contained native H3 shots.
 
-Total duration should remain approximately {target_duration} seconds. Each duration_sec must be between {minimum_seconds:.2f} and {maximum_seconds:.2f} seconds; prefer 8, 10, 12, or 14 seconds when pacing permits. Do not output a 20-second shot.
+Total duration should remain approximately {target_duration} seconds. Each duration_sec must be between {minimum_seconds:.2f} and {maximum_seconds:.2f} seconds; prefer these valid native durations when pacing permits: {preferred_duration_text}. Do not output a duration above {maximum_seconds:.2f} seconds.
 
 PROJECT WORLD SOURCE OF TRUTH:
 {story_description}

@@ -39,7 +39,9 @@ from services.director_video_strategy import (  # noqa: E402
     SHOT_IMAGES_DIRECT_REFERENCES,
     adapt_bounded_timeline,
     apply_independent_shot_context,
+    build_director_video_execution_profile,
     resolve_shot_image_policy,
+    validate_director_execution_frames,
 )
 
 
@@ -273,6 +275,16 @@ class TestDirectorModelAssessment(unittest.TestCase):
                 "frames_steps": 17,
                 "director_video_strategy": "bounded_start_end",
                 "director_shot_image_support": "optional",
+                "resolutions": [("720p", "1280x704")],
+                "director_memory_policy": {
+                    "resolution_bands": [{
+                        "min_pixels": 0,
+                        "vram_tiers": [
+                            {"max_vram_gb": 24, "frames": 243},
+                            {"frames": 345},
+                        ],
+                    }],
+                },
             },
         )
         try:
@@ -289,6 +301,14 @@ class TestDirectorModelAssessment(unittest.TestCase):
                         ),
                         "target_duration": 10,
                         "_director_shot_image_policy": SHOT_IMAGE_PROMPT_ONLY,
+                        "_director_video_execution_profile": (
+                            build_director_video_execution_profile(
+                                "minimax_h3",
+                                pipeline._wgp.get_model_def("minimax_h3"),
+                                {"resolution": "1280x704"},
+                                {"gpu_vram_gb": 24},
+                            )
+                        ),
                     },
                     "short_film_story",
                 )
@@ -298,7 +318,7 @@ class TestDirectorModelAssessment(unittest.TestCase):
 
         self.assertEqual(captured["fps"], 24)
         self.assertEqual(captured["frames_minimum"], 124)
-        self.assertEqual(captured["frames_maximum"], 345)
+        self.assertEqual(captured["frames_maximum"], 243)
         self.assertEqual(captured["frames_steps"], 17)
         self.assertEqual(clips[0]["duration_frames"], 243)
         self.assertIn("Friends TV show", plans[0]["video_prompt"])
@@ -985,6 +1005,230 @@ class TestDirectorModelAssessment(unittest.TestCase):
         )
 
 
+class TestDirectorVideoExecutionProfile(unittest.TestCase):
+    @staticmethod
+    def _h3_model(*, full: bool = False) -> dict:
+        memory_policy = {
+            "resolution_bands": [
+                {
+                    "min_pixels": 1_800_000,
+                    "vram_tiers": [
+                        {
+                            "max_vram_gb": 12,
+                            "frames": None,
+                            "fallback_resolution": "720p or lower",
+                        },
+                        {"max_vram_gb": 24, "frames": 124},
+                        {"max_vram_gb": 32, "frames": 243},
+                        {"frames": 345},
+                    ],
+                },
+                {
+                    "min_pixels": 800_000,
+                    "vram_tiers": [
+                        {"max_vram_gb": 12, "frames": 124},
+                        {"max_vram_gb": 24, "frames": 243},
+                        {"frames": 345},
+                    ],
+                },
+                {
+                    "min_pixels": 0,
+                    "vram_tiers": [{"frames": 345}],
+                },
+            ],
+        }
+        return {
+            "architecture": "minimax_h3",
+            "director_video_strategy": "bounded_start_end",
+            "frames_minimum": 124,
+            "frames_maximum": 345,
+            "frames_steps": 17,
+            "fps": 24,
+            "minimax_h3_full_checkpoint": full,
+            "director_memory_policy": memory_policy,
+            "resolutions": [
+                ("1280x704 (16:9 720p)", "1280x704"),
+                ("704x1280 (9:16 720p)", "704x1280"),
+                ("1920x1088 (16:9 1080p)", "1920x1088"),
+                ("1088x1920 (9:16 1080p)", "1088x1920"),
+            ],
+        }
+
+    def test_auto_profile_uses_exact_canvas_vram_policy(self):
+        profile = build_director_video_execution_profile(
+            "minimax_h3",
+            self._h3_model(),
+            {"resolution": "1280x720"},
+            {"gpu_vram_gb": 24},
+            resolution_preset="720p",
+            aspect_ratio="16:9",
+        )
+
+        self.assertEqual(profile["normalized_resolution"], "1280x704")
+        self.assertEqual(profile["recommended_max_frames"], 243)
+        self.assertEqual(profile["effective_max_frames"], 243)
+        self.assertAlmostEqual(profile["effective_max_seconds"], 10.125)
+        self.assertFalse(profile["manual_override"])
+
+        high_resolution = build_director_video_execution_profile(
+            "minimax_h3",
+            self._h3_model(),
+            {"resolution": "1920x1088"},
+            {"gpu_vram_gb": 24},
+        )
+        self.assertEqual(high_resolution["effective_max_frames"], 124)
+        high_resolution_32gb = build_director_video_execution_profile(
+            "minimax_h3",
+            self._h3_model(),
+            {"resolution": "1920x1088"},
+            {"gpu_vram_gb": 32},
+        )
+        self.assertEqual(high_resolution_32gb["effective_max_frames"], 243)
+
+    def test_unsupported_auto_profile_requires_lower_canvas_or_override(self):
+        with self.assertRaisesRegex(ValueError, "no automatic one-pass profile"):
+            build_director_video_execution_profile(
+                "minimax_h3",
+                self._h3_model(),
+                {"resolution": "1920x1088"},
+                {"gpu_vram_gb": 12},
+            )
+
+        profile = build_director_video_execution_profile(
+            "minimax_h3",
+            self._h3_model(),
+            {"resolution": "1920x1088"},
+            {"gpu_vram_gb": 12},
+            manual_max_frames=124,
+        )
+        self.assertEqual(profile["effective_max_frames"], 124)
+        self.assertTrue(profile["manual_override"])
+        self.assertFalse(profile["hardware_supported"])
+
+    def test_manual_profile_must_stay_on_native_lattice(self):
+        with self.assertRaisesRegex(ValueError, "124-345 frame lattice"):
+            build_director_video_execution_profile(
+                "minimax_h3",
+                self._h3_model(),
+                {"resolution": "1280x704"},
+                {"gpu_vram_gb": 24},
+                manual_max_frames=240,
+            )
+
+        profile = build_director_video_execution_profile(
+            "minimax_h3",
+            self._h3_model(),
+            {"resolution": "1280x704"},
+            {"gpu_vram_gb": 24},
+            manual_max_frames=345,
+        )
+        self.assertEqual(profile["effective_max_frames"], 345)
+        validate_director_execution_frames(profile, 345)
+
+    def test_validation_rejects_runtime_window_shrink(self):
+        profile = build_director_video_execution_profile(
+            "minimax_h3",
+            self._h3_model(),
+            {"resolution": "1280x704"},
+            {"gpu_vram_gb": 24},
+        )
+        with self.assertRaisesRegex(ValueError, "one native pass"):
+            validate_director_execution_frames(profile, 345)
+
+    def test_timeline_is_split_to_effective_profile_before_generation(self):
+        profile = build_director_video_execution_profile(
+            "minimax_h3",
+            self._h3_model(),
+            {"resolution": "1280x704"},
+            {"gpu_vram_gb": 24},
+        )
+        plans, clips = adapt_bounded_timeline(
+            [{
+                "video_prompt": "One uninterrupted fourteen-second action.",
+                "window_prompts": ["first beat", "second beat"],
+            }],
+            [{"start": 0.0, "end": 14.375, "duration_sec": 14.375}],
+            fps=24,
+            minimum_frames=124,
+            maximum_frames=profile["effective_max_frames"],
+            frame_step=17,
+        )
+
+        self.assertEqual(len(plans), 2)
+        self.assertEqual(len(clips), 2)
+        for clip in clips:
+            self.assertLessEqual(
+                clip["duration_frames"],
+                profile["effective_max_frames"],
+            )
+            validate_director_execution_frames(
+                profile,
+                clip["duration_frames"],
+            )
+
+    def test_saved_auto_profile_is_rechecked_on_a_smaller_gpu(self):
+        model_def = self._h3_model()
+        profile = build_director_video_execution_profile(
+            "minimax_h3",
+            model_def,
+            {"resolution": "1280x704"},
+            {"gpu_vram_gb": 24},
+        )
+        state = {
+            "video_model": "minimax_h3",
+            "video_params": {"resolution": "1280x704"},
+            "video_loras": {},
+            "_params_snapshot": {"video_model": "minimax_h3"},
+        }
+
+        with patch.object(
+            pipeline,
+            "_director_hardware_snapshot",
+            return_value={"gpu_vram_gb": 12},
+        ):
+            with self.assertRaisesRegex(ValueError, "current GPU"):
+                pipeline._validate_saved_profile_for_current_hardware(
+                    state,
+                    profile,
+                    model_def,
+                    [243],
+                )
+
+    def test_director_turbo_child_keeps_one_native_pass_and_managed_recipe(self):
+        model_def = self._h3_model()
+        profile = build_director_video_execution_profile(
+            "minimax_h3",
+            model_def,
+            {
+                "resolution": "1280x704",
+                "minimax_h3_turbo_mode": True,
+            },
+            {"gpu_vram_gb": 24},
+        )
+        params = {
+            "model_type": "minimax_h3",
+            "video_length": 243,
+            "per_clip_frames": [243],
+            "minimax_h3_turbo_mode": True,
+            "_director_video_execution_profile": profile,
+        }
+
+        with patch.object(
+            pipeline,
+            "_wgp",
+            SimpleNamespace(get_model_def=lambda _model_type: model_def),
+        ):
+            pipeline._prepare_director_generation_params(params)
+
+        self.assertTrue(params["sliding_window_memory_override"])
+        self.assertEqual(params["num_inference_steps"], 6)
+        self.assertEqual(
+            params["activated_loras"],
+            ["minimax_h3_turbo_4step_ckpt500.safetensors"],
+        )
+        self.assertEqual(params["loras_multipliers"], "0.50")
+
+
 class TestDirectorBackendValidation(unittest.TestCase):
     def setUp(self):
         self.original_wgp = pipeline._wgp
@@ -1499,6 +1743,14 @@ class TestDirectorUICatalogContract(unittest.TestCase):
         chat_path = os.path.join(
             _ROOT_DIR, "ui", "src", "components", "Sidebar", "DirectorChat.tsx",
         )
+        lora_selector_path = os.path.join(
+            _ROOT_DIR,
+            "ui",
+            "src",
+            "components",
+            "SettingsDrawer",
+            "DirectorLoraSelector.tsx",
+        )
         launch_path = os.path.join(_APP_DIR, "launch.py")
         pipeline_path = os.path.join(_APP_DIR, "services", "director_pipeline.py")
         with open(client_path, encoding="utf-8") as handle:
@@ -1509,6 +1761,8 @@ class TestDirectorUICatalogContract(unittest.TestCase):
             types = handle.read()
         with open(chat_path, encoding="utf-8") as handle:
             chat = handle.read()
+        with open(lora_selector_path, encoding="utf-8") as handle:
+            lora_selector = handle.read()
         with open(launch_path, encoding="utf-8") as handle:
             launch = handle.read()
         with open(pipeline_path, encoding="utf-8") as handle:
@@ -1518,10 +1772,22 @@ class TestDirectorUICatalogContract(unittest.TestCase):
         self.assertIn("const backendModels: ModelDef[]", store)
         self.assertIn("...m,", store)
         self.assertIn("shot_image_guidance: directorShotImageGuidance", store)
+        self.assertIn("director_max_shot_frames: directorMaxShotFrames", store)
+        self.assertIn("resolution: directorVideoResolution", store)
+        self.assertIn("minimax_h3_turbo_mode: directorTurboEnabled", store)
         self.assertIn("shot_image_support?", types)
         self.assertIn("Shot image guidance", chat)
+        self.assertIn("Maximum planned shot", chat)
+        self.assertIn("H3 Turbo", chat)
+        self.assertIn("director_memory_policy", chat)
+        self.assertIn("LoRA strength", lora_selector)
+        self.assertIn('type="number"', lora_selector)
+        self.assertIn("updateWeight(filename", lora_selector)
         self.assertIn("usesShotImages && (atStep('review')", chat)
         self.assertIn("SHOT_IMAGE_PROMPT_ONLY", pipeline_source)
+        self.assertIn("_director_video_execution_profile", pipeline_source)
+        self.assertIn("sliding_window_memory_override", pipeline_source)
+        self.assertIn('"director_memory_policy": md.get', launch)
         self.assertIn("per_clip_continue_from_previous", launch)
         self.assertIn('"_continuation_tail_skip", 8', launch)
 

@@ -2,7 +2,7 @@
     "model": {
         "name": "H3 First / Last — Pruned",
         "architecture": "minimax_h3",
-        "description": "Recommended lighter MiniMax H3 First / Last model. Creates video from text alone or with a first frame, last frame, or both, and generates synchronized stereo audio. Longer Studio clips continue through native 14.4-second windows. It does not accept reference audio. Turbo / distilled H3 LoRAs require the Full model.",
+        "description": "Recommended lighter MiniMax H3 First / Last model. Creates video from text alone or with a first frame, last frame, or both, and generates synchronized stereo audio. Longer Studio clips continue through native 14.4-second windows. It does not accept reference audio. H3 LoRAs, including Turbo, are converted automatically when needed.",
         "URLs": [
             "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/0543966fbdce5ba05709a8f2031c94bdba629b4a/diffusion_models/minimax_h3_fl2va_pruned_fp8_scaled.safetensors"
         ]
