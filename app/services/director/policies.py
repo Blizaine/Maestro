@@ -303,12 +303,27 @@ def compress_prompt_text(text: str) -> tuple[str, int]:
 
 # ── System Prompt Builders (compact rule blocks for LLM) ─────────────
 
-def build_character_rules_block(has_reference: bool, characters: Optional[list[CharacterProfile]] = None) -> str:
+def build_character_rules_block(
+    has_reference: bool,
+    characters: Optional[list[CharacterProfile]] = None,
+    *,
+    preserve_names: bool = False,
+) -> str:
     """Build the character-related rules block for LLM system prompts."""
-    from .guide_loader import load_guide
-    base = load_guide("character_identification_rules.md")
-    if not base:
-        base = "CHARACTER RULES:\n- Describe characters by appearance, not names."
+    if preserve_names:
+        base = (
+            "H3 CHARACTER RULES:\n"
+            "- Preserve every user-supplied proper character/person name and "
+            "series, film, or franchise in video prompts exactly as written.\n"
+            "- Keep the proper name together with useful visible traits; never "
+            "collapse a named identity to a generic man, woman, or character.\n"
+            "- Do not invent names that the user or screenplay did not supply."
+        )
+    else:
+        from .guide_loader import load_guide
+        base = load_guide("character_identification_rules.md")
+        if not base:
+            base = "CHARACTER RULES:\n- Describe characters by appearance, not names."
 
     lines = [base]
     if has_reference:
@@ -338,11 +353,19 @@ def build_character_rules_block(has_reference: bool, characters: Optional[list[C
             "'tall man in gleaming silver plate armor' (NOT 'man in black')."
         )
     if characters:
-        lines.append("- Character reference (use ONLY the visual descriptions below, never names):")
+        lines.append(
+            "- Character reference (retain each supplied name/label with its visual description):"
+            if preserve_names
+            else "- Character reference (use ONLY the visual descriptions below, never names):"
+        )
         for c in characters:
             desc = describe_character(c)
-            # Do NOT include display_name — LLMs parrot names into prompts despite instructions
-            lines.append(f"  * {c.id}: {desc}")
+            if preserve_names and c.display_name:
+                lines.append(f"  * {c.id} / {c.display_name}: {desc}")
+            else:
+                # Do NOT include display_name in image-driven workflows —
+                # image models need visible descriptions, not bare names.
+                lines.append(f"  * {c.id}: {desc}")
         lines.append(
             "- The descriptions above are REFERENCE-PHOTO descriptions. "
             "If the screenplay transforms a character (e.g. into a knight, "

@@ -1,14 +1,27 @@
+import type { DirectorModelCompatibility, H3WindowPlan, ScailResolutionProfile } from '../types'
+
 const BASE = ''  // same origin in production; Vite proxy handles /api in dev
 
 export interface ApiModel {
   model_type: string
   name: string
+  description?: string
+  selector_help?: string
+  lora_compatibility_note?: string
   family: string
   architecture: string
   is_i2v: boolean
   is_t2v: boolean
   guidance_max_phases: number
   fps: number
+  supports_end_frame?: boolean
+  /** Legacy broad flag: accepts input audio OR generates output audio. */
+  supports_audio?: boolean
+  supports_audio_input?: boolean
+  generates_audio?: boolean
+  supports_ref_images?: boolean
+  /** Per-workflow eligibility computed by the Director backend. */
+  director?: DirectorModelCompatibility
   is_downloaded?: boolean
   // True when the model JSON declares `"nsfw_only": true` in its
   // model block. The UI hides it from selectors and the visibility
@@ -66,6 +79,33 @@ export async function fetchModels(): Promise<{ families: ApiFamily[]; models: Ap
   return res.json()
 }
 
+export interface ModelVisibilitySettings {
+  configured: boolean
+  enabled_models: string[]
+  initialized_mature_models: string[]
+  defaults_version: number
+}
+
+export async function fetchModelVisibility(): Promise<ModelVisibilitySettings> {
+  const res = await fetch(`${BASE}/api/v1/model-visibility`)
+  if (!res.ok) throw new Error('Failed to fetch model visibility')
+  return res.json()
+}
+
+export async function updateModelVisibility(params: {
+  enabled_models: string[]
+  initialized_mature_models: string[]
+  defaults_version: number
+}): Promise<ModelVisibilitySettings> {
+  const res = await fetch(`${BASE}/api/v1/model-visibility`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!res.ok) throw new Error('Failed to save model visibility')
+  return res.json()
+}
+
 // Re-scan defaults/ + finetunes/ on the server so a newly-imported checkpoint
 // appears in the model list without a restart. Returns model_types that appeared.
 export async function reloadModels(): Promise<{ status: string; model_count: number; added: string[] }> {
@@ -113,7 +153,7 @@ export async function fetchDefaults(modelType: string): Promise<Record<string, u
 
 // --- Generation ---
 
-export async function submitGeneration(params: Record<string, unknown>): Promise<{ job_id: string }> {
+export async function submitGeneration(params: Record<string, unknown>): Promise<{ job_id: string; h3_window_plan?: H3WindowPlan }> {
   const res = await fetch(`${BASE}/api/v1/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -122,6 +162,31 @@ export async function submitGeneration(params: Record<string, unknown>): Promise
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Generation failed' }))
     throw new Error(err.detail || 'Generation failed')
+  }
+  return res.json()
+}
+
+export async function planH3Windows(params: {
+  prompt: string
+  model_type: string
+  resolution: string
+  total_frames: number
+  window_frames: number
+  overlap_frames: number
+  discard_frames: number
+  sliding_window_memory_override?: boolean
+  has_start_image?: boolean
+  has_end_image?: boolean
+  image_paths?: string[]
+}): Promise<H3WindowPlan> {
+  const res = await fetch(`${BASE}/api/v1/llm/plan-h3-windows`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'H3 window planning failed' }))
+    throw new Error(err.detail || 'H3 window planning failed')
   }
   return res.json()
 }
@@ -272,7 +337,7 @@ export async function cancelJob(jobId: string): Promise<void> {
 export async function fetchActiveJobs(): Promise<{ jobs: Array<{
   job_id: string; status: string; progress: number; step: number;
   total_steps: number; phase: string; message: string; output_files: string[];
-  error: string | null; created_at: number;
+  error: string | null; created_at: number; h3_window_plan?: H3WindowPlan | null;
 }> }> {
   const res = await fetch(`${BASE}/api/v1/jobs`)
   if (!res.ok) throw new Error('Failed to fetch jobs')
@@ -386,7 +451,7 @@ export async function fetchGroupClips(groupId: string): Promise<{ group_id: stri
 export interface PipelineStatus {
   id: string
   status: 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'
-  phase: 'planning' | 'polishing_prompts' | 'generating_images' | 'generating_video' | 'post_processing' | 'completed'
+  phase: 'planning' | 'polishing_prompts' | 'generating_images' | 'preparing_video' | 'generating_video' | 'post_processing' | 'completed' | 'failed' | 'cancelled'
   auto_mode: boolean
   progress: { current: number; total: number; message: string; step: number; total_steps: number }
   clip_plans: Array<{ video_prompt: string; image_prompt: string }>
@@ -398,6 +463,7 @@ export interface PipelineStatus {
   oom_info?: import('../types').OomInfo | null
   pause_reason: string | null
   llm_streaming: boolean
+  recovered_from_disk?: boolean
   /** Non-fatal warnings raised during the run — currently used for
    *  architecture-mismatch advisories when image LoRAs are dropped
    *  because they were trained for a different Flux variant than the
@@ -412,7 +478,10 @@ export async function startPipeline(params: Record<string, unknown>): Promise<{ 
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
   })
-  if (!res.ok) throw new Error('Failed to start pipeline')
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to start pipeline' }))
+    throw new Error(err.detail || err.error || 'Failed to start pipeline')
+  }
   return res.json()
 }
 
@@ -837,13 +906,123 @@ export async function submitEditAnything(params: {
   return res.json()
 }
 
+// --- Repaint (SCAIL-2 Animate: edited first frame + source motion) ---
+
+export interface RepaintRegionRequest {
+  id?: string;
+  /** Person/object phrase to track through the source video. */
+  source: string;
+  /** Corresponding person/object phrase in the edited first frame. */
+  target: string;
+}
+
+export async function submitRepaint(params: {
+  video_path: string;
+  target_frame_path: string;
+  region_mappings?: RepaintRegionRequest[];
+  prompt?: string;
+  start_time?: number;
+  end_time?: number;
+  model_type?: string;
+  negative_prompt?: string;
+  seed?: number;
+  num_inference_steps?: number;
+  /** SCAIL-2 HQ only. Fast is CFG-distilled and stays at 1. */
+  guidance_scale?: number;
+  resolution_profile?: ScailResolutionProfile;
+  activated_loras?: string[];
+  loras_multipliers?: string;
+  workspace?: string;
+}): Promise<{
+  job_id: string;
+  status: string;
+  frames?: number;
+  region_count?: number;
+  resolution_profile?: ScailResolutionProfile;
+  resolution?: string;
+  sliding_window_size?: number;
+  num_inference_steps?: number;
+  guidance_scale?: number;
+}> {
+  const res = await fetch(`${BASE}/api/v1/repaint`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Repaint failed' }))
+    throw new Error(err.detail || 'Repaint failed')
+  }
+  return res.json()
+}
+
+export async function repaintPreview(params: {
+  video_path: string;
+  target_frame_path: string;
+  region_mappings: RepaintRegionRequest[];
+  time?: number;
+  workspace?: string;
+}): Promise<{
+  found: boolean;
+  frame_index: number;
+  source_preview: string;
+  target_preview: string;
+  mapping_results: Array<{
+    mapping_index: number;
+    source: string;
+    target: string;
+    source_found: boolean;
+    target_found: boolean;
+    color: number[];
+  }>;
+}> {
+  const res = await fetch(`${BASE}/api/v1/repaint/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Repaint preview failed' }))
+    throw new Error(err.detail || 'Repaint preview failed')
+  }
+  return res.json()
+}
+
 // --- Recast (SCAIL-2 Replace: swap a person for a reference character) ---
 
 export async function submitRecast(params: {
   video_path: string;
-  ref_image_path: string;
+  ref_image_path?: string;
+  /** Same-character views for the legacy single-mapping request. */
+  additional_ref_image_paths?: string[];
+  /** Deterministic source-person → replacement-reference assignments. */
+  character_mappings?: Array<{
+    id?: string;
+    target: string;
+    ref_image_path: string;
+    additional_ref_image_paths?: string[];
+    reference_aligned_to_source?: boolean;
+  }>;
   /** Who to replace, as a SAM3 keyword ("woman", "man in red"). */
   target?: string;
+  /** Number of matching people to track and replace (1-5). */
+  person_count?: number;
+  /** The reference is an edited copy of the selected source first frame. */
+  reference_aligned_to_source?: boolean;
+  /** Preserve original subject identity while neutralizing reference scenery. */
+  isolate_reference?: boolean;
+  /** Derive a tighter same-character identity view when none is supplied. */
+  auto_face_detail?: boolean;
+  /** Rewrite and append Maestro's identity/scene continuity guidance. */
+  enhance_prompt?: boolean;
+  /** Strict post-composite fallback; may create visible lighting/color seams. */
+  protect_bystanders?: boolean;
+  /** Experimental: preserve other visible identities with native SCAIL-2 color correspondence. */
+  preserve_bystanders?: boolean;
+  /** Apply the official SCAIL-2 replacement Relighting LoRA. */
+  use_relighting?: boolean;
+  /** Spatial quality only; does not select a model or change its step schedule. */
+  resolution_profile?: ScailResolutionProfile;
   /** Optional scene/character description — a good one helps identity. */
   prompt?: string;
   start_time?: number;
@@ -853,8 +1032,21 @@ export async function submitRecast(params: {
   seed?: number;
   num_inference_steps?: number;
   guidance_scale?: number;
+  activated_loras?: string[];
+  loras_multipliers?: string;
   workspace?: string;
-}): Promise<{ job_id: string; status: string; frames?: number; target?: string }> {
+}): Promise<{
+  job_id: string;
+  status: string;
+  frames?: number;
+  target?: string;
+  person_count?: number;
+  resolution_profile?: ScailResolutionProfile;
+  resolution?: string;
+  sliding_window_size?: number;
+  num_inference_steps?: number;
+  guidance_scale?: number;
+}> {
   const res = await fetch(`${BASE}/api/v1/recast`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -870,9 +1062,60 @@ export async function submitRecast(params: {
 export async function recastPreview(params: {
   video_path: string;
   target?: string;
+  person_count?: number;
+  ref_image_path?: string;
+  additional_ref_image_paths?: string[];
+  character_mappings?: Array<{
+    id?: string;
+    target: string;
+    ref_image_path?: string;
+    additional_ref_image_paths?: string[];
+    reference_aligned_to_source?: boolean;
+  }>;
+  isolate_reference?: boolean;
+  auto_face_detail?: boolean;
+  resolution_profile?: ScailResolutionProfile;
   time?: number;
+  end_time?: number;
   workspace?: string;
-}): Promise<{ found: boolean; frame_index: number; preview: string }> {
+}): Promise<{
+  found: boolean;
+  matched_people: number;
+  requested_people: number;
+  frame_index: number;
+  time_seconds?: number;
+  timeline_start_seconds?: number;
+  timeline_end_seconds?: number;
+  sampled_frame_count?: number;
+  preview: string;
+  resolution_profile?: ScailResolutionProfile;
+  output_resolution?: number[];
+  mapping_results?: Array<{
+    mapping_index: number;
+    target: string;
+    found: boolean;
+    color: number[];
+    overlap_fraction: number;
+    first_frame_index?: number | null;
+    first_time_seconds?: number | null;
+    anchor_frame_index?: number | null;
+    anchor_time_seconds?: number | null;
+  }>;
+  reference_previews?: Array<{
+    mapping_index: number;
+    view_index: number;
+    kind: 'primary' | 'additional' | 'auto_face_detail';
+    mask_source: string;
+    source_size: number[];
+    prepared_size: number[];
+    crop_box?: number[];
+    detail_size?: number[];
+    detail_source?: string;
+    prepared_image: string;
+    clip_identity_image?: string;
+    semantic_mask: string;
+  }>;
+}> {
   const res = await fetch(`${BASE}/api/v1/recast/preview`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -890,9 +1133,14 @@ export async function recastPreview(params: {
 export async function submitOutpaint(params: {
   video_path: string; prompt: string; model_type: string;
   pad_top?: number; pad_bottom?: number; pad_left?: number; pad_right?: number;
+  outpaint_aspect?: 'source' | '16:9' | '9:16' | '1:1' | '4:3' | '3:4';
   resolution_preset?: 'auto' | '480p' | '540p' | '720p' | '1080p';
   source_preservation?: number;
   outpaint_lora_strength?: number;
+  mask_preserving_outpaint?: boolean;
+  num_inference_steps?: number;
+  guidance_scale?: number;
+  negative_prompt?: string;
   seed?: number;
   activated_loras?: string[]; loras_multipliers?: string;
   workspace?: string;
@@ -1007,7 +1255,15 @@ export async function mixAudio(tracks: { path: string; start_time: number; volum
 
 // --- Upload ---
 
-export async function uploadImage(file: File): Promise<{ filename: string; path: string; url: string; fps?: number; frame_count?: number }> {
+export async function uploadImage(file: File): Promise<{
+  filename: string
+  path: string
+  url: string
+  fps?: number
+  frame_count?: number
+  duration_seconds?: number
+  has_audio?: boolean
+}> {
   const form = new FormData()
   form.append('file', file)
   const res = await fetch(`${BASE}/api/v1/upload`, {
@@ -1167,6 +1423,7 @@ export async function llmEnhancePrompt(params: {
   tts_enhance_mode?: string
   tts_voice_count?: number
   max_new_tokens?: number
+  reference_context?: string
 }): Promise<{ original: string; enhanced: string }> {
   const res = await fetch(`${BASE}/api/v1/llm/enhance-prompt`, {
     method: 'POST',
@@ -1182,7 +1439,12 @@ export async function llmEnhancePrompt(params: {
 
 // --- Audio Analysis ---
 
-export async function uploadAudio(file: File): Promise<{ filename: string; path: string; url: string }> {
+export async function uploadAudio(file: File): Promise<{
+  filename: string
+  path: string
+  url: string
+  duration_seconds?: number | null
+}> {
   const form = new FormData()
   form.append('file', file)
   const res = await fetch(`${BASE}/api/v1/upload-audio`, {

@@ -25,7 +25,10 @@ _APP_DIR = os.path.abspath(os.path.join(_HERE, "..", "app"))
 if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
-from services.perf_recommend import compute_per_job_coefficient  # noqa: E402
+from services.perf_recommend import (  # noqa: E402
+    compute_h3_weight_budget,
+    compute_per_job_coefficient,
+)
 
 
 class TestPassOverheadResolutionScaling(unittest.TestCase):
@@ -173,6 +176,132 @@ class TestPassOverheadResolutionScaling(unittest.TestCase):
         )
         joined = " ".join(result["reasons"])
         self.assertNotIn("resolution scale", joined)
+
+
+class TestMiniMaxH3ActivationBudget(unittest.TestCase):
+    def test_long_540p_job_restores_known_good_4090_headroom(self):
+        budget = compute_h3_weight_budget(24.0, "960x544", 336)
+        self.assertLessEqual(budget["weight_budget_gb"], 17.1)
+        self.assertGreaterEqual(budget["activation_reserve_gb"], 6.9)
+
+    def test_portrait_and_landscape_have_the_same_budget(self):
+        landscape = compute_h3_weight_budget(24.0, "960x544", 336)
+        portrait = compute_h3_weight_budget(24.0, "544x960", 336)
+        self.assertEqual(landscape, portrait)
+
+    def test_short_480p_job_keeps_more_weights_but_never_exceeds_cap(self):
+        budget = compute_h3_weight_budget(24.0, "864x480", 124)
+        self.assertGreater(budget["weight_budget_gb"], 17.5)
+        self.assertLessEqual(budget["weight_budget_gb"], 18.0)
+
+    def test_video_reference_adds_full_attention_reserve(self):
+        budget = compute_h3_weight_budget(24.0, "960x544", 345, 1)
+        self.assertAlmostEqual(budget["activation_reserve_gb"], 17.0, places=2)
+        self.assertAlmostEqual(budget["weight_budget_gb"], 7.0, places=2)
+
+    def test_lower_vram_card_streams_more_transformer_weights(self):
+        budget = compute_h3_weight_budget(16.0, "960x544", 345)
+        self.assertAlmostEqual(budget["activation_reserve_gb"], 7.0, places=2)
+        self.assertAlmostEqual(budget["weight_budget_gb"], 9.0, places=2)
+
+    def test_fixed_mmgp_workspace_is_not_double_counted_at_native_size(self):
+        budget = compute_h3_weight_budget(
+            24.0,
+            "960x544",
+            345,
+            runtime_workspace_gb=10.0,
+        )
+        self.assertFalse(budget["runtime_scaling_active"])
+        self.assertEqual(budget["scaled_runtime_workspace_gb"], 0.0)
+        self.assertAlmostEqual(budget["activation_reserve_gb"], 7.0, places=2)
+        self.assertAlmostEqual(budget["weight_budget_gb"], 17.0, places=2)
+
+    def test_pruned_768p_full_window_preserves_step_zero_headroom_on_4090(self):
+        budget = compute_h3_weight_budget(
+            24.0,
+            "1344x768",
+            345,
+            runtime_workspace_gb=10.0,
+        )
+        self.assertTrue(budget["runtime_scaling_active"])
+        self.assertGreater(budget["weight_budget_gb"], 6.0)
+        self.assertLess(budget["weight_budget_gb"], 6.5)
+        self.assertGreater(budget["activation_reserve_gb"], 17.5)
+        self.assertEqual(budget["runtime_safety_margin_gb"], 1.0)
+
+    def test_aligned_720p_retains_more_transformer_residency_than_768p(self):
+        aligned_720p = compute_h3_weight_budget(
+            24.0,
+            "1280x704",
+            345,
+            runtime_workspace_gb=10.0,
+        )
+        high_768p = compute_h3_weight_budget(
+            24.0,
+            "1344x768",
+            345,
+            runtime_workspace_gb=10.0,
+        )
+        self.assertGreater(
+            aligned_720p["weight_budget_gb"],
+            high_768p["weight_budget_gb"],
+        )
+        self.assertGreater(aligned_720p["weight_budget_gb"], 7.5)
+        self.assertLess(aligned_720p["weight_budget_gb"], 8.5)
+
+    def test_recommended_720p_window_keeps_allocator_headroom_on_4090(self):
+        budget = compute_h3_weight_budget(
+            24.0,
+            "1280x704",
+            243,
+            runtime_workspace_gb=10.0,
+        )
+        self.assertTrue(budget["runtime_scaling_active"])
+        self.assertGreater(budget["activation_reserve_gb"], 12.0)
+        self.assertGreater(budget["weight_budget_gb"], 11.0)
+        self.assertLess(budget["weight_budget_gb"], 12.0)
+
+    def test_pruned_768p_full_window_reaches_streaming_floor_on_16gb_card(self):
+        budget = compute_h3_weight_budget(
+            16.0,
+            "1344x768",
+            345,
+            runtime_workspace_gb=10.0,
+        )
+        self.assertTrue(budget["runtime_scaling_active"])
+        self.assertEqual(budget["weight_budget_gb"], 3.5)
+        self.assertEqual(budget["activation_reserve_gb"], 12.5)
+
+    def test_pruned_768p_short_window_uses_fixed_mmgp_workspace(self):
+        budget = compute_h3_weight_budget(
+            16.0,
+            "1344x768",
+            124,
+            runtime_workspace_gb=10.0,
+        )
+        self.assertFalse(budget["runtime_scaling_active"])
+        self.assertEqual(budget["scaled_runtime_workspace_gb"], 0.0)
+        self.assertGreater(budget["weight_budget_gb"], 9.0)
+
+    def test_1080p_window_scales_runtime_workspace_on_4090(self):
+        budget = compute_h3_weight_budget(
+            24.0,
+            "1920x1088",
+            124,
+            runtime_workspace_gb=10.0,
+            additional_reserve_gb=0.75,
+        )
+        self.assertTrue(budget["runtime_scaling_active"])
+        self.assertGreater(budget["compute_ratio"], 1.4)
+        self.assertGreater(budget["activation_reserve_gb"], 16.0)
+        self.assertLess(budget["weight_budget_gb"], 8.0)
+        self.assertEqual(budget["runtime_safety_margin_gb"], 1.0)
+        self.assertEqual(budget["additional_reserve_gb"], 0.75)
+        self.assertAlmostEqual(
+            budget["activation_reserve_gb"],
+            budget["scaled_runtime_workspace_gb"] + 1.75,
+            places=6,
+        )
 
 
 if __name__ == "__main__":

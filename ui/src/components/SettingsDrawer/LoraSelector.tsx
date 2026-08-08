@@ -106,11 +106,16 @@ export function LoraSortToggle({ sort, onChange }: { sort: LoraPickerSort; onCha
 
 export function LoraSelector() {
   const modelType = useStore(s => s.params.model_type)
+  const loraCompatibilityNote = useStore(s => s.models.find(
+    model => model.model_type === s.params.model_type,
+  )?.lora_compatibility_note)
   const activatedLoras = useStore(s => s.params.activated_loras)
   const availableLoras = useStore(s => s.availableLoras)
   const lorasLoading = useStore(s => s.lorasLoading)
   const loraWeights = useStore(s => s.loraWeights)
   const modelOptions = useStore(s => s.modelOptions)
+  const generationMode = useStore(s => s.generationMode)
+  const editSubMode = useStore(s => s.editSubMode)
   const toggleLora = useStore(s => s.toggleLora)
   const setLoraWeight = useStore(s => s.setLoraWeight)
   const loadLoras = useStore(s => s.loadLoras)
@@ -245,6 +250,13 @@ export function LoraSelector() {
     </div>
   )
 
+  const compatibilityNotice = loraCompatibilityNote ? (
+    <div className="mb-2 flex items-start gap-1.5 rounded-lg border border-border bg-bg-tertiary px-2.5 py-2 text-[10px] leading-relaxed text-text-secondary">
+      <Info size={11} className="mt-0.5 shrink-0 text-accent-blue" />
+      <span>{loraCompatibilityNote}</span>
+    </div>
+  ) : null
+
   // Load LoRA details (weight recommendations for the list, guides for activated)
   useEffect(() => {
     if (!modelType) return
@@ -319,7 +331,10 @@ export function LoraSelector() {
     }
   }
 
-  const phases = modelOptions?.guidance_max_phases ?? 1
+  // Recast owns a one-phase SCAIL-2 schedule. Showing the Wan family's
+  // generic three phase sliders produced invalid `1;1;1` multipliers.
+  const recastSinglePhase = generationMode === 'avatar' && editSubMode === 'recast'
+  const phases = recastSinglePhase ? 1 : Math.max(1, modelOptions?.guidance_max_phases ?? 1)
 
   // Load LoRAs when model changes
   useEffect(() => {
@@ -358,6 +373,7 @@ export function LoraSelector() {
     return (
       <div>
         {loraHeader}
+        {compatibilityNotice}
         <div className="text-xs text-text-muted bg-bg-tertiary border border-border rounded-lg px-3 py-4 text-center flex items-center justify-center gap-2">
           <Loader2 size={12} className="animate-spin" />
           Loading LoRAs...
@@ -370,6 +386,7 @@ export function LoraSelector() {
     return (
       <div>
         {loraHeader}
+        {compatibilityNotice}
         <div className="text-xs text-text-muted bg-bg-tertiary border border-border rounded-lg px-3 py-4 text-center">
           No LoRAs found for this model
         </div>
@@ -380,6 +397,7 @@ export function LoraSelector() {
   return (
     <div>
       {loraHeader}
+      {compatibilityNotice}
 
       {/* Search + NSFW + Updatable toggles */}
       <div className="flex items-center gap-2 mb-2">
@@ -527,7 +545,11 @@ export function LoraSelector() {
             </button>
           </div>
           {activatedLoras.map(filename => {
-            const weights = loraWeights[filename] || Array(phases).fill(1.0)
+            const storedWeights = loraWeights[filename] || [1.0]
+            const weights = Array.from(
+              { length: phases },
+              (_, i) => storedWeights[i] ?? storedWeights[storedWeights.length - 1] ?? 1.0,
+            )
             return (
               <div key={filename} className="bg-bg-tertiary border border-border rounded-lg px-2.5 py-2">
                 <div className="flex items-center justify-between mb-1.5">

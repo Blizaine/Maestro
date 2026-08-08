@@ -5,13 +5,18 @@ export function ResolutionPresets() {
   const resolutionPreset = useStore(s => s.resolutionPreset)
   const setResolutionPreset = useStore(s => s.setResolutionPreset)
   const generationMode = useStore(s => s.generationMode)
+  const modelOptions = useStore(s => s.modelOptions)
   const isEdit = generationMode === 'avatar'
 
   const isImage = generationMode === 'image'
-  // Edit and Image modes get Auto option
-  const presets: ResolutionPreset[] = (isEdit || isImage)
-    ? ['auto', '480p', '540p', '720p', '1080p']
-    : ['480p', '540p', '720p', '1080p']
+  // Model-specific lists take precedence so a family can label its native
+  // tier and clearly identify higher-cost experimental canvases.
+  const presets: ResolutionPreset[] = modelOptions?.resolution_preset_order?.length
+    ? modelOptions.resolution_preset_order
+    : (isEdit || isImage)
+      ? ['auto', '480p', '540p', '720p', '1080p']
+      : ['480p', '540p', '720p', '1080p']
+  const selectedModelPreset = modelOptions?.resolution_presets?.[resolutionPreset]
 
   return (
     <div>
@@ -27,13 +32,22 @@ export function ResolutionPresets() {
                 : 'text-text-secondary hover:text-text-primary'
             }`}
           >
-            {p === 'auto' ? 'Auto' : p}
+            {p === 'auto'
+              ? 'Auto'
+              : modelOptions?.resolution_presets?.[p]?.label || p}
           </button>
         ))}
       </div>
       {resolutionPreset === 'auto' && (
         <p className="text-[9px] text-text-muted mt-0.5">
           {isEdit ? 'Uses source clip resolution' : isImage ? 'Matches reference image aspect ratio' : 'Auto resolution'}
+        </p>
+      )}
+      {selectedModelPreset?.hint && (
+        <p className={`mt-1 text-[9px] leading-relaxed ${
+          selectedModelPreset.experimental ? 'text-indicator-warning' : 'text-text-muted'
+        }`}>
+          {selectedModelPreset.hint}
         </p>
       )}
     </div>

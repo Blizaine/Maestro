@@ -36,6 +36,7 @@ _ARCH_SPECS = {
         "distilled_lora": "ltx-2.3-22b-distilled-lora-384.safetensors",
         "union_control_lora": "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors",
         "outpaint_ic_lora": "ltx-2.3-22b-ic-lora-outpaint.safetensors",
+        "inpaint_ic_lora": "ltx-2.3-22b-ic-lora-in-outpainting-0.9.safetensors",
         # ID-LoRA voice-identity LoRA — auto-loaded by get_loras_transformer
         # when a voice_reference is provided. Per upstream WanGP v11.77,
         # works on both dev and distilled despite being trained on dev.

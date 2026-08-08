@@ -4,11 +4,11 @@ import type { EditSubMode } from '../../types'
 
 const ALL_SUB_MODES: { value: EditSubMode; label: string; experimental?: boolean }[] = [
   { value: 'retake', label: 'Retake' },
-  { value: 'inpaint', label: 'Inpaint', experimental: true },
-  { value: 'outpaint', label: 'Outpaint' },
-  { value: 'restyle', label: 'Restyle', experimental: true },
   { value: 'edit_anything', label: 'Edit Anything' },
+  { value: 'outpaint', label: 'Outpaint' },
+  { value: 'restyle', label: 'Repaint' },
   { value: 'recast', label: 'Recast' },
+  { value: 'inpaint', label: 'Inpaint', experimental: true },
 ]
 
 export function EditSubModeToggle() {
@@ -26,7 +26,7 @@ export function EditSubModeToggle() {
     : ALL_SUB_MODES.filter(m => !m.experimental)
 
   useEffect(() => {
-    if (!showExperimental && (editSubMode === 'inpaint' || editSubMode === 'restyle')) {
+    if (!showExperimental && editSubMode === 'inpaint') {
       setEditSubMode('retake')
     }
   }, [showExperimental, editSubMode, setEditSubMode])

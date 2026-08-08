@@ -1,5 +1,5 @@
-import { useState, useRef, useEffect } from 'react'
-import { Sparkles, Loader2, ChevronUp, Brain, PenLine } from 'lucide-react'
+import { useState, useRef, useEffect, useLayoutEffect } from 'react'
+import { Sparkles, Loader2, ChevronDown, ChevronUp, Brain, PenLine, RefreshCw } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 
 const placeholders: Record<string, string> = {
@@ -7,6 +7,51 @@ const placeholders: Record<string, string> = {
   video: 'Describe your video...',
   audio: 'Enter text to speak or describe audio...',
   avatar: 'Describe your avatar animation...',
+}
+
+function H3WindowPromptTextarea({
+  value,
+  onChange,
+  readOnly,
+  title,
+  active,
+}: {
+  value: string
+  onChange: (value: string) => void
+  readOnly: boolean
+  title: string
+  active: boolean
+}) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  const fitToContent = () => {
+    const textarea = textareaRef.current
+    if (!textarea) return
+    textarea.style.height = 'auto'
+    // scrollHeight includes padding but not the two one-pixel borders used
+    // by this border-box textarea. Include them so the final line never clips.
+    textarea.style.height = `${textarea.scrollHeight + 2}px`
+  }
+
+  useLayoutEffect(fitToContent, [value])
+  useEffect(() => {
+    window.addEventListener('resize', fitToContent)
+    return () => window.removeEventListener('resize', fitToContent)
+  }, [])
+
+  return (
+    <textarea
+      ref={textareaRef}
+      rows={1}
+      value={value}
+      onChange={event => onChange(event.target.value)}
+      readOnly={readOnly}
+      title={title}
+      className={`w-full min-h-[92px] resize-none overflow-hidden bg-bg-secondary border rounded px-2 py-1.5 text-[10px] leading-relaxed text-text-secondary focus:outline-none focus:border-accent-blue ${
+        active ? 'border-accent-blue/70 bg-accent-blue/5' : 'border-border'
+      }`}
+    />
+  )
 }
 
 function useEnhanceStatus(isEnhancing: boolean) {
@@ -66,6 +111,7 @@ export function PromptInput() {
   const prompt = useStore(s => s.params.prompt)
   const setParam = useStore(s => s.setParam)
   const generationMode = useStore(s => s.generationMode)
+  const editSubMode = useStore(s => s.editSubMode)
   const enhancePrompt = useStore(s => s.enhancePrompt)
   const isEnhancing = useStore(s => s.isEnhancing)
   const durationSeconds = useStore(s => s.durationSeconds)
@@ -73,7 +119,22 @@ export function PromptInput() {
   const slidingWindowOverlap = useStore(s => s.slidingWindowOverlap)
   const modelOptions = useStore(s => s.modelOptions)
   const imageMode = useStore(s => s.params.image_mode)
+  const h3WindowPlanningEnabled = useStore(s => s.params.minimax_h3_window_storyboard !== false)
+  const h3WindowPlan = useStore(s => s.h3WindowPlan)
+  const updateH3WindowPrompt = useStore(s => s.updateH3WindowPrompt)
+  const activeH3JobPhase = useStore(s => {
+    const job = s.jobs.find(item => (
+      (item.status === 'queued' || item.status === 'running')
+      && !!item.h3WindowPlan
+    ))
+    return job ? (job.phase || job.message || '') : ''
+  })
+  const activeH3JobPlanSignature = useStore(s => s.jobs.find(item => (
+    (item.status === 'queued' || item.status === 'running')
+    && !!item.h3WindowPlan
+  ))?.h3WindowPlan?.signature || '')
   const [ttsMenuOpen, setTtsMenuOpen] = useState(false)
+  const [windowPlanOpen, setWindowPlanOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
 
   const isAudioOnly = modelOptions?.audio_only
@@ -98,10 +159,34 @@ export function PromptInput() {
   const overlapSec = slidingWindowOverlap / fps
   const discardSec = discardFrames / fps
   const stride = slidingWindowSeconds - discardSec - overlapSec
-  const windowCount = stride > 0 && durationSeconds > slidingWindowSeconds
+  const supportsSlidingWindows = modelOptions?.sliding_window === true
+  const windowCount = supportsSlidingWindows && stride > 0 && durationSeconds > slidingWindowSeconds
     ? 1 + Math.ceil((durationSeconds - slidingWindowSeconds + discardSec) / stride)
     : 1
-  const usesWindows = generationMode === 'video' && windowCount > 1 && imageMode !== 2
+  const usesWindows = generationMode === 'video' && supportsSlidingWindows && windowCount > 1 && imageMode !== 2
+  const usesH3WindowPlanner = (
+    usesWindows
+    && modelOptions?.sliding_window_auto_prompt_pacing === true
+    && h3WindowPlanningEnabled
+  )
+  const h3PlanIsStale = !!h3WindowPlan && (
+    h3WindowPlan.source_prompt.trim() !== prompt.trim()
+    || h3WindowPlan.window_count !== windowCount
+    || h3WindowPlan.total_frames !== Math.max(1, Math.round(durationSeconds * fps))
+    || h3WindowPlan.window_frames !== Math.max(1, Math.round(slidingWindowSeconds * fps))
+  )
+  const matchingActiveH3Phase = (
+    h3WindowPlan?.signature === activeH3JobPlanSignature
+      ? activeH3JobPhase
+      : ''
+  )
+  const activeWindowMatch = matchingActiveH3Phase.match(/Sliding Window\s+(\d+)\/(\d+)/i)
+  const activeH3Window = activeWindowMatch ? Number(activeWindowMatch[1]) : null
+  const modePlaceholder = generationMode === 'avatar' && editSubMode === 'recast'
+    ? 'Describe the finished video and replacement characters...'
+    : generationMode === 'avatar' && editSubMode === 'restyle'
+      ? 'Describe the finished video...'
+      : (placeholders[generationMode] || 'Describe your content...')
 
   // Close TTS menu on outside click
   useEffect(() => {
@@ -112,6 +197,15 @@ export function PromptInput() {
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
   }, [ttsMenuOpen])
+
+  // A server-created plan used to arrive collapsed, making the exact prompts
+  // effectively invisible once an expensive generation had started. Open a
+  // newly planned storyboard once; the user can still collapse it afterward.
+  useEffect(() => {
+    if (usesH3WindowPlanner && h3WindowPlan?.signature) {
+      setWindowPlanOpen(true)
+    }
+  }, [usesH3WindowPlanner, h3WindowPlan?.signature])
 
   // grow shrink-0: fill spare vertical space when the sidebar is roomy, but
   // never shrink below the textarea's min-height. Dropping the old
@@ -140,12 +234,75 @@ export function PromptInput() {
           )}
         </div>
       )}
+      {usesH3WindowPlanner && h3WindowPlan && (
+        <div className="mb-1.5">
+          <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-border bg-bg-tertiary/70">
+            <button
+              type="button"
+              onClick={() => setWindowPlanOpen(open => !open)}
+              className="flex-1 min-w-0 flex items-center gap-1.5 text-left"
+              title="Review the complete Context-IR prompt assigned to each H3 continuation window."
+            >
+              {windowPlanOpen ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+              <span className="text-[10px] font-medium text-text-secondary truncate">
+                Exact H3 prompts · {h3WindowPlan.window_count} windows
+              </span>
+              {h3PlanIsStale && (
+                <span className="text-[9px] text-amber-400">Needs update</span>
+              )}
+              {h3WindowPlan.planned_by === 'deterministic_fallback' && (
+                <span className="text-[9px] text-amber-400">Fallback</span>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => enhancePrompt()}
+              disabled={isEnhancing}
+              title="Rebuild the H3 window plan from the current idea and timing."
+              className="p-1 text-text-muted hover:text-accent-blue disabled:opacity-50"
+            >
+              <RefreshCw size={11} className={isEnhancing ? 'animate-spin' : ''} />
+            </button>
+          </div>
+          {windowPlanOpen && (
+            <div className="mt-2 space-y-3">
+              {h3WindowPlan.windows.map((window, index) => (
+                <div
+                  key={`${window.index}-${window.start_frame}`}
+                  className="space-y-1"
+                >
+                  <div className={`flex items-center justify-between text-[9px] ${
+                    activeH3Window === window.index ? 'text-accent-blue' : 'text-text-muted'
+                  }`}>
+                    <span>
+                      Window {window.index}: {window.title || `Beat ${window.index}`}
+                      {activeH3Window === window.index ? ' · Generating now' : ''}
+                    </span>
+                    <span>{window.start_seconds.toFixed(1)}–{window.end_seconds.toFixed(1)}s</span>
+                  </div>
+                  <H3WindowPromptTextarea
+                    value={window.prompt}
+                    onChange={value => updateH3WindowPrompt(index, value)}
+                    readOnly={!!matchingActiveH3Phase}
+                    title={matchingActiveH3Phase
+                      ? 'This is the exact prompt already submitted for the active generation.'
+                      : 'Edit this exact window prompt before the next generation.'}
+                    active={activeH3Window === window.index}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
       <textarea
         value={prompt}
         onChange={e => setParam('prompt', e.target.value)}
-        placeholder={usesWindows
-          ? `Line 1 = window 1, line 2 = window 2... (${windowCount} windows)`
-          : (placeholders[generationMode] || 'Describe your content...')}
+        placeholder={usesH3WindowPlanner
+          ? `Describe the complete video idea—Maestro will plan ${windowCount} H3 windows.`
+          : usesWindows
+            ? `Line 1 = window 1, line 2 = window 2... (${windowCount} windows)`
+          : modePlaceholder}
         className="w-full flex-1 bg-bg-tertiary border border-border rounded-lg px-3 py-2 pr-10 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue transition-colors"
         style={{ resize: 'none', minHeight: 112 }}
       />

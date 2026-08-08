@@ -135,6 +135,7 @@ _HANDLER_MODULES = [
     "shared.qtypes.nvfp4",
     "shared.qtypes.nunchaku_int4",
     "shared.qtypes.nunchaku_fp4",
+    "shared.qtypes.int8_convrot",
     "shared.qtypes.gguf",
 ]
 quant_router.unregister_handler(".fp8_quanto_bridge")
@@ -746,6 +747,18 @@ def collect_custom_settings_from_inputs(model_def, inputs, strict=False):
             continue
         if parsed_value is not None:
             custom_settings_dict[setting_id] = parsed_value
+    # Endpoint-owned settings (for example Recast's prepared reference masks)
+    # do not have public UI slots.  Preserve only the model handler's explicit
+    # allowlist; unknown request keys remain discarded.
+    runtime_custom_settings = model_def.get("runtime_custom_settings", [])
+    if isinstance(runtime_custom_settings, (list, tuple, set)):
+        for setting_id in runtime_custom_settings:
+            if (
+                isinstance(setting_id, str)
+                and setting_id in existing_custom_settings
+                and existing_custom_settings[setting_id] is not None
+            ):
+                custom_settings_dict[setting_id] = existing_custom_settings[setting_id]
     return custom_settings_dict if len(custom_settings_dict) > 0 else None, None
 
 def clear_custom_setting_slots(inputs):
@@ -759,7 +772,11 @@ def validate_settings(state, model_type, single_prompt, inputs):
     model_def = get_model_def(model_type)
     model_handler = get_model_handler(model_type)
     image_outputs = inputs["image_mode"] > 0
-    any_steps_skipping = model_def.get("tea_cache", False) or model_def.get("mag_cache", False)
+    any_steps_skipping = (
+        model_def.get("tea_cache", False)
+        or model_def.get("mag_cache", False)
+        or model_def.get("first_block_cache", False)
+    )
     model_type = get_base_model_type(model_type)
 
     model_filename = get_model_filename(model_type)  
@@ -804,6 +821,9 @@ def validate_settings(state, model_type, single_prompt, inputs):
     resolution = inputs["resolution"]
     # Resolve auto resolution early — compute from reference image before validation
     if not resolution or "x" not in resolution or resolution.startswith("auto"):
+        _resolution_hint = str(resolution or "auto")
+        _auto_budgets = model_def.get("auto_resolution_budgets") or {}
+        _auto_fallbacks = model_def.get("auto_resolution_fallbacks") or {}
         _val_refs = inputs.get("image_refs")
         _val_start = inputs.get("image_start")
         _val_ref_path = None
@@ -824,7 +844,14 @@ def validate_settings(state, model_type, single_prompt, inputs):
             _ri.close()
 
         if _rw and _rh:
-            _budget = 1920 * 1088 if "1080" in str(resolution) else (848 * 480 if "480" in str(resolution) else 1280 * 720)
+            if _resolution_hint in _auto_budgets:
+                _budget = int(_auto_budgets[_resolution_hint])
+            elif "1080" in _resolution_hint:
+                _budget = 1920 * 1088
+            elif "480" in _resolution_hint:
+                _budget = 848 * 480
+            else:
+                _budget = 1280 * 720
             _bs = model_def.get("block_size", 16)
             _sc = (_budget / (_rw * _rh)) ** 0.5
             _aw = int(round(_rw * _sc / _bs)) * _bs
@@ -833,7 +860,10 @@ def validate_settings(state, model_type, single_prompt, inputs):
             inputs["resolution"] = resolution
             print(f"[Auto Resolution] {_rw}x{_rh} ref → {_aw}x{_ah} output")
         else:
-            resolution = "1280x720"
+            resolution = _auto_fallbacks.get(
+                _resolution_hint,
+                "1280x720",
+            )
             inputs["resolution"] = resolution
             print(f"[Auto Resolution] No ref image found, using fallback {resolution}")
     width, height = resolution.split("x")
@@ -942,7 +972,36 @@ def validate_settings(state, model_type, single_prompt, inputs):
     else:
         model_switch_phase = 1
         
-    if not any_steps_skipping: skip_steps_cache_type = ""
+    if not any_steps_skipping:
+        skip_steps_cache_type = ""
+    supported_cache_types = {""}
+    if model_def.get("tea_cache", False):
+        supported_cache_types.add("tea")
+    if model_def.get("mag_cache", False):
+        supported_cache_types.add("mag")
+    if model_def.get("first_block_cache", False):
+        supported_cache_types.add("first_block")
+    if skip_steps_cache_type not in supported_cache_types:
+        gr.Info(
+            f"This model does not support step-skipping type "
+            f"'{skip_steps_cache_type}'."
+        )
+        return ret()
+    if skip_steps_cache_type == "first_block":
+        try:
+            cache_threshold = float(inputs.get("skip_steps_multiplier", 0.08))
+        except (TypeError, ValueError):
+            cache_threshold = -1
+        thresholds = {
+            float(value)
+            for value in model_def.get("first_block_cache_thresholds", ())
+        }
+        if cache_threshold not in thresholds:
+            gr.Info(
+                f"Unsupported First Block Cache threshold "
+                f"'{cache_threshold}'."
+            )
+            return ret()
     if not model_def.get("lock_inference_steps", False) and model_type in ["ltxv_13B"] and num_inference_steps < 20:
         gr.Info("The minimum number of steps should be 20") 
         return ret()
@@ -1180,7 +1239,11 @@ def validate_settings(state, model_type, single_prompt, inputs):
 
     if test_any_sliding_window(model_type) and image_mode == 0:
         if video_length > sliding_window_size:
-            if test_class_t2v(model_type) and not "G" in video_prompt_type :
+            if (
+                test_class_t2v(model_type)
+                and not model_def.get("video_continuation", False)
+                and not "G" in video_prompt_type
+            ):
                 gr.Info(f"You have requested to Generate Sliding Windows with a Text to Video model. Unless you use the Video to Video feature this is useless as a t2v model doesn't see past frames and it will generate the same video in each new window.") 
                 return ret()
             full_video_length = video_length if video_source is None else video_length +  sliding_window_overlap -1
@@ -2047,7 +2110,7 @@ def update_generation_status(html_content):
     if(html_content):
         return gr.update(value=html_content)
 
-family_handlers = ["models.wan.wan_handler", "models.wan.ovi_handler", "models.wan.df_handler", "models.hyvideo.hunyuan_handler", "models.ltx_video.ltxv_handler", "models.ltx2.ltx2_handler", "models.ltx2.scenema_audio_handler", "models.ltx2.ltx_audio_tts_handler", "models.longcat.longcat_handler", "models.flux.flux_handler", "models.qwen.qwen_handler", "models.kandinsky5.kandinsky_handler",  "models.z_image.z_image_handler", "models.krea2.krea2_handler", "models.hidream.hidream_handler", "models.TTS.ace_step_handler", "models.TTS.chatterbox_handler", "models.TTS.qwen3_handler", "models.TTS.yue_handler", "models.TTS.heartmula_handler", "models.TTS.kugelaudio_handler", "models.TTS.index_tts2_handler"]
+family_handlers = ["models.wan.wan_handler", "models.wan.ovi_handler", "models.wan.df_handler", "models.hyvideo.hunyuan_handler", "models.ltx_video.ltxv_handler", "models.ltx2.ltx2_handler", "models.ltx2.scenema_audio_handler", "models.ltx2.ltx_audio_tts_handler", "models.minimax_h3.minimax_h3_handler", "models.longcat.longcat_handler", "models.flux.flux_handler", "models.qwen.qwen_handler", "models.kandinsky5.kandinsky_handler",  "models.z_image.z_image_handler", "models.krea2.krea2_handler", "models.hidream.hidream_handler", "models.TTS.ace_step_handler", "models.TTS.chatterbox_handler", "models.TTS.qwen3_handler", "models.TTS.yue_handler", "models.TTS.heartmula_handler", "models.TTS.kugelaudio_handler", "models.TTS.index_tts2_handler"]
 DEFAULT_LORA_ROOT = "loras"
 
 def register_family_lora_args(parser, lora_root):
@@ -2853,6 +2916,89 @@ def get_model_min_frames_and_step(model_type):
     frames_steps = model_def.get("frames_steps", 4)
     latent_size = model_def.get("latent_size", frames_steps)
     return frames_minimum, frames_steps, latent_size 
+
+def align_model_frame_count(
+    frame_count,
+    model_def,
+    for_generation=False,
+    clamp_maximum=True,
+):
+    """Align a requested frame count to a model's native temporal grid."""
+    frame_count = int(frame_count)
+    modulus = int(model_def.get("frame_alignment_modulus", 0) or 0)
+    if modulus > 0:
+        remainder = int(model_def.get("frame_alignment_remainder", 1)) % modulus
+        minimum = int(model_def.get("frames_minimum", 1))
+        maximum = (
+            model_def.get("frames_maximum", None)
+            if clamp_maximum
+            else None
+        )
+        frame_count = max(minimum, frame_count)
+        if maximum is not None:
+            frame_count = min(int(maximum), frame_count)
+
+        delta = (frame_count - remainder) % modulus
+        mode = str(model_def.get("frame_alignment_mode", "floor")).lower()
+        if delta:
+            if mode == "ceil":
+                frame_count += modulus - delta
+            elif mode == "nearest":
+                frame_count += modulus - delta if delta >= modulus / 2 else -delta
+            else:
+                frame_count -= delta
+
+        if maximum is not None and frame_count > int(maximum):
+            frame_count -= modulus
+        if frame_count < minimum:
+            frame_count += modulus
+        return frame_count
+
+    latent_size = int(model_def.get("latent_size", model_def.get("frames_steps", 4)))
+    if for_generation:
+        return (frame_count // latent_size) * latent_size + 1
+    return (frame_count - 1) // latent_size * latent_size + 1
+
+
+def normalize_model_total_frame_count(frame_count, model_def):
+    """Normalize an output timeline without treating a window cap as total."""
+
+    frame_count = int(frame_count)
+    maximum = model_def.get("frames_maximum", None)
+    if (
+        model_def.get("sliding_window_exact_total_frames", False)
+        and maximum is not None
+        and frame_count > int(maximum)
+    ):
+        return max(int(model_def.get("frames_minimum", 1)), frame_count)
+    return align_model_frame_count(frame_count, model_def)
+
+
+def compute_next_sliding_window_length(
+    remaining_with_context,
+    sliding_window_size,
+    latent_size,
+    model_def,
+):
+    """Size a continuation pass without ever exceeding its window cap.
+
+    Models such as MiniMax H3 keep the requested joined duration exact while
+    requiring every individual pass to land on a model-native frame grid.  A
+    previous exact-duration branch aligned the *entire remaining timeline*
+    but forgot to reapply ``sliding_window_size``.  The first 1080p H3 pass
+    could therefore use the intended 124 frames while pass two silently grew
+    to 226 frames and exhausted VRAM.
+    """
+
+    if model_def.get("sliding_window_exact_total_frames", False):
+        candidate = align_model_frame_count(
+            remaining_with_context,
+            model_def,
+            for_generation=True,
+        )
+    else:
+        candidate = (remaining_with_context // latent_size) * latent_size + 1
+    return min(int(sliding_window_size), int(candidate))
     
 def get_model_fps(model_type):
     model_def = get_model_def(model_type)
@@ -3524,7 +3670,7 @@ def get_local_model_filename(model_filename, use_locator = True, extra_paths = N
     
 
 
-def process_files_def(repoId = None, sourceFolderList = None, fileList = None, targetFolderList = None):
+def process_files_def(repoId = None, sourceFolderList = None, fileList = None, targetFolderList = None, revision = None):
     if targetFolderList is None:
         targetFolderList = [None] * len(sourceFolderList)
     for targetFolder, sourceFolder, files in zip(targetFolderList, sourceFolderList,fileList ):
@@ -3534,7 +3680,12 @@ def process_files_def(repoId = None, sourceFolderList = None, fileList = None, t
         local_dir = os.path.join(targetRoot, targetFolder) if targetFolder is not None else targetRoot
         if len(files)==0:
             if fl.locate_folder(sourceFolder if targetFolder is None else os.path.join(targetFolder, sourceFolder), error_if_none= False ) is None:
-                snapshot_download(repo_id=repoId,  allow_patterns=sourceFolder +"/*", local_dir= local_dir)
+                snapshot_download(
+                    repo_id=repoId,
+                    revision=revision,
+                    allow_patterns=sourceFolder + "/*",
+                    local_dir=local_dir,
+                )
         else:
             folder_parts = [p for p in (targetFolder, sourceFolder) if p]
             if folder_parts:
@@ -3568,13 +3719,29 @@ def process_files_def(repoId = None, sourceFolderList = None, fileList = None, t
                     for onefile, rel_key in zip(files, rel_keys):
                         if not os.path.isfile(os.path.join(targetRoot, rel_key)):
                             if len(sourceFolder) > 0:
-                                hf_download_with_public_fallback(repo_id=repoId,  filename=onefile, local_dir = local_dir, subfolder=sourceFolder)
+                                hf_download_with_public_fallback(
+                                    repo_id=repoId,
+                                    revision=revision,
+                                    filename=onefile,
+                                    local_dir=local_dir,
+                                    subfolder=sourceFolder,
+                                )
                             else:
-                                hf_download_with_public_fallback(repo_id=repoId,  filename=onefile, local_dir = local_dir)
+                                hf_download_with_public_fallback(
+                                    repo_id=repoId,
+                                    revision=revision,
+                                    filename=onefile,
+                                    local_dir=local_dir,
+                                )
             else:
                 for onefile in files:
                     if fl.locate_file(onefile, error_if_none= False) is None:
-                        hf_download_with_public_fallback(repo_id=repoId,  filename=onefile, local_dir = local_dir)
+                        hf_download_with_public_fallback(
+                            repo_id=repoId,
+                            revision=revision,
+                            filename=onefile,
+                            local_dir=local_dir,
+                        )
 
 
 def download_mmaudio(variant_override=None):
@@ -3649,21 +3816,34 @@ def hf_download_with_public_fallback(**kwargs):
         raise
 
 def download_file(url,filename):
-    if url.startswith("https://huggingface.co/") and "/resolve/main/" in url:
+    hf_match = re.match(
+        r"^https://huggingface\.co/([^/]+/[^/]+)/resolve/([^/]+)/(.+)$",
+        url,
+    )
+    if hf_match is not None:
         base_dir = os.path.dirname(filename)
-        url = url[len("https://huggingface.co/"):]
-        url_parts = url.split("/resolve/main/")
-        repoId = url_parts[0]
-        onefile = os.path.basename(url_parts[-1])
-        sourceFolder = os.path.dirname(url_parts[-1])
+        repoId, revision, repo_path = hf_match.groups()
+        onefile = os.path.basename(repo_path)
+        sourceFolder = os.path.dirname(repo_path)
         if len(sourceFolder) == 0:
-            hf_download_with_public_fallback(repo_id=repoId,  filename=onefile, local_dir = fl.get_download_location() if len(base_dir)==0 else base_dir)
+            hf_download_with_public_fallback(
+                repo_id=repoId,
+                revision=revision,
+                filename=onefile,
+                local_dir=fl.get_download_location() if len(base_dir) == 0 else base_dir,
+            )
         else:
             temp_dir_path = os.path.join(fl.get_download_location(), "temp")
             target_path = os.path.join(temp_dir_path, sourceFolder)
             if not os.path.exists(target_path):
                 os.makedirs(target_path)
-            hf_download_with_public_fallback(repo_id=repoId,  filename=onefile, local_dir = temp_dir_path, subfolder=sourceFolder)
+            hf_download_with_public_fallback(
+                repo_id=repoId,
+                revision=revision,
+                filename=onefile,
+                local_dir=temp_dir_path,
+                subfolder=sourceFolder,
+            )
             final_dir = fl.get_download_location() if len(base_dir)==0 else base_dir
             # shutil.move(file, missing_dir) RENAMES the file to the dir's
             # path — a 13GB text encoder became a file literally named
@@ -4115,7 +4295,21 @@ def load_models(model_type, override_profile = -1, output_type="video", **model_
 
 
     model_type_handler = model_types_handlers[base_model_type]
-    text_encoder_URLs= get_model_recursive_prop(model_type, "text_encoder_URLs", return_list= True)
+    text_encoder_variants = model_def.get("minimax_h3_text_encoder_variants", {}) if model_def else {}
+    requested_text_encoder_variant = str(
+        model_kwargs.get("minimax_h3_text_encoder")
+        or (model_def or {}).get("minimax_h3_text_encoder_default", "")
+    )
+    if text_encoder_variants:
+        text_encoder_spec = text_encoder_variants.get(requested_text_encoder_variant)
+        if text_encoder_spec is None:
+            raise ValueError(
+                f"Unknown MiniMax H3 text encoder '{requested_text_encoder_variant}'. "
+                f"Choose one of: {', '.join(text_encoder_variants)}."
+            )
+        text_encoder_URLs = text_encoder_spec.get("URLs", [])
+    else:
+        text_encoder_URLs= get_model_recursive_prop(model_type, "text_encoder_URLs", return_list= True)
     if text_encoder_URLs is not None:
         # Per-model override: a model_def can force a specific text encoder
         # quantization regardless of the user's global setting. Used by
@@ -4193,6 +4387,14 @@ def load_models(model_type, override_profile = -1, output_type="video", **model_
         print("Pytorch compilation is not supported for this Model")
     # kwargs["pinnedMemory"] = "text_encoder"
     offloadobj = offload.profile(pipe, profile_no= mmgp_profile, compile = compile_modules, quantizeTransformer = False, loras = loras_transformer, perc_reserved_mem_max = perc_reserved_mem_max , vram_safety_coefficient = vram_safety_coefficient , convertWeightsFloatTo = transformer_dtype, **kwargs)  
+    # Let the job-level memory planner tell whether a resident model was
+    # profiled with enough activation headroom for a later, heavier request
+    # (notably H3 Ref2VA with a video reference).  A lower coefficient remains
+    # safe for lighter jobs and does not force an unnecessary reload.
+    try:
+        wan_model._maestro_profile_vram_coefficient = float(vram_safety_coefficient)
+    except Exception:
+        pass
     if len(args.gpu) > 0:
         torch.set_default_device(args.gpu)
     transformer_type = model_type
@@ -5112,8 +5314,15 @@ def select_video(state, current_gallery_tab, input_file_list, file_selected, aud
             video_skip_steps_multiplier = configs.get("skip_steps_multiplier", 0)
             video_skip_steps_cache_start_step_perc = configs.get("skip_steps_start_step_perc", 0)
             if len(video_skip_steps_cache_type) > 0:
-                video_skip_steps_cache = "TeaCache" if video_skip_steps_cache_type == "tea" else "MagCache"
-                video_skip_steps_cache += f" x{video_skip_steps_multiplier }"
+                video_skip_steps_cache = {
+                    "tea": "TeaCache",
+                    "mag": "MagCache",
+                    "first_block": "First Block Cache",
+                }.get(video_skip_steps_cache_type, video_skip_steps_cache_type)
+                if video_skip_steps_cache_type == "first_block":
+                    video_skip_steps_cache += f" threshold {video_skip_steps_multiplier}"
+                else:
+                    video_skip_steps_cache += f" x{video_skip_steps_multiplier}"
                 if video_skip_steps_cache_start_step_perc >0:  video_skip_steps_cache += f", Start from {video_skip_steps_cache_start_step_perc}%"
                 values += [ video_skip_steps_cache ]
                 labels += [ "Skip Steps" ]
@@ -5261,10 +5470,14 @@ def get_preprocessor(process_type, inpaint_color, pre_video_guide=None):
         anno_ins = lambda img: DepthV2VideoAnnotator(cfg_dict).forward(img)
     elif process_type=="depth_temporal":
         from preprocessing.video_depth import VideoDepthAnnotator
+        from services.managed_preprocessors import ensure_video_depth_checkpoint
 
         variant = server_config.get("depth_anything_v2_variant", "vitl")
         cfg_dict = {
-            "PRETRAINED_MODEL": fl.locate_file(f"depth/video_depth_anything_{variant}.pth"),
+            # REST jobs provision this before the main LTX model is loaded so
+            # the one-time download is visible in the job tile. Keep this
+            # fallback here for Classic UI, CLI, and direct API callers.
+            "PRETRAINED_MODEL": ensure_video_depth_checkpoint(variant),
             'MODEL_VARIANT': variant,
         }
         _vda_instance = VideoDepthAnnotator(cfg_dict)
@@ -6173,7 +6386,20 @@ def enhance_prompt(state, prompt, prompt_enhancer, multi_images_gen_type, multi_
     return prompt, prompt
 
 def get_outpainting_dims(video_guide_outpainting):
-    return None if video_guide_outpainting== None or len(video_guide_outpainting) == 0 or video_guide_outpainting == "0 0 0 0" or video_guide_outpainting.startswith("#") else [int(v) for v in video_guide_outpainting.split(" ")] 
+    if (
+        video_guide_outpainting is None
+        or len(video_guide_outpainting) == 0
+        or video_guide_outpainting == "0 0 0 0"
+        or video_guide_outpainting.startswith("#")
+    ):
+        return None
+    # Fractional percentages let Maestro place the protected source rectangle
+    # exactly after snapping the output canvas to LTX-2's 64-pixel grid.
+    values = [
+        float(value)
+        for value in video_guide_outpainting.split()
+    ]
+    return values if any(value > 0 for value in values) else None
 
 def parse_guide_inpaint_color(value):
     if isinstance(value, str):
@@ -6247,6 +6473,7 @@ def _trim_video_tail(clip_path, trim_frames, fps):
 
 def concatenate_multi_clip_videos(
     clip_paths, output_path, audio_path=None, audio_start_sec=0.0,
+    abort_callback=None, pad_audio=False, audio_duration_sec=None,
 ):
     """Concatenate video clips into one video, optionally adding a full audio track.
 
@@ -6254,10 +6481,15 @@ def concatenate_multi_clip_videos(
     uniform format.  This is slower than stream-copy but reliably handles
     codec, timebase, and resolution mismatches that cause the concat demuxer
     to silently drop clips. ``audio_start_sec`` identifies the source-track
-    timestamp represented by the joined video's first frame.
+    timestamp represented by the joined video's first frame. ``pad_audio``
+    extends a marginally short source track with silence. When padding is
+    requested, ``audio_duration_sec`` must identify the exact finite video
+    duration; bounding ``apad`` prevents its infinite stream from filling
+    ffmpeg's filter buffers before the concat video is flushed.
     """
     import subprocess
     import math
+    import time
     output_path = os.path.abspath(output_path)
     output_path_ffmpeg = output_path.replace("\\", "/")
     ffmpeg_bin = os.environ.get("FFMPEG_BINARY", "ffmpeg")
@@ -6290,6 +6522,24 @@ def concatenate_multi_clip_videos(
         audio_start_sec = 0.0
     if not math.isfinite(audio_start_sec) or audio_start_sec < 0:
         audio_start_sec = 0.0
+    try:
+        audio_duration_sec = float(audio_duration_sec)
+    except (TypeError, ValueError):
+        audio_duration_sec = None
+    if (
+        audio_duration_sec is not None
+        and (
+            not math.isfinite(audio_duration_sec)
+            or audio_duration_sec <= 0
+        )
+    ):
+        audio_duration_sec = None
+    if pad_audio and audio_duration_sec is None:
+        print(
+            "[Multi-Clip] WARNING: finite audio duration was not supplied; "
+            "source-audio padding is disabled."
+        )
+        pad_audio = False
 
     # Check if clips have embedded audio (e.g., LTX-2.3 generated video+audio)
     clips_have_audio = False
@@ -6360,10 +6610,22 @@ def concatenate_multi_clip_videos(
     else:
         filter_inputs = "".join(f"[{i}:v]" for i in range(n))
         filter_str = f"{filter_inputs}concat=n={n}:v=1:a=0[outv]"
-        if audio_path and audio_start_sec > 0:
+        if audio_path and (audio_start_sec > 0 or pad_audio):
+            audio_filters = []
+            if audio_start_sec > 0:
+                audio_filters.append(
+                    f"atrim=start={audio_start_sec:.6f}"
+                )
+            audio_filters.append("asetpts=PTS-STARTPTS")
+            if pad_audio:
+                audio_filters.append("apad")
+                audio_filters.append(
+                    f"atrim=duration={audio_duration_sec:.6f}"
+                )
             filter_str += (
-                f";[{n}:a]atrim=start={audio_start_sec:.6f},"
-                "asetpts=PTS-STARTPTS[outa]"
+                f";[{n}:a]"
+                + ",".join(audio_filters)
+                + "[outa]"
             )
         cmd += ["-filter_complex", filter_str]
         cmd += ["-map", "[outv]"]
@@ -6372,7 +6634,11 @@ def concatenate_multi_clip_videos(
         # Keep one pristine continuous soundtrack, but trim any leading time
         # omitted by the Director plan. This avoids both lip-sync offset and
         # the audible boundary blips caused by concatenating native clip audio.
-        audio_map = "[outa]" if audio_start_sec > 0 else f"{n}:a:0"
+        audio_map = (
+            "[outa]"
+            if audio_start_sec > 0 or pad_audio
+            else f"{n}:a:0"
+        )
         cmd += ["-map", audio_map]
         cmd += ["-c:a", "aac", "-shortest"]
 
@@ -6398,15 +6664,53 @@ def concatenate_multi_clip_videos(
                 f"{cleanup_error}"
             )
 
+    process = None
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
-        if result.returncode != 0:
-            err = result.stderr or ""
+        if abort_callback is None:
+            completed = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=1200,
+            )
+            returncode = completed.returncode
+            stderr = completed.stderr
+        else:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            deadline = time.monotonic() + 1200.0
+            while True:
+                try:
+                    _stdout, stderr = process.communicate(timeout=0.5)
+                    break
+                except subprocess.TimeoutExpired:
+                    if abort_callback():
+                        print("[Multi-Clip] Concatenation cancelled")
+                        process.terminate()
+                        try:
+                            process.communicate(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.communicate()
+                        _remove_partial_output()
+                        return False
+                    if time.monotonic() >= deadline:
+                        process.kill()
+                        process.communicate()
+                        raise subprocess.TimeoutExpired(cmd, 1200)
+            returncode = process.returncode
+
+        if returncode != 0:
+            err = stderr or ""
             error_lines = [l for l in err.split('\n')
                            if any(k in l.lower() for k in ['error', 'fail', 'invalid',
                                                             'no such', 'not found',
                                                             'could not', 'unable'])]
-            print(f"[Multi-Clip] ffmpeg failed (exit {result.returncode}):")
+            print(f"[Multi-Clip] ffmpeg failed (exit {returncode}):")
             if error_lines:
                 print('\n'.join(error_lines[-10:]))
             else:
@@ -6427,6 +6731,9 @@ def concatenate_multi_clip_videos(
             return False
     except subprocess.TimeoutExpired:
         print(f"[Multi-Clip] ffmpeg timed out after 1200s")
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.communicate()
         _remove_partial_output()
         return False
     except Exception as e:
@@ -6572,6 +6879,87 @@ def resolve_model_preprocess_all(model_def, **kwargs):
     preprocess_all = model_def.get("preprocess_all", False)
     return preprocess_all(**kwargs) if callable(preprocess_all) else preprocess_all
 
+
+def _resolve_scail2_recast_warmup_frames(
+    custom_settings, model_def, video_prompt_type, latent_size,
+):
+    """Return a bounded, VAE-aligned internal Recast warm-up length."""
+    if (
+        not isinstance(custom_settings, dict)
+        or not isinstance(model_def, dict)
+        or not model_def.get("scail2", False)
+        or "0" not in (video_prompt_type or "")
+    ):
+        return 0
+    try:
+        requested = int(
+            custom_settings.get("scail2_recast_warmup_frames", 0) or 0,
+        )
+    except (TypeError, ValueError):
+        return 0
+    step = max(1, int(latent_size or 1))
+    requested = min(32, max(0, requested))
+    return requested // step * step
+
+
+def _shift_guide_window_for_warmup(start_frame, end_frame, warmup_frames):
+    """Map the generated timeline back onto the original control timeline."""
+    shift = max(0, int(warmup_frames or 0))
+    return int(start_frame) - shift, int(end_frame) - shift
+
+
+def _prepend_first_video_frame(video, frame_count):
+    """Prepend repeated frame zero to a raw T/H/W/C guide or mask tensor."""
+    count = max(0, int(frame_count or 0))
+    if video is None or count == 0 or video.shape[0] == 0:
+        return video
+    repeated = video[:1].expand(count, *video.shape[1:])
+    return torch.cat([repeated, video], dim=0)
+
+
+def _prepend_reverse_motion_preroll(
+    video, frame_count, anchor_offset=None,
+):
+    """Prepend disposable reverse motion ending immediately before frame zero.
+
+    Repeating frame zero does not consume SCAIL-2's reference-to-control
+    transition: the transition simply waits until real control motion starts.
+    Walking the first source frames backwards gives the model real motion
+    during the internal pre-roll while still landing exactly on source frame
+    zero when the published timeline begins. When a mapped identity enters
+    later in one continuous camera shot, ``anchor_offset`` starts the hidden
+    walk at a strong frame where every identity is visible. The walk is
+    sampled down to the bounded pre-roll length, so no visible cut is added.
+    """
+    count = max(0, int(frame_count or 0))
+    if video is None or count == 0 or video.shape[0] == 0:
+        return video
+    maximum_offset = max(0, int(video.shape[0]) - 1)
+    try:
+        requested_anchor = int(anchor_offset)
+    except (TypeError, ValueError):
+        requested_anchor = count
+    available = min(maximum_offset, max(0, requested_anchor))
+    if available == 0:
+        return _prepend_first_video_frame(video, count)
+    if available > count:
+        indices = torch.linspace(
+            float(available),
+            1.0,
+            steps=count,
+            device=video.device,
+        ).round().to(dtype=torch.long)
+        reverse_motion = video.index_select(0, indices)
+    else:
+        reverse_motion = video[1:available + 1].flip(0)
+    if len(reverse_motion) < count:
+        farthest = reverse_motion[:1].expand(
+            count - len(reverse_motion), *video.shape[1:],
+        )
+        reverse_motion = torch.cat([farthest, reverse_motion], dim=0)
+    return torch.cat([reverse_motion, video], dim=0)
+
+
 def custom_preprocess_video_with_mask(model_handler, base_model_type, pre_video_guide, video_guide, video_mask, height, width, max_frames, start_frame, fit_canvas, fit_crop, target_fps,  block_size, expand_scale, video_prompt_type, model_def=None, custom_settings=None):
     pad_frames = 0
     if start_frame < 0:
@@ -6585,12 +6973,40 @@ def custom_preprocess_video_with_mask(model_handler, base_model_type, pre_video_
         return None, None, None, None
     model_def = model_def or {}
     raw_custom_preprocessor_inputs = model_def.get("custom_preprocessor_raw_inputs", False)
+    recast_motion_preroll = (
+        pad_frames > 0
+        and model_def.get("scail2", False)
+        and "0" in (video_prompt_type or "")
+        and isinstance(custom_settings, dict)
+        and bool(custom_settings.get("scail2_recast_warmup_frames", 0))
+    )
+    try:
+        recast_warmup_anchor_offset = int(
+            custom_settings.get(
+                "scail2_recast_warmup_anchor_offset",
+                0,
+            ) or 0
+        ) if isinstance(custom_settings, dict) else 0
+    except (TypeError, ValueError):
+        recast_warmup_anchor_offset = 0
+
+    def prepend_padding(video):
+        if recast_motion_preroll:
+            return _prepend_reverse_motion_preroll(
+                video,
+                pad_frames,
+                anchor_offset=(recast_warmup_anchor_offset or None),
+            )
+        return _prepend_first_video_frame(video, pad_frames)
+
     video_guide = get_resampled_video(video_guide, start_frame, max_frames, target_fps)
+    video_guide = prepend_padding(video_guide)
     if not raw_custom_preprocessor_inputs:
         video_guide = video_guide.permute(-1, 0, 1, 2) / 127.5 - 1.
     any_mask = video_mask is not None
     if video_mask is not None:
         video_mask = get_resampled_video(video_mask, start_frame, max_frames, target_fps)
+        video_mask = prepend_padding(video_mask)
         if not raw_custom_preprocessor_inputs:
             video_mask = video_mask.permute(-1, 0, 1, 2)[:1] / 255.
 
@@ -6622,10 +7038,6 @@ def custom_preprocess_video_with_mask(model_handler, base_model_type, pre_video_
 
     video_guide_processed, video_guide_processed2, video_mask_processed, video_mask_processed2  = model_handler.custom_preprocess(base_model_type = base_model_type, pre_video_guide = pre_video_guide, video_guide = video_guide, video_mask = video_mask, height = height, width = width, fit_canvas = fit_canvas , fit_crop = fit_crop, target_fps = target_fps,  block_size = block_size, max_workers = max_workers, expand_scale = expand_scale, video_prompt_type=video_prompt_type, model_def=model_def, custom_settings=custom_settings)
 
-    # if pad_frames > 0:
-    #     masked_frames = masked_frames[0] * pad_frames + masked_frames
-    #     if any_mask: masked_frames = masks[0] * pad_frames + masks
-
     return video_guide_processed, video_guide_processed2, video_mask_processed, video_mask_processed2 
 
 def _video_tensor_to_uint8_chunk_inplace(sample, value_range=(-1, 1)):
@@ -6635,6 +7047,23 @@ def _video_tensor_to_uint8_chunk_inplace(sample, value_range=(-1, 1)):
     sample = sample.clamp_(min_val, max_val)
     sample = sample.sub_(min_val).mul_(255.0 / (max_val - min_val)).to(torch.uint8)
     return sample
+
+def _resolve_image_ref_fit(model_def, auto_aspect):
+    """Choose shared reference fitting without pre-empting model postprocessing.
+
+    Fixed-aspect workflows traditionally letterbox references onto the final
+    canvas. Models such as SCAIL-2 transform reference RGB and semantic masks
+    together in a custom postprocessor, so padding here would become permanent
+    conditioning content and would also misalign a separately recovered alpha.
+    """
+    model_def = model_def or {}
+    ref_fit = model_def.get("fit_into_canvas_image_refs", 1)
+    postprocessor_handles_canvas = model_def.get(
+        "custom_image_ref_postprocessor_handles_canvas", False,
+    )
+    if not auto_aspect and ref_fit == 0 and not postprocessor_handles_canvas:
+        return 1
+    return ref_fit
 
 def generate_video(
     task,
@@ -6796,11 +7225,29 @@ def generate_video(
     # pull during outpainting without having to also activate it in the UI
     # (which would double-load it).
     outpaint_lora_strength=1.0,
+    # Maestro Outpaint's official LTX-2.3 masked workflow. The dedicated
+    # Outpaint endpoint enables it by default; generic Studio control-video
+    # runs retain their existing behavior unless they opt in explicitly.
+    outpaint_mask_preserve=False,
     # Distilled single-stage mode — run the distilled pipeline at full target
     # resolution with no stage-2 upscale+refine. Exclusive with
     # progressive_pipeline. Read by ltx2.py and forwarded into
     # DistilledPipeline via kwargs.
     single_stage_pipeline=False,
+    # Official Lightricks masked workflow. It decodes and Laplacian-blends the
+    # first pass in pixel space before target-resolution refinement.
+    outpaint_full_resolution_refine=False,
+    # Use Maestro's managed In/Outpaint IC-LoRA stack.
+    outpaint_official_stack=False,
+    # MiniMax H3 Ref2VA's ordered image/video/audio manifest and reference
+    # preparation policy. Other model runtimes ignore these kwargs.
+    minimax_h3_references=None,
+    minimax_h3_reference_detail="match",
+    minimax_h3_text_encoder="nvfp4_awq",
+    # Complete Context-IR prompts compiled by Maestro's H3 sliding-window
+    # planner. Kept as a real list so semantic newlines inside each prompt are
+    # never mistaken for prompt boundaries.
+    h3_window_prompts=None,
 ):
 
 
@@ -6880,6 +7327,23 @@ def generate_video(
             time.sleep(1)
     vae_upsampling = model_def.get("vae_upsampler", None)
     model_kwargs = {}
+    if str(model_def.get("architecture") or "").startswith("minimax_h3"):
+        requested_h3_text_encoder = str(
+            minimax_h3_text_encoder
+            or model_def.get("minimax_h3_text_encoder_default", "nvfp4_awq")
+        )
+        model_kwargs["minimax_h3_text_encoder"] = requested_h3_text_encoder
+        loaded_h3_text_encoder = getattr(wan_model, "text_encoder_variant", None)
+        if (
+            wan_model is not None
+            and loaded_h3_text_encoder != requested_h3_text_encoder
+        ):
+            print(
+                "[MiniMax H3] Text encoder changed "
+                f"{loaded_h3_text_encoder or 'unknown'} -> {requested_h3_text_encoder}; "
+                "reloading the model profile."
+            )
+            reload_needed = True
     if vae_upsampling is not None:
         new_vae_upsampling = None if image_mode not in vae_upsampling or "vae" not in spatial_upsampling else spatial_upsampling
         # Read back the currently-applied setting to decide whether a reload
@@ -6965,37 +7429,61 @@ def generate_video(
     # Auto resolution: compute from reference image aspect ratio
     if _auto_aspect:
         _auto_resolved = False
+        _resolution_hint = str(resolution or "auto")
+        _h3_auto_budgets = model_def.get("auto_resolution_budgets") or {}
+        _h3_auto_fallbacks = model_def.get("auto_resolution_fallbacks") or {}
         # Determine pixel budget from resolution hint
-        if "1080" in str(resolution):
+        if _resolution_hint in _h3_auto_budgets:
+            _auto_budget = int(_h3_auto_budgets[_resolution_hint])
+        elif "1080" in _resolution_hint:
             _auto_budget = 1920 * 1088
-        elif "480" in str(resolution):
+        elif "480" in _resolution_hint:
             _auto_budget = 848 * 480
         else:
             _auto_budget = 1280 * 720  # default 720p
-        # Check for reference images (image gen) or start image (video gen)
+        # Check for reference images (image gen), an FL2VA start image, or
+        # the first visual Ref2VA reference. Audio-only references cannot
+        # establish an output aspect ratio.
         _auto_ref = None
+        _auto_ref_kind = "image"
         if is_image and image_refs:
             _auto_ref = image_refs[0] if isinstance(image_refs, list) else image_refs
         elif image_start:
             _auto_ref = image_start
+        elif minimax_h3_references:
+            for _reference in minimax_h3_references:
+                if not isinstance(_reference, dict):
+                    continue
+                _reference_kind = str(
+                    _reference.get("type") or _reference.get("kind") or ""
+                ).strip().lower()
+                _reference_path = _reference.get("path")
+                if _reference_kind in {"image", "video"} and _reference_path:
+                    _auto_ref = _reference_path
+                    _auto_ref_kind = _reference_kind
+                    break
+        if isinstance(_auto_ref, (list, tuple)):
+            _auto_ref = _auto_ref[0] if _auto_ref else None
         # Get dimensions — ref could be a file path or PIL Image
         from PIL import Image as _PILImg
         _rw, _rh = None, None
         if isinstance(_auto_ref, _PILImg.Image):
             _rw, _rh = _auto_ref.size
         elif isinstance(_auto_ref, str) and os.path.isfile(_auto_ref):
-            _ri = _PILImg.open(_auto_ref)
-            _rw, _rh = _ri.size
-            _ri.close()
+            if _auto_ref_kind == "video":
+                _, _rw, _rh, _ = get_video_info(_auto_ref)
+            else:
+                with _PILImg.open(_auto_ref) as _ri:
+                    _rw, _rh = _ri.size
         if _rw and _rh:
             _scale = (_auto_budget / (_rw * _rh)) ** 0.5
-            _aw = int(round(_rw * _scale / block_size)) * block_size
-            _ah = int(round(_rh * _scale / block_size)) * block_size
+            _aw = max(block_size, int(round(_rw * _scale / block_size)) * block_size)
+            _ah = max(block_size, int(round(_rh * _scale / block_size)) * block_size)
             resolution = f"{_aw}x{_ah}"
             print(f"[Auto Resolution] {_rw}x{_rh} source → {_aw}x{_ah} output (budget={'1080p' if _auto_budget > 1000000 else '720p'})")
             _auto_resolved = True
         if not _auto_resolved:
-            resolution = "1280x720"  # fallback
+            resolution = _h3_auto_fallbacks.get(_resolution_hint, "1280x720")
 
     width, height = resolution.split("x")
     width, height = int(width) // block_size *  block_size, int(height) // block_size *  block_size
@@ -7110,7 +7598,24 @@ def generate_video(
     trans2 = get_transformer_model(wan_model, 2)
     audio_sampling_rate = 16000
 
-    if multi_prompts_gen_type == 2:
+    if (
+        str(model_def.get("architecture") or "").startswith("minimax_h3")
+        and isinstance(h3_window_prompts, (list, tuple))
+        and h3_window_prompts
+    ):
+        prompts = [
+            str(item).strip()
+            for item in h3_window_prompts
+            if isinstance(item, str) and item.strip()
+        ]
+        if not prompts:
+            prompts = [prompt]
+        else:
+            print(
+                f"[MiniMax H3] Using {len(prompts)} explicit "
+                "window-local Context-IR prompts."
+            )
+    elif multi_prompts_gen_type == 2:
         prompts = [prompt]
     else:
         prompts = prompt.split("\n")
@@ -7118,7 +7623,16 @@ def generate_video(
     if len(prompts) > 1:
         print(f"[Prompt Split] {len(prompts)} prompts from multi-line input (multi_prompts_gen_type={multi_prompts_gen_type})")
     parsed_keep_frames_video_source= max_source_video_frames if len(keep_frames_video_source) ==0 else int(keep_frames_video_source) 
-    transformer_loras_filenames, transformer_loras_multipliers  = get_transformer_loras(model_type)
+    if outpaint_official_stack:
+        # The current reference route owns its system adapter schedule. Suppress any
+        # model-definition LoRAs so a saved special variant cannot accidentally
+        # remain active beside the managed two-stage In/Outpainting IC-LoRA.
+        transformer_loras_filenames = []
+        transformer_loras_multipliers = []
+    else:
+        transformer_loras_filenames, transformer_loras_multipliers = (
+            get_transformer_loras(model_type)
+        )
     if guidance_phases < 1: guidance_phases = 1
     # LoRA multipliers may use the ";" phase syntax (e.g. "0.75;0.50" =
     # stage 1 / stage 2 on LTX-2 two-stage models). Parse them against the
@@ -7149,6 +7663,9 @@ def generate_video(
     else:
         print(f"[LoRA] No LoRAs activated for this generation (model_type={model_type})")
 
+    if hasattr(wan_model, "validate_loras"):
+        wan_model.validate_loras(loras_selected)
+
     if hasattr(wan_model, "get_trans_lora"):
         trans_lora, trans2_lora = wan_model.get_trans_lora()
     else:     
@@ -7174,15 +7691,32 @@ def generate_video(
             raise gr.Error("Error while loading Loras: " + ", ".join(error_files))
         if trans2_lora is not None: 
             offload.sync_models_loras(trans_lora, trans2_lora)
+        if hasattr(wan_model, "finalize_loras"):
+            wan_model.finalize_loras()
         
     seed = None if seed == -1 else seed
     # negative_prompt = "" # not applicable in the inference
     model_filename = get_model_filename(base_model_type)  
 
     _, _, latent_size = get_model_min_frames_and_step(model_type)
-    video_length = (video_length -1) // latent_size * latent_size + 1
+    video_length = normalize_model_total_frame_count(video_length, model_def)
+    published_video_length = video_length
+    recast_warmup_frames = _resolve_scail2_recast_warmup_frames(
+        custom_settings, model_def, video_prompt_type, latent_size,
+    )
+    if recast_warmup_frames > 0:
+        video_length += recast_warmup_frames
+        print(
+            "[Recast] Internal reverse-motion pre-roll: "
+            f"{recast_warmup_frames} frames "
+            f"({published_video_length} published, {video_length} generated)."
+        )
     if sliding_window_size !=0:
-        sliding_window_size = (sliding_window_size -1) // latent_size * latent_size + 1
+        sliding_window_size = align_model_frame_count(
+            sliding_window_size,
+            model_def,
+            for_generation=True,
+        )
     # Requantize audio_frame_offset to match the actual quantized video_length per clip.
     # Only recalculate for uniform-duration clips (multi_prompts_gen_type==3).
     # Clips dispatched from the manifest path (launch.py) already carry correct
@@ -7277,6 +7811,16 @@ def generate_video(
     if "K" in video_prompt_type: 
         any_background_ref = 2 if model_def.get("all_image_refs_are_background_ref", False) or custom_frames_injection else 1
     outpainting_dims = get_outpainting_dims(video_guide_outpainting)
+    if (
+        outpaint_mask_preserve
+        and base_model_type == "ltx2_22B"
+        and outpainting_dims is not None
+    ):
+        # Keep shared preprocessing neutral. This is also the canvas color
+        # used by the Diffusers LTX-2.3 Outpaint reference Space. ltx2.py
+        # applies the spatial source-attention mask after the reference tensor
+        # has been isolated.
+        guide_inpaint_color = (128, 128, 128)
     # Aspect-ratio outpainting ("Fit into a X:Y box") is an upstream Wan2GP
     # feature we never ported, but the cherry-picked pose-alignment refactor
     # (the "O" mode block below) references video_guide_outpainting_ratio at
@@ -7316,6 +7860,8 @@ def generate_video(
         elif skip_steps_cache_type == "tea":
             def_tea_coefficients = model_def.get("teacache_coefficients", None) if model_def != None else None
             if def_tea_coefficients is not None: skip_steps_cache.coefficients = def_tea_coefficients
+        elif skip_steps_cache_type == "first_block":
+            pass
         else:
             raise Exception(f"unknown cache type {skip_steps_cache_type}")
     trans.cache = skip_steps_cache
@@ -7621,9 +8167,30 @@ def generate_video(
             sliding_window = sliding_window  or extra_windows > 0
             if sliding_window and window_no > 0:
                 # num_frames_generated -= reuse_frames
-                if (requested_frames_to_generate - num_frames_generated) <  latent_size:
+                remaining_output_frames = (
+                    requested_frames_to_generate - num_frames_generated
+                )
+                if remaining_output_frames <= 0:
                     break
-                current_video_length = min(sliding_window_size, ((requested_frames_to_generate - num_frames_generated + reuse_frames + discard_last_frames) // latent_size) * latent_size + 1 )
+                if (
+                    remaining_output_frames < latent_size
+                    and not model_def.get(
+                        "sliding_window_exact_total_frames",
+                        False,
+                    )
+                ):
+                    break
+                remaining_with_context = (
+                    remaining_output_frames
+                    + reuse_frames
+                    + discard_last_frames
+                )
+                current_video_length = compute_next_sliding_window_length(
+                    remaining_with_context,
+                    sliding_window_size,
+                    latent_size,
+                    model_def,
+                )
 
             total_windows = initial_total_windows + extra_windows
             gen["total_windows"] = total_windows
@@ -7657,7 +8224,10 @@ def generate_video(
                 pre_video_frame = convert_tensor_to_image(prefix_video[:, -1])
                 source_video_overlap_frames_count = pre_video_guide.shape[1]
                 source_video_frames_count = prefix_video.shape[1]
-                if sample_fit_canvas != None:
+                # SCAIL-2's fake start image is an identity reference, not
+                # an output-frame anchor.  Keep fit_canvas available so the
+                # control video establishes the generated canvas/aspect.
+                if sample_fit_canvas != None and not fake_start_image:
                     image_size  = pre_video_guide.shape[-2:]
                     sample_fit_canvas = None
                 guide_start_frame =  prefix_video.shape[1]
@@ -7665,9 +8235,19 @@ def generate_video(
                     source_video_overlap_frames_count = source_video_frames_count = guide_start_frame = 0
             if image_end is not None:
                 image_end_list=  image_end if isinstance(image_end, list) else [image_end]
-                if len(image_end_list) >= window_no:
+                image_end_for_window = None
+                if (
+                    model_def.get("sliding_window_end_image_at_final", False)
+                    and sliding_window
+                    and len(image_end_list) == 1
+                ):
+                    if window_no == total_windows:
+                        image_end_for_window = image_end_list[0]
+                elif len(image_end_list) >= window_no:
+                    image_end_for_window = image_end_list[window_no - 1]
+                if image_end_for_window is not None:
                     new_height, new_width = image_size                    
-                    image_end_tensor, _, _ = calculate_dimensions_and_resize_image(image_end_list[window_no-1], new_height, new_width, sample_fit_canvas, fit_crop, block_size = block_size)
+                    image_end_tensor, _, _ = calculate_dimensions_and_resize_image(image_end_for_window, new_height, new_width, sample_fit_canvas, fit_crop, block_size = block_size)
                     # image_end_tensor =image_end_list[window_no-1].resize((new_width, new_height), resample=Image.Resampling.LANCZOS) 
                     refresh_preview["image_end"] = image_end_tensor 
                     image_end_tensor = convert_image_to_tensor(image_end_tensor)
@@ -7809,11 +8389,22 @@ def generate_video(
                 if len(error) > 0:
                     raise gr.Error(f"invalid keep frames {keep_frames_video_guide}")
                 guide_frames_extract_start = aligned_window_start_frame if extract_guide_from_window_start else aligned_guide_start_frame
+                guide_frames_extract_end = aligned_guide_end_frame
+                guide_frames_extract_start, guide_frames_extract_end = (
+                    _shift_guide_window_for_warmup(
+                        guide_frames_extract_start,
+                        guide_frames_extract_end,
+                        recast_warmup_frames,
+                    )
+                )
                 extra_control_frames = model_def.get("extra_control_frames", 0)
                 if extra_control_frames > 0 and aligned_guide_start_frame >= extra_control_frames: guide_frames_extract_start -= extra_control_frames
                         
                 keep_frames_parsed = [True] * -guide_frames_extract_start if guide_frames_extract_start  <0 else []
-                keep_frames_parsed += keep_frames_parsed_full[max(0, guide_frames_extract_start): aligned_guide_end_frame ] 
+                keep_frames_parsed += keep_frames_parsed_full[
+                    max(0, guide_frames_extract_start):
+                    max(0, guide_frames_extract_end)
+                ]
                 guide_frames_extract_count = len(keep_frames_parsed)
 
                 process_all = resolve_model_preprocess_all(model_def, base_model_type=base_model_type, video_prompt_type=video_prompt_type, image_prompt_type=image_prompt_type, audio_prompt_type=audio_prompt_type, custom_settings=custom_settings)
@@ -7906,7 +8497,8 @@ def generate_video(
                     
             if window_no == 1 and image_refs is not None and len(image_refs) > 0:
                 # Only adjust image_size from ref when auto aspect is selected.
-                # Fixed aspect (user chose 16:9 etc.) keeps the target resolution — ref gets padded inside.
+                # Fixed aspect (user chose 16:9 etc.) keeps the target
+                # resolution; reference fitting is resolved below.
                 if sample_fit_canvas is not None and _auto_aspect and (nb_frames_positions > 0 or "K" in video_prompt_type) :
                     from shared.utils.utils import get_outpainting_full_area_dimensions
                     w, h = image_refs[0].size
@@ -7942,11 +8534,12 @@ def generate_video(
                         if remove_background_images_ref > 0:
                             send_cmd("progress", [0, get_latest_status(state, "Removing Images References Background")])
 
-                        # When user selected a fixed aspect ratio, force fit_into_canvas=1
-                        # to pad ref images instead of stretching them
-                        _ref_fit = model_def.get("fit_into_canvas_image_refs", 1)
-                        if not _auto_aspect and _ref_fit == 0:
-                            _ref_fit = 1
+                        # Most fixed-aspect models letterbox refs here. SCAIL-2
+                        # explicitly delegates final canvas fitting to its
+                        # custom RGB/mask/alpha postprocessor.
+                        _ref_fit = _resolve_image_ref_fit(
+                            model_def, _auto_aspect,
+                        )
                         src_ref_images, src_ref_masks  = resize_and_remove_background(src_ref_images , image_size[1], image_size[0],
                                                                                         remove_background_images_ref > 0, any_background_ref,
                                                                                         fit_into_canvas= _ref_fit,
@@ -8058,12 +8651,29 @@ def generate_video(
                 send_cmd("output")
 
             try:
-                input_video_for_model = pre_video_guide
+                # SCAIL-2's first-window fake start image is only an
+                # identity-reference carrier.  The custom preprocessor has
+                # already sized the control/reference tensors to the
+                # control-video canvas, so passing the original fake frame
+                # here can overwrite height/width inside the model and make
+                # its latent disagree with those tensors.  Later windows do
+                # need their generated history as input_video.
+                input_video_for_model = None if fake_start_image and window_no == 1 else pre_video_guide
                 prefix_frames_count = source_video_overlap_frames_count if window_no <= 1 else reuse_frames
                 prefix_video_for_model = prefix_video
                 if prefix_video is not None and prefix_video.dtype == torch.uint8:
                     prefix_video_for_model = prefix_video.float().div_(127.5).sub_(1.0)
-                custom_settings_for_model = custom_settings if isinstance(custom_settings, dict) else {}
+                custom_settings_for_model = (
+                    dict(custom_settings)
+                    if isinstance(custom_settings, dict)
+                    else {}
+                )
+                if "scail2_recast_warmup_frames" in custom_settings_for_model:
+                    # Keep the model's decode trim exactly synchronized with
+                    # the bounded/VAE-aligned frame count used by extraction.
+                    custom_settings_for_model[
+                        "scail2_recast_warmup_frames"
+                    ] = recast_warmup_frames
                 overridden_inputs = None
                 samples = call_with_sticky_interrupt(
                     gen,
@@ -8085,7 +8695,7 @@ def generate_video(
                     denoising_strength=denoising_strength,
                     masking_strength=masking_strength,
                     prefix_frames_count = prefix_frames_count,
-                    frame_num= (current_video_length // latent_size)* latent_size + 1,
+                    frame_num=align_model_frame_count(current_video_length, model_def, for_generation=True),
                     batch_size = batch_size,
                     height = image_size[0],
                     width = image_size[1],
@@ -8161,6 +8771,7 @@ def generate_video(
                     original_input_ref_images = original_image_refs[nb_frames_positions:] if original_image_refs is not None else [],
                     image_refs_relative_size = image_refs_relative_size,
                     outpainting_dims = outpainting_dims,
+                    outpaint_mask_preserve=outpaint_mask_preserve,
                     face_arc_embeds = face_arc_embeds,
                     custom_settings=custom_settings_for_model,
                     save_masks=args.save_masks,
@@ -8201,12 +8812,18 @@ def generate_video(
                     reference_pipeline=reference_pipeline,
                     progressive_pipeline=progressive_pipeline,
                     single_stage_pipeline=single_stage_pipeline,
+                    outpaint_full_resolution_refine=outpaint_full_resolution_refine,
+                    outpaint_official_stack=outpaint_official_stack,
                     progressive_stage2_steps=progressive_stage2_steps,
                     progressive_stage3_steps=progressive_stage3_steps,
                     progressive_stage2_sigma=progressive_stage2_sigma,
                     progressive_stage3_sigma=progressive_stage3_sigma,
                     progressive_stage1_image_weight=progressive_stage1_image_weight,
                     progressive_stage3_image_weight=progressive_stage3_image_weight,
+                    **({} if not model_def.get("omni_reference", False) else {
+                        "minimax_h3_references": minimax_h3_references,
+                        "minimax_h3_reference_detail": minimax_h3_reference_detail,
+                    }),
                     # Motion suffix: only passed when the loaded suffix video
                     # is available. Other model handlers (Wan / Flux / Qwen /
                     # Hunyuan) don't accept these kwargs, so we omit them
@@ -8335,7 +8952,15 @@ def generate_video(
                 if not (audio_only or is_image):                    
                     sample = _video_tensor_to_uint8_chunk_inplace(sample)
 
-                if prefix_video != None and window_no == 1 :
+                # SCAIL-2's fake start image carries identity only and has
+                # zero output-timeline frames.  Do not let its original
+                # spatial canvas reach final assembly: even ``[:, :-0]`` is
+                # an empty tensor whose height/width must match torch.cat's
+                # generated chunk, which fails when the control video chose
+                # a different canvas.
+                if fake_start_image and window_no == 1:
+                    prefix_video = None
+                elif prefix_video != None and window_no == 1 :
                     if prefix_video.dtype != sample.dtype:
                         if sample.dtype == torch.uint8:
                             prefix_video = _video_tensor_to_uint8_chunk_inplace(prefix_video)
@@ -8357,6 +8982,38 @@ def generate_video(
                     guide_start_frame -= reuse_frames 
                     if generated_audio is not None:
                         generated_audio = truncate_audio( generated_audio, reuse_frames, 0, fps, output_audio_sampling_rate,)
+
+                if (
+                    sliding_window
+                    and model_def.get("sliding_window_trim_to_requested", False)
+                ):
+                    # H3's individual passes must lie on a 17*n+5 grid, but
+                    # the joined Studio duration can be any frame count. The
+                    # final pass may therefore decode a few extra frames (or
+                    # a minimum-size continuation for a very short tail).
+                    # Trim that tail only after removing the shared boundary
+                    # frame so video and native audio keep the exact requested
+                    # joined duration.
+                    remaining_output_frames = max(
+                        0,
+                        requested_frames_to_generate
+                        - frames_already_processed_count,
+                    )
+                    excess_output_frames = max(
+                        0,
+                        int(sample.shape[1]) - remaining_output_frames,
+                    )
+                    if excess_output_frames > 0:
+                        sample = sample[:, :-excess_output_frames]
+                        guide_start_frame -= excess_output_frames
+                        if generated_audio is not None:
+                            generated_audio = truncate_audio(
+                                generated_audio,
+                                0,
+                                excess_output_frames,
+                                fps,
+                                output_audio_sampling_rate,
+                            )
 
                 num_frames_generated = guide_start_frame - (source_video_frames_count - source_video_overlap_frames_count)
                 if generated_audio is not None:
@@ -8440,6 +9097,10 @@ def generate_video(
                     extension = container
                     output_dir = save_path
                 inputs = get_function_arguments(generate_video, locals())
+                if recast_warmup_frames > 0:
+                    # The warm-up is an internal conditioning detail, not part
+                    # of the duration users see or restore from metadata.
+                    inputs["video_length"] = published_video_length
                 if overridden_inputs is not None: inputs.update(overridden_inputs)
                 if len(output_filename):
                     from shared.utils.filename_formatter import FilenameFormatter
@@ -8868,7 +9529,17 @@ def generate_video(
                 # Multi-clip concatenation: store clip path and concatenate when all clips are done
                 # Only register after the LAST sliding window (or if no sliding window)
                 is_last_window = not sliding_window or window_no >= gen.get("total_windows", 1)
-                if multi_clip_info is not None and not is_image and not audio_only and is_last_window:
+                if (
+                    multi_clip_info is not None
+                    and not is_image
+                    and not audio_only
+                    and is_last_window
+                    # A one-shot Director timeline is already the finished
+                    # video. Registering a one-item "group" created a second,
+                    # byte-equivalent _multiclip file for no useful purpose.
+                    and int(multi_clip_info.get("total", 0) or 0) > 1
+                    and not multi_clip_info.get("defer_concat", False)
+                ):
                     clip_path = video_path[0] if isinstance(video_path, list) else video_path
                     clip_store = gen.setdefault("multi_clip_paths", {})
                     group_id = multi_clip_info["group_id"]
@@ -8881,7 +9552,11 @@ def generate_video(
                     if len(group) == multi_clip_info["total"]:
                         # All clips in this group are done — concatenate
                         clip_paths = [group[i]["path"] for i in range(multi_clip_info["total"])]
-                        concat_audio = original_audio_guide or audio_source
+                        concat_audio = (
+                            multi_clip_info.get("concat_audio_path")
+                            or original_audio_guide
+                            or audio_source
+                        )
                         concat_ext = os.path.splitext(clip_path)[1]
                         concat_name = f"{time_flag}_seed{seed}_multiclip{concat_ext}"
                         concat_path = os.path.join(save_path, concat_name)
@@ -9994,7 +10669,11 @@ def prepare_inputs_dict(target, inputs, model_type = None, model_filename = None
         pop += ["alt_scale"]
 
 
-    if not (model_def.get("tea_cache", False) or model_def.get("mag_cache", False)) :
+    if not (
+        model_def.get("tea_cache", False)
+        or model_def.get("mag_cache", False)
+        or model_def.get("first_block_cache", False)
+    ):
         pop += ["skip_steps_cache_type", "skip_steps_multiplier", "skip_steps_start_step_perc"]
 
     guidance_max_phases = model_def.get("guidance_max_phases", 0)
@@ -11573,6 +12252,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
             lock_inference_steps = model_def.get("lock_inference_steps", False) or (audio_only and not inference_steps_enabled)
             any_tea_cache = model_def.get("tea_cache", False)
             any_mag_cache = model_def.get("mag_cache", False)
+            any_first_block_cache = model_def.get("first_block_cache", False)
             recammaster = base_model_type in ["recam_1.3B"]
             vace = test_vace_module(base_model_type)
             multitalk = model_def.get("multitalk_class", False)
@@ -12200,7 +12880,13 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                     current_video_length = video_length_locked if video_length_locked is not None else ui_get("video_length", 81 if get_model_family(base_model_type)=="wan" else 97)
 
                     computed_fps = get_computed_fps(ui_get("force_fps"), base_model_type , ui_defaults.get("video_guide", None), ui_defaults.get("video_source", None))
-                    video_length = gr.Slider(0 if audio_only else min_frames, get_max_frames(737 if test_any_sliding_window(base_model_type) else 337), value=current_video_length, 
+                    model_frames_maximum = model_def.get("frames_maximum", None)
+                    max_frames = (
+                        int(model_frames_maximum)
+                        if model_frames_maximum is not None
+                        else get_max_frames(737 if test_any_sliding_window(base_model_type) else 337)
+                    )
+                    video_length = gr.Slider(0 if audio_only else min_frames, max_frames, value=current_video_length,
                          step=frames_step, label=compute_video_length_label(computed_fps, current_video_length, video_length_locked) , visible = True, interactive= video_length_locked is None, show_reset_button= False)
 
             with gr.Row(visible = not lock_inference_steps) as inference_steps_row:                                       
@@ -12337,31 +13023,46 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                             allow_custom_value= True,
                         )
                         loras_multipliers = gr.Textbox(label="Loras Multipliers (1.0 by default) separated by Space chars or CR, lines that start with # are ignored", value=launch_multis_str)
-                with gr.Tab("Steps Skipping", visible = any_tea_cache or any_mag_cache) as speed_tab:
+                with gr.Tab(
+                    "Steps Skipping",
+                    visible=(
+                        any_tea_cache
+                        or any_mag_cache
+                        or any_first_block_cache
+                    ),
+                ) as speed_tab:
                     with gr.Column():
-                        gr.Markdown("<B>Tea Cache and Mag Cache accelerate the Video Generation by skipping intelligently some steps, the more steps are skipped the lower the quality of the video.</B>")
-                        gr.Markdown("<B>Steps Skipping  consumes also VRAM. It is recommended not to skip at least the first 10% steps.</B>")
+                        gr.Markdown("<B>Step-skipping accelerators avoid selected full transformer evaluations. More skipped evaluations may reduce output quality.</B>")
+                        gr.Markdown("<B>Keep an initial warmup so the accelerator can establish a stable history.</B>")
                         steps_skipping_choices = [("None", "")]
                         if any_tea_cache: steps_skipping_choices += [("Tea Cache", "tea")]
                         if any_mag_cache: steps_skipping_choices += [("Mag Cache", "mag")]
+                        if any_first_block_cache: steps_skipping_choices += [("First Block Cache", "first_block")]
                         skip_steps_cache_type = gr.Dropdown(
                             choices= steps_skipping_choices,
-                            value="" if not (any_tea_cache or any_mag_cache) else ui_get("skip_steps_cache_type"),
+                            value="" if not (any_tea_cache or any_mag_cache or any_first_block_cache) else ui_get("skip_steps_cache_type"),
                             visible=True,
                             label="Skip Steps Cache Type"
                         )
  
-                        skip_steps_multiplier = gr.Dropdown(
-                            choices=[
-                                ("around x1.5 speed up", 1.5), 
-                                ("around x1.75 speed up", 1.75), 
-                                ("around x2 speed up", 2.0), 
-                                ("around x2.25 speed up", 2.25), 
-                                ("around x2.5 speed up", 2.5), 
+                        skip_steps_multiplier_choices = model_def.get(
+                            "skip_steps_multiplier_choices",
+                            [
+                                ("around x1.5 speed up", 1.5),
+                                ("around x1.75 speed up", 1.75),
+                                ("around x2 speed up", 2.0),
+                                ("around x2.25 speed up", 2.25),
+                                ("around x2.5 speed up", 2.5),
                             ],
+                        )
+                        skip_steps_multiplier = gr.Dropdown(
+                            choices=skip_steps_multiplier_choices,
                             value=float(ui_get("skip_steps_multiplier")),
                             visible=True,
-                            label="Skip Steps Cache Global Acceleration"
+                            label=model_def.get(
+                                "skip_steps_multiplier_label",
+                                "Skip Steps Cache Global Acceleration",
+                            ),
                         )
                         skip_steps_start_step_perc = gr.Slider(0, 100, value=ui_get("skip_steps_start_step_perc"), step=1, label="Skip Steps starting moment in % of generation", show_reset_button= False) 
 

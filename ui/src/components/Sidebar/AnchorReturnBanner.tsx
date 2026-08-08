@@ -2,9 +2,9 @@ import { ArrowLeft, X, Check, SkipForward } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 
 /**
- * Persistent banner that drives the Edit Anything → Image Mode round-trip
- * for a single boundary anchor at a time. Mounted at the top of the
- * sidebar whenever `editReturnTarget` is set.
+ * Persistent banner that drives Edit Anything/Recast/Repaint → Image Mode
+ * round-trips for one boundary anchor or reference at a time.
+ * Mounted at the top of the sidebar whenever `editReturnTarget` is set.
  *
  * Each round-trip is independent — start and end anchors are populated
  * by separate "Edit X in Image Mode" buttons in EditAnythingControls.
@@ -27,7 +27,15 @@ export function AnchorReturnBanner() {
 
   if (!target) return null
 
-  const anchorLabel = target.anchor === 'start' ? 'Start' : 'End'
+  const isRecast = target.anchor === 'recast'
+  const isRepaint = target.anchor === 'repaint'
+  const anchorLabel = target.anchor === 'start'
+    ? 'Start'
+    : target.anchor === 'end'
+      ? 'End'
+      : isRepaint
+        ? 'Repaint First Frame'
+        : 'Recast Reference'
 
   // Latest image output (newest first, type === 'image')
   const latestImage = outputs.find(o => o.type === 'image')
@@ -38,20 +46,30 @@ export function AnchorReturnBanner() {
       <div className="flex items-center gap-2 mb-1.5">
         <ArrowLeft size={12} className="text-accent-blue shrink-0" />
         <span className="text-[10px] font-semibold text-accent-blue">
-          Editing {anchorLabel} Anchor
+          {isRecast
+            ? 'Editing Recast Reference'
+            : isRepaint
+              ? 'Editing Repaint First Frame'
+              : `Editing ${anchorLabel} Anchor`}
         </span>
         <button
           onClick={cancel}
-          title="Cancel — return to Edit Anything without setting this anchor"
+          title={isRecast
+            ? 'Cancel — return to Recast without changing its reference'
+            : isRepaint
+              ? 'Cancel — return to Repaint without changing its edited frame'
+              : 'Cancel — return to Edit Anything without setting this anchor'}
           className="ml-auto p-0.5 rounded hover:bg-accent-blue/20 text-accent-blue/80 hover:text-accent-blue"
         >
           <X size={11} />
         </button>
       </div>
       <p className="text-[9px] text-text-muted leading-snug mb-2">
-        Edit the {anchorLabel.toLowerCase()} frame in Image Mode. Apply your
-        result to use it as the {anchorLabel.toLowerCase()} boundary anchor,
-        or skip to fall back to the source frame.
+        {isRecast
+          ? 'Edit the selected trim-start frame in Image Mode. Apply the result to use it as Recast’s replacement reference, or return unchanged.'
+          : isRepaint
+            ? 'Repaint the selected first frame in Image Mode. Apply the result to animate that exact new scene with the source video’s motion.'
+            : `Edit the ${anchorLabel.toLowerCase()} frame in Image Mode. Apply your result to use it as the ${anchorLabel.toLowerCase()} boundary anchor, or skip to fall back to the source frame.`}
       </p>
       <div className="flex gap-1.5">
         <button
@@ -64,11 +82,15 @@ export function AnchorReturnBanner() {
         </button>
         <button
           onClick={skip}
-          title={`Skip ${anchorLabel} anchor — fall back to source frame`}
+          title={isRecast
+            ? 'Return to Recast without changing its reference'
+            : isRepaint
+              ? 'Return to Repaint without changing its edited frame'
+              : `Skip ${anchorLabel} anchor — fall back to source frame`}
           className="flex items-center justify-center gap-1 px-2 py-1 rounded border border-border text-text-secondary hover:bg-bg-hover text-[10px] transition-colors"
         >
           <SkipForward size={11} />
-          Skip
+          {isRecast || isRepaint ? 'Return unchanged' : 'Skip'}
         </button>
       </div>
       {!hasLatestImage && (

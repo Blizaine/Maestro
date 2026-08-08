@@ -19,6 +19,7 @@ import torch
 import os
 import glob
 import json
+import math
 import time
 import uuid
 import asyncio
@@ -96,6 +97,13 @@ if _hf_token_path:
 # Now safe to import wgp - all module-level code will run with patched argv
 print("[Maestro] Importing WanGP engine...")
 import wgp
+from models.minimax_h3.turbo import (
+    MINIMAX_H3_TURBO_LORA_FILENAME,
+    MINIMAX_H3_TURBO_LORA_REPO_ID,
+    MINIMAX_H3_TURBO_LORA_REVISION,
+    MINIMAX_H3_TURBO_LORA_SHA256,
+    MINIMAX_H3_TURBO_LORA_SIZE,
+)
 print(f"[Maestro] WanGP loaded: {len(wgp.displayed_model_types)} models available")
 # Base save path always comes from server_config["save_path"] (never from wgp.save_path which gets workspace-modified)
 
@@ -177,16 +185,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
-import logging
+from services.access_log_filter import install_quiet_access_filter
 
-# Suppress noisy polling endpoints from uvicorn access log
-class _QuietAccessFilter(logging.Filter):
-    _quiet_paths = {"/api/v1/llm/status", "/api/v1/outputs", "/health"}
-    def filter(self, record):
-        msg = record.getMessage()
-        return not any(p in msg for p in self._quiet_paths)
-
-logging.getLogger("uvicorn.access").addFilter(_QuietAccessFilter())
+# Uvicorn's logging configuration replaces handlers but retains logger-level
+# filters. Install early, then idempotently confirm it again before startup.
+install_quiet_access_filter()
 
 api = FastAPI(title="Maestro API", version="1.0.0")
 
@@ -407,12 +410,24 @@ def _check_model_downloaded(model_type: str) -> bool:
     transformer + each weight module) must be present.
     """
     try:
-        if wgp.get_model_def(model_type) is None:
+        model_def = wgp.get_model_def(model_type)
+        if model_def is None:
             return False
         groups = _model_weight_groups(model_type)
         if not groups:
             return False
         if not all(_variant_group_downloaded(g) for g in groups):
+            return False
+        # Some edit pipelines split required conditioning weights out of the
+        # main transformer/text-encoder groups. Krea 2 Edit cannot run without
+        # its Qwen3-VL vision tower, so do not report it as ready until that
+        # preloaded companion file is actually discoverable (including through
+        # linked checkpoint roots).
+        vision_encoder_filename = model_def.get("vision_encoder_filename")
+        if (
+            vision_encoder_filename
+            and wgp.fl.locate_file(vision_encoder_filename, error_if_none=False) is None
+        ):
             return False
         # Def-bundled accelerator loras (e.g. SCAIL-2 Fast's lightx2v
         # distill) are loaded unconditionally at generation time, so they
@@ -429,6 +444,8 @@ def _check_model_downloaded(model_type: str) -> bool:
 @api.get("/api/v1/models")
 def list_models():
     """List available model families and model types."""
+    from services.director_model_compat import assess_director_model
+
     # Families
     families = []
     for fid, (order, label) in wgp.families_infos.items():
@@ -444,18 +461,34 @@ def list_models():
         if md is None:
             continue
         family = wgp.get_model_family(mt, for_ui=True)
+        architecture = wgp.get_base_model_type(mt)
+        director_compat = assess_director_model(
+            mt,
+            md,
+            family=family,
+            architecture=architecture,
+        )
         models.append({
             "model_type": mt,
             "name": md.get("name", mt),
+            "description": md.get("description", ""),
+            "selector_help": md.get("selector_help", ""),
+            "lora_compatibility_note": md.get("lora_compatibility_note", ""),
             "family": family,
-            "architecture": wgp.get_base_model_type(mt),
+            "architecture": architecture,
             "is_i2v": wgp.test_class_i2v(mt),
             "is_t2v": wgp.test_class_t2v(mt),
             "guidance_max_phases": md.get("guidance_max_phases", 1),
             "fps": md.get("fps", 16),
             "supports_end_frame": "E" in md.get("image_prompt_types_allowed", ""),
-            "supports_audio": bool(md.get("any_audio_prompt", False)),
-            "supports_ref_images": bool(md.get("image_ref_choices")),
+            "supports_audio": bool(md.get("any_audio_prompt", False) or md.get("returns_audio", False)),
+            "supports_audio_input": bool(
+                md.get("any_audio_prompt", False)
+                or md.get("supports_reference_audio", False)
+            ),
+            "generates_audio": bool(md.get("returns_audio", False)),
+            "supports_ref_images": bool(md.get("image_ref_choices") or md.get("omni_reference")),
+            "director": director_compat,
             "is_downloaded": _check_model_downloaded(mt),
             # When True, the UI hides this model unless Mature Mode is
             # enabled. Set in the model JSON's "model" block (e.g.
@@ -466,6 +499,130 @@ def list_models():
         })
 
     return {"families": families, "models": models}
+
+
+_MODEL_VISIBILITY_CONFIG_KEY = "maestro_model_visibility"
+_MODEL_VISIBILITY_WRITE_LOCK = threading.RLock()
+
+
+def _normalize_model_visibility_ids(values):
+    """Return a stable, de-duplicated list of persisted model identifiers."""
+    if not isinstance(values, list):
+        raise ValueError("Model visibility must be a list.")
+    normalized = []
+    seen = set()
+    for value in values:
+        if not isinstance(value, str):
+            raise ValueError("Model visibility entries must be strings.")
+        model_type = value.strip()
+        if not model_type or model_type in seen:
+            continue
+        if len(model_type) > 200:
+            raise ValueError("A model identifier is too long.")
+        seen.add(model_type)
+        normalized.append(model_type)
+    if len(normalized) > 5000:
+        raise ValueError("Too many model visibility entries.")
+    return normalized
+
+
+def _model_visibility_response():
+    raw = wgp.server_config.get(_MODEL_VISIBILITY_CONFIG_KEY)
+    configured = isinstance(raw, dict) and isinstance(
+        raw.get("enabled_models"), list,
+    )
+    if not configured:
+        return {
+            "configured": False,
+            "enabled_models": [],
+            "initialized_mature_models": [],
+            "defaults_version": 0,
+        }
+    try:
+        enabled_models = _normalize_model_visibility_ids(
+            raw.get("enabled_models", []),
+        )
+        initialized_mature_models = _normalize_model_visibility_ids(
+            raw.get("initialized_mature_models", []),
+        )
+    except ValueError:
+        return {
+            "configured": False,
+            "enabled_models": [],
+            "initialized_mature_models": [],
+            "defaults_version": 0,
+        }
+    try:
+        defaults_version = max(0, int(raw.get("defaults_version", 0)))
+    except (TypeError, ValueError):
+        defaults_version = 0
+    return {
+        "configured": True,
+        "enabled_models": enabled_models,
+        "initialized_mature_models": initialized_mature_models,
+        "defaults_version": defaults_version,
+    }
+
+
+def _persist_model_visibility_config():
+    """Atomically persist visibility across Pinokio's changing UI ports."""
+    config_path = os.path.abspath(wgp.server_config_filename)
+    temp_path = (
+        f"{config_path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    with _MODEL_VISIBILITY_WRITE_LOCK:
+        try:
+            with open(temp_path, "w", encoding="utf-8") as handle:
+                json.dump(wgp.server_config, handle, indent=4)
+            os.replace(temp_path, config_path)
+        finally:
+            if os.path.isfile(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+
+
+@api.get("/api/v1/model-visibility")
+def get_model_visibility():
+    """Return the server-persisted model selector whitelist."""
+    return _model_visibility_response()
+
+
+@api.put("/api/v1/model-visibility")
+async def update_model_visibility(request: Request):
+    """Persist model visibility independently of the browser's origin."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="Model visibility payload must be an object.",
+        )
+    try:
+        enabled_models = _normalize_model_visibility_ids(
+            body.get("enabled_models"),
+        )
+        initialized_mature_models = _normalize_model_visibility_ids(
+            body.get("initialized_mature_models", []),
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    try:
+        defaults_version = max(0, int(body.get("defaults_version", 0)))
+    except (TypeError, ValueError) as error:
+        raise HTTPException(
+            status_code=400,
+            detail="defaults_version must be an integer.",
+        ) from error
+
+    with _MODEL_VISIBILITY_WRITE_LOCK:
+        wgp.server_config[_MODEL_VISIBILITY_CONFIG_KEY] = {
+            "enabled_models": enabled_models,
+            "initialized_mature_models": initialized_mature_models,
+            "defaults_version": defaults_version,
+        }
+        _persist_model_visibility_config()
+        return _model_visibility_response()
 
 
 @api.get("/api/v1/models/{model_type}/debug")
@@ -847,6 +1004,12 @@ _SYSTEM_MANAGED_LORA_PATTERNS = (
     _re_sys_lora.compile(r"distilled[-_]lora", _re_sys_lora.IGNORECASE),
     # Edit Anything LoRA (Alissonerdx, auto-downloaded by /api/v1/edit-anything).
     _re_sys_lora.compile(r"edit[-_]anything", _re_sys_lora.IGNORECASE),
+    # Official SCAIL-2 Relighting LoRA, downloaded and converted on first
+    # Recast use. It is pinned to the upstream checkpoint hash below.
+    _re_sys_lora.compile(r"scail2[-_]relighting[-_]lora", _re_sys_lora.IGNORECASE),
+    # MiniMax H3 Turbo accelerator, exposed as a managed experimental preset
+    # for Full H3 checkpoints and downloaded on first use.
+    _re_sys_lora.compile(r"minimax[-_]h3[-_]turbo", _re_sys_lora.IGNORECASE),
     # LTX-2.3 Transition LoRA (auto-downloaded by ensureTransitionLoraForBlend).
     _re_sys_lora.compile(r"transition", _re_sys_lora.IGNORECASE),
 )
@@ -1354,6 +1517,44 @@ def delete_lora_file(directory: str, filename: str):
     return {"status": "ok", "deleted": filename, "deferred": bool(result.get("deferred")), "extras_removed": extras_removed}
 
 
+def _lora_is_compatible_with_model(model_def: dict, path: str) -> bool:
+    """Keep special adapters out of model selectors that cannot run them."""
+
+    del model_def, path
+    # MiniMax H3 Full/Pruned AdaLN conversion happens in the transformer
+    # preprocessor, so H3 adapters no longer need a checkpoint-size filter.
+    return True
+
+
+def _minimax_h3_turbo_option(model_def: dict) -> dict | None:
+    """Return the managed Turbo preset exposed by a compatible H3 model."""
+
+    architecture = str((model_def or {}).get("architecture") or "")
+    if not architecture.startswith("minimax_h3"):
+        return None
+
+    from models.minimax_h3.turbo import (
+        MINIMAX_H3_TURBO_LORA_FILENAME,
+        MINIMAX_H3_TURBO_PRESET_STEPS,
+        MINIMAX_H3_TURBO_PRESET_WEIGHT,
+    )
+
+    return {
+        "filename": MINIMAX_H3_TURBO_LORA_FILENAME,
+        "label": "Turbo mode",
+        "experimental": True,
+        "steps": MINIMAX_H3_TURBO_PRESET_STEPS,
+        "weight": MINIMAX_H3_TURBO_PRESET_WEIGHT,
+        "guide": (
+            "Experimental MiniMax H3 accelerator for Full and Pruned "
+            "checkpoints. Maestro's one-click preset uses 6 steps and starts "
+            "at strength 0.50. Adjust its active LoRA strength in Advanced; "
+            "the managed adapter and small compatibility data download "
+            "automatically on first use. Pruned is recommended on 16 GB GPUs."
+        ),
+    }
+
+
 @api.get("/api/v1/loras/{model_type}")
 def list_loras(model_type: str):
     """List available LoRA files for a model type."""
@@ -1366,7 +1567,8 @@ def list_loras(model_type: str):
     except Exception:
         return {"loras": [], "guidance_max_phases": md.get("guidance_max_phases", 1)}
 
-    if lora_dir is None or not os.path.isdir(lora_dir):
+    turbo_option = _minimax_h3_turbo_option(md)
+    if lora_dir is None:
         return {"loras": [], "guidance_max_phases": md.get("guidance_max_phases", 1)}
 
     # Merge the primary dir with linked read-only dirs (Linked Model
@@ -1374,9 +1576,17 @@ def list_loras(model_type: str):
     # existing Wan2GP install show up in the Studio selector without
     # copying them.
     names = set()
-    for search_dir in wgp.get_lora_search_dirs(model_type):
-        for f in glob.glob(os.path.join(search_dir, "*.safetensors")) + glob.glob(os.path.join(search_dir, "*.sft")):
-            names.add(os.path.basename(f))
+    if os.path.isdir(lora_dir):
+        for search_dir in wgp.get_lora_search_dirs(model_type):
+            for f in glob.glob(os.path.join(search_dir, "*.safetensors")) + glob.glob(os.path.join(search_dir, "*.sft")):
+                if not _lora_is_compatible_with_model(md, f):
+                    continue
+                names.add(os.path.basename(f))
+    # Managed choices are virtual until first use. Keeping the pinned Turbo
+    # filename in the catalog makes it discoverable on a fresh install; the
+    # generation preflight below performs the verified one-time download.
+    if turbo_option:
+        names.add(turbo_option["filename"])
     loras = sorted(names)
 
     return {
@@ -1395,23 +1605,27 @@ def list_loras_details(model_type: str):
         lora_dir = wgp.get_lora_dir(model_type)
     except Exception:
         return {"loras": [], "guidance_max_phases": md.get("guidance_max_phases", 1)}
-    if lora_dir is None or not os.path.isdir(lora_dir):
+    turbo_option = _minimax_h3_turbo_option(md)
+    if lora_dir is None:
         return {"loras": [], "guidance_max_phases": md.get("guidance_max_phases", 1)}
 
     # Merge across the primary dir and linked read-only dirs (same set as
     # the plain listing endpoint), primary copy wins per filename.
     _seen_names = set()
     files = []
-    for _search_dir in wgp.get_lora_search_dirs(model_type):
-        for f in sorted(
-            glob.glob(os.path.join(_search_dir, "*.safetensors"))
-            + glob.glob(os.path.join(_search_dir, "*.sft"))
-        ):
-            _b = os.path.basename(f)
-            if _b in _seen_names:
-                continue
-            _seen_names.add(_b)
-            files.append(f)
+    if os.path.isdir(lora_dir):
+        for _search_dir in wgp.get_lora_search_dirs(model_type):
+            for f in sorted(
+                glob.glob(os.path.join(_search_dir, "*.safetensors"))
+                + glob.glob(os.path.join(_search_dir, "*.sft"))
+            ):
+                if not _lora_is_compatible_with_model(md, f):
+                    continue
+                _b = os.path.basename(f)
+                if _b in _seen_names:
+                    continue
+                _seen_names.add(_b)
+                files.append(f)
     files.sort(key=lambda p: os.path.basename(p))
 
     # Read the cached update manifest once per request so each row can
@@ -1530,6 +1744,37 @@ def list_loras_details(model_type: str):
             filename=basename,
         ))
         loras.append(info)
+
+    if turbo_option:
+        filename = turbo_option["filename"]
+        info = next((item for item in loras if item["filename"] == filename), None)
+        if info is None:
+            info = {
+                "filename": filename,
+                "trained_words": [],
+                "preview_url": None,
+                "civitai_model_id": None,
+                "recommended_weights": None,
+                "has_guide": False,
+                "nsfw": False,
+                "downloaded_at": None,
+                "released_at": None,
+                "lora_id": f"managed:{filename}",
+            }
+            loras.append(info)
+        info.update({
+            "managed": True,
+            "recommended_weights": {
+                "source": "default",
+                "default": turbo_option["weight"],
+                "min": 0.50,
+                "max": 1.00,
+            },
+            "has_guide": True,
+            "guide": turbo_option["guide"],
+            "update_status": "current",
+        })
+        loras.sort(key=lambda item: item["filename"])
     return {
         "loras": loras,
         "guidance_max_phases": md.get("guidance_max_phases", 1),
@@ -1855,6 +2100,16 @@ def _fix_civitai_images(data: dict):
 # this map in sync with what creators actually pick — entries missing
 # here become invisible to our browser even though they show up in
 # CivitAI's UI and 3rd-party clients (civarchive et al).
+# MiniMax H3 LoRA metadata is not fully standardized yet. CivitAI currently
+# uses "MiniMax H3", while Hugging Face cards variously use the official repo,
+# Comfy's repack, or only a ``minimax-h3`` tag. Match the unambiguous combined
+# model name, but never a generic "H3" token on its own.
+def _is_minimax_h3_identity(*values) -> bool:
+    identity = " ".join(str(value) for value in values if value).casefold()
+    compact = "".join(char for char in identity if char.isalnum())
+    return "minimaxh3" in compact
+
+
 CIVIT_TO_LOCAL_ARCH = {
     # Wan Video
     "Wan Video 14B t2v": "t2v",
@@ -1890,13 +2145,29 @@ CIVIT_TO_LOCAL_ARCH = {
     "LTXV": "ltxv",
     "LTXV2": "ltx2",
     "LTXV 2.3": "ltx2",
+    # MiniMax H3 (shared by First/Last, Omni, pruned, and full models)
+    "MiniMax H3": "minimax_h3",
     # Qwen Image
     "Qwen": "qwen_image_20B",
+    # Krea 2
+    "Krea 2": "krea2",
     # Other
     "ZImageTurbo": "z_image",
     "Mochi": "mocha",
     "CogVideoX": "cogvideox",
 }
+
+
+def _civitai_lora_arch(base_model: str) -> str:
+    """Return the canonical local LoRA directory key for a CivitAI base."""
+    mapped = CIVIT_TO_LOCAL_ARCH.get(base_model, "")
+    if mapped:
+        return mapped
+    # Keep pasted URLs working if CivitAI changes punctuation or casing while
+    # retaining the recognizable MiniMax H3 model identity.
+    if _is_minimax_h3_identity(base_model):
+        return "minimax_h3"
+    return ""
 
 # Generic placeholder filenames that HF authors commonly use when
 # uploading a single LoRA file. The on-disk name "lora_weights.safetensors"
@@ -1952,6 +2223,8 @@ def _hf_disk_filename(repo_id: str, lora_filename: str, user_specified: bool) ->
 
 # HuggingFace base_model repo IDs → local LoRA directory
 HF_BASE_TO_LOCAL_DIR = {
+    "MiniMaxAI/MiniMax-H3": "minimax_h3",
+    "Comfy-Org/MiniMax-H3": "minimax_h3",
     "Lightricks/LTX-2.3": "ltx2",
     "Lightricks/LTX-Video-2-0.9.8-distilled": "ltxv",
     "Lightricks/LTX-Video": "ltxv",
@@ -1967,6 +2240,9 @@ HF_BASE_TO_LOCAL_DIR = {
     "tencent/HunyuanVideo": "hunyuan",
     "Qwen/Qwen-Image-Edit-2511": "qwen",
     "Alibaba/Qwen-Image-20B": "qwen",
+    "krea/Krea-2-Raw": "krea2",
+    "krea/Krea-2-Turbo": "krea2",
+    "DeepBeepMeep/krea-2": "krea2",
 }
 
 # Smart base model filters for the browser.
@@ -1975,6 +2251,7 @@ HF_BASE_TO_LOCAL_DIR = {
 # Virtual entries (search_query set) let us create sub-filters CivitAI doesn't have.
 CIVITAI_MODEL_FILTERS = [
     # --- Video ---
+    {"label": "MiniMax H3", "civitai_base": "MiniMax H3", "default_dir": "minimax_h3"},
     # LTX — CivitAI now exposes three distinct baseModel values:
     # LTXV (LTX 1), LTXV2 (LTX-2), LTXV 2.3 (LTX-2.3). The previous
     # search_query workarounds bucketed everything under "LTXV" and
@@ -2009,6 +2286,7 @@ CIVITAI_MODEL_FILTERS = [
     {"label": "Flux.2 Klein 9B", "civitai_base": "Flux.2 Klein 9B,Flux.2 Klein 9B-base", "default_dir": "flux2_klein_9b"},
     {"label": "Flux.2 Klein 4B", "civitai_base": "Flux.2 Klein 4B,Flux.2 Klein 4B-base", "default_dir": "flux2_klein_4b"},
     {"label": "Qwen", "civitai_base": "Qwen", "default_dir": "qwen"},
+    {"label": "Krea 2", "civitai_base": "Krea 2", "default_dir": "krea2"},
     {"label": "ZImageTurbo", "civitai_base": "ZImageTurbo", "default_dir": "z_image"},
 ]
 
@@ -2403,6 +2681,7 @@ def _serialize_download_record(record, fallback_id: str = "") -> dict:
         record = {}
     progress = _safe_download_number(record.get("progress"), integer=True)
     error = record.get("error")
+    model_type = record.get("model_type")
     warnings = record.get("warnings")
     if not isinstance(warnings, (list, tuple)):
         warnings = []
@@ -2420,6 +2699,9 @@ def _serialize_download_record(record, fallback_id: str = "") -> dict:
         "error": None if error is None else str(error),
         "started_at": _safe_download_number(record.get("started_at")),
         "completed_at": _safe_download_number(record.get("completed_at")),
+        # Present after a checkpoint has been registered successfully. The UI
+        # uses this as a filename-independent signal to refresh model lists.
+        "model_type": None if not model_type else str(model_type),
         "warnings": [str(warning) for warning in warnings],
     }
 
@@ -3028,7 +3310,7 @@ def civitai_model_detail(model_id: int):
     # Enrich versions with local arch mapping and fix image URLs
     for version in data.get("modelVersions", []):
         base = version.get("baseModel", "")
-        arch = CIVIT_TO_LOCAL_ARCH.get(base)
+        arch = _civitai_lora_arch(base)
         version["localArch"] = arch
         for img in version.get("images", []):
             url = img.get("url", "")
@@ -3085,6 +3367,13 @@ async def civitai_download(request: Request):
     kind = (body.get("kind") or "lora").lower()  # "lora" (default) | "checkpoint"
     target_architecture = body.get("target_architecture", "")  # required for checkpoint imports
     auto_quantize = bool(body.get("auto_quantize", False))  # checkpoint: load-time int8
+
+    # Trust the version's base-model identity over a stale browser mapping.
+    # An explicit directory choice remains authoritative.
+    if kind == "lora" and not target_dir_name:
+        inferred_target_arch = _civitai_lora_arch(base_model)
+        if inferred_target_arch:
+            target_arch = inferred_target_arch
 
     if not url:
         raise HTTPException(status_code=400, detail="download_url is required")
@@ -3553,7 +3842,7 @@ def _import_civitai_lora_by_url(url: str, target_dir_override: str = "") -> JSON
         #  2. CIVIT_TO_LOCAL_ARCH lookup by version's baseModel
         #  3. fallback to lora_root (no arch subdir)
         base_model = chosen.get("baseModel", "") or ""
-        target_arch = CIVIT_TO_LOCAL_ARCH.get(base_model, "")
+        target_arch = _civitai_lora_arch(base_model)
 
         lora_root = wgp.server_config.get("loras_root", "loras") if hasattr(wgp, "server_config") else "loras"
         if not os.path.isabs(lora_root):
@@ -3714,7 +4003,10 @@ async def hf_import_lora(request: Request):
                 " ".join(str(b) for b in base_models),
                 " ".join(str(t) for t in repo.get("tags", []) or []),
             ]).lower()
-            if "ltx-2.3" in _identity_blob or "ltx2.3" in _identity_blob or "ltx_2_3" in _identity_blob:
+            if _is_minimax_h3_identity(_identity_blob):
+                target_dir = "minimax_h3"
+                hf_base_label = "MiniMax H3 (detected from repo name/tags)"
+            elif "ltx-2.3" in _identity_blob or "ltx2.3" in _identity_blob or "ltx_2_3" in _identity_blob:
                 target_dir = "ltx2"
                 hf_base_label = "LTX-2.3 (detected from repo name/tags)"
             elif "ltx-2" in _identity_blob or "ltx2" in _identity_blob:
@@ -4827,6 +5119,39 @@ async def scan_and_generate_guides(request: Request):
 
 
 
+def _recommended_minimax_h3_encoder(model_type: str, model_def: dict) -> str:
+    """Resolve H3's default encoder from actual kernel support and RAM."""
+
+    variants = model_def.get("minimax_h3_text_encoder_variants") or {}
+    fallback = str(model_def.get("minimax_h3_text_encoder_default") or "nvfp4_awq")
+    if not variants:
+        return fallback
+    try:
+        handler = wgp.get_model_handler(wgp.get_base_model_type(model_type))
+        selected = handler.recommend_text_encoder(_get_cached_hardware(), model_def)
+        if selected in variants:
+            return selected
+    except Exception as error:
+        print(f"[MiniMax H3] Hardware-aware encoder recommendation failed: {error}")
+    return fallback if fallback in variants else next(iter(variants))
+
+
+def _minimax_h3_runtime_advisory(model_def: dict) -> dict | None:
+    """Return a non-blocking Full-H3 hardware warning for Studio."""
+
+    if not str((model_def or {}).get("architecture") or "").startswith(
+        "minimax_h3"
+    ):
+        return None
+    try:
+        from models.minimax_h3.minimax_h3_handler import h3_runtime_preflight
+
+        return h3_runtime_preflight(model_def, _get_cached_hardware())
+    except Exception as error:
+        print(f"[MiniMax H3] Runtime preflight unavailable: {error}")
+        return None
+
+
 @api.get("/api/v1/model-options/{model_type}")
 def get_model_options(model_type: str):
     """Return UI-relevant model options for dynamic rendering."""
@@ -4879,6 +5204,13 @@ def get_model_options(model_type: str):
     else:
         solvers = None
 
+    _h3_encoder_variants = md.get("minimax_h3_text_encoder_variants") or {}
+    _h3_encoder_default = (
+        _recommended_minimax_h3_encoder(model_type, md)
+        if _h3_encoder_variants
+        else None
+    )
+
     return {
         "model_type": model_type,
         "architecture": md.get("architecture", model_type),
@@ -4887,9 +5219,28 @@ def get_model_options(model_type: str):
 
         # Boolean flags
         "sliding_window": md.get("sliding_window", False),
+        "video_continuation": md.get("video_continuation", False),
         "motion_amplitude": md.get("motion_amplitude", False),
         "flow_shift": bool(md.get("flow_shift", False)),
         "tea_cache": md.get("tea_cache", False),
+        "first_block_cache": md.get("first_block_cache", False),
+        "skip_steps_multiplier_choices": [
+            [str(choice[0]), float(choice[1])]
+            for choice in md.get("skip_steps_multiplier_choices", [])
+            if isinstance(choice, (list, tuple)) and len(choice) >= 2
+        ] or None,
+        "skip_steps_multiplier_label": md.get(
+            "skip_steps_multiplier_label",
+            "Cache Strength",
+        ),
+        "default_skip_steps_multiplier": _ui_defaults.get(
+            "skip_steps_multiplier",
+            0.08,
+        ),
+        "default_skip_steps_start_step_perc": _ui_defaults.get(
+            "skip_steps_start_step_perc",
+            25,
+        ),
         "returns_audio": md.get("returns_audio", False),
         "any_audio_prompt": md.get("any_audio_prompt", False),
         "audio_scale_name": md.get("audio_scale_name", ""),
@@ -4900,6 +5251,29 @@ def get_model_options(model_type: str):
         "t2v_class": md.get("t2v_class", False),
         "image_outputs": md.get("image_outputs", False),
         "supports_end_frame": "E" in md.get("image_prompt_types_allowed", ""),
+        "omni_reference": md.get("omni_reference", False),
+        "omni_reference_limits": md.get("omni_reference_limits"),
+        "omni_reference_detail_choices": md.get("omni_reference_detail_choices"),
+        "omni_reference_detail_default": md.get("omni_reference_detail_default", "match"),
+        "minimax_h3_text_encoder_choices": [
+            {
+                "value": key,
+                "label": (
+                    f"{value.get('name', key)} (Recommended)"
+                    if key == _h3_encoder_default
+                    else value.get("name", key)
+                ),
+                "size_hint": value.get("size_hint", ""),
+                "recommended": key == _h3_encoder_default,
+            }
+            for key, value in _h3_encoder_variants.items()
+        ] or None,
+        "minimax_h3_text_encoder_default": _h3_encoder_default,
+        "minimax_h3_turbo": _minimax_h3_turbo_option(md),
+        "minimax_h3_runtime_advisory": _minimax_h3_runtime_advisory(md),
+        "resolution_presets": md.get("resolution_presets"),
+        "resolution_preset_order": md.get("resolution_preset_order"),
+        "supports_auto_aspect": md.get("supports_auto_aspect", False),
 
         # Choice configs
         "guide_preprocessing": extract_choice("guide_preprocessing"),
@@ -4909,6 +5283,7 @@ def get_model_options(model_type: str):
 
         # Image reference options
         "background_removal_label": md.get("background_removal_label"),
+        "max_image_refs": md.get("max_image_refs"),
         "sample_solvers": solvers,
 
         # Self refiner
@@ -4924,11 +5299,19 @@ def get_model_options(model_type: str):
 
         # Sliding window
         "sliding_window_defaults": md.get("sliding_window_defaults"),
+        "sliding_window_memory_policy": md.get(
+            "sliding_window_memory_policy"
+        ),
+        "director_memory_policy": md.get("director_memory_policy"),
+        "sliding_window_auto_prompt_pacing": md.get(
+            "sliding_window_auto_prompt_pacing", False
+        ),
 
         # Timing
         "fps": md.get("fps", 16),
         "frames_minimum": md.get("frames_minimum", 5),
         "frames_steps": md.get("frames_steps", 4),
+        "frames_maximum": md.get("frames_maximum"),
 
         # Model defaults (sent to frontend so UI can apply them on model selection)
         # Check model def first, then fall back to ui_defaults from the handler
@@ -5713,21 +6096,23 @@ def get_services_config():
         "use_director_v2": services.get("use_director_v2", True),
         "nsfw_mode": nsfw,
         "nsfw_accepted_at": services.get("nsfw_accepted_at", None),
-        # Default flipped from "off" to "third_pass" — Pass 3 polish runs
-        # each generated prompt through a model-specific dialect pass after
-        # planning, which produces materially better LTX-2 / Flux output
-        # than relying on Pass 2 alone with a single hardcoded dialect.
+        # Default flipped from "off" to model-aware "third_pass". Models
+        # such as LTX-2 / Flux retain dialect polishing, while native H3
+        # video prompts bypass creative rewriting and keep deterministic
+        # continuity/dialogue preflight.
         "director_prompt_polish": services.get("director_prompt_polish", "third_pass"),
         "civitai_api_key": _mask_key(services.get("civitai_api_key", "")),
         "civitai_api_key_set": bool(services.get("civitai_api_key", "")),
-        "voice_reference_enabled": services.get("voice_reference_enabled", False),
+        # Voice Reference is a stable, user-facing capability now. Fresh
+        # installs expose its controls by default, while an explicitly saved
+        # False value remains respected.
+        "voice_reference_enabled": services.get("voice_reference_enabled", True),
         "ltx_progressive_pipeline": services.get("ltx_progressive_pipeline", False),
         # Master gate for experimental features. When False (default for
         # fresh installs and a sane "ship-ready" baseline), the Services
-        # panel hides the engine-v2 toggle, voice reference, external
-        # API keys, and the Studio prompt enhancer config; the Edit
-        # mode picker hides Inpaint and Restyle. Toggling this on
-        # surfaces those affordances for power users.
+        # panel hides external API keys and the Studio prompt enhancer
+        # config; the Edit mode picker hides Inpaint. Voice Reference is
+        # intentionally independent of this gate.
         "show_experimental": services.get("show_experimental", False),
         # Storage Manager: opt-in gate for removing duplicate files FROM
         # linked installs (the inverse of Reclaim). Default off — deleting
@@ -6665,6 +7050,84 @@ async def director_generate_music(request: Request):
     return {"audio_path": audio_path, "filename": filename, "style": style, "lyrics": lyrics}
 
 
+@api.post("/api/v1/llm/plan-h3-windows")
+async def llm_plan_h3_windows(request: Request):
+    """Expand one H3 First/Last concept into exact per-window prompts."""
+
+    body = await request.json()
+    prompt = str(body.get("prompt") or "").strip()
+    model_type = str(body.get("model_type") or "")
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt is required")
+    model_def = wgp.get_model_def(model_type) or {}
+    if not str(model_def.get("architecture") or "").startswith("minimax_h3"):
+        raise HTTPException(status_code=400, detail="H3 window planning requires a MiniMax H3 model.")
+    if model_def.get("omni_reference"):
+        raise HTTPException(status_code=400, detail="MiniMax H3 Omni does not use sliding windows.")
+
+    planning_inputs = {
+        "model_type": model_type,
+        "resolution": body.get("resolution") or "864x480",
+        "video_length": body.get("total_frames") or body.get("video_length") or 124,
+        "sliding_window_size": body.get("window_frames") or body.get("sliding_window_size") or 345,
+        "sliding_window_overlap": body.get("overlap_frames", body.get("sliding_window_overlap", 1)),
+        "sliding_window_discard_last_frames": body.get("discard_frames", body.get("sliding_window_discard_last_frames", 0)),
+        "sliding_window_memory_override": bool(body.get("sliding_window_memory_override", False)),
+    }
+    from models.minimax_h3.minimax_h3_handler import apply_h3_window_memory_policy
+
+    adjustment = apply_h3_window_memory_policy(
+        planning_inputs,
+        model_def,
+        _get_cached_hardware(),
+    )
+    if adjustment and adjustment.get("unsupported"):
+        raise HTTPException(status_code=400, detail=adjustment["message"])
+
+    from services import llm_service
+    from services.h3_window_planner import plan_h3_sliding_windows
+
+    try:
+        _ensure_llm_loaded()
+    except Exception as load_error:
+        # The pure planner has a deterministic no-LLM fallback. Keep H3
+        # usable on installs where the optional local planning model has not
+        # been downloaded yet, and surface that state in planned_by.
+        print(f"[MiniMax H3] Planner LLM unavailable; using fallback: {load_error}")
+    services = wgp.server_config.get("services", {})
+    provider = services.get("llm_provider", "local")
+    nsfw = services.get("nsfw_mode", False) and provider not in _PUBLIC_LLM_PROVIDERS
+    image_paths = [
+        path for path in (body.get("image_paths") or [])
+        if isinstance(path, str) and path and os.path.isfile(path)
+    ]
+    total_frames = int(planning_inputs["video_length"])
+    window_frames = int(planning_inputs["sliding_window_size"])
+    overlap_frames = int(planning_inputs["sliding_window_overlap"] or 0)
+    discard_frames = int(planning_inputs["sliding_window_discard_last_frames"] or 0)
+    try:
+        result = await asyncio.to_thread(
+            plan_h3_sliding_windows,
+            prompt,
+            model_type=model_type,
+            resolution=str(planning_inputs["resolution"]),
+            total_frames=total_frames,
+            window_frames=window_frames,
+            overlap_frames=overlap_frames,
+            discard_frames=discard_frames,
+            fps=float(model_def.get("fps", 24) or 24),
+            has_start_image=bool(body.get("has_start_image")),
+            has_end_image=bool(body.get("has_end_image")),
+            image_paths=image_paths or None,
+            nsfw=bool(nsfw),
+        )
+        result["effective_window_frames"] = window_frames
+        return result
+    except Exception as error:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(error)) from error
+
+
 @api.post("/api/v1/llm/enhance-prompt")
 async def llm_enhance_prompt(request: Request):
     """Enhance a generation prompt. Routes to Wan2GP enhancer or local LLM based on config."""
@@ -6674,19 +7137,30 @@ async def llm_enhance_prompt(request: Request):
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
 
+    model_type = str(body.get("model_type", "") or "")
+    generation_mode = str(body.get("mode", "video") or "video")
+    needs_h3_context_ir = (
+        model_type.lower().startswith("minimax_h3")
+        and generation_mode in ("video", "avatar")
+    )
     enhancer_enabled = int(wgp.server_config.get("enhancer_enabled", 0) or 0)
 
-    # Route to Wan2GP enhancer if enabled
-    if enhancer_enabled > 0:
+    # The generic Wan2GP cinematic enhancer cannot produce MiniMax H3's
+    # required Context-IR fields, speaker IDs, or <d> dialogue tags. Route H3
+    # through Maestro's model-specific guide even when the legacy enhancer is
+    # enabled; all other model families retain the configured behavior.
+    if enhancer_enabled > 0 and not needs_h3_context_ir:
         try:
             # Support both single image_path and array image_paths
             image_paths = body.get("image_paths") or []
             if not image_paths and body.get("image_path"):
                 image_paths = [body["image_path"]]
-            return await _enhance_with_wangp(prompt, body.get("mode", "video"), enhancer_enabled, image_paths=image_paths)
+            return await _enhance_with_wangp(prompt, generation_mode, enhancer_enabled, image_paths=image_paths)
         except Exception as e:
             print(f"[Enhance] Wan2GP enhancer failed, falling back to LLM: {e}")
             # Fall through to LLM
+    elif enhancer_enabled > 0 and needs_h3_context_ir:
+        print("[Enhance] MiniMax H3 requires structured Context-IR; using Maestro's model-specific LLM guide")
 
     # Use our local LLM service
     from services import llm_service
@@ -6739,7 +7213,6 @@ async def llm_enhance_prompt(request: Request):
     # Load LoRA info for activated LoRAs — extract ONLY trigger words and key tips
     lora_hint_text = ""
     activated_loras = body.get("activated_loras") or []
-    model_type = body.get("model_type", "")
     print(f"[Enhance] LoRA check: activated_loras={activated_loras}, model_type={model_type}")
     if activated_loras and model_type:
         try:
@@ -6820,6 +7293,7 @@ async def llm_enhance_prompt(request: Request):
             tts_enhance_mode=body.get("tts_enhance_mode"),
             tts_voice_count=body.get("tts_voice_count", 2),
             raw_enhancer_mode=raw_enhancer_mode,
+            reference_context=body.get("reference_context"),
         )
         return {"original": prompt, "enhanced": result}
     except Exception as e:
@@ -6926,6 +7400,17 @@ async def llm_describe_image(request: Request):
 # ============================================================================
 # API Routes: Audio Analysis
 # ============================================================================
+
+def _probe_audio_duration(filepath: str) -> float | None:
+    try:
+        import soundfile as sf
+
+        info = sf.info(filepath)
+        if info.samplerate and info.frames:
+            return round(float(info.frames) / float(info.samplerate), 3)
+    except Exception:
+        pass
+    return None
 
 @api.post("/api/v1/upload-audio")
 async def upload_audio(request: Request, file: UploadFile = File(...)):
@@ -7048,6 +7533,7 @@ async def upload_audio(request: Request, file: UploadFile = File(...)):
         "filename": unique_name,
         "path": filepath,
         "url": f"/api/v1/uploads/audio/{unique_name}",
+        "duration_seconds": _probe_audio_duration(filepath),
     }
 
 
@@ -7553,15 +8039,19 @@ async def director_pipeline_start(request: Request):
     _init_pipeline()
     from services.director_pipeline import start_pipeline
     body = await request.json()
-    pid = start_pipeline(body)
+    try:
+        pid = start_pipeline(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"pipeline_id": pid}
 
 
 @api.get("/api/v1/director/pipeline/{pid}")
 def director_pipeline_status(pid: str):
     """Get current pipeline status with rich progress info."""
-    from services.director_pipeline import get_pipeline
-    p = get_pipeline(pid)
+    from services.director_pipeline import get_pipeline_status
+    base = wgp.server_config.get("save_path", "outputs")
+    p = get_pipeline_status(pid, base)
     if not p:
         raise HTTPException(status_code=404, detail="Pipeline not found")
     # Don't leak full params back to client
@@ -7857,8 +8347,8 @@ async def director_v2_plan(request: Request):
         planner_kwargs["nsfw"] = services.get("nsfw_mode", False) and provider not in _PUBLIC_LLM_PROVIDERS
 
         # Prompt polish mode: off | full_guide | light_guide | third_pass.
-        # Default flipped from "off" to "third_pass" — see /api/v1/services
-        # GET endpoint for full rationale.
+        # The default third pass is model-aware — see /api/v1/services GET
+        # for the current routing behavior.
         polish_mode = services.get("director_prompt_polish", "third_pass")
         video_model = body.get("video_model", "")
         image_model = body.get("image_model", "")
@@ -7919,6 +8409,7 @@ async def director_v2_plan(request: Request):
 async def generate(request: Request):
     """Submit a generation job. Returns immediately with a job_id."""
     body = await request.json()
+    h3_window_plan_response = None
 
     is_sfx = body.get("sfx_mode")
     if not body.get("model_type"):
@@ -7928,6 +8419,241 @@ async def generate(request: Request):
     # SFX virtual models (mmaudio_*) are frontend-only; skip backend model validation
     if not is_sfx and wgp.get_model_def(body["model_type"]) is None:
         raise HTTPException(status_code=400, detail=f"Unknown model: {body['model_type']}")
+
+    try:
+        _base_model_type = wgp.get_base_model_type(body["model_type"])
+    except Exception:
+        _base_model_type = body.get("model_type")
+    _generation_model_def = wgp.get_model_def(body["model_type"]) or {}
+    if _generation_model_def.get("omni_reference"):
+        from models.minimax_h3.ref2va import validate_reference_manifest
+
+        try:
+            per_clip_references = body.get("per_clip_minimax_h3_references")
+            if per_clip_references is not None:
+                if not isinstance(per_clip_references, list) or not per_clip_references:
+                    raise ValueError(
+                        "Per-clip MiniMax H3 references must contain one manifest per shot."
+                    )
+                body["per_clip_minimax_h3_references"] = [
+                    validate_reference_manifest(manifest, require_files=True)
+                    for manifest in per_clip_references
+                ]
+            else:
+                body["minimax_h3_references"] = validate_reference_manifest(
+                    body.get("minimax_h3_references"),
+                    require_files=True,
+                )
+            detail = str(body.get("minimax_h3_reference_detail") or "match").strip().lower()
+            if detail not in {"match", "max"}:
+                raise ValueError("Reference detail must be 'match' or 'max'.")
+            body["minimax_h3_reference_detail"] = detail
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+    if str(_generation_model_def.get("architecture") or "").startswith("minimax_h3"):
+        variants = _generation_model_def.get("minimax_h3_text_encoder_variants") or {}
+        selected_encoder = str(
+            body.get("minimax_h3_text_encoder")
+            or _recommended_minimax_h3_encoder(body["model_type"], _generation_model_def)
+        )
+        if selected_encoder not in variants:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Unknown MiniMax H3 text encoder '{selected_encoder}'. "
+                    f"Choose one of: {', '.join(variants)}."
+                ),
+            )
+        body["minimax_h3_text_encoder"] = selected_encoder
+        try:
+            from models.minimax_h3.turbo import (
+                normalize_minimax_h3_turbo_request,
+            )
+
+            if normalize_minimax_h3_turbo_request(
+                body,
+                full_checkpoint=bool(
+                    _generation_model_def.get(
+                        "minimax_h3_full_checkpoint", False
+                    )
+                ),
+            ):
+                print(
+                    "[MiniMax H3 Turbo] Experimental preset enabled: "
+                    f"{body['num_inference_steps']} steps, "
+                    f"LoRA strength {body['loras_multipliers'].split()[-1]}."
+                )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        from models.minimax_h3.minimax_h3_handler import (
+            apply_h3_window_memory_policy,
+            h3_runtime_preflight,
+        )
+
+        h3_hardware = _get_cached_hardware()
+        h3_runtime_advisory = h3_runtime_preflight(
+            _generation_model_def,
+            h3_hardware,
+        )
+        if h3_runtime_advisory:
+            print(
+                "[MiniMax H3] PERFORMANCE WARNING: "
+                f"{h3_runtime_advisory['message']}"
+            )
+        h3_window_adjustment = apply_h3_window_memory_policy(
+            body,
+            _generation_model_def,
+            h3_hardware,
+        )
+        if h3_window_adjustment:
+            if h3_window_adjustment.get("unsupported"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=h3_window_adjustment["message"],
+                )
+            print(
+                "[MiniMax H3] VRAM-aware FL2VA window: "
+                f"{h3_window_adjustment['checkpoint'].title()} checkpoint, "
+                f"{h3_window_adjustment['gpu_vram_gb']:.1f} GB, "
+                f"{h3_window_adjustment['resolution']}, "
+                f"{h3_window_adjustment['requested_window_frames']} -> "
+                f"{h3_window_adjustment['effective_window_frames']} frames. "
+                "Requested output duration is unchanged."
+            )
+
+        # H3 First/Last continuation passes need genuinely different prompts.
+        # A timing wrapper around one full-shot prompt still lets the model see
+        # (and prematurely perform) every later action.  Plan after the VRAM
+        # policy has finalized the real pass length, then pass an explicit
+        # prompt array to wgp's existing per-window selector.
+        h3_storyboard_enabled = body.get("minimax_h3_window_storyboard", True) is not False
+        h3_is_multi_clip = int(body.get("multi_prompts_gen_type") or 0) == 3
+        try:
+            h3_total_frames = int(body.get("video_length") or 0)
+            h3_window_frames = int(body.get("sliding_window_size") or h3_total_frames or 0)
+            h3_overlap_frames = int(body.get("sliding_window_overlap") or 0)
+            h3_discard_frames = int(body.get("sliding_window_discard_last_frames") or 0)
+        except (TypeError, ValueError):
+            h3_total_frames = h3_window_frames = h3_overlap_frames = h3_discard_frames = 0
+        h3_needs_storyboard = (
+            h3_storyboard_enabled
+            and not _generation_model_def.get("omni_reference")
+            and not h3_is_multi_clip
+            and h3_total_frames > h3_window_frames > 0
+        )
+        if h3_needs_storyboard:
+            from services.h3_window_planner import (
+                compute_h3_window_boundaries,
+                h3_window_plan_signature,
+                plan_h3_sliding_windows,
+            )
+
+            h3_fps = float(_generation_model_def.get("fps", 24) or 24)
+            h3_start_value = body.get("image_start")
+            h3_end_value = body.get("image_end")
+            h3_has_start = bool(h3_start_value)
+            h3_has_end = bool(h3_end_value)
+            h3_expected_signature = h3_window_plan_signature(
+                str(body.get("prompt") or ""),
+                model_type=str(body.get("model_type") or ""),
+                resolution=str(body.get("resolution") or ""),
+                total_frames=h3_total_frames,
+                window_frames=h3_window_frames,
+                overlap_frames=h3_overlap_frames,
+                discard_frames=h3_discard_frames,
+                fps=h3_fps,
+                has_start_image=h3_has_start,
+                has_end_image=h3_has_end,
+            )
+            h3_expected_count = len(
+                compute_h3_window_boundaries(
+                    h3_total_frames,
+                    h3_window_frames,
+                    fps=h3_fps,
+                    overlap_frames=h3_overlap_frames,
+                    discard_frames=h3_discard_frames,
+                )
+            )
+            cached_prompts = body.get("h3_window_prompts")
+            cached_plan = body.get("h3_window_plan")
+            cached_is_valid = (
+                isinstance(cached_prompts, list)
+                and len(cached_prompts) == h3_expected_count
+                and all(isinstance(item, str) and item.strip() for item in cached_prompts)
+                and body.get("h3_window_plan_signature") == h3_expected_signature
+            )
+            if cached_is_valid:
+                print(f"[MiniMax H3] Reusing reviewed {h3_expected_count}-window prompt plan.")
+                if isinstance(cached_plan, dict):
+                    h3_window_plan_response = cached_plan
+            else:
+                from services import llm_service
+
+                llm_was_loaded = llm_service.is_loaded()
+                try:
+                    _ensure_llm_loaded()
+                except Exception as load_error:
+                    print(f"[MiniMax H3] Planner LLM unavailable; using fallback: {load_error}")
+                services = wgp.server_config.get("services", {})
+                provider = services.get("llm_provider", "local")
+                nsfw = services.get("nsfw_mode", False) and provider not in _PUBLIC_LLM_PROVIDERS
+                h3_images = []
+                for value in (h3_start_value, h3_end_value):
+                    if isinstance(value, (list, tuple)):
+                        value = value[0] if value else None
+                    if isinstance(value, str) and value and os.path.isfile(value):
+                        h3_images.append(value)
+                print(
+                    f"[MiniMax H3] Planning {h3_expected_count} window-local prompts "
+                    f"after VRAM-safe geometry ({h3_window_frames} frames/window)."
+                )
+                h3_window_plan_response = await asyncio.to_thread(
+                    plan_h3_sliding_windows,
+                    str(body.get("prompt") or ""),
+                    model_type=str(body.get("model_type") or ""),
+                    resolution=str(body.get("resolution") or ""),
+                    total_frames=h3_total_frames,
+                    window_frames=h3_window_frames,
+                    overlap_frames=h3_overlap_frames,
+                    discard_frames=h3_discard_frames,
+                    fps=h3_fps,
+                    has_start_image=h3_has_start,
+                    has_end_image=h3_has_end,
+                    image_paths=h3_images or None,
+                    nsfw=bool(nsfw),
+                )
+                cached_prompts = h3_window_plan_response["window_prompts"]
+                # A planner loaded only for this request should not compete
+                # with the 20B/33B video model for VRAM or RAM.
+                if not llm_was_loaded and llm_service.is_loaded():
+                    try:
+                        if llm_service.get_status().get("provider") == "local":
+                            llm_service.unload_model()
+                    except Exception as unload_error:
+                        print(f"[MiniMax H3] Planner LLM unload skipped: {unload_error}")
+
+            body["minimax_h3_window_storyboard"] = True
+            body["h3_window_prompts"] = list(cached_prompts)
+            body["h3_window_plan_signature"] = h3_expected_signature
+            if h3_window_plan_response is not None:
+                body["h3_window_plan"] = h3_window_plan_response
+            # An explicitly reviewed plan may have been created moments ago
+            # by the Enhance button, leaving the local planner resident. H3
+            # inference needs that VRAM; the planner is cheap to reload later.
+            try:
+                from services import llm_service as _h3_planner_llm
+
+                if (
+                    _h3_planner_llm.is_loaded()
+                    and _h3_planner_llm.get_status().get("provider") == "local"
+                ):
+                    _h3_planner_llm.unload_model()
+            except Exception as unload_error:
+                print(f"[MiniMax H3] Planner LLM release skipped: {unload_error}")
+        else:
+            body.pop("h3_window_prompts", None)
+            body.pop("h3_window_plan_signature", None)
+            body.pop("h3_window_plan", None)
 
     # Defense: normalize video_prompt_type so flags whose required input
     # is missing get stripped before wgp.py's validation rejects the job.
@@ -8052,7 +8778,15 @@ async def generate(request: Request):
             # that's the actual quantize-boundary danger zone. For
             # legitimate sliding-window gens (sliding much smaller than
             # video) leave the values alone.
-            if (_video_length - _latent) <= _sliding_window <= (_video_length + _latent):
+            if (
+                not _generation_model_def.get(
+                    "sliding_window_exact_total_frames",
+                    False,
+                )
+                and (_video_length - _latent)
+                <= _sliding_window
+                <= (_video_length + _latent)
+            ):
                 _new_sw = _video_length + _latent + 1
                 print(
                     f"[generate] Sliding-window safety bump: "
@@ -8093,7 +8827,10 @@ async def generate(request: Request):
     thread = threading.Thread(target=_run_generation, args=(job_id,), daemon=False)
     thread.start()
 
-    return {"job_id": job_id, "status": "queued"}
+    response = {"job_id": job_id, "status": "queued"}
+    if h3_window_plan_response is not None:
+        response["h3_window_plan"] = h3_window_plan_response
+    return response
 
 
 @api.post("/api/v1/retake")
@@ -8274,6 +9011,86 @@ async def extract_frames_endpoint(request: Request):
 EDIT_ANYTHING_LORA_HF_URL = "https://huggingface.co/Alissonerdx/LTX-LoRAs"
 EDIT_ANYTHING_LORA_FILENAME = "ltx23_edit_anything_global_rank128_v1_9000steps_adamw.safetensors"
 
+# Official replacement-specific SCAIL-2 Relighting LoRA. Upstream publishes a
+# SAT/PyTorch checkpoint, so Maestro downloads the immutable revision, verifies
+# its official hash, and converts it once to Wan safetensors on first use.
+_RECAST_RELIGHTING_LORA_FILENAME = "scail2_relighting_lora.safetensors"
+_RECAST_RELIGHTING_LORA_REVISION = "150cc0ca4e98e50e60b9295dacde39442fdccab2"
+_RECAST_RELIGHTING_LORA_REMOTE_PATH = "model/relighting-lora.pt"
+_RECAST_RELIGHTING_LORA_SHA256 = "80d338a7969c1b286c8f5c4996b37eb198d0864837fecb6c87c106ca74571a2b"
+_RECAST_RELIGHTING_LORA_SIZE = 1_227_381_060
+
+
+def _normalize_recast_lora_settings(
+    activated_loras, loras_multipliers, use_relighting,
+):
+    """Return aligned, single-phase LoRA settings for a Recast run.
+
+    Wan exposes as many as three LoRA phases in the shared Studio UI, while
+    SCAIL-2 Recast deliberately runs one guidance phase. Old/stale UI state
+    can therefore contain ``1;1;1`` even when Recast has only one selected
+    LoRA. Pair multipliers with their LoRA *before* appending the managed
+    relighting LoRA, discard orphan multipliers, and retain only the first
+    phase for every selected LoRA.
+
+    Selecting the official relighting LoRA directly in Advanced is also an
+    explicit opt-in. The main Recast toggle adds it at 1.0 only when Advanced
+    has not already supplied it, preserving a user-adjusted Advanced weight.
+    """
+
+    if isinstance(activated_loras, (list, tuple)):
+        source_loras = [
+            str(item).strip()
+            for item in activated_loras
+            if isinstance(item, str) and item.strip()
+        ]
+    else:
+        source_loras = []
+
+    if isinstance(loras_multipliers, (list, tuple)):
+        source_multipliers = [
+            str(item).strip() for item in loras_multipliers
+        ]
+    else:
+        source_multipliers = []
+        for line in str(loras_multipliers or "").replace("\r", "").split("\n"):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            source_multipliers.extend(line.replace("|", " ").split())
+
+    def _single_phase_multiplier(index):
+        if index >= len(source_multipliers):
+            return "1.0"
+        first_phase = source_multipliers[index].split(";", 1)[0].strip()
+        return first_phase or "1.0"
+
+    def _lora_key(value):
+        return str(value).replace("\\", "/").rsplit("/", 1)[-1].casefold()
+
+    normalized_loras = []
+    normalized_multipliers = []
+    seen = set()
+    for index, name in enumerate(source_loras):
+        key = _lora_key(name)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized_loras.append(name)
+        normalized_multipliers.append(_single_phase_multiplier(index))
+
+    relighting_key = _lora_key(_RECAST_RELIGHTING_LORA_FILENAME)
+    if use_relighting and relighting_key not in seen:
+        normalized_loras.append(_RECAST_RELIGHTING_LORA_FILENAME)
+        normalized_multipliers.append("1.0")
+        seen.add(relighting_key)
+
+    return (
+        normalized_loras,
+        " ".join(normalized_multipliers),
+        relighting_key in seen,
+    )
+
 
 # ── Managed auto-download LoRAs ──────────────────────────────────────────
 # LoRAs that Maestro fetches on first use so a fresh install doesn't error
@@ -8283,13 +9100,37 @@ EDIT_ANYTHING_LORA_FILENAME = "ltx23_edit_anything_global_rank128_v1_9000steps_a
 # powers the server-side safety net in _run_generation so the job waits for
 # the download instead of failing if the user hits Generate first.
 #
-# Maps the on-disk .safetensors filename → the HuggingFace repo that hosts
-# it (the file is pulled from `<repo>/resolve/main/<filename>`). `label` is
-# what we show the user in the job status while it downloads.
+# Maps the final on-disk .safetensors filename to its HuggingFace source.
+# Most entries download that same filename; converted sources can declare an
+# immutable revision, remote path, expected hash/size, and converter. `label`
+# is what the job status shows while the one-time setup runs.
 _MANAGED_LORAS = {
     EDIT_ANYTHING_LORA_FILENAME: {
         "repo_id": "Alissonerdx/LTX-LoRAs",
         "label": "Edit Anything",
+        "support_url": EDIT_ANYTHING_LORA_HF_URL,
+    },
+    _RECAST_RELIGHTING_LORA_FILENAME: {
+        "repo_id": "zai-org/SCAIL-2",
+        "revision": _RECAST_RELIGHTING_LORA_REVISION,
+        "remote_path": _RECAST_RELIGHTING_LORA_REMOTE_PATH,
+        "sha256": _RECAST_RELIGHTING_LORA_SHA256,
+        "size": _RECAST_RELIGHTING_LORA_SIZE,
+        "converter": "scail2_sat_lora",
+        "label": "SCAIL-2 Relighting",
+        "support_url": "https://huggingface.co/zai-org/SCAIL-2/blob/main/model/relighting-lora.pt",
+    },
+    MINIMAX_H3_TURBO_LORA_FILENAME: {
+        "repo_id": MINIMAX_H3_TURBO_LORA_REPO_ID,
+        "revision": MINIMAX_H3_TURBO_LORA_REVISION,
+        "remote_path": MINIMAX_H3_TURBO_LORA_FILENAME,
+        "sha256": MINIMAX_H3_TURBO_LORA_SHA256,
+        "size": MINIMAX_H3_TURBO_LORA_SIZE,
+        "label": "MiniMax H3 Turbo (Experimental)",
+        "support_url": (
+            "https://huggingface.co/"
+            f"{MINIMAX_H3_TURBO_LORA_REPO_ID}"
+        ),
     },
 }
 
@@ -8345,6 +9186,15 @@ def _ensure_managed_loras_present(activated_loras, model_type, progress=None):
         save_path = os.path.join(target_dir, base)
         label = spec.get("label", base)
 
+        # A linked installation's verified converted file is a valid runtime
+        # source too; don't reclaim another 1.2 GB in the primary install.
+        try:
+            resolved_path = wgp.resolve_lora_path(model_type, base)
+        except Exception:
+            resolved_path = save_path
+        if os.path.isfile(resolved_path):
+            continue
+
         # If another part of the app is already fetching this exact file (the
         # frontend pre-downloads it when the panel mounts), wait for that to
         # finish rather than starting a second concurrent download — on
@@ -8377,43 +9227,86 @@ def _ensure_managed_loras_present(activated_loras, model_type, progress=None):
             continue
 
         os.makedirs(target_dir, exist_ok=True)
-        url = f"https://huggingface.co/{spec['repo_id']}/resolve/main/{base}"
+        remote_path = spec.get("remote_path", base)
+        revision = spec.get("revision", "main")
+        url = f"https://huggingface.co/{spec['repo_id']}/resolve/{revision}/{remote_path}"
         # Unique temp + atomic rename: a partial/failed download can never be
         # mistaken for a valid LoRA, and we don't clobber another writer.
         tmp_path = save_path + f".{uuid.uuid4().hex[:8]}.part"
+        source_tmp_path = (
+            save_path + f".{uuid.uuid4().hex[:8]}.source.part"
+            if spec.get("converter") else tmp_path
+        )
         print(f"[ManagedLoRA] {label} not found — downloading {url} -> {save_path}")
         if progress:
             progress(f"Downloading {label} model (one-time setup)…")
         try:
+            import hashlib
+
             resp = requests.get(url, stream=True, timeout=30)
             resp.raise_for_status()
             total = int(resp.headers.get("content-length", 0))
             done = 0
             last_pct = -1
-            with open(tmp_path, "wb") as out:
+            digest = hashlib.sha256()
+            with open(source_tmp_path, "wb") as out:
                 for chunk in resp.iter_content(chunk_size=1024 * 1024):
                     if not chunk:
                         continue
                     out.write(chunk)
+                    digest.update(chunk)
                     done += len(chunk)
                     if progress and total > 0:
                         pct = int(done * 100 / total)
                         if pct >= last_pct + 5:
                             last_pct = pct
                             progress(f"Downloading {label} model (one-time setup)… {pct}%")
+
+            expected_size = spec.get("size")
+            if expected_size is not None and done != int(expected_size):
+                raise RuntimeError(
+                    f"download size mismatch (expected {int(expected_size)} bytes, got {done})"
+                )
+            expected_sha256 = spec.get("sha256")
+            actual_sha256 = digest.hexdigest()
+            if expected_sha256 and actual_sha256.lower() != str(expected_sha256).lower():
+                raise RuntimeError("download SHA-256 mismatch; the checkpoint was not published")
+
+            if spec.get("converter") == "scail2_sat_lora":
+                if progress:
+                    progress(f"Converting {label} model (one-time setup)…")
+                print(f"[ManagedLoRA] Converting official SAT LoRA -> {tmp_path}")
+                from services.scail2_lora import convert_scail2_sat_lora
+                tensor_count = convert_scail2_sat_lora(
+                    source_tmp_path,
+                    tmp_path,
+                    expected_sha256=str(expected_sha256),
+                )
+                print(f"[ManagedLoRA] Converted {tensor_count} SCAIL-2 Relighting tensors")
+                os.remove(source_tmp_path)
+            elif source_tmp_path != tmp_path:
+                os.replace(source_tmp_path, tmp_path)
             os.replace(tmp_path, save_path)
             downloaded.append(base)
             print(f"[ManagedLoRA] {label} downloaded -> {save_path}")
         except Exception as e:
-            try:
-                if os.path.isfile(tmp_path):
-                    os.remove(tmp_path)
-            except Exception:
-                pass
+            for partial_path in {tmp_path, source_tmp_path}:
+                try:
+                    if os.path.isfile(partial_path):
+                        os.remove(partial_path)
+                except Exception:
+                    pass
+            support_url = spec.get("support_url", f"https://huggingface.co/{spec['repo_id']}")
+            if spec.get("converter"):
+                recovery_hint = (
+                    f"Retry the automatic setup, or download the official source from "
+                    f"{support_url} and convert it with SCAIL-2's convert_lora.py."
+                )
+            else:
+                recovery_hint = f"Try again, or import it manually from {support_url}."
             raise RuntimeError(
                 f"Could not download the {label} model automatically: {e}. "
-                f"Check your internet connection and try again, or import it "
-                f"manually from {EDIT_ANYTHING_LORA_HF_URL}."
+                f"Check your internet connection. {recovery_hint}"
             ) from e
 
     return downloaded
@@ -8628,51 +9521,6263 @@ def _resolve_recast_media(raw, workspace):
     return None
 
 
-@api.post("/api/v1/recast/preview")
-async def recast_preview_endpoint(request: Request):
-    """Preview which person the Recast keyword selects: SAM3 keyword
-    segmentation on a single frame, returned as the frame with the mask
-    tinted. First call loads SAM3 (~10-15s); later calls are fast — the
-    model stays cached and the generation pre-step reuses it.
+_RECAST_MASK_COLORS = [
+    (0, 0, 255),
+    (255, 0, 0),
+    (0, 255, 0),
+    (255, 0, 255),
+    (0, 255, 255),
+]
 
-    Body: { video_path: str, target?: str, time?: float, workspace?: str }
+# Extra SAM3 tracking colors used by native bystander mapping and the adaptive
+# protection fallback. SCAIL-2 can condition at most five people, but the
+# source or generated scene may contain additional people that must remain
+# distinguishable while Maestro selects the relevant tracks.
+_RECAST_PROTECTION_COLORS = _RECAST_MASK_COLORS + [
+    (255, 255, 0),
+    (255, 128, 0),
+    (128, 0, 255),
+    (0, 192, 128),
+    (255, 64, 128),
+]
+
+_RECAST_FAST_MODEL_TYPE = "scail2_14B_recast_fast"
+_RECAST_LEGACY_FAST_MODEL_TYPE = "scail2_14B_fast"
+_RECAST_RESOLUTION_PROFILES = {
+    # Width/height describe the landscape budget. The source video's
+    # orientation and aspect ratio are applied below on a 32px boundary.
+    "480p": (832, 480),
+    "512p": (896, 512),
+    "704p": (1280, 704),
+}
+_RECAST_WARMUP_FRAMES = 8
+_RECAST_U2NET_CACHE_LIMIT = 8
+_recast_u2net_session = None
+_recast_u2net_session_lock = threading.Lock()
+_recast_u2net_run_lock = threading.Lock()
+_recast_u2net_cache_lock = threading.Lock()
+_recast_u2net_cache = {}
+
+
+def _normalize_recast_person_count(value):
+    """Clamp the SCAIL-2 person slot count to its supported 1-5 range."""
+    try:
+        return min(5, max(1, int(value)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _normalize_recast_resolution_profile(value):
+    """Return a supported SCAIL-2 edit resolution without changing models."""
+    normalized = str(value or "").strip().lower().replace(" ", "")
+    aliases = {
+        "480": "480p",
+        "832x480": "480p",
+        "fast": "480p",
+        "512": "512p",
+        "896x512": "512p",
+        "quality": "512p",
+        "704": "704p",
+        "1280x704": "704p",
+        "high": "704p",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in _RECAST_RESOLUTION_PROFILES:
+        return "480p"
+    return normalized
+
+
+def _normalize_scail2_inference_steps(value, default):
+    """Clamp dedicated SCAIL-2 edit jobs to the UI's supported step range."""
+    try:
+        steps = int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        steps = int(default)
+    return min(50, max(1, steps))
+
+
+def _normalize_scail2_guidance_scale(value, default=5.0):
+    """Return a finite SCAIL-2 HQ guidance value accepted by the UI."""
+    import math
+
+    try:
+        guidance = float(value)
+    except (TypeError, ValueError, OverflowError):
+        guidance = float(default)
+    if not math.isfinite(guidance):
+        guidance = float(default)
+    return min(20.0, max(0.0, guidance))
+
+
+def _recast_window_size_for_profile(resolution_profile, total_vram_gb):
+    """Choose a VAE-aligned SCAIL-2 edit window without changing model steps.
+
+    SCAIL-2 activation pressure scales approximately with spatial pixels times
+    frames in the active window. A 1280x704 frame has almost twice the pixels
+    of 896x512, so retaining the ordinary 81-frame window would nearly double
+    the non-streamable attention workspace. Shorter 4n+1 windows keep 704p
+    practical while MMGP independently streams model weights.
+
+    A zero return means the detected GPU is below the currently supported
+    704p floor. Unknown hardware uses the conservative middle window rather
+    than rejecting a valid NVIDIA setup because a probe was unavailable.
     """
+    profile = _normalize_recast_resolution_profile(resolution_profile)
+    if profile != "704p":
+        return 81
+    try:
+        vram_gb = float(total_vram_gb)
+    except (TypeError, ValueError):
+        vram_gb = 0.0
+    if vram_gb <= 0:
+        return 41
+    if vram_gb >= 24.0:
+        return 49
+    if vram_gb >= 20.0:
+        return 41
+    if vram_gb >= 16.0:
+        return 33
+    return 0
+
+
+def _build_recast_prompt(raw_prompt, person_count, enhance=True):
+    """Return an idempotent finished-video description for SCAIL-2.
+
+    Upstream explicitly asks for a description of the completed video, not an
+    editing command. Convert the most common ``replace X with Y`` phrasing and
+    append descriptive continuity language without imperative "keep" clauses.
+    When enhancement is disabled, preserve the user's prompt verbatim apart
+    from surrounding whitespace so A/B tests can isolate the model behavior.
+    """
+    import re
+
+    prompt = str(raw_prompt or "").strip()
+    if not enhance:
+        if not prompt:
+            raise ValueError(
+                "Enter a Recast prompt when automatic prompt enhancement is disabled."
+            )
+        return prompt
+
+    detail_marker = "The surrounding people, environment, camera framing"
+    count = _normalize_recast_person_count(person_count)
+    plural = count != 1
+    if prompt:
+        instruction_patterns = (
+            r"^(?:please\s+)?(?:replace|swap)\s+.+?\s+(?:with|for)\s+(.+)$",
+            r"^(?:please\s+)?change\s+.+?\s+(?:into|to)\s+(.+)$",
+        )
+        for pattern in instruction_patterns:
+            match = re.match(pattern, prompt, flags=re.IGNORECASE | re.DOTALL)
+            if match:
+                prompt = match.group(1).strip()
+                break
+    if not prompt:
+        prompt = (
+            "Several clearly defined characters perform naturally within the scene"
+            if plural else
+            "A clearly defined character performs naturally within the scene"
+        )
+    prompt = prompt[0].upper() + prompt[1:] if prompt else prompt
+    if detail_marker in prompt:
+        return prompt
+    prompt = prompt.rstrip()
+    if prompt[-1:] not in ".!?":
+        prompt += "."
+    identity = (
+        "The characters' faces, hair, body shapes, and complete outfits remain "
+        "visually consistent as they follow the visible action and interactions."
+        if plural else
+        "The character's face, hair, body shape, and complete outfit remain "
+        "visually consistent as the character follows the visible action and interactions."
+    )
+    return (
+        f"{prompt} {identity} {detail_marker}, lighting, shadows, and nearby "
+        "objects form one coherent, naturally lit scene throughout the video."
+    )
+
+
+def _extract_output_seed(filename):
+    """Return the resolved seed embedded in a generated media filename."""
+    import os
+    import re
+
+    match = re.search(r"(?:^|_)seed(\d+)(?:_|$)", os.path.splitext(filename)[0])
+    return int(match.group(1)) if match else None
+
+
+def _recast_video_has_audio(video_path):
+    """Return whether ffprobe finds an audio stream in a video."""
+    import subprocess
+
+    probe = subprocess.run(
+        [
+            "ffprobe", "-v", "quiet", "-select_streams", "a:0",
+            "-show_entries", "stream=codec_type", "-of", "csv=p=0",
+            video_path,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    return probe.returncode == 0 and bool(probe.stdout.strip())
+
+
+def _build_recast_mask_lock_command(source_video, mask_video, generated_video, output_path):
+    """Build the ffmpeg pass that restores every pixel outside the target.
+
+    The SCAIL target is selected by a colored tracking mask. ``colorkey``
+    converts the native Replace mask's white background to transparency;
+    two tiny dilations plus a soft edge keep the replacement seam clean
+    without giving the model room to alter neighboring people.
+    """
+    import json
+    import subprocess
+
+    probe = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height", "-of", "json",
+            generated_video,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    try:
+        stream = (json.loads(probe.stdout).get("streams") or [])[0]
+        width, height = int(stream["width"]), int(stream["height"])
+    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        width, height = 0, 0
+    if width <= 0 or height <= 0:
+        raise ValueError(f"Could not read generated Recast dimensions: {generated_video}")
+    filter_graph = (
+        f"[0:v]scale={width}:{height}:flags=lanczos,setsar=1,setpts=PTS-STARTPTS[base];"
+        f"[1:v]scale={width}:{height}:flags=neighbor,format=rgba,"
+        "colorkey=0xFFFFFF:0.18:0.04,alphaextract,dilation,dilation,"
+        "gblur=sigma=1.2[alpha];"
+        "[2:v]format=rgba,setpts=PTS-STARTPTS[generated];"
+        "[generated][alpha]alphamerge[foreground];"
+        "[base][foreground]overlay=shortest=1:format=auto[outv]"
+    )
+    command = [
+        "ffmpeg", "-y",
+        "-i", source_video,
+        "-i", mask_video,
+        "-i", generated_video,
+        "-filter_complex", filter_graph,
+        "-map", "[outv]",
+        # Preserve the generated file's embedded prompt and resolved seed.
+        "-map_metadata", "2",
+        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+        "-pix_fmt", "yuv420p",
+    ]
+    if _recast_video_has_audio(generated_video):
+        command += ["-map", "2:a:0", "-c:a", "copy"]
+    elif _recast_video_has_audio(source_video):
+        command += ["-map", "0:a:0", "-c:a", "aac", "-b:a", "192k"]
+    else:
+        command += ["-an"]
+    return command + ["-shortest", "-movflags", "+faststart", output_path]
+
+
+def _render_recast_mask_locked_video(source_video, mask_video, generated_video):
+    """Render a protected sibling file and return its path."""
+    import subprocess
+
+    stem, extension = os.path.splitext(generated_video)
+    protected_path = f"{stem}.recast-protected{extension}"
+    command = _build_recast_mask_lock_command(
+        source_video, mask_video, generated_video, protected_path,
+    )
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    if result.returncode != 0 or not os.path.isfile(protected_path):
+        if os.path.isfile(protected_path):
+            try:
+                os.remove(protected_path)
+            except OSError:
+                pass
+        raise RuntimeError(
+            "Recast target-mask protection failed: "
+            + (result.stderr[-500:] if result.stderr else "ffmpeg produced no output")
+        )
+    return protected_path
+
+
+def _recast_color_region(mask_frames, color, tolerance=90):
+    """Return pixels close to an RGB tracking color after lossy video decode."""
+    import numpy as np
+
+    frames = np.asarray(mask_frames, dtype=np.int16)
+    target = np.asarray(color, dtype=np.int16).reshape(1, 1, 1, 3)
+    return np.max(np.abs(frames - target), axis=-1) <= int(tolerance)
+
+
+def _matte_recast_reference_frame(reference_frame, semantic_mask, neutral_value=127):
+    """Remove pixels that an additional SCAIL reference must not describe.
+
+    SCAIL-2 encodes reference RGB and its semantic mask separately. A black
+    semantic region therefore does not stop identity detail in the original
+    RGB image from reaching the reference latent. Replace hidden pixels with
+    model-neutral gray so a bystander reference cannot reintroduce the old
+    target or condition the surrounding scene.
+    """
+    import numpy as np
+
+    frame = np.asarray(reference_frame, dtype=np.uint8)
+    mask = np.asarray(semantic_mask, dtype=np.uint8)
+    if frame.ndim != 3 or frame.shape[-1] != 3:
+        raise ValueError(
+            f"Recast reference frame must have H/W/RGB dimensions; got {frame.shape}."
+        )
+    if mask.shape != frame.shape:
+        raise ValueError(
+            "Recast reference frame and semantic mask must have matching "
+            f"H/W/RGB dimensions; got frame={frame.shape}, mask={mask.shape}."
+        )
+    try:
+        neutral = int(neutral_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Recast reference neutral value must be an integer.") from exc
+    if not 0 <= neutral <= 255:
+        raise ValueError("Recast reference neutral value must be between 0 and 255.")
+
+    visible = np.any(mask > 30, axis=-1)
+    matted = np.full_like(frame, neutral, dtype=np.uint8)
+    matted[visible] = frame[visible]
+    return matted
+
+
+def _recast_reference_canvas_size(
+    source_frame, base_width=832, base_height=480, block_size=32,
+):
+    """Choose a SCAIL output/reference canvas for the control orientation.
+
+    Recast profiles advertise a landscape resolution budget, but SCAIL-2
+    reallocates that budget to follow the control video's aspect ratio.
+    Preparing hidden references at a literal landscape size makes portrait
+    controls consume references that are cropped again later. Preserve the
+    source orientation on SCAIL-2's documented 32px boundary.
+    """
+    import math
+    import numpy as np
+
+    frame = np.asarray(source_frame)
+    if frame.ndim != 3 or frame.shape[-1] != 3:
+        raise ValueError(
+            "Recast reference canvas needs an H/W/RGB source frame; "
+            f"got {frame.shape}."
+        )
+    try:
+        base_width = int(base_width)
+        base_height = int(base_height)
+        block_size = int(block_size)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Recast reference canvas dimensions must be integers.") from exc
+    if min(base_width, base_height, block_size) <= 0:
+        raise ValueError("Recast reference canvas dimensions must be positive.")
+
+    source_height, source_width = frame.shape[:2]
+    aspect = float(source_width) / float(max(1, source_height))
+    short_edge = min(base_width, base_height)
+    long_edge = max(base_width, base_height)
+
+    def _floor_block(value):
+        return max(
+            block_size,
+            int(math.floor(float(value) / block_size)) * block_size,
+        )
+
+    if aspect >= 1.0:
+        height = short_edge
+        width = min(long_edge, _floor_block(height * aspect))
+    else:
+        width = short_edge
+        height = min(long_edge, _floor_block(width / max(aspect, 1e-6)))
+    return int(width), int(height)
+
+
+def _recast_resolution_for_source(source_frame, resolution_profile=None):
+    """Resolve a SCAIL-2 edit profile to the source-oriented output size."""
+    profile = _normalize_recast_resolution_profile(resolution_profile)
+    base_width, base_height = _RECAST_RESOLUTION_PROFILES[profile]
+    return _recast_reference_canvas_size(
+        source_frame,
+        base_width=base_width,
+        base_height=base_height,
+        block_size=32,
+    )
+
+
+def _build_recast_source_scene_layers(
+    source_frame, target_mask, selected_count, output_size=None,
+):
+    """Return a target-free scene image and its official visibility mask."""
+    import cv2
+    import numpy as np
+    from PIL import Image as _PILImage
+    from PIL import ImageFilter as _PILImageFilter
+
+    frame = np.asarray(source_frame, dtype=np.uint8)
+    mask = np.asarray(target_mask, dtype=np.uint8)
+    if frame.ndim != 3 or frame.shape[-1] != 3:
+        raise ValueError(
+            "Recast source-scene reference needs an H/W/RGB source frame; "
+            f"got {frame.shape}."
+        )
+    if mask.shape != frame.shape:
+        raise ValueError(
+            "Recast source frame and target-anchor mask must have "
+            f"matching dimensions; got frame={frame.shape}, mask={mask.shape}."
+        )
+    if output_size is not None:
+        try:
+            output_width, output_height = (
+                int(output_size[0]),
+                int(output_size[1]),
+            )
+        except (TypeError, ValueError, IndexError) as exc:
+            raise ValueError(
+                "Recast source-scene output size must contain width and height."
+            ) from exc
+        if output_width <= 0 or output_height <= 0:
+            raise ValueError(
+                "Recast source-scene output dimensions must be positive."
+            )
+        frame = np.asarray(
+            _PILImage.fromarray(frame).resize(
+                (output_width, output_height),
+                resample=_PILImage.Resampling.LANCZOS,
+            ),
+            dtype=np.uint8,
+        )
+        mask = np.asarray(
+            _PILImage.fromarray(mask).resize(
+                (output_width, output_height),
+                resample=_PILImage.Resampling.NEAREST,
+            ),
+            dtype=np.uint8,
+        )
+
+    requested_count = _normalize_recast_person_count(selected_count)
+    target_region = np.zeros(frame.shape[:2], dtype=bool)
+    mask_frames = mask[None]
+    for color in _RECAST_MASK_COLORS[:requested_count]:
+        target_region |= _recast_color_region(mask_frames, color)[0]
+    if not bool(target_region.any()):
+        raise ValueError(
+            "Could not build the Recast source-scene reference because the "
+            "selected target is missing from the anchor mask."
+        )
+
+    # Hide a small margin around the old target. The semantic mask is exact,
+    # but VAE receptive fields can otherwise retain hair, clothing, or edge
+    # pixels just outside the segmentation boundary.
+    expansion = max(
+        2,
+        min(16, int(round(min(frame.shape[:2]) * 0.01))),
+    )
+    expanded = _PILImage.fromarray(
+        target_region.astype(np.uint8) * 255,
+    ).filter(_PILImageFilter.MaxFilter(expansion * 2 + 1))
+    hidden_region = np.asarray(expanded, dtype=np.uint8) > 127
+
+    # A neutral gray hole is not truly invisible to the VAE; the reference
+    # mask is learned conditioning rather than a hard RGB gate. Inpaint the
+    # hidden pixels from their surrounding scene so any latent leakage carries
+    # compatible scene color/texture instead of replacing the whole background
+    # with the matte color. The black semantic mask still tells SCAIL-2 not to
+    # treat the synthesized hole as authoritative visible content.
+    inpaint_mask = hidden_region.astype(np.uint8) * 255
+    reference_frame = cv2.inpaint(
+        frame,
+        inpaint_mask,
+        max(3, expansion * 2),
+        cv2.INPAINT_TELEA,
+    )
+    reference_mask = np.full_like(frame, 255, dtype=np.uint8)
+    reference_mask[hidden_region] = 0
+    return {
+        "image": reference_frame,
+        "mask": reference_mask,
+        "hidden_fraction": float(hidden_region.mean()),
+        "expansion_pixels": expansion,
+    }
+
+
+def _build_recast_source_scene_reference(
+    source_frame, target_mask, selected_count, output_dir, job_id,
+    neutral_value=127, output_size=None,
+):
+    """Build an official-style clean-background reference for Recast.
+
+    SCAIL-2's multi-reference mask semantics use white for source content that
+    should remain visible and black for content that must be ignored. Preserve
+    the selected source frame everywhere except the old target, then inpaint
+    and black-mask that target so neither its identity nor a gray matte can
+    leak through the VAE. This reuses one target anchor from Recast's tracked
+    timeline; it does not add another SAM3 tracking pass.
+    """
+    import os
+    from PIL import Image as _PILImage
+    layers = _build_recast_source_scene_layers(
+        source_frame,
+        target_mask,
+        selected_count,
+        output_size=output_size,
+    )
+    try:
+        int(neutral_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Recast source-scene neutral value must be an integer."
+        ) from exc
+    if not 0 <= int(neutral_value) <= 255:
+        raise ValueError(
+            "Recast source-scene neutral value must be between 0 and 255."
+        )
+
+    os.makedirs(output_dir, exist_ok=True)
+    reference_path = os.path.join(
+        output_dir, f"recast_source_scene_ref_{job_id}.png",
+    )
+    reference_mask_path = os.path.join(
+        output_dir, f"recast_source_scene_mask_{job_id}.png",
+    )
+    _PILImage.fromarray(layers["image"]).save(reference_path)
+    _PILImage.fromarray(layers["mask"]).save(reference_mask_path)
+    return {
+        "image": reference_path,
+        "mask": reference_mask_path,
+        "hidden_fraction": layers["hidden_fraction"],
+        "expansion_pixels": layers["expansion_pixels"],
+    }
+
+
+def _enable_recast_dynamic_source_scene_reference(
+    params, source_frame, target_mask, selected_count, output_dir, job_id,
+):
+    """Enable target-free source-scene conditioning for Recast.
+
+    The historical helper/flag names say ``dynamic`` for saved-project
+    compatibility. Dedicated single-shot Recast reuses this persisted pair.
+    Timeline-aware jobs retain it as a fallback and ask SCAIL-2 to rebuild the
+    pair from each current control window.
+    """
+    if not isinstance(params, dict):
+        raise ValueError("Recast generation parameters must be a dictionary.")
+    image_refs = params.get("image_refs")
+    custom_settings = params.get("custom_settings")
+    if not isinstance(image_refs, list) or not image_refs:
+        raise ValueError(
+            "Recast needs a primary identity reference before adding the "
+            "source-scene reference."
+        )
+    if not isinstance(custom_settings, dict):
+        raise ValueError("Recast custom settings are missing.")
+    additional_masks = custom_settings.get(
+        "scail2_additional_reference_mask_paths",
+    )
+    expected_colors = custom_settings.get(
+        "scail2_reference_expected_colors",
+    )
+    if not isinstance(additional_masks, list):
+        raise ValueError("Recast additional reference masks are missing.")
+    if not isinstance(expected_colors, list):
+        raise ValueError("Recast expected reference colors are missing.")
+    if len(additional_masks) != len(image_refs) - 1:
+        raise ValueError(
+            "Recast image references and additional masks are out of sync."
+        )
+    if len(expected_colors) != len(image_refs):
+        raise ValueError(
+            "Recast image references and expected colors are out of sync."
+        )
+
+    output_size = params.get("edit_recast_reference_canvas")
+    if (
+        not isinstance(output_size, (list, tuple))
+        or len(output_size) != 2
+    ):
+        output_size = _recast_reference_canvas_size(source_frame)
+    else:
+        try:
+            output_size = tuple(int(value) for value in output_size)
+        except (TypeError, ValueError):
+            output_size = _recast_reference_canvas_size(source_frame)
+        if min(output_size) <= 0:
+            output_size = _recast_reference_canvas_size(source_frame)
+    scene_reference = _build_recast_source_scene_reference(
+        source_frame,
+        target_mask,
+        selected_count,
+        output_dir,
+        job_id,
+        output_size=output_size,
+    )
+    # Keep this pair out of ``image_refs`` so it does not become a user-facing
+    # character slot.  The dedicated conditioner loads it as a separate,
+    # stable additional reference for every segment.
+    custom_settings["scail2_dynamic_source_scene_reference"] = True
+    custom_settings["scail2_source_scene_reference_path"] = (
+        scene_reference["image"]
+    )
+    custom_settings["scail2_source_scene_mask_path"] = (
+        scene_reference["mask"]
+    )
+    params["edit_recast_source_scene_reference"] = scene_reference["image"]
+    params["edit_recast_source_scene_mask"] = scene_reference["mask"]
+    params["edit_recast_source_scene_hidden_fraction"] = scene_reference[
+        "hidden_fraction"
+    ]
+    params["edit_recast_reference_canvas"] = list(output_size)
+    params["edit_recast_source_scene_conditioning"] = (
+        "stable_official_reference"
+    )
+    return scene_reference
+
+
+def _compose_recast_group_reference_frame(
+    source_frame, semantic_mask, target_reference_layers, selected_count,
+    neutral_value=127,
+):
+    """Build one native multi-person SCAIL reference on a neutral canvas.
+
+    The selected shared frame supplies only the tracked bystanders. Each selected
+    source target is replaced by the corresponding prepared replacement
+    cutout, positioned inside that target's shared-frame slot. The returned
+    semantic mask therefore describes every visible conditioned person in one
+    ordinary multi-color reference instead of making bystanders compete as a
+    separate, target-free multi-reference image.
+    """
+    import numpy as np
+    from PIL import Image as _PILImage
+
+    source = np.asarray(source_frame, dtype=np.uint8)
+    group_mask = np.asarray(semantic_mask, dtype=np.uint8)
+    if (
+        source.ndim != 3
+        or source.shape[-1] != 3
+        or group_mask.shape != source.shape
+    ):
+        raise ValueError(
+            "Recast group reference needs matching H/W/RGB source and mask "
+            f"arrays; got source={source.shape}, mask={group_mask.shape}."
+        )
+    layers = list(target_reference_layers or [])
+    if not layers:
+        raise ValueError("Recast group reference needs a prepared target layer.")
+    try:
+        neutral = int(neutral_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Recast group neutral value must be an integer.") from exc
+    if not 0 <= neutral <= 255:
+        raise ValueError("Recast group neutral value must be between 0 and 255.")
+
+    normalized_layers = []
+    canvas_width = canvas_height = None
+    for layer_index, layer in enumerate(layers):
+        if not isinstance(layer, (list, tuple)) or len(layer) != 2:
+            raise ValueError(
+                "Each Recast group target layer must contain an RGB image and "
+                "its semantic mask."
+            )
+        layer_rgb = np.asarray(layer[0], dtype=np.uint8)
+        layer_mask = np.asarray(layer[1], dtype=np.uint8)
+        if (
+            layer_rgb.ndim != 3
+            or layer_rgb.shape[-1] != 3
+            or layer_mask.shape != layer_rgb.shape
+        ):
+            raise ValueError(
+                f"Recast group target layer {layer_index + 1} has mismatched "
+                f"RGB/mask dimensions: image={layer_rgb.shape}, "
+                f"mask={layer_mask.shape}."
+            )
+        if canvas_width is None:
+            canvas_height, canvas_width = layer_rgb.shape[:2]
+        elif layer_rgb.shape[:2] != (canvas_height, canvas_width):
+            layer_rgb = np.asarray(
+                _PILImage.fromarray(layer_rgb).resize(
+                    (canvas_width, canvas_height),
+                    resample=_PILImage.Resampling.LANCZOS,
+                ),
+                dtype=np.uint8,
+            )
+            layer_mask = np.asarray(
+                _PILImage.fromarray(layer_mask).resize(
+                    (canvas_width, canvas_height),
+                    resample=_PILImage.Resampling.NEAREST,
+                ),
+                dtype=np.uint8,
+            )
+        normalized_layers.append((layer_rgb, layer_mask))
+
+    if source.shape[:2] != (canvas_height, canvas_width):
+        source = np.asarray(
+            _PILImage.fromarray(source).resize(
+                (canvas_width, canvas_height),
+                resample=_PILImage.Resampling.LANCZOS,
+            ),
+            dtype=np.uint8,
+        )
+        group_mask = np.asarray(
+            _PILImage.fromarray(group_mask).resize(
+                (canvas_width, canvas_height),
+                resample=_PILImage.Resampling.NEAREST,
+            ),
+            dtype=np.uint8,
+        )
+
+    requested_count = _normalize_recast_person_count(selected_count)
+    composite = np.full_like(source, neutral, dtype=np.uint8)
+    composite_mask = np.zeros_like(group_mask, dtype=np.uint8)
+
+    # Retain source pixels only for the explicitly color-mapped bystanders.
+    # The old selected subject and the surrounding scene never enter this RGB
+    # reference, so neither can compete with the requested replacement.
+    for color in _RECAST_MASK_COLORS[requested_count:]:
+        color_array = np.asarray(color, dtype=np.uint8)
+        region = np.all(group_mask == color_array, axis=-1)
+        if bool(region.any()):
+            composite[region] = source[region]
+            composite_mask[region] = color_array
+
+    for target_index, color in enumerate(
+        _RECAST_MASK_COLORS[:requested_count],
+    ):
+        color_array = np.asarray(color, dtype=np.uint8)
+        target_region = np.all(group_mask == color_array, axis=-1)
+        target_ys, target_xs = np.nonzero(target_region)
+        if len(target_xs) == 0:
+            raise ValueError(
+                "Could not place replacement target "
+                f"{target_index + 1}: its first-frame color is missing."
+            )
+
+        # Legacy "replace N people" reuses one identity for every selected
+        # slot; explicit character mappings provide one primary layer each.
+        layer_rgb, layer_mask = normalized_layers[
+            min(target_index, len(normalized_layers) - 1)
+        ]
+        subject = np.any(layer_mask > 30, axis=-1)
+        subject_ys, subject_xs = np.nonzero(subject)
+        if len(subject_xs) == 0:
+            raise ValueError(
+                f"Prepared replacement target {target_index + 1} is empty."
+            )
+        sx0, sx1 = int(subject_xs.min()), int(subject_xs.max()) + 1
+        sy0, sy1 = int(subject_ys.min()), int(subject_ys.max()) + 1
+        subject_rgb = layer_rgb[sy0:sy1, sx0:sx1]
+        subject_alpha = (
+            subject[sy0:sy1, sx0:sx1].astype(np.uint8) * 255
+        )
+
+        tx0, tx1 = int(target_xs.min()), int(target_xs.max()) + 1
+        ty0, ty1 = int(target_ys.min()), int(target_ys.max()) + 1
+        target_width, target_height = max(1, tx1 - tx0), max(1, ty1 - ty0)
+        scale = min(
+            target_width / max(1, subject_rgb.shape[1]),
+            target_height / max(1, subject_rgb.shape[0]),
+        )
+        placed_width = max(
+            1,
+            min(canvas_width, int(round(subject_rgb.shape[1] * scale))),
+        )
+        placed_height = max(
+            1,
+            min(canvas_height, int(round(subject_rgb.shape[0] * scale))),
+        )
+        placed_rgb = np.asarray(
+            _PILImage.fromarray(subject_rgb).resize(
+                (placed_width, placed_height),
+                resample=_PILImage.Resampling.LANCZOS,
+            ),
+            dtype=np.uint8,
+        )
+        placed_alpha = np.asarray(
+            _PILImage.fromarray(subject_alpha).resize(
+                (placed_width, placed_height),
+                resample=_PILImage.Resampling.BILINEAR,
+            ),
+            dtype=np.float32,
+        ) / 255.0
+
+        left = int(round((tx0 + tx1 - placed_width) / 2.0))
+        top = ty1 - placed_height
+        left = max(0, min(left, canvas_width - placed_width))
+        top = max(0, min(top, canvas_height - placed_height))
+        right, bottom = left + placed_width, top + placed_height
+
+        alpha = placed_alpha[..., None]
+        destination = composite[top:bottom, left:right].astype(np.float32)
+        composite[top:bottom, left:right] = np.rint(
+            placed_rgb.astype(np.float32) * alpha
+            + destination * (1.0 - alpha)
+        ).clip(0, 255).astype(np.uint8)
+        visible = placed_alpha > 0.05
+        mask_destination = composite_mask[top:bottom, left:right]
+        mask_destination[visible] = color_array
+
+    return composite, composite_mask
+
+
+def _compose_recast_cast_reference_frame(
+    target_reference_layers, selected_count, canvas_size, neutral_value=127,
+):
+    """Arrange independently prepared characters in one native SCAIL cast.
+
+    SCAIL-2's trained multi-person path expects all mapped identities and their
+    semantic colors in one primary reference.  A timeline may never show every
+    requested character at once, so this neutral cast sheet is the fallback
+    when no shared source frame can provide natural target positions.
+    """
+    import numpy as np
+    from PIL import Image as _PILImage
+
+    layers = list(target_reference_layers or [])
+    requested_count = _normalize_recast_person_count(selected_count)
+    if len(layers) < requested_count:
+        raise ValueError(
+            "Recast cast reference needs one prepared target layer per "
+            f"character ({len(layers)}/{requested_count})."
+        )
+    try:
+        canvas_width, canvas_height = (
+            int(canvas_size[0]),
+            int(canvas_size[1]),
+        )
+        neutral = int(neutral_value)
+    except (IndexError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "Recast cast reference needs a valid canvas and neutral value."
+        ) from exc
+    if min(canvas_width, canvas_height) <= 0:
+        raise ValueError("Recast cast reference canvas must be positive.")
+    if not 0 <= neutral <= 255:
+        raise ValueError(
+            "Recast cast reference neutral value must be between 0 and 255."
+        )
+
+    composite = np.full(
+        (canvas_height, canvas_width, 3),
+        neutral,
+        dtype=np.uint8,
+    )
+    composite_mask = np.zeros_like(composite)
+    outer_margin = max(4, int(round(min(canvas_width, canvas_height) * 0.025)))
+    gap = max(4, int(round(canvas_width * 0.012)))
+    available_width = max(
+        requested_count,
+        canvas_width - 2 * outer_margin - gap * (requested_count - 1),
+    )
+    cell_width = float(available_width) / float(requested_count)
+    maximum_height = max(1, canvas_height - 2 * outer_margin)
+
+    for target_index in range(requested_count):
+        layer = layers[target_index]
+        if not isinstance(layer, (list, tuple)) or len(layer) != 2:
+            raise ValueError(
+                "Each Recast cast target layer must contain an RGB image and "
+                "its semantic mask."
+            )
+        layer_rgb = np.asarray(layer[0], dtype=np.uint8)
+        layer_mask = np.asarray(layer[1], dtype=np.uint8)
+        if (
+            layer_rgb.ndim != 3
+            or layer_rgb.shape[-1] != 3
+            or layer_mask.shape != layer_rgb.shape
+        ):
+            raise ValueError(
+                f"Recast cast target layer {target_index + 1} has mismatched "
+                f"RGB/mask dimensions: image={layer_rgb.shape}, "
+                f"mask={layer_mask.shape}."
+            )
+        color_array = np.asarray(
+            _RECAST_MASK_COLORS[target_index],
+            dtype=np.uint8,
+        )
+        subject = np.all(layer_mask == color_array, axis=-1)
+        if not bool(subject.any()):
+            # Prepared PNG masks are normally exact, but tolerate masks from
+            # older saved jobs whose semantic color was not persisted.
+            subject = np.any(layer_mask > 30, axis=-1)
+        subject_ys, subject_xs = np.nonzero(subject)
+        if len(subject_xs) == 0:
+            raise ValueError(
+                f"Prepared replacement target {target_index + 1} is empty."
+            )
+        sx0, sx1 = int(subject_xs.min()), int(subject_xs.max()) + 1
+        sy0, sy1 = int(subject_ys.min()), int(subject_ys.max()) + 1
+        subject_rgb = layer_rgb[sy0:sy1, sx0:sx1]
+        subject_alpha = (
+            subject[sy0:sy1, sx0:sx1].astype(np.uint8) * 255
+        )
+
+        maximum_width = max(1, int(round(cell_width * 0.90)))
+        scale = min(
+            maximum_width / max(1, subject_rgb.shape[1]),
+            maximum_height / max(1, subject_rgb.shape[0]),
+        )
+        placed_width = max(1, int(round(subject_rgb.shape[1] * scale)))
+        placed_height = max(1, int(round(subject_rgb.shape[0] * scale)))
+        placed_rgb = np.asarray(
+            _PILImage.fromarray(subject_rgb).resize(
+                (placed_width, placed_height),
+                resample=_PILImage.Resampling.LANCZOS,
+            ),
+            dtype=np.uint8,
+        )
+        placed_alpha = np.asarray(
+            _PILImage.fromarray(subject_alpha).resize(
+                (placed_width, placed_height),
+                resample=_PILImage.Resampling.BILINEAR,
+            ),
+            dtype=np.float32,
+        ) / 255.0
+
+        cell_left = outer_margin + target_index * (cell_width + gap)
+        left = int(round(cell_left + (cell_width - placed_width) / 2.0))
+        top = int(round((canvas_height - placed_height) / 2.0))
+        left = max(0, min(left, canvas_width - placed_width))
+        top = max(0, min(top, canvas_height - placed_height))
+        right, bottom = left + placed_width, top + placed_height
+
+        alpha = placed_alpha[..., None]
+        destination = composite[top:bottom, left:right].astype(np.float32)
+        composite[top:bottom, left:right] = np.rint(
+            placed_rgb.astype(np.float32) * alpha
+            + destination * (1.0 - alpha)
+        ).clip(0, 255).astype(np.uint8)
+        visible = placed_alpha > 0.05
+        mask_destination = composite_mask[top:bottom, left:right]
+        mask_destination[visible] = color_array
+
+    return composite, composite_mask
+
+
+def _build_recast_target_group_reference(
+    prepared_refs, output_dir, job_id, selected_count, *,
+    shared_source_frame=None, shared_semantic_mask=None,
+):
+    """Persist one primary multi-character reference for SCAIL-2 Recast."""
+    import numpy as np
+    from PIL import Image as _PILImage
+
+    target_layers = []
+    for item in prepared_refs.get("primary_target_refs", []):
+        if (
+            not isinstance(item, dict)
+            or not item.get("image")
+            or not item.get("mask")
+        ):
+            raise ValueError(
+                "Multi-character Recast needs prepared target image/mask "
+                "pairs."
+            )
+        with _PILImage.open(item["image"]) as target_image:
+            target_rgb = np.asarray(
+                target_image.convert("RGB"),
+                dtype=np.uint8,
+            )
+        with _PILImage.open(item["mask"]) as target_mask:
+            target_semantic = np.asarray(
+                target_mask.convert("RGB"),
+                dtype=np.uint8,
+            )
+        target_layers.append((target_rgb, target_semantic))
+
+    mode = "cast_sheet"
+    if shared_source_frame is not None and shared_semantic_mask is not None:
+        try:
+            reference_frame, reference_mask = (
+                _compose_recast_group_reference_frame(
+                    shared_source_frame,
+                    shared_semantic_mask,
+                    target_layers,
+                    selected_count,
+                )
+            )
+        except ValueError as shared_error:
+            print(
+                "[Recast] Shared-frame cast layout was unavailable; "
+                f"using a neutral cast sheet: {shared_error}"
+            )
+            reference_frame, reference_mask = (
+                _compose_recast_cast_reference_frame(
+                    target_layers,
+                    selected_count,
+                    prepared_refs["reference_canvas"],
+                )
+            )
+        else:
+            mode = "shared_timeline_frame"
+    else:
+        reference_frame, reference_mask = (
+            _compose_recast_cast_reference_frame(
+                target_layers,
+                selected_count,
+                prepared_refs["reference_canvas"],
+            )
+        )
+
+    os.makedirs(output_dir, exist_ok=True)
+    reference_path = os.path.join(
+        output_dir,
+        f"recast_cast_ref_{job_id}.png",
+    )
+    reference_mask_path = os.path.join(
+        output_dir,
+        f"recast_cast_mask_{job_id}.png",
+    )
+    _PILImage.fromarray(reference_frame).save(reference_path)
+    _PILImage.fromarray(reference_mask).save(reference_mask_path)
+    return {
+        "image": reference_path,
+        "mask": reference_mask_path,
+        "mode": mode,
+        "character_count": _normalize_recast_person_count(selected_count),
+    }
+
+
+def _compose_recast_native_people_masks(
+    target_mask_frames, all_people_masks, selected_count,
+    reference_frame_index=0,
+):
+    """Build native SCAIL-2 masks for targets plus visible bystanders.
+
+    The user's selected targets retain the first SCAIL colors. Other people
+    visible in the selected shared frame are assigned the remaining colors (up
+    to SCAIL-2's five-person limit). The driving mask carries all of those
+    correspondences, while the shared-frame reference mask identifies every
+    target and bystander for one ordinary multi-person reference.
+    """
+    import numpy as np
+
+    targets = np.asarray(target_mask_frames, dtype=np.uint8)
+    people = np.asarray(all_people_masks, dtype=np.uint8)
+    if targets.shape != people.shape or targets.ndim != 4 or targets.shape[-1] != 3:
+        raise ValueError(
+            "Native Recast people masks must have matching T/H/W/RGB dimensions; "
+            f"got targets={targets.shape}, people={people.shape}."
+        )
+    try:
+        reference_index = int(reference_frame_index)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Native Recast reference frame index must be an integer."
+        ) from exc
+    if not 0 <= reference_index < len(targets):
+        raise ValueError(
+            "Native Recast reference frame index is outside the mask timeline."
+        )
+
+    requested_count = _normalize_recast_person_count(selected_count)
+    target_regions = []
+    for color in _RECAST_MASK_COLORS[:requested_count]:
+        region = _recast_color_region(targets, color)
+        if bool(region.any()):
+            target_regions.append(region)
+    if len(target_regions) != requested_count:
+        raise ValueError(
+            "Could not recover every selected target from the tracked Recast mask "
+            f"({len(target_regions)}/{requested_count})."
+        )
+
+    candidates = []
+    for color_index, color in enumerate(_RECAST_PROTECTION_COLORS):
+        region = np.all(people == np.asarray(color, dtype=np.uint8), axis=-1)
+        area = int(region.sum())
+        reference_frame_area = int(region[reference_index].sum())
+        if area and reference_frame_area:
+            candidates.append({
+                "source_color_index": color_index,
+                "region": region,
+                "area": area,
+                "reference_frame_area": reference_frame_area,
+            })
+    if not candidates:
+        raise ValueError("SAM3 found no people to map for native Recast preservation.")
+
+    # Match the broad "person" tracks back to the user's more specific target
+    # tracks. Anything matched here must never be reused as a bystander ref.
+    pairings = []
+    for target_index, target_region in enumerate(target_regions):
+        target_area = max(1, int(target_region.sum()))
+        for candidate_index, candidate in enumerate(candidates):
+            overlap = int(np.logical_and(target_region, candidate["region"]).sum())
+            score = overlap / np.sqrt(float(target_area * candidate["area"]))
+            pairings.append((score, overlap, target_index, candidate_index))
+    pairings.sort(key=lambda item: (item[0], item[1]), reverse=True)
+
+    used_targets = set()
+    target_candidate_indices = set()
+    for score, overlap, target_index, candidate_index in pairings:
+        if target_index in used_targets or candidate_index in target_candidate_indices:
+            continue
+        if overlap <= 0 or score < 0.02:
+            continue
+        used_targets.add(target_index)
+        target_candidate_indices.add(candidate_index)
+        if len(used_targets) == len(target_regions):
+            break
+    if len(used_targets) != len(target_regions):
+        raise ValueError(
+            "Could not match every selected target to the source person tracks "
+            f"({len(used_targets)}/{len(target_regions)})."
+        )
+
+    target_union = np.logical_or.reduce(target_regions)
+    bystanders = []
+    for candidate_index, candidate in enumerate(candidates):
+        if candidate_index in target_candidate_indices:
+            continue
+        overlap = int(np.logical_and(target_union, candidate["region"]).sum())
+        overlap_fraction = overlap / max(
+            1, min(candidate["area"], int(target_union.sum())),
+        )
+        # Avoid treating a fragmented duplicate of a target track as another
+        # person when SAM's broad prompt splits loose clothing or an occlusion.
+        # A high threshold deliberately retains real dancers who pass behind
+        # or partly overlap the selected subject.
+        if overlap_fraction > 0.65:
+            continue
+        bystanders.append(candidate)
+    bystanders.sort(
+        key=lambda candidate: (
+            candidate["area"],
+            candidate["reference_frame_area"],
+        ),
+        reverse=True,
+    )
+    capacity = max(0, len(_RECAST_MASK_COLORS) - len(target_regions))
+    bystanders = bystanders[:capacity]
+
+    driving_mask = np.full_like(targets, 255, dtype=np.uint8)
+    group_ref_mask = np.zeros(targets.shape[1:], dtype=np.uint8)
+    assignments = []
+    for offset, candidate in enumerate(bystanders):
+        assigned_index = len(target_regions) + offset
+        assigned_color = _RECAST_MASK_COLORS[assigned_index]
+        driving_mask[candidate["region"]] = np.asarray(assigned_color, dtype=np.uint8)
+        group_ref_mask[candidate["region"][reference_index]] = np.asarray(
+            assigned_color, dtype=np.uint8,
+        )
+        assignments.append((
+            candidate["source_color_index"],
+            assigned_index,
+            candidate["area"],
+        ))
+
+    # The explicit target mask wins wherever people overlap or cross.
+    for target_index, target_region in enumerate(target_regions):
+        driving_mask[target_region] = np.asarray(
+            _RECAST_MASK_COLORS[target_index], dtype=np.uint8,
+        )
+    # A broad bystander track can overlap the selected subject in the shared
+    # frame. The selected target wins there, keeping one unambiguous color per
+    # pixel in the native group reference.
+    group_ref_mask[target_union[reference_index]] = 0
+    for target_index, target_region in enumerate(target_regions):
+        group_ref_mask[target_region[reference_index]] = np.asarray(
+            _RECAST_MASK_COLORS[target_index], dtype=np.uint8,
+        )
+    return (
+        driving_mask,
+        group_ref_mask,
+        len(target_regions) + len(bystanders),
+        assignments,
+    )
+
+
+def _recast_probe_needs_bystander_tracking(
+    probe_frame, target_probe_mask, selected_count,
+):
+    """Cheaply decide whether Recast needs a second full SAM3 tracking pass.
+
+    Native group preservation can only use people visible in the first frame,
+    so a one-frame broad ``person`` segmentation is sufficient to determine
+    whether any usable bystander exists. If the probe is ambiguous, return
+    True and retain the conservative full-pass behavior.
+    """
+    import numpy as np
+    from shared import magic_mask
+
+    frame = np.asarray(probe_frame, dtype=np.uint8)
+    target = np.asarray(target_probe_mask, dtype=np.uint8)
+    if frame.ndim != 3 or frame.shape[-1] != 3 or target.shape != frame.shape:
+        return True
+    try:
+        people = magic_mask.generate_keyword_masks(
+            frame[None],
+            "person",
+            no_hole=True,
+            colorize_objects=True,
+            color_palette=_RECAST_PROTECTION_COLORS,
+            max_colored_objects=len(_RECAST_PROTECTION_COLORS),
+        )
+        _, _, conditioning_count, _ = _compose_recast_native_people_masks(
+            target[None],
+            people,
+            selected_count,
+        )
+    except Exception:
+        return True
+    return conditioning_count > _normalize_recast_person_count(selected_count)
+
+
+def _build_recast_native_people_conditioning(
+    source_video, target_mask_video, selected_count, output_dir, job_id,
+    target_references=None, progress_callback=None, reference_frame_index=0,
+):
+    """Track source bystanders and write one SCAIL-native group reference."""
+    import cv2
+    import numpy as np
+    from PIL import Image as _PILImage
+    from shared import magic_mask
+
+    source_path, source_frames, fps = magic_mask.prepare_video_mask_input(source_video)
+    _, target_masks, _ = magic_mask.prepare_video_mask_input(target_mask_video)
+    frame_count, height, width = source_frames.shape[:3]
+    if len(target_masks) != frame_count:
+        indices = np.rint(
+            np.linspace(0, len(target_masks) - 1, frame_count),
+        ).astype(np.int64)
+        target_masks = target_masks[indices]
+    if target_masks.shape[1:3] != (height, width):
+        target_masks = np.stack([
+            cv2.resize(frame, (width, height), interpolation=cv2.INTER_NEAREST)
+            for frame in target_masks
+        ])
+
+    all_people_masks = magic_mask.generate_keyword_masks(
+        source_frames,
+        "person",
+        no_hole=True,
+        colorize_objects=True,
+        color_palette=_RECAST_PROTECTION_COLORS,
+        max_colored_objects=len(_RECAST_PROTECTION_COLORS),
+        progress_callback=progress_callback,
+    )
+    driving_mask, group_ref_mask, conditioning_count, assignments = (
+        _compose_recast_native_people_masks(
+            target_masks,
+            all_people_masks,
+            selected_count,
+            reference_frame_index=reference_frame_index,
+        )
+    )
+    if conditioning_count <= _normalize_recast_person_count(selected_count):
+        return {
+            "video_mask": target_mask_video,
+            "reference_image": None,
+            "reference_mask": None,
+            "conditioning_count": conditioning_count,
+            "assignments": assignments,
+        }
+
+    os.makedirs(output_dir, exist_ok=True)
+    driving_mask_path = magic_mask.save_mask_video(
+        source_path,
+        driving_mask,
+        fps,
+        ["recast people"],
+        output_dir=output_dir,
+    )
+    reference_path = os.path.join(
+        output_dir, f"recast_group_ref_{job_id}.png",
+    )
+    reference_mask_path = os.path.join(
+        output_dir, f"recast_group_mask_{job_id}.png",
+    )
+    target_layers = []
+    for item in target_references or []:
+        if not isinstance(item, dict) or not item.get("image") or not item.get("mask"):
+            raise ValueError(
+                "Native Recast preservation needs prepared target image/mask pairs."
+            )
+        with _PILImage.open(item["image"]) as target_image:
+            target_rgb = np.asarray(target_image.convert("RGB"), dtype=np.uint8)
+        with _PILImage.open(item["mask"]) as target_mask:
+            target_semantic = np.asarray(
+                target_mask.convert("RGB"), dtype=np.uint8,
+            )
+        target_layers.append((target_rgb, target_semantic))
+    reference_frame, reference_mask = _compose_recast_group_reference_frame(
+        source_frames[int(reference_frame_index)],
+        group_ref_mask,
+        target_layers,
+        selected_count,
+    )
+    _PILImage.fromarray(reference_frame).save(reference_path)
+    _PILImage.fromarray(reference_mask).save(reference_mask_path)
+    return {
+        "video_mask": driving_mask_path,
+        "reference_image": reference_path,
+        "reference_mask": reference_mask_path,
+        "conditioning_count": conditioning_count,
+        "assignments": assignments,
+    }
+
+
+def _select_recast_generated_regions(
+    source_mask_frames, generated_people_masks, person_count,
+):
+    """Select generated person tracks that correspond to source targets.
+
+    The source mask identifies who the user approved. SAM3 assigns stable
+    colors to every person in the generated video. Spatiotemporal overlap
+    matches those generated tracks back to the approved targets even when
+    replacement changes body size or silhouette substantially.
+    """
+    import numpy as np
+
+    source = np.asarray(source_mask_frames, dtype=np.uint8)
+    generated = np.asarray(generated_people_masks, dtype=np.uint8)
+    if source.shape != generated.shape or source.ndim != 4 or source.shape[-1] != 3:
+        raise ValueError(
+            "Adaptive Recast masks must have matching T/H/W/RGB dimensions; "
+            f"got source={source.shape}, generated={generated.shape}."
+        )
+
+    source_white = np.all(source > 225, axis=-1)
+    source_black = np.all(source < 30, axis=-1)
+    source_union = ~source_white & ~source_black
+    if not bool(source_union.any()):
+        raise ValueError("The approved Recast target mask is empty.")
+
+    requested_count = min(5, max(1, int(person_count or 1)))
+    target_regions = []
+    for color in _RECAST_MASK_COLORS[:requested_count]:
+        region = _recast_color_region(source, color)
+        if bool(region.any()):
+            target_regions.append(region)
+    if not target_regions:
+        target_regions = [source_union]
+
+    candidates = []
+    for color_index, color in enumerate(_RECAST_PROTECTION_COLORS):
+        region = np.all(generated == np.asarray(color, dtype=np.uint8), axis=-1)
+        area = int(region.sum())
+        if area:
+            candidates.append((color_index, region, area))
+    if not candidates:
+        raise ValueError("SAM3 found no people in the generated Recast video.")
+
+    pairings = []
+    for target_index, target_region in enumerate(target_regions):
+        target_area = max(1, int(target_region.sum()))
+        for color_index, generated_region, generated_area in candidates:
+            overlap = int(np.logical_and(target_region, generated_region).sum())
+            score = overlap / np.sqrt(float(target_area * generated_area))
+            pairings.append(
+                (score, overlap, target_index, color_index, generated_region)
+            )
+    pairings.sort(key=lambda item: (item[0], item[1]), reverse=True)
+
+    used_targets = set()
+    used_colors = set()
+    selected_regions = []
+    selected_scores = []
+    for score, overlap, target_index, color_index, generated_region in pairings:
+        if target_index in used_targets or color_index in used_colors:
+            continue
+        # A tiny incidental crossing should not attach an unrelated bystander.
+        if overlap <= 0 or score < 0.02:
+            continue
+        used_targets.add(target_index)
+        used_colors.add(color_index)
+        selected_regions.append(generated_region)
+        selected_scores.append((color_index, float(score), overlap))
+        if len(used_targets) == len(target_regions):
+            break
+
+    if len(used_targets) != len(target_regions):
+        raise ValueError(
+            "Could not match every generated replacement to its approved "
+            f"source target ({len(used_targets)}/{len(target_regions)} matched)."
+        )
+
+    adaptive = source_union.copy()
+    for region in selected_regions:
+        adaptive |= region
+    return adaptive, selected_scores
+
+
+def _build_recast_adaptive_mask(
+    generated_video, source_mask_video, person_count, output_dir,
+    progress_callback=None,
+):
+    """Trace generated replacement silhouettes and return a mask-video path."""
+    import cv2
+    import numpy as np
+    from shared import magic_mask
+
+    generated_path, generated_frames, fps = magic_mask.prepare_video_mask_input(
+        generated_video,
+    )
+    _, source_masks, _ = magic_mask.prepare_video_mask_input(source_mask_video)
+    frame_count, height, width = generated_frames.shape[:3]
+    if len(source_masks) != frame_count:
+        indices = np.rint(
+            np.linspace(0, len(source_masks) - 1, frame_count)
+        ).astype(np.int64)
+        source_masks = source_masks[indices]
+    if source_masks.shape[1:3] != (height, width):
+        source_masks = np.stack([
+            cv2.resize(frame, (width, height), interpolation=cv2.INTER_NEAREST)
+            for frame in source_masks
+        ])
+
+    generated_people = magic_mask.generate_keyword_masks(
+        generated_frames,
+        "person",
+        no_hole=True,
+        colorize_objects=True,
+        color_palette=_RECAST_PROTECTION_COLORS,
+        max_colored_objects=len(_RECAST_PROTECTION_COLORS),
+        progress_callback=progress_callback,
+    )
+    adaptive, selected_scores = _select_recast_generated_regions(
+        source_masks, generated_people, person_count,
+    )
+
+    # Close tiny segmentation gaps and leave a narrow safety rim for hair,
+    # fingers, motion blur, and compression. The ffmpeg compositor feathers it.
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    adaptive = np.stack([
+        cv2.dilate(
+            cv2.morphologyEx(frame.astype(np.uint8), cv2.MORPH_CLOSE, kernel),
+            kernel,
+        ) != 0
+        for frame in adaptive
+    ])
+    output_masks = np.zeros((frame_count, height, width, 3), dtype=np.uint8)
+    output_masks[adaptive] = np.asarray(_RECAST_MASK_COLORS[0], dtype=np.uint8)
+    mask_path = magic_mask.save_mask_video(
+        generated_path,
+        output_masks,
+        fps,
+        ["adaptive recast target"],
+        output_dir=output_dir,
+        background_color=(255, 255, 255),
+    )
+    score_text = ", ".join(
+        f"track {color_index}: {score:.3f} ({overlap} px)"
+        for color_index, score, overlap in selected_scores
+    )
+    print(f"  [Recast] Adaptive protection selected {score_text}")
+    return mask_path
+
+
+def _count_recast_mask_people(mask, colors):
+    """Count SCAIL-2 palette colors present in a colorized SAM3 mask."""
+    import numpy as np
+
+    array = np.asarray(mask)
+    if array.ndim < 3 or array.shape[-1] != 3:
+        return 0
+    return sum(
+        bool(np.all(array == np.asarray(color, dtype=array.dtype), axis=-1).any())
+        for color in colors
+    )
+
+
+def _align_recast_reference_mask(source_mask, reference_mask, target_colors, candidate_colors):
+    """Match people in an edited first frame to source targets by overlap.
+
+    SAM3 segments every person in the edited reference.  Spatial overlap
+    with the already-previewed source mask then tells us which new person
+    belongs to each SCAIL slot, even when the edit changed "woman" to "man".
+    """
+    import itertools
+    import numpy as np
+    from PIL import Image as _PILImage
+
+    source = np.asarray(source_mask, dtype=np.uint8)
+    reference = np.asarray(reference_mask, dtype=np.uint8)
+    if source.shape[:2] != reference.shape[:2]:
+        source = np.asarray(
+            _PILImage.fromarray(source, mode="RGB").resize(
+                (reference.shape[1], reference.shape[0]),
+                resample=_PILImage.Resampling.NEAREST,
+            ),
+            dtype=np.uint8,
+        )
+
+    target_regions = [
+        np.all(source == np.asarray(color, dtype=np.uint8), axis=-1)
+        for color in target_colors
+    ]
+    present_candidates = []
+    for color in candidate_colors:
+        region = np.all(reference == np.asarray(color, dtype=np.uint8), axis=-1)
+        if bool(region.any()):
+            present_candidates.append(region)
+
+    scores = np.zeros((len(target_regions), len(present_candidates)), dtype=np.float64)
+    for target_idx, target_region in enumerate(target_regions):
+        for candidate_idx, candidate_region in enumerate(present_candidates):
+            union = np.logical_or(target_region, candidate_region).sum()
+            if union:
+                scores[target_idx, candidate_idx] = np.logical_and(target_region, candidate_region).sum() / union
+
+    assignment = ()
+    if present_candidates:
+        assignment_size = min(len(target_regions), len(present_candidates))
+        assignment = max(
+            itertools.permutations(range(len(present_candidates)), assignment_size),
+            key=lambda candidate_ids: sum(
+                scores[target_idx, candidate_id]
+                for target_idx, candidate_id in enumerate(candidate_ids)
+            ),
+        )
+
+    output = np.zeros_like(reference, dtype=np.uint8)
+    matched = 0
+    for target_idx, (target_color, target_region) in enumerate(zip(target_colors, target_regions)):
+        selected_region = target_region
+        if target_idx < len(assignment):
+            candidate_idx = assignment[target_idx]
+            if scores[target_idx, candidate_idx] > 0.01:
+                selected_region = present_candidates[candidate_idx]
+                matched += 1
+        output[selected_region] = np.asarray(target_color, dtype=np.uint8)
+    return output, matched
+
+
+def _normalize_recast_character_mappings(body, workspace):
+    """Resolve explicit Recast character mappings while retaining legacy API input.
+
+    New clients send one mapping per source person.  Older clients send a
+    single target/reference plus ``person_count``; that form is intentionally
+    left grouped so existing saved settings remain loadable.
+    """
+    raw_mappings = body.get("character_mappings")
+    explicit = isinstance(raw_mappings, list) and len(raw_mappings) > 0
+    if explicit:
+        if len(raw_mappings) > len(_RECAST_MASK_COLORS):
+            raise ValueError("SCAIL-2 supports at most five character mappings.")
+        mappings = []
+        for index, raw_mapping in enumerate(raw_mappings):
+            if not isinstance(raw_mapping, dict):
+                raise ValueError(f"Character mapping {index + 1} is invalid.")
+            target = str(raw_mapping.get("target") or "").strip()
+            if not target:
+                raise ValueError(
+                    f"Character mapping {index + 1} needs a source-person description."
+                )
+            raw_reference = (
+                raw_mapping.get("ref_image_path")
+                or raw_mapping.get("reference_image_path")
+            )
+            reference_path = _resolve_recast_media(raw_reference, workspace)
+            if not reference_path:
+                raise ValueError(
+                    f"Character mapping {index + 1} reference was not found: "
+                    f"{raw_reference}"
+                )
+            additional_paths = []
+            raw_additional = (
+                raw_mapping.get("additional_ref_image_paths")
+                or raw_mapping.get("additional_reference_paths")
+                or []
+            )
+            if not isinstance(raw_additional, list):
+                raise ValueError(
+                    f"Character mapping {index + 1} additional views must be a list."
+                )
+            for raw_path in raw_additional[:4]:
+                resolved = _resolve_recast_media(raw_path, workspace)
+                if not resolved:
+                    raise ValueError(
+                        f"Character mapping {index + 1} additional view was not found: "
+                        f"{raw_path}"
+                    )
+                additional_paths.append(resolved)
+            mappings.append({
+                "id": str(raw_mapping.get("id") or f"recast-{index + 1}"),
+                "target": target,
+                "ref_image_path": reference_path,
+                "additional_ref_image_paths": additional_paths,
+                "reference_aligned_to_source": (
+                    raw_mapping.get("reference_aligned_to_source") is True
+                ),
+            })
+        if len(mappings) > 1 and any(
+            mapping["reference_aligned_to_source"] for mapping in mappings
+        ):
+            raise ValueError(
+                "An edited full-frame reference can currently map one replacement. "
+                "Use standalone primary references for multi-character mapping."
+            )
+        return mappings, True
+
+    raw_reference = body.get("ref_image_path")
+    reference_path = _resolve_recast_media(raw_reference, workspace)
+    if not reference_path:
+        raise ValueError(f"Reference image not found: {raw_reference}")
+    additional_paths = []
+    raw_additional = body.get("additional_ref_image_paths") or []
+    if not isinstance(raw_additional, list):
+        raise ValueError("Additional reference views must be a list.")
+    for raw_path in raw_additional[:4]:
+        resolved = _resolve_recast_media(raw_path, workspace)
+        if not resolved:
+            raise ValueError(f"Additional reference view was not found: {raw_path}")
+        additional_paths.append(resolved)
+    return [{
+        "id": "recast-1",
+        "target": str(body.get("target") or "person").strip() or "person",
+        "ref_image_path": reference_path,
+        "additional_ref_image_paths": additional_paths,
+        "reference_aligned_to_source": (
+            body.get("reference_aligned_to_source") is True
+        ),
+    }], False
+
+
+def _compose_recast_character_masks(
+    mapping_masks, colors, overlap_limit=0.35,
+    background_color=(255, 255, 255),
+):
+    """Merge separately tracked people into deterministic SCAIL color slots."""
+    import numpy as np
+
+    if not mapping_masks or len(mapping_masks) != len(colors):
+        raise ValueError("Recast needs one tracked mask per character color.")
+    shape = np.asarray(mapping_masks[0]).shape
+    if len(shape) not in (3, 4):
+        raise ValueError(f"Unsupported Recast character-mask shape: {shape}.")
+    region_shape = shape[:-1] if shape[-1] == 3 else shape
+    background = np.asarray(background_color, dtype=np.uint8)
+    if background.shape != (3,):
+        raise ValueError("Character-mask background must be one RGB color.")
+    output = np.empty((*region_shape, 3), dtype=np.uint8)
+    output[...] = background
+    occupied = np.zeros(region_shape, dtype=bool)
+    overlaps = []
+    for index, (raw_mask, color) in enumerate(zip(mapping_masks, colors)):
+        mask = np.asarray(raw_mask)
+        if mask.shape != shape:
+            raise ValueError("Every Recast character mask must have matching dimensions.")
+        region = np.any(mask > 30, axis=-1) if mask.shape[-1] == 3 else mask.astype(bool)
+        area = int(region.sum())
+        if area <= 0:
+            raise ValueError(f"Character mapping {index + 1} matched no pixels.")
+        overlap = np.logical_and(region, occupied)
+        overlap_fraction = float(overlap.sum()) / float(max(1, area))
+        overlaps.append(overlap_fraction)
+        if overlap_fraction > float(overlap_limit):
+            raise ValueError(
+                f"Character mapping {index + 1} overlaps an earlier mapping by "
+                f"{overlap_fraction:.0%}. Use more specific source descriptions."
+            )
+        # Earlier cards win the occasional occlusion pixel, making color
+        # assignment stable regardless of SAM's internal object ordering.
+        writable = region & ~occupied
+        output[writable] = np.asarray(color, dtype=np.uint8)
+        occupied |= region
+    return output, overlaps
+
+
+def _detect_recast_shot_ranges(
+    source_frames, min_shot_frames=4, absolute_cut_threshold=0.12,
+):
+    """Return half-open camera-shot ranges for timeline-aware SAM3 tracking.
+
+    A hard cut needs a fresh text anchor: carrying a segmentation track
+    through the cut can attach one character card to whichever person happens
+    to occupy the same screen position in the next shot. The detector combines
+    low-resolution pixel change with color-histogram change and uses the
+    video's own motion baseline, so ordinary camera motion is not treated as a
+    cut. The absolute floor remains deliberately below typical same-location
+    shot/reverse-shot edits: their shared lighting and background can keep the
+    combined score below 0.30 even though the subject changes completely.
+    """
+    import cv2
+    import numpy as np
+
+    frames = np.asarray(source_frames, dtype=np.uint8)
+    if frames.ndim != 4 or frames.shape[-1] != 3:
+        raise ValueError(
+            "Recast shot detection needs T/H/W/RGB source frames."
+        )
+    frame_count = int(len(frames))
+    if frame_count <= 1:
+        return [(0, frame_count)] if frame_count else []
+
+    thumbnails = []
+    histograms = []
+    for frame in frames:
+        thumbnail = cv2.resize(
+            frame,
+            (64, 36),
+            interpolation=cv2.INTER_AREA,
+        )
+        thumbnails.append(thumbnail.astype(np.float32) / 255.0)
+        histogram = cv2.calcHist(
+            [thumbnail],
+            [0, 1],
+            None,
+            [16, 16],
+            [0, 256, 0, 256],
+        )
+        cv2.normalize(histogram, histogram)
+        histograms.append(histogram)
+
+    scores = []
+    for index in range(1, frame_count):
+        pixel_change = float(
+            np.mean(np.abs(thumbnails[index] - thumbnails[index - 1]))
+        )
+        histogram_change = float(
+            cv2.compareHist(
+                histograms[index - 1],
+                histograms[index],
+                cv2.HISTCMP_BHATTACHARYYA,
+            )
+        )
+        scores.append(0.60 * pixel_change + 0.40 * histogram_change)
+    score_array = np.asarray(scores, dtype=np.float32)
+    median = float(np.median(score_array))
+    mad = float(np.median(np.abs(score_array - median)))
+    adaptive_threshold = median + max(0.10, 6.0 * mad)
+    threshold = max(float(absolute_cut_threshold), adaptive_threshold)
+
+    minimum = max(2, int(min_shot_frames))
+    boundaries = [0]
+    for frame_index, score in enumerate(scores, start=1):
+        if score < threshold:
+            continue
+        previous = scores[frame_index - 2] if frame_index > 1 else -1.0
+        following = (
+            scores[frame_index]
+            if frame_index < len(scores)
+            else -1.0
+        )
+        if score < previous or score < following:
+            continue
+        if frame_index - boundaries[-1] < minimum:
+            continue
+        if frame_count - frame_index < minimum:
+            continue
+        boundaries.append(frame_index)
+    boundaries.append(frame_count)
+    return [
+        (start, end)
+        for start, end in zip(boundaries, boundaries[1:])
+        if end > start
+    ]
+
+
+def _summarize_recast_mapping_mask(mask, fps=25.0):
+    """Describe where one independently tracked mapping appears."""
+    import numpy as np
+
+    array = np.asarray(mask)
+    if array.ndim == 4 and array.shape[-1] == 3:
+        region = np.any(array > 30, axis=-1)
+    elif array.ndim == 3:
+        region = array.astype(bool)
+    else:
+        raise ValueError(
+            f"Unsupported Recast mapping-mask shape: {array.shape}."
+        )
+    areas = region.reshape(len(region), -1).sum(axis=1)
+    present_indices = np.flatnonzero(areas > 0)
+    if not len(present_indices):
+        return None
+
+    appearance_ranges = []
+    range_start = int(present_indices[0])
+    previous = range_start
+    for raw_index in present_indices[1:]:
+        frame_index = int(raw_index)
+        if frame_index > previous + 1:
+            appearance_ranges.append([range_start, previous + 1])
+            range_start = frame_index
+        previous = frame_index
+    appearance_ranges.append([range_start, previous + 1])
+
+    anchor_index = int(np.argmax(areas))
+    safe_fps = float(fps or 25.0)
+    return {
+        "first_frame_index": int(present_indices[0]),
+        "last_frame_index": int(present_indices[-1]),
+        "anchor_frame_index": anchor_index,
+        "first_time_seconds": float(present_indices[0]) / safe_fps,
+        "anchor_time_seconds": float(anchor_index) / safe_fps,
+        "appearance_ranges": appearance_ranges,
+        "anchor_area": int(areas[anchor_index]),
+        "present_frame_count": int(len(present_indices)),
+    }
+
+
+def _select_recast_timeline_anchor(mapping_masks):
+    """Choose a useful shared scene frame and report true co-occurrence."""
+    import numpy as np
+
+    if not mapping_masks:
+        return None, None
+    regions = []
+    areas = []
+    for raw_mask in mapping_masks:
+        mask = np.asarray(raw_mask)
+        region = (
+            np.any(mask > 30, axis=-1)
+            if mask.ndim == 4 and mask.shape[-1] == 3
+            else mask.astype(bool)
+        )
+        regions.append(region)
+        areas.append(region.reshape(len(region), -1).sum(axis=1))
+    frame_count = len(regions[0])
+    if any(len(region) != frame_count for region in regions):
+        raise ValueError("Recast mapping timelines have different lengths.")
+
+    present = np.stack([area > 0 for area in areas], axis=0)
+    common_indices = np.flatnonzero(np.all(present, axis=0))
+    if len(common_indices):
+        common_scores = np.stack(areas, axis=0)[:, common_indices].sum(axis=0)
+        common_index = int(common_indices[int(np.argmax(common_scores))])
+    else:
+        common_index = None
+
+    visible_counts = present.sum(axis=0)
+    total_areas = np.stack(areas, axis=0).sum(axis=0)
+    scene_index = int(np.lexsort((total_areas, visible_counts))[-1])
+    return common_index, scene_index
+
+
+def _normalize_recast_tracking_target(target):
+    """Use wording SAM3 grounds reliably without changing user metadata."""
+    import re
+
+    text = " ".join(str(target or "").split())
+    # SAM3 consistently grounds "person in red/black/..." more reliably than
+    # the equivalent "person wearing ..." phrasing in camera-shot close-ups.
+    return re.sub(r"\bwearing\b", "in", text, flags=re.IGNORECASE)
+
+
+def _recast_mask_region(mask):
+    """Return a boolean T/H/W or H/W region from a Recast mask."""
+    import numpy as np
+
+    array = np.asarray(mask)
+    if array.ndim in (3, 4) and array.shape[-1] == 3:
+        return np.any(array > 30, axis=-1)
+    if array.ndim in (2, 3):
+        return array.astype(bool)
+    raise ValueError(f"Unsupported Recast mask shape: {array.shape}.")
+
+
+def _find_recast_unmapped_shots(
+    mapping_masks, shot_ranges, min_area_ratio=0.0001,
+):
+    """Return camera shots where no mapped character was grounded."""
+    import numpy as np
+
+    regions = [_recast_mask_region(mask) for mask in mapping_masks or []]
+    if not regions:
+        return []
+    frame_count = int(len(regions[0]))
+    frame_area = int(regions[0].shape[-2] * regions[0].shape[-1])
+    minimum_pixels = max(
+        16,
+        int(round(frame_area * max(0.0, float(min_area_ratio)))),
+    )
+    unresolved = []
+    for shot_index, (raw_start, raw_end) in enumerate(shot_ranges or []):
+        start = max(0, min(frame_count, int(raw_start)))
+        end = max(start, min(frame_count, int(raw_end)))
+        if end <= start:
+            continue
+        largest = max(
+            (
+                int(
+                    region[start:end]
+                    .reshape(end - start, -1)
+                    .sum(axis=1)
+                    .max()
+                )
+                for region in regions
+            ),
+            default=0,
+        )
+        if largest < minimum_pixels:
+            unresolved.append({
+                "shot_index": shot_index,
+                "start_frame": start,
+                "end_frame": end,
+            })
+    return unresolved
+
+
+def _recast_appearance_descriptor(source_frame, subject_region):
+    """Build a compact clothing/appearance descriptor for shot reacquisition."""
+    import cv2
+    import numpy as np
+
+    frame = np.asarray(source_frame, dtype=np.uint8)
+    region = np.asarray(subject_region).astype(bool)
+    if (
+        frame.ndim != 3
+        or frame.shape[-1] != 3
+        or region.shape != frame.shape[:2]
+        or not bool(region.any())
+    ):
+        return None
+
+    # Erode away SAM's boundary pixels so the descriptor represents the
+    # person rather than the changing background around their silhouette.
+    edge = max(3, int(round(min(region.shape) * 0.012)))
+    if edge % 2 == 0:
+        edge += 1
+    core = cv2.erode(
+        region.astype(np.uint8),
+        np.ones((edge, edge), dtype=np.uint8),
+        iterations=1,
+    ).astype(bool)
+    if int(core.sum()) < 100:
+        core = region
+    mask = core.astype(np.uint8)
+
+    hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV)
+    lab = cv2.cvtColor(frame, cv2.COLOR_RGB2LAB)
+    hue_saturation = cv2.calcHist(
+        [hsv],
+        [0, 1],
+        mask,
+        [24, 8],
+        [0, 180, 0, 256],
+    ).reshape(-1)
+    perceptual_color = cv2.calcHist(
+        [lab],
+        [0, 1, 2],
+        mask,
+        [8, 8, 8],
+        [0, 256, 0, 256, 0, 256],
+    ).reshape(-1)
+    hue_saturation /= max(1.0, float(hue_saturation.sum()))
+    perceptual_color /= max(1.0, float(perceptual_color.sum()))
+    descriptor = np.concatenate(
+        [hue_saturation, perceptual_color],
+    ).astype(np.float32, copy=False)
+    norm = float(np.linalg.norm(descriptor))
+    return descriptor / norm if norm > 1e-8 else None
+
+
+def _build_recast_mapping_appearance_prototypes(
+    source_frames, mapping_masks, shot_ranges, max_per_mapping=6,
+):
+    """Collect high-confidence per-shot source appearances for each card."""
+    import numpy as np
+
+    frames = np.asarray(source_frames, dtype=np.uint8)
+    prototypes = []
+    for raw_mask in mapping_masks or []:
+        region = _recast_mask_region(raw_mask)
+        candidates = []
+        for raw_start, raw_end in shot_ranges or [(0, len(frames))]:
+            start = max(0, min(len(frames), int(raw_start)))
+            end = max(start, min(len(frames), int(raw_end)))
+            if end <= start:
+                continue
+            areas = (
+                region[start:end]
+                .reshape(end - start, -1)
+                .sum(axis=1)
+            )
+            if not int(areas.max(initial=0)):
+                continue
+            frame_index = start + int(np.argmax(areas))
+            descriptor = _recast_appearance_descriptor(
+                frames[frame_index],
+                region[frame_index],
+            )
+            if descriptor is not None:
+                candidates.append((
+                    int(areas[frame_index - start]),
+                    descriptor,
+                ))
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        prototypes.append([
+            descriptor
+            for _area, descriptor in candidates[:max_per_mapping]
+        ])
+    return prototypes
+
+
+def _recover_recast_unmapped_shots(
+    source_frames, mapping_masks, shot_ranges, unresolved_shots,
+    compact_people_mask, compact_ranges, *,
+    minimum_similarity=0.72, minimum_margin=0.06,
+):
+    """Assign generic SAM people in blank shots by source appearance.
+
+    Text grounding remains authoritative. This fallback is used only when an
+    entire camera shot has no mapped target, and only accepts a generic person
+    when their clothing/color descriptor clearly favors one established
+    mapping prototype.
+    """
+    import numpy as np
+
+    frames = np.asarray(source_frames, dtype=np.uint8)
+    people = np.asarray(compact_people_mask, dtype=np.uint8)
+    # These masks are private products of the current tracking job. Mutate
+    # them in place instead of duplicating several full-resolution video
+    # tensors (which can consume multiple gigabytes on a 20-second clip).
+    output_masks = [
+        np.asarray(mask, dtype=np.uint8)
+        for mask in mapping_masks
+    ]
+    prototypes = _build_recast_mapping_appearance_prototypes(
+        frames,
+        output_masks,
+        shot_ranges,
+    )
+    recovered = []
+
+    for shot, compact_bounds in zip(
+        unresolved_shots,
+        compact_ranges,
+    ):
+        compact_start, compact_end = (
+            int(compact_bounds[0]),
+            int(compact_bounds[1]),
+        )
+        source_start, source_end = (
+            int(shot["start_frame"]),
+            int(shot["end_frame"]),
+        )
+        if (
+            compact_end <= compact_start
+            or source_end - source_start != compact_end - compact_start
+        ):
+            continue
+
+        candidates = []
+        shot_people = people[compact_start:compact_end]
+        for candidate_index, color in enumerate(_RECAST_MASK_COLORS):
+            color_array = np.asarray(color, dtype=np.uint8)
+            region = np.all(shot_people == color_array, axis=-1)
+            areas = region.reshape(len(region), -1).sum(axis=1)
+            if not int(areas.max(initial=0)):
+                continue
+            local_anchor = int(np.argmax(areas))
+            descriptor = _recast_appearance_descriptor(
+                frames[source_start + local_anchor],
+                region[local_anchor],
+            )
+            if descriptor is None:
+                continue
+            scores = []
+            for mapping_prototypes in prototypes:
+                scores.append(max(
+                    (
+                        float(np.dot(descriptor, prototype))
+                        for prototype in mapping_prototypes
+                    ),
+                    default=0.0,
+                ))
+            candidates.append({
+                "candidate_index": candidate_index,
+                "region": region,
+                "scores": scores,
+                "area": int(areas[local_anchor]),
+            })
+
+        pairings = []
+        for candidate in candidates:
+            scores = list(candidate["scores"])
+            for mapping_index, score in enumerate(scores):
+                alternatives = [
+                    other_score
+                    for other_index, other_score in enumerate(scores)
+                    if other_index != mapping_index
+                ]
+                margin = score - max(alternatives, default=0.0)
+                if (
+                    score >= float(minimum_similarity)
+                    and margin >= float(minimum_margin)
+                    and prototypes[mapping_index]
+                ):
+                    pairings.append((
+                        score,
+                        margin,
+                        candidate["area"],
+                        candidate["candidate_index"],
+                        mapping_index,
+                        candidate["region"],
+                    ))
+        pairings.sort(reverse=True, key=lambda item: item[:3])
+
+        used_candidates = set()
+        used_mappings = set()
+        for (
+            score, margin, _area, candidate_index, mapping_index, region,
+        ) in pairings:
+            if (
+                candidate_index in used_candidates
+                or mapping_index in used_mappings
+            ):
+                continue
+            color_array = np.asarray(
+                _RECAST_MASK_COLORS[mapping_index],
+                dtype=np.uint8,
+            )
+            target = output_masks[mapping_index][source_start:source_end]
+            target[region] = color_array
+            used_candidates.add(candidate_index)
+            used_mappings.add(mapping_index)
+            recovered.append({
+                "shot_index": int(shot["shot_index"]),
+                "mapping_index": mapping_index,
+                "similarity": round(float(score), 4),
+                "margin": round(float(margin), 4),
+            })
+    return output_masks, recovered
+
+
+def _build_recast_character_mask(
+    source_video, mappings, output_dir, progress_callback=None,
+    abort_callback=None,
+):
+    """Track mapped characters across shots, then save one color mask."""
+    import numpy as np
+    from shared import magic_mask
+
+    source_path, source_frames, fps = magic_mask.prepare_video_mask_input(
+        source_video,
+    )
+    shot_ranges = _detect_recast_shot_ranges(source_frames)
+    if len(shot_ranges) > 1:
+        safe_fps = float(fps or 25.0)
+        cut_times = ", ".join(
+            f"{start / safe_fps:.2f}s"
+            for start, _end in shot_ranges[1:]
+        )
+        print(
+            f"[Recast] Detected {len(shot_ranges)} camera shots; "
+            f"reacquiring mapped characters after cuts at {cut_times}."
+        )
+    else:
+        print(
+            "[Recast] Detected one continuous camera shot; "
+            "tracking mapped characters across the full timeline."
+        )
+    mapping_masks = []
+    mapping_summaries = []
+    tracking_targets = []
+    total_mappings = len(mappings)
+    for index, mapping in enumerate(mappings):
+        if abort_callback is not None:
+            abort_callback()
+
+        def _mapping_progress(done, total, mapping_index=index):
+            if abort_callback is not None:
+                abort_callback()
+            if progress_callback is not None:
+                progress_callback(
+                    mapping_index,
+                    total_mappings,
+                    done,
+                    total,
+                )
+
+        color = _RECAST_MASK_COLORS[index]
+        tracking_target = _normalize_recast_tracking_target(
+            mapping["target"],
+        )
+        tracking_targets.append(tracking_target)
+        if tracking_target != mapping["target"]:
+            print(
+                "[Recast] SAM3 tracking wording normalized: "
+                f"'{mapping['target']}' -> '{tracking_target}'."
+            )
+        tracked = magic_mask.generate_keyword_masks(
+            source_frames,
+            tracking_target,
+            no_hole=True,
+            colorize_objects=True,
+            color_palette=[color],
+            max_colored_objects=1,
+            progress_callback=_mapping_progress,
+            tracking_segments=shot_ranges,
+        )
+        summary = _summarize_recast_mapping_mask(tracked, fps)
+        if summary is None:
+            raise ValueError(
+                f"Character mapping {index + 1} found no "
+                f"'{mapping['target']}' anywhere in the selected video. "
+                "Try a more specific description or adjust the trim range."
+            )
+        summary.update({
+            "mapping_index": index,
+            "target": mapping["target"],
+            "tracking_target": tracking_target,
+            "color": list(color),
+        })
+        mapping_masks.append(tracked)
+        mapping_summaries.append(summary)
+
+    unresolved_shots = _find_recast_unmapped_shots(
+        mapping_masks,
+        shot_ranges,
+    )
+    recovered_shots = []
+    if unresolved_shots:
+        compact_parts = []
+        compact_ranges = []
+        compact_offset = 0
+        for shot in unresolved_shots:
+            start = int(shot["start_frame"])
+            end = int(shot["end_frame"])
+            compact_parts.append(source_frames[start:end])
+            length = end - start
+            compact_ranges.append(
+                (compact_offset, compact_offset + length),
+            )
+            compact_offset += length
+        recovery_frames = (
+            compact_parts[0]
+            if len(compact_parts) == 1
+            else np.concatenate(compact_parts, axis=0)
+        )
+        shot_numbers = ", ".join(
+            str(int(shot["shot_index"]) + 1)
+            for shot in unresolved_shots
+        )
+        print(
+            "[Recast] No mapped target was grounded in camera shot"
+            f"{'s' if len(unresolved_shots) != 1 else ''} "
+            f"{shot_numbers}; running generic-person appearance recovery."
+        )
+
+        def _recovery_progress(_done, _total):
+            if abort_callback is not None:
+                abort_callback()
+
+        compact_people_mask = magic_mask.generate_keyword_masks(
+            recovery_frames,
+            "person",
+            no_hole=True,
+            colorize_objects=True,
+            color_palette=_RECAST_MASK_COLORS,
+            max_colored_objects=len(_RECAST_MASK_COLORS),
+            progress_callback=_recovery_progress,
+            tracking_segments=compact_ranges,
+        )
+        mapping_masks, recovered_shots = (
+            _recover_recast_unmapped_shots(
+                source_frames,
+                mapping_masks,
+                shot_ranges,
+                unresolved_shots,
+                compact_people_mask,
+                compact_ranges,
+            )
+        )
+        del compact_people_mask
+        del recovery_frames
+        if recovered_shots:
+            recovery_summary = ", ".join(
+                "shot "
+                f"{item['shot_index'] + 1} -> character "
+                f"{chr(65 + item['mapping_index'])} "
+                f"({item['similarity']:.2f})"
+                for item in recovered_shots
+            )
+            print(
+                "[Recast] Appearance recovery accepted "
+                f"{recovery_summary}."
+            )
+            refreshed_summaries = []
+            for index, mapping_mask in enumerate(mapping_masks):
+                refreshed = _summarize_recast_mapping_mask(
+                    mapping_mask,
+                    fps,
+                )
+                if refreshed is None:
+                    refreshed = mapping_summaries[index]
+                refreshed.update({
+                    "mapping_index": index,
+                    "target": mappings[index]["target"],
+                    "tracking_target": tracking_targets[index],
+                    "color": list(_RECAST_MASK_COLORS[index]),
+                    "recovered_shot_indices": [
+                        item["shot_index"]
+                        for item in recovered_shots
+                        if item["mapping_index"] == index
+                    ],
+                })
+                refreshed_summaries.append(refreshed)
+            mapping_summaries = refreshed_summaries
+        else:
+            print(
+                "[Recast] Generic-person recovery found no sufficiently "
+                "distinct identity match; unresolved shots remain unchanged."
+            )
+    merged, overlaps = _compose_recast_character_masks(
+        mapping_masks,
+        _RECAST_MASK_COLORS[:total_mappings],
+    )
+    common_frame_index, scene_anchor_index = (
+        _select_recast_timeline_anchor(mapping_masks)
+    )
+    for summary, overlap in zip(mapping_summaries, overlaps):
+        summary["overlap_fraction"] = float(overlap)
+    mask_path = magic_mask.save_mask_video(
+        source_path,
+        merged,
+        fps,
+        [mapping["target"] for mapping in mappings],
+        output_dir=output_dir,
+        abort_callback=abort_callback,
+        background_color=(255, 255, 255),
+    )
+    return {
+        "video_mask": mask_path,
+        "mask_frames": merged,
+        "source_frames": source_frames,
+        "fps": fps,
+        "overlaps": overlaps,
+        "mapping_masks": mapping_masks,
+        "mapping_summaries": mapping_summaries,
+        "recovered_shots": recovered_shots,
+        "shot_ranges": [list(bounds) for bounds in shot_ranges],
+        "shot_count": len(shot_ranges),
+        "common_frame_index": common_frame_index,
+        "scene_anchor_index": scene_anchor_index,
+        "timeline_aware": (
+            len(shot_ranges) > 1
+            or (
+                total_mappings > 1
+                and common_frame_index is None
+            )
+            or any(
+                summary["first_frame_index"] > 0
+                for summary in mapping_summaries
+            )
+        ),
+    }
+
+
+def _plan_recast_shot_segments(
+    mapping_masks, shot_ranges, min_area_ratio=0.0001, *,
+    split_cast_transitions=False, min_cast_run_frames=4,
+):
+    """Resolve active mappings and the best composition anchor per segment.
+
+    Presence is evaluated inside each detected camera shot rather than across
+    a diffusion window. This prevents two characters in adjacent
+    shot/reverse-shot frames from being mistaken for a simultaneous cast.
+
+    Recast can additionally divide one camera shot when its stable set of
+    mapped characters changes. SCAIL-2 then starts every generated segment
+    with the same semantic colors represented by its primary reference,
+    instead of asking it to introduce a second identity partway through a
+    window. Short presence/dropout runs are absorbed into their neighbors so
+    detector flicker and momentary occlusion do not create tiny jobs.
+    """
+    import numpy as np
+
+    masks = [np.asarray(mask) for mask in mapping_masks or []]
+    if not masks:
+        raise ValueError("Shot-aware Recast needs tracked mapping masks.")
+    frame_count = int(len(masks[0]))
+    if frame_count <= 0:
+        raise ValueError("Shot-aware Recast received an empty timeline.")
+    if any(len(mask) != frame_count for mask in masks):
+        raise ValueError("Shot-aware Recast mapping timelines differ in length.")
+
+    regions = []
+    areas = []
+    for mask in masks:
+        if mask.ndim == 4 and mask.shape[-1] == 3:
+            region = np.any(mask > 30, axis=-1)
+        elif mask.ndim == 3:
+            region = mask.astype(bool)
+        else:
+            raise ValueError(
+                f"Unsupported Recast mapping-mask shape: {mask.shape}."
+            )
+        regions.append(region)
+        areas.append(region.reshape(frame_count, -1).sum(axis=1))
+
+    frame_area = int(regions[0].shape[-2] * regions[0].shape[-1])
+    minimum_pixels = max(
+        16,
+        int(round(frame_area * max(0.0, float(min_area_ratio)))),
+    )
+    try:
+        minimum_cast_run = max(1, int(min_cast_run_frames))
+    except (TypeError, ValueError):
+        minimum_cast_run = 4
+
+    def _runs(values):
+        values = np.asarray(values, dtype=bool)
+        if not len(values):
+            return []
+        result = []
+        run_start = 0
+        run_value = bool(values[0])
+        for index in range(1, len(values)):
+            value = bool(values[index])
+            if value == run_value:
+                continue
+            result.append((run_start, index, run_value))
+            run_start, run_value = index, value
+        result.append((run_start, len(values), run_value))
+        return result
+
+    def _stabilize_presence(values):
+        stable = np.asarray(values, dtype=bool).copy()
+        if minimum_cast_run <= 1 or len(stable) <= 1:
+            return stable
+        while True:
+            presence_runs = _runs(stable)
+            if len(presence_runs) <= 1:
+                return stable
+            short = [
+                (end - start, run_index, start, end)
+                for run_index, (start, end, _value) in enumerate(
+                    presence_runs
+                )
+                if end - start < minimum_cast_run
+            ]
+            if not short:
+                return stable
+            _length, run_index, start, end = min(short)
+            if run_index == 0:
+                replacement = presence_runs[1][2]
+            elif run_index == len(presence_runs) - 1:
+                replacement = presence_runs[-2][2]
+            else:
+                # Boolean runs alternate, so both neighbors normally agree.
+                # The duration tie-break keeps this safe if the representation
+                # ever expands beyond a single presence bit.
+                left = presence_runs[run_index - 1]
+                right = presence_runs[run_index + 1]
+                replacement = (
+                    left[2]
+                    if (
+                        left[2] == right[2]
+                        or left[1] - left[0] >= right[1] - right[0]
+                    )
+                    else right[2]
+                )
+            stable[start:end] = replacement
+
+    def _signature_runs(stable_presence):
+        if stable_presence.shape[1] <= 0:
+            return []
+        signatures = [
+            tuple(np.flatnonzero(stable_presence[:, frame_index]).tolist())
+            for frame_index in range(stable_presence.shape[1])
+        ]
+        result = []
+        run_start = 0
+        run_signature = signatures[0]
+        for frame_index in range(1, len(signatures)):
+            signature = signatures[frame_index]
+            if signature == run_signature:
+                continue
+            result.append([run_start, frame_index, run_signature])
+            run_start, run_signature = frame_index, signature
+        result.append([run_start, len(signatures), run_signature])
+
+        # Two long tracks can overlap or hand off for only a frame or two even
+        # after each individual presence timeline is stable. Fold that brief
+        # combined signature into the most compatible neighboring segment.
+        while len(result) > 1:
+            short = [
+                (end - start, run_index)
+                for run_index, (start, end, _signature) in enumerate(result)
+                if end - start < minimum_cast_run
+            ]
+            if not short:
+                break
+            _length, run_index = min(short)
+            current = set(result[run_index][2])
+            neighbor_indices = [
+                index
+                for index in (run_index - 1, run_index + 1)
+                if 0 <= index < len(result)
+            ]
+            replacement_index = max(
+                neighbor_indices,
+                key=lambda index: (
+                    len(current.intersection(result[index][2])),
+                    -len(current.symmetric_difference(result[index][2])),
+                    result[index][1] - result[index][0],
+                    -abs(index - run_index),
+                ),
+            )
+            result[run_index][2] = result[replacement_index][2]
+            merged = []
+            for start, end, signature in result:
+                if merged and merged[-1][2] == signature:
+                    merged[-1][1] = end
+                else:
+                    merged.append([start, end, signature])
+            result = merged
+        return result
+
+    normalized_ranges = []
+    for raw_start, raw_end in shot_ranges or [(0, frame_count)]:
+        start = max(0, min(frame_count, int(raw_start)))
+        end = max(start, min(frame_count, int(raw_end)))
+        if end > start:
+            normalized_ranges.append((start, end))
+    if not normalized_ranges:
+        normalized_ranges = [(0, frame_count)]
+
+    plans = []
+    for camera_shot_index, (shot_start, shot_end) in enumerate(
+        normalized_ranges
+    ):
+        shot_areas = np.stack(
+            [area[shot_start:shot_end] for area in areas],
+            axis=0,
+        )
+        if split_cast_transitions:
+            stable_presence = np.stack([
+                _stabilize_presence(mapping_area >= minimum_pixels)
+                for mapping_area in shot_areas
+            ])
+            local_segments = _signature_runs(stable_presence)
+        else:
+            active = tuple(
+                index
+                for index in range(len(masks))
+                if int(shot_areas[index].max(initial=0)) >= minimum_pixels
+            )
+            local_segments = [[0, shot_end - shot_start, active]]
+
+        for cast_segment_index, (
+            local_start, local_end, active_signature,
+        ) in enumerate(local_segments):
+            start = shot_start + int(local_start)
+            end = shot_start + int(local_end)
+            active_indices = [int(index) for index in active_signature]
+            segment_areas = np.stack(
+                [area[start:end] for area in areas],
+                axis=0,
+            )
+            if active_indices:
+                active_areas = segment_areas[active_indices]
+                visible = active_areas >= minimum_pixels
+                common = np.all(visible, axis=0)
+                if bool(common.any()):
+                    candidates = np.flatnonzero(common)
+                    first_all_active = start + int(candidates[0])
+                    # Favor a frame where the least-visible active character
+                    # is still large, then total area as the tie-breaker.
+                    minimum_area = active_areas[:, candidates].min(axis=0)
+                    total_area = active_areas[:, candidates].sum(axis=0)
+                    local_anchor = int(
+                        candidates[
+                            np.lexsort((total_area, minimum_area))[-1]
+                        ]
+                    )
+                    cooccurring = True
+                else:
+                    first_all_active = None
+                    visible_count = visible.sum(axis=0)
+                    total_area = active_areas.sum(axis=0)
+                    local_anchor = int(
+                        np.lexsort((total_area, visible_count))[-1]
+                    )
+                    cooccurring = False
+                anchor = start + local_anchor
+            else:
+                anchor = start
+                first_all_active = None
+                cooccurring = False
+
+            initial_active = [
+                index
+                for index in active_indices
+                if int(areas[index][start]) >= minimum_pixels
+            ]
+            active_count = len(active_indices)
+            plans.append({
+                "shot_index": len(plans),
+                "camera_shot_index": camera_shot_index,
+                "cast_segment_index": cast_segment_index,
+                "segment_reason": (
+                    "camera_shot"
+                    if cast_segment_index == 0
+                    else "cast_change"
+                ),
+                "start_frame": start,
+                "end_frame": end,
+                "frame_count": end - start,
+                "anchor_frame_index": anchor,
+                "first_all_active_frame_index": first_all_active,
+                "active_mapping_indices": active_indices,
+                "initial_active_mapping_indices": initial_active,
+                "starts_with_all_active_mappings": (
+                    initial_active == active_indices
+                ),
+                "cooccurring": cooccurring,
+                "mode": (
+                    "passthrough"
+                    if active_count == 0
+                    else "solo"
+                    if active_count == 1
+                    else "group"
+                ),
+            })
+    return plans
+
+
+def _resample_recast_tracking_timeline(
+    source_frames, mapping_masks, shot_ranges, target_frame_count,
+):
+    """Resample tracked frames and cuts onto Recast's generation timeline."""
+    import numpy as np
+
+    source = np.asarray(source_frames)
+    source_count = int(len(source))
+    target_count = int(target_frame_count)
+    if source_count <= 0 or target_count <= 0:
+        raise ValueError("Recast timeline frame counts must be positive.")
+    masks = [np.asarray(mask) for mask in mapping_masks or []]
+    if any(len(mask) != source_count for mask in masks):
+        raise ValueError("Recast masks do not match the source timeline.")
+
+    indices = np.floor(
+        np.arange(target_count, dtype=np.float64)
+        * float(source_count)
+        / float(target_count)
+    ).astype(np.int64)
+    indices = np.clip(indices, 0, source_count - 1)
+    resampled_source = source[indices]
+    resampled_masks = [mask[indices] for mask in masks]
+
+    ranges = list(shot_ranges or [(0, source_count)])
+    if not ranges:
+        ranges = [(0, source_count)]
+    shot_count = min(len(ranges), target_count)
+    ranges = ranges[:shot_count]
+    boundaries = [0]
+    for boundary_index, (_start, raw_end) in enumerate(ranges[:-1], 1):
+        remaining = shot_count - boundary_index
+        scaled = int(round(
+            max(0, min(source_count, int(raw_end)))
+            * float(target_count)
+            / float(source_count)
+        ))
+        lower = boundaries[-1] + 1
+        upper = target_count - remaining
+        boundaries.append(max(lower, min(upper, scaled)))
+    boundaries.append(target_count)
+    resampled_ranges = [
+        (start, end)
+        for start, end in zip(boundaries, boundaries[1:])
+        if end > start
+    ]
+    return resampled_source, resampled_masks, resampled_ranges
+
+
+def _remap_recast_shot_mask(
+    semantic_mask, active_mapping_indices,
+    background_color=(255, 255, 255),
+):
+    """Convert global card colors to contiguous per-shot SCAIL colors."""
+    import numpy as np
+
+    mask = np.asarray(semantic_mask, dtype=np.uint8)
+    if mask.ndim not in (3, 4) or mask.shape[-1] != 3:
+        raise ValueError(
+            f"Recast semantic mask must be H/W/RGB or T/H/W/RGB; got {mask.shape}."
+        )
+    output = np.empty_like(mask, dtype=np.uint8)
+    output[...] = np.asarray(background_color, dtype=np.uint8)
+    for local_index, mapping_index in enumerate(active_mapping_indices or []):
+        global_color = np.asarray(
+            _RECAST_MASK_COLORS[int(mapping_index)],
+            dtype=np.uint8,
+        )
+        local_color = np.asarray(
+            _RECAST_MASK_COLORS[local_index],
+            dtype=np.uint8,
+        )
+        output[np.all(mask == global_color, axis=-1)] = local_color
+    return output
+
+
+def _quantize_recast_shot_frame_count(
+    frame_count, minimum_frames, latent_size,
+):
+    """Return a valid model length and tail trim for one exact-length shot."""
+    count = int(frame_count)
+    minimum = max(1, int(minimum_frames))
+    latent = max(1, int(latent_size))
+    if count <= 0:
+        raise ValueError("A Recast shot must contain at least one frame.")
+    generated = ((count - 1 + latent - 1) // latent) * latent + 1
+    generated = max(generated, minimum)
+    if (generated - 1) % latent:
+        generated = (
+            (generated - 1 + latent - 1) // latent
+        ) * latent + 1
+    return generated, generated - count
+
+
+def _build_recast_shot_prompt(
+    active_count, *, finished_video_prompt=None, total_mapping_count=None,
+):
+    """Build text that cannot introduce identities absent from this shot."""
+    count = max(1, min(5, int(active_count)))
+    try:
+        total_count = max(1, min(5, int(total_mapping_count)))
+    except (TypeError, ValueError):
+        total_count = None
+    requested_prompt = str(finished_video_prompt or "").strip()
+    if (
+        count > 1
+        and total_count == count
+        and any(character.isalnum() for character in requested_prompt)
+    ):
+        # When the whole requested cast shares a shot, the user's
+        # finished-video description is safe and materially helps SCAIL-2
+        # retain clothing details that may be outside a portrait reference.
+        # Solo/subset shots stay neutral so an absent identity cannot leak in.
+        return requested_prompt
+    if count == 1:
+        return (
+            "A clearly defined character performs naturally within the "
+            "original scene. The character's face, hair, body shape, and "
+            "complete outfit remain visually consistent while following the "
+            "visible action and camera movement. The environment, lighting, "
+            "shadows, and nearby objects form one coherent natural shot."
+        )
+    return (
+        f"{count} clearly defined characters perform naturally within the "
+        "original scene. Each character's face, hair, body shape, and complete "
+        "outfit remain visually distinct and consistent while following the "
+        "visible action and interactions. The environment, lighting, shadows, "
+        "and nearby objects form one coherent natural shot."
+    )
+
+
+def _clean_recast_reference_region(region):
+    """Keep the dominant connected subject and discard detached people."""
+    import cv2
+    import numpy as np
+
+    binary = np.ascontiguousarray(
+        np.asarray(region).astype(np.uint8, copy=False),
+    )
+    if binary.ndim != 2 or not bool(binary.any()):
+        return binary.astype(bool), 0
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        binary,
+        connectivity=8,
+    )
+    foreground_count = max(0, int(component_count) - 1)
+    if foreground_count <= 1:
+        return binary.astype(bool), foreground_count
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    selected_label = 1 + int(np.argmax(areas))
+    return labels == selected_label, foreground_count
+
+
+def _select_recast_reference_instance(colored_mask, palette):
+    """Select one prominent central SAM3 instance from a reference image."""
+    import numpy as np
+
+    mask = np.asarray(colored_mask)
+    if mask.ndim == 2:
+        cleaned, component_count = _clean_recast_reference_region(mask)
+        return cleaned, {
+            "instance_count": component_count,
+            "selected_index": 0,
+        }
+    if mask.ndim != 3 or mask.shape[-1] != 3:
+        raise ValueError(
+            "SAM3 returned an unsupported reference mask shape: "
+            f"{mask.shape}."
+        )
+
+    height, width = mask.shape[:2]
+    center_x = (width - 1) / 2.0
+    center_y = (height - 1) / 2.0
+    max_distance = max(1.0, (center_x ** 2 + center_y ** 2) ** 0.5)
+    candidates = []
+    for palette_index, color in enumerate(palette):
+        color_array = np.asarray(color, dtype=np.uint8)
+        region = np.all(mask == color_array, axis=-1)
+        if not bool(region.any()):
+            continue
+        cleaned, component_count = _clean_recast_reference_region(region)
+        ys, xs = np.nonzero(cleaned)
+        if len(xs) == 0:
+            continue
+        area = int(len(xs))
+        distance = (
+            (float(xs.mean()) - center_x) ** 2
+            + (float(ys.mean()) - center_y) ** 2
+        ) ** 0.5
+        centrality = max(0.0, 1.0 - distance / max_distance)
+        # Area remains the dominant signal. Centrality breaks close calls in
+        # favor of the foreground subject users normally place near the middle.
+        score = float(area) * (1.0 + 0.25 * centrality)
+        candidates.append({
+            "region": cleaned,
+            "score": score,
+            "area": area,
+            "palette_index": palette_index,
+            "component_count": component_count,
+        })
+
+    if not candidates:
+        fallback, component_count = _clean_recast_reference_region(
+            np.any(mask > 30, axis=-1),
+        )
+        return fallback, {
+            "instance_count": component_count,
+            "selected_index": 0,
+        }
+    selected = max(candidates, key=lambda item: item["score"])
+    return selected["region"], {
+        "instance_count": len(candidates),
+        "selected_index": selected["palette_index"],
+        "discarded_components": max(0, selected["component_count"] - 1),
+    }
+
+
+def _recast_reference_subject_mask(reference_frame, alpha_channel=None):
+    """Find the single person represented by a standalone reference view."""
+    import numpy as np
+    from shared import magic_mask
+
+    if alpha_channel is not None:
+        alpha = np.asarray(alpha_channel, dtype=np.uint8)
+        transparent_fraction = (
+            float(np.count_nonzero(alpha < 250)) / float(alpha.size)
+            if alpha.size else 0.0
+        )
+        if transparent_fraction >= 0.02 and int(alpha.max()) > 5:
+            selected, component_count = _clean_recast_reference_region(
+                alpha > 5,
+            )
+            opacity = alpha.astype(np.float32) / 255.0
+            opacity[~selected] = 0.0
+            return (
+                selected,
+                opacity,
+                "png alpha"
+                + (
+                    f" (dominant of {component_count} regions)"
+                    if component_count > 1 else ""
+                ),
+            )
+
+    frame = np.asarray(reference_frame, dtype=np.uint8)
+    instance_palette = [
+        (0, 0, 255),
+        (255, 0, 0),
+        (0, 255, 0),
+        (255, 0, 255),
+        (0, 255, 255),
+    ]
+    for keyword in ("person", "human character", "woman", "man"):
+        mask = magic_mask.generate_keyword_masks(
+            frame[None],
+            keyword,
+            no_hole=True,
+            colorize_objects=True,
+            color_palette=instance_palette,
+            max_colored_objects=len(instance_palette),
+        )[0]
+        region, selection = _select_recast_reference_instance(
+            mask,
+            instance_palette,
+        )
+        if bool(region.any()):
+            instance_count = int(selection.get("instance_count") or 1)
+            selected_number = int(selection.get("selected_index") or 0) + 1
+            source = (
+                f"{keyword} instance {selected_number}/{instance_count}"
+                if instance_count > 1
+                else f"{keyword} instance"
+            )
+            discarded = int(selection.get("discarded_components") or 0)
+            if discarded:
+                source += f" (removed {discarded} detached region(s))"
+            return region, region.astype(np.float32), source
+    raise ValueError(
+        "SAM3 could not find one person in the replacement reference. "
+        "Try a clearer full- or half-body image."
+    )
+
+
+def _decontaminate_recast_reference_edges(reference_frame, subject, width=3):
+    """Replace bright boundary contamination with nearby foreground color."""
+    import cv2
+    import numpy as np
+
+    frame = np.asarray(reference_frame, dtype=np.uint8)
+    region = np.asarray(subject).astype(bool)
+    if frame.ndim != 3 or frame.shape[-1] != 3:
+        raise ValueError(
+            "Recast edge cleanup needs an H/W/RGB reference image."
+        )
+    if region.shape != frame.shape[:2]:
+        raise ValueError(
+            "Recast edge cleanup mask does not match its reference image."
+        )
+    cleaned = frame.copy()
+    current = region.copy()
+    kernel = np.ones((3, 3), dtype=np.uint8)
+    for _ in range(max(1, int(width))):
+        inner = cv2.erode(
+            current.astype(np.uint8),
+            kernel,
+            iterations=1,
+        ).astype(bool)
+        boundary = current & ~inner
+        if not bool(boundary.any()) or not bool(inner.any()):
+            break
+        neighbor_count = cv2.filter2D(
+            inner.astype(np.float32),
+            cv2.CV_32F,
+            kernel.astype(np.float32),
+            borderType=cv2.BORDER_REPLICATE,
+        )
+        replace = boundary & (neighbor_count > 0.0)
+        for channel in range(3):
+            neighbor_sum = cv2.filter2D(
+                cleaned[..., channel].astype(np.float32)
+                * inner.astype(np.float32),
+                cv2.CV_32F,
+                kernel.astype(np.float32),
+                borderType=cv2.BORDER_REPLICATE,
+            )
+            values = neighbor_sum / np.maximum(neighbor_count, 1.0)
+            cleaned[..., channel][replace] = np.rint(
+                values[replace],
+            ).clip(0, 255).astype(np.uint8)
+        current = inner
+    return cleaned
+
+
+def _constrain_recast_u2net_matte(subject, opacity, u2net_alpha):
+    """Keep a soft U2Net edge inside the person instance selected by SAM3."""
+    import cv2
+    import numpy as np
+
+    region = np.asarray(subject).astype(bool)
+    original_opacity = np.clip(
+        np.asarray(opacity, dtype=np.float32),
+        0.0,
+        1.0,
+    )
+    matte = np.asarray(u2net_alpha, dtype=np.float32)
+    if matte.size and float(matte.max()) > 1.0:
+        matte = matte / 255.0
+    matte = np.clip(matte, 0.0, 1.0)
+    if (
+        region.shape != original_opacity.shape
+        or region.shape != matte.shape
+    ):
+        raise ValueError(
+            "U2Net matte dimensions do not match the selected SAM3 person."
+        )
+    if not bool(region.any()):
+        raise ValueError("The selected SAM3 person mask is empty.")
+
+    # SAM3 owns identity selection. U2Net is allowed only a small perimeter
+    # around that instance so another person in the reference cannot leak
+    # back into the conditioning image.
+    edge_width = max(
+        1,
+        min(4, int(round(min(region.shape[:2]) * 0.004))),
+    )
+    kernel_size = edge_width * 2 + 1
+    kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
+    guard = cv2.dilate(
+        region.astype(np.uint8),
+        kernel,
+        iterations=1,
+    ).astype(bool)
+    guard_soft = cv2.GaussianBlur(
+        guard.astype(np.float32),
+        (0, 0),
+        sigmaX=max(0.75, edge_width * 0.55),
+        sigmaY=max(0.75, edge_width * 0.55),
+    )
+    guard_soft[~guard] = 0.0
+
+    # Retain a feathered SAM3 silhouette even if U2Net misses a hand, hair
+    # curl, or dark clothing. U2Net still supplies the cleaner outer alpha.
+    inside_distance = cv2.distanceTransform(
+        region.astype(np.uint8),
+        cv2.DIST_L2,
+        3,
+    )
+    sam_feather = np.clip(
+        inside_distance / float(edge_width + 0.5),
+        0.0,
+        1.0,
+    )
+    sam_feather *= original_opacity
+    refined = np.maximum(matte * guard_soft, sam_feather)
+    refined[~guard] = 0.0
+    return np.clip(refined, 0.0, 1.0).astype(np.float32)
+
+
+def _get_recast_u2net_session():
+    """Load the existing local background-removal model once on CPU."""
+    global _recast_u2net_session
+
+    if _recast_u2net_session is not None:
+        return _recast_u2net_session
+    with _recast_u2net_session_lock:
+        if _recast_u2net_session is None:
+            model_home = os.path.join(_app_dir, "ckpts", "rembg")
+            os.makedirs(model_home, exist_ok=True)
+            os.environ.setdefault("U2NET_HOME", model_home)
+            import onnxruntime as _ort
+            from rembg import new_session
+
+            print(
+                "[Recast] Loading U2Net edge refinement on CPU "
+                "(SAM3 remains the person selector)"
+            )
+            # This rembg release ignores a caller-supplied providers list and
+            # chooses CUDA whenever the GPU build of ONNX Runtime is present.
+            # That both spends generation VRAM and emits a scary DLL error on
+            # systems whose ORT CUDA version differs from PyTorch. Report CPU
+            # only for the brief session-construction call; the resulting ORT
+            # session then remains explicitly CPU-backed for its lifetime.
+            original_get_device = _ort.get_device
+            try:
+                _ort.get_device = lambda: "CPU"
+                _recast_u2net_session = new_session("u2net")
+            finally:
+                _ort.get_device = original_get_device
+    return _recast_u2net_session
+
+
+def _run_recast_u2net_matte(reference_frame, reference_path=None):
+    """Return decontaminated foreground RGB and alpha, with a small cache."""
+    import numpy as np
+    from PIL import Image as _PILImage
+    from rembg import remove
+
+    frame = np.asarray(reference_frame, dtype=np.uint8)
+    cache_key = None
+    if reference_path:
+        try:
+            stat = os.stat(reference_path)
+            cache_key = (
+                os.path.normcase(os.path.realpath(reference_path)),
+                int(stat.st_mtime_ns),
+                int(stat.st_size),
+            )
+        except OSError:
+            cache_key = None
+    if cache_key is not None:
+        with _recast_u2net_cache_lock:
+            cached = _recast_u2net_cache.get(cache_key)
+            if cached is not None:
+                return cached[0].copy(), cached[1].copy()
+
+    session = _get_recast_u2net_session()
+    with _recast_u2net_run_lock:
+        cutout = remove(
+            _PILImage.fromarray(frame),
+            session=session,
+            alpha_matting=True,
+            alpha_matting_erode_size=1,
+            bgcolor=(0, 0, 0, 0),
+        )
+    if not isinstance(cutout, _PILImage.Image):
+        raise ValueError("U2Net returned an unsupported Recast matte.")
+    cutout_array = np.asarray(cutout.convert("RGBA"), dtype=np.uint8)
+    foreground = cutout_array[..., :3].copy()
+    alpha = cutout_array[..., 3].astype(np.float32) / 255.0
+    if foreground.shape != frame.shape or alpha.shape != frame.shape[:2]:
+        raise ValueError("U2Net returned a mismatched Recast matte size.")
+
+    if cache_key is not None:
+        with _recast_u2net_cache_lock:
+            _recast_u2net_cache[cache_key] = (
+                foreground.copy(),
+                alpha.copy(),
+            )
+            while len(_recast_u2net_cache) > _RECAST_U2NET_CACHE_LIMIT:
+                oldest_key = next(iter(_recast_u2net_cache))
+                _recast_u2net_cache.pop(oldest_key, None)
+    return foreground, alpha
+
+
+def _refine_recast_reference_cutout(
+    reference_frame,
+    subject,
+    opacity,
+    mask_source,
+    *,
+    reference_path=None,
+    matte_runner=None,
+):
+    """Clean one selected reference subject without changing its identity."""
+    import cv2
+    import numpy as np
+
+    frame = np.asarray(reference_frame, dtype=np.uint8)
+    selected = np.asarray(subject).astype(bool)
+    selected_opacity = np.clip(
+        np.asarray(opacity, dtype=np.float32),
+        0.0,
+        1.0,
+    )
+    # Respect a user's authored transparent cutout. It already has the most
+    # precise alpha available and should not be reinterpreted by U2Net.
+    if str(mask_source).lower().startswith("png alpha"):
+        return selected, selected_opacity, mask_source, frame.copy()
+
+    runner = matte_runner or _run_recast_u2net_matte
+    edge_width = max(
+        1,
+        min(4, int(round(min(selected.shape[:2]) * 0.004))),
+    )
+    fallback_rgb = _decontaminate_recast_reference_edges(
+        frame,
+        selected,
+        width=edge_width,
+    )
+    try:
+        u2net_rgb, u2net_alpha = runner(
+            frame,
+            reference_path=reference_path,
+        )
+        u2net_rgb = np.asarray(u2net_rgb, dtype=np.uint8)
+        u2net_alpha = np.asarray(u2net_alpha, dtype=np.float32)
+        if u2net_rgb.shape != frame.shape:
+            raise ValueError("U2Net foreground RGB size is invalid.")
+        if u2net_alpha.shape != selected.shape:
+            raise ValueError("U2Net alpha size is invalid.")
+        normalized_alpha = (
+            u2net_alpha / 255.0
+            if u2net_alpha.size and float(u2net_alpha.max()) > 1.0
+            else u2net_alpha
+        )
+        coverage = float(np.count_nonzero(
+            (normalized_alpha > 0.05) & selected,
+        )) / float(max(1, np.count_nonzero(selected)))
+        if coverage < 0.45:
+            raise ValueError(
+                f"U2Net covered only {coverage:.0%} of the selected person."
+            )
+        refined_opacity = _constrain_recast_u2net_matte(
+            selected,
+            selected_opacity,
+            normalized_alpha,
+        )
+        refined_subject = refined_opacity > 0.02
+        cleaned_rgb = fallback_rgb
+        valid_foreground = normalized_alpha > 0.01
+        cleaned_rgb[valid_foreground] = u2net_rgb[valid_foreground]
+        return (
+            refined_subject,
+            refined_opacity,
+            f"{mask_source} + U2Net soft edge",
+            cleaned_rgb,
+        )
+    except Exception as exc:
+        # Recast must still work offline or when the optional matte runtime is
+        # unavailable. The local fallback removes the most obvious fringe and
+        # feathers only the boundary of the SAM-selected person.
+        distance = cv2.distanceTransform(
+            selected.astype(np.uint8),
+            cv2.DIST_L2,
+            3,
+        )
+        fallback_opacity = np.minimum(
+            selected_opacity,
+            np.clip(
+                distance / float(edge_width + 0.5),
+                0.0,
+                1.0,
+            ),
+        ).astype(np.float32)
+        print(
+            "[Recast] U2Net edge refinement unavailable; using local "
+            f"boundary cleanup ({exc})"
+        )
+        return (
+            selected,
+            fallback_opacity,
+            f"{mask_source} + local edge cleanup",
+            fallback_rgb,
+        )
+
+
+def _recast_subject_crop_box(subject, margin_fraction=0.08):
+    """Return a padded subject box without discarding any identity pixels."""
+    import numpy as np
+
+    region = np.asarray(subject).astype(bool)
+    ys, xs = np.nonzero(region)
+    if len(xs) == 0:
+        return 0, 0, region.shape[1], region.shape[0]
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    margin = max(4, int(round(max(x1 - x0, y1 - y0) * margin_fraction)))
+    return (
+        max(0, x0 - margin),
+        max(0, y0 - margin),
+        min(region.shape[1], x1 + margin),
+        min(region.shape[0], y1 + margin),
+    )
+
+
+def _recast_face_detail_crop_box(subject):
+    """Frame the upper identity region while retaining hair and shoulders.
+
+    Recast references are expected to contain one clear replacement subject.
+    A second, tighter view of that same subject gives SCAIL-2 substantially
+    more facial detail without sacrificing the primary image's outfit/body
+    information.  The semantic subject silhouette keeps this deterministic
+    and avoids introducing a separate face-model download.
+    """
+    import numpy as np
+
+    region = np.asarray(subject).astype(bool)
+    height, width = region.shape[:2]
+    ys, xs = np.nonzero(region)
+    if len(xs) == 0 or width < 2 or height < 2:
+        return 0, 0, width, height
+
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    subject_width = max(1, x1 - x0)
+    subject_height = max(1, y1 - y0)
+
+    # The upper 56% of an upright subject is a reliable head-and-shoulders
+    # detail view.  A roughly 4:5 crop matches the successful manual Recast
+    # close-up workflow while leaving room for hair, neck, and clothing cues.
+    crop_height = max(2, int(round(subject_height * 0.56)))
+    crop_width = max(
+        2,
+        int(round(crop_height * 0.80)),
+        int(round(subject_width * 0.66)),
+    )
+    crop_height = max(crop_height, int(round(crop_width / 0.82)))
+    crop_width = min(width, crop_width)
+    crop_height = min(height, crop_height)
+
+    upper_limit = y0 + max(1, int(round(subject_height * 0.40)))
+    upper_xs = np.nonzero(region & (
+        np.arange(height, dtype=np.int32)[:, None] < upper_limit
+    ))[1]
+    center_x = (
+        float(np.median(upper_xs))
+        if len(upper_xs)
+        else (x0 + x1) / 2.0
+    )
+
+    left = int(round(center_x - crop_width / 2.0))
+    top = int(round(y0 - subject_height * 0.02))
+    left = max(0, min(left, width - crop_width))
+    top = max(0, min(top, height - crop_height))
+    return left, top, left + crop_width, top + crop_height
+
+
+def _derive_recast_face_detail_reference(
+    reference_path,
+    output_path,
+    *,
+    refine_cutout=True,
+):
+    """Persist an automatic head-and-shoulders view of one reference."""
+    import numpy as np
+    from PIL import Image as _PILImage, ImageOps as _PILImageOps
+
+    with _PILImage.open(reference_path) as source:
+        rgba = _PILImageOps.exif_transpose(source).convert("RGBA")
+        rgb = np.asarray(rgba.convert("RGB"), dtype=np.uint8)
+        alpha = np.asarray(rgba.getchannel("A"), dtype=np.uint8)
+
+    subject, opacity, mask_source = _recast_reference_subject_mask(rgb, alpha)
+    foreground_rgb = rgb
+    if refine_cutout:
+        subject, opacity, mask_source, foreground_rgb = (
+            _refine_recast_reference_cutout(
+                rgb,
+                subject,
+                opacity,
+                mask_source,
+                reference_path=reference_path,
+            )
+        )
+    crop_box = _recast_face_detail_crop_box(subject)
+    if crop_box == (0, 0, rgba.width, rgba.height):
+        return None
+    clean_rgba = np.concatenate(
+        (
+            np.asarray(foreground_rgb, dtype=np.uint8),
+            np.rint(np.clip(opacity, 0.0, 1.0) * 255.0)
+            .astype(np.uint8)[..., None],
+        ),
+        axis=-1,
+    )
+    detail = _PILImage.fromarray(clean_rgba).crop(crop_box)
+    if detail.width < 2 or detail.height < 2:
+        return None
+    detail.save(output_path, format="PNG")
+    left, top, right, bottom = crop_box
+    metadata = {
+        "path": output_path,
+        "crop_box": list(crop_box),
+        "source_size": [rgba.width, rgba.height],
+        "detail_size": [detail.width, detail.height],
+        "detail_source": f"upper-subject crop from {mask_source}",
+    }
+    return {
+        "metadata": metadata,
+        # Reuse this one segmentation pass for both generated SCAIL views.
+        # Without these cached layers, the primary plus derived crop would
+        # make SAM3 analyze the same identity three times.
+        "source_conditioning": (
+            subject,
+            opacity,
+            mask_source,
+            foreground_rgb,
+        ),
+        "detail_conditioning": (
+            subject[top:bottom, left:right],
+            opacity[top:bottom, left:right],
+            mask_source,
+            foreground_rgb[top:bottom, left:right],
+        ),
+    }
+
+
+def _recast_region_bbox_aspect(region):
+    """Return width/height for the visible bounding box of a mask."""
+    import numpy as np
+
+    ys, xs = np.nonzero(np.asarray(region).astype(bool))
+    if len(xs) == 0:
+        return None
+    width = max(1, int(xs.max()) - int(xs.min()) + 1)
+    height = max(1, int(ys.max()) - int(ys.min()) + 1)
+    return float(width) / float(height)
+
+
+def _recast_face_detail_upscale_factor(detail_size, canvas_size):
+    """Return the enlargement needed to contain a detail view on its canvas."""
+    try:
+        detail_width, detail_height = (
+            float(detail_size[0]),
+            float(detail_size[1]),
+        )
+        canvas_width, canvas_height = (
+            float(canvas_size[0]),
+            float(canvas_size[1]),
+        )
+    except (IndexError, TypeError, ValueError):
+        return None
+    if min(
+        detail_width,
+        detail_height,
+        canvas_width,
+        canvas_height,
+    ) <= 0:
+        return None
+    return min(
+        canvas_width / detail_width,
+        canvas_height / detail_height,
+    )
+
+
+def _recast_should_add_auto_face_detail(
+    mapping,
+    enabled=True,
+    *,
+    source_probe_mask=None,
+    semantic_color=None,
+    reference_subject=None,
+    detail_size=None,
+    canvas_size=None,
+    max_upscale=1.75,
+):
+    """Use auto detail only when it will not compete with an explicit view."""
+    eligible = bool(
+        enabled
+        and not mapping.get("reference_aligned_to_source")
+        and not mapping.get("additional_ref_image_paths")
+    )
+    if not eligible:
+        return False
+
+    upscale_factor = _recast_face_detail_upscale_factor(
+        detail_size,
+        canvas_size,
+    )
+    if (
+        upscale_factor is not None
+        and upscale_factor > float(max_upscale)
+    ):
+        return False
+
+    if (
+        source_probe_mask is None
+        or semantic_color is None
+        or reference_subject is None
+    ):
+        return eligible
+
+    import numpy as np
+
+    source_mask = np.asarray(source_probe_mask)
+    if source_mask.ndim == 3 and source_mask.shape[-1] == 3:
+        target_region = np.all(
+            source_mask == np.asarray(semantic_color, dtype=np.uint8),
+            axis=-1,
+        )
+    else:
+        target_region = source_mask.astype(bool)
+    target_aspect = _recast_region_bbox_aspect(target_region)
+    reference_aspect = _recast_region_bbox_aspect(reference_subject)
+    if target_aspect is None or reference_aspect is None:
+        return eligible
+
+    # A tall/narrow driving silhouette normally means a full-body shot. If
+    # the supplied identity is a substantially wider upper-body portrait,
+    # another enlarged face crop becomes a second competing spatial subject.
+    # Keep the primary identity view but omit that redundant extra region.
+    if (
+        target_aspect < 0.65
+        and reference_aspect > target_aspect * 1.45
+    ):
+        return False
+    return eligible
+
+
+def _fit_recast_reference_layers(
+    rgb, semantic_rgb, width, height, *, aligned=False,
+    crop_to_subject=True, canvas_color=(127, 127, 127),
+):
+    """Apply the exact shared image/mask transform used by Recast."""
+    import numpy as np
+    from PIL import Image as _PILImage
+
+    rgb_image = _PILImage.fromarray(np.asarray(rgb, dtype=np.uint8))
+    mask_image = _PILImage.fromarray(np.asarray(semantic_rgb, dtype=np.uint8))
+    if aligned:
+        scale = max(width / rgb_image.width, height / rgb_image.height)
+        resized_size = (
+            max(width, int(round(rgb_image.width * scale))),
+            max(height, int(round(rgb_image.height * scale))),
+        )
+        rgb_image = rgb_image.resize(
+            resized_size, resample=_PILImage.Resampling.LANCZOS,
+        )
+        mask_image = mask_image.resize(
+            resized_size, resample=_PILImage.Resampling.NEAREST,
+        )
+        left = (resized_size[0] - width) // 2
+        top = (resized_size[1] - height) // 2
+        box = (left, top, left + width, top + height)
+        return rgb_image.crop(box), mask_image.crop(box)
+
+    subject = np.any(np.asarray(semantic_rgb, dtype=np.uint8) > 30, axis=-1)
+    crop_box = (
+        _recast_subject_crop_box(subject)
+        if crop_to_subject
+        else (0, 0, rgb_image.width, rgb_image.height)
+    )
+    rgb_image = rgb_image.crop(crop_box)
+    mask_image = mask_image.crop(crop_box)
+    scale = min(width / rgb_image.width, height / rgb_image.height)
+    resized_size = (
+        max(1, min(width, int(round(rgb_image.width * scale)))),
+        max(1, min(height, int(round(rgb_image.height * scale)))),
+    )
+    rgb_image = rgb_image.resize(
+        resized_size, resample=_PILImage.Resampling.LANCZOS,
+    )
+    mask_image = mask_image.resize(
+        resized_size, resample=_PILImage.Resampling.NEAREST,
+    )
+    rgb_canvas = _PILImage.new(
+        "RGB",
+        (width, height),
+        tuple(int(value) for value in canvas_color),
+    )
+    mask_canvas = _PILImage.new("RGB", (width, height), (0, 0, 0))
+    offset = ((width - resized_size[0]) // 2, (height - resized_size[1]) // 2)
+    rgb_canvas.paste(rgb_image, offset)
+    mask_canvas.paste(mask_image, offset)
+    return rgb_canvas, mask_canvas
+
+
+def _prepare_recast_reference_frame(
+    reference_path, color, *, isolate_reference=True,
+    aligned_semantic_mask=None, subject_conditioning=None,
+    spatial_background=None, width=832, height=480,
+):
+    """Build separate CLIP-identity and spatial RGB inputs for SCAIL-2."""
+    import numpy as np
+    from PIL import Image as _PILImage, ImageOps as _PILImageOps
+
+    with _PILImage.open(reference_path) as source:
+        rgba = _PILImageOps.exif_transpose(source).convert("RGBA")
+        rgb = np.asarray(rgba.convert("RGB"), dtype=np.uint8)
+        alpha = np.asarray(rgba.getchannel("A"), dtype=np.uint8)
+
+    aligned = aligned_semantic_mask is not None
+    foreground_rgb = rgb
+    if aligned:
+        semantic_rgb = np.asarray(aligned_semantic_mask, dtype=np.uint8)
+        if semantic_rgb.shape[:2] != rgb.shape[:2]:
+            semantic_rgb = np.asarray(
+                _PILImage.fromarray(semantic_rgb, mode="RGB").resize(
+                    (rgb.shape[1], rgb.shape[0]),
+                    resample=_PILImage.Resampling.NEAREST,
+                ),
+                dtype=np.uint8,
+            )
+        subject = np.any(semantic_rgb > 30, axis=-1)
+        opacity = subject.astype(np.float32)
+        mask_source = "aligned source overlap"
+    else:
+        if subject_conditioning is None:
+            subject, opacity, mask_source = _recast_reference_subject_mask(
+                rgb, alpha,
+            )
+            if isolate_reference:
+                subject, opacity, mask_source, foreground_rgb = (
+                    _refine_recast_reference_cutout(
+                        rgb,
+                        subject,
+                        opacity,
+                        mask_source,
+                        reference_path=reference_path,
+                    )
+                )
+        else:
+            if len(subject_conditioning) == 4:
+                (
+                    subject,
+                    opacity,
+                    mask_source,
+                    foreground_rgb,
+                ) = subject_conditioning
+            elif len(subject_conditioning) == 3:
+                subject, opacity, mask_source = subject_conditioning
+            else:
+                raise ValueError(
+                    "Cached Recast reference conditioning is invalid."
+                )
+            subject = np.asarray(subject).astype(bool)
+            opacity = np.asarray(opacity, dtype=np.float32)
+            foreground_rgb = np.asarray(foreground_rgb, dtype=np.uint8)
+            if (
+                subject.shape != rgb.shape[:2]
+                or opacity.shape != rgb.shape[:2]
+                or foreground_rgb.shape != rgb.shape
+            ):
+                raise ValueError(
+                    "Cached Recast reference mask does not match its image."
+                )
+        semantic_rgb = np.zeros_like(rgb, dtype=np.uint8)
+        semantic_rgb[subject] = np.asarray(color, dtype=np.uint8)
+
+    if isolate_reference:
+        foreground_image, prepared_mask = _fit_recast_reference_layers(
+            foreground_rgb,
+            semantic_rgb,
+            int(width),
+            int(height),
+            aligned=aligned,
+            crop_to_subject=True,
+        )
+        opacity_rgb = np.repeat(
+            np.rint(np.clip(opacity, 0.0, 1.0) * 255.0)
+            .astype(np.uint8)[..., None],
+            3,
+            axis=-1,
+        )
+        opacity_image, _ = _fit_recast_reference_layers(
+            opacity_rgb,
+            semantic_rgb,
+            int(width),
+            int(height),
+            aligned=aligned,
+            crop_to_subject=True,
+            canvas_color=(0, 0, 0),
+        )
+        if spatial_background is None:
+            background = np.full(
+                (int(height), int(width), 3),
+                127,
+                dtype=np.uint8,
+            )
+        else:
+            background = np.asarray(spatial_background, dtype=np.uint8)
+            if background.ndim != 3 or background.shape[-1] != 3:
+                raise ValueError(
+                    "Recast spatial background must be an H/W/RGB image; "
+                    f"got {background.shape}."
+                )
+            if background.shape[:2] != (int(height), int(width)):
+                background = np.asarray(
+                    _PILImage.fromarray(background).resize(
+                        (int(width), int(height)),
+                        resample=_PILImage.Resampling.LANCZOS,
+                    ),
+                    dtype=np.uint8,
+                )
+        foreground_array = np.asarray(
+            foreground_image.convert("RGB"),
+            dtype=np.uint8,
+        )
+        prepared_opacity = (
+            np.asarray(
+                opacity_image.convert("RGB"),
+                dtype=np.float32,
+            )[..., :1]
+            / 255.0
+        )
+        semantic_region = np.any(
+            np.asarray(
+                prepared_mask.convert("RGB"),
+                dtype=np.uint8,
+            ) > 30,
+            axis=-1,
+        )
+        prepared_opacity[~semantic_region] = 0.0
+        prepared_array = np.rint(
+            foreground_array.astype(np.float32) * prepared_opacity
+            + background.astype(np.float32) * (1.0 - prepared_opacity)
+        ).clip(0, 255).astype(np.uint8)
+        prepared_image = _PILImage.fromarray(prepared_array)
+    else:
+        prepared_image, prepared_mask = _fit_recast_reference_layers(
+            rgb,
+            semantic_rgb,
+            int(width),
+            int(height),
+            aligned=aligned,
+            crop_to_subject=False,
+        )
+    if isolate_reference:
+        # Keep the original, uncropped reference composition for CLIP identity.
+        # Only the VAE/spatial reference gets the source-scene background and
+        # tighter subject framing. This preserves the strong face signal
+        # observed with isolation disabled without allowing the reference
+        # room/background to leak through SCAIL-2's spatial latent.
+        identity_image, _ = _fit_recast_reference_layers(
+            rgb,
+            semantic_rgb,
+            int(width),
+            int(height),
+            aligned=aligned,
+            crop_to_subject=False,
+        )
+    else:
+        identity_image = prepared_image.copy()
+    return {
+        "image": prepared_image,
+        "identity_image": identity_image,
+        "mask": prepared_mask,
+        "mask_source": mask_source,
+        "source_size": (int(rgb.shape[1]), int(rgb.shape[0])),
+        "prepared_size": (int(width), int(height)),
+    }
+
+
+def _recast_image_data_uri(image, image_format="PNG"):
+    import base64
+    import io
+
+    buffer = io.BytesIO()
+    image.save(buffer, format=image_format)
+    mime = "image/png" if image_format.upper() == "PNG" else "image/jpeg"
+    return f"data:{mime};base64," + base64.b64encode(buffer.getvalue()).decode()
+
+
+def _compose_recast_timeline_preview(
+    source_frames, mapping_masks, mapping_results, max_tile_width=420,
+):
+    """Build one compact card per mapping at its best sampled anchor."""
+    import numpy as np
+    from PIL import Image as _PILImage, ImageDraw as _PILImageDraw
+
+    frames = np.asarray(source_frames, dtype=np.uint8)
+    if frames.ndim != 4 or frames.shape[-1] != 3:
+        raise ValueError("Recast timeline preview needs T/H/W/RGB frames.")
+    tiles = []
+    for result, raw_mask in zip(mapping_results, mapping_masks):
+        if not result.get("found"):
+            continue
+        sample_index = int(result["anchor_sample_index"])
+        frame = frames[sample_index].copy()
+        mask = np.asarray(raw_mask, dtype=np.uint8)[sample_index]
+        selected = np.any(mask > 30, axis=-1)
+        if bool(selected.any()):
+            frame[selected] = (
+                frame[selected].astype(np.float32) * 0.45
+                + mask[selected].astype(np.float32) * 0.55
+            ).astype(np.uint8)
+        image = _PILImage.fromarray(frame)
+        if image.width > int(max_tile_width):
+            tile_height = max(
+                1,
+                int(round(image.height * int(max_tile_width) / image.width)),
+            )
+            image = image.resize(
+                (int(max_tile_width), tile_height),
+                resample=_PILImage.Resampling.LANCZOS,
+            )
+        header_height = 24
+        tile = _PILImage.new(
+            "RGB",
+            (image.width, image.height + header_height),
+            (22, 24, 29),
+        )
+        tile.paste(image, (0, header_height))
+        draw = _PILImageDraw.Draw(tile)
+        color = tuple(int(value) for value in result["color"])
+        draw.rectangle((6, 6, 16, 16), fill=color, outline=(235, 235, 235))
+        label = (
+            f"Character {chr(65 + int(result['mapping_index']))} - "
+            f"{float(result['anchor_time_seconds']):.1f}s"
+        )
+        draw.text((22, 5), label, fill=(235, 238, 244))
+        tiles.append(tile)
+    if not tiles:
+        return _PILImage.fromarray(frames[0])
+    columns = min(2, len(tiles))
+    rows = (len(tiles) + columns - 1) // columns
+    cell_width = max(tile.width for tile in tiles)
+    cell_height = max(tile.height for tile in tiles)
+    sheet = _PILImage.new(
+        "RGB",
+        (columns * cell_width, rows * cell_height),
+        (14, 16, 20),
+    )
+    for index, tile in enumerate(tiles):
+        x = (index % columns) * cell_width
+        y = (index // columns) * cell_height
+        sheet.paste(tile, (x, y))
+    return sheet
+
+
+def _recast_reference_preview_payload(
+    prepared, mapping_index, view_index, kind, view_metadata=None,
+):
+    image = prepared["image"].convert("RGB")
+    identity_image = prepared["identity_image"].convert("RGB")
+    mask = prepared["mask"].convert("RGB")
+    payload = {
+        "mapping_index": mapping_index,
+        "view_index": view_index,
+        "kind": kind,
+        "mask_source": prepared["mask_source"],
+        "source_size": list(prepared["source_size"]),
+        "prepared_size": list(prepared["prepared_size"]),
+        "prepared_image": _recast_image_data_uri(image),
+        "semantic_mask": _recast_image_data_uri(mask),
+    }
+    if view_metadata:
+        payload.update({
+            key: value
+            for key, value in view_metadata.items()
+            if key in {
+                "crop_box", "detail_size", "detail_source",
+                "detail_upscale_factor",
+            }
+        })
+    if mapping_index == 0 and view_index == 0:
+        payload["clip_identity_image"] = _recast_image_data_uri(identity_image)
+    return payload
+
+
+def _prepare_recast_reference_conditioning(
+    mappings, source_probe_mask, output_dir, job_id, *,
+    isolate_reference, selected_count, auto_face_detail=True,
+    source_frame=None, reference_canvas=None, mapping_anchors=None,
+):
+    """Prepare reference pairs using each character's own timeline anchor."""
+    import numpy as np
+    from PIL import Image as _PILImage, ImageOps as _PILImageOps
+    from shared import magic_mask
+
+    os.makedirs(output_dir, exist_ok=True)
+    image_paths = []
+    mask_paths = []
+    clip_identity_path = None
+    expected_colors = []
+    previews = []
+    auto_face_detail_refs = []
+    primary_target_refs = []
+    canvas_width, canvas_height = 832, 480
+    anchor_list = (
+        mapping_anchors
+        if isinstance(mapping_anchors, list)
+        else []
+    )
+    first_anchor_frame = None
+    if anchor_list and isinstance(anchor_list[0], dict):
+        first_anchor_frame = anchor_list[0].get("source_frame")
+    if reference_canvas is not None:
+        try:
+            canvas_width, canvas_height = (
+                int(reference_canvas[0]),
+                int(reference_canvas[1]),
+            )
+        except (IndexError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "Recast reference canvas must contain width and height."
+            ) from exc
+        if (
+            min(canvas_width, canvas_height) <= 0
+            or canvas_width % 32
+            or canvas_height % 32
+        ):
+            raise ValueError(
+                "Recast reference canvas dimensions must be positive and "
+                "divisible by 32."
+            )
+    elif source_frame is not None:
+        canvas_width, canvas_height = _recast_reference_canvas_size(
+            source_frame,
+        )
+    elif first_anchor_frame is not None:
+        canvas_width, canvas_height = _recast_reference_canvas_size(
+            first_anchor_frame,
+        )
+    for mapping_index, mapping in enumerate(mappings):
+        color = _RECAST_MASK_COLORS[mapping_index]
+        mapping_source_frame = source_frame
+        mapping_source_mask = source_probe_mask
+        if (
+            mapping_index < len(anchor_list)
+            and isinstance(anchor_list[mapping_index], dict)
+        ):
+            mapping_source_frame = anchor_list[mapping_index].get(
+                "source_frame",
+                mapping_source_frame,
+            )
+            mapping_source_mask = anchor_list[mapping_index].get(
+                "source_mask",
+                mapping_source_mask,
+            )
+        spatial_background = None
+        if mapping_source_frame is not None:
+            scene_layers = _build_recast_source_scene_layers(
+                mapping_source_frame,
+                mapping_source_mask,
+                selected_count,
+                output_size=(canvas_width, canvas_height),
+            )
+            spatial_background = scene_layers["image"]
+        views = [{
+            "kind": "primary",
+            "path": mapping["ref_image_path"],
+        }]
+        if _recast_should_add_auto_face_detail(mapping, auto_face_detail):
+            detail_path = os.path.join(
+                output_dir,
+                f"recast_auto_face_detail_{job_id}_{mapping_index + 1}.png",
+            )
+            detail_result = _derive_recast_face_detail_reference(
+                mapping["ref_image_path"],
+                detail_path,
+                refine_cutout=isolate_reference,
+            )
+            if detail_result:
+                views[0]["subject_conditioning"] = detail_result[
+                    "source_conditioning"
+                ]
+                detail_upscale_factor = _recast_face_detail_upscale_factor(
+                    detail_result["metadata"]["detail_size"],
+                    (canvas_width, canvas_height),
+                )
+                detail_result["metadata"]["detail_upscale_factor"] = (
+                    round(detail_upscale_factor, 3)
+                    if detail_upscale_factor is not None
+                    else None
+                )
+                if _recast_should_add_auto_face_detail(
+                    mapping,
+                    auto_face_detail,
+                    source_probe_mask=mapping_source_mask,
+                    semantic_color=color,
+                    reference_subject=detail_result[
+                        "source_conditioning"
+                    ][0],
+                    detail_size=detail_result["metadata"]["detail_size"],
+                    canvas_size=(canvas_width, canvas_height),
+                ):
+                    views.append({
+                        "kind": "auto_face_detail",
+                        "path": detail_path,
+                        "metadata": detail_result["metadata"],
+                        "subject_conditioning": detail_result[
+                            "detail_conditioning"
+                        ],
+                    })
+                    auto_face_detail_refs.append({
+                        "mapping_index": mapping_index,
+                        **detail_result["metadata"],
+                    })
+                else:
+                    try:
+                        os.remove(detail_path)
+                    except OSError:
+                        pass
+                    if (
+                        detail_upscale_factor is not None
+                        and detail_upscale_factor > 1.75
+                    ):
+                        reason = (
+                            "the crop would require "
+                            f"{detail_upscale_factor:.2f}x enlargement"
+                        )
+                    else:
+                        reason = (
+                            "the source target is full-body while the identity "
+                            "reference is already a tighter upper-body view"
+                        )
+                    print(
+                        "[Recast] Skipped automatic face-detail spatial view "
+                        f"for mapping {mapping_index + 1}: {reason}."
+                    )
+        views.extend({
+            "kind": "additional",
+            "path": path,
+        } for path in mapping.get("additional_ref_image_paths", []))
+        for view_index, view in enumerate(views):
+            kind = view["kind"]
+            reference_path = view["path"]
+            aligned_mask = None
+            if view_index == 0 and mapping.get("reference_aligned_to_source"):
+                with _PILImage.open(reference_path) as reference_image:
+                    reference_frame = np.asarray(
+                        _PILImageOps.exif_transpose(reference_image).convert("RGB"),
+                        dtype=np.uint8,
+                    )
+                reference_people = magic_mask.generate_keyword_masks(
+                    reference_frame[None],
+                    "person",
+                    no_hole=True,
+                    colorize_objects=True,
+                    color_palette=_RECAST_MASK_COLORS,
+                    max_colored_objects=len(_RECAST_MASK_COLORS),
+                )[0]
+                aligned_colors = (
+                    _RECAST_MASK_COLORS[:selected_count]
+                    if len(mappings) == 1 and selected_count > 1
+                    else [color]
+                )
+                aligned_mask, matched = _align_recast_reference_mask(
+                    mapping_source_mask,
+                    reference_people,
+                    aligned_colors,
+                    _RECAST_MASK_COLORS,
+                )
+                if matched < len(aligned_colors):
+                    raise ValueError(
+                        "The edited first-frame reference could not be aligned "
+                        f"to every selected source person ({matched}/"
+                        f"{len(aligned_colors)})."
+                    )
+            prepared = _prepare_recast_reference_frame(
+                reference_path,
+                color,
+                isolate_reference=isolate_reference,
+                aligned_semantic_mask=aligned_mask,
+                subject_conditioning=view.get("subject_conditioning"),
+                spatial_background=spatial_background,
+                width=canvas_width,
+                height=canvas_height,
+            )
+            suffix = f"{mapping_index + 1}_{view_index + 1}"
+            prepared_path = os.path.join(
+                output_dir, f"recast_prepared_ref_{job_id}_{suffix}.png",
+            )
+            mask_path = os.path.join(
+                output_dir, f"recast_prepared_mask_{job_id}_{suffix}.png",
+            )
+            prepared["image"].save(prepared_path)
+            prepared["mask"].save(mask_path)
+            if clip_identity_path is None:
+                if isolate_reference:
+                    clip_identity_path = os.path.join(
+                        output_dir,
+                        f"recast_clip_identity_ref_{job_id}_{suffix}.png",
+                    )
+                    prepared["identity_image"].save(clip_identity_path)
+                else:
+                    clip_identity_path = prepared_path
+            image_paths.append(prepared_path)
+            mask_paths.append(mask_path)
+            expected_colors.append(list(color))
+            if view_index == 0:
+                primary_target_refs.append({
+                    "mapping_index": mapping_index,
+                    "image": prepared_path,
+                    "mask": mask_path,
+                    "color": list(color),
+                })
+            previews.append(
+                _recast_reference_preview_payload(
+                    prepared,
+                    mapping_index,
+                    view_index,
+                    kind,
+                    view.get("metadata"),
+                )
+            )
+    if not image_paths:
+        raise ValueError("Recast needs at least one prepared reference.")
+    return {
+        "image_refs": image_paths,
+        "clip_identity_ref": clip_identity_path,
+        "primary_mask": mask_paths[0],
+        "additional_masks": mask_paths[1:],
+        "expected_colors": expected_colors,
+        "previews": previews,
+        "auto_face_detail_refs": auto_face_detail_refs,
+        "primary_target_refs": primary_target_refs,
+        "reference_canvas": [canvas_width, canvas_height],
+    }
+
+
+def _resize_recast_shot_frames(frames, canvas_size, *, semantic=False):
+    """Resize T/H/W/RGB frames to the exact generation canvas."""
+    import numpy as np
+    from PIL import Image as _PILImage
+
+    array = np.asarray(frames, dtype=np.uint8)
+    if array.ndim != 4 or array.shape[-1] != 3:
+        raise ValueError(
+            f"Recast shot frames must be T/H/W/RGB; got {array.shape}."
+        )
+    width, height = int(canvas_size[0]), int(canvas_size[1])
+    if min(width, height) <= 0:
+        raise ValueError("Recast shot canvas dimensions must be positive.")
+    if array.shape[1:3] == (height, width):
+        return array.copy()
+    resample = (
+        _PILImage.Resampling.NEAREST
+        if semantic
+        else _PILImage.Resampling.LANCZOS
+    )
+    return np.stack([
+        np.asarray(
+            _PILImage.fromarray(frame).resize(
+                (width, height),
+                resample=resample,
+            ),
+            dtype=np.uint8,
+        )
+        for frame in array
+    ])
+
+
+def _write_recast_shot_video(path, frames, fps, *, semantic=False):
+    """Persist one silent internal guide or semantic-mask clip."""
+    import imageio.v2 as imageio
+    import numpy as np
+
+    array = np.asarray(frames, dtype=np.uint8)
+    if array.ndim != 4 or array.shape[-1] != 3 or len(array) == 0:
+        raise ValueError("Cannot write an empty or malformed Recast shot.")
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    if semantic:
+        from shared import magic_mask
+
+        codec_params = magic_mask._magic_mask_video_codec_params()
+    else:
+        codec_params = {
+            "codec": "libx264",
+            "quality": 9,
+            "pixelformat": "yuv420p",
+            "macro_block_size": 1,
+        }
+    writer = imageio.get_writer(
+        path,
+        fps=float(fps),
+        ffmpeg_log_level="error",
+        **codec_params,
+    )
+    try:
+        for frame in array:
+            writer.append_data(frame)
+    finally:
+        writer.close()
+    return path
+
+
+def _recolor_recast_reference_mask(
+    semantic_mask, global_mapping_index, local_mapping_index,
+):
+    """Recolor one prepared identity mask for a shot-local character slot."""
+    import numpy as np
+
+    mask = np.asarray(semantic_mask, dtype=np.uint8)
+    global_color = np.asarray(
+        _RECAST_MASK_COLORS[int(global_mapping_index)],
+        dtype=np.uint8,
+    )
+    local_color = np.asarray(
+        _RECAST_MASK_COLORS[int(local_mapping_index)],
+        dtype=np.uint8,
+    )
+    region = np.all(mask == global_color, axis=-1)
+    if not bool(region.any()):
+        region = np.any(mask > 30, axis=-1)
+    output = np.zeros_like(mask, dtype=np.uint8)
+    output[region] = local_color
+    return output
+
+
+def _load_recast_reference_pair(
+    image_path, mask_path, global_mapping_index, local_mapping_index,
+):
+    """Load a prepared image/mask pair and assign its shot-local color."""
+    import numpy as np
+    from PIL import Image as _PILImage
+
+    with _PILImage.open(image_path) as image:
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    with _PILImage.open(mask_path) as mask:
+        semantic = np.asarray(mask.convert("RGB"), dtype=np.uint8)
+    if semantic.shape != rgb.shape:
+        raise ValueError(
+            "Prepared Recast reference image and mask dimensions differ."
+        )
+    return (
+        rgb,
+        _recolor_recast_reference_mask(
+            semantic,
+            global_mapping_index,
+            local_mapping_index,
+        ),
+    )
+
+
+def _save_recast_reference_pair(
+    output_dir, stem, image, semantic_mask,
+):
+    """Save an internal SCAIL reference pair and return both paths."""
+    from PIL import Image as _PILImage
+
+    os.makedirs(output_dir, exist_ok=True)
+    image_path = os.path.join(output_dir, f"{stem}.png")
+    mask_path = os.path.join(output_dir, f"{stem}_mask.png")
+    _PILImage.fromarray(image).save(image_path)
+    _PILImage.fromarray(semantic_mask).save(mask_path)
+    return image_path, mask_path
+
+
+def _build_recast_shot_reference_conditioning(
+    prepared_refs, active_mapping_indices, source_frame,
+    local_semantic_mask, output_dir, job_id, shot_index, *,
+    cooccurring, reference_canvas,
+):
+    """Build balanced, composition-aware references for one camera shot."""
+    import numpy as np
+
+    active = [int(index) for index in active_mapping_indices]
+    if not active:
+        raise ValueError("A generated Recast shot needs an active character.")
+    active_count = len(active)
+    all_images = list(prepared_refs.get("image_refs") or [])
+    all_masks = [
+        prepared_refs.get("primary_mask"),
+        *list(prepared_refs.get("additional_masks") or []),
+    ]
+    all_colors = list(prepared_refs.get("expected_colors") or [])
+    if (
+        len(all_images) != len(all_masks)
+        or len(all_images) != len(all_colors)
+    ):
+        raise ValueError("Prepared Recast reference pairs are out of sync.")
+
+    views_by_mapping = {mapping_index: [] for mapping_index in active}
+    for image_path, mask_path, raw_color in zip(
+        all_images, all_masks, all_colors,
+    ):
+        if not image_path or not mask_path or raw_color is None:
+            continue
+        try:
+            color = tuple(int(channel) for channel in raw_color)
+        except (TypeError, ValueError):
+            continue
+        for mapping_index in active:
+            if color == tuple(_RECAST_MASK_COLORS[mapping_index]):
+                views_by_mapping[mapping_index].append(
+                    (image_path, mask_path),
+                )
+                break
+
+    primary_items = {
+        int(item["mapping_index"]): item
+        for item in prepared_refs.get("primary_target_refs") or []
+        if isinstance(item, dict) and "mapping_index" in item
+    }
+    primary_layers = []
+    for local_index, mapping_index in enumerate(active):
+        item = primary_items.get(mapping_index)
+        if not item:
+            raise ValueError(
+                f"Missing primary reference for Recast mapping "
+                f"{mapping_index + 1}."
+            )
+        primary_layers.append(
+            _load_recast_reference_pair(
+                item["image"],
+                item["mask"],
+                mapping_index,
+                local_index,
+            )
+        )
+
+    primary_mode = "shot_layout"
+    try:
+        if active_count > 1 and not cooccurring:
+            raise ValueError(
+                "active characters never share one frame in this shot"
+            )
+        primary_image, primary_mask = (
+            _compose_recast_group_reference_frame(
+                source_frame,
+                local_semantic_mask,
+                primary_layers,
+                active_count,
+            )
+        )
+    except ValueError as composition_error:
+        print(
+            f"[Recast] Shot {shot_index + 1} has no usable shared layout; "
+            f"using a balanced cast sheet: {composition_error}"
+        )
+        primary_image, primary_mask = (
+            _compose_recast_cast_reference_frame(
+                primary_layers,
+                active_count,
+                reference_canvas,
+            )
+        )
+        primary_mode = "cast_sheet"
+
+    stem = f"recast_shot_ref_{job_id}_{shot_index + 1}"
+    primary_path, primary_mask_path = _save_recast_reference_pair(
+        output_dir,
+        stem,
+        primary_image,
+        primary_mask,
+    )
+    image_refs = [primary_path]
+    mask_paths = [primary_mask_path]
+    expected_colors = [
+        list(_RECAST_MASK_COLORS[0])
+        if active_count == 1
+        else None
+    ]
+
+    if active_count == 1:
+        mapping_index = active[0]
+        for view_index, (image_path, mask_path) in enumerate(
+            views_by_mapping.get(mapping_index) or [],
+            1,
+        ):
+            _rgb, recolored_mask = _load_recast_reference_pair(
+                image_path,
+                mask_path,
+                mapping_index,
+                0,
+            )
+            recolored_mask_path = os.path.join(
+                output_dir,
+                f"{stem}_identity_{view_index}_mask.png",
+            )
+            from PIL import Image as _PILImage
+
+            _PILImage.fromarray(recolored_mask).save(recolored_mask_path)
+            image_refs.append(image_path)
+            mask_paths.append(recolored_mask_path)
+            expected_colors.append(list(_RECAST_MASK_COLORS[0]))
+    else:
+        # A spatial group primary already contains every active identity in
+        # the tracked left/right slots. Extra side-by-side cast/detail sheets
+        # can disagree with those positions when the source actors cross or
+        # appear in reverse card order. SCAIL-2 then follows the sheet layout
+        # instead of its semantic colors, swapping and enlarging characters.
+        # Keep the native group pair singular; the dedicated source-scene
+        # reference below remains the only supporting reference.
+        omitted_views = sum(
+            len(views_by_mapping.get(mapping_index) or [])
+            for mapping_index in active
+        )
+        reference_kind = (
+            "spatial"
+            if primary_mode == "shot_layout"
+            else "balanced"
+        )
+        print(
+            f"[Recast] Shot {shot_index + 1} uses one {reference_kind} "
+            f"{active_count}-character reference; omitted "
+            f"{omitted_views} separate identity view(s) that could override "
+            "tracked color correspondence."
+        )
+
+    scene_reference = _build_recast_source_scene_reference(
+        source_frame,
+        local_semantic_mask,
+        active_count,
+        output_dir,
+        f"{job_id}_shot_{shot_index + 1}",
+        output_size=tuple(reference_canvas),
+    )
+    return {
+        "image_refs": image_refs,
+        "primary_mask": mask_paths[0],
+        "additional_masks": mask_paths[1:],
+        "expected_colors": expected_colors,
+        "clip_identity_ref": (
+            (views_by_mapping.get(active[0]) or [(primary_path, None)])[0][0]
+            if active_count == 1
+            else primary_path
+        ),
+        "source_scene_reference": scene_reference,
+        "primary_mode": primary_mode,
+    }
+
+
+def _build_recast_shot_manifest(
+    base_params, mapped_tracking, prepared_refs, output_dir, job_id, *,
+    reference_canvas, target_frame_count, generation_fps,
+    minimum_frames, latent_size,
+):
+    """Create internal, exact-length generation tasks per detected shot."""
+    import copy
+    import numpy as np
+
+    source_frames, mapping_masks, shot_ranges = (
+        _resample_recast_tracking_timeline(
+            mapped_tracking["source_frames"],
+            mapped_tracking["mapping_masks"],
+            mapped_tracking["shot_ranges"],
+            target_frame_count,
+        )
+    )
+    cast_transition_hold_frames = max(
+        4,
+        min(12, int(round(max(1.0, float(generation_fps)) * 0.2))),
+    )
+    transition_plans = _plan_recast_shot_segments(
+        mapping_masks,
+        shot_ranges,
+        split_cast_transitions=True,
+        min_cast_run_frames=cast_transition_hold_frames,
+    )
+    plans = _plan_recast_shot_segments(
+        mapping_masks,
+        shot_ranges,
+        # Keep every camera shot continuous. Splitting at a cast entrance
+        # created tiny independent clips that could leave the source actor
+        # untouched and made SCAIL-2 relearn color/identity correspondence at
+        # the join. A hidden identity-aware pre-roll below gives late entrants
+        # an initialization frame without publishing a new boundary.
+        split_cast_transitions=False,
+        min_cast_run_frames=cast_transition_hold_frames,
+    )
+    cast_transition_count = max(
+        0,
+        len(transition_plans) - len(shot_ranges),
+    )
+
+    global_semantic = np.empty(
+        (*source_frames.shape[:-1], 3),
+        dtype=np.uint8,
+    )
+    global_semantic[...] = (255, 255, 255)
+    occupied = np.zeros(source_frames.shape[:-1], dtype=bool)
+    for mapping_index, mapping_mask in enumerate(mapping_masks):
+        region = (
+            np.any(mapping_mask > 30, axis=-1)
+            if mapping_mask.ndim == 4
+            else mapping_mask.astype(bool)
+        )
+        writable = region & ~occupied
+        global_semantic[writable] = np.asarray(
+            _RECAST_MASK_COLORS[mapping_index],
+            dtype=np.uint8,
+        )
+        occupied |= region
+
+    os.makedirs(output_dir, exist_ok=True)
+    tasks = []
+    published_plans = []
+    for plan in plans:
+        shot_index = int(plan["shot_index"])
+        start, end = int(plan["start_frame"]), int(plan["end_frame"])
+        active = list(plan["active_mapping_indices"])
+        shot_frames = source_frames[start:end]
+        resized_source = _resize_recast_shot_frames(
+            shot_frames,
+            reference_canvas,
+        )
+        published = dict(plan)
+        published["active_mapping_indices"] = list(active)
+
+        if not active:
+            passthrough_path = os.path.join(
+                output_dir,
+                f"recast_{job_id}_shot_{shot_index + 1}_source.mp4",
+            )
+            _write_recast_shot_video(
+                passthrough_path,
+                resized_source,
+                generation_fps,
+            )
+            plan["passthrough_path"] = passthrough_path
+            published["generation_mode"] = "source_passthrough"
+            published_plans.append(published)
+            continue
+
+        local_mask = _remap_recast_shot_mask(
+            global_semantic[start:end],
+            active,
+        )
+        resized_mask = _resize_recast_shot_frames(
+            local_mask,
+            reference_canvas,
+            semantic=True,
+        )
+        anchor_index = int(plan["anchor_frame_index"])
+        anchor_mask = _remap_recast_shot_mask(
+            global_semantic[anchor_index],
+            active,
+            background_color=(0, 0, 0),
+        )
+        shot_refs = _build_recast_shot_reference_conditioning(
+            prepared_refs,
+            active,
+            source_frames[anchor_index],
+            anchor_mask,
+            output_dir,
+            job_id,
+            shot_index,
+            cooccurring=bool(plan["cooccurring"]),
+            reference_canvas=reference_canvas,
+        )
+
+        generated_frames, trim_tail = (
+            _quantize_recast_shot_frame_count(
+                end - start,
+                minimum_frames,
+                latent_size,
+            )
+        )
+        pad_count = generated_frames - (end - start)
+        if pad_count > 0:
+            resized_source = np.concatenate([
+                resized_source,
+                np.repeat(resized_source[-1:], pad_count, axis=0),
+            ])
+            resized_mask = np.concatenate([
+                resized_mask,
+                np.repeat(resized_mask[-1:], pad_count, axis=0),
+            ])
+
+        guide_path = os.path.join(
+            output_dir,
+            f"recast_{job_id}_shot_{shot_index + 1}_guide.mp4",
+        )
+        mask_path = os.path.join(
+            output_dir,
+            f"recast_{job_id}_shot_{shot_index + 1}_mask.mp4",
+        )
+        _write_recast_shot_video(
+            guide_path,
+            resized_source,
+            generation_fps,
+        )
+        _write_recast_shot_video(
+            mask_path,
+            resized_mask,
+            generation_fps,
+            semantic=True,
+        )
+
+        custom_settings = copy.deepcopy(
+            base_params.get("custom_settings") or {},
+        )
+        try:
+            requested_warmup = max(
+                0,
+                int(custom_settings.get(
+                    "scail2_recast_warmup_frames",
+                    8,
+                ) or 0),
+            )
+        except (TypeError, ValueError):
+            requested_warmup = 8
+        identity_warmup_anchor = None
+        if (
+            len(active) > 1
+            and bool(plan.get("cooccurring"))
+            and not bool(plan.get("starts_with_all_active_mappings"))
+        ):
+            first_all_active = plan.get("first_all_active_frame_index")
+            if first_all_active is not None:
+                latent = max(1, int(latent_size))
+                # Keep the normal hidden-frame budget whenever possible. The
+                # remote anchor supplies the missing identity; increasing the
+                # budget from 8 to 16 can needlessly create another diffusion
+                # window on common 5-second shots.
+                desired_warmup = min(
+                    16,
+                    max(latent, requested_warmup or 8),
+                )
+                desired_warmup = min(
+                    16,
+                    max(
+                        latent,
+                        (
+                            (desired_warmup + latent - 1)
+                            // latent
+                        ) * latent,
+                    ),
+                )
+                identity_warmup_anchor = max(
+                    1,
+                    int(plan["anchor_frame_index"]) - start,
+                )
+                custom_settings["scail2_recast_warmup_frames"] = (
+                    desired_warmup
+                )
+                custom_settings[
+                    "scail2_recast_warmup_anchor_offset"
+                ] = identity_warmup_anchor
+                published["identity_warmup_frames"] = desired_warmup
+                published["identity_warmup_anchor_frame_index"] = int(
+                    plan["anchor_frame_index"]
+                )
+                print(
+                    f"[Recast] Shot {shot_index + 1} stays continuous; "
+                    f"a hidden {desired_warmup}-frame identity pre-roll "
+                    f"starts from mapped frame "
+                    f"{int(plan['anchor_frame_index'])} before returning "
+                    "to the shot boundary."
+                )
+        custom_settings.update({
+            "scail2_reference_mask_path": shot_refs["primary_mask"],
+            "scail2_additional_reference_mask_paths": list(
+                shot_refs["additional_masks"],
+            ),
+            "scail2_reference_expected_colors": list(
+                shot_refs["expected_colors"],
+            ),
+            "scail2_clip_reference_path": shot_refs["clip_identity_ref"],
+            "scail2_primary_reference_people": len(active),
+            "scail2_dynamic_source_scene_reference": True,
+            "scail2_timeline_source_scene_reference": False,
+            "scail2_source_scene_reference_path": shot_refs[
+                "source_scene_reference"
+            ]["image"],
+            "scail2_source_scene_mask_path": shot_refs[
+                "source_scene_reference"
+            ]["mask"],
+            "scail2_identity_latent_reference_index": 0,
+        })
+        shot_prompt = _build_recast_shot_prompt(
+            len(active),
+            finished_video_prompt=base_params.get("prompt"),
+            total_mapping_count=len(mapping_masks),
+        )
+        tasks.append({
+            "shot_index": shot_index,
+            "params": {
+                "prompt": shot_prompt,
+                "video_guide": guide_path,
+                "video_mask": mask_path,
+                "image_refs": list(shot_refs["image_refs"]),
+                "video_length": generated_frames,
+                "trim_tail_frames": trim_tail,
+                "video_prompt_type": f"V0{len(active)}AI",
+                "image_prompt_type": "",
+                # Each internal clip is silent. One pristine source track is
+                # attached only after exact-frame assembly.
+                "audio_prompt_type": "",
+                "audio_guide": None,
+                "audio_source": None,
+                "force_fps": "control",
+                "custom_settings": custom_settings,
+                "_recast_protect_bystanders": False,
+                "output_filename": (
+                    f"recast_{job_id}_shot_{shot_index + 1}.mp4"
+                ),
+            },
+        })
+        plan["generated_task_index"] = len(tasks) - 1
+        published.update({
+            "generation_mode": "scail2",
+            "generated_frame_count": generated_frames,
+            "trim_tail_frames": trim_tail,
+            "reference_mode": shot_refs["primary_mode"],
+        })
+        published_plans.append(published)
+
+    return {
+        "tasks": tasks,
+        "shots": plans,
+        "published_shots": published_plans,
+        "frame_count": int(target_frame_count),
+        "fps": float(generation_fps),
+        "camera_shot_count": len(shot_ranges),
+        "cast_transition_count": cast_transition_count,
+    }
+
+
+def _normalize_repaint_region_mappings(raw_mappings):
+    """Validate optional source-video → edited-frame semantic mappings."""
+    if raw_mappings in (None, []):
+        return []
+    if not isinstance(raw_mappings, list):
+        raise ValueError("Repaint region_mappings must be a list.")
+    if len(raw_mappings) > len(_RECAST_MASK_COLORS):
+        raise ValueError("SCAIL-2 supports at most five Repaint regions.")
+    mappings = []
+    for index, raw in enumerate(raw_mappings):
+        if not isinstance(raw, dict):
+            raise ValueError(f"Repaint region {index + 1} is invalid.")
+        source = str(
+            raw.get("source")
+            or raw.get("source_target")
+            or raw.get("source_description")
+            or ""
+        ).strip()
+        target = str(
+            raw.get("target")
+            or raw.get("target_description")
+            or raw.get("edited_target")
+            or ""
+        ).strip()
+        if not source or not target:
+            raise ValueError(
+                f"Repaint region {index + 1} needs both a source-video "
+                "description and an edited-frame description."
+            )
+        mappings.append({
+            "id": str(raw.get("id") or f"repaint-{index + 1}"),
+            "source": source,
+            "target": target,
+        })
+    return mappings
+
+
+def _repaint_resolution_for_aspect(
+    width, height, pixel_budget=848 * 480, block_size=16,
+):
+    """Return a SCAIL-sized canvas while preserving the source aspect."""
+    import math
+
+    source_width = int(width)
+    source_height = int(height)
+    block = max(1, int(block_size))
+    budget = max(block * block, int(pixel_budget))
+    if source_width <= 0 or source_height <= 0:
+        raise ValueError("Repaint source dimensions must be positive.")
+    ratio = float(source_width) / float(source_height)
+    ideal_width = math.sqrt(float(budget) * ratio)
+    ideal_height = math.sqrt(float(budget) / ratio)
+    output_width = max(block, int(round(ideal_width / block)) * block)
+    output_height = max(block, int(round(ideal_height / block)) * block)
+    return output_width, output_height
+
+
+def _validate_repaint_target_aspect(
+    source_width, source_height, target_width, target_height,
+    tolerance=0.025,
+):
+    """Reject edited frames that would require a destructive crop."""
+    values = [
+        int(source_width), int(source_height),
+        int(target_width), int(target_height),
+    ]
+    if any(value <= 0 for value in values):
+        raise ValueError("Repaint source and edited-frame dimensions must be positive.")
+    source_ratio = float(values[0]) / float(values[1])
+    target_ratio = float(values[2]) / float(values[3])
+    difference = abs(target_ratio - source_ratio) / source_ratio
+    if difference > float(tolerance):
+        raise ValueError(
+            "The edited first frame must keep the source video's aspect ratio "
+            f"({values[0]}×{values[1]} source vs "
+            f"{values[2]}×{values[3]} edited frame). "
+            "Edit the extracted frame in Image Mode or resize without cropping."
+        )
+    return difference
+
+
+def _prepare_repaint_target_frame(
+    target_path, source_width, source_height, output_width, output_height,
+    output_dir, job_id,
+):
+    """Orient, validate, and resize the edited frame without cropping."""
+    from PIL import Image as _PILImage
+    from PIL import ImageOps as _PILImageOps
+
+    with _PILImage.open(target_path) as image:
+        target = _PILImageOps.exif_transpose(image).convert("RGB")
+        target_width, target_height = target.size
+        _validate_repaint_target_aspect(
+            source_width,
+            source_height,
+            target_width,
+            target_height,
+        )
+        target = target.resize(
+            (int(output_width), int(output_height)),
+            resample=_PILImage.Resampling.LANCZOS,
+        )
+        os.makedirs(output_dir, exist_ok=True)
+        prepared_path = os.path.join(
+            output_dir,
+            f"repaint_target_{job_id}.png",
+        )
+        target.save(prepared_path)
+    return prepared_path, (target_width, target_height)
+
+
+def _repaint_preview_data_uri(frame, semantic_mask, background="black"):
+    """Blend a semantic mask over one RGB frame and return a JPEG data URI."""
+    import base64
+    import io as _io
+    import numpy as np
+    from PIL import Image as _PILImage
+
+    rgb = np.asarray(frame, dtype=np.uint8)
+    mask = np.asarray(semantic_mask, dtype=np.uint8)
+    if rgb.shape != mask.shape:
+        raise ValueError(
+            f"Repaint preview frame/mask mismatch: {rgb.shape} vs {mask.shape}."
+        )
+    selected = (
+        ~np.all(mask > 225, axis=-1)
+        if background == "white"
+        else np.any(mask > 30, axis=-1)
+    )
+    overlay = rgb.copy()
+    if bool(selected.any()):
+        overlay[selected] = (
+            overlay[selected].astype(np.float32) * 0.45
+            + mask[selected].astype(np.float32) * 0.55
+        ).astype(np.uint8)
+    buffer = _io.BytesIO()
+    _PILImage.fromarray(overlay).save(buffer, format="JPEG", quality=85)
+    return (
+        "data:image/jpeg;base64,"
+        + base64.b64encode(buffer.getvalue()).decode()
+    )
+
+
+def _build_repaint_semantic_conditioning(
+    source_video, target_frame_path, mappings, output_dir,
+    progress_callback=None, abort_callback=None,
+):
+    """Track mapped regions independently inside every detected camera shot."""
+    import numpy as np
+    from PIL import Image as _PILImage
+    from shared import magic_mask
+
+    source_path, source_frames, fps = magic_mask.prepare_video_mask_input(
+        source_video,
+    )
+    shot_ranges = _detect_recast_shot_ranges(source_frames)
+    if len(shot_ranges) > 1:
+        print(
+            "[Repaint] Detected "
+            f"{len(shot_ranges)} camera shots; SAM3 will reacquire each "
+            "mapped region after every cut."
+        )
+    with _PILImage.open(target_frame_path) as target_image:
+        target_frame = np.asarray(target_image.convert("RGB"), dtype=np.uint8)
+
+    source_masks = []
+    target_masks = []
+    mapping_summaries = []
+    total = len(mappings)
+    for index, mapping in enumerate(mappings):
+        if abort_callback is not None:
+            abort_callback()
+
+        def _source_progress(done, frame_total, mapping_index=index):
+            if abort_callback is not None:
+                abort_callback()
+            if progress_callback is not None:
+                progress_callback(
+                    mapping_index,
+                    total,
+                    done,
+                    frame_total,
+                )
+
+        color = _RECAST_MASK_COLORS[index]
+        source_mask = magic_mask.generate_keyword_masks(
+            source_frames,
+            mapping["source"],
+            no_hole=True,
+            colorize_objects=True,
+            color_palette=[color],
+            max_colored_objects=1,
+            progress_callback=_source_progress,
+            tracking_segments=shot_ranges,
+        )
+        summary = _summarize_recast_mapping_mask(source_mask, fps)
+        if summary is None:
+            raise ValueError(
+                f"Repaint region {index + 1} found no "
+                f"'{mapping['source']}' anywhere in the selected video."
+            )
+        target_mask = magic_mask.generate_keyword_masks(
+            target_frame[None],
+            mapping["target"],
+            no_hole=True,
+            colorize_objects=True,
+            color_palette=[color],
+            max_colored_objects=1,
+        )[0]
+        if not bool(target_mask.any()):
+            raise ValueError(
+                f"Repaint region {index + 1} found no "
+                f"'{mapping['target']}' in the edited first frame."
+            )
+        source_masks.append(source_mask)
+        target_masks.append(target_mask)
+        mapping_summaries.append(summary)
+
+    driving_mask, _ = _compose_recast_character_masks(
+        source_masks,
+        _RECAST_MASK_COLORS[:total],
+        background_color=(0, 0, 0),
+    )
+    reference_mask, _ = _compose_recast_character_masks(
+        target_masks,
+        _RECAST_MASK_COLORS[:total],
+        background_color=(255, 255, 255),
+    )
+    video_mask_path = magic_mask.save_mask_video(
+        source_path,
+        driving_mask,
+        fps,
+        [mapping["source"] for mapping in mappings],
+        output_dir=output_dir,
+        abort_callback=abort_callback,
+        background_color=(0, 0, 0),
+    )
+    os.makedirs(output_dir, exist_ok=True)
+    reference_mask_path = os.path.join(
+        output_dir,
+        "repaint_reference_mask_"
+        + uuid.uuid4().hex[:8]
+        + ".png",
+    )
+    _PILImage.fromarray(reference_mask).save(reference_mask_path)
+    return {
+        "source_video": source_path,
+        "source_frames": source_frames,
+        "fps": float(fps),
+        "mapping_masks": source_masks,
+        "mapping_summaries": mapping_summaries,
+        "target_frame": target_frame,
+        "target_masks": target_masks,
+        "shot_ranges": [list(bounds) for bounds in shot_ranges],
+        "shot_count": len(shot_ranges),
+        "video_mask": video_mask_path,
+        "reference_mask": reference_mask_path,
+        "region_count": total,
+    }
+
+
+def _build_repaint_shot_prompt(
+    active_count, *, finished_video_prompt=None, total_mapping_count=None,
+):
+    """Avoid mentioning mapped subjects that are absent from a camera shot."""
+    count = max(1, min(5, int(active_count)))
+    try:
+        total_count = max(1, min(5, int(total_mapping_count)))
+    except (TypeError, ValueError):
+        total_count = None
+    requested_prompt = str(finished_video_prompt or "").strip()
+    if (
+        total_count == count
+        and any(character.isalnum() for character in requested_prompt)
+    ):
+        return requested_prompt
+    noun = "region" if count == 1 else "regions"
+    return (
+        f"The {count} mapped edited {noun} move naturally with the exact "
+        "source action and camera motion. Their edited appearance remains "
+        "consistent, while the surrounding original scene, people, objects, "
+        "lighting, and composition remain coherent and unchanged."
+    )
+
+
+def _build_repaint_shot_reference_conditioning(
+    target_frame, target_masks, active_mapping_indices, source_frame,
+    local_semantic_mask, output_dir, job_id, shot_index, *,
+    cooccurring, reference_canvas, use_exact_target_frame=False,
+):
+    """Build one shot-local edited-region reference plus a clean scene anchor."""
+    active = [int(index) for index in active_mapping_indices]
+    if not active:
+        raise ValueError("A generated Repaint shot needs an active region.")
+    if any(
+        index < 0 or index >= len(target_masks)
+        for index in active
+    ):
+        raise ValueError("Repaint shot references contain an invalid mapping.")
+
+    target_layers = []
+    for local_index, mapping_index in enumerate(active):
+        target_layers.append((
+            target_frame,
+            _recolor_recast_reference_mask(
+                target_masks[mapping_index],
+                mapping_index,
+                local_index,
+            ),
+        ))
+
+    if use_exact_target_frame:
+        primary_image = target_frame
+        primary_mask, _ = _compose_recast_character_masks(
+            [layer[1] for layer in target_layers],
+            _RECAST_MASK_COLORS[:len(active)],
+            background_color=(255, 255, 255),
+        )
+        primary_mode = "edited_first_frame"
+    else:
+        primary_mode = "shot_layout"
+        try:
+            if len(active) > 1 and not cooccurring:
+                raise ValueError(
+                    "active edited regions never share one frame in this shot"
+                )
+            primary_image, primary_mask = (
+                _compose_recast_group_reference_frame(
+                    source_frame,
+                    local_semantic_mask,
+                    target_layers,
+                    len(active),
+                )
+            )
+        except ValueError as composition_error:
+            print(
+                f"[Repaint] Shot {shot_index + 1} has no usable shared "
+                f"layout; using a balanced region sheet: "
+                f"{composition_error}"
+            )
+            primary_image, primary_mask = (
+                _compose_recast_cast_reference_frame(
+                    target_layers,
+                    len(active),
+                    reference_canvas,
+                )
+            )
+            primary_mode = "region_sheet"
+
+    stem = f"repaint_shot_ref_{job_id}_{shot_index + 1}"
+    primary_path, primary_mask_path = _save_recast_reference_pair(
+        output_dir,
+        stem,
+        primary_image,
+        primary_mask,
+    )
+    scene_reference = _build_recast_source_scene_reference(
+        source_frame,
+        local_semantic_mask,
+        len(active),
+        output_dir,
+        f"repaint_{job_id}_shot_{shot_index + 1}",
+        output_size=tuple(reference_canvas),
+    )
+    return {
+        "image_start": primary_path,
+        "primary_mask": primary_mask_path,
+        "expected_colors": [
+            list(_RECAST_MASK_COLORS[0])
+            if len(active) == 1
+            else None
+        ],
+        "source_scene_reference": scene_reference,
+        "primary_mode": primary_mode,
+    }
+
+
+def _build_repaint_shot_manifest(
+    base_params, conditioning, output_dir, job_id, *,
+    reference_canvas, target_frame_count, generation_fps,
+    minimum_frames, latent_size,
+):
+    """Create silent, exact-length mapped Repaint tasks per camera shot."""
+    import copy
+    import numpy as np
+
+    source_frames, mapping_masks, shot_ranges = (
+        _resample_recast_tracking_timeline(
+            conditioning["source_frames"],
+            conditioning["mapping_masks"],
+            conditioning["shot_ranges"],
+            target_frame_count,
+        )
+    )
+    plans = _plan_recast_shot_segments(mapping_masks, shot_ranges)
+
+    global_semantic = np.zeros(
+        (*source_frames.shape[:-1], 3),
+        dtype=np.uint8,
+    )
+    occupied = np.zeros(source_frames.shape[:-1], dtype=bool)
+    for mapping_index, mapping_mask in enumerate(mapping_masks):
+        region = (
+            np.any(mapping_mask > 30, axis=-1)
+            if mapping_mask.ndim == 4
+            else mapping_mask.astype(bool)
+        )
+        writable = region & ~occupied
+        global_semantic[writable] = np.asarray(
+            _RECAST_MASK_COLORS[mapping_index],
+            dtype=np.uint8,
+        )
+        occupied |= region
+
+    os.makedirs(output_dir, exist_ok=True)
+    tasks = []
+    published_plans = []
+    for plan in plans:
+        shot_index = int(plan["shot_index"])
+        start, end = int(plan["start_frame"]), int(plan["end_frame"])
+        active = list(plan["active_mapping_indices"])
+        resized_source = _resize_recast_shot_frames(
+            source_frames[start:end],
+            reference_canvas,
+        )
+        published = dict(plan)
+        published["active_mapping_indices"] = list(active)
+
+        if not active:
+            passthrough_path = os.path.join(
+                output_dir,
+                f"repaint_{job_id}_shot_{shot_index + 1}_source.mp4",
+            )
+            _write_recast_shot_video(
+                passthrough_path,
+                resized_source,
+                generation_fps,
+            )
+            plan["passthrough_path"] = passthrough_path
+            published["generation_mode"] = "source_passthrough"
+            published_plans.append(published)
+            continue
+
+        local_mask = _remap_recast_shot_mask(
+            global_semantic[start:end],
+            active,
+            background_color=(0, 0, 0),
+        )
+        resized_mask = _resize_recast_shot_frames(
+            local_mask,
+            reference_canvas,
+            semantic=True,
+        )
+        use_exact_target_frame = (
+            shot_index == 0
+            and len(active) == len(mapping_masks)
+            and all(
+                bool(np.any(mapping_masks[index][start] > 30))
+                for index in active
+            )
+        )
+        # The user's edited image is the selected first source frame. Keep
+        # its clean scene anchor on that same frame; pairing it with a later
+        # camera position would create contradictory background references.
+        anchor_index = (
+            start
+            if use_exact_target_frame
+            else int(plan["anchor_frame_index"])
+        )
+        anchor_mask = _remap_recast_shot_mask(
+            global_semantic[anchor_index],
+            active,
+            background_color=(0, 0, 0),
+        )
+        shot_refs = _build_repaint_shot_reference_conditioning(
+            conditioning["target_frame"],
+            conditioning["target_masks"],
+            active,
+            source_frames[anchor_index],
+            anchor_mask,
+            output_dir,
+            job_id,
+            shot_index,
+            cooccurring=bool(plan["cooccurring"]),
+            reference_canvas=reference_canvas,
+            use_exact_target_frame=use_exact_target_frame,
+        )
+
+        generated_frames, trim_tail = (
+            _quantize_recast_shot_frame_count(
+                end - start,
+                minimum_frames,
+                latent_size,
+            )
+        )
+        pad_count = generated_frames - (end - start)
+        if pad_count > 0:
+            resized_source = np.concatenate([
+                resized_source,
+                np.repeat(resized_source[-1:], pad_count, axis=0),
+            ])
+            resized_mask = np.concatenate([
+                resized_mask,
+                np.repeat(resized_mask[-1:], pad_count, axis=0),
+            ])
+
+        guide_path = os.path.join(
+            output_dir,
+            f"repaint_{job_id}_shot_{shot_index + 1}_guide.mp4",
+        )
+        mask_path = os.path.join(
+            output_dir,
+            f"repaint_{job_id}_shot_{shot_index + 1}_mask.mp4",
+        )
+        _write_recast_shot_video(
+            guide_path,
+            resized_source,
+            generation_fps,
+        )
+        _write_recast_shot_video(
+            mask_path,
+            resized_mask,
+            generation_fps,
+            semantic=True,
+        )
+
+        custom_settings = copy.deepcopy(
+            base_params.get("custom_settings") or {},
+        )
+        custom_settings.update({
+            "scail2_reference_mask_path": shot_refs["primary_mask"],
+            "scail2_additional_reference_mask_paths": [],
+            "scail2_reference_expected_colors": list(
+                shot_refs["expected_colors"],
+            ),
+            "scail2_clip_reference_path": shot_refs["image_start"],
+            "scail2_primary_reference_people": len(active),
+            "scail2_dynamic_source_scene_reference": True,
+            "scail2_timeline_source_scene_reference": False,
+            "scail2_source_scene_reference_path": shot_refs[
+                "source_scene_reference"
+            ]["image"],
+            "scail2_source_scene_mask_path": shot_refs[
+                "source_scene_reference"
+            ]["mask"],
+        })
+        shot_prompt = _build_repaint_shot_prompt(
+            len(active),
+            finished_video_prompt=base_params.get("prompt"),
+            total_mapping_count=len(mapping_masks),
+        )
+        tasks.append({
+            "shot_index": shot_index,
+            "params": {
+                "prompt": shot_prompt,
+                "video_guide": guide_path,
+                "video_mask": mask_path,
+                "image_start": shot_refs["image_start"],
+                "image_refs": [],
+                "video_length": generated_frames,
+                "trim_tail_frames": trim_tail,
+                "video_prompt_type": f"V{len(active)}A",
+                "image_prompt_type": "S",
+                # Internal shots remain silent. The finishing worker restores
+                # one pristine source track after exact-frame assembly.
+                "audio_prompt_type": "",
+                "audio_guide": None,
+                "audio_source": None,
+                "force_fps": "control",
+                "custom_settings": custom_settings,
+                "output_filename": (
+                    f"repaint_{job_id}_shot_{shot_index + 1}.mp4"
+                ),
+            },
+        })
+        plan["generated_task_index"] = len(tasks) - 1
+        published.update({
+            "generation_mode": "scail2",
+            "generated_frame_count": generated_frames,
+            "trim_tail_frames": trim_tail,
+            "reference_mode": shot_refs["primary_mode"],
+            "reference_anchor_frame_index": anchor_index,
+            "native_scene_preservation": True,
+        })
+        published_plans.append(published)
+
+    return {
+        "tasks": tasks,
+        "shots": plans,
+        "published_shots": published_plans,
+        "frame_count": int(target_frame_count),
+        "fps": float(generation_fps),
+    }
+
+
+@api.post("/api/v1/repaint/preview")
+async def repaint_preview_endpoint(request: Request):
+    """Preview optional source/edited-frame semantic correspondences."""
     body = await request.json()
-    video_path = _resolve_recast_media(body.get("video_path"), body.get("workspace"))
+    workspace = body.get("workspace")
+    video_path = _resolve_recast_media(body.get("video_path"), workspace)
+    target_path = _resolve_recast_media(
+        body.get("target_frame_path"),
+        workspace,
+    )
     if not video_path:
-        raise HTTPException(status_code=400, detail=f"Video not found: {body.get('video_path')}")
-    target = (body.get("target") or "person").strip() or "person"
+        raise HTTPException(
+            status_code=400,
+            detail=f"Video not found: {body.get('video_path')}",
+        )
+    if not target_path:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Edited first frame not found: "
+                f"{body.get('target_frame_path')}"
+            ),
+        )
+    try:
+        mappings = _normalize_repaint_region_mappings(
+            body.get("region_mappings"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not mappings:
+        raise HTTPException(
+            status_code=400,
+            detail="Add at least one region before previewing mappings.",
+        )
+
     at_time = float(body.get("time", 0) or 0)
     try:
         import decord
+        import numpy as np
+        from PIL import Image as _PILImage
+        from PIL import ImageOps as _PILImageOps
+        from shared import magic_mask
+
+        reader = decord.VideoReader(video_path)
+        fps = reader.get_avg_fps() or 25
+        frame_index = min(
+            len(reader) - 1,
+            max(0, int(at_time * fps)),
+        )
+        source_frame = reader[frame_index].asnumpy()
+        del reader
+        source_height, source_width = source_frame.shape[:2]
+        with _PILImage.open(target_path) as image:
+            target_image = _PILImageOps.exif_transpose(image).convert("RGB")
+            _validate_repaint_target_aspect(
+                source_width,
+                source_height,
+                *target_image.size,
+            )
+            target_frame = np.asarray(
+                target_image.resize(
+                    (source_width, source_height),
+                    resample=_PILImage.Resampling.LANCZOS,
+                ),
+                dtype=np.uint8,
+            )
+
+        source_preview_mask = np.zeros_like(source_frame, dtype=np.uint8)
+        target_preview_mask = np.full_like(
+            target_frame,
+            255,
+            dtype=np.uint8,
+        )
+        source_occupied = np.zeros(
+            source_frame.shape[:2],
+            dtype=bool,
+        )
+        target_occupied = np.zeros(
+            target_frame.shape[:2],
+            dtype=bool,
+        )
+        results = []
+        for index, mapping in enumerate(mappings):
+            color = _RECAST_MASK_COLORS[index]
+            source_mask = magic_mask.generate_keyword_masks(
+                source_frame[None],
+                mapping["source"],
+                no_hole=True,
+                colorize_objects=True,
+                color_palette=[color],
+                max_colored_objects=1,
+            )[0]
+            target_mask = magic_mask.generate_keyword_masks(
+                target_frame[None],
+                mapping["target"],
+                no_hole=True,
+                colorize_objects=True,
+                color_palette=[color],
+                max_colored_objects=1,
+            )[0]
+            source_region = np.any(source_mask > 30, axis=-1)
+            target_region = np.any(target_mask > 30, axis=-1)
+            source_preview_mask[source_region & ~source_occupied] = color
+            target_preview_mask[target_region & ~target_occupied] = color
+            source_occupied |= source_region
+            target_occupied |= target_region
+            results.append({
+                "mapping_index": index,
+                "source": mapping["source"],
+                "target": mapping["target"],
+                "source_found": bool(source_region.any()),
+                "target_found": bool(target_region.any()),
+                "color": list(color),
+            })
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Repaint preview failed: {exc}",
+        )
+
+    found = all(
+        result["source_found"] and result["target_found"]
+        for result in results
+    )
+    return {
+        "found": found,
+        "frame_index": frame_index,
+        "source_preview": _repaint_preview_data_uri(
+            source_frame,
+            source_preview_mask,
+            background="black",
+        ),
+        "target_preview": _repaint_preview_data_uri(
+            target_frame,
+            target_preview_mask,
+            background="white",
+        ),
+        "mapping_results": results,
+    }
+
+
+@api.post("/api/v1/repaint")
+async def repaint_endpoint(request: Request):
+    """Animate an edited first frame with SCAIL-2 and a source video.
+
+    With no region mappings this deliberately mirrors the proven Studio
+    Video/Frames SCAIL Animate path. Optional mappings add paired SAM3
+    semantic masks for specific people or objects without changing that
+    underlying motion-conditioning recipe.
+    """
+    body = await request.json()
+    workspace = body.get("workspace")
+    original_video_path = _resolve_recast_media(
+        body.get("video_path"),
+        workspace,
+    )
+    original_target_path = _resolve_recast_media(
+        body.get("target_frame_path"),
+        workspace,
+    )
+    if not original_video_path:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Video not found: {body.get('video_path')}",
+        )
+    if not original_target_path:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Edited first frame not found: "
+                f"{body.get('target_frame_path')}"
+            ),
+        )
+    try:
+        mappings = _normalize_repaint_region_mappings(
+            body.get("region_mappings"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    job_id = uuid.uuid4().hex[:8]
+    video_path = original_video_path
+    trim_start = body.get("start_time")
+    trim_end = body.get("end_time")
+    selected_start = 0.0
+    selected_end = None
+    if trim_start is not None and trim_end is not None:
+        try:
+            selected_start = float(trim_start)
+            selected_end = float(trim_end)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400,
+                detail="Repaint trim times must be numeric.",
+            )
+        if selected_start < 0 or selected_end <= selected_start + 0.05:
+            raise HTTPException(
+                status_code=400,
+                detail="Repaint needs a valid source-video time range.",
+            )
+        try:
+            import subprocess
+
+            trim_dir = os.path.join(os.getcwd(), "uploads")
+            os.makedirs(trim_dir, exist_ok=True)
+            trimmed_path = os.path.join(
+                trim_dir,
+                f"repaint_trim_{job_id}.mp4",
+            )
+            command = [
+                "ffmpeg", "-y", "-i", video_path,
+                "-ss", f"{selected_start:.3f}",
+                "-to", f"{selected_end:.3f}",
+                "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+                "-c:a", "aac", "-b:a", "192k",
+                trimmed_path,
+            ]
+            process = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            if process.returncode != 0 or not os.path.isfile(trimmed_path):
+                raise RuntimeError(process.stderr[-500:])
+            video_path = trimmed_path
+            print(
+                "[Repaint] Trimmed source to "
+                f"[{selected_start:.2f}s, {selected_end:.2f}s] -> "
+                f"{os.path.basename(trimmed_path)}"
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Could not prepare the selected Repaint range: {exc}",
+            )
+
+    try:
+        import decord
+
+        reader = decord.VideoReader(video_path)
+        fps = float(reader.get_avg_fps() or 25)
+        total_frames = len(reader)
+        if total_frames <= 0:
+            raise ValueError("the selected video range contains no frames")
+        probe_frame = reader[0].asnumpy()
+        del reader
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot read Repaint source video: {exc}",
+        )
+
+    source_height, source_width = probe_frame.shape[:2]
+    resolution_profile = _normalize_recast_resolution_profile(
+        body.get("resolution_profile"),
+    )
+    output_width, output_height = _recast_resolution_for_source(
+        probe_frame,
+        resolution_profile,
+    )
+    output_resolution = f"{output_width}x{output_height}"
+    repaint_vram_gb = 0.0
+    try:
+        repaint_vram_gb = float(
+            _get_cached_hardware().get("gpu_vram_gb", 0.0),
+        )
+    except (TypeError, ValueError, AttributeError):
+        repaint_vram_gb = 0.0
+    repaint_window_size = _recast_window_size_for_profile(
+        resolution_profile,
+        repaint_vram_gb,
+    )
+    if repaint_window_size <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "704p Repaint currently requires at least 16 GB of VRAM. "
+                f"Detected {repaint_vram_gb:.1f} GB; select 512p or 480p."
+            ),
+        )
+    print(
+        f"[Repaint] Resolution profile {resolution_profile} -> "
+        f"{output_resolution}."
+    )
+    if resolution_profile == "704p":
+        hardware_label = (
+            f"{repaint_vram_gb:.1f} GB VRAM"
+            if repaint_vram_gb > 0
+            else "unknown VRAM"
+        )
+        print(
+            f"[Repaint] Adaptive 704p window: {hardware_label} -> "
+            f"{repaint_window_size} frames with 5-frame overlap."
+        )
+    try:
+        prepared_target_path, target_size = _prepare_repaint_target_frame(
+            original_target_path,
+            source_width,
+            source_height,
+            output_width,
+            output_height,
+            os.path.join(os.getcwd(), "uploads"),
+            job_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not prepare the edited first frame: {exc}",
+        )
+
+    model_type = str(body.get("model_type") or "scail2_14B_fast")
+    if model_type not in {"scail2_14B_fast", "scail2_14B"}:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Repaint requires SCAIL-2 Fast or SCAIL-2 HQ. "
+                f"Received: {model_type}"
+            ),
+        )
+    if wgp.get_model_def(model_type) is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown model: {model_type}",
+        )
+    fast_profile = model_type == "scail2_14B_fast"
+    duration_s = total_frames / fps if fps else 0.0
+    force_fps = "control"
+    generation_frames = total_frames
+    if fps > 30.5:
+        force_fps = "30"
+        generation_frames = int(round(duration_s * 30.0))
+        print(
+            f"[Repaint] fps cap: {fps:.6g}fps source → "
+            f"30fps ({generation_frames} frames)"
+        )
+
+    raw_prompt = str(body.get("prompt") or "").strip()
+    prompt = raw_prompt or (
+        "The edited first-frame scene moves naturally with the source "
+        "video's exact action, interaction, and camera motion."
+    )
+    activated_loras = body.get("activated_loras")
+    if not isinstance(activated_loras, list):
+        activated_loras = []
+    loras_multipliers = str(body.get("loras_multipliers") or "")
+    region_count = len(mappings)
+    process_type = f"V{region_count}A" if region_count else "V1"
+    inference_steps = _normalize_scail2_inference_steps(
+        body.get("num_inference_steps"),
+        6 if fast_profile else 40,
+    )
+    # SCAIL-2 Fast uses a CFG-step-distilled LightX LoRA, so CFG remains at
+    # one. The full model supports ordinary classifier-free guidance.
+    guidance_scale = (
+        1.0
+        if fast_profile
+        else _normalize_scail2_guidance_scale(
+            body.get("guidance_scale"),
+            5.0,
+        )
+    )
+    print(
+        f"[Repaint] Sampling: {inference_steps} steps, "
+        f"guidance {guidance_scale:g} "
+        f"({'Fast distilled' if fast_profile else 'HQ'})."
+    )
+    gen_params = {
+        "prompt": prompt,
+        "model_type": model_type,
+        "negative_prompt": str(body.get("negative_prompt") or ""),
+        "seed": body.get("seed", -1),
+        "activated_loras": activated_loras,
+        "loras_multipliers": loras_multipliers,
+        "num_inference_steps": inference_steps,
+        "flow_shift": 5 if fast_profile else 3,
+        "guidance_scale": guidance_scale,
+        "sample_solver": "euler" if fast_profile else "unipc",
+        "generation_mode": "video",
+        # Keep ``restyle`` as the internal saved-output id so existing gallery
+        # filters and sidecars remain compatible; the UI calls this Repaint.
+        "edit_sub_mode": "restyle",
+        "video_prompt_type": process_type,
+        "image_prompt_type": "S",
+        "video_guide": video_path,
+        "image_start": prepared_target_path,
+        "video_length": generation_frames,
+        "_duration_seconds": duration_s,
+        "resolution": output_resolution,
+        "force_fps": force_fps,
+        "audio_prompt_type": "R",
+        "input_video_strength": 1,
+        "sliding_window_size": repaint_window_size,
+        "sliding_window_overlap": 5,
+        "settings_version": 2.57,
+        "custom_settings": {
+            "image_ref_keyword_content": (
+                mappings[0]["target"] if mappings else "human character"
+            ),
+            "scail2_animate_preprocessing": "raw",
+        },
+        # Gallery Load Settings / API diagnostics.
+        "edit_video_path": original_video_path,
+        "edit_start_time": selected_start,
+        "edit_end_time": selected_end if selected_end is not None else duration_s,
+        "edit_repaint_target_frame": original_target_path,
+        "edit_repaint_prepared_target_frame": prepared_target_path,
+        "edit_repaint_target_size": list(target_size),
+        "edit_repaint_region_mappings": mappings,
+        "edit_repaint_region_count": region_count,
+        "edit_repaint_resolution_profile": resolution_profile,
+        "edit_repaint_output_resolution": [output_width, output_height],
+        "edit_repaint_sliding_window_size": repaint_window_size,
+        "edit_repaint_conditioning": (
+            "semantic_regions" if mappings else "whole_frame_animate"
+        ),
+    }
+
+    workspace_name = workspace or _get_active_workspace()
+    job = {
+        "id": job_id,
+        "status": "queued",
+        "progress": 0,
+        "step": 0,
+        "total_steps": 0,
+        "phase": "",
+        "message": "Queued (repaint)",
+        "created_at": time.time(),
+        "params": gen_params,
+        "output_files": [],
+        "error": None,
+        "workspace": workspace_name,
+        "out_dir": _workspace_dir(workspace_name),
+    }
+    _jobs[job_id] = job
+
+    if not mappings:
+        threading.Thread(
+            target=_run_generation,
+            args=(job_id,),
+            daemon=False,
+        ).start()
+        return {
+            "job_id": job_id,
+            "status": "queued",
+            "frames": generation_frames,
+            "region_count": 0,
+            "resolution_profile": resolution_profile,
+            "resolution": output_resolution,
+            "sliding_window_size": repaint_window_size,
+            "num_inference_steps": inference_steps,
+            "guidance_scale": guidance_scale,
+        }
+
+    def _run_repaint():
+        abort_state = {"abort": False}
+        shot_temp_dir = None
+        shot_final_out_dir = None
+        try:
+            with generation_slot(_gen_lock, job) as acquired:
+                if not acquired:
+                    return
+                if not try_start(
+                    job,
+                    phase="Mapping repaint regions",
+                    message=(
+                        f"Mapping {region_count} Repaint "
+                        f"region{'s' if region_count != 1 else ''}..."
+                    ),
+                ):
+                    return
+                if not register_abort_state(
+                    job,
+                    job_id,
+                    _active_gen_states,
+                    abort_state,
+                ):
+                    return
+
+                progress_state = {"bucket": -1}
+
+                def _abort_repaint_mapping():
+                    if is_cancel_requested(job):
+                        raise InterruptedError(
+                            "Repaint region mapping was cancelled",
+                        )
+
+                def _mapping_progress(index, count, done, total):
+                    percent = min(
+                        100,
+                        max(
+                            0,
+                            int(round(
+                                100
+                                * (
+                                    index
+                                    + float(done) / max(1, total)
+                                )
+                                / max(1, count)
+                            )),
+                        ),
+                    )
+                    bucket = percent // 5
+                    if bucket == progress_state["bucket"]:
+                        return
+                    progress_state["bucket"] = bucket
+                    if not update_job(
+                        job,
+                        phase="Mapping repaint regions",
+                        message=f"Mapping Repaint regions... {percent}%",
+                    ):
+                        raise InterruptedError(
+                            "Repaint region mapping was cancelled",
+                        )
+
+                conditioning = _build_repaint_semantic_conditioning(
+                    video_path,
+                    prepared_target_path,
+                    mappings,
+                    os.path.join(os.getcwd(), "uploads"),
+                    progress_callback=_mapping_progress,
+                    abort_callback=_abort_repaint_mapping,
+                )
+                if is_cancel_requested(job):
+                    return
+                job["params"]["video_mask"] = conditioning["video_mask"]
+                job["params"]["custom_settings"][
+                    "scail2_reference_mask_path"
+                ] = conditioning["reference_mask"]
+                job["params"]["custom_settings"][
+                    "scail2_primary_reference_people"
+                ] = region_count
+                job["params"]["custom_settings"][
+                    "scail2_reference_expected_colors"
+                ] = [
+                    list(color)
+                    for color in _RECAST_MASK_COLORS[:region_count]
+                ]
+                job["params"]["edit_repaint_video_mask"] = conditioning[
+                    "video_mask"
+                ]
+                job["params"]["edit_repaint_reference_mask"] = conditioning[
+                    "reference_mask"
+                ]
+                job["params"]["edit_repaint_shot_ranges"] = conditioning[
+                    "shot_ranges"
+                ]
+                job["params"]["edit_repaint_mapping_summaries"] = (
+                    conditioning["mapping_summaries"]
+                )
+                print(
+                    "[Repaint] Built native semantic correspondence for "
+                    f"{region_count} region{'s' if region_count != 1 else ''}."
+                )
+
+                if not update_job(
+                    job,
+                    phase="Preparing camera shots",
+                    message="Preparing shot-specific Repaint references...",
+                ):
+                    return
+                import secrets
+                import shutil
+                import tempfile
+
+                try:
+                    resolved_seed = int(job["params"].get("seed", -1))
+                except (TypeError, ValueError):
+                    resolved_seed = -1
+                if resolved_seed < 0:
+                    resolved_seed = secrets.randbelow(1_000_000_000)
+                job["params"]["seed"] = resolved_seed
+
+                generation_fps = (
+                    30.0
+                    if force_fps == "30"
+                    else float(conditioning.get("fps") or fps or 25.0)
+                )
+                try:
+                    minimum_frames, _frame_step, latent_size = (
+                        wgp.get_model_min_frames_and_step(model_type)
+                    )
+                except Exception:
+                    minimum_frames, latent_size = 5, 4
+
+                shot_temp_dir = tempfile.mkdtemp(
+                    prefix="maestro-repaint-shots-",
+                )
+                try:
+                    shot_manifest = _build_repaint_shot_manifest(
+                        job["params"],
+                        conditioning,
+                        shot_temp_dir,
+                        job_id,
+                        reference_canvas=(output_width, output_height),
+                        target_frame_count=generation_frames,
+                        generation_fps=generation_fps,
+                        minimum_frames=minimum_frames,
+                        latent_size=latent_size,
+                    )
+                    if not shot_manifest["tasks"]:
+                        raise ValueError(
+                            "The mapped Repaint regions were too small to "
+                            "schedule in any camera shot."
+                        )
+                except Exception:
+                    shutil.rmtree(
+                        shot_temp_dir,
+                        ignore_errors=True,
+                    )
+                    shot_temp_dir = None
+                    raise
+
+                final_out_dir = job.get("out_dir") or _workspace_dir(
+                    workspace_name,
+                )
+                shot_final_out_dir = final_out_dir
+                job["params"].update({
+                    "_defer_output_publication": True,
+                    "_repaint_shot_manifest": shot_manifest["tasks"],
+                    "_repaint_shot_temp_dir": shot_temp_dir,
+                    "_repaint_final_out_dir": final_out_dir,
+                    "_repaint_source_video": video_path,
+                    "_repaint_shot_bundle": {
+                        "shots": shot_manifest["shots"],
+                        "published_shots": shot_manifest[
+                            "published_shots"
+                        ],
+                        "frame_count": shot_manifest["frame_count"],
+                        "fps": shot_manifest["fps"],
+                        "resolved_seed": resolved_seed,
+                    },
+                    "edit_repaint_shot_aware": True,
+                    "edit_repaint_shot_plan": shot_manifest[
+                        "published_shots"
+                    ],
+                    "edit_repaint_native_scene_preservation": True,
+                })
+                # Generated shots and their references are disposable. The
+                # finishing worker publishes only the exact joined timeline.
+                job["out_dir"] = shot_temp_dir
+                generated_count = len(shot_manifest["tasks"])
+                passthrough_count = sum(
+                    1
+                    for shot in shot_manifest["shots"]
+                    if shot["mode"] == "passthrough"
+                )
+                print(
+                    "[Repaint] Shot-aware plan prepared "
+                    f"{len(shot_manifest['shots'])} camera shots "
+                    f"({generated_count} generated, "
+                    f"{passthrough_count} source passthrough), "
+                    f"{shot_manifest['frame_count']} exact output frames "
+                    f"at {shot_manifest['fps']:.6g}fps."
+                )
+        except InterruptedError:
+            return
+        except Exception as exc:
+            traceback.print_exc()
+            if shot_temp_dir and os.path.isdir(shot_temp_dir):
+                import shutil
+
+                shutil.rmtree(shot_temp_dir, ignore_errors=True)
+                if shot_final_out_dir:
+                    job["out_dir"] = shot_final_out_dir
+            finish_job(
+                job,
+                "failed",
+                error=f"Repaint region mapping failed: {exc}",
+                message="Region mapping failed",
+            )
+            return
+        finally:
+            unregister_abort_state(
+                job_id,
+                _active_gen_states,
+                abort_state,
+            )
+
+        if not try_requeue(job, message="Queued (repaint)", phase=""):
+            if shot_temp_dir and os.path.isdir(shot_temp_dir):
+                import shutil
+
+                shutil.rmtree(shot_temp_dir, ignore_errors=True)
+                if shot_final_out_dir:
+                    job["out_dir"] = shot_final_out_dir
+            return
+        _run_repaint_shot_generation(job_id)
+
+    threading.Thread(target=_run_repaint, daemon=False).start()
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "frames": generation_frames,
+        "region_count": region_count,
+        "resolution_profile": resolution_profile,
+        "resolution": output_resolution,
+        "sliding_window_size": repaint_window_size,
+        "num_inference_steps": inference_steps,
+        "guidance_scale": guidance_scale,
+    }
+
+
+@api.post("/api/v1/recast/preview")
+async def recast_preview_endpoint(request: Request):
+    """Preview mapped people across the selected Recast timeline.
+
+    Body: { video_path: str, target?: str, person_count?: int,
+            character_mappings?: list, ref_image_path?: str,
+            time?: float, end_time?: float, workspace?: str }
+    """
+    body = await request.json()
+    workspace = body.get("workspace")
+    video_path = _resolve_recast_media(body.get("video_path"), workspace)
+    if not video_path:
+        raise HTTPException(status_code=400, detail=f"Video not found: {body.get('video_path')}")
+    raw_mappings = body.get("character_mappings")
+    explicit_mappings = isinstance(raw_mappings, list) and len(raw_mappings) > 0
+    if explicit_mappings:
+        if len(raw_mappings) > len(_RECAST_MASK_COLORS):
+            raise HTTPException(
+                status_code=400,
+                detail="SCAIL-2 supports at most five character mappings.",
+            )
+        preview_mappings = []
+        for index, mapping in enumerate(raw_mappings):
+            if not isinstance(mapping, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Character mapping {index + 1} is invalid.",
+                )
+            target = str(mapping.get("target") or "").strip()
+            if not target:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Character mapping {index + 1} needs a source-person description.",
+                )
+            preview_mappings.append({"target": target})
+        person_count = len(preview_mappings)
+    else:
+        target = (body.get("target") or "person").strip() or "person"
+        person_count = _normalize_recast_person_count(body.get("person_count"))
+        preview_mappings = [{"target": target}]
+    mask_colors = _RECAST_MASK_COLORS[:person_count]
+    at_time = max(0.0, float(body.get("time", 0) or 0))
+    try:
+        import decord
+        import numpy as np
+
         vr = decord.VideoReader(video_path)
         fps = vr.get_avg_fps() or 25
-        idx = min(len(vr) - 1, max(0, int(at_time * fps)))
-        frame = vr[idx].asnumpy()
+        total_video_frames = len(vr)
+        if total_video_frames <= 0:
+            raise ValueError("The selected video contains no frames.")
+        start_index = min(
+            total_video_frames - 1,
+            max(0, int(round(at_time * fps))),
+        )
+        raw_end_time = body.get("end_time")
+        end_time = (
+            float(raw_end_time)
+            if raw_end_time is not None
+            else float(total_video_frames) / float(fps)
+        )
+        if end_time <= at_time:
+            end_index = total_video_frames - 1
+        else:
+            end_index = min(
+                total_video_frames - 1,
+                max(start_index, int(round(end_time * fps)) - 1),
+            )
+        if explicit_mappings:
+            span = end_index - start_index + 1
+            sample_count = min(24, max(1, span))
+            sample_indices = np.unique(
+                np.rint(
+                    np.linspace(start_index, end_index, sample_count),
+                ).astype(np.int64)
+            )
+            sampled_frames = vr.get_batch(sample_indices).asnumpy()
+        else:
+            sample_indices = np.asarray([start_index], dtype=np.int64)
+            sampled_frames = vr.get_batch(sample_indices).asnumpy()
         del vr
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Cannot read video: {e}")
     try:
-        import numpy as np
         from shared import magic_mask
-        mask = magic_mask.generate_keyword_masks(frame[None], target, no_hole=True)[0]
+
+        mapping_results = []
+        mapping_anchors = None
+        if explicit_mappings:
+            mapping_masks = []
+            found_mapping_indices = []
+            for index, mapping in enumerate(preview_mappings):
+                tracking_target = _normalize_recast_tracking_target(
+                    mapping["target"],
+                )
+                mapping_mask = magic_mask.generate_keyword_masks(
+                    sampled_frames,
+                    tracking_target,
+                    no_hole=True,
+                    colorize_objects=True,
+                    color_palette=[mask_colors[index]],
+                    max_colored_objects=1,
+                    tracking_segments=[
+                        (sample_index, sample_index + 1)
+                        for sample_index in range(len(sampled_frames))
+                    ],
+                )
+                region = np.any(mapping_mask > 30, axis=-1)
+                areas = region.reshape(len(region), -1).sum(axis=1)
+                present_samples = np.flatnonzero(areas > 0)
+                found_mapping = bool(len(present_samples))
+                result = {
+                    "mapping_index": index,
+                    "target": mapping["target"],
+                    "found": found_mapping,
+                    "color": list(mask_colors[index]),
+                    "overlap_fraction": 0.0,
+                    "first_frame_index": None,
+                    "first_time_seconds": None,
+                    "anchor_frame_index": None,
+                    "anchor_time_seconds": None,
+                    "anchor_sample_index": None,
+                }
+                if found_mapping:
+                    anchor_sample_index = int(np.argmax(areas))
+                    first_sample_index = int(present_samples[0])
+                    anchor_frame_index = int(
+                        sample_indices[anchor_sample_index]
+                    )
+                    first_frame_index = int(
+                        sample_indices[first_sample_index]
+                    )
+                    result.update({
+                        "first_frame_index": first_frame_index,
+                        "first_time_seconds": (
+                            float(first_frame_index) / float(fps)
+                        ),
+                        "anchor_frame_index": anchor_frame_index,
+                        "anchor_time_seconds": (
+                            float(anchor_frame_index) / float(fps)
+                        ),
+                        "anchor_sample_index": anchor_sample_index,
+                    })
+                    mapping_masks.append(mapping_mask)
+                    found_mapping_indices.append(index)
+                mapping_results.append(result)
+            if mapping_masks:
+                sampled_mask, overlaps = _compose_recast_character_masks(
+                    mapping_masks,
+                    [mask_colors[index] for index in found_mapping_indices],
+                )
+                for mapping_index, overlap in zip(
+                    found_mapping_indices, overlaps,
+                ):
+                    mapping_results[mapping_index][
+                        "overlap_fraction"
+                    ] = overlap
+                common_sample_index, scene_sample_index = (
+                    _select_recast_timeline_anchor(mapping_masks)
+                )
+            else:
+                sampled_mask = np.full(
+                    sampled_frames.shape,
+                    255,
+                    dtype=np.uint8,
+                )
+                common_sample_index, scene_sample_index = None, 0
+            matched_people = sum(result["found"] for result in mapping_results)
+            selected_sample_index = (
+                common_sample_index
+                if common_sample_index is not None
+                else scene_sample_index
+            )
+            idx = int(sample_indices[selected_sample_index])
+            frame = sampled_frames[selected_sample_index]
+            mask = sampled_mask[selected_sample_index]
+            preview_image = _compose_recast_timeline_preview(
+                sampled_frames,
+                [
+                    mapping_mask
+                    for mapping_mask in mapping_masks
+                ],
+                [
+                    mapping_results[mapping_index]
+                    for mapping_index in found_mapping_indices
+                ],
+            )
+            if matched_people == person_count:
+                mapping_anchors = []
+                tracked_by_mapping = {
+                    mapping_index: mapping_mask
+                    for mapping_index, mapping_mask in zip(
+                        found_mapping_indices,
+                        mapping_masks,
+                    )
+                }
+                for mapping_index in range(person_count):
+                    result = mapping_results[mapping_index]
+                    anchor_sample_index = int(
+                        result["anchor_sample_index"]
+                    )
+                    mapping_anchors.append({
+                        "frame_index": result["anchor_frame_index"],
+                        "source_frame": sampled_frames[
+                            anchor_sample_index
+                        ],
+                        "source_mask": sampled_mask[
+                            anchor_sample_index
+                        ],
+                        "mapping_mask": tracked_by_mapping[mapping_index][
+                            anchor_sample_index
+                        ],
+                    })
+        else:
+            mask = magic_mask.generate_keyword_masks(
+                sampled_frames, target, no_hole=True,
+                colorize_objects=True,
+                color_palette=mask_colors,
+                max_colored_objects=person_count,
+            )[0]
+            idx = int(sample_indices[0])
+            frame = sampled_frames[0]
+            matched_people = _count_recast_mask_people(mask, mask_colors)
+            mapping_results = [{
+                "mapping_index": 0,
+                "target": target,
+                "found": matched_people >= person_count,
+                "color": list(mask_colors[0]),
+                "overlap_fraction": 0.0,
+                "first_frame_index": idx if matched_people else None,
+                "first_time_seconds": (
+                    float(idx) / float(fps)
+                    if matched_people
+                    else None
+                ),
+                "anchor_frame_index": idx if matched_people else None,
+                "anchor_time_seconds": (
+                    float(idx) / float(fps)
+                    if matched_people
+                    else None
+                ),
+            }]
+            selected = mask.any(axis=-1)
+            overlay = frame.copy()
+            if bool(selected.any()):
+                overlay[selected] = (
+                    overlay[selected].astype(np.float32) * 0.45
+                    + mask[selected].astype(np.float32) * 0.55
+                ).astype(np.uint8)
+            from PIL import Image as _PILImage
+            preview_image = _PILImage.fromarray(overlay)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Segmentation failed: {e}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Segmentation failed: {e}")
-    found = bool(mask.any())
-    overlay = frame.copy()
-    if found:
-        sel = mask.astype(bool)
-        tint = np.array([60, 110, 255], dtype=np.float32)
-        overlay[sel] = (overlay[sel].astype(np.float32) * 0.45 + tint * 0.55).astype(np.uint8)
+    found = matched_people >= person_count
     import base64
     import io as _io
-    from PIL import Image as _PILImage
+
     buf = _io.BytesIO()
-    _PILImage.fromarray(overlay).save(buf, format="JPEG", quality=85)
+    preview_image.save(buf, format="JPEG", quality=85)
+    resolution_profile = _normalize_recast_resolution_profile(
+        body.get("resolution_profile"),
+    )
+    reference_canvas = _recast_resolution_for_source(
+        frame,
+        resolution_profile,
+    )
+    reference_previews = []
+    has_reference = bool(body.get("ref_image_path"))
+    if explicit_mappings:
+        has_reference = all(
+            isinstance(mapping, dict)
+            and bool(
+                mapping.get("ref_image_path")
+                or mapping.get("reference_image_path")
+            )
+            for mapping in raw_mappings
+        )
+    if has_reference and found:
+        try:
+            import tempfile
+
+            resolved_mappings, _ = _normalize_recast_character_mappings(
+                body, workspace,
+            )
+            with tempfile.TemporaryDirectory(
+                prefix="maestro-recast-preview-",
+            ) as preview_dir:
+                prepared = _prepare_recast_reference_conditioning(
+                    resolved_mappings,
+                    mask,
+                    preview_dir,
+                    "preview",
+                    isolate_reference=body.get("isolate_reference") is not False,
+                    selected_count=person_count,
+                    auto_face_detail=body.get("auto_face_detail") is not False,
+                    source_frame=frame,
+                    reference_canvas=reference_canvas,
+                    mapping_anchors=mapping_anchors,
+                )
+                reference_previews = prepared["previews"]
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Reference preview failed: {exc}",
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Reference preview failed: {exc}",
+            )
     return {
         "found": found,
+        "matched_people": matched_people,
+        "requested_people": person_count,
         "frame_index": idx,
+        "time_seconds": float(idx) / float(fps),
+        "timeline_start_seconds": float(start_index) / float(fps),
+        "timeline_end_seconds": float(end_index + 1) / float(fps),
+        "sampled_frame_count": int(len(sample_indices)),
         "preview": "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode(),
+        "mapping_results": mapping_results,
+        "reference_previews": reference_previews,
+        "resolution_profile": resolution_profile,
+        "output_resolution": list(reference_canvas),
     }
 
 
@@ -8686,13 +15791,35 @@ async def recast_endpoint(request: Request):
     message reflects detection progress.
 
     Body: {
-        video_path: str, ref_image_path: str,
+        video_path: str, ref_image_path?: str,
+        character_mappings?: [{
+            target: str, ref_image_path: str,
+            additional_ref_image_paths?: list[str],
+        }],
         target?: str ("who to replace" keyword, default "person"),
-        prompt?: str (describing the new character in the scene helps),
+        person_count?: int (legacy grouped replacement count, 1-5),
+        additional_ref_image_paths?: list[str] (legacy same-character views),
+        reference_aligned_to_source?: bool (reference is an edited first frame),
+        auto_face_detail?: bool (derive a tighter identity view when no
+            additional view is supplied; default true),
+        protect_bystanders?: bool (strict post-composite; default false),
+        preserve_bystanders?: bool (single-reference native multi-person
+            identity conditioning; default true),
+        isolate_reference?: bool (neutralize unrelated reference background;
+            default true),
+        enhance_prompt?: bool (rewrite and append identity/scene continuity
+            guidance; default false),
+        use_relighting?: bool (optional official SCAIL-2 Relighting LoRA;
+            default false),
+        resolution_profile?: str ("480p", "512p", or "704p"; changes spatial
+            resolution and, at 704p, the adaptive window size; never model or
+            step schedule),
+        prompt?: str (describe the completed video, not an edit command),
         start_time?: float, end_time?: float  (optional trim),
-        model_type?: str (default scail2_14B_fast),
+        model_type?: str (default scail2_14B_recast_fast),
         negative_prompt?: str, seed?: int,
         num_inference_steps?: int, guidance_scale?: float,
+        activated_loras?: list, loras_multipliers?: str,
         workspace?: str,
     }
     """
@@ -8702,10 +15829,41 @@ async def recast_endpoint(request: Request):
     video_path = _resolve_recast_media(body.get("video_path"), workspace)
     if not video_path:
         raise HTTPException(status_code=400, detail=f"Video not found: {body.get('video_path')}")
-    ref_image_path = _resolve_recast_media(body.get("ref_image_path"), workspace)
-    if not ref_image_path:
-        raise HTTPException(status_code=400, detail=f"Reference image not found: {body.get('ref_image_path')}")
-    target = (body.get("target") or "person").strip() or "person"
+    try:
+        character_mappings, explicit_character_mappings = (
+            _normalize_recast_character_mappings(body, workspace)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    ref_image_path = character_mappings[0]["ref_image_path"]
+    target = character_mappings[0]["target"]
+    person_count = (
+        len(character_mappings)
+        if explicit_character_mappings
+        else _normalize_recast_person_count(body.get("person_count"))
+    )
+    reference_aligned_to_source = character_mappings[0][
+        "reference_aligned_to_source"
+    ]
+    # Native SCAIL output is the default. Strict pixel lock remains available
+    # as an expert fallback, but compositing source pixels over a freshly
+    # rendered frame can create visible lighting/color seams.
+    protect_bystanders = body.get("protect_bystanders") is True
+    # Older saved jobs used ``preserve_scene_reference`` for an experimental
+    # full-frame reference. Keep that input as a compatibility alias, but the
+    # implementation now builds one neutral group reference containing only
+    # the requested replacement and color-mapped people.
+    if "preserve_bystanders" in body:
+        preserve_bystanders = body.get("preserve_bystanders") is True
+    elif "preserve_scene_reference" in body:
+        preserve_bystanders = body.get("preserve_scene_reference") is True
+    else:
+        preserve_bystanders = True
+    isolate_reference = body.get("isolate_reference") is not False
+    auto_face_detail = body.get("auto_face_detail") is not False
+    enhance_prompt = body.get("enhance_prompt") is True
+    use_relighting = body.get("use_relighting") is True
+    mask_colors = _RECAST_MASK_COLORS[:person_count]
     original_video_path = video_path
 
     # Optional trim — outpaint's frame-accurate re-encode pattern. The
@@ -8744,17 +15902,70 @@ async def recast_endpoint(request: Request):
         vr = decord.VideoReader(video_path)
         fps = vr.get_avg_fps() or 25
         total_frames = len(vr)
-        mid_frame = vr[total_frames // 2].asnumpy()
+        probe_frame = vr[0].asnumpy()
         del vr
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Cannot read video: {e}")
 
-    model_type = body.get("model_type") or "scail2_14B_fast"
+    resolution_profile = _normalize_recast_resolution_profile(
+        body.get("resolution_profile"),
+    )
+    recast_width, recast_height = _recast_resolution_for_source(
+        probe_frame,
+        resolution_profile,
+    )
+    recast_resolution = f"{recast_width}x{recast_height}"
+    print(
+        f"[Recast] Resolution profile {resolution_profile} -> "
+        f"{recast_resolution}; model and step schedule remain independent."
+    )
+    recast_vram_gb = 0.0
+    try:
+        recast_vram_gb = float(
+            _get_cached_hardware().get("gpu_vram_gb", 0.0),
+        )
+    except (TypeError, ValueError, AttributeError):
+        recast_vram_gb = 0.0
+    recast_window_size = _recast_window_size_for_profile(
+        resolution_profile,
+        recast_vram_gb,
+    )
+    if recast_window_size <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "704p Recast currently requires at least 16 GB of VRAM. "
+                f"Detected {recast_vram_gb:.1f} GB; select 512p or 480p."
+            ),
+        )
+    if resolution_profile == "704p":
+        hardware_label = (
+            f"{recast_vram_gb:.1f} GB VRAM"
+            if recast_vram_gb > 0
+            else "unknown VRAM"
+        )
+        print(
+            f"[Recast] Adaptive 704p window: {hardware_label} -> "
+            f"{recast_window_size} frames with 5-frame overlap."
+        )
+
+    requested_model_type = body.get("model_type") or _RECAST_FAST_MODEL_TYPE
+    # Settings saved before the dedicated Recast model existed selected the
+    # general I2V-accelerated SCAIL Fast model. Transparently migrate those
+    # jobs to the dedicated, corrected native-replacement recipe instead of
+    # recreating the incompatible hybrid that caused weak replacements.
+    model_type = (
+        _RECAST_FAST_MODEL_TYPE
+        if requested_model_type == _RECAST_LEGACY_FAST_MODEL_TYPE
+        else requested_model_type
+    )
     if wgp.get_model_def(model_type) is None:
         raise HTTPException(status_code=400, detail=f"Unknown model: {model_type}")
-    # Operating point follows the model flavor: the Fast finetune runs the
-    # distill schedule (6 steps, no CFG), the base model its native 40/5.
-    is_fast = "fast" in model_type
+    recast_fast = model_type == _RECAST_FAST_MODEL_TYPE
+    # Both Recast profiles use SCAIL-2's native replacement conditioning.
+    # Fast differs only in the official I2V LightX operating point; the base
+    # model remains available as the full 40-step comparison.
+    recast_conditioning = "native_replace_fast" if recast_fast else "native_replace"
     duration_s = total_frames / fps if fps else 0
 
     # Cap the follow rate at 30fps (same rationale as the generate guard):
@@ -8768,9 +15979,74 @@ async def recast_endpoint(request: Request):
         gen_frames = int(round(duration_s * 30.0))
         print(f"[Recast] fps cap: {float(fps):.6g}fps source → generating at 30fps ({gen_frames} frames)")
 
-    prompt = (body.get("prompt") or "").strip() or (
-        "The person from the reference image performs in the scene, "
-        "matching the original camera framing, motion, and lighting."
+    raw_recast_prompt = str(body.get("prompt") or "").strip()
+    try:
+        prompt = _build_recast_prompt(
+            raw_recast_prompt, person_count, enhance=enhance_prompt,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    activated_loras, loras_multipliers, use_relighting = (
+        _normalize_recast_lora_settings(
+            body.get("activated_loras"),
+            body.get("loras_multipliers"),
+            use_relighting,
+        )
+    )
+    if use_relighting:
+        relighting_index = next(
+            index
+            for index, name in enumerate(activated_loras)
+            if str(name).replace("\\", "/").rsplit("/", 1)[-1].casefold()
+            == _RECAST_RELIGHTING_LORA_FILENAME.casefold()
+        )
+        relighting_weight = loras_multipliers.split()[relighting_index]
+        print(
+            "[Recast] SCAIL-2 Relighting LoRA enabled with single-phase "
+            f"weight {relighting_weight}."
+        )
+
+    serialized_mappings = [
+        {
+            "id": mapping["id"],
+            "target": mapping["target"],
+            "ref_image_path": mapping["ref_image_path"],
+            "additional_ref_image_paths": list(
+                mapping.get("additional_ref_image_paths", []),
+            ),
+            "reference_aligned_to_source": mapping[
+                "reference_aligned_to_source"
+            ],
+        }
+        for mapping in character_mappings
+    ]
+    initial_reference_paths = [
+        path
+        for mapping in character_mappings
+        for path in [
+            mapping["ref_image_path"],
+            *mapping.get("additional_ref_image_paths", []),
+        ]
+    ]
+    inference_steps = _normalize_scail2_inference_steps(
+        body.get("num_inference_steps"),
+        8 if recast_fast else 40,
+    )
+    # The Fast LightX recipe is CFG-distilled, but its denoising step count is
+    # intentionally user-adjustable for quality/speed experiments.
+    guidance_scale = (
+        1.0
+        if recast_fast
+        else _normalize_scail2_guidance_scale(
+            body.get("guidance_scale"),
+            5.0,
+        )
+    )
+    print(
+        f"[Recast] Sampling: {inference_steps} steps, "
+        f"guidance {guidance_scale:g} "
+        f"({'Fast distilled' if recast_fast else 'HQ'})."
     )
 
     gen_params = {
@@ -8778,33 +16054,82 @@ async def recast_endpoint(request: Request):
         "model_type": model_type,
         "negative_prompt": body.get("negative_prompt", ""),
         "seed": body.get("seed", -1),
-        "guidance_scale": float(body.get("guidance_scale", 1.0 if is_fast else 5.0)),
-        "num_inference_steps": int(body.get("num_inference_steps", 6 if is_fast else 40)),
-        "flow_shift": 5 if is_fast else 3,
-        "sample_solver": "euler" if is_fast else "unipc",
+        "activated_loras": activated_loras,
+        "loras_multipliers": loras_multipliers,
+        "guidance_scale": guidance_scale,
+        "num_inference_steps": inference_steps,
+        "flow_shift": 1 if recast_fast else 3,
+        "sample_solver": "unipc",
         "generation_mode": "video",
         "edit_sub_mode": "recast",
-        # SCAIL-2 Replace One Person + Persons Locations mask + Reference Image
-        "video_prompt_type": "V01AI",
+        # The 0 is SCAIL-2's native Replace 1-5 People flag. The reference is
+        # identity conditioning only; it must never become the output canvas.
+        "video_prompt_type": f"V0{person_count}AI",
         "image_prompt_type": "",
         "video_guide": video_path,
         # video_mask is filled by the detection pre-step below.
-        "image_refs": [ref_image_path],
+        "image_refs": initial_reference_paths,
         "video_length": gen_frames,
         "_duration_seconds": duration_s,
-        "resolution": "832x480",
+        "resolution": recast_resolution,
         "force_fps": recast_force_fps,
         "audio_prompt_type": "R",
-        "sliding_window_size": 81,
+        "sliding_window_size": recast_window_size,
         "sliding_window_overlap": 5,
         "settings_version": 2.57,
-        "custom_settings": {"image_ref_keyword_content": "human character"},
+        "custom_settings": {
+            "image_ref_keyword_content": "human character",
+            "scail2_animate_preprocessing": "raw",
+            "scail2_recast_conditioning": "native_replace",
+            # The detection pre-step prepares exact RGB/mask pairs.  Runtime
+            # isolation stays off so it cannot harden the already-preserved
+            # soft alpha edges a second time.
+            "scail2_primary_reference_people": 1,
+            "scail2_isolate_reference_background": False,
+            "scail2_reference_alpha_path": "",
+            # Recast gives CLIP the untouched primary image. When isolation is
+            # requested, SCAIL-2 also encodes that original through the VAE and
+            # retains its latent features inside the semantic subject mask;
+            # the neutral reference remains outside the subject.
+            "scail2_clip_reference_path": "",
+            "scail2_identity_latent_isolation": isolate_reference,
+            # Zero keeps the identity-preserving VAE blend on the ordinary
+            # primary target reference. Native group preservation moves that
+            # target reference to slot one and updates this index accordingly.
+            "scail2_identity_latent_reference_index": 0,
+            # Generate a disposable reverse-motion pre-roll from the first
+            # control/mask frames, then remove it before output assembly.
+            "scail2_recast_warmup_frames": _RECAST_WARMUP_FRAMES,
+            # Establish identity and scene with all prepared references in
+            # window one. Continuations use the primary SCAIL reference plus
+            # clean generated overlap to avoid cumulative multi-ref artifacts.
+            "scail2_primary_only_continuations": True,
+        },
         # UI restore keys for the gallery Edits filter + Load Settings.
         "edit_video_path": original_video_path,
         "edit_start_time": float(trim_start) if trim_start is not None else 0.0,
         "edit_end_time": float(trim_end) if trim_end is not None else duration_s,
         "edit_recast_target": target,
+        "edit_recast_person_count": person_count,
+        "edit_recast_character_mappings": serialized_mappings,
+        "edit_recast_conditioning_people": person_count,
         "edit_recast_ref_path": ref_image_path,
+        "edit_recast_ref_aligned": reference_aligned_to_source,
+        "edit_recast_isolate_reference": isolate_reference,
+        "edit_recast_auto_face_detail": auto_face_detail,
+        "edit_recast_enhance_prompt": enhance_prompt,
+        "edit_recast_raw_prompt": raw_recast_prompt,
+        "edit_recast_protect_bystanders": protect_bystanders,
+        "edit_recast_preserve_bystanders": preserve_bystanders,
+        "edit_recast_use_relighting": use_relighting,
+        "edit_recast_resolution_profile": resolution_profile,
+        "edit_recast_output_resolution": [recast_width, recast_height],
+        "edit_recast_sliding_window_size": recast_window_size,
+        "edit_recast_conditioning": recast_conditioning,
+        "edit_recast_warmup_frames": _RECAST_WARMUP_FRAMES,
+        # Consumed by _run_generation's deterministic Recast finishing pass.
+        "_recast_protect_bystanders": protect_bystanders,
+        "_recast_source_video": video_path,
     }
 
     workspace_name = workspace or _get_active_workspace()
@@ -8817,9 +16142,16 @@ async def recast_endpoint(request: Request):
         "workspace": workspace_name, "out_dir": job_out_dir,
     }
     _jobs[job_id] = job
+    initial_probe_frame = probe_frame
 
     def _run_recast():
         abort_state = {"abort": False}
+        shot_temp_dir = None
+        shot_final_out_dir = None
+        # The timeline-aware branch selects a later frame and therefore
+        # reassigns ``probe_frame`` below. Initialize the resulting local from
+        # the endpoint's decoded first frame before either branch reads it.
+        probe_frame = initial_probe_frame
         try:
             # The SAM3 tracking pass is GPU work. Take the generation lock
             # for the detection phase so queued recasts don't run their
@@ -8835,7 +16167,7 @@ async def recast_endpoint(request: Request):
                 if not try_start(
                     job,
                     phase="Detecting target",
-                    message=f"Finding '{target}' in the video...",
+                    message=f"Finding {person_count} '{target}' subject{'s' if person_count != 1 else ''} in the video...",
                 ):
                     return
                 if not register_abort_state(
@@ -8843,37 +16175,673 @@ async def recast_endpoint(request: Request):
                 ):
                     return
                 from shared import magic_mask
-                # Fail fast with a clear error if the keyword matches nothing —
-                # cheaper than discovering it after a full tracking pass.
-                probe_mask = magic_mask.generate_keyword_masks(mid_frame[None], target, no_hole=True)[0]
-                if not bool(probe_mask.any()):
+                mapped_tracking = None
+                mapping_anchors = None
+                native_reference_frame_index = 0
+                scene_anchor_frame = probe_frame
+                scene_anchor_mask = None
+                shot_aware_recast_required = False
+                cast_transition_count = 0
+                if explicit_character_mappings:
+                    tracking_progress = {"bucket": -1}
+
+                    def _abort_mapped_tracking():
+                        if is_cancel_requested(job):
+                            raise InterruptedError(
+                                "Recast character tracking was cancelled",
+                            )
+
+                    def _mapped_tracking_progress(
+                        mapping_index, mapping_total, done, total,
+                    ):
+                        percent = min(
+                            100,
+                            max(
+                                0,
+                                int(round(
+                                    100
+                                    * (
+                                        mapping_index
+                                        + float(done) / max(1, total)
+                                    )
+                                    / max(1, mapping_total)
+                                )),
+                            ),
+                        )
+                        bucket = percent // 5
+                        if bucket == tracking_progress["bucket"]:
+                            return
+                        tracking_progress["bucket"] = bucket
+                        if not update_job(
+                            job,
+                            phase="Tracking timeline",
+                            message=(
+                                "Finding mapped characters across shots... "
+                                f"{percent}%"
+                            ),
+                        ):
+                            raise InterruptedError(
+                                "Recast character tracking was cancelled",
+                            )
+
+                    try:
+                        mapped_tracking = _build_recast_character_mask(
+                            video_path,
+                            character_mappings,
+                            os.path.join(os.getcwd(), "uploads"),
+                            progress_callback=_mapped_tracking_progress,
+                            abort_callback=_abort_mapped_tracking,
+                        )
+                    except InterruptedError:
+                        return
+
+                    tracking_fps = float(
+                        mapped_tracking.get("fps") or fps or 25.0
+                    )
+                    cast_transition_hold_frames = max(
+                        4,
+                        min(
+                            12,
+                            int(round(max(1.0, tracking_fps) * 0.2)),
+                        ),
+                    )
+                    cast_preview = _plan_recast_shot_segments(
+                        mapped_tracking["mapping_masks"],
+                        mapped_tracking["shot_ranges"],
+                        split_cast_transitions=True,
+                        min_cast_run_frames=cast_transition_hold_frames,
+                    )
+                    cast_transition_count = max(
+                        0,
+                        len(cast_preview) - int(mapped_tracking["shot_count"]),
+                    )
+                    shot_aware_recast_required = (
+                        int(mapped_tracking["shot_count"]) > 1
+                        or cast_transition_count > 0
+                    )
+                    common_index = mapped_tracking["common_frame_index"]
+                    scene_index = mapped_tracking["scene_anchor_index"]
+                    native_reference_frame_index = (
+                        common_index
+                        if common_index is not None
+                        else scene_index
+                    )
+                    probe_frame = mapped_tracking["source_frames"][
+                        native_reference_frame_index
+                    ]
+                    probe_mask = mapped_tracking["mask_frames"][
+                        native_reference_frame_index
+                    ]
+                    scene_anchor_frame = mapped_tracking["source_frames"][
+                        scene_index
+                    ]
+                    scene_anchor_mask = mapped_tracking["mask_frames"][
+                        scene_index
+                    ]
+                    mapping_anchors = []
+                    for summary in mapped_tracking["mapping_summaries"]:
+                        anchor_index = summary["anchor_frame_index"]
+                        mapping_anchors.append({
+                            "frame_index": anchor_index,
+                            "source_frame": mapped_tracking["source_frames"][
+                                anchor_index
+                            ],
+                            "source_mask": mapped_tracking["mask_frames"][
+                                anchor_index
+                            ],
+                        })
+                    job["params"]["edit_recast_timeline_anchors"] = [
+                        dict(summary)
+                        for summary in mapped_tracking["mapping_summaries"]
+                    ]
+                    job["params"]["edit_recast_recovered_shots"] = [
+                        dict(item)
+                        for item in mapped_tracking.get(
+                            "recovered_shots",
+                            [],
+                        )
+                    ]
+                    job["params"]["edit_recast_shot_ranges"] = [
+                        list(bounds)
+                        for bounds in mapped_tracking["shot_ranges"]
+                    ]
+                    job["params"]["edit_recast_shot_count"] = (
+                        mapped_tracking["shot_count"]
+                    )
+                    job["params"]["edit_recast_common_frame_index"] = (
+                        common_index
+                    )
+                    job["params"]["edit_recast_timeline_aware"] = (
+                        mapped_tracking["timeline_aware"]
+                    )
+                    job["params"]["edit_recast_cast_transition_count"] = (
+                        cast_transition_count
+                    )
+                    print(
+                        "[Recast] Timeline discovery mapped "
+                        f"{person_count} character"
+                        f"{'s' if person_count != 1 else ''} across "
+                        f"{mapped_tracking['shot_count']} shot"
+                        f"{'s' if mapped_tracking['shot_count'] != 1 else ''}; "
+                        + (
+                            f"shared anchor frame={common_index}."
+                            if common_index is not None
+                            else "no shared frame; using per-character anchors."
+                        )
+                    )
+                    if cast_transition_count:
+                        print(
+                            "[Recast] Found "
+                            f"{cast_transition_count} stable cast change"
+                            f"{'s' if cast_transition_count != 1 else ''} "
+                            "inside a camera shot; hidden identity pre-rolls "
+                            "will initialize late entrants without splitting "
+                            "the visible shot."
+                        )
+                    matched_people = person_count
+                else:
+                    probe_mask = magic_mask.generate_keyword_masks(
+                        probe_frame[None], target, no_hole=True,
+                        colorize_objects=True,
+                        color_palette=mask_colors,
+                        max_colored_objects=person_count,
+                    )[0]
+                    matched_people = _count_recast_mask_people(
+                        probe_mask, mask_colors,
+                    )
+                    scene_anchor_mask = probe_mask
+                if matched_people < person_count:
                     finish_job(
                         job,
                         "failed",
-                        error=f"Could not find '{target}' in the video. Try a different description (e.g. 'woman', 'man in red').",
-                        message="Target not found",
+                        error=(
+                            f"Found {matched_people} of {person_count} requested "
+                            f"'{target}' subjects in the first frame. Try "
+                            "another description, lower the person count, or "
+                            "adjust the trim start."
+                        ),
+                        message="Not enough targets found",
                     )
                     return
+                native_group_supported = (
+                    not explicit_character_mappings
+                    or (
+                        not shot_aware_recast_required
+                        and mapped_tracking["shot_count"] == 1
+                        and mapped_tracking["common_frame_index"] is not None
+                    )
+                )
+                map_native_bystanders = (
+                    preserve_bystanders
+                    and native_group_supported
+                    and _recast_probe_needs_bystander_tracking(
+                        probe_frame,
+                        probe_mask,
+                        person_count,
+                    )
+                )
+                job["params"]["edit_recast_bystander_tracking"] = (
+                    "full"
+                    if map_native_bystanders
+                    else (
+                        "timeline_scene"
+                        if preserve_bystanders and not native_group_supported
+                        else "not_needed"
+                    )
+                )
+                if preserve_bystanders and not map_native_bystanders:
+                    if not native_group_supported:
+                        print(
+                            "[Recast] Multi-shot/separate-appearance mapping "
+                            "will preserve surrounding people with per-window "
+                            "source-scene anchors instead of one contradictory "
+                            "group reference."
+                        )
+                    else:
+                        print(
+                            "[Recast] Anchor-frame probe found no additional "
+                            "bystanders; skipping the second full SAM3 pass."
+                        )
                 if is_cancel_requested(job):
                     return
                 if not update_job(
                     job,
-                    message=f"Tracking '{target}' across {total_frames} frames...",
+                    phase="Preparing references",
+                    message="Preparing exact SCAIL-2 reference crops and masks...",
                 ):
                     return
-                mask_path, _ = magic_mask.generate_video_mask(
-                    video_path, target,
-                    colorize_objects=True,
-                    color_palette=[(0, 0, 255)],
-                    max_colored_objects=1,
-                    background_color=(255, 255, 255),
-                    output_dir=os.path.join(os.getcwd(), "uploads"),
+                prepared_refs = _prepare_recast_reference_conditioning(
+                    character_mappings,
+                    probe_mask,
+                    os.path.join(os.getcwd(), "uploads"),
+                    job_id,
+                    isolate_reference=isolate_reference,
+                    selected_count=person_count,
+                    auto_face_detail=auto_face_detail,
+                    source_frame=probe_frame,
+                    reference_canvas=(recast_width, recast_height),
+                    mapping_anchors=mapping_anchors,
                 )
+                job["params"]["image_refs"] = prepared_refs["image_refs"]
+                job["params"]["custom_settings"][
+                    "scail2_reference_mask_path"
+                ] = prepared_refs["primary_mask"]
+                job["params"]["custom_settings"][
+                    "scail2_additional_reference_mask_paths"
+                ] = prepared_refs["additional_masks"]
+                job["params"]["custom_settings"][
+                    "scail2_reference_expected_colors"
+                ] = prepared_refs["expected_colors"]
+                job["params"]["custom_settings"][
+                    "scail2_clip_reference_path"
+                ] = prepared_refs["clip_identity_ref"]
+                target_group_reference = None
+                if explicit_character_mappings and person_count > 1:
+                    target_group_reference = (
+                        _build_recast_target_group_reference(
+                            prepared_refs,
+                            os.path.join(os.getcwd(), "uploads"),
+                            job_id,
+                            person_count,
+                            shared_source_frame=(
+                                probe_frame
+                                if common_index is not None
+                                else None
+                            ),
+                            shared_semantic_mask=(
+                                probe_mask
+                                if common_index is not None
+                                else None
+                            ),
+                        )
+                    )
+                    # SCAIL-2 was trained to map several semantic colors from
+                    # one primary multi-person reference. Keep the individual
+                    # full/detail views as supporting evidence rather than
+                    # asking the experimental multi-reference path to decide
+                    # which unrelated identity owns each color.
+                    job["params"]["image_refs"] = [
+                        target_group_reference["image"],
+                        *prepared_refs["image_refs"],
+                    ]
+                    job["params"]["custom_settings"][
+                        "scail2_reference_mask_path"
+                    ] = target_group_reference["mask"]
+                    job["params"]["custom_settings"][
+                        "scail2_additional_reference_mask_paths"
+                    ] = [
+                        prepared_refs["primary_mask"],
+                        *prepared_refs["additional_masks"],
+                    ]
+                    job["params"]["custom_settings"][
+                        "scail2_reference_expected_colors"
+                    ] = [
+                        None,
+                        *prepared_refs["expected_colors"],
+                    ]
+                    job["params"]["custom_settings"][
+                        "scail2_primary_reference_people"
+                    ] = person_count
+                    job["params"]["custom_settings"][
+                        "scail2_identity_latent_reference_index"
+                    ] = 1
+                    job["params"]["edit_recast_cast_reference"] = (
+                        target_group_reference["image"]
+                    )
+                    job["params"]["edit_recast_cast_mask"] = (
+                        target_group_reference["mask"]
+                    )
+                    job["params"]["edit_recast_cast_mode"] = (
+                        target_group_reference["mode"]
+                    )
+                    job["params"]["edit_recast_conditioning_people"] = (
+                        person_count
+                    )
+                    print(
+                        "[Recast] Built one native color-mapped cast "
+                        f"reference for {person_count} characters "
+                        f"({target_group_reference['mode']})."
+                    )
+                job["params"]["edit_recast_prepared_refs"] = list(
+                    prepared_refs["image_refs"],
+                )
+                job["params"]["edit_recast_clip_identity_ref"] = (
+                    prepared_refs["clip_identity_ref"]
+                )
+                job["params"]["edit_recast_auto_face_detail_refs"] = list(
+                    prepared_refs["auto_face_detail_refs"],
+                )
+                job["params"]["edit_recast_reference_canvas"] = list(
+                    prepared_refs["reference_canvas"],
+                )
+                source_scene_reference = None
+
+                def _ensure_source_scene_reference(reason):
+                    nonlocal source_scene_reference
+                    if source_scene_reference is not None:
+                        return source_scene_reference
+                    source_scene_reference = (
+                        _enable_recast_dynamic_source_scene_reference(
+                            job["params"],
+                            scene_anchor_frame,
+                            scene_anchor_mask,
+                            person_count,
+                            os.path.join(os.getcwd(), "uploads"),
+                            job_id,
+                        )
+                    )
+                    job["params"][
+                        "edit_recast_source_scene_reference_reason"
+                    ] = reason
+                    if (
+                        explicit_character_mappings
+                        and mapped_tracking["timeline_aware"]
+                    ):
+                        job["params"]["custom_settings"][
+                            "scail2_timeline_source_scene_reference"
+                        ] = True
+                        job["params"][
+                            "edit_recast_source_scene_conditioning"
+                        ] = "per_window_timeline_reference"
+                    print(
+                        "[Recast] Enabled source-scene anchoring "
+                        f"({reason}; hidden="
+                        f"{source_scene_reference['hidden_fraction']:.1%}, "
+                        f"margin={source_scene_reference['expansion_pixels']}px)."
+                    )
+                    return source_scene_reference
+
+                print(
+                    "[Recast] Prepared "
+                    f"{len(prepared_refs['image_refs'])} exact reference "
+                    "view(s) with paired semantic masks and an identity-first "
+                    "primary VAE/CLIP image"
+                    + (
+                        f", including {len(prepared_refs['auto_face_detail_refs'])} "
+                        "automatic face-detail view(s)."
+                        if prepared_refs["auto_face_detail_refs"]
+                        else "."
+                    )
+                )
+                if explicit_character_mappings:
+                    mask_path = mapped_tracking["video_mask"]
+                else:
+                    if not update_job(
+                        job,
+                        phase="Tracking targets",
+                        message=(
+                            f"Tracking '{target}' across "
+                            f"{total_frames} frames..."
+                        ),
+                    ):
+                        return
+                    mask_path, _ = magic_mask.generate_video_mask(
+                        video_path, target,
+                        colorize_objects=True,
+                        color_palette=mask_colors,
+                        max_colored_objects=person_count,
+                        background_color=(255, 255, 255),
+                        output_dir=os.path.join(os.getcwd(), "uploads"),
+                    )
                 if is_cancel_requested(job):
                     return
                 job["params"]["video_mask"] = mask_path
+                if not map_native_bystanders:
+                    _ensure_source_scene_reference(
+                        "no separate bystander pass needed",
+                    )
+                if map_native_bystanders:
+                    if not update_job(
+                        job,
+                        message="Mapping the other people for native preservation...",
+                        phase="Mapping surrounding people",
+                    ):
+                        return
+
+                    mapping_progress = {"bucket": -1}
+
+                    def _native_people_progress(done, total):
+                        percent = min(
+                            100,
+                            max(0, int(round(100 * float(done) / max(1, total)))),
+                        )
+                        bucket = percent // 5
+                        if bucket == mapping_progress["bucket"]:
+                            return
+                        mapping_progress["bucket"] = bucket
+                        if not update_job(
+                            job,
+                            message=f"Mapping the other people... {percent}%",
+                            phase="Mapping surrounding people",
+                        ):
+                            raise InterruptedError("Recast bystander mapping was cancelled")
+
+                    try:
+                        native_people = _build_recast_native_people_conditioning(
+                            video_path,
+                            mask_path,
+                            person_count,
+                            os.path.join(os.getcwd(), "uploads"),
+                            job_id,
+                            target_references=prepared_refs[
+                                "primary_target_refs"
+                            ],
+                            progress_callback=_native_people_progress,
+                            reference_frame_index=(
+                                native_reference_frame_index
+                            ),
+                        )
+                    except InterruptedError:
+                        return
+                    except Exception as native_error:
+                        # Native preservation is an enhancement. If broad
+                        # person mapping is ambiguous, retain the known-good
+                        # target-only Recast instead of failing the whole job.
+                        print(
+                            "[Recast] Native bystander conditioning unavailable; "
+                            f"continuing target-only: {native_error}"
+                        )
+                        traceback.print_exc()
+                        _ensure_source_scene_reference(
+                            "native bystander mapping unavailable",
+                        )
+                    else:
+                        if is_cancel_requested(job):
+                            return
+                        if native_people["reference_image"]:
+                            job["params"]["video_mask"] = native_people["video_mask"]
+                            target_image_refs = list(
+                                prepared_refs["image_refs"],
+                            )
+                            target_mask_paths = [
+                                prepared_refs["primary_mask"],
+                                *prepared_refs["additional_masks"],
+                            ]
+                            target_expected_colors = list(
+                                prepared_refs["expected_colors"],
+                            )
+                            # The color-mapped group is now the primary
+                            # reference adjacent to the video timeline. Large
+                            # target and face-detail views remain as supporting
+                            # references, so bystander identity no longer
+                            # arrives through a contradictory target-free frame.
+                            job["params"]["image_refs"] = [
+                                native_people["reference_image"],
+                                *target_image_refs,
+                            ]
+                            job["params"]["custom_settings"][
+                                "scail2_reference_mask_path"
+                            ] = native_people["reference_mask"]
+                            job["params"]["custom_settings"][
+                                "scail2_additional_reference_mask_paths"
+                            ] = target_mask_paths
+                            job["params"]["custom_settings"][
+                                "scail2_reference_expected_colors"
+                            ] = [None, *target_expected_colors]
+                            job["params"]["custom_settings"][
+                                "scail2_primary_reference_people"
+                            ] = native_people["conditioning_count"]
+                            job["params"]["custom_settings"][
+                                "scail2_identity_latent_reference_index"
+                            ] = 1
+                            job["params"]["video_prompt_type"] = (
+                                f"V0{native_people['conditioning_count']}AI"
+                            )
+                            job["params"]["edit_recast_conditioning_people"] = (
+                                native_people["conditioning_count"]
+                            )
+                            job["params"]["edit_recast_group_reference"] = (
+                                native_people["reference_image"]
+                            )
+                            job["params"]["edit_recast_group_mask"] = (
+                                native_people["reference_mask"]
+                            )
+                            print(
+                                "[Recast] Native group conditioning mapped "
+                                f"{native_people['conditioning_count']} people "
+                                f"(targets={person_count}, "
+                                f"bystanders={len(native_people['assignments'])})"
+                            )
+                        else:
+                            _ensure_source_scene_reference(
+                                "no additional bystanders survived full tracking",
+                            )
+                            print(
+                                "[Recast] No additional visible bystanders fit "
+                                "the native five-person conditioning limit."
+                            )
+
+                if (
+                    explicit_character_mappings
+                    and shot_aware_recast_required
+                ):
+                    if not update_job(
+                        job,
+                        phase="Preparing cast-aware segments",
+                        message=(
+                            "Preparing shot and cast-specific character "
+                            "references..."
+                        ),
+                    ):
+                        return
+                    import secrets
+                    import shutil
+                    import tempfile
+
+                    try:
+                        resolved_seed = int(job["params"].get("seed", -1))
+                    except (TypeError, ValueError):
+                        resolved_seed = -1
+                    if resolved_seed < 0:
+                        resolved_seed = secrets.randbelow(1_000_000_000)
+                    job["params"]["seed"] = resolved_seed
+
+                    generation_fps = (
+                        30.0
+                        if recast_force_fps == "30"
+                        else float(mapped_tracking.get("fps") or fps or 25.0)
+                    )
+                    try:
+                        minimum_frames, _frame_step, latent_size = (
+                            wgp.get_model_min_frames_and_step(model_type)
+                        )
+                    except Exception:
+                        minimum_frames, latent_size = 5, 4
+
+                    shot_temp_dir = tempfile.mkdtemp(
+                        prefix="maestro-recast-shots-",
+                    )
+                    try:
+                        shot_manifest = _build_recast_shot_manifest(
+                            job["params"],
+                            mapped_tracking,
+                            prepared_refs,
+                            shot_temp_dir,
+                            job_id,
+                            reference_canvas=(
+                                recast_width,
+                                recast_height,
+                            ),
+                            target_frame_count=gen_frames,
+                            generation_fps=generation_fps,
+                            minimum_frames=minimum_frames,
+                            latent_size=latent_size,
+                        )
+                    except Exception:
+                        shutil.rmtree(
+                            shot_temp_dir,
+                            ignore_errors=True,
+                        )
+                        raise
+
+                    final_out_dir = job.get("out_dir") or _workspace_dir(
+                        workspace_name,
+                    )
+                    shot_final_out_dir = final_out_dir
+                    job["params"].update({
+                        "_defer_output_publication": True,
+                        "_recast_shot_manifest": shot_manifest["tasks"],
+                        "_recast_shot_temp_dir": shot_temp_dir,
+                        "_recast_final_out_dir": final_out_dir,
+                        "_recast_shot_bundle": {
+                            "shots": shot_manifest["shots"],
+                            "published_shots": shot_manifest[
+                                "published_shots"
+                            ],
+                            "frame_count": shot_manifest["frame_count"],
+                            "fps": shot_manifest["fps"],
+                            "camera_shot_count": shot_manifest[
+                                "camera_shot_count"
+                            ],
+                            "cast_transition_count": shot_manifest[
+                                "cast_transition_count"
+                            ],
+                            "resolved_seed": resolved_seed,
+                        },
+                        "edit_recast_shot_aware": True,
+                        "edit_recast_shot_plan": shot_manifest[
+                            "published_shots"
+                        ],
+                    })
+                    if job["params"].get("_recast_protect_bystanders"):
+                        print(
+                            "[Recast] Strict pixel-lock fallback is disabled "
+                            "for shot-aware generation; native shot references "
+                            "preserve the surrounding scene."
+                        )
+                        job["params"]["_recast_protect_bystanders"] = False
+                    # Generated shots and their references are disposable.
+                    # Point the normal task engine at the private directory;
+                    # the finishing worker publishes only the final join.
+                    job["out_dir"] = shot_temp_dir
+                    generated_count = len(shot_manifest["tasks"])
+                    passthrough_count = sum(
+                        1
+                        for shot in shot_manifest["shots"]
+                        if shot["mode"] == "passthrough"
+                    )
+                    print(
+                        "[Recast] Shot-aware plan prepared "
+                        f"{len(shot_manifest['shots'])} generation segments "
+                        f"from {shot_manifest['camera_shot_count']} camera "
+                        "shot"
+                        f"{'s' if shot_manifest['camera_shot_count'] != 1 else ''} "
+                        f"with {shot_manifest['cast_transition_count']} stable "
+                        "cast transition"
+                        f"{'s' if shot_manifest['cast_transition_count'] != 1 else ''} "
+                        f"({generated_count} generated, "
+                        f"{passthrough_count} source passthrough), "
+                        f"{shot_manifest['frame_count']} exact output frames "
+                        f"at {shot_manifest['fps']:.6g}fps."
+                    )
         except Exception as e:
             traceback.print_exc()
+            if shot_temp_dir and os.path.isdir(shot_temp_dir):
+                import shutil
+
+                shutil.rmtree(shot_temp_dir, ignore_errors=True)
+                if shot_final_out_dir:
+                    job["out_dir"] = shot_final_out_dir
             finish_job(
                 job,
                 "failed",
@@ -8886,13 +16854,863 @@ async def recast_endpoint(request: Request):
                 unregister_abort_state(job_id, _active_gen_states, abort_state)
 
         if not try_requeue(job, message="Queued (recast)", phase=""):
+            if shot_temp_dir and os.path.isdir(shot_temp_dir):
+                import shutil
+
+                shutil.rmtree(shot_temp_dir, ignore_errors=True)
+                if shot_final_out_dir:
+                    job["out_dir"] = shot_final_out_dir
             return
-        _run_generation(job_id)
+        if job["params"].get("_recast_shot_manifest"):
+            _run_recast_shot_generation(job_id)
+        else:
+            _run_generation(job_id)
 
     thread = threading.Thread(target=_run_recast, daemon=False)
     thread.start()
 
-    return {"job_id": job_id, "status": "queued", "frames": total_frames, "target": target}
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "frames": total_frames,
+        "target": target,
+        "person_count": person_count,
+        "resolution_profile": resolution_profile,
+        "resolution": recast_resolution,
+        "sliding_window_size": recast_window_size,
+        "num_inference_steps": inference_steps,
+        "guidance_scale": guidance_scale,
+    }
+
+
+def _resolve_outpaint_sampling(
+    body, base_model_type, model_def, model_defaults,
+):
+    """Resolve model-aware Outpaint steps and guidance.
+
+    Outpaint used to omit the Studio Advanced values and independently fall
+    back to 8 steps. That is valid for distilled LTX-2, but LTXV 13B Dev
+    rejects fewer than 20 steps. Use each model's own defaults, honor locked
+    schedules, and reject invalid API input before it reaches the queue.
+    """
+    model_def = model_def if isinstance(model_def, dict) else {}
+    model_defaults = (
+        model_defaults if isinstance(model_defaults, dict) else {}
+    )
+    default_steps = (
+        model_def.get("num_inference_steps")
+        or model_defaults.get("num_inference_steps")
+        or 8
+    )
+    default_guidance = (
+        model_def.get("guidance_scale")
+        or model_defaults.get("guidance_scale")
+        or 1.0
+    )
+
+    try:
+        default_steps = int(default_steps)
+        default_guidance = float(default_guidance)
+        if model_def.get("lock_inference_steps", False):
+            inference_steps = default_steps
+        else:
+            inference_steps = int(
+                body.get("num_inference_steps", default_steps)
+            )
+        if model_def.get("lock_guidance_scale", False):
+            guidance_scale = default_guidance
+        else:
+            guidance_scale = float(
+                body.get("guidance_scale", default_guidance)
+            )
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "Inference Steps and Guidance Scale must be numeric."
+        ) from error
+
+    if inference_steps <= 0:
+        raise ValueError("Inference Steps must be greater than zero.")
+    if (
+        base_model_type == "ltxv_13B"
+        and not model_def.get("lock_inference_steps", False)
+        and inference_steps < 20
+    ):
+        raise ValueError(
+            "LTX Video 13B requires at least 20 inference steps."
+        )
+    return inference_steps, guidance_scale
+
+
+def _resolve_outpaint_video_timing(
+    source_frames,
+    source_fps,
+    model_def,
+    reference_fps=None,
+):
+    """Resolve Outpaint duration, FPS, and the model's 8n+1 frame grid.
+
+    The short-form Diffusers LTX-2.3 Outpaint demo resamples every source to
+    24 fps.  ``reference_fps`` remains available for reproducing that narrow
+    demo contract and rounds *up* to the next complete latent group so the
+    source tail is not discarded. Maestro's production video path omits it:
+    preserving source timing produced materially better long-form continuity
+    and lets the normal sliding-window path carry clips beyond one window.
+    """
+    model_def = model_def if isinstance(model_def, dict) else {}
+    try:
+        fallback_fps = float(model_def.get("fps") or 25)
+    except (TypeError, ValueError):
+        fallback_fps = 25.0
+    if not math.isfinite(fallback_fps) or fallback_fps <= 0:
+        fallback_fps = 25.0
+
+    try:
+        source_frame_count = max(1, int(source_frames))
+    except (TypeError, ValueError):
+        source_frame_count = 1
+    try:
+        source_rate = float(source_fps)
+    except (TypeError, ValueError):
+        source_rate = fallback_fps
+    if not math.isfinite(source_rate) or source_rate <= 0:
+        source_rate = fallback_fps
+    uses_reference_rate = reference_fps is not None
+    if uses_reference_rate:
+        try:
+            target_fps = float(reference_fps)
+        except (TypeError, ValueError):
+            target_fps = 24.0
+        if not math.isfinite(target_fps) or target_fps <= 0:
+            target_fps = 24.0
+    else:
+        target_fps = source_rate
+
+    duration = source_frame_count / source_rate
+    try:
+        minimum_frames = max(
+            1,
+            int(model_def.get("frames_minimum") or 1),
+        )
+    except (TypeError, ValueError):
+        minimum_frames = 1
+    try:
+        frame_step = max(
+            1,
+            int(
+                model_def.get("latent_size")
+                or model_def.get("frames_steps")
+                or 1
+            ),
+        )
+    except (TypeError, ValueError):
+        frame_step = 1
+
+    nominal_frames = max(
+        float(minimum_frames),
+        (
+            duration * target_fps
+            if uses_reference_rate
+            else float(source_frame_count)
+        ),
+    )
+    if uses_reference_rate:
+        # The reference loader clamps samples past EOF to the final source
+        # frame.  Preserve that behavior instead of dropping up to seven
+        # source frames when converting to LTX's causal temporal grid.
+        latent_steps = max(
+            0,
+            int(math.ceil((nominal_frames - 1) / frame_step)),
+        )
+    else:
+        latent_steps = max(
+            0,
+            int((nominal_frames - 1) // frame_step),
+        )
+    target_frames = max(
+        minimum_frames,
+        latent_steps * frame_step + 1,
+    )
+    return duration, target_fps, target_frames
+
+
+def _resolve_ltx2_outpaint_reference_model(requested_model_type):
+    """Select the best locally available model for official Outpaint.
+
+    Lightricks' published two-stage graph uses the LTX-2.3 Dev transformer
+    with the Distilled 1.1 LoRA at 0.5.  Keep an explicitly selected Dev
+    model.  When the UI supplied a baked-Distilled model, prefer a compatible
+    Dev checkpoint only when it is already installed; otherwise retain the
+    requested model as a no-download compatibility fallback.
+    """
+
+    from urllib.parse import unquote, urlparse
+    from shared.utils import files_locator as fl
+
+    requested_def = wgp.get_model_def(requested_model_type) or {}
+    requested_is_dev = bool(
+        requested_def.get("architecture") == "ltx2_22B"
+        and requested_def.get("ltx2_pipeline", "two_stage")
+        != "distilled"
+    )
+    if requested_is_dev:
+        return requested_model_type
+
+    requested_lower = str(requested_model_type or "").lower()
+    dev_candidates = (
+        ("ltx2_22B_fp8", "ltx2_22B_1_1", "ltx2_22B")
+        if "fp8" in requested_lower
+        else ("ltx2_22B_1_1", "ltx2_22B_fp8", "ltx2_22B")
+    )
+    seen = set()
+    for candidate in dev_candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        candidate_def = wgp.get_model_def(candidate) or {}
+        if (
+            candidate_def.get("architecture") != "ltx2_22B"
+            or candidate_def.get("ltx2_pipeline", "two_stage")
+            == "distilled"
+        ):
+            continue
+        urls = wgp.get_model_recursive_prop(
+            candidate,
+            "URLs",
+            return_list=True,
+        )
+        for url in urls or []:
+            filename = os.path.basename(
+                unquote(urlparse(str(url)).path)
+            )
+            if (
+                filename
+                and fl.locate_file(filename, error_if_none=False)
+                is not None
+            ):
+                return candidate
+    return requested_model_type
+
+
+_OUTPAINT_PIXEL_BUDGETS = {
+    "480p": 480 * 848,
+    "540p": 540 * 960,
+    "720p": 720 * 1280,
+    "1080p": 1088 * 1920,
+}
+
+# A 257-frame 704x1280 two-stage Outpaint is the largest composition verified
+# to fit a 24 GB card with Maestro's normal streaming profile.
+# Keep larger canvases within the same approximate pixel-frame activation
+# budget by shortening each diffusion window. This affects peak VRAM, not the
+# total clip length; the existing sliding-window path covers the remainder.
+_OUTPAINT_SINGLE_STAGE_REFERENCE_PIXELS = 704 * 1280
+_OUTPAINT_SINGLE_STAGE_REFERENCE_FRAMES = 257
+
+
+def _cap_outpaint_single_stage_window(
+    requested_frames,
+    target_width,
+    target_height,
+    window_min=17,
+    window_max=501,
+):
+    requested_frames = max(1, int(requested_frames))
+    target_pixels = max(1, int(target_width) * int(target_height))
+    window_min = max(1, int(window_min))
+    window_max = max(window_min, int(window_max))
+    capped = max(window_min, min(window_max, requested_frames))
+    if target_pixels <= _OUTPAINT_SINGLE_STAGE_REFERENCE_PIXELS:
+        return capped
+
+    pixel_frame_budget = (
+        _OUTPAINT_SINGLE_STAGE_REFERENCE_PIXELS
+        * _OUTPAINT_SINGLE_STAGE_REFERENCE_FRAMES
+    )
+    safe_frames = max(window_min, int(pixel_frame_budget / target_pixels))
+    # LTX-2's causal temporal grid is 1 + 8k frames. Keeping the window on
+    # that grid prevents downstream rounding from increasing it again.
+    safe_frames = 1 + max(0, (safe_frames - 1) // 8) * 8
+    safe_frames = max(window_min, min(window_max, safe_frames))
+    return min(capped, safe_frames)
+
+
+def _resolve_outpaint_canvas_geometry(
+    src_w,
+    src_h,
+    pad_top,
+    pad_bottom,
+    pad_left,
+    pad_right,
+    resolution_preset="auto",
+    alignment=64,
+):
+    """Resolve one grid-aligned Outpaint canvas and protected source rect.
+
+    LTX-2's VAE works on a 64-pixel spatial grid. Previously the endpoint
+    computed padding against an arbitrary target (for example 896x1593)
+    and wgp silently floored that target later (to 896x1536). The model and
+    source-overlay coordinates consequently described different canvases.
+
+    Scale the complete composition uniformly, snap the final canvas once,
+    then derive fractional padding percentages from that exact canvas.
+    """
+    src_w = max(1, int(src_w))
+    src_h = max(1, int(src_h))
+    pad_top = max(0, int(pad_top))
+    pad_bottom = max(0, int(pad_bottom))
+    pad_left = max(0, int(pad_left))
+    pad_right = max(0, int(pad_right))
+    alignment = max(1, int(alignment))
+
+    composed_w = src_w + pad_left + pad_right
+    composed_h = src_h + pad_top + pad_bottom
+    target_w = float(composed_w)
+    target_h = float(composed_h)
+    preset = str(resolution_preset or "auto").lower()
+    if preset in _OUTPAINT_PIXEL_BUDGETS:
+        scale = (
+            _OUTPAINT_PIXEL_BUDGETS[preset]
+            / max(1.0, target_w * target_h)
+        ) ** 0.5
+        target_w *= scale
+        target_h *= scale
+
+    def _align(value):
+        return max(
+            alignment,
+            int(math.floor((float(value) / alignment) + 0.5))
+            * alignment,
+        )
+
+    final_w = _align(target_w)
+    final_h = _align(target_h)
+
+    # Uniformly fit the requested composition into the aligned canvas. Any
+    # few grid-rounding pixels left over are centered around the composition,
+    # preserving both the source aspect and the user's source placement.
+    scale = min(
+        final_w / max(1.0, float(composed_w)),
+        final_h / max(1.0, float(composed_h)),
+    )
+    fitted_w = composed_w * scale
+    fitted_h = composed_h * scale
+    composition_x = (final_w - fitted_w) / 2.0
+    composition_y = (final_h - fitted_h) / 2.0
+    overlay_x = int(round(composition_x + pad_left * scale))
+    overlay_y = int(round(composition_y + pad_top * scale))
+    overlay_w = max(1, int(round(src_w * scale)))
+    overlay_h = max(1, int(round(src_h * scale)))
+    overlay_x = max(0, min(overlay_x, final_w - overlay_w))
+    overlay_y = max(0, min(overlay_y, final_h - overlay_h))
+
+    resolved_left = overlay_x
+    resolved_top = overlay_y
+    resolved_right = max(0, final_w - overlay_x - overlay_w)
+    resolved_bottom = max(0, final_h - overlay_y - overlay_h)
+    dims = (
+        100.0 * resolved_top / overlay_h,
+        100.0 * resolved_bottom / overlay_h,
+        100.0 * resolved_left / overlay_w,
+        100.0 * resolved_right / overlay_w,
+    )
+
+    # Re-resolve through the same helper inference uses. These coordinates
+    # are retained for legacy overlay metadata and make any float rounding
+    # difference observable instead of allowing two geometries to diverge.
+    from shared.utils.utils import get_outpainting_frame_location
+
+    (
+        model_overlay_h,
+        model_overlay_w,
+        model_overlay_y,
+        model_overlay_x,
+    ) = get_outpainting_frame_location(
+        final_h,
+        final_w,
+        list(dims),
+        1,
+    )
+    return {
+        "final_w": final_w,
+        "final_h": final_h,
+        "dims": dims,
+        "overlay_w": int(model_overlay_w),
+        "overlay_h": int(model_overlay_h),
+        "overlay_x": int(model_overlay_x),
+        "overlay_y": int(model_overlay_y),
+        "requested_w": composed_w,
+        "requested_h": composed_h,
+    }
+
+
+def _format_outpaint_percentage(value):
+    text = f"{float(value):.8f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _detect_outpaint_video_shot_ranges(
+    source_video, target_frame_count, *, abort_callback=None,
+    min_shot_frames=4, absolute_cut_threshold=0.12,
+):
+    """Stream a video into tiny thumbnails and return hard-cut ranges.
+
+    Outpaint only needs camera-cut boundaries, not the full-resolution frame
+    tensor that Recast keeps for SAM tracking. Retaining 64x36 RGB thumbnails
+    bounds memory while deliberately reusing Recast's proven adaptive cut
+    scoring. ``target_frame_count`` matches the exact timeline LTX will
+    generate; any source tail outside its causal 8n+1 grid is ignored just as
+    it is by the ordinary continuous Outpaint path.
+    """
+    import cv2
+    import numpy as np
+
+    frame_limit = max(1, int(target_frame_count))
+    capture = cv2.VideoCapture(str(source_video))
+    if not capture.isOpened():
+        capture.release()
+        raise ValueError(
+            f"Outpaint could not open the source video: {source_video}"
+        )
+
+    thumbnails = []
+    try:
+        while len(thumbnails) < frame_limit:
+            if abort_callback is not None:
+                abort_callback()
+            ok, frame = capture.read()
+            if not ok or frame is None:
+                break
+            thumbnail = cv2.resize(
+                frame,
+                (64, 36),
+                interpolation=cv2.INTER_AREA,
+            )
+            thumbnails.append(cv2.cvtColor(thumbnail, cv2.COLOR_BGR2RGB))
+    finally:
+        capture.release()
+
+    decoded_count = len(thumbnails)
+    if decoded_count <= 0:
+        raise ValueError("Outpaint source video contains no decodable frames.")
+    if decoded_count < frame_limit:
+        raise ValueError(
+            "Outpaint source ended before its planned timeline "
+            f"({decoded_count}/{frame_limit} frames)."
+        )
+
+    return _detect_recast_shot_ranges(
+        np.stack(thumbnails),
+        min_shot_frames=min_shot_frames,
+        absolute_cut_threshold=absolute_cut_threshold,
+    )
+
+
+def _build_outpaint_shot_filter(
+    start_frame, end_frame, pad_frames, fps,
+):
+    """Build an exact-frame, CFR filter for one lossless internal guide."""
+    start = int(start_frame)
+    end = int(end_frame)
+    padding = max(0, int(pad_frames))
+    rate = float(fps)
+    if start < 0 or end <= start:
+        raise ValueError("Outpaint shot frame bounds are invalid.")
+    if not math.isfinite(rate) or rate <= 0:
+        raise ValueError("Outpaint shot FPS must be positive.")
+    rate_text = f"{rate:.12g}"
+    return (
+        f"trim=start_frame={start}:end_frame={end},"
+        f"setpts=N/({rate_text}*TB),"
+        f"tpad=stop_mode=clone:stop={padding}"
+    )
+
+
+def _write_outpaint_shot_guide(
+    source_video, output_path, *, start_frame, end_frame, pad_frames,
+    fps, abort_callback=None,
+):
+    """Write one frame-exact, lossless H.264 guide without loading it whole."""
+    import subprocess
+
+    if abort_callback is not None:
+        abort_callback()
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    filter_graph = _build_outpaint_shot_filter(
+        start_frame,
+        end_frame,
+        pad_frames,
+        fps,
+    )
+    ffmpeg_bin = os.environ.get("FFMPEG_BINARY", "ffmpeg")
+    expected_frames = (
+        int(end_frame) - int(start_frame) + max(0, int(pad_frames))
+    )
+    timeout = max(
+        120,
+        min(900, int(math.ceil(expected_frames / float(fps) * 10.0))),
+    )
+    command = [
+        ffmpeg_bin,
+        "-y",
+        "-v",
+        "error",
+        "-i",
+        str(source_video),
+        "-map",
+        "0:v:0",
+        "-vf",
+        filter_graph,
+        "-an",
+        "-map_metadata",
+        "0",
+        # The generated margins are color-sensitive. CRF 0 prevents an
+        # intermediate guide encode from softening or shifting the protected
+        # source before the IC-LoRA sees it.
+        "-c:v",
+        "libx264",
+        "-crf",
+        "0",
+        "-preset",
+        "fast",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if abort_callback is not None:
+        abort_callback()
+    if completed.returncode != 0 or not os.path.isfile(output_path):
+        if os.path.isfile(output_path):
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
+        detail = (completed.stderr or "unknown ffmpeg error").strip()
+        raise RuntimeError(
+            "Could not prepare Outpaint camera shot: " + detail[:500]
+        )
+
+    actual_frames = _recast_video_frame_count(output_path)
+    if actual_frames != expected_frames:
+        try:
+            os.remove(output_path)
+        except OSError:
+            pass
+        raise RuntimeError(
+            "Outpaint camera-shot guide changed timeline length "
+            f"({actual_frames}/{expected_frames} frames)."
+        )
+    return output_path
+
+
+def _build_outpaint_shot_manifest(
+    base_params, source_video, shot_ranges, output_dir, job_id, *,
+    target_frame_count, generation_fps, minimum_frames, latent_size,
+    guide_writer=None, progress_callback=None, abort_callback=None,
+):
+    """Create exact-length official Outpaint tasks for every camera shot."""
+    target_count = int(target_frame_count)
+    if target_count <= 0:
+        raise ValueError("Outpaint target timeline must contain frames.")
+    ranges = [
+        (int(bounds[0]), int(bounds[1]))
+        for bounds in (shot_ranges or [])
+    ]
+    if not ranges:
+        ranges = [(0, target_count)]
+    cursor = 0
+    for start, end in ranges:
+        if start != cursor or end <= start or end > target_count:
+            raise ValueError(
+                "Outpaint camera shots must cover one contiguous timeline."
+            )
+        cursor = end
+    if cursor != target_count:
+        raise ValueError(
+            "Outpaint camera shots do not cover the complete timeline."
+        )
+
+    writer = guide_writer or _write_outpaint_shot_guide
+    os.makedirs(output_dir, exist_ok=True)
+    tasks = []
+    plans = []
+    total_shots = len(ranges)
+    for shot_index, (start, end) in enumerate(ranges):
+        if abort_callback is not None:
+            abort_callback()
+        if progress_callback is not None:
+            progress_callback(shot_index, total_shots)
+        exact_frames = end - start
+        generated_frames, trim_tail = _quantize_recast_shot_frame_count(
+            exact_frames,
+            minimum_frames,
+            latent_size,
+        )
+        guide_path = os.path.join(
+            output_dir,
+            f"outpaint_{job_id}_shot_{shot_index + 1}_guide.mp4",
+        )
+        writer(
+            source_video,
+            guide_path,
+            start_frame=start,
+            end_frame=end,
+            pad_frames=trim_tail,
+            fps=generation_fps,
+            abort_callback=abort_callback,
+        )
+        tasks.append({
+            "shot_index": shot_index,
+            "params": {
+                "video_guide": guide_path,
+                "video_length": generated_frames,
+                "trim_tail_frames": trim_tail,
+                "video_prompt_type": "VG",
+                "image_prompt_type": "",
+                "force_fps": "control",
+                # Internal shots never replace their audio or perform the
+                # continuous-path smear trim. One source track is attached
+                # only after exact-frame assembly.
+                "audio_prompt_type": "",
+                "audio_guide": None,
+                "audio_source": None,
+                "_outpaint_preserve_audio": False,
+                "_outpaint_source_video": None,
+                "_outpaint_lock_source_pixels": False,
+                "_outpaint_trim_smear": False,
+                "output_filename": (
+                    f"outpaint_{job_id}_shot_{shot_index + 1}.mp4"
+                ),
+            },
+        })
+        plans.append({
+            "shot_index": shot_index,
+            "start_frame": start,
+            "end_frame": end,
+            "frame_count": exact_frames,
+            "generated_frame_count": generated_frames,
+            "trim_tail_frames": trim_tail,
+            "mode": "outpaint",
+        })
+
+    return {
+        "tasks": tasks,
+        "shots": plans,
+        "published_shots": [dict(plan) for plan in plans],
+        "frame_count": target_count,
+        "fps": float(generation_fps),
+    }
+
+
+def _prepare_and_run_outpaint(job_id):
+    """Detect camera cuts, prepare private shot tasks, then generate."""
+    import secrets
+    import shutil
+    import tempfile
+
+    job = _jobs[job_id]
+    abort_state = {"abort": False}
+    shot_temp_dir = None
+    shot_final_out_dir = None
+    has_shot_manifest = False
+
+    try:
+        # Match Recast/Repaint's two-phase lifecycle. Preparation is short and
+        # CPU-bound, but taking the slot preserves submission order and avoids
+        # stacking ffmpeg decoding on top of another active generation.
+        with generation_slot(_gen_lock, job) as acquired:
+            if not acquired:
+                return
+            if not try_start(
+                job,
+                phase="Detecting camera shots",
+                message="Detecting camera cuts for Outpaint...",
+            ):
+                return
+            if not register_abort_state(
+                job,
+                job_id,
+                _active_gen_states,
+                abort_state,
+            ):
+                return
+
+            def _abort_preparation():
+                if is_cancel_requested(job):
+                    raise InterruptedError(
+                        "Outpaint camera-shot preparation was cancelled",
+                    )
+
+            params = job.get("params") or {}
+            source_video = params.get("video_guide")
+            target_frame_count = int(params.get("video_length") or 0)
+            generation_fps = float(
+                params.get("_outpaint_generation_fps") or 0
+            )
+            if not source_video or not os.path.isfile(source_video):
+                raise ValueError("Outpaint source video is unavailable.")
+            if target_frame_count <= 0 or generation_fps <= 0:
+                raise ValueError("Outpaint timeline metadata is invalid.")
+
+            shot_ranges = _detect_outpaint_video_shot_ranges(
+                source_video,
+                target_frame_count,
+                abort_callback=_abort_preparation,
+            )
+            params["edit_outpaint_detected_shot_ranges"] = [
+                [int(start), int(end)]
+                for start, end in shot_ranges
+            ]
+            if len(shot_ranges) <= 1:
+                print(
+                    "[Outpaint] Detected one continuous camera shot; "
+                    "using the proven continuous pipeline."
+                )
+            else:
+                cut_times = ", ".join(
+                    f"{start / generation_fps:.2f}s"
+                    for start, _end in shot_ranges[1:]
+                )
+                print(
+                    f"[Outpaint] Detected {len(shot_ranges)} camera shots; "
+                    f"generating each independently after cuts at "
+                    f"{cut_times}."
+                )
+                if not update_job(
+                    job,
+                    phase="Preparing camera shots",
+                    message=(
+                        f"Preparing {len(shot_ranges)} Outpaint shots..."
+                    ),
+                ):
+                    raise InterruptedError(
+                        "Outpaint camera-shot preparation was cancelled",
+                    )
+
+                try:
+                    resolved_seed = int(params.get("seed", -1))
+                except (TypeError, ValueError):
+                    resolved_seed = -1
+                if resolved_seed < 0:
+                    resolved_seed = secrets.randbelow(1_000_000_000)
+                params["seed"] = resolved_seed
+
+                model_type = params.get("model_type")
+                try:
+                    minimum_frames, _frame_step, latent_size = (
+                        wgp.get_model_min_frames_and_step(model_type)
+                    )
+                except Exception:
+                    minimum_frames, latent_size = 17, 8
+
+                shot_temp_dir = tempfile.mkdtemp(
+                    prefix="maestro-outpaint-shots-",
+                )
+
+                def _preparation_progress(index, total):
+                    if not update_job(
+                        job,
+                        phase="Preparing camera shots",
+                        message=(
+                            f"Preparing Outpaint shot {index + 1}/{total}..."
+                        ),
+                    ):
+                        raise InterruptedError(
+                            "Outpaint camera-shot preparation was cancelled",
+                        )
+
+                try:
+                    shot_manifest = _build_outpaint_shot_manifest(
+                        params,
+                        source_video,
+                        shot_ranges,
+                        shot_temp_dir,
+                        job_id,
+                        target_frame_count=target_frame_count,
+                        generation_fps=generation_fps,
+                        minimum_frames=minimum_frames,
+                        latent_size=latent_size,
+                        progress_callback=_preparation_progress,
+                        abort_callback=_abort_preparation,
+                    )
+                except Exception:
+                    shutil.rmtree(shot_temp_dir, ignore_errors=True)
+                    shot_temp_dir = None
+                    raise
+
+                shot_final_out_dir = job.get("out_dir") or _workspace_dir(
+                    job.get("workspace"),
+                )
+                params.update({
+                    "_defer_output_publication": True,
+                    "_outpaint_shot_manifest": shot_manifest["tasks"],
+                    "_outpaint_shot_temp_dir": shot_temp_dir,
+                    "_outpaint_final_out_dir": shot_final_out_dir,
+                    "_outpaint_shot_source_video": source_video,
+                    "_outpaint_shot_bundle": {
+                        "shots": shot_manifest["shots"],
+                        "published_shots": shot_manifest[
+                            "published_shots"
+                        ],
+                        "frame_count": shot_manifest["frame_count"],
+                        "fps": shot_manifest["fps"],
+                        "resolved_seed": resolved_seed,
+                        "preserve_source_audio": bool(
+                            params.get("_outpaint_preserve_audio", True)
+                        ),
+                    },
+                    "edit_outpaint_shot_aware": True,
+                    "edit_outpaint_shot_plan": shot_manifest[
+                        "published_shots"
+                    ],
+                })
+                job["out_dir"] = shot_temp_dir
+                has_shot_manifest = True
+                print(
+                    "[Outpaint] Shot-aware plan prepared "
+                    f"{len(shot_manifest['shots'])} camera shots, "
+                    f"{shot_manifest['frame_count']} exact output frames "
+                    f"at {shot_manifest['fps']:.6g}fps."
+                )
+    except InterruptedError:
+        return
+    except Exception as error:
+        traceback.print_exc()
+        if shot_temp_dir and os.path.isdir(shot_temp_dir):
+            shutil.rmtree(shot_temp_dir, ignore_errors=True)
+        if shot_final_out_dir:
+            job["out_dir"] = shot_final_out_dir
+        finish_job(
+            job,
+            "failed",
+            error=f"Outpaint shot preparation failed: {error}",
+            message="Outpaint shot preparation failed",
+        )
+        return
+    finally:
+        unregister_abort_state(
+            job_id,
+            _active_gen_states,
+            abort_state,
+        )
+
+    if not try_requeue(job, message="Queued (outpaint)", phase=""):
+        if shot_temp_dir and os.path.isdir(shot_temp_dir):
+            shutil.rmtree(shot_temp_dir, ignore_errors=True)
+        if shot_final_out_dir:
+            job["out_dir"] = shot_final_out_dir
+        return
+    if has_shot_manifest:
+        _run_outpaint_shot_generation(job_id)
+    else:
+        _run_generation(job_id)
 
 
 @api.post("/api/v1/outpaint")
@@ -8903,6 +17721,8 @@ async def outpaint_endpoint(request: Request):
         video_path: str, prompt: str, model_type: str,
         pad_top?: int, pad_bottom?: int, pad_left?: int, pad_right?: int,
         gamma_correct?: bool, seed?: int,
+        num_inference_steps?: int, guidance_scale?: float,
+        negative_prompt?: str,
         activated_loras?: list, loras_multipliers?: str, workspace?: str,
     }
     """
@@ -8927,6 +17747,7 @@ async def outpaint_endpoint(request: Request):
     model_type = body.get("model_type")
     if not model_type:
         raise HTTPException(status_code=400, detail="model_type is required")
+    requested_model_type = model_type
 
     pad_top = int(body.get("pad_top", 0))
     pad_bottom = int(body.get("pad_bottom", 0))
@@ -8983,68 +17804,128 @@ async def outpaint_endpoint(request: Request):
     if is_video:
         import decord
         vr = decord.VideoReader(video_path)
-        total_frames = len(vr)
+        source_total_frames = len(vr)
+        source_fps = float(vr.get_avg_fps() or 0)
         src_h, src_w = vr[0].shape[:2]
         del vr
+        total_frames = source_total_frames
     else:
         img = PILImage.open(video_path).convert("RGB")
         src_w, src_h = img.size
+        source_total_frames = 1
+        source_fps = 0.0
         total_frames = 1
         del img
 
-    # Convert pixel pads to INTEGER percentages relative to source dimensions
-    # — wgp.get_outpainting_dims parses with int() and raises on decimals, so
-    # float format was silently dropping outpainting_dims → the model skipped
-    # canvas expansion entirely. Minimum 1% when any pad is requested so a
-    # small pixel ask doesn't round to zero.
-    def _pct(pad, dim):
-        if pad <= 0:
-            return 0
-        return max(1, round(100.0 * pad / max(1, dim)))
-    pct_top = _pct(pad_top, src_h)
-    pct_bottom = _pct(pad_bottom, src_h)
-    pct_left = _pct(pad_left, src_w)
-    pct_right = _pct(pad_right, src_w)
-    video_guide_outpainting = f"{pct_top} {pct_bottom} {pct_left} {pct_right}"
-
-    final_w = src_w + pad_left + pad_right
-    final_h = src_h + pad_top + pad_bottom
-
-    # Resolution budget: Auto keeps native size (may OOM on bigger models);
-    # presets scale the final canvas down to a fixed pixel budget while
-    # preserving the target aspect. Outpainting percentages are unchanged —
-    # they're relative and the pipeline fits source into the scaled canvas.
-    _OUTPAINT_PIXEL_BUDGETS = {
-        "480p": 480 * 848,      # ~407k
-        "540p": 540 * 960,      # ~518k
-        "720p": 720 * 1280,     # ~922k
-        "1080p": 1088 * 1920,   # ~2.08M
-    }
+    # Resolve the output grid and protected source rectangle together. The
+    # fractional percentages survive through wgp so inference and later
+    # metadata describe the same exact canvas.
     resolution_preset = str(body.get("resolution_preset") or "auto").lower()
-    if resolution_preset in _OUTPAINT_PIXEL_BUDGETS and final_w > 0 and final_h > 0:
-        target_pixels = _OUTPAINT_PIXEL_BUDGETS[resolution_preset]
-        current_pixels = final_w * final_h
-        scale = (target_pixels / current_pixels) ** 0.5
-        scaled_w = max(32, round(final_w * scale / 32) * 32)
-        scaled_h = max(32, round(final_h * scale / 32) * 32)
-        print(f"[Outpaint] Resolution preset '{resolution_preset}': {final_w}x{final_h} -> {scaled_w}x{scaled_h}")
-        final_w, final_h = scaled_w, scaled_h
+    base_model_type = wgp.get_base_model_type(model_type)
+    outpaint_alignment = 64 if base_model_type == "ltx2_22B" else 32
+    geometry = _resolve_outpaint_canvas_geometry(
+        src_w,
+        src_h,
+        pad_top,
+        pad_bottom,
+        pad_left,
+        pad_right,
+        resolution_preset,
+        outpaint_alignment,
+    )
+    final_w = geometry["final_w"]
+    final_h = geometry["final_h"]
+    overlay_w = geometry["overlay_w"]
+    overlay_h = geometry["overlay_h"]
+    overlay_x = geometry["overlay_x"]
+    overlay_y = geometry["overlay_y"]
+    video_guide_outpainting = " ".join(
+        _format_outpaint_percentage(value)
+        for value in geometry["dims"]
+    )
 
-    print(f"[Outpaint] Source: {src_w}x{src_h}, Target: {final_w}x{final_h}, Dims (%): {video_guide_outpainting}")
+    # Auto stays near native dimensions; quality presets apply a pixel budget
+    # before both axes are snapped to the model grid.
+    if (
+        final_w != geometry["requested_w"]
+        or final_h != geometry["requested_h"]
+    ):
+        print(
+            f"[Outpaint] Grid-aligned canvas: "
+            f"{geometry['requested_w']}x{geometry['requested_h']} -> "
+            f"{final_w}x{final_h}"
+        )
+    print(
+        f"[Outpaint] Source: {src_w}x{src_h}, "
+        f"Target: {final_w}x{final_h}, "
+        f"Protected rect: {overlay_w}x{overlay_h}"
+        f"+{overlay_x}+{overlay_y}, "
+        f"Dims (%): {video_guide_outpainting}"
+    )
 
-    # Source preservation: maps to denoising_strength (which wgp reads as
-    # control_strength for the masked-gen path). Higher = source region more
-    # tightly pinned to the input, lower = model gets more creative latitude
-    # across the boundary. Range clamped to [0.3, 1.0].
-    source_preservation = float(body.get("source_preservation", 1.0))
-    source_preservation = max(0.3, min(1.0, source_preservation))
+    requested_mask_preservation = bool(
+        body.get("mask_preserving_outpaint", True)
+    )
+    mask_preserving_outpaint = bool(
+        requested_mask_preservation
+        and is_video
+        and base_model_type == "ltx2_22B"
+    )
+    if requested_mask_preservation and not mask_preserving_outpaint:
+        print(
+            "[Outpaint] Mask-preserving workflow is currently available "
+            "for LTX-2.3 22B video outpainting; using the legacy path."
+        )
+    official_outpaint = bool(mask_preserving_outpaint)
+    if official_outpaint:
+        model_type = _resolve_ltx2_outpaint_reference_model(model_type)
+        if model_type != requested_model_type:
+            print(
+                "[Outpaint] Official reference model stack: "
+                f"{requested_model_type} -> {model_type} "
+                "(installed Dev checkpoint + Distilled 1.1 LoRA at 0.5 "
+                "+ In/Outpainting IC-LoRA)."
+            )
+        else:
+            selected_def = wgp.get_model_def(model_type) or {}
+            if selected_def.get("ltx2_pipeline", "two_stage") == "distilled":
+                print(
+                    "[Outpaint] No installed Dev checkpoint was found; "
+                    "using the selected baked-Distilled model as a "
+                    "compatibility fallback."
+                )
+        base_model_type = wgp.get_base_model_type(model_type)
+        print(
+            "[Outpaint] Using Lightricks' official two-stage workflow "
+            "(#66FF00 mask guide, full reference attention, decoded-pixel "
+            "handoff, and Laplacian source restoration)."
+        )
 
-    # Outpaint LoRA strength: read by ltx2.get_loras_transformer when
-    # auto-loading the outpaint IC-LoRA. Stronger = more assertive mask
-    # adherence (can also bleed into the source). Default 1.0 is the
-    # upstream-trained value.
-    outpaint_lora_strength = float(body.get("outpaint_lora_strength", 1.0))
-    outpaint_lora_strength = max(0.0, min(2.0, outpaint_lora_strength))
+    # The official mask-conditioned path requires full control strength. The
+    # legacy rollback path keeps accepting the old conditioning control.
+    if mask_preserving_outpaint:
+        source_preservation = 1.0
+    else:
+        source_preservation = float(
+            body.get("source_preservation", 1.0)
+        )
+        source_preservation = max(
+            0.3,
+            min(1.0, source_preservation),
+        )
+
+    # The official in/outpainting LoRA is fixed at its trained strength.
+    # Legacy mode retains the old multiplier solely for rollback testing.
+    if mask_preserving_outpaint:
+        outpaint_lora_strength = 1.0
+    else:
+        outpaint_lora_strength = float(
+            body.get("outpaint_lora_strength", 1.0)
+        )
+        outpaint_lora_strength = max(
+            0.0,
+            min(2.0, outpaint_lora_strength),
+        )
 
     # Preserve source audio: outpainting only changes spatial canvas — the
     # temporal content (and therefore the audio) is identical to the source.
@@ -9063,7 +17944,9 @@ async def outpaint_endpoint(request: Request):
     # visible rectangular seam because the model's outpainted region has
     # slightly different color/tone than raw source. Kept as opt-in for
     # power users who explicitly want pixel-perfect source area.
-    lock_source_pixels = bool(body.get("lock_source_pixels", False)) and is_video
+    lock_source_pixels = bool(
+        body.get("lock_source_pixels", False)
+    ) and is_video and not mask_preserving_outpaint
 
     # Trim sliding-window smear: at the boundary between window 1 and
     # window 2, the model's prefix-conditioning produces ~reuse_frames
@@ -9077,22 +17960,6 @@ async def outpaint_endpoint(request: Request):
     # lip sync. Single-window outpaint has no boundary so no-op.
     trim_window_smear = bool(body.get("trim_window_smear", True)) and is_video
 
-    # Compute source-area overlay coordinates in OUTPUT canvas (post-rescale).
-    # The source rectangle in the pre-rescale canvas is (pad_left, pad_top,
-    # src_w, src_h). After rescale by ratio = final_w/pre_final_w, both
-    # the offset and the size scale uniformly.
-    pre_final_w = src_w + pad_left + pad_right
-    pre_final_h = src_h + pad_top + pad_bottom
-    if pre_final_w > 0 and pre_final_h > 0:
-        ratio_w = final_w / pre_final_w
-        ratio_h = final_h / pre_final_h
-        overlay_w = max(2, round(src_w * ratio_w))
-        overlay_h = max(2, round(src_h * ratio_h))
-        overlay_x = max(0, round(pad_left * ratio_w))
-        overlay_y = max(0, round(pad_top * ratio_h))
-    else:
-        overlay_w = overlay_h = overlay_x = overlay_y = 0
-
     # Sliding window for long clips: outpaint VRAM scales with window frames ×
     # canvas pixels. Single-shot generation works for short clips at modest
     # resolutions but OOMs on longer clips (e.g. 57s @ 720p needs ~6 windows).
@@ -9105,6 +17972,48 @@ async def outpaint_endpoint(request: Request):
         _model_def = wgp.get_model_def(model_type) or {}
     except Exception:
         _model_def = {}
+    try:
+        _model_defaults = wgp.get_default_settings(model_type) or {}
+    except Exception:
+        _model_defaults = {}
+    if is_video:
+        (
+            source_duration,
+            generation_fps,
+            total_frames,
+        ) = _resolve_outpaint_video_timing(
+            source_total_frames,
+            source_fps,
+            _model_def,
+        )
+        print(
+            "[Outpaint] Timing: "
+            f"{source_total_frames} frames at {source_fps:.3f} fps "
+            f"({source_duration:.3f}s) -> {total_frames} frames at "
+            f"{generation_fps:g} fps"
+        )
+    if official_outpaint:
+        # The official graph distills the Dev transformer to the published
+        # eight-step schedule. Do not let stale saved settings alter it.
+        inference_steps = 8
+        guidance_scale = 1.0
+        print(
+            "[Outpaint] Reference sampling: 8-step masked first pass + "
+            "2-step decoded-pixel refinement, CFG 1."
+        )
+    else:
+        try:
+            inference_steps, guidance_scale = _resolve_outpaint_sampling(
+                body,
+                wgp.get_base_model_type(model_type),
+                _model_def,
+                _model_defaults,
+            )
+        except ValueError as error:
+            raise HTTPException(
+                status_code=400,
+                detail=str(error),
+            ) from error
     _sw_defaults = _model_def.get("sliding_window_defaults", {})
     sliding_window_size = int(body.get("sliding_window_size", _sw_defaults.get("window_default", 241)))
     sliding_window_overlap = int(body.get("sliding_window_overlap", _sw_defaults.get("overlap_default", 9)))
@@ -9116,15 +18025,100 @@ async def outpaint_endpoint(request: Request):
     _window_max = int(_sw_defaults.get("window_max", 501))
     _window_min = int(_sw_defaults.get("window_min", 17))
     sliding_window_size = max(_window_min, min(_window_max, sliding_window_size))
+    if official_outpaint and is_video:
+        requested_window_size = sliding_window_size
+        sliding_window_size = _cap_outpaint_single_stage_window(
+            sliding_window_size,
+            final_w,
+            final_h,
+            _window_min,
+            _window_max,
+        )
+        if sliding_window_size < requested_window_size:
+            print(
+                "[Outpaint] Two-stage Outpaint VRAM window cap: "
+                f"{requested_window_size} -> {sliding_window_size} frames "
+                f"for {final_w}x{final_h}. The complete clip will use "
+                "additional sliding windows."
+            )
+    # Outpaint system LoRAs are selected internally. Remove a persisted manual
+    # selection of either system file so rerunning old settings cannot load
+    # both the legacy and official variants at once.
+    activated_loras = list(body.get("activated_loras") or [])
+    multiplier_tokens = [
+        token.split(";", 1)[0]
+        for token in str(body.get("loras_multipliers") or "").split()
+    ]
+    system_outpaint_loras = {
+        "ltx-2.3-22b-ic-lora-outpaint.safetensors",
+        "ltx-2.3-22b-ic-lora-in-outpainting-0.9.safetensors",
+    }
+    filtered_loras = []
+    filtered_multipliers = []
+    for index, lora in enumerate(activated_loras):
+        if os.path.basename(str(lora)).lower() in system_outpaint_loras:
+            print(
+                "[Outpaint] Ignoring manually selected system LoRA "
+                f"{os.path.basename(str(lora))}; the workflow manages it."
+            )
+            continue
+        if official_outpaint:
+            print(
+                "[Outpaint] Ignoring user LoRA "
+                f"{os.path.basename(str(lora))}; the reference workflow "
+                "manages its Distilled and IC-LoRA adapters internally."
+            )
+            continue
+        filtered_loras.append(lora)
+        filtered_multipliers.append(
+            multiplier_tokens[index]
+            if index < len(multiplier_tokens)
+            else "1"
+        )
+
+    submitted_outpaint_prompt = str(body.get("prompt") or "").strip()
+    if official_outpaint:
+        # Lightricks recommends an empty/minimal prompt, or a description of
+        # only the missing region. Appending a whole-scene instruction makes
+        # the model redraw or duplicate subjects at the source boundary.
+        outpaint_prompt = (
+            "."
+            if not submitted_outpaint_prompt
+            or submitted_outpaint_prompt.lower() == "extend the scene naturally"
+            else submitted_outpaint_prompt
+        )
+    else:
+        raw_outpaint_prompt = submitted_outpaint_prompt
+        if not raw_outpaint_prompt or raw_outpaint_prompt.lower() == "extend the scene naturally":
+            raw_outpaint_prompt = (
+                "the scene continues naturally beyond the original frame, "
+                "consistent style and lighting"
+            )
+        outpaint_prompt = (
+            f"{raw_outpaint_prompt}; seamlessly extend the scene into the "
+            "empty margins, matching the existing content."
+        )
 
     gen_params = {
-        "prompt": body.get("prompt", "extend the scene naturally"),
+        "prompt": outpaint_prompt,
         "model_type": model_type,
-        "negative_prompt": body.get("negative_prompt", "pc game, console game, video game, ugly, 3d render, photo, still, static, slow"),
+        # The published Outpaint app deliberately leaves this empty. A broad
+        # generic negative prompt can shift the generated margins away from
+        # the appearance of the protected source.
+        "negative_prompt": (
+            ""
+            if official_outpaint
+            else str(body.get("negative_prompt") or "")
+        ),
         "seed": body.get("seed", -1),
-        "guidance_scale": 1.0,
-        "num_inference_steps": body.get("num_inference_steps", 8),
+        "guidance_scale": guidance_scale,
+        "num_inference_steps": inference_steps,
         "video_length": max(total_frames, 17) if is_video else 1,
+        # Keep the generated timeline on the source video's native cadence.
+        # Forcing the reference demo's 24 fps collapsed a known-good 305-frame
+        # / two-window clip into one 249-frame window and caused the generated
+        # margins to diverge visibly from the protected source rectangle.
+        "force_fps": "control" if is_video else "auto",
         "resolution": f"{final_w}x{final_h}",
         "generation_mode": "video" if is_video else "image",
         # Tag for the gallery's Edits filter + Load Settings restore path.
@@ -9142,15 +18136,24 @@ async def outpaint_endpoint(request: Request):
         # must survive the signature filter. We pass it through raw_params and
         # ltx2.py picks it up via kwargs.get.
         "outpaint_lora_strength": outpaint_lora_strength,
-        "activated_loras": body.get("activated_loras", []),
-        "loras_multipliers": " ".join(m.split(";")[0] for m in (body.get("loras_multipliers", "") or "").split()),
+        "outpaint_mask_preserve": mask_preserving_outpaint,
+        "outpaint_official_stack": official_outpaint,
+        # Match the current Lightricks graph as one coherent pipeline. The
+        # implementation paints the exact marker immediately before VAE
+        # encoding, keeps full reference attention, blends pass one back to
+        # source pixels, resizes with Lanczos, and restores source again after
+        # pass two. The marker-safe source pyramid prevents #66FF00 leakage.
+        "single_stage_pipeline": False,
+        "outpaint_full_resolution_refine": official_outpaint,
+        "activated_loras": filtered_loras,
+        "loras_multipliers": " ".join(filtered_multipliers),
         # Sliding window engages automatically when total_frames > sliding_window_size
         # (wgp.py:6739). For images / very short clips, force window > clip so the
         # pipeline runs single-shot (cheaper than multi-window for tiny inputs).
         "sliding_window_size": sliding_window_size if (is_video and total_frames > sliding_window_size) else (max(total_frames, 17) + 10 if is_video else 17),
         "sliding_window_overlap": sliding_window_overlap,
         "sliding_window_discard_last_frames": sliding_window_discard_last_frames,
-        "settings_version": 2.52,
+        "settings_version": 2.53,
         # Underscore-prefixed flags survive job["params"] but get stripped by
         # the wgp.generate_video signature filter (line ~5119), so they don't
         # reach the inference pipeline. _run_generation reads them after the
@@ -9164,6 +18167,12 @@ async def outpaint_endpoint(request: Request):
         "_outpaint_overlay_y": overlay_y,
         "_outpaint_canvas_w": final_w,
         "_outpaint_canvas_h": final_h,
+        # Private preparation metadata for automatic camera-shot dispatch.
+        # It is stripped from the final sidecar after assembly.
+        "_outpaint_generation_fps": generation_fps if is_video else None,
+        "_outpaint_source_frame_count": (
+            source_total_frames if is_video else None
+        ),
         # Smear trim params: only meaningful when total_frames > sliding_window_size
         # (multi-window mode). Boundary 1 is at output position
         # sliding_window_size - sliding_window_discard_last_frames.
@@ -9184,6 +18193,9 @@ async def outpaint_endpoint(request: Request):
         "outpaint_resolution_preset": resolution_preset,
         "outpaint_source_preservation": source_preservation,
         "outpaint_lora_strength_ui": outpaint_lora_strength,
+        "outpaint_mask_preserving": mask_preserving_outpaint,
+        "outpaint_requested_model_type": requested_model_type,
+        "edit_outpaint_raw_prompt": submitted_outpaint_prompt,
         "outpaint_trim_start": body.get("start_time"),
         "outpaint_trim_end": body.get("end_time"),
     }
@@ -9202,7 +18214,12 @@ async def outpaint_endpoint(request: Request):
     }
     _jobs[job_id] = job
 
-    thread = threading.Thread(target=_run_generation, args=(job_id,), daemon=False)
+    worker = (
+        _prepare_and_run_outpaint
+        if official_outpaint and is_video
+        else _run_generation
+    )
+    thread = threading.Thread(target=worker, args=(job_id,), daemon=False)
     thread.start()
 
     # Estimate window count for the response so the UI can surface it.
@@ -10482,6 +19499,8 @@ def _stage_count_from_params(params: dict) -> int:
         return 1
     if params.get("progressive_pipeline"):
         return 3
+    if params.get("outpaint_full_resolution_refine"):
+        return 2
     if params.get("single_stage_pipeline"):
         return 1
     return 2
@@ -10501,7 +19520,10 @@ def _apply_per_job_coefficient(job: dict) -> None:
       }
     """
     try:
-        from services.perf_recommend import compute_per_job_coefficient
+        from services.perf_recommend import (
+            compute_h3_weight_budget,
+            compute_per_job_coefficient,
+        )
 
         params = job.get("params") or {}
 
@@ -10586,6 +19608,29 @@ def _apply_per_job_coefficient(job: dict) -> None:
             _base_mt = wgp.get_base_model_type(model_type) if model_type else None
         except Exception:
             _base_mt = None
+        try:
+            _job_model_def = wgp.get_model_def(model_type) if model_type else {}
+        except Exception:
+            _job_model_def = {}
+        _h3_references = list(params.get("minimax_h3_references") or [])
+        _h3_video_reference_count = sum(
+            1
+            for reference in _h3_references
+            if isinstance(reference, dict)
+            and str(reference.get("type") or reference.get("kind") or "").lower() == "video"
+        )
+        _is_h3 = str(_job_model_def.get("architecture") or "").startswith(
+            "minimax_h3"
+        )
+        _h3_omni_video = bool(
+            _job_model_def.get("omni_reference")
+            and _h3_video_reference_count
+        )
+        # H3 itself is a single denoising pipeline. Treating the ordinary
+        # two-stage UI default as a second H3 stage double-counts model memory.
+        if _is_h3:
+            stage_count = 1
+
         if _base_mt in ("scail2_14B", "scail2_1.3B"):
             _ref_pixels, _ref_frames = 848 * 480, 81
             _pixels = _ref_pixels
@@ -10598,6 +19643,36 @@ def _apply_per_job_coefficient(job: dict) -> None:
             _frames = effective_frames or _ref_frames
             model_activation_gb = 6.0 * (_pixels / _ref_pixels) * (_frames / _ref_frames)
 
+        h3_reference_activation_gb = 0.0
+        if _h3_omni_video:
+            # Every Ref2VA video is appended as full spatiotemporal attention
+            # context. With Match Output detail, one 15-second 960x544 video
+            # contributes roughly another complete target-video token set.
+            # Reserve 8 GB per baseline-sized video for packed hidden states,
+            # Q/K/V, attention output, and allocator slack. The transformer is
+            # streamed more aggressively below, matching WanGP's low-VRAM H3
+            # strategy instead of letting weights occupy activation space.
+            _ref_pixels = 960 * 544
+            _ref_frames = 345
+            _pixels = _ref_pixels
+            if isinstance(resolution, str) and "x" in resolution:
+                try:
+                    _w, _h = resolution.lower().split("x")
+                    _pixels = int(_w) * int(_h)
+                except (ValueError, TypeError):
+                    pass
+            _frames = min(effective_frames or _ref_frames, _ref_frames)
+            h3_reference_activation_gb = (
+                8.0
+                * _h3_video_reference_count
+                * (_pixels / _ref_pixels)
+                * (_frames / _ref_frames)
+            )
+            # Diagnostic estimate only. The dedicated H3 budget below uses
+            # its own 10 GB/reference reserve; feeding this estimate into the
+            # generic coefficient too would charge every video reference
+            # twice and make low-VRAM Omni jobs needlessly slow.
+
         adjustment = compute_per_job_coefficient(
             base_coef=base_coef,
             total_vram_gb=total_vram_gb,
@@ -10608,11 +19683,120 @@ def _apply_per_job_coefficient(job: dict) -> None:
             video_length_frames=effective_frames,
             model_activation_gb=model_activation_gb,
         )
+        if h3_reference_activation_gb:
+            adjustment["h3_reference_activation_estimate_gb"] = (
+                h3_reference_activation_gb
+            )
+        # The dedicated upstream SCAIL-2 transformer uses the official
+        # attention/token layout instead of WanGP's generalized fused path.
+        # Its measured peak is healthy when transformer residency is held to
+        # roughly 7 GB on a 24 GB card; allowing the ordinary coefficient
+        # floor to keep 10-12 GB resident leaves too little attention
+        # workspace and makes WDDM spill into shared memory (minutes per
+        # denoise step). MMGP streams the remaining weights efficiently.
+        dedicated_scail2 = (
+            _base_mt in ("scail2_14B", "scail2_1.3B")
+            and os.environ.get(
+                "MAESTRO_SCAIL2_DEDICATED_MODEL", "1",
+            ).strip().lower() not in {"0", "false", "no", "off"}
+        )
+        if dedicated_scail2:
+            dedicated_weight_budget_gb = min(
+                16.0,
+                max(3.5, total_vram_gb - 17.0),
+            )
+            dedicated_coefficient_cap = (
+                dedicated_weight_budget_gb / total_vram_gb
+            )
+            if adjustment["effective_coef"] > dedicated_coefficient_cap:
+                adjustment["effective_coef"] = dedicated_coefficient_cap
+                adjustment["floored"] = False
+                adjustment["reasons"].append(
+                    f"- dedicated SCAIL-2 transformer residency capped at "
+                    f"{dedicated_weight_budget_gb:.1f} GB to preserve "
+                    "attention workspace"
+                )
+            adjustment["dedicated_scail2_budget_gb"] = (
+                dedicated_weight_budget_gb
+            )
+        if _is_h3:
+            # H3 is one pipeline stage, but its packed text + stereo audio +
+            # video attention needs explicit workspace.  Without this cap,
+            # the generic light-job bonus raised a 960x544 x 336-frame job
+            # to 19.3 GB of resident weights on a 24 GB 4090 and the process
+            # exited on denoising step zero.  The budget also scales down for
+            # lower-VRAM cards and adds reference-video attention headroom.
+            h3_runtime_workspace_gb = float(
+                _job_model_def.get(
+                    "minimax_h3_transformer_working_vram_gb",
+                    0.0,
+                )
+                or 0.0
+            )
+            h3_budget = compute_h3_weight_budget(
+                total_vram_gb,
+                resolution,
+                effective_frames,
+                _h3_video_reference_count if _h3_omni_video else 0,
+                runtime_workspace_gb=h3_runtime_workspace_gb,
+                # A LoRA's resident adapter tensors are outside the base
+                # transformer's measured working set. The generic LoRA
+                # coefficient can be superseded by H3's stricter absolute
+                # cap, so carry the bytes into this budget explicitly.
+                additional_reserve_gb=adjustment.get("lora_total_gb", 0.0),
+            )
+            h3_weight_budget_gb = h3_budget["weight_budget_gb"]
+            h3_coefficient_cap = h3_weight_budget_gb / total_vram_gb
+            if adjustment["effective_coef"] > h3_coefficient_cap:
+                adjustment["effective_coef"] = h3_coefficient_cap
+                adjustment["floored"] = False
+                adjustment["reasons"].append(
+                    f"- MiniMax H3 transformer residency "
+                    f"capped at {h3_weight_budget_gb:.1f} GB to preserve "
+                    f"{h3_budget['activation_reserve_gb']:.1f} GB of packed-sequence workspace"
+                )
+            adjustment["h3_weight_budget_gb"] = h3_weight_budget_gb
+            adjustment["h3_activation_reserve_gb"] = h3_budget[
+                "activation_reserve_gb"
+            ]
+            adjustment["h3_runtime_workspace_gb"] = h3_runtime_workspace_gb
+            adjustment["h3_scaled_runtime_workspace_gb"] = h3_budget[
+                "scaled_runtime_workspace_gb"
+            ]
+            if h3_budget["runtime_scaling_active"]:
+                adjustment["reasons"].append(
+                    f"- H3's {h3_runtime_workspace_gb:.1f} GB runtime "
+                    "workspace baseline scales to "
+                    f"{h3_budget['scaled_runtime_workspace_gb']:.1f} GB for "
+                    "this high-token window; MMGP streams "
+                    "model weights around that reserve"
+                )
+            if h3_budget["runtime_safety_margin_gb"]:
+                adjustment["reasons"].append(
+                    f"- {h3_budget['runtime_safety_margin_gb']:.1f} GB "
+                    "high-load allocator/display safety margin"
+                )
+            if h3_budget["additional_reserve_gb"]:
+                adjustment["reasons"].append(
+                    f"- {h3_budget['additional_reserve_gb']:.2f} GB reserved "
+                    "inside the H3 cap for active LoRA tensors"
+                )
         job["vram_adjustment"] = adjustment
 
         effective = adjustment["effective_coef"]
-        if abs(effective - base_coef) > 1e-6:
+        if abs(effective - base_coef) > 1e-6 or _is_h3:
             wgp.args.vram_safety_coefficient = effective
+            if _is_h3 and getattr(wgp, "wan_model", None) is not None:
+                loaded_coefficient = getattr(
+                    wgp.wan_model,
+                    "_maestro_profile_vram_coefficient",
+                    None,
+                )
+                if loaded_coefficient is None or float(loaded_coefficient) > effective + 1e-6:
+                    wgp.reload_needed = True
+                    adjustment["reasons"].append(
+                        "- resident H3 profile will reload with packed-sequence headroom"
+                    )
             cap_gb = effective * total_vram_gb
             base_cap_gb = base_coef * total_vram_gb
             # Log the frame-clamp explicitly when it fired so a future
@@ -11574,6 +20758,58 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                 _run_sfx_generation(job, raw_params, start_time)
                 return job.get("status") == "completed"
 
+            # Temporal-depth control has its own optional 458 MB / 1.54 GB
+            # preprocessor checkpoint. Provision it before wgp loads the much
+            # larger generation model; otherwise a fresh install spends
+            # minutes loading LTX and only then fails on the missing file.
+            try:
+                from services.managed_preprocessors import (
+                    ensure_video_depth_checkpoint,
+                    uses_temporal_depth,
+                )
+
+                if uses_temporal_depth(raw_params):
+                    ensure_video_depth_checkpoint(
+                        wgp.server_config.get(
+                            "depth_anything_v2_variant", "vitl"
+                        ),
+                        progress=lambda msg: update_job(job, message=msg),
+                    )
+                    update_job(job, message="Preparing temporal-depth control…")
+            except Exception as e:
+                finish_job(job, "failed", error=str(e), message=str(e))
+                return False
+
+            # H3 Full and Pruned checkpoints use different AdaLN widths. Any
+            # H3 LoRA may therefore need the small revision-pinned affine fit
+            # before MMGP preprocesses it. Provision both known compressed
+            # widths up front; this is a ~2 MB one-time setup and also covers
+            # manually imported/CivitAI adapters, not just managed Turbo.
+            try:
+                _h3_model_def = wgp.get_model_def(
+                    raw_params.get("model_type")
+                ) or {}
+                if (
+                    str(_h3_model_def.get("architecture") or "").startswith(
+                        "minimax_h3"
+                    )
+                    and raw_params.get("activated_loras")
+                ):
+                    from services.managed_preprocessors import (
+                        ensure_minimax_h3_lora_affine_maps,
+                    )
+
+                    ensure_minimax_h3_lora_affine_maps(
+                        "ref2va"
+                        if _h3_model_def.get("omni_reference")
+                        else "fl2va",
+                        progress=lambda msg: update_job(job, message=msg),
+                    )
+                    update_job(job, message="Preparing MiniMax H3 LoRAs…")
+            except Exception as e:
+                finish_job(job, "failed", error=str(e), message=str(e))
+                return False
+
             # Safety net for managed auto-download LoRAs (e.g. Edit Anything):
             # fetch the file on first use if the frontend's proactive download
             # hasn't finished yet, so the user doesn't hit a "file not found"
@@ -11626,8 +20862,98 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
             pp_voice_clone_refs = raw_params.pop("voice_clone_refs", None) or []
             pp_voice_clone_mode = raw_params.pop("voice_clone_mode", "single")
 
+            defer_output_publication = bool(
+                raw_params.pop("_defer_output_publication", False)
+            )
+            recast_shot_manifest = raw_params.pop(
+                "_recast_shot_manifest",
+                None,
+            )
+            repaint_shot_manifest = raw_params.pop(
+                "_repaint_shot_manifest",
+                None,
+            )
+            outpaint_shot_manifest = raw_params.pop(
+                "_outpaint_shot_manifest",
+                None,
+            )
+            if recast_shot_manifest is not None:
+                shot_manifest = recast_shot_manifest
+                shot_workflow = "Recast"
+            elif repaint_shot_manifest is not None:
+                shot_manifest = repaint_shot_manifest
+                shot_workflow = "Repaint"
+            else:
+                shot_manifest = outpaint_shot_manifest
+                shot_workflow = "Outpaint"
+
+            if outpaint_shot_manifest is not None:
+                # Internal Outpaint shots must not run the continuous job's
+                # postprocessor against the complete source video. The final
+                # shot-aware worker restores one pristine audio track only
+                # after all exact-length clips have been assembled.
+                raw_params["_outpaint_preserve_audio"] = False
+                raw_params["_outpaint_source_video"] = None
+                raw_params["_outpaint_lock_source_pixels"] = False
+                raw_params["_outpaint_trim_smear"] = False
+
+            # Shot-aware edits supply exact per-shot guides and settings. They
+            # run through the ordinary task engine but defer concatenation and
+            # publication to their finishing worker.
+            if shot_manifest is not None:
+                import copy
+
+                if not isinstance(shot_manifest, list):
+                    finish_job(
+                        job,
+                        "failed",
+                        error=f"{shot_workflow} shot manifest is invalid",
+                        message=f"{shot_workflow} shot preparation failed",
+                    )
+                    return False
+                generated_entries = [
+                    entry
+                    for entry in shot_manifest
+                    if isinstance(entry, dict)
+                    and isinstance(entry.get("params"), dict)
+                ]
+                if not generated_entries:
+                    finish_job(
+                        job,
+                        "failed",
+                        error=(
+                            f"{shot_workflow} shot manifest contains no "
+                            "generated shots"
+                        ),
+                        message=f"{shot_workflow} shot preparation failed",
+                    )
+                    return False
+
+                manifest = []
+                group_id = f"{shot_workflow.casefold()}_shots_{job_id}"
+                for sequence_index, entry in enumerate(generated_entries):
+                    wgp.task_id += 1
+                    shot_params = copy.deepcopy(raw_params)
+                    shot_params.update(copy.deepcopy(entry["params"]))
+                    shot_params["multi_prompts_gen_type"] = 0
+                    shot_params["multi_clip_info"] = {
+                        "group_id": group_id,
+                        "index": int(entry.get(
+                            "shot_index",
+                            sequence_index,
+                        )),
+                        "total": len(generated_entries),
+                        "defer_concat": True,
+                        "progress_label": "Shot",
+                    }
+                    manifest.append({
+                        "id": wgp.task_id,
+                        "params": shot_params,
+                        "plugin_data": {},
+                    })
+
             # Multi-clip mode: split single request into per-clip tasks
-            if raw_params.get("multi_prompts_gen_type") == 3:
+            elif raw_params.get("multi_prompts_gen_type") == 3:
                 prompt_text = raw_params.get("prompt", "")
                 # Use clip boundary separator if present (Director v2 with sliding window support),
                 # otherwise fall back to newline split (Studio mode / legacy Director)
@@ -11645,9 +20971,24 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                 sw_size = raw_params.get("sliding_window_size", raw_params.get("video_length", 121))
                 per_clip_frames = raw_params.pop("per_clip_frames", None)  # optional per-clip durations
                 per_clip_keyframes = raw_params.pop("per_clip_keyframes", None)  # optional keyframe injection per clip
+                per_clip_h3_references = raw_params.pop(
+                    "per_clip_minimax_h3_references", None,
+                )
+                per_clip_continuations = raw_params.pop(
+                    "per_clip_continue_from_previous", None,
+                )
+                multi_clip_concat_audio = raw_params.pop(
+                    "multi_clip_concat_audio", None,
+                )
                 multi_clip_audio_start_sec = raw_params.pop("multi_clip_audio_start_sec", 0.0)
                 group_id = f"mc_{int(time.time())}_{raw_params.get('seed', 0)}"
-                clip_count = max(len(prompt_lines), len(image_starts), 1)
+                clip_count = max(
+                    len(prompt_lines),
+                    len(image_starts),
+                    len(per_clip_h3_references or []),
+                    len(per_clip_continuations or []),
+                    1,
+                )
 
                 # Get model latent_size for frame quantization — wgp.py quantizes
                 # video_length to (n-1)//latent_size*latent_size+1, so we must match
@@ -11657,6 +20998,16 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     _mc_min_f, _mc_fs, _mc_latent = wgp.get_model_min_frames_and_step(_mc_model_type)
                 except Exception:
                     _mc_min_f, _mc_fs, _mc_latent = 17, 8, 8
+                try:
+                    _mc_model_def = wgp.get_model_def(_mc_model_type) or {}
+                except Exception:
+                    _mc_model_def = {}
+                _mc_bounded_director = str(
+                    _mc_model_def.get("director_video_strategy") or "rolling_window"
+                ) in {"bounded_start_end", "omni_reference"}
+                _mc_trim_end_frames = bool(
+                    _mc_model_def.get("director_trim_end_frames", True)
+                )
 
                 manifest = []
                 # Director timelines can begin after a silent intro. Preserve
@@ -11681,6 +21032,14 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     clip_params["image_start"] = image_starts[i] if i < len(image_starts) else None
                     clip_end = image_ends[i] if i < len(image_ends) else None
                     clip_params["image_end"] = clip_end if clip_end else None
+                    if per_clip_h3_references is not None:
+                        if i >= len(per_clip_h3_references):
+                            raise ValueError(
+                                f"Missing MiniMax H3 reference manifest for clip {i + 1}."
+                            )
+                        clip_params["minimax_h3_references"] = (
+                            per_clip_h3_references[i]
+                        )
                     # Set per-clip image_prompt_type based on which images are present
                     has_start = bool(clip_params.get("image_start"))
                     has_end = bool(clip_end)
@@ -11690,17 +21049,44 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                         clip_params["image_prompt_type"] = "S"
                     elif has_end:
                         clip_params["image_prompt_type"] = "E"
-                    # Mark clips without start image for continuation from previous clip
+                    # Rolling-window multi-clip keeps its historic automatic
+                    # continuation. Bounded models opt in per clip: Director
+                    # uses this for duration-split FL2VA segments or an
+                    # explicitly planned literal continuation, never across
+                    # an ordinary editorial cut.
                     if not has_start and i > 0:
-                        clip_params["_continuation"] = True
+                        bounded_continuation = bool(
+                            per_clip_continuations
+                            and i < len(per_clip_continuations)
+                            and per_clip_continuations[i]
+                        )
+                        if not _mc_bounded_director or bounded_continuation:
+                            clip_params["_continuation"] = True
+                            if bounded_continuation:
+                                clip_params["_continuation_tail_skip"] = 0
                     clip_frames = per_clip_frames[i] if per_clip_frames and i < len(per_clip_frames) else sw_size
-                    # Quantize to valid frame count (same formula as wgp.py line 6280)
-                    clip_frames = (clip_frames - 1) // _mc_latent * _mc_latent + 1
-                    clip_frames = max(clip_frames, _mc_min_f)
+                    if _mc_bounded_director:
+                        clip_frames = int(clip_frames)
+                        _mc_max_f = int(
+                            _mc_model_def.get("frames_maximum") or clip_frames
+                        )
+                        if not (
+                            _mc_min_f <= clip_frames <= _mc_max_f
+                            and (clip_frames - _mc_min_f) % max(1, _mc_fs) == 0
+                        ):
+                            raise ValueError(
+                                f"Clip {i + 1} has {clip_frames} frames, outside "
+                                f"the selected model's {_mc_min_f}-{_mc_max_f} "
+                                f"frame lattice (step {_mc_fs})."
+                            )
+                    else:
+                        # Quantize to valid frame count (same formula as wgp.py)
+                        clip_frames = (clip_frames - 1) // _mc_latent * _mc_latent + 1
+                        clip_frames = max(clip_frames, _mc_min_f)
                     # SE mode: mark tail frames for trimming (removes end-frame
                     # conditioning distortion at tensor level before saving)
                     trim_tail = 0
-                    if has_end:
+                    if has_end and _mc_trim_end_frames:
                         trim_tail = _mc_fs
                         last_se_clip_end_image = clip_end
                     clip_params["video_length"] = clip_frames
@@ -11714,6 +21100,7 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                         "total": clip_count,
                         "cumulative_offset": True,
                         "audio_start_sec": multi_clip_audio_start_sec,
+                        "concat_audio_path": multi_clip_concat_audio,
                     }
                     # If the clip prompt has newlines (window_prompts), use mode 1 (per-window)
                     # Otherwise mode 0 (single task)
@@ -11738,7 +21125,7 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                 # Compensation tail clip: if SE trimming removed frames, generate a
                 # short extra clip (start-frame only, no SE distortion) to fill the gap
                 # so the final video matches the full audio duration.
-                if total_trimmed_frames > 0:
+                if total_trimmed_frames > 0 and _mc_trim_end_frames:
                     # Snap to valid frame count for the model
                     model_type = raw_params.get("model_type", "")
                     try:
@@ -11766,6 +21153,7 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                         "total": clip_count + 1,
                         "cumulative_offset": True,
                         "audio_start_sec": multi_clip_audio_start_sec,
+                        "concat_audio_path": multi_clip_concat_audio,
                     }
                     tail_params["multi_prompts_gen_type"] = 0
 
@@ -11784,7 +21172,17 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                 # SE trim: if end image is set, mark tail frames for trimming
                 # (removes distorted frames from end-frame conditioning)
                 has_end_image = raw_params.get("image_end") not in (None, "", [])
-                if has_end_image and raw_params.get("video_length"):
+                try:
+                    _single_model_def = wgp.get_model_def(
+                        raw_params.get("model_type", "")
+                    ) or {}
+                except Exception:
+                    _single_model_def = {}
+                if (
+                    has_end_image
+                    and raw_params.get("video_length")
+                    and bool(_single_model_def.get("director_trim_end_frames", True))
+                ):
                     model_type = raw_params.get("model_type", "")
                     try:
                         _, fs, _ = wgp.get_model_min_frames_and_step(model_type)
@@ -11898,19 +21296,28 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     ext = os.path.splitext(fname)[1].lower()
                     if ext not in GENERATED_MEDIA_EXTENSIONS:
                         continue
+                    file_sidecar = dict(sidecar)
+                    file_sidecar["params"] = sidecar_params.copy()
+                    resolved_seed = _extract_output_seed(fname)
+                    if resolved_seed is not None:
+                        # A request seed of -1 means "choose randomly".  The
+                        # filename carries the seed that was actually used;
+                        # store it so Load Settings reproduces a good result,
+                        # including after ffmpeg post-processing.
+                        file_sidecar["params"]["seed"] = resolved_seed
                     if fname in clip_index_by_filename:
-                        sidecar["director_clip_index"] = (
+                        file_sidecar["director_clip_index"] = (
                             clip_index_by_filename[fname]
                         )
                     else:
-                        sidecar.pop("director_clip_index", None)
-                    sidecar["output_filename"] = fname
+                        file_sidecar.pop("director_clip_index", None)
+                    file_sidecar["output_filename"] = fname
                     meta_path = os.path.join(
                         out_dir, os.path.splitext(fname)[0] + ".meta.json",
                     )
                     try:
                         with open(meta_path, "w", encoding="utf-8") as f:
-                            json.dump(sidecar, f, indent=2)
+                            json.dump(file_sidecar, f, indent=2)
                     except Exception:
                         pass
 
@@ -11926,10 +21333,17 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                 prompt_preview = (task.get('prompt', '') or '')[:60]
                 print(f"\n[Task {task_no}/{total_tasks}] {prompt_preview}...")
                 if is_multiclip:
+                    progress_info = (
+                        (task.get("params") or {}).get("multi_clip_info")
+                        or {}
+                    )
+                    progress_label = str(
+                        progress_info.get("progress_label") or "Clip"
+                    )
                     if not update_job(
                         job,
-                        message=f"Clip {task_no}/{total_tasks}",
-                        phase=f"Clip {task_no}/{total_tasks}",
+                        message=f"{progress_label} {task_no}/{total_tasks}",
+                        phase=f"{progress_label} {task_no}/{total_tasks}",
                     ):
                         cancelled = True
                         break
@@ -12016,7 +21430,22 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                                     # Aggregate: each clip contributes 1/total_tasks of overall progress
                                     clip_progress = step / total
                                     progress_updates["progress"] = int(((task_idx + clip_progress) / total_tasks) * 100)
-                                    msg = f"Clip {task_no}/{total_tasks}: {msg}"
+                                    progress_info = (
+                                        (task.get("params") or {}).get(
+                                            "multi_clip_info",
+                                        )
+                                        or {}
+                                    )
+                                    progress_label = str(
+                                        progress_info.get(
+                                            "progress_label",
+                                        )
+                                        or "Clip"
+                                    )
+                                    msg = (
+                                        f"{progress_label} "
+                                        f"{task_no}/{total_tasks}: {msg}"
+                                    )
                                     progress_updates.update(step=step, total_steps=total)
                                 else:
                                     progress_updates.update(
@@ -12111,6 +21540,15 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                         next_task = queue[task_idx + 1]
                         next_params = next_task.get('params', {})
                         if next_params.pop("_continuation", False):
+                            try:
+                                continuation_tail_skip = max(
+                                    0,
+                                    int(next_params.pop(
+                                        "_continuation_tail_skip", 8,
+                                    )),
+                                )
+                            except (TypeError, ValueError):
+                                continuation_tail_skip = 8
                             # Find the latest video explicitly registered by
                             # this task; a shared-folder diff can pick up a
                             # concurrent dashboard operation's media.
@@ -12137,8 +21575,13 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                                     from PIL import Image as PILImage
                                     import decord
                                     vr = decord.VideoReader(latest_video)
-                                    # Skip last 8 frames (LTX-2 end-of-clip distortion)
-                                    safe_idx = max(0, len(vr) - 9)
+                                    # LTX-2 skips its distortion-prone tail;
+                                    # bounded H3 continuations use the true
+                                    # final frame (the model does not trim one).
+                                    safe_idx = max(
+                                        0,
+                                        len(vr) - continuation_tail_skip - 1,
+                                    )
                                     last_frame = vr[safe_idx].asnumpy()
                                     del vr
                                     frame_img = PILImage.fromarray(last_frame)
@@ -12183,11 +21626,20 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                 )
                 record_job_outputs(
                     job,
-                    new_files,
-                    clip_output_files=clip_output_files,
-                    join_output_file=join_output_file,
+                    [] if defer_output_publication else new_files,
+                    clip_output_files=(
+                        None
+                        if defer_output_publication
+                        else clip_output_files
+                    ),
+                    join_output_file=(
+                        None
+                        if defer_output_publication
+                        else join_output_file
+                    ),
                 )
-                _write_output_sidecars(new_files)
+                if not defer_output_publication:
+                    _write_output_sidecars(new_files)
 
             if cancelled or is_cancel_requested(job):
                 return False
@@ -12460,6 +21912,130 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                             except Exception as outpaint_post_err:
                                 print(f"  [Outpaint] Post-process error (non-fatal): {outpaint_post_err}")
 
+                # Recast target lock: SCAIL-2 regenerates the full frame even
+                # in Replace mode, so a strong identity can leak into a nearby
+                # person. Trace the actual generated replacement, match it to
+                # the approved source target by overlap, and restore the source
+                # everywhere outside the union of the old and new silhouettes.
+                if success and raw_params.get("_recast_protect_bystanders"):
+                    source_video = raw_params.get("_recast_source_video")
+                    mask_video = raw_params.get("video_mask")
+                    video_exts = {".mp4", ".webm", ".mkv", ".mov"}
+                    candidates = [
+                        name for name in new_files
+                        if os.path.splitext(name)[1].lower() in video_exts
+                    ]
+                    if source_video and mask_video and candidates:
+                        fname = candidates[-1]
+                        generated_video = os.path.join(out_dir, fname)
+                        protected_path = None
+                        adaptive_mask_dir = None
+                        try:
+                            if not update_job(
+                                job,
+                                message="Preparing adaptive Recast protection...",
+                                phase="Tracing generated replacement",
+                            ):
+                                return False
+
+                            # SAM3 needs its own CUDA headroom. Recast is
+                            # already rendered, so release the generation model
+                            # before tracing the finished replacement. The next
+                            # generation reloads it normally.
+                            if (
+                                getattr(wgp, "wan_model", None) is not None
+                                or getattr(wgp, "offloadobj", None) is not None
+                            ):
+                                print("  [Recast] Releasing generation model for adaptive protection")
+                                wgp.release_model()
+
+                            import tempfile
+                            adaptive_mask_dir = tempfile.mkdtemp(
+                                prefix="maestro-recast-protect-",
+                            )
+                            protection_progress = {"bucket": -1}
+
+                            def _adaptive_protection_progress(done, total):
+                                percent = min(
+                                    100,
+                                    max(0, int(round(100 * float(done) / max(1, total)))),
+                                )
+                                bucket = percent // 5
+                                if bucket == protection_progress["bucket"]:
+                                    return
+                                protection_progress["bucket"] = bucket
+                                if not update_job(
+                                    job,
+                                    message=f"Tracing generated replacement... {percent}%",
+                                    phase="Tracing generated replacement",
+                                ):
+                                    raise InterruptedError("Recast protection was cancelled")
+
+                            adaptive_mask = _build_recast_adaptive_mask(
+                                generated_video,
+                                mask_video,
+                                raw_params.get("edit_recast_person_count", 1),
+                                adaptive_mask_dir,
+                                progress_callback=_adaptive_protection_progress,
+                            )
+                            if not update_job(
+                                job,
+                                message="Protecting people outside the generated replacement...",
+                                phase="Protecting surrounding people",
+                            ):
+                                return False
+                            protected_path = _render_recast_mask_locked_video(
+                                source_video, adaptive_mask, generated_video,
+                            )
+                            replaced = False
+                            last_error = None
+                            for _retry in range(15):
+                                try:
+                                    os.replace(protected_path, generated_video)
+                                    replaced = True
+                                    break
+                                except PermissionError as exc:
+                                    last_error = exc
+                                    gc.collect()
+                                    time.sleep(1)
+                            if replaced:
+                                print(f"  [Recast] Protected non-target pixels in {fname}")
+                            else:
+                                stem, extension = os.path.splitext(generated_video)
+                                final_path = f"{stem}_target_locked{extension}"
+                                os.replace(protected_path, final_path)
+                                protected_path = None
+                                final_name = os.path.basename(final_path)
+                                new_files = [
+                                    final_name if name == fname else name
+                                    for name in new_files
+                                ]
+                                record_job_outputs(job, new_files)
+                                if not update_job(job, output_files=new_files):
+                                    return False
+                                print(
+                                    "  [Recast] Original output was locked "
+                                    f"({last_error}); published {final_name}"
+                                )
+                        except InterruptedError as recast_protect_cancelled:
+                            print(f"  [Recast] {recast_protect_cancelled}")
+                            return False
+                        except Exception as recast_protect_error:
+                            print(
+                                "  [Recast] Warning: target-mask protection "
+                                f"failed; keeping generated frame: {recast_protect_error}"
+                            )
+                            traceback.print_exc()
+                        finally:
+                            if protected_path and os.path.isfile(protected_path):
+                                try:
+                                    os.remove(protected_path)
+                                except OSError:
+                                    pass
+                            if adaptive_mask_dir:
+                                import shutil
+                                shutil.rmtree(adaptive_mask_dir, ignore_errors=True)
+
                 # Post-generation FlashVSR pass — whole-file upscale on the
                 # assembled video (see the pop near the top of this function
                 # for why this isn't done inline per sliding window). Ordered
@@ -12578,10 +22154,22 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                         except Exception as dan_err:
                             print(f"  [DynAudNorm] Warning: failed on {fname}: {dan_err}")
 
-                # Refresh sidecars after post-processing/renames.
-                _write_output_sidecars(new_files)
+                # Refresh sidecars after post-processing/renames. Internal
+                # shot clips are deleted after shot-aware edit assembly and
+                # therefore must never be published as gallery artifacts.
+                if not defer_output_publication:
+                    _write_output_sidecars(new_files)
 
             if success and not finalize:
+                deferred_updates = {}
+                if defer_output_publication:
+                    deferred_updates.update({
+                        "_internal_output_files": list(new_files),
+                        "_internal_clip_output_files": dict(
+                            clip_output_files,
+                        ),
+                        "_internal_join_output_file": join_output_file,
+                    })
                 return update_job(
                     job,
                     progress=99,
@@ -12589,6 +22177,7 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     total_steps=0,
                     phase="Finalizing",
                     message="Finalizing...",
+                    **deferred_updates,
                 )
 
             finish_job(
@@ -12632,6 +22221,765 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                 active_dir = _workspace_dir()
                 wgp.save_path = active_dir
                 wgp.image_save_path = active_dir
+
+
+def _recast_video_frame_count(video_path):
+    """Return the exact decoded video-frame count for final validation."""
+    import decord
+
+    reader = decord.VideoReader(video_path)
+    try:
+        return int(len(reader))
+    finally:
+        del reader
+
+
+def _write_recast_shot_aware_sidecar(
+    job, output_path, shot_bundle, generation_time,
+):
+    """Persist restorable settings without leaking disposable shot paths."""
+    import copy
+
+    output_name = os.path.basename(output_path)
+    params = copy.deepcopy(job.get("params") or {})
+    for key in (
+        "_defer_output_publication",
+        "_recast_shot_manifest",
+        "_recast_shot_temp_dir",
+        "_recast_final_out_dir",
+        "_recast_shot_bundle",
+    ):
+        params.pop(key, None)
+    params["video_length"] = int(shot_bundle["frame_count"])
+    params["seed"] = int(shot_bundle["resolved_seed"])
+    params["edit_recast_shot_aware"] = True
+    params["edit_recast_shot_plan"] = list(
+        shot_bundle.get("published_shots") or [],
+    )
+
+    upload_filenames = {}
+    for key in (
+        "image_start", "image_end", "video_guide", "audio_guide",
+        "audio_guide2", "audio_guide3", "audio_guide4",
+        "audio_guide5", "audio_guide6",
+    ):
+        value = params.get(key)
+        if isinstance(value, str) and value:
+            upload_filenames[key] = os.path.basename(value)
+        elif isinstance(value, list):
+            upload_filenames[key] = [
+                os.path.basename(item)
+                if isinstance(item, str) and item else ""
+                for item in value
+            ]
+
+    sidecar = {
+        "params": params,
+        "upload_filenames": upload_filenames,
+        "generation_mode": params.get("generation_mode"),
+        "job_id": job.get("id"),
+        "generation_time": int(round(float(generation_time))),
+        "created_at": time.time(),
+        "output_filename": output_name,
+    }
+    meta_path = os.path.splitext(output_path)[0] + ".meta.json"
+    with open(meta_path, "w", encoding="utf-8") as handle:
+        json.dump(sidecar, handle, indent=2)
+
+
+def _run_recast_shot_generation(job_id):
+    """Generate cast-aware segments independently, then restore source audio."""
+    import shutil
+
+    job = _jobs[job_id]
+    params = job.get("params") or {}
+    shot_bundle = params.get("_recast_shot_bundle") or {}
+    temp_dir = params.get("_recast_shot_temp_dir")
+    final_out_dir = params.get("_recast_final_out_dir") or _workspace_dir(
+        job.get("workspace"),
+    )
+    assembly_state = {"abort": False}
+    final_path = None
+    published = False
+    started_at = time.time()
+
+    try:
+        if not _run_generation(job_id, finalize=False):
+            return
+        if not register_abort_state(
+            job,
+            job_id,
+            _active_gen_states,
+            assembly_state,
+        ):
+            return
+        if not update_job(
+            job,
+            progress=99,
+            step=0,
+            total_steps=0,
+            phase="Joining Recast segments",
+            message="Joining cast-aware segments and restoring source audio...",
+        ):
+            return
+
+        clip_outputs = job.get("_internal_clip_output_files") or {}
+        ordered_paths = []
+        for shot in shot_bundle.get("shots") or []:
+            if shot.get("mode") == "passthrough":
+                clip_path = shot.get("passthrough_path")
+            else:
+                raw_name = (
+                    clip_outputs.get(int(shot["shot_index"]))
+                    or clip_outputs.get(str(int(shot["shot_index"])))
+                )
+                clip_path = (
+                    raw_name
+                    if raw_name and os.path.isabs(raw_name)
+                    else os.path.join(temp_dir or "", raw_name or "")
+                )
+            if not clip_path or not os.path.isfile(clip_path):
+                raise RuntimeError(
+                    "Recast assembly is missing generation segment "
+                    f"{int(shot.get('shot_index', 0)) + 1}."
+                )
+            ordered_paths.append(clip_path)
+
+        if not ordered_paths:
+            raise RuntimeError("Recast shot assembly has no video segments.")
+
+        os.makedirs(final_out_dir, exist_ok=True)
+        seed = int(shot_bundle["resolved_seed"])
+        timestamp = time.strftime("%Y-%m-%d-%Hh%Mm%Ss")
+        extension = os.path.splitext(ordered_paths[0])[1] or ".mp4"
+        final_path = wgp.get_available_filename(
+            final_out_dir,
+            f"{timestamp}_seed{seed}_recast_shot_aware{extension}",
+        )
+        source_video = params.get("_recast_source_video")
+        source_audio = None
+        if source_video and os.path.isfile(source_video):
+            try:
+                if _recast_video_has_audio(source_video):
+                    source_audio = source_video
+            except Exception as audio_probe_error:
+                print(
+                    "[Recast] Could not probe source audio; assembling "
+                    f"video-only: {audio_probe_error}"
+                )
+
+        assembled = wgp.concatenate_multi_clip_videos(
+            ordered_paths,
+            final_path,
+            source_audio,
+            audio_start_sec=0.0,
+            abort_callback=lambda: is_cancel_requested(job),
+            pad_audio=True,
+            audio_duration_sec=(
+                float(shot_bundle["frame_count"])
+                / float(shot_bundle["fps"])
+            ),
+        )
+        if is_cancel_requested(job):
+            if final_path and os.path.isfile(final_path):
+                try:
+                    os.remove(final_path)
+                except OSError:
+                    pass
+            return
+        if not assembled or not os.path.isfile(final_path):
+            raise RuntimeError("Recast cast-aware assembly failed.")
+
+        expected_frames = int(shot_bundle["frame_count"])
+        actual_frames = _recast_video_frame_count(final_path)
+        if actual_frames != expected_frames:
+            try:
+                os.remove(final_path)
+            except OSError:
+                pass
+            raise RuntimeError(
+                "Recast cast-aware assembly changed the timeline length "
+                f"({actual_frames}/{expected_frames} frames)."
+            )
+
+        _write_recast_shot_aware_sidecar(
+            job,
+            final_path,
+            shot_bundle,
+            time.time() - started_at,
+        )
+        final_name = os.path.basename(final_path)
+        job["out_dir"] = final_out_dir
+        published = finish_job(
+            job,
+            "completed",
+            output_files=[final_name],
+            clip_output_files={},
+            join_output_file=final_name,
+            progress=100,
+            step=0,
+            total_steps=0,
+            phase="",
+            message="Done",
+        )
+        if not published:
+            return
+        print(
+            "[Recast] Shot-aware assembly completed: "
+            f"{len(ordered_paths)} segments, {actual_frames} frames, "
+            f"{'continuous source audio' if source_audio else 'video only'}."
+        )
+    except Exception as error:
+        traceback.print_exc()
+        if not is_cancel_requested(job):
+            finish_job(
+                job,
+                "failed",
+                error=str(error),
+                message=f"Recast assembly failed: {error}",
+            )
+    finally:
+        if final_path and not published:
+            for leftover in (
+                final_path,
+                os.path.splitext(final_path)[0] + ".meta.json",
+            ):
+                if os.path.isfile(leftover):
+                    try:
+                        os.remove(leftover)
+                    except OSError:
+                        pass
+        unregister_abort_state(
+            job_id,
+            _active_gen_states,
+            assembly_state,
+        )
+        job["out_dir"] = final_out_dir
+        job.pop("_internal_output_files", None)
+        job.pop("_internal_clip_output_files", None)
+        job.pop("_internal_join_output_file", None)
+        if isinstance(job.get("params"), dict):
+            published_shots = list(
+                (shot_bundle or {}).get("published_shots") or [],
+            )
+            if published_shots:
+                job["params"]["edit_recast_shot_aware"] = True
+                job["params"]["edit_recast_shot_plan"] = published_shots
+            job["params"].pop("_recast_shot_manifest", None)
+            job["params"].pop("_recast_shot_temp_dir", None)
+            job["params"].pop("_recast_final_out_dir", None)
+            job["params"].pop("_recast_shot_bundle", None)
+            job["params"].pop("_defer_output_publication", None)
+        if temp_dir and os.path.isdir(temp_dir):
+            resolved_temp = os.path.realpath(temp_dir)
+            expected_prefix = "maestro-recast-shots-"
+            if os.path.basename(resolved_temp).startswith(expected_prefix):
+                shutil.rmtree(resolved_temp, ignore_errors=True)
+
+
+def _write_repaint_shot_aware_sidecar(
+    job, output_path, shot_bundle, generation_time,
+):
+    """Persist mapped Repaint settings without disposable shot artifacts."""
+    import copy
+
+    output_name = os.path.basename(output_path)
+    params = copy.deepcopy(job.get("params") or {})
+    for key in (
+        "_defer_output_publication",
+        "_repaint_shot_manifest",
+        "_repaint_shot_temp_dir",
+        "_repaint_final_out_dir",
+        "_repaint_source_video",
+        "_repaint_shot_bundle",
+    ):
+        params.pop(key, None)
+    params["video_length"] = int(shot_bundle["frame_count"])
+    params["seed"] = int(shot_bundle["resolved_seed"])
+    params["edit_repaint_shot_aware"] = True
+    params["edit_repaint_native_scene_preservation"] = True
+    params["edit_repaint_shot_plan"] = list(
+        shot_bundle.get("published_shots") or [],
+    )
+
+    upload_filenames = {}
+    for key in (
+        "image_start", "image_end", "video_guide", "audio_guide",
+        "audio_guide2", "audio_guide3", "audio_guide4",
+        "audio_guide5", "audio_guide6",
+    ):
+        value = params.get(key)
+        if isinstance(value, str) and value:
+            upload_filenames[key] = os.path.basename(value)
+        elif isinstance(value, list):
+            upload_filenames[key] = [
+                os.path.basename(item)
+                if isinstance(item, str) and item else ""
+                for item in value
+            ]
+
+    sidecar = {
+        "params": params,
+        "upload_filenames": upload_filenames,
+        "generation_mode": params.get("generation_mode"),
+        "job_id": job.get("id"),
+        "generation_time": int(round(float(generation_time))),
+        "created_at": time.time(),
+        "output_filename": output_name,
+    }
+    meta_path = os.path.splitext(output_path)[0] + ".meta.json"
+    with open(meta_path, "w", encoding="utf-8") as handle:
+        json.dump(sidecar, handle, indent=2)
+
+
+def _run_repaint_shot_generation(job_id):
+    """Generate mapped camera shots, then restore one exact source track."""
+    import shutil
+
+    job = _jobs[job_id]
+    params = job.get("params") or {}
+    shot_bundle = params.get("_repaint_shot_bundle") or {}
+    temp_dir = params.get("_repaint_shot_temp_dir")
+    final_out_dir = params.get("_repaint_final_out_dir") or _workspace_dir(
+        job.get("workspace"),
+    )
+    assembly_state = {"abort": False}
+    final_path = None
+    published = False
+    started_at = time.time()
+
+    try:
+        if not _run_generation(job_id, finalize=False):
+            return
+        if not register_abort_state(
+            job,
+            job_id,
+            _active_gen_states,
+            assembly_state,
+        ):
+            return
+        if not update_job(
+            job,
+            progress=99,
+            step=0,
+            total_steps=0,
+            phase="Joining camera shots",
+            message="Joining Repaint shots and restoring source audio...",
+        ):
+            return
+
+        clip_outputs = job.get("_internal_clip_output_files") or {}
+        ordered_paths = []
+        for shot in shot_bundle.get("shots") or []:
+            if shot.get("mode") == "passthrough":
+                clip_path = shot.get("passthrough_path")
+            else:
+                raw_name = (
+                    clip_outputs.get(int(shot["shot_index"]))
+                    or clip_outputs.get(str(int(shot["shot_index"])))
+                )
+                clip_path = (
+                    raw_name
+                    if raw_name and os.path.isabs(raw_name)
+                    else os.path.join(temp_dir or "", raw_name or "")
+                )
+            if not clip_path or not os.path.isfile(clip_path):
+                raise RuntimeError(
+                    "Repaint shot assembly is missing camera shot "
+                    f"{int(shot.get('shot_index', 0)) + 1}."
+                )
+            ordered_paths.append(clip_path)
+
+        if not ordered_paths:
+            raise RuntimeError("Repaint shot assembly has no video segments.")
+
+        os.makedirs(final_out_dir, exist_ok=True)
+        seed = int(shot_bundle["resolved_seed"])
+        timestamp = time.strftime("%Y-%m-%d-%Hh%Mm%Ss")
+        extension = os.path.splitext(ordered_paths[0])[1] or ".mp4"
+        final_path = wgp.get_available_filename(
+            final_out_dir,
+            f"{timestamp}_seed{seed}_repaint_shot_aware{extension}",
+        )
+        source_video = params.get("_repaint_source_video")
+        source_audio = None
+        if source_video and os.path.isfile(source_video):
+            try:
+                if _recast_video_has_audio(source_video):
+                    source_audio = source_video
+            except Exception as audio_probe_error:
+                print(
+                    "[Repaint] Could not probe source audio; assembling "
+                    f"video-only: {audio_probe_error}"
+                )
+
+        assembled = wgp.concatenate_multi_clip_videos(
+            ordered_paths,
+            final_path,
+            source_audio,
+            audio_start_sec=0.0,
+            abort_callback=lambda: is_cancel_requested(job),
+            pad_audio=True,
+            audio_duration_sec=(
+                float(shot_bundle["frame_count"])
+                / float(shot_bundle["fps"])
+            ),
+        )
+        if is_cancel_requested(job):
+            if final_path and os.path.isfile(final_path):
+                try:
+                    os.remove(final_path)
+                except OSError:
+                    pass
+            return
+        if not assembled or not os.path.isfile(final_path):
+            raise RuntimeError("Repaint camera-shot assembly failed.")
+
+        expected_frames = int(shot_bundle["frame_count"])
+        actual_frames = _recast_video_frame_count(final_path)
+        if actual_frames != expected_frames:
+            try:
+                os.remove(final_path)
+            except OSError:
+                pass
+            raise RuntimeError(
+                "Repaint camera-shot assembly changed the timeline length "
+                f"({actual_frames}/{expected_frames} frames)."
+            )
+
+        _write_repaint_shot_aware_sidecar(
+            job,
+            final_path,
+            shot_bundle,
+            time.time() - started_at,
+        )
+        final_name = os.path.basename(final_path)
+        job["out_dir"] = final_out_dir
+        published = finish_job(
+            job,
+            "completed",
+            output_files=[final_name],
+            clip_output_files={},
+            join_output_file=final_name,
+            progress=100,
+            step=0,
+            total_steps=0,
+            phase="",
+            message="Done",
+        )
+        if not published:
+            return
+        print(
+            "[Repaint] Shot-aware assembly completed: "
+            f"{len(ordered_paths)} shots, {actual_frames} frames, "
+            f"{'continuous source audio' if source_audio else 'video only'}."
+        )
+    except Exception as error:
+        traceback.print_exc()
+        if not is_cancel_requested(job):
+            finish_job(
+                job,
+                "failed",
+                error=str(error),
+                message=f"Repaint assembly failed: {error}",
+            )
+    finally:
+        if final_path and not published:
+            for leftover in (
+                final_path,
+                os.path.splitext(final_path)[0] + ".meta.json",
+            ):
+                if os.path.isfile(leftover):
+                    try:
+                        os.remove(leftover)
+                    except OSError:
+                        pass
+        unregister_abort_state(
+            job_id,
+            _active_gen_states,
+            assembly_state,
+        )
+        job["out_dir"] = final_out_dir
+        job.pop("_internal_output_files", None)
+        job.pop("_internal_clip_output_files", None)
+        job.pop("_internal_join_output_file", None)
+        if isinstance(job.get("params"), dict):
+            published_shots = list(
+                (shot_bundle or {}).get("published_shots") or [],
+            )
+            if published_shots:
+                job["params"]["edit_repaint_shot_aware"] = True
+                job["params"]["edit_repaint_shot_plan"] = published_shots
+                job["params"][
+                    "edit_repaint_native_scene_preservation"
+                ] = True
+            job["params"].pop("_repaint_shot_manifest", None)
+            job["params"].pop("_repaint_shot_temp_dir", None)
+            job["params"].pop("_repaint_final_out_dir", None)
+            job["params"].pop("_repaint_source_video", None)
+            job["params"].pop("_repaint_shot_bundle", None)
+            job["params"].pop("_defer_output_publication", None)
+        if temp_dir and os.path.isdir(temp_dir):
+            resolved_temp = os.path.realpath(temp_dir)
+            expected_prefix = "maestro-repaint-shots-"
+            if os.path.basename(resolved_temp).startswith(expected_prefix):
+                shutil.rmtree(resolved_temp, ignore_errors=True)
+
+
+def _write_outpaint_shot_aware_sidecar(
+    job, output_path, shot_bundle, generation_time,
+):
+    """Persist restorable Outpaint settings without private shot paths."""
+    import copy
+
+    output_name = os.path.basename(output_path)
+    params = copy.deepcopy(job.get("params") or {})
+    params.pop("_defer_output_publication", None)
+    for key in list(params):
+        if str(key).startswith("_outpaint_"):
+            params.pop(key, None)
+    params["video_length"] = int(shot_bundle["frame_count"])
+    params["seed"] = int(shot_bundle["resolved_seed"])
+    params["edit_outpaint_shot_aware"] = True
+    params["edit_outpaint_shot_plan"] = list(
+        shot_bundle.get("published_shots") or [],
+    )
+    params["outpaint_preserve_source_audio"] = bool(
+        shot_bundle.get("preserve_source_audio", True)
+    )
+
+    upload_filenames = {}
+    for key in (
+        "image_start", "image_end", "video_guide", "audio_guide",
+        "audio_guide2", "audio_guide3", "audio_guide4",
+        "audio_guide5", "audio_guide6",
+    ):
+        value = params.get(key)
+        if isinstance(value, str) and value:
+            upload_filenames[key] = os.path.basename(value)
+        elif isinstance(value, list):
+            upload_filenames[key] = [
+                os.path.basename(item)
+                if isinstance(item, str) and item else ""
+                for item in value
+            ]
+
+    sidecar = {
+        "params": params,
+        "upload_filenames": upload_filenames,
+        "generation_mode": params.get("generation_mode"),
+        "job_id": job.get("id"),
+        "generation_time": int(round(float(generation_time))),
+        "created_at": time.time(),
+        "output_filename": output_name,
+    }
+    meta_path = os.path.splitext(output_path)[0] + ".meta.json"
+    with open(meta_path, "w", encoding="utf-8") as handle:
+        json.dump(sidecar, handle, indent=2)
+
+
+def _run_outpaint_shot_generation(job_id):
+    """Generate Outpaint shots independently, then join one exact timeline."""
+    import shutil
+
+    job = _jobs[job_id]
+    params = job.get("params") or {}
+    shot_bundle = params.get("_outpaint_shot_bundle") or {}
+    temp_dir = params.get("_outpaint_shot_temp_dir")
+    final_out_dir = params.get("_outpaint_final_out_dir") or _workspace_dir(
+        job.get("workspace"),
+    )
+    assembly_state = {"abort": False}
+    final_path = None
+    published = False
+    started_at = time.time()
+
+    try:
+        if not _run_generation(job_id, finalize=False):
+            return
+        if not register_abort_state(
+            job,
+            job_id,
+            _active_gen_states,
+            assembly_state,
+        ):
+            return
+        if not update_job(
+            job,
+            progress=99,
+            step=0,
+            total_steps=0,
+            phase="Joining camera shots",
+            message="Joining Outpaint shots and restoring source audio...",
+        ):
+            return
+
+        clip_outputs = job.get("_internal_clip_output_files") or {}
+        ordered_paths = []
+        for shot in shot_bundle.get("shots") or []:
+            shot_index = int(shot.get("shot_index", len(ordered_paths)))
+            raw_name = (
+                clip_outputs.get(shot_index)
+                or clip_outputs.get(str(shot_index))
+            )
+            clip_path = (
+                raw_name
+                if raw_name and os.path.isabs(raw_name)
+                else os.path.join(temp_dir or "", raw_name or "")
+            )
+            if not clip_path or not os.path.isfile(clip_path):
+                raise RuntimeError(
+                    "Outpaint shot assembly is missing camera shot "
+                    f"{shot_index + 1}."
+                )
+            expected_shot_frames = int(shot.get("frame_count") or 0)
+            actual_shot_frames = _recast_video_frame_count(clip_path)
+            if actual_shot_frames != expected_shot_frames:
+                raise RuntimeError(
+                    f"Outpaint camera shot {shot_index + 1} changed "
+                    "timeline length "
+                    f"({actual_shot_frames}/{expected_shot_frames} frames)."
+                )
+            ordered_paths.append(clip_path)
+
+        if not ordered_paths:
+            raise RuntimeError("Outpaint shot assembly has no video segments.")
+
+        os.makedirs(final_out_dir, exist_ok=True)
+        seed = int(shot_bundle["resolved_seed"])
+        timestamp = time.strftime("%Y-%m-%d-%Hh%Mm%Ss")
+        extension = os.path.splitext(ordered_paths[0])[1] or ".mp4"
+        final_path = wgp.get_available_filename(
+            final_out_dir,
+            f"{timestamp}_seed{seed}_outpaint_shot_aware{extension}",
+        )
+        source_video = params.get("_outpaint_shot_source_video")
+        source_audio = None
+        if (
+            shot_bundle.get("preserve_source_audio", True)
+            and source_video
+            and os.path.isfile(source_video)
+        ):
+            try:
+                if _recast_video_has_audio(source_video):
+                    source_audio = source_video
+            except Exception as audio_probe_error:
+                print(
+                    "[Outpaint] Could not probe source audio; using "
+                    f"generated shot audio: {audio_probe_error}"
+                )
+
+        expected_frames = int(shot_bundle["frame_count"])
+        fps = float(shot_bundle["fps"])
+        assembled = wgp.concatenate_multi_clip_videos(
+            ordered_paths,
+            final_path,
+            source_audio,
+            audio_start_sec=0.0,
+            abort_callback=lambda: is_cancel_requested(job),
+            pad_audio=bool(source_audio),
+            audio_duration_sec=float(expected_frames) / fps,
+        )
+        if is_cancel_requested(job):
+            if final_path and os.path.isfile(final_path):
+                try:
+                    os.remove(final_path)
+                except OSError:
+                    pass
+            return
+        if not assembled or not os.path.isfile(final_path):
+            raise RuntimeError("Outpaint camera-shot assembly failed.")
+
+        actual_frames = _recast_video_frame_count(final_path)
+        if actual_frames != expected_frames:
+            try:
+                os.remove(final_path)
+            except OSError:
+                pass
+            raise RuntimeError(
+                "Outpaint camera-shot assembly changed the timeline length "
+                f"({actual_frames}/{expected_frames} frames)."
+            )
+
+        _write_outpaint_shot_aware_sidecar(
+            job,
+            final_path,
+            shot_bundle,
+            time.time() - started_at,
+        )
+        final_name = os.path.basename(final_path)
+        job["out_dir"] = final_out_dir
+        published = finish_job(
+            job,
+            "completed",
+            output_files=[final_name],
+            clip_output_files={},
+            join_output_file=final_name,
+            progress=100,
+            step=0,
+            total_steps=0,
+            phase="",
+            message="Done",
+        )
+        if not published:
+            return
+        print(
+            "[Outpaint] Shot-aware assembly completed: "
+            f"{len(ordered_paths)} shots, {actual_frames} frames, "
+            f"{'continuous source audio' if source_audio else 'generated audio'}."
+        )
+    except Exception as error:
+        traceback.print_exc()
+        if not is_cancel_requested(job):
+            finish_job(
+                job,
+                "failed",
+                error=str(error),
+                message=f"Outpaint assembly failed: {error}",
+            )
+    finally:
+        if final_path and not published:
+            for leftover in (
+                final_path,
+                os.path.splitext(final_path)[0] + ".meta.json",
+            ):
+                if os.path.isfile(leftover):
+                    try:
+                        os.remove(leftover)
+                    except OSError:
+                        pass
+        unregister_abort_state(
+            job_id,
+            _active_gen_states,
+            assembly_state,
+        )
+        job["out_dir"] = final_out_dir
+        job.pop("_internal_output_files", None)
+        job.pop("_internal_clip_output_files", None)
+        job.pop("_internal_join_output_file", None)
+        if isinstance(job.get("params"), dict):
+            published_shots = list(
+                (shot_bundle or {}).get("published_shots") or [],
+            )
+            if published_shots:
+                job["params"]["edit_outpaint_shot_aware"] = True
+                job["params"]["edit_outpaint_shot_plan"] = published_shots
+            for key in (
+                "_outpaint_shot_manifest",
+                "_outpaint_shot_temp_dir",
+                "_outpaint_final_out_dir",
+                "_outpaint_shot_source_video",
+                "_outpaint_shot_bundle",
+                "_outpaint_generation_fps",
+                "_outpaint_source_frame_count",
+                "_defer_output_publication",
+            ):
+                job["params"].pop(key, None)
+        if temp_dir and os.path.isdir(temp_dir):
+            resolved_temp = os.path.realpath(temp_dir)
+            expected_prefix = "maestro-outpaint-shots-"
+            if os.path.basename(resolved_temp).startswith(expected_prefix):
+                shutil.rmtree(resolved_temp, ignore_errors=True)
 
 
 @api.get("/api/v1/status/{job_id}")
@@ -12692,6 +23040,15 @@ def list_jobs():
                 "error": j["error"],
                 "oom_info": j.get("oom_info"),
                 "created_at": j.get("created_at", 0),
+                # Lets a refreshed browser restore the exact H3 prompts that
+                # are already driving an in-flight sliding-window job. This is
+                # planning metadata only; model paths and unrelated params stay
+                # private.
+                "h3_window_plan": (
+                    (j.get("params") or {}).get("h3_window_plan")
+                    if isinstance(j.get("params"), dict)
+                    else None
+                ),
             })
     active.sort(key=lambda x: x["created_at"])
     return {"jobs": active}
@@ -13012,6 +23369,10 @@ def get_output_metadata(name: str):
                 embedded = _read_embedded()
                 if embedded and "seed" in embedded:
                     params["seed"] = embedded["seed"]
+                else:
+                    resolved_seed = _extract_output_seed(name)
+                    if resolved_seed is not None:
+                        params["seed"] = resolved_seed
             return {"source": "sidecar", **sidecar}
         except Exception:
             pass
@@ -13068,7 +23429,7 @@ def rejoin_clips(body: dict):
             }
             # Get audio from first clip's params
             if mci["index"] == 0 and not audio_path:
-                ag = params.get("audio_guide", "")
+                ag = mci.get("concat_audio_path") or params.get("audio_guide", "")
                 if ag and os.path.isfile(ag):
                     audio_path = ag
                     try:
@@ -13379,6 +23740,14 @@ async def upload_image(request: Request, file: UploadFile = File(...)):
             if _fps:
                 result["fps"] = float(_fps)
                 result["frame_count"] = int(_frame_count or 0)
+                result["duration_seconds"] = round(float(_frame_count or 0) / float(_fps), 3)
+            try:
+                import av as _av
+
+                with _av.open(filepath) as _container:
+                    result["has_audio"] = bool(_container.streams.audio)
+            except Exception:
+                result["has_audio"] = False
         except Exception:
             pass
     return result
@@ -13546,24 +23915,8 @@ if __name__ == "__main__":
         print(f"  (Bound to {host} — LAN-accessible via this machine's IP)")
     print(f"{'='*50}\n")
 
-    # Suppress noisy UI-polling access logs (downloads/active + status/<id>)
-    # — these fire 1-2× per second whenever the UI is open and drown out
-    # actual model-generation log output. Errors and non-polling endpoints
-    # still log normally.
-    import logging as _logging
-    _UVICORN_POLL_NOISE = (
-        "/api/v1/downloads/active",
-        "/api/v1/status/",
-        "/api/v1/jobs",  # job list polled by Studio sidebar
-    )
-    class _SilencePollingAccessLog(_logging.Filter):
-        def filter(self, record):
-            try:
-                msg = record.getMessage()
-            except Exception:
-                return True
-            return not any(noisy in msg for noisy in _UVICORN_POLL_NOISE)
-    _logging.getLogger("uvicorn.access").addFilter(_SilencePollingAccessLog())
+    # Confirm the polling filter immediately before Uvicorn configures logging.
+    install_quiet_access_filter()
 
     try:
         uvicorn.run(api, host=host, port=port)

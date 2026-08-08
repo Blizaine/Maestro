@@ -4,9 +4,39 @@ export interface ModelFamily {
   order: number
 }
 
+export type DirectorPipelineType = 'music_video' | 'short_film_audio' | 'short_film_story'
+export type DirectorShotImageGuidance = 'auto' | 'prompt_only' | 'generate'
+export type DirectorShotImagePolicy = 'generate' | 'prompt_only' | 'direct_references'
+
+export interface DirectorCapabilityResult {
+  compatible: boolean
+  reason: string
+}
+
+export interface DirectorModelCompatibility {
+  image: DirectorCapabilityResult
+  video: Record<DirectorPipelineType | 'seamless', DirectorCapabilityResult>
+  supports_audio_input: boolean
+  generates_audio: boolean
+  supports_voice_reference: boolean
+  voice_reference_mode?: 'none' | 'id_lora' | 'native_reference'
+  video_strategy?: 'rolling_window' | 'bounded_start_end' | 'omni_reference'
+  audio_input_mode?: 'none' | 'generic_audio_guide' | 'reference_manifest'
+  reference_mode?: 'none' | 'start_frame' | 'start_end' | 'omni_manifest'
+  shot_image_support?: 'required' | 'optional' | 'direct_references'
+  supports_endpoint_continuity?: boolean
+  clip_min_frames?: number | null
+  clip_max_frames?: number | null
+  clip_frame_step?: number | null
+  max_image_refs: number | null
+}
+
 export interface ModelDef {
   model_type: string
   name: string
+  description?: string
+  selector_help?: string
+  lora_compatibility_note?: string
   family: string
   architecture: string
   is_i2v: boolean
@@ -14,8 +44,12 @@ export interface ModelDef {
   guidance_max_phases: number
   fps: number
   supports_end_frame?: boolean
+  /** Legacy broad flag: accepts input audio OR generates output audio. */
   supports_audio?: boolean
+  supports_audio_input?: boolean
+  generates_audio?: boolean
   supports_ref_images?: boolean
+  director?: DirectorModelCompatibility
   is_downloaded?: boolean
   // True when this model is only available with Mature Mode enabled.
   // Backend always returns the entry; UI filters it out when
@@ -50,6 +84,14 @@ export interface GenerateParams {
   multi_prompts_gen_type?: number
   sliding_window_size?: number
   sliding_window_overlap?: number
+  /** Explicitly honor a manually locked window above the model's VRAM-aware recommendation. */
+  sliding_window_memory_override?: boolean
+  /** Optional model-specific transformer step cache. */
+  skip_steps_cache_type?: '' | 'first_block'
+  /** First Block Cache residual-change threshold. */
+  skip_steps_multiplier?: number
+  /** Percentage of denoising steps to run before caching may begin. */
+  skip_steps_start_step_perc?: number
   guidance_phases?: number
   video_prompt_type?: string
   audio_prompt_type?: string
@@ -115,6 +157,65 @@ export interface GenerateParams {
   tts_comp_release?: number
   tts_comp_makeup?: number
   tts_voice_count?: number
+  // MiniMax H3 Ref2VA ordered Omni-reference manifest.
+  minimax_h3_references?: MiniMaxH3Reference[]
+  minimax_h3_reference_detail?: 'match' | 'max'
+  minimax_h3_text_encoder?: 'nvfp4_awq' | 'gguf_q2_k' | 'gguf_q4_k_m' | 'int8' | 'bf16'
+  /** One-click managed H3 Turbo recipe for Full or Pruned H3. */
+  minimax_h3_turbo_mode?: boolean
+  /** Automatically expand one long H3 concept into window-local prompts. */
+  minimax_h3_window_storyboard?: boolean
+  /** Compiled Context-IR prompts, one per continuation pass. */
+  h3_window_prompts?: string[]
+  h3_window_plan_signature?: string
+  h3_window_plan?: H3WindowPlan
+}
+
+export type MiniMaxH3ReferenceType = 'image' | 'video' | 'audio'
+export type MiniMaxH3AudioIntent = 'voice' | 'drive' | 'style'
+
+export interface MiniMaxH3Reference {
+  id: string
+  type: MiniMaxH3ReferenceType
+  path: string
+  filename: string
+  url?: string
+  role?: string
+  audio_intent?: MiniMaxH3AudioIntent
+  include_audio?: boolean
+  has_audio?: boolean
+  audio_path?: string
+  audio_filename?: string
+  audio_duration_seconds?: number | null
+  duration_seconds?: number | null
+}
+
+export interface H3WindowPlanWindow {
+  index: number
+  title: string
+  start_frame: number
+  end_frame: number
+  start_seconds: number
+  end_seconds: number
+  opening_state: string
+  closing_state: string
+  prompt: string
+}
+
+export interface H3WindowPlan {
+  source_prompt: string
+  signature: string
+  planned_by: 'llm' | 'deterministic_fallback' | 'not_needed'
+  total_frames: number
+  window_frames: number
+  effective_window_frames?: number
+  window_count: number
+  resolution: string
+  model_type: string
+  subject_continuity?: string
+  setting_continuity?: string
+  windows: H3WindowPlanWindow[]
+  window_prompts: string[]
 }
 
 /** OOM (out-of-VRAM) failure metadata. Set on jobs and pipelines that
@@ -146,6 +247,8 @@ export interface GenerationJob {
   error: string | null
   /** Present only on failed jobs that look like CUDA OOMs (see OomInfo). */
   oomInfo?: OomInfo | null
+  /** Exact prompts assigned to an in-flight H3 sliding-window generation. */
+  h3WindowPlan?: H3WindowPlan | null
 }
 
 export interface OutputFile {
@@ -165,10 +268,38 @@ export interface OutputFile {
 
 export type MediaFilter = 'all' | 'images' | 'videos' | 'audio' | 'avatars' | 'multiclip' | 'favorites'
 export type AspectRatio = 'auto' | '16:9' | '9:16' | '1:1' | '4:3' | '3:4'
-export type ResolutionPreset = 'auto' | '480p' | '540p' | '720p' | '1080p'
+export type ResolutionPreset = 'auto' | '480p' | '540p' | '720p' | '768p' | '1080p'
+export type ScailResolutionProfile = '480p' | '512p' | '704p'
+/** Backward-compatible name for saved Recast/API callers. */
+export type RecastResolutionProfile = ScailResolutionProfile
 export type GenerationMode = 'image' | 'video' | 'audio' | 'avatar' | 'tools'
 export type EditSubMode = 'retake' | 'inpaint' | 'restyle' | 'outpaint' | 'edit_anything' | 'recast'
 export type AudioSubMode = 'speech' | 'music' | 'sfx' | 'mixer'
+
+export interface RecastReferenceAsset {
+  file: File | null
+  path: string
+  url: string
+}
+
+export interface RecastCharacterMapping {
+  id: string
+  target: string
+  refFile: File | null
+  refPath: string
+  refUrl: string
+  additionalRefs: RecastReferenceAsset[]
+  referenceAlignedToSource: boolean
+}
+
+/** Optional SCAIL-2 Repaint correspondence. The source phrase is tracked
+ * through the control video and the target phrase is segmented in the edited
+ * first frame; both receive the same stable semantic color. */
+export interface RepaintRegionMapping {
+  id: string
+  source: string
+  target: string
+}
 
 export interface ChoiceConfig {
   selection?: string[]
@@ -180,15 +311,35 @@ export interface ChoiceConfig {
   letters_filter?: string
 }
 
+export interface SlidingWindowMemoryPolicy {
+  checkpoint?: 'full' | 'pruned'
+  manual_override?: boolean
+  auto_resolution_pixels?: Record<string, number>
+  resolution_bands: Array<{
+    min_pixels: number
+    vram_tiers: Array<{
+      max_vram_gb?: number
+      frames: number | null
+      fallback_resolution?: string
+    }>
+  }>
+}
+
 export interface ModelOptions {
   model_type: string
   architecture: string
   guidance_max_phases: number
   lock_guidance_phases: boolean
   sliding_window: boolean
+  video_continuation?: boolean
   motion_amplitude: boolean
   flow_shift: boolean
   tea_cache: boolean
+  first_block_cache?: boolean
+  skip_steps_multiplier_choices?: [string, number][] | null
+  skip_steps_multiplier_label?: string
+  default_skip_steps_multiplier?: number
+  default_skip_steps_start_step_perc?: number
   returns_audio: boolean
   any_audio_prompt: boolean
   audio_scale_name: string
@@ -199,15 +350,69 @@ export interface ModelOptions {
   t2v_class: boolean
   image_outputs: boolean
   supports_end_frame: boolean
+  omni_reference?: boolean
+  omni_reference_limits?: {
+    image: number
+    video: number
+    audio: number
+    total: number
+  } | null
+  omni_reference_detail_choices?: [string, 'match' | 'max'][] | null
+  omni_reference_detail_default?: 'match' | 'max'
+  minimax_h3_text_encoder_choices?: {
+    value: string
+    label: string
+    size_hint: string
+    recommended?: boolean
+  }[] | null
+  minimax_h3_text_encoder_default?: string
+  minimax_h3_turbo?: {
+    filename: string
+    label: string
+    experimental: boolean
+    steps: number
+    weight: number
+    guide: string
+  } | null
+  minimax_h3_runtime_advisory?: {
+    level: 'warning' | 'info'
+    title: string
+    message: string
+    reasons: Array<{
+      code: 'triton_unavailable' | 'system_ram_low' | string
+      message: string
+    }>
+    recommended_model_type?: string
+    recommended_turbo?: boolean
+    estimated_pipeline_ram_gb?: number
+    minimum_system_ram_gb?: number
+    detected_ram_gb?: number | null
+    supports_triton?: boolean | null
+    blocking: boolean
+  } | null
+  resolution_presets?: Partial<Record<ResolutionPreset, {
+    label: string
+    experimental?: boolean
+    hint?: string
+    values: Partial<Record<AspectRatio, string>>
+  }>> | null
+  resolution_preset_order?: ResolutionPreset[] | null
+  supports_auto_aspect?: boolean
   guide_preprocessing: ChoiceConfig | null
   guide_custom_choices: ChoiceConfig | null
   image_ref_choices: ChoiceConfig | null
   audio_prompt_type_sources: ChoiceConfig | null
   background_removal_label: string | null
+  max_image_refs?: number | null
   sample_solvers: [string, string][] | null
   self_refiner: boolean
   self_refiner_max_plans: number
   sliding_window_defaults: Record<string, number> | null
+  sliding_window_auto_prompt_pacing?: boolean
+  sliding_window_memory_policy?: SlidingWindowMemoryPolicy | null
+  /** Native one-pass policy used by Director. Omni publishes this without
+   * exposing Studio sliding-window controls. */
+  director_memory_policy?: SlidingWindowMemoryPolicy | null
   // LTX-2 Dev pipeline capabilities (guidance controls in Advanced Settings)
   perturbation?: boolean
   reference_pipeline?: boolean
@@ -217,6 +422,7 @@ export interface ModelOptions {
   fps: number
   frames_minimum: number
   frames_steps: number
+  frames_maximum?: number | null
   default_num_inference_steps: number | null
   default_guidance_scale: number | null
   hide_resolution_presets: boolean
@@ -308,7 +514,7 @@ export interface ServicesConfig {
    *  (default), the Services panel hides Director v2 engine, Voice
    *  Reference, external API keys (Google/OpenAI/Anthropic), and the
    *  Studio prompt enhancer config; the Edit mode picker hides
-   *  Inpaint and Restyle. Flipping this on surfaces all of them. */
+   *  Inpaint. Flipping this on surfaces all of them. */
   show_experimental: boolean
   /** Storage Manager opt-in: allow removing duplicate files FROM linked
    *  installs (Recycle Bin only). Default off — informed consent. */
@@ -461,6 +667,8 @@ export interface CivitAIDownload {
   /** Unix timestamps (seconds) supplied by the download registry. */
   started_at: number | null
   completed_at: number | null
+  /** Present after a downloaded checkpoint is registered as a model. */
+  model_type?: string | null
   // Non-fatal warnings raised after the download finished — most
   // commonly the architecture-mismatch warning when a Klein-4B-trained
   // LoRA lands in flux2_klein_9b/ or vice versa. UI shows these inline
@@ -490,6 +698,8 @@ export interface LoraInfo {
   preview_url: string | null
   civitai_model_id: number | null
   recommended_weights: LoraRecommendedWeights | null
+  /** Managed choices may be listed before their first-use download. */
+  managed?: boolean
   has_guide: boolean
   guide?: string | null
   /** NSFW flag from the .civitai.json sidecar (or inferred from filename/tags).
@@ -844,6 +1054,9 @@ export interface SavedPipelineState {
   seamless: boolean
   image_model: string
   video_model: string
+  /** Effective saved behavior. Missing on legacy projects, which require images. */
+  shot_image_policy?: DirectorShotImagePolicy
+  shot_image_guidance?: DirectorShotImageGuidance
   llm_log: PipelineLlmLog | null
   clips: PipelineClipState[]
   output_files: string[]

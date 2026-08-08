@@ -840,6 +840,7 @@ class TestDirectorCancellation(unittest.TestCase):
         record["params"].update({
             "seamless": False,
             "video_model": "ltx2_22B_distilled_1_1",
+            "video_params": {"num_inference_steps": 13},
             "audio_path": audio_path,
             # The model definition must win over a stale frontend fps.
             "fps": 16,
@@ -893,6 +894,7 @@ class TestDirectorCancellation(unittest.TestCase):
         # 545 frames, shortening the joined timeline by another 0.32 seconds.
         self.assertEqual(submitted[0]["video_length"], 553)
         self.assertEqual(submitted[0]["sliding_window_size"], 562)
+        self.assertEqual(submitted[0]["num_inference_steps"], 13)
         self.assertEqual(len(audio_slices), 1)
         self.assertAlmostEqual(audio_slices[0][1], 97.88, places=3)
         self.assertAlmostEqual(audio_slices[0][2], 22.12, places=3)
@@ -918,7 +920,10 @@ class TestDirectorCancellation(unittest.TestCase):
             "pipeline_type": "short_film_story",
             "seamless": False,
             "video_model": "ltx2_22B_distilled_1_1",
-            "video_params": {"resolution": "1280x720"},
+            "video_params": {
+                "resolution": "1280x720",
+                "num_inference_steps": 13,
+            },
             "fps": 25,
         }
         plans = [
@@ -963,6 +968,7 @@ class TestDirectorCancellation(unittest.TestCase):
             ],
         )
         self.assertEqual(submitted[0]["image_prompt_type"], "S")
+        self.assertEqual(submitted[0]["num_inference_steps"], 13)
 
     def test_standard_video_uses_first_planned_time_as_audio_origin(self):
         pid = "pipe-video-audio-origin"
@@ -1066,6 +1072,36 @@ class TestDirectorCancellation(unittest.TestCase):
 
         submit.assert_not_called()
 
+    def test_prompt_only_video_rerun_does_not_require_a_start_image(self):
+        pid = "pipe-video-prompt-only"
+        record = self._add_pipeline(pid, "completed")
+        record["params"].update({
+            "pipeline_type": "short_film_story",
+            "_director_shot_image_policy": "prompt_only",
+        })
+        record["clip_plans"] = [{
+            "image_prompt": "unused still",
+            "video_prompt": "A named character crosses the room.",
+        }]
+        record["_planned_clips"] = [{
+            "start": 0,
+            "end": 5,
+            "duration_sec": 5,
+        }]
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+        captured = {}
+
+        with patch.object(
+            pipeline,
+            "_submit_and_wait",
+            side_effect=lambda params, **kwargs: captured.update(params) or ["new.mp4"],
+        ):
+            result = pipeline.rerun_clip_video(self.temp_dir.name, pid, 0)
+
+        self.assertEqual(result["filename"], "new.mp4")
+        self.assertNotIn("image_start", captured)
+        self.assertEqual(captured["image_prompt_type"], "")
+
     def test_rejoin_rejects_stale_video_instead_of_omitting_clip(self):
         pid = "pipe-stale-rejoin"
         record = self._add_pipeline(pid, "completed")
@@ -1122,6 +1158,53 @@ class TestDirectorCancellation(unittest.TestCase):
             pipeline.rejoin_clips(self.temp_dir.name, pid)
 
         concatenate.assert_not_called()
+
+    def test_prompt_only_rejoin_does_not_require_start_images(self):
+        pid = "pipe-prompt-only-rejoin"
+        record = self._add_pipeline(pid, "completed")
+        record["params"]["_director_shot_image_policy"] = "prompt_only"
+        record["clip_plans"] = [
+            {"image_prompt": "one", "video_prompt": "one"},
+            {"image_prompt": "two", "video_prompt": "two"},
+        ]
+        record["_clip_video_files"] = ["one.mp4", "two.mp4"]
+        for filename in record["_clip_video_files"]:
+            self._write_media(filename, b"video")
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+
+        def concatenate(video_files, output_path, audio_path, **kwargs):
+            self.assertEqual(len(video_files), 2)
+            with open(output_path, "wb") as handle:
+                handle.write(b"joined")
+            return True
+
+        pipeline._wgp.concatenate_multi_clip_videos = Mock(
+            side_effect=concatenate,
+        )
+        result = pipeline.rejoin_clips(self.temp_dir.name, pid)
+        self.assertTrue(result["filename"].endswith("_rejoin_multiclip.mp4"))
+
+    def test_prompt_only_repair_ignores_intentionally_missing_images(self):
+        pid = "pipe-prompt-only-repair"
+        record = self._add_pipeline(pid, "completed")
+        record["params"]["_director_shot_image_policy"] = "prompt_only"
+        record["clip_plans"] = [
+            {"image_prompt": "one", "video_prompt": "one"},
+            {"image_prompt": "two", "video_prompt": "two"},
+        ]
+        record["_clip_video_files"] = ["one.mp4", None]
+        self._write_media("one.mp4", b"video")
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+        state = pipeline.load_pipeline_state(self.temp_dir.name, pid)
+
+        plan = pipeline._plan_pipeline_repair(
+            self.temp_dir.name,
+            pid,
+            state,
+        )
+
+        self.assertEqual(plan["image_indices"], [])
+        self.assertEqual(plan["video_indices"], [1])
 
     def test_rejoin_rejects_recorded_video_missing_on_disk(self):
         pid = "pipe-missing-rejoin-video"

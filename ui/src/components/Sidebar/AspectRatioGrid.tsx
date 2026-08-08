@@ -13,9 +13,10 @@ export function AspectRatioGrid() {
   const aspectRatio = useStore(s => s.aspectRatio)
   const setAspectRatio = useStore(s => s.setAspectRatio)
   const generationMode = useStore(s => s.generationMode)
+  const modelOptions = useStore(s => s.modelOptions)
   const isImage = generationMode === 'image'
 
-  const ratios = isImage
+  const ratios = isImage || modelOptions?.supports_auto_aspect
     ? [{ value: 'auto' as AspectRatio, icon: '⊞' }, ...standardRatios]
     : standardRatios
 

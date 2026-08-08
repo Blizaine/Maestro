@@ -278,6 +278,93 @@ class TestJobLifecycleWiring(unittest.TestCase):
             )
             self.assertIn("[outa]", command)
 
+    def test_multiclip_concat_can_be_cancelled_during_ffmpeg(self):
+        concatenate = _load_isolated_function(
+            "app/wgp.py",
+            "concatenate_multi_clip_videos",
+            {"os": os},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            clip = os.path.join(directory, "clip.mp4")
+            output = os.path.join(directory, "joined.mp4")
+            with open(clip, "wb") as handle:
+                handle.write(b"clip")
+
+            class FakeProcess:
+                def __init__(self, *_args, **_kwargs):
+                    self.returncode = None
+                    self.finished = False
+                    with open(output, "wb") as handle:
+                        handle.write(b"partial")
+
+                def communicate(self, timeout=None):
+                    if not self.finished:
+                        raise subprocess.TimeoutExpired("ffmpeg", timeout)
+                    return "", ""
+
+                def terminate(self):
+                    self.finished = True
+                    self.returncode = -15
+
+                def kill(self):
+                    self.finished = True
+                    self.returncode = -9
+
+                def poll(self):
+                    return self.returncode
+
+            probe = SimpleNamespace(returncode=0, stdout="", stderr="")
+            with patch("subprocess.run", return_value=probe):
+                with patch("subprocess.Popen", FakeProcess):
+                    self.assertFalse(concatenate(
+                        [clip],
+                        output,
+                        abort_callback=lambda: True,
+                    ))
+            self.assertFalse(os.path.exists(output))
+
+    def test_multiclip_can_pad_short_audio_to_exact_video_timeline(self):
+        concatenate = _load_isolated_function(
+            "app/wgp.py",
+            "concatenate_multi_clip_videos",
+            {"os": os},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            clip = os.path.join(directory, "clip.mp4")
+            audio = os.path.join(directory, "source.mp4")
+            output = os.path.join(directory, "joined.mp4")
+            for path in (clip, audio):
+                with open(path, "wb") as handle:
+                    handle.write(b"media")
+            commands = []
+
+            def fake_run(command, **kwargs):
+                commands.append(command)
+                if "-filter_complex" in command:
+                    with open(output, "wb") as handle:
+                        handle.write(b"joined")
+                stdout = "30/1\n" if "stream=r_frame_rate" in command else ""
+                return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+            with patch("subprocess.run", side_effect=fake_run):
+                self.assertTrue(concatenate(
+                    [clip],
+                    output,
+                    audio,
+                    pad_audio=True,
+                    audio_duration_sec=1.25,
+                ))
+
+            command = next(c for c in commands if "-filter_complex" in c)
+            filter_value = command[command.index("-filter_complex") + 1]
+            self.assertIn(
+                "[1:a]asetpts=PTS-STARTPTS,apad,"
+                "atrim=duration=1.250000[outa]",
+                filter_value,
+            )
+            self.assertIn("[outa]", command)
+            self.assertIn("-shortest", command)
+
     def test_multiclip_dispatch_preserves_audio_origin(self):
         generation = _function(self.launch, "_run_generation")
         with open(
