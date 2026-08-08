@@ -5293,6 +5293,9 @@ def get_model_options(model_type: str):
         "sliding_window_memory_policy": md.get(
             "sliding_window_memory_policy"
         ),
+        "omni_sequence_memory_policy": md.get(
+            "omni_sequence_memory_policy"
+        ),
         "director_memory_policy": md.get("director_memory_policy"),
         "sliding_window_auto_prompt_pacing": md.get(
             "sliding_window_auto_prompt_pacing", False
@@ -7111,8 +7114,109 @@ async def llm_plan_h3_windows(request: Request):
             has_end_image=bool(body.get("has_end_image")),
             image_paths=image_paths or None,
             nsfw=bool(nsfw),
+            camera_coverage=str(body.get("camera_coverage") or "auto"),
         )
         result["effective_window_frames"] = window_frames
+        return result
+    except Exception as error:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(error)) from error
+
+
+@api.post("/api/v1/llm/plan-h3-sequence")
+async def llm_plan_h3_sequence(request: Request):
+    """Expand one H3 Omni concept into independent reference-driven clips."""
+
+    body = await request.json()
+    prompt = str(body.get("prompt") or "").strip()
+    model_type = str(body.get("model_type") or "")
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt is required")
+    model_def = wgp.get_model_def(model_type) or {}
+    if not (
+        str(model_def.get("architecture") or "").startswith("minimax_h3")
+        and model_def.get("omni_reference")
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="H3 reference-sequence planning requires a MiniMax H3 Omni model.",
+        )
+
+    from models.minimax_h3.ref2va import validate_reference_manifest
+    from models.minimax_h3.minimax_h3_handler import (
+        apply_h3_omni_sequence_memory_policy,
+    )
+    from services.h3_sequence_planner import plan_h3_reference_sequence
+
+    try:
+        references = validate_reference_manifest(
+            body.get("references") or body.get("minimax_h3_references"),
+            require_files=True,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    sequence_inputs = {
+        "resolution": body.get("resolution") or "864x480",
+        "video_length": body.get("total_frames") or 124,
+        "minimax_h3_sequence_clip_frames": body.get(
+            "sequence_clip_frames"
+        ) or body.get("minimax_h3_sequence_clip_frames"),
+        "minimax_h3_sequence_memory_override": bool(
+            body.get("sequence_memory_override", False)
+            or body.get("minimax_h3_sequence_memory_override", False)
+        ),
+    }
+    sequence_adjustment = apply_h3_omni_sequence_memory_policy(
+        sequence_inputs,
+        model_def,
+        _get_cached_hardware(),
+    )
+    if sequence_adjustment and sequence_adjustment.get("unsupported"):
+        raise HTTPException(
+            status_code=400,
+            detail=sequence_adjustment["message"],
+        )
+    effective_clip_frames = int(
+        sequence_inputs.get("minimax_h3_sequence_clip_frames")
+        or model_def.get("frames_maximum")
+        or 345
+    )
+    try:
+        _ensure_llm_loaded()
+    except Exception as load_error:
+        print(
+            "[MiniMax H3 Omni] Sequence planner LLM unavailable; "
+            f"using fallback: {load_error}"
+        )
+    services = wgp.server_config.get("services", {})
+    provider = services.get("llm_provider", "local")
+    nsfw = services.get("nsfw_mode", False) and provider not in _PUBLIC_LLM_PROVIDERS
+    image_paths = [
+        item.get("path")
+        for item in references
+        if item.get("type") == "image"
+        and isinstance(item.get("path"), str)
+        and os.path.isfile(item["path"])
+    ]
+    try:
+        result = await asyncio.to_thread(
+            plan_h3_reference_sequence,
+            prompt,
+            model_type=model_type,
+            resolution=str(sequence_inputs["resolution"]),
+            total_frames=int(body.get("total_frames") or 124),
+            references=references,
+            min_clip_frames=int(model_def.get("frames_minimum") or 124),
+            max_clip_frames=effective_clip_frames,
+            frame_step=int(model_def.get("frames_steps") or 17),
+            fps=float(model_def.get("fps") or 24),
+            camera_coverage=str(body.get("camera_coverage") or "auto"),
+            image_paths=image_paths or None,
+            nsfw=bool(nsfw),
+        )
+        result["effective_window_frames"] = effective_clip_frames
+        if sequence_adjustment:
+            result["sequence_memory"] = sequence_adjustment
         return result
     except Exception as error:
         traceback.print_exc()
@@ -8512,6 +8616,213 @@ async def generate(request: Request):
                 "Requested output duration is unchanged."
             )
 
+        # Ref2VA has no native sliding windows. Studio's experimental
+        # Reference Sequence instead plans independent native clips, repeats
+        # the canonical manifest for each one, and lets the existing
+        # multi-clip worker join them. The worker may add a tiny, generated
+        # composition-only continuity pack between clips; original references
+        # always remain first and authoritative.
+        h3_reference_sequence_active = False
+        h3_sequence_enabled = (
+            bool(_generation_model_def.get("omni_reference"))
+            and body.get("minimax_h3_reference_sequence") is True
+        )
+        try:
+            h3_sequence_total_frames = int(body.get("video_length") or 0)
+        except (TypeError, ValueError):
+            h3_sequence_total_frames = 0
+        h3_sequence_max_frames = int(
+            _generation_model_def.get("frames_maximum") or 345
+        )
+        if h3_sequence_enabled:
+            from models.minimax_h3.minimax_h3_handler import (
+                apply_h3_omni_sequence_memory_policy,
+            )
+
+            h3_sequence_adjustment = apply_h3_omni_sequence_memory_policy(
+                body,
+                _generation_model_def,
+                h3_hardware,
+            )
+            if (
+                h3_sequence_adjustment
+                and h3_sequence_adjustment.get("unsupported")
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=h3_sequence_adjustment["message"],
+                )
+            h3_sequence_max_frames = int(
+                body.get("minimax_h3_sequence_clip_frames")
+                or h3_sequence_max_frames
+            )
+            # The job-level VRAM estimator runs before multi-clip dispatch.
+            # Give it the actual native pass ceiling so it budgets one Omni
+            # clip rather than the entire joined sequence timeline.
+            body["sliding_window_size"] = min(
+                h3_sequence_total_frames or h3_sequence_max_frames,
+                h3_sequence_max_frames,
+            )
+            if h3_sequence_adjustment:
+                override_label = (
+                    "manual"
+                    if h3_sequence_adjustment.get("manual_override")
+                    else "Auto"
+                )
+                print(
+                    f"[MiniMax H3 Omni] {override_label} native clip: "
+                    f"{h3_sequence_adjustment['checkpoint'].title()} "
+                    f"checkpoint, "
+                    f"{h3_sequence_adjustment['gpu_vram_gb']:.1f} GB, "
+                    f"{h3_sequence_adjustment['resolution']}, "
+                    f"{h3_sequence_max_frames} frames maximum. "
+                    "Requested sequence duration is unchanged."
+                )
+        if h3_sequence_enabled and h3_sequence_total_frames > h3_sequence_max_frames:
+            from services.h3_sequence_planner import (
+                compute_h3_sequence_clips,
+                h3_sequence_plan_signature,
+                plan_h3_reference_sequence,
+            )
+
+            h3_sequence_min_frames = int(
+                _generation_model_def.get("frames_minimum") or 124
+            )
+            h3_sequence_step = int(
+                _generation_model_def.get("frames_steps") or 17
+            )
+            h3_sequence_fps = float(_generation_model_def.get("fps") or 24)
+            h3_sequence_refs = list(body.get("minimax_h3_references") or [])
+            h3_sequence_signature = h3_sequence_plan_signature(
+                str(body.get("prompt") or ""),
+                model_type=str(body.get("model_type") or ""),
+                resolution=str(body.get("resolution") or ""),
+                total_frames=h3_sequence_total_frames,
+                min_clip_frames=h3_sequence_min_frames,
+                max_clip_frames=h3_sequence_max_frames,
+                frame_step=h3_sequence_step,
+                fps=h3_sequence_fps,
+                references=h3_sequence_refs,
+                camera_coverage=str(
+                    body.get("minimax_h3_camera_coverage") or "auto"
+                ),
+            )
+            h3_sequence_geometry, _ = compute_h3_sequence_clips(
+                h3_sequence_total_frames,
+                min_clip_frames=h3_sequence_min_frames,
+                max_clip_frames=h3_sequence_max_frames,
+                frame_step=h3_sequence_step,
+                fps=h3_sequence_fps,
+            )
+            cached_prompts = body.get("h3_window_prompts")
+            cached_plan = body.get("h3_window_plan")
+            cached_is_valid = (
+                isinstance(cached_prompts, list)
+                and len(cached_prompts) == len(h3_sequence_geometry)
+                and all(
+                    isinstance(item, str) and item.strip()
+                    for item in cached_prompts
+                )
+                and isinstance(cached_plan, dict)
+                and cached_plan.get("plan_kind") == "reference_sequence"
+                and body.get("h3_window_plan_signature") == h3_sequence_signature
+            )
+            if cached_is_valid:
+                h3_window_plan_response = cached_plan
+                print(
+                    "[MiniMax H3 Omni] Reusing reviewed "
+                    f"{len(cached_prompts)}-clip sequence plan."
+                )
+            else:
+                from services import llm_service
+
+                llm_was_loaded = llm_service.is_loaded()
+                try:
+                    _ensure_llm_loaded()
+                except Exception as load_error:
+                    print(
+                        "[MiniMax H3 Omni] Sequence planner LLM unavailable; "
+                        f"using fallback: {load_error}"
+                    )
+                services = wgp.server_config.get("services", {})
+                provider = services.get("llm_provider", "local")
+                nsfw = (
+                    services.get("nsfw_mode", False)
+                    and provider not in _PUBLIC_LLM_PROVIDERS
+                )
+                h3_sequence_images = [
+                    item.get("path")
+                    for item in h3_sequence_refs
+                    if isinstance(item, dict)
+                    and item.get("type") == "image"
+                    and isinstance(item.get("path"), str)
+                    and os.path.isfile(item["path"])
+                ]
+                print(
+                    f"[MiniMax H3 Omni] Planning {len(h3_sequence_geometry)} "
+                    "independent reference-driven clips."
+                )
+                h3_window_plan_response = await asyncio.to_thread(
+                    plan_h3_reference_sequence,
+                    str(body.get("prompt") or ""),
+                    model_type=str(body.get("model_type") or ""),
+                    resolution=str(body.get("resolution") or ""),
+                    total_frames=h3_sequence_total_frames,
+                    references=h3_sequence_refs,
+                    min_clip_frames=h3_sequence_min_frames,
+                    max_clip_frames=h3_sequence_max_frames,
+                    frame_step=h3_sequence_step,
+                    fps=h3_sequence_fps,
+                    camera_coverage=str(
+                        body.get("minimax_h3_camera_coverage") or "auto"
+                    ),
+                    image_paths=h3_sequence_images or None,
+                    nsfw=bool(nsfw),
+                )
+                cached_prompts = h3_window_plan_response["window_prompts"]
+                if not llm_was_loaded and llm_service.is_loaded():
+                    try:
+                        if llm_service.get_status().get("provider") == "local":
+                            llm_service.unload_model()
+                    except Exception as unload_error:
+                        print(
+                            "[MiniMax H3 Omni] Sequence planner unload skipped: "
+                            f"{unload_error}"
+                        )
+
+            h3_reference_sequence_active = True
+            per_clip_frames = list(
+                h3_window_plan_response.get("per_clip_frames")
+                or [item["frames"] for item in h3_sequence_geometry]
+            )
+            body["prompt"] = "\n---CLIP_BOUNDARY---\n".join(cached_prompts)
+            body["multi_prompts_gen_type"] = 3
+            body["per_clip_frames"] = per_clip_frames
+            body["per_clip_minimax_h3_references"] = [
+                [dict(reference) for reference in h3_sequence_refs]
+                for _ in per_clip_frames
+            ]
+            body["_omni_sequence_continuity"] = (
+                body.get("minimax_h3_sequence_continuity") is not False
+            )
+            body["_omni_sequence_target_frames"] = h3_sequence_total_frames
+            body["h3_window_prompts"] = list(cached_prompts)
+            body["h3_window_plan_signature"] = h3_sequence_signature
+            body["h3_window_plan"] = h3_window_plan_response
+            try:
+                from services import llm_service as _h3_sequence_llm
+
+                if (
+                    _h3_sequence_llm.is_loaded()
+                    and _h3_sequence_llm.get_status().get("provider") == "local"
+                ):
+                    _h3_sequence_llm.unload_model()
+            except Exception as unload_error:
+                print(
+                    "[MiniMax H3 Omni] Sequence planner release skipped: "
+                    f"{unload_error}"
+                )
+
         # H3 First/Last continuation passes need genuinely different prompts.
         # A timing wrapper around one full-shot prompt still lets the model see
         # (and prematurely perform) every later action.  Plan after the VRAM
@@ -8555,6 +8866,9 @@ async def generate(request: Request):
                 fps=h3_fps,
                 has_start_image=h3_has_start,
                 has_end_image=h3_has_end,
+                camera_coverage=str(
+                    body.get("minimax_h3_camera_coverage") or "auto"
+                ),
             )
             h3_expected_count = len(
                 compute_h3_window_boundaries(
@@ -8612,6 +8926,9 @@ async def generate(request: Request):
                     has_end_image=h3_has_end,
                     image_paths=h3_images or None,
                     nsfw=bool(nsfw),
+                    camera_coverage=str(
+                        body.get("minimax_h3_camera_coverage") or "auto"
+                    ),
                 )
                 cached_prompts = h3_window_plan_response["window_prompts"]
                 # A planner loaded only for this request should not compete
@@ -8641,7 +8958,7 @@ async def generate(request: Request):
                     _h3_planner_llm.unload_model()
             except Exception as unload_error:
                 print(f"[MiniMax H3] Planner LLM release skipped: {unload_error}")
-        else:
+        elif not h3_reference_sequence_active:
             body.pop("h3_window_prompts", None)
             body.pop("h3_window_plan_signature", None)
             body.pop("h3_window_plan", None)
@@ -20972,6 +21289,16 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     "multi_clip_concat_audio", None,
                 )
                 multi_clip_audio_start_sec = raw_params.pop("multi_clip_audio_start_sec", 0.0)
+                omni_sequence_continuity = bool(
+                    raw_params.pop("_omni_sequence_continuity", False)
+                )
+                try:
+                    omni_sequence_target_frames = max(
+                        0,
+                        int(raw_params.pop("_omni_sequence_target_frames", 0) or 0),
+                    )
+                except (TypeError, ValueError):
+                    omni_sequence_target_frames = 0
                 group_id = f"mc_{int(time.time())}_{raw_params.get('seed', 0)}"
                 clip_count = max(
                     len(prompt_lines),
@@ -21092,6 +21419,8 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                         "cumulative_offset": True,
                         "audio_start_sec": multi_clip_audio_start_sec,
                         "concat_audio_path": multi_clip_concat_audio,
+                        "omni_sequence_continuity": omni_sequence_continuity,
+                        "target_total_frames": omni_sequence_target_frames,
                     }
                     # If the clip prompt has newlines (window_prompts), use mode 1 (per-window)
                     # Otherwise mode 0 (single task)
@@ -21313,6 +21642,7 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                         pass
 
             is_multiclip = total_tasks > 1 and any(t.get('params', {}).get('multi_clip_info') for t in queue)
+            omni_sequence_temp_files = []
 
             for task_idx, task in enumerate(queue):
                 if is_cancel_requested(job):
@@ -21586,6 +21916,135 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                                 except Exception as e:
                                     print(f"  [Continuation] Failed to extract frame: {e}")
 
+                    # H3 Omni Reference Sequence: keep canonical user media
+                    # first, then add at most two generated, composition-only
+                    # images. Clip 2 receives one readable late frame from
+                    # clip 1. Clip 3+ may also receive one persistent look
+                    # frame selected from clip 1. The rolling image is replaced
+                    # every clip instead of accumulating drift.
+                    sequence_info = (
+                        (task.get("params") or {}).get("multi_clip_info")
+                        or {}
+                    )
+                    if (
+                        is_multiclip
+                        and sequence_info.get("omni_sequence_continuity")
+                        and task_idx + 1 < total_tasks
+                    ):
+                        latest_video = None
+                        for output_path in reversed(task_files):
+                            if os.path.splitext(output_path)[1].lower() not in {
+                                ".mp4", ".webm", ".mkv", ".mov",
+                            }:
+                                continue
+                            candidate = output_path
+                            if not os.path.isabs(candidate):
+                                candidate = os.path.join(out_dir, candidate)
+                            candidate = os.path.realpath(candidate)
+                            if (
+                                os.path.normcase(os.path.dirname(candidate))
+                                == os.path.normcase(os.path.realpath(out_dir))
+                                and os.path.isfile(candidate)
+                            ):
+                                latest_video = candidate
+                                break
+                        if latest_video:
+                            try:
+                                from services.h3_sequence_continuity import (
+                                    append_generated_reference,
+                                    augment_prompt_with_continuity,
+                                    reference_capacity,
+                                    select_reference_frame,
+                                )
+
+                                if task_idx == 0 and task_idx + 2 < total_tasks:
+                                    first_future_refs = list(
+                                        (queue[task_idx + 2].get("params") or {}).get(
+                                            "minimax_h3_references"
+                                        )
+                                        or []
+                                    )
+                                    if reference_capacity(first_future_refs, 2):
+                                        look_image = select_reference_frame(
+                                            latest_video,
+                                            kind="look",
+                                            fps=float(_mc_model_def.get("fps") or 24),
+                                        )
+                                        omni_sequence_look_path = os.path.join(
+                                            out_dir,
+                                            f"_omni_sequence_look_{job_id}.png",
+                                        )
+                                        look_image.save(omni_sequence_look_path)
+                                        omni_sequence_temp_files.append(
+                                            omni_sequence_look_path
+                                        )
+                                        for future_task in queue[task_idx + 2:]:
+                                            future_params = future_task.get("params") or {}
+                                            future_refs, picture_number = append_generated_reference(
+                                                list(future_params.get("minimax_h3_references") or []),
+                                                omni_sequence_look_path,
+                                                role=(
+                                                    "Maestro project-look reference from the first "
+                                                    "generated clip; scene, wardrobe, lighting, and "
+                                                    "color only"
+                                                ),
+                                            )
+                                            if picture_number is not None:
+                                                future_params["minimax_h3_references"] = future_refs
+                                                future_prompt = augment_prompt_with_continuity(
+                                                    str(future_params.get("prompt") or ""),
+                                                    picture_number=picture_number,
+                                                    kind="look",
+                                                )
+                                                future_params["prompt"] = future_prompt
+                                                future_task["prompt"] = future_prompt
+
+                                next_task = queue[task_idx + 1]
+                                next_params = next_task.get("params") or {}
+                                next_refs = list(
+                                    next_params.get("minimax_h3_references") or []
+                                )
+                                if reference_capacity(next_refs, 1):
+                                    continuity_image = select_reference_frame(
+                                        latest_video,
+                                        kind="continuity",
+                                        fps=float(_mc_model_def.get("fps") or 24),
+                                    )
+                                    continuity_path = os.path.join(
+                                        out_dir,
+                                        f"_omni_sequence_continuity_{job_id}_{task_no}.png",
+                                    )
+                                    continuity_image.save(continuity_path)
+                                    omni_sequence_temp_files.append(continuity_path)
+                                    next_refs, picture_number = append_generated_reference(
+                                        next_refs,
+                                        continuity_path,
+                                        role=(
+                                            "Maestro rolling continuity reference from the "
+                                            "preceding generated clip; blocking, environment "
+                                            "state, lighting, and screen direction only"
+                                        ),
+                                    )
+                                    if picture_number is not None:
+                                        next_params["minimax_h3_references"] = next_refs
+                                        next_prompt = augment_prompt_with_continuity(
+                                            str(next_params.get("prompt") or ""),
+                                            picture_number=picture_number,
+                                            kind="continuity",
+                                        )
+                                        next_params["prompt"] = next_prompt
+                                        next_task["prompt"] = next_prompt
+                                        print(
+                                            "  [H3 Omni Sequence] Added curated "
+                                            f"continuity Picture {picture_number} for clip "
+                                            f"{task_no + 1}."
+                                        )
+                            except Exception as sequence_error:
+                                print(
+                                    "  [H3 Omni Sequence] Continuity selection "
+                                    f"skipped: {sequence_error}"
+                                )
+
             elapsed = time.time() - start_time
             print(f"\n{'='*50}")
             summary = f"Queue completed: {completed}/{total_tasks} tasks in {wgp.format_time(elapsed)}"
@@ -21602,6 +22061,12 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                             os.remove(os.path.join(out_dir, f))
                         except Exception:
                             pass
+            for temp_path in omni_sequence_temp_files:
+                try:
+                    if os.path.isfile(temp_path):
+                        os.remove(temp_path)
+                except OSError:
+                    pass
 
             # Publish any files that finished before an abort. Director waits
             # for this worker to settle and persists these partial outputs.

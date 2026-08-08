@@ -43,10 +43,16 @@ _TRANSFORMER_WORKING_VRAM_MB = 10 * 1024
 # pass remains inside this native limit and reuses exactly one boundary frame.
 _H3_MIN_FRAMES = 124
 _H3_MAX_FRAMES = 345
+_H3_FRAME_STEP = 17
+# Ref2VA appends its ordered reference context to the target sequence. Keep
+# Auto sequence clips one legal H3 frame step below the ordinary FL2VA pass
+# recommendation so reference conditioning has a small activation cushion.
+# Expert users can lock Sequence Clip Length to reclaim the native ceiling.
+_H3_OMNI_REFERENCE_MARGIN_STEPS = 1
 _H3_SLIDING_WINDOW_DEFAULTS = {
     "window_min": _H3_MIN_FRAMES,
     "window_max": _H3_MAX_FRAMES,
-    "window_step": 17,
+    "window_step": _H3_FRAME_STEP,
     "window_default": _H3_MAX_FRAMES,
     "overlap_min": 1,
     "overlap_max": 1,
@@ -623,6 +629,142 @@ def recommended_h3_window_frames(
     return int(profile.get("frames") or 0)
 
 
+def recommended_h3_omni_sequence_profile(
+    total_vram_gb,
+    resolution,
+    model_def: dict | None = None,
+) -> dict:
+    """Return the safe native Ref2VA clip size for an Omni sequence.
+
+    Omni Sequence is not a sliding-window pipeline: every item is an
+    independent native Ref2VA generation. The same canvas/checkpoint memory
+    table still describes the target pass, but Ref2VA also packs reference
+    media beside that target. Auto therefore reserves one legal frame step
+    as lightweight reference-context headroom while preserving H3's minimum.
+    """
+
+    model_def = model_def or {}
+    profile = dict(
+        recommended_h3_window_profile(
+            total_vram_gb,
+            resolution,
+            model_def,
+        )
+    )
+    profile["base_frames"] = profile.get("frames")
+    profile["reference_margin_frames"] = 0
+    if not profile.get("supported") or not profile.get("frames"):
+        return profile
+
+    minimum = max(1, int(model_def.get("frames_minimum") or _H3_MIN_FRAMES))
+    maximum = max(minimum, int(model_def.get("frames_maximum") or _H3_MAX_FRAMES))
+    step = max(1, int(model_def.get("frames_steps") or _H3_FRAME_STEP))
+    policy = model_def.get("omni_sequence_memory_policy") or {}
+    try:
+        margin_steps = max(
+            0,
+            int(
+                policy.get(
+                    "reference_margin_steps",
+                    _H3_OMNI_REFERENCE_MARGIN_STEPS,
+                )
+            ),
+        )
+    except (TypeError, ValueError):
+        margin_steps = _H3_OMNI_REFERENCE_MARGIN_STEPS
+
+    base_frames = min(maximum, max(minimum, int(profile["frames"])))
+    safe_frames = max(minimum, base_frames - margin_steps * step)
+    safe_frames = minimum + ((safe_frames - minimum) // step) * step
+    safe_frames = min(maximum, max(minimum, safe_frames))
+    profile["frames"] = safe_frames
+    profile["reference_margin_frames"] = base_frames - safe_frames
+    profile["reference_margin_steps"] = margin_steps
+    return profile
+
+
+def apply_h3_omni_sequence_memory_policy(
+    inputs: dict,
+    model_def: dict,
+    hardware: dict | None,
+) -> dict | None:
+    """Resolve one native Omni Sequence clip without changing total duration.
+
+    Auto uses the GPU/canvas/checkpoint recommendation plus Ref2VA headroom.
+    A locked manual value remains available for experimentation and is only
+    normalized to the model's legal frame lattice.
+    """
+
+    if not isinstance(inputs, dict) or not (model_def or {}).get(
+        "omni_reference"
+    ):
+        return None
+    hardware = hardware or {}
+    minimum = max(1, int(model_def.get("frames_minimum") or _H3_MIN_FRAMES))
+    maximum = max(minimum, int(model_def.get("frames_maximum") or _H3_MAX_FRAMES))
+    step = max(1, int(model_def.get("frames_steps") or _H3_FRAME_STEP))
+    try:
+        total_vram_gb = float(hardware.get("gpu_vram_gb") or 0)
+        total_frames = int(inputs.get("video_length") or minimum)
+        requested_clip = int(
+            inputs.get("minimax_h3_sequence_clip_frames") or maximum
+        )
+    except (TypeError, ValueError):
+        return None
+
+    requested_clip = min(maximum, max(minimum, requested_clip))
+    requested_clip = minimum + ((requested_clip - minimum) // step) * step
+    manual_override = inputs.get(
+        "minimax_h3_sequence_memory_override", False
+    ) is True
+    resolution = _normalize_h3_resolution(
+        inputs.get("resolution", "864x480")
+    )
+    profile = recommended_h3_omni_sequence_profile(
+        total_vram_gb,
+        resolution,
+        model_def,
+    )
+    if not manual_override and not profile.get("supported"):
+        fallback = profile.get("fallback_resolution") or "a lower resolution"
+        return {
+            "unsupported": True,
+            "message": (
+                "MiniMax H3 Omni Auto does not recommend "
+                f"{profile['resolution']} on a {total_vram_gb:.0f} GB GPU: "
+                "H3 cannot use a native clip shorter than its 124-frame "
+                "(5.2-second) minimum. "
+                f"Choose {fallback}, or manually lock Sequence Clip Length "
+                "in Advanced to try this combination experimentally."
+            ),
+            "gpu_vram_gb": total_vram_gb,
+            "resolution": profile["resolution"],
+            "requested_clip_frames": requested_clip,
+            "effective_clip_frames": None,
+            "output_frames": total_frames,
+            "fallback_resolution": fallback,
+            "checkpoint": profile["checkpoint"],
+            "manual_override": False,
+        }
+
+    safe_clip = int(profile.get("frames") or maximum)
+    effective_clip = requested_clip if manual_override else safe_clip
+    inputs["minimax_h3_sequence_clip_frames"] = effective_clip
+    return {
+        "gpu_vram_gb": total_vram_gb,
+        "resolution": resolution,
+        "requested_clip_frames": requested_clip,
+        "effective_clip_frames": effective_clip,
+        "recommended_clip_frames": safe_clip,
+        "output_frames": total_frames,
+        "checkpoint": profile["checkpoint"],
+        "manual_override": manual_override,
+        "reference_margin_frames": int(
+            profile.get("reference_margin_frames") or 0
+        ),
+    }
+
+
 def h3_runtime_preflight(
     model_def: dict | None,
     hardware: dict | None,
@@ -1086,6 +1228,11 @@ class family_handler:
             ),
         }
         if omni_reference:
+            sequence_memory_policy = (
+                _H3_FULL_WINDOW_MEMORY_POLICY
+                if full_checkpoint
+                else _H3_PRUNED_WINDOW_MEMORY_POLICY
+            )
             result.update(
                 {
                     "omni_reference": True,
@@ -1100,6 +1247,16 @@ class family_handler:
                         ("Maximum reference detail", "max"),
                     ],
                     "omni_reference_detail_default": "match",
+                    # Omni has no rolling windows, but each independent
+                    # sequence clip has the same target-pass memory curve.
+                    # Publish it under an Omni-specific name so Studio can
+                    # auto-size clips without exposing FL2VA controls.
+                    "omni_sequence_memory_policy": {
+                        **sequence_memory_policy,
+                        "reference_margin_steps": (
+                            _H3_OMNI_REFERENCE_MARGIN_STEPS
+                        ),
+                    },
                 }
             )
         else:

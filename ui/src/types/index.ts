@@ -160,11 +160,21 @@ export interface GenerateParams {
   // MiniMax H3 Ref2VA ordered Omni-reference manifest.
   minimax_h3_references?: MiniMaxH3Reference[]
   minimax_h3_reference_detail?: 'match' | 'max'
+  /** Experimental long-form Omni orchestration using independent clips. */
+  minimax_h3_reference_sequence?: boolean
+  /** Native Ref2VA clip ceiling selected by Auto or the Advanced override. */
+  minimax_h3_sequence_clip_frames?: number
+  /** Honor the user's locked Omni clip length above Auto's recommendation. */
+  minimax_h3_sequence_memory_override?: boolean
+  /** Add bounded generated look/blocking references between sequence clips. */
+  minimax_h3_sequence_continuity?: boolean
   minimax_h3_text_encoder?: 'nvfp4_awq' | 'gguf_q2_k' | 'gguf_q4_k_m' | 'int8' | 'bf16'
   /** One-click managed H3 Turbo recipe for Full or Pruned H3. */
   minimax_h3_turbo_mode?: boolean
   /** Automatically expand one long H3 concept into window-local prompts. */
   minimax_h3_window_storyboard?: boolean
+  /** H3 First/Last edit grammar used by the automatic window planner. */
+  minimax_h3_camera_coverage?: 'auto' | 'continuous' | 'multi_shot'
   /** Compiled Context-IR prompts, one per continuation pass. */
   h3_window_prompts?: string[]
   h3_window_plan_signature?: string
@@ -182,6 +192,7 @@ export interface MiniMaxH3Reference {
   url?: string
   role?: string
   audio_intent?: MiniMaxH3AudioIntent
+  image_intent?: 'identity' | 'scene' | 'style' | 'composition'
   include_audio?: boolean
   has_audio?: boolean
   audio_path?: string
@@ -199,6 +210,9 @@ export interface H3WindowPlanWindow {
   end_seconds: number
   opening_state: string
   closing_state: string
+  coverage?: string
+  pacing?: string
+  shot_count?: number
   prompt: string
 }
 
@@ -206,10 +220,14 @@ export interface H3WindowPlan {
   source_prompt: string
   signature: string
   planned_by: 'llm' | 'deterministic_fallback' | 'not_needed'
+  plan_kind?: 'sliding_window' | 'reference_sequence'
+  camera_coverage?: 'auto' | 'continuous' | 'multi_shot'
   total_frames: number
   window_frames: number
   effective_window_frames?: number
   window_count: number
+  per_clip_frames?: number[]
+  trim_tail_frames?: number
   resolution: string
   model_type: string
   subject_continuity?: string
@@ -314,6 +332,8 @@ export interface ChoiceConfig {
 export interface SlidingWindowMemoryPolicy {
   checkpoint?: 'full' | 'pruned'
   manual_override?: boolean
+  /** Legal H3 frame steps reserved for Ref2VA reference-context headroom. */
+  reference_margin_steps?: number
   auto_resolution_pixels?: Record<string, number>
   resolution_bands: Array<{
     min_pixels: number
@@ -410,6 +430,8 @@ export interface ModelOptions {
   sliding_window_defaults: Record<string, number> | null
   sliding_window_auto_prompt_pacing?: boolean
   sliding_window_memory_policy?: SlidingWindowMemoryPolicy | null
+  /** Native per-clip policy for independent H3 Omni reference sequences. */
+  omni_sequence_memory_policy?: SlidingWindowMemoryPolicy | null
   /** Native one-pass policy used by Director. Omni publishes this without
    * exposing Studio sliding-window controls. */
   director_memory_policy?: SlidingWindowMemoryPolicy | null

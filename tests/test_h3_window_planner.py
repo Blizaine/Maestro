@@ -24,6 +24,96 @@ from services.h3_window_planner import (  # noqa: E402
     h3_window_plan_signature,
     plan_h3_sliding_windows,
 )
+from services.h3_story_ledger import extract_source_events  # noqa: E402
+
+
+def _staged_ledger(
+    prompt: str,
+    segment_count: int,
+    *,
+    dialogue: bool = False,
+    golden: bool = False,
+) -> dict:
+    source_events = extract_source_events(prompt)
+    event_buckets: list[list[str]] = [[] for _ in range(segment_count)]
+    for index, event in enumerate(source_events):
+        target = min(
+            segment_count - 1,
+            round(index * (segment_count - 1) / max(1, len(source_events) - 1)),
+        )
+        event_buckets[target].append(event["event_id"])
+    generated = ([{
+        "dialogue_id": "D1",
+        "speaker": "Lana Lang",
+        "language": "English",
+        "delivery": "asks in stunned disbelief",
+        "text": "Clark, how did you do that?",
+    }] if dialogue else [])
+    return {
+        "subject_continuity": "One unchanged subject",
+        "setting_continuity": "One unchanged location",
+        "visual_continuity": "One coherent live-action style",
+        "editing_style": "Motivated cinematic coverage",
+        "initial_state": "The subject begins at rest",
+        "ambient_audio": "continuous room tone",
+        "music": "N/A",
+        "required_final_outcome": "The requested final action completes",
+        "beats": [
+            {
+                "beat_id": f"B{index + 1}",
+                "segment": index + 1,
+                "description": (
+                    "Clark emits a golden energy wave"
+                    if golden and index == 1
+                    else (
+                        " Then ".join(
+                            event["text"] for event in source_events
+                            if event["event_id"] in event_buckets[index]
+                        ) or f"Only action {index + 1} happens"
+                    )
+                ),
+                "source_event_ids": event_buckets[index],
+                "dialogue_ids": (["D1"] if dialogue and index + 1 == segment_count else []),
+                "state_after": f"The subject reaches state {index + 1}",
+                "sound_effects": "Natural synchronized action",
+            }
+            for index in range(segment_count)
+        ],
+        "generated_dialogue": generated,
+    }
+
+
+def _staged_segment(
+    index: int,
+    duration: float,
+    *,
+    dialogue_id: str | None = None,
+    action: str | None = None,
+) -> dict:
+    return {
+        "segment": index,
+        "title": f"Beat {index}",
+        "opening_state": f"Opening state {index}",
+        "coverage": "cinematic coverage",
+        "pacing": "natural real-time pacing",
+        "shots": [{
+            "shot": 1,
+            "start_seconds": 0.0,
+            "end_seconds": duration,
+            "transition": "opening composition",
+            "framing": "cinematic medium shot",
+            "camera": "the camera follows the action",
+            "beat_ids": [f"B{index}"],
+            "action": action or f"Only action {index} happens",
+            "dialogue": ([{
+                "dialogue_id": dialogue_id,
+                "delivery": "asks in stunned disbelief",
+                "action": "staring at Clark",
+            }] if dialogue_id else []),
+            "sound_effects": "Natural synchronized action",
+        }],
+        "closing_state": f"The subject reaches state {index}",
+    }
 
 
 class H3WindowPlannerTests(unittest.TestCase):
@@ -154,30 +244,23 @@ class H3WindowPlannerTests(unittest.TestCase):
 
     @patch("services.llm_service.generate")
     def test_planner_compiles_a_valid_llm_storyboard(self, generate):
-        windows = [
-            {
-                "window": index + 1,
-                "title": f"Beat {index + 1}",
-                "action": f"Only action {index + 1} happens",
-                "dialogue": [],
-                "sound_effects": "N/A",
-                "closing_state": f"The subject reaches state {index + 1}",
-            }
-            for index in range(3)
+        source_prompt = "A three-beat continuous action"
+        spans = compute_h3_window_boundaries(345, 124, fps=24, overlap_frames=1)
+        durations = [item["end_seconds"] - item["start_seconds"] for item in spans]
+        ledger = _staged_ledger(source_prompt, 3)
+        generate.side_effect = [
+            json.dumps(ledger),
+            *(
+                json.dumps(_staged_segment(
+                    index + 1,
+                    duration,
+                    action=ledger["beats"][index]["description"],
+                ))
+                for index, duration in enumerate(durations)
+            ),
         ]
-        generate.return_value = json.dumps(
-            {
-                "subject_continuity": "One unchanged subject",
-                "setting_continuity": "One unchanged location",
-                "visual_continuity": "One continuous shot",
-                "initial_state": "The subject begins at rest",
-                "ambient_audio": "continuous room tone",
-                "music": "N/A",
-                "windows": windows,
-            }
-        )
         result = plan_h3_sliding_windows(
-            "A three-beat continuous action",
+            source_prompt,
             model_type="minimax_h3",
             resolution="1920x1088",
             total_frames=345,
@@ -187,37 +270,19 @@ class H3WindowPlannerTests(unittest.TestCase):
         )
         self.assertEqual(result["planned_by"], "llm")
         self.assertEqual(result["window_count"], 3)
-        self.assertIn("Only action 1", result["window_prompts"][0])
+        self.assertIn("A three-beat continuous action", result["window_prompts"][0])
         self.assertNotIn("Only action 2", result["window_prompts"][0])
         self.assertIn("Only action 3", result["window_prompts"][-1])
-        self.assertEqual(generate.call_count, 1)
-        planning_prompt = generate.call_args.kwargs["prompt"]
-        self.assertIn("local time 0.000s", planning_prompt)
-        self.assertIn("never place a global timestamp inside a JSON field", planning_prompt)
+        self.assertEqual(generate.call_count, 4)
+        ledger_prompt = generate.call_args_list[0].kwargs["prompt"]
+        first_segment_prompt = generate.call_args_list[1].kwargs["prompt"]
+        self.assertIn("Segment geometry", ledger_prompt)
+        self.assertIn("local duration 0.000", first_segment_prompt)
+        self.assertIn("Assigned beats", first_segment_prompt)
 
     @patch("services.llm_service.generate")
     def test_mature_mode_uses_fidelity_note_not_general_enhancer(self, generate):
-        generate.return_value = json.dumps(
-            {
-                "subject_continuity": "The exact named character remains unchanged",
-                "setting_continuity": "The exact requested location remains unchanged",
-                "visual_continuity": "One continuous shot",
-                "initial_state": "The character begins walking",
-                "ambient_audio": "natural street ambience",
-                "music": "N/A",
-                "windows": [
-                    {
-                        "window": index + 1,
-                        "title": f"Beat {index + 1}",
-                        "action": f"Requested action {index + 1}",
-                        "dialogue": [],
-                        "sound_effects": "N/A",
-                        "closing_state": f"Requested state {index + 1}",
-                    }
-                    for index in range(3)
-                ],
-            }
-        )
+        generate.side_effect = RuntimeError("offline")
         plan_h3_sliding_windows(
             "A named character completes one requested action",
             model_type="minimax_h3",
@@ -228,7 +293,7 @@ class H3WindowPlannerTests(unittest.TestCase):
             fps=24,
             nsfw=True,
         )
-        system_prompt = generate.call_args.kwargs["system_prompt"]
+        system_prompt = generate.call_args_list[0].kwargs["system_prompt"]
         self.assertIn("SOURCE FIDELITY", system_prompt)
         self.assertIn("MATURE-MODE FIDELITY", system_prompt)
         self.assertIn("Do not censor it, add to it, or intensify it", system_prompt)
@@ -274,17 +339,96 @@ class H3WindowPlannerTests(unittest.TestCase):
             )
         )
 
-    def test_contract_rejects_invented_power_and_global_cut(self):
+    def test_compiler_preserves_timed_cuts_inside_each_local_window(self):
+        boundaries = compute_h3_window_boundaries(
+            480,
+            240,
+            fps=24,
+            overlap_frames=0,
+        )
+        plan = {
+            "subject_continuity": "The two fighters keep the same identities and wardrobe",
+            "setting_continuity": "A dark concrete arena",
+            "visual_continuity": "Fast live-action screen direction",
+            "editing_style": "Dynamic action coverage",
+            "initial_state": "The fighters square off in a wide composition",
+            "ambient_audio": "Arena room tone",
+            "music": "N/A",
+            "windows": [
+                {
+                    "window": 1,
+                    "title": "Opening exchange",
+                    "coverage": "dynamic multi-shot action",
+                    "pacing": "fast real-time action",
+                    "shots": [
+                        {
+                            "shot": 1,
+                            "start_seconds": 0,
+                            "end_seconds": 4,
+                            "transition": "opening composition",
+                            "framing": "wide tracking shot",
+                            "camera": "truck left with both fighters",
+                            "action": "They sprint toward each other",
+                            "dialogue": [],
+                            "sound_effects": "Rapid footsteps",
+                        },
+                        {
+                            "shot": 2,
+                            "start_seconds": 4,
+                            "end_seconds": 10,
+                            "transition": "hard cut",
+                            "framing": "low-angle medium shot",
+                            "camera": "short handheld push in",
+                            "action": "The first punch lands once",
+                            "dialogue": [],
+                            "sound_effects": "Single heavy impact",
+                        },
+                    ],
+                    "closing_state": "Both fighters hold at center frame after the impact",
+                },
+                {
+                    "window": 2,
+                    "title": "Follow-through",
+                    "coverage": "continuous reaction shot",
+                    "pacing": "fast real-time action",
+                    "shots": [{
+                        "shot": 1,
+                        "start_seconds": 0,
+                        "end_seconds": 10,
+                        "transition": "opening composition",
+                        "framing": "medium two-shot",
+                        "camera": "orbit clockwise and settle",
+                        "action": "They recover and separate",
+                        "dialogue": [],
+                        "sound_effects": "Shoes scrape the floor",
+                    }],
+                    "closing_state": "They stop at opposite sides of the arena",
+                },
+            ],
+        }
+        compiled = compile_h3_window_prompts(plan, boundaries)
+        self.assertIn("[Shot 2] At 4.00 seconds, hard cut", compiled[0]["prompt"])
+        self.assertIn("The first punch lands once", compiled[0]["prompt"])
+        self.assertNotIn("They recover and separate", compiled[0]["prompt"])
+        self.assertIn(
+            "Both fighters hold at center frame after the impact",
+            compiled[1]["prompt"],
+        )
+
+    def test_contract_allows_local_cut_but_rejects_global_timeline_labels(self):
         prompt = (
             "Tom Welling as Clark Kent uses his powers to save Lana Lang "
             "played by Kristin Kreuk."
         )
         bad_plan = {
             "windows": [{
-                "action": (
-                    "Cut at 10.125 seconds. Clark emits a golden energy wave."
-                ),
-                "dialogue": [],
+                "shots": [{
+                    "start_seconds": 4.0,
+                    "end_seconds": 8.0,
+                    "transition": "hard cut",
+                    "action": "Clark emits a golden energy wave.",
+                    "dialogue": [],
+                }],
             }],
         }
         violations = _plan_contract_violations(
@@ -294,62 +438,54 @@ class H3WindowPlannerTests(unittest.TestCase):
         )
         joined = " ".join(violations)
         self.assertIn("invented unrequested power", joined)
-        self.assertIn("global edit", joined)
+        self.assertNotIn("global window", joined)
         self.assertIn("entirely mute", joined)
+
+        global_plan = {
+            "windows": [{
+                "shots": [{
+                    "action": "At global 10.125s, Clark turns toward Lana.",
+                    "dialogue": [],
+                }],
+            }],
+        }
+        global_violations = _plan_contract_violations(
+            prompt,
+            global_plan,
+            expect_dialogue=False,
+        )
+        self.assertIn(
+            "global window label/timestamp",
+            " ".join(global_violations),
+        )
 
     @patch("services.llm_service.generate")
     def test_planner_repairs_mute_invented_spectacle(self, generate):
-        def make_plan(*, golden: bool, dialogue: bool) -> dict:
-            return {
-                "subject_continuity": (
-                    "Tom Welling as Clark Kent and Kristin Kreuk as Lana "
-                    "Lang remain unchanged"
-                ),
-                "setting_continuity": "Smallville main street in warm daylight",
-                "visual_continuity": "One continuous live-action tracking shot",
-                "initial_state": "Clark walks toward Lana on the sidewalk",
-                "ambient_audio": "Kansas small-town street ambience",
-                "music": "N/A",
-                "windows": [
-                    {
-                        "window": index + 1,
-                        "title": f"Beat {index + 1}",
-                        "action": (
-                            "Clark emits a golden energy wave"
-                            if golden and index == 1
-                            else (
-                                "Clark and Lana advance through rescue beat "
-                                f"{index + 1}"
-                            )
-                        ),
-                        "dialogue": ([{
-                            "speaker": "Lana Lang",
-                            "speaker_id": "S1",
-                            "language": "English",
-                            "delivery": "asks in stunned disbelief",
-                            "action": "staring at Clark",
-                            "text": "Clark, how did you do that?",
-                        }] if dialogue and index == 2 else []),
-                        "sound_effects": "Natural synchronized action",
-                        "closing_state": (
-                            "Clark and Lana hold continuation position "
-                            f"{index + 1}"
-                        ),
-                    }
-                    for index in range(4)
-                ],
-            }
-
+        source_prompt = (
+            "Tom Welling is Clark Kent in Smallville when a person "
+            "attacks Lana Lang played by Kristin Kreuk. Clark uses his "
+            "powers to save her and she can't believe what she sees."
+        )
+        spans = compute_h3_window_boundaries(972, 243, fps=24, overlap_frames=0)
+        durations = [item["end_seconds"] - item["start_seconds"] for item in spans]
+        repaired_ledger = _staged_ledger(source_prompt, 4, dialogue=True)
         generate.side_effect = [
-            json.dumps(make_plan(golden=True, dialogue=False)),
-            json.dumps(make_plan(golden=False, dialogue=True)),
+            json.dumps(_staged_ledger(source_prompt, 4, golden=True, dialogue=False)),
+            json.dumps(repaired_ledger),
+            *(
+                json.dumps(
+                    _staged_segment(
+                        index + 1,
+                        duration,
+                        dialogue_id="D1" if index + 1 == 4 else None,
+                        action=repaired_ledger["beats"][index]["description"],
+                    )
+                )
+                for index, duration in enumerate(durations)
+            ),
         ]
         result = plan_h3_sliding_windows(
-            (
-                "Tom Welling is Clark Kent in Smallville when a person "
-                "attacks Lana Lang played by Kristin Kreuk. Clark uses his "
-                "powers to save her and she can't believe what she sees."
-            ),
+            source_prompt,
             model_type="minimax_h3",
             resolution="960x544",
             total_frames=972,
@@ -357,7 +493,7 @@ class H3WindowPlannerTests(unittest.TestCase):
             overlap_frames=0,
             fps=24,
         )
-        self.assertEqual(generate.call_count, 2)
+        self.assertEqual(generate.call_count, 6)
         self.assertEqual(result["planned_by"], "llm")
         joined = " ".join(result["window_prompts"])
         self.assertNotIn("golden energy", joined)

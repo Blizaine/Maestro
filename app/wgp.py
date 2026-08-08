@@ -6474,6 +6474,7 @@ def _trim_video_tail(clip_path, trim_frames, fps):
 def concatenate_multi_clip_videos(
     clip_paths, output_path, audio_path=None, audio_start_sec=0.0,
     abort_callback=None, pad_audio=False, audio_duration_sec=None,
+    video_duration_sec=None,
 ):
     """Concatenate video clips into one video, optionally adding a full audio track.
 
@@ -6540,6 +6541,18 @@ def concatenate_multi_clip_videos(
             "source-audio padding is disabled."
         )
         pad_audio = False
+    try:
+        video_duration_sec = float(video_duration_sec)
+    except (TypeError, ValueError):
+        video_duration_sec = None
+    if (
+        video_duration_sec is not None
+        and (
+            not math.isfinite(video_duration_sec)
+            or video_duration_sec <= 0
+        )
+    ):
+        video_duration_sec = None
 
     # Check if clips have embedded audio (e.g., LTX-2.3 generated video+audio)
     clips_have_audio = False
@@ -6603,13 +6616,26 @@ def concatenate_multi_clip_videos(
     if use_clip_audio:
         # Concat both video and audio streams from each clip
         filter_inputs = "".join(f"[{i}:v][{i}:a]" for i in range(n))
-        filter_str = f"{filter_inputs}concat=n={n}:v=1:a=1[outv][outa]"
+        if video_duration_sec is not None:
+            filter_str = (
+                f"{filter_inputs}concat=n={n}:v=1:a=1[joinedv][joineda];"
+                f"[joinedv]trim=duration={video_duration_sec:.6f},setpts=PTS-STARTPTS[outv];"
+                f"[joineda]atrim=duration={video_duration_sec:.6f},asetpts=PTS-STARTPTS[outa]"
+            )
+        else:
+            filter_str = f"{filter_inputs}concat=n={n}:v=1:a=1[outv][outa]"
         cmd += ["-filter_complex", filter_str]
         cmd += ["-map", "[outv]", "-map", "[outa]"]
         cmd += ["-c:a", "aac"]
     else:
         filter_inputs = "".join(f"[{i}:v]" for i in range(n))
-        filter_str = f"{filter_inputs}concat=n={n}:v=1:a=0[outv]"
+        if video_duration_sec is not None:
+            filter_str = (
+                f"{filter_inputs}concat=n={n}:v=1:a=0[joinedv];"
+                f"[joinedv]trim=duration={video_duration_sec:.6f},setpts=PTS-STARTPTS[outv]"
+            )
+        else:
+            filter_str = f"{filter_inputs}concat=n={n}:v=1:a=0[outv]"
         if audio_path and (audio_start_sec > 0 or pad_audio):
             audio_filters = []
             if audio_start_sec > 0:
@@ -9561,20 +9587,74 @@ def generate_video(
                         concat_name = f"{time_flag}_seed{seed}_multiclip{concat_ext}"
                         concat_path = os.path.join(save_path, concat_name)
                         print(f"[Multi-Clip] Concatenating {len(clip_paths)} clips into {concat_path}")
+                        target_total_frames = int(
+                            multi_clip_info.get("target_total_frames", 0) or 0
+                        )
+                        target_duration_sec = None
+                        if target_total_frames > 0:
+                            target_fps = float(model_def.get("fps") or fps or 24)
+                            target_duration_sec = target_total_frames / max(1.0, target_fps)
                         if concatenate_multi_clip_videos(
                             clip_paths,
                             concat_path,
                             concat_audio,
                             audio_start_sec=multi_clip_info.get("audio_start_sec", 0),
+                            video_duration_sec=target_duration_sec,
                         ):
                             print(f"[Multi-Clip] Concatenated video saved: {concat_path}")
                             with lock:
                                 file_list.append(concat_path)
                                 concat_configs = configs.copy()
-                                concat_configs["prompt"] = "\n".join(group[i]["prompt"] for i in range(multi_clip_info["total"]))
-                                concat_configs["image_start"] = [group[i]["image_start"] for i in range(multi_clip_info["total"])]
-                                concat_configs["multi_prompts_gen_type"] = 3
-                                concat_configs["video_length"] = multi_clip_info["total"] * video_length
+                                sequence_plan = concat_configs.get("h3_window_plan")
+                                is_h3_reference_sequence = (
+                                    target_total_frames > 0
+                                    and isinstance(sequence_plan, dict)
+                                    and sequence_plan.get("plan_kind") == "reference_sequence"
+                                )
+                                if is_h3_reference_sequence:
+                                    # The joined sequence is still one Studio
+                                    # Omni concept, not a user-authored
+                                    # Multi-Shot project. Preserve the source
+                                    # idea + reviewed plan for Load Settings,
+                                    # and never persist deleted internal
+                                    # continuity pictures as user references.
+                                    concat_configs["prompt"] = str(
+                                        sequence_plan.get("source_prompt") or ""
+                                    )
+                                    concat_configs["image_start"] = ""
+                                    concat_configs["multi_prompts_gen_type"] = 0
+                                    concat_configs["per_clip_frames"] = list(
+                                        sequence_plan.get("per_clip_frames") or []
+                                    )
+                                    concat_configs["minimax_h3_references"] = [
+                                        item for item in (
+                                            concat_configs.get("minimax_h3_references")
+                                            or []
+                                        )
+                                        if not (
+                                            isinstance(item, dict)
+                                            and item.get("_maestro_generated_continuity")
+                                        )
+                                    ]
+                                else:
+                                    concat_configs["prompt"] = (
+                                        "\n---CLIP_BOUNDARY---\n".join(
+                                            group[i]["prompt"]
+                                            for i in range(multi_clip_info["total"])
+                                        )
+                                    )
+                                    concat_configs["image_start"] = [
+                                        group[i]["image_start"]
+                                        for i in range(multi_clip_info["total"])
+                                    ]
+                                    concat_configs["multi_prompts_gen_type"] = 3
+                                concat_configs["video_length"] = (
+                                    target_total_frames
+                                    if target_total_frames > 0
+                                    else multi_clip_info["total"] * video_length
+                                )
+                                if target_duration_sec is not None:
+                                    concat_configs["duration_seconds"] = target_duration_sec
                                 concat_configs["sliding_window_size"] = video_length
                                 if original_audio_guide:
                                     concat_configs["audio_guide"] = original_audio_guide

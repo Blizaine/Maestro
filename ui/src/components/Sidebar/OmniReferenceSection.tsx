@@ -152,6 +152,43 @@ export function OmniReferenceSection() {
         <span className="text-[9px] text-text-muted">{references.length}/{limits.total}</span>
       </div>
 
+      <div className="rounded-lg border border-border bg-bg-tertiary/50 px-2.5 py-2 space-y-1.5">
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={params.minimax_h3_reference_sequence === true}
+            onChange={event => setParam('minimax_h3_reference_sequence', event.target.checked)}
+            className="accent-accent-blue"
+          />
+          <span className="text-[10px] text-text-secondary">Reference Sequence</span>
+          <span className="text-[8px] text-amber-300/90 border border-amber-400/30 rounded px-1 py-0.5">
+            Experimental
+          </span>
+          <span
+            title="Extends the Duration control beyond one native Omni clip. Maestro plans independent editorial clips, repeats your canonical references, and joins the results."
+            className="text-text-muted cursor-help"
+          >
+            <Info size={11} />
+          </span>
+        </label>
+        {params.minimax_h3_reference_sequence === true && (
+          <label className="flex items-start gap-2 text-[9px] text-text-muted cursor-pointer">
+            <input
+              type="checkbox"
+              checked={params.minimax_h3_sequence_continuity !== false}
+              onChange={event => setParam('minimax_h3_sequence_continuity', event.target.checked)}
+              className="accent-accent-blue mt-0.5"
+            />
+            <span>
+              Carry scene continuity between clips
+              <span className="block text-[8px] mt-0.5">
+                Canonical references stay authoritative; generated frames guide only scene look and blocking.
+              </span>
+            </span>
+          </label>
+        )}
+      </div>
+
       <div
         className="rounded-lg border border-dashed border-border hover:border-border-light px-3 py-2.5 flex items-center justify-center gap-2 cursor-pointer transition-colors"
         onClick={() => inputRef.current?.click()}

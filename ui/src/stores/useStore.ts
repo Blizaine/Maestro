@@ -2,6 +2,11 @@ import { create } from 'zustand'
 import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, DirectorShotImageGuidance, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineRepairState, SavedPipelineState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping, H3WindowPlan } from '../types'
 import * as api from '../api/client'
 import { applyThemePrefs, getStoredPrefs, type FamilyId, type ThemeMode, type ThemePrefs } from '../lib/theme'
+import {
+  effectiveH3OmniSequenceFrames,
+  normalizeH3NativeFrames,
+  recommendedH3OmniSequenceProfile,
+} from '../lib/h3Memory'
 
 const CIVIT_DOWNLOAD_POLL_MS = 2000
 const CIVIT_DOWNLOAD_COMPLETED_VISIBLE_MS = 30_000
@@ -2375,7 +2380,10 @@ export const useStore = create<AppState>((set, get) => ({
     const prevImageMode = key === 'image_mode' ? ((get().params.image_mode as number) ?? 0) : null
     const invalidatesH3Plan = [
       'prompt', 'model_type', 'resolution', 'image_start', 'image_end',
-      'image_mode',
+      'image_mode', 'minimax_h3_camera_coverage',
+      'minimax_h3_reference_sequence', 'minimax_h3_references',
+      'minimax_h3_sequence_clip_frames',
+      'minimax_h3_sequence_memory_override',
     ].includes(String(key))
     set(s => ({
       params: { ...s.params, [key]: value },
@@ -3368,7 +3376,11 @@ export const useStore = create<AppState>((set, get) => ({
     const nativeMaximum = options?.frames_maximum
       ? options.frames_maximum / fps
       : null
-    const maximum = options?.sliding_window || nativeMaximum == null
+    const h3ReferenceSequence = (
+      options?.omni_reference === true
+      && get().params.minimax_h3_reference_sequence === true
+    )
+    const maximum = options?.sliding_window || nativeMaximum == null || h3ReferenceSequence
       ? Number.POSITIVE_INFINITY
       : nativeMaximum
     let seconds = Math.min(maximum, Math.max(minimum, s))
@@ -3403,11 +3415,30 @@ export const useStore = create<AppState>((set, get) => ({
       const step = Math.max(1, swDefaults.window_step ?? 1)
       frames = minimum + Math.round((frames - minimum) / step) * step
       frames = Math.max(minimum, Math.min(maximum, frames))
+    } else if (
+      options?.omni_reference === true
+      && get().params.minimax_h3_reference_sequence === true
+    ) {
+      frames = normalizeH3NativeFrames(
+        frames,
+        options.frames_minimum ?? 124,
+        options.frames_maximum ?? 345,
+        options.frames_steps ?? 17,
+      )
     }
     const seconds = frames / fps
     set(state => ({
       slidingWindowSeconds: seconds,
-      params: { ...state.params, sliding_window_size: frames },
+      params: {
+        ...state.params,
+        sliding_window_size: frames,
+        ...(
+          state.modelOptions?.omni_reference === true
+          && state.params.minimax_h3_reference_sequence === true
+            ? { minimax_h3_sequence_clip_frames: frames }
+            : {}
+        ),
+      },
       h3WindowPlan: null,
     }))
     get().syncClipCount()
@@ -3422,10 +3453,17 @@ export const useStore = create<AppState>((set, get) => ({
     }))
   },
   slidingWindowLocked: false,
-  setSlidingWindowLocked: (locked) => set({
+  setSlidingWindowLocked: (locked) => set(state => ({
     slidingWindowLocked: locked,
+    params: (
+      state.modelOptions?.omni_reference === true
+      && state.params.minimax_h3_reference_sequence === true
+    ) ? {
+        ...state.params,
+        minimax_h3_sequence_memory_override: locked,
+      } : state.params,
     h3WindowPlan: null,
-  }),
+  })),
 
   outputCount: 1,
   setOutputCount: (n) => set(s => ({
@@ -4456,18 +4494,44 @@ export const useStore = create<AppState>((set, get) => ({
     }
 
     const params: Record<string, unknown> = { ...state.params, generation_mode: state.generationMode, workspace: state.activeWorkspace }
+    let effectiveH3SequenceClipFrames: number | null = null
 
     if (state.generationMode === 'video') {
       const fps = state.modelOptions?.fps ?? 16
       const supportsSlidingWindows = state.modelOptions?.sliding_window === true
       const minimumFrames = state.modelOptions?.frames_minimum ?? 1
       const maximumFrames = state.modelOptions?.frames_maximum ?? null
+      const h3ReferenceSequenceRequested = (
+        isOmniReference
+        && params.minimax_h3_reference_sequence === true
+      )
+      effectiveH3SequenceClipFrames = maximumFrames
+      if (h3ReferenceSequenceRequested && maximumFrames != null) {
+        const sequenceBudget = effectiveH3OmniSequenceFrames({
+          policy: state.modelOptions?.omni_sequence_memory_policy,
+          resolution: String(params.resolution || ''),
+          totalVramGb: state.systemStats?.gpu.vram_total_gb ?? 0,
+          minimumFrames,
+          maximumFrames,
+          frameStep: state.modelOptions?.frames_steps ?? 17,
+          selectedFrames: Math.round(state.slidingWindowSeconds * fps),
+          manualOverride: state.slidingWindowLocked,
+        })
+        effectiveH3SequenceClipFrames = sequenceBudget.frames
+        params.minimax_h3_sequence_clip_frames = effectiveH3SequenceClipFrames
+        params.minimax_h3_sequence_memory_override = state.slidingWindowLocked
+      } else {
+        delete params.minimax_h3_sequence_clip_frames
+        delete params.minimax_h3_sequence_memory_override
+      }
       let requestedFrames = Math.max(
         minimumFrames,
         Math.round(state.durationSeconds * fps),
       )
       if (!supportsSlidingWindows && maximumFrames != null) {
-        requestedFrames = Math.min(maximumFrames, requestedFrames)
+        if (!h3ReferenceSequenceRequested) {
+          requestedFrames = Math.min(maximumFrames, requestedFrames)
+        }
       } else if (
         supportsSlidingWindows
         && maximumFrames != null
@@ -4521,6 +4585,10 @@ export const useStore = create<AppState>((set, get) => ({
       // leak them into unrelated model requests or their saved sidecars.
       delete params.minimax_h3_references
       delete params.minimax_h3_reference_detail
+      delete params.minimax_h3_reference_sequence
+      delete params.minimax_h3_sequence_continuity
+      delete params.minimax_h3_sequence_clip_frames
+      delete params.minimax_h3_sequence_memory_override
     }
     if (!state.modelOptions?.minimax_h3_text_encoder_choices?.length) {
       delete params.minimax_h3_text_encoder
@@ -5053,9 +5121,31 @@ export const useStore = create<AppState>((set, get) => ({
       && state.params.image_mode !== 2
       && Number(params.video_length || 0) > Number(params.sliding_window_size || 0)
     )
+    const h3ReferenceSequenceActive = (
+      state.generationMode === 'video'
+      && isOmniReference
+      && params.minimax_h3_reference_sequence === true
+      && Number(params.video_length || 0) > Number(
+        effectiveH3SequenceClipFrames
+        || state.modelOptions?.frames_maximum
+        || 0,
+      )
+    )
+    const h3PlanActive = h3WindowStoryboardActive || h3ReferenceSequenceActive
     if (state.modelOptions?.sliding_window_auto_prompt_pacing === true) {
       params.minimax_h3_window_storyboard = h3WindowStoryboardActive
       if (h3WindowStoryboardActive && state.h3WindowPlan) {
+        params.h3_window_prompts = state.h3WindowPlan.windows.map(window => window.prompt)
+        params.h3_window_plan_signature = state.h3WindowPlan.signature
+        params.h3_window_plan = state.h3WindowPlan
+      } else {
+        delete params.h3_window_prompts
+        delete params.h3_window_plan_signature
+        delete params.h3_window_plan
+      }
+    } else if (h3ReferenceSequenceActive) {
+      delete params.minimax_h3_window_storyboard
+      if (state.h3WindowPlan?.plan_kind === 'reference_sequence') {
         params.h3_window_prompts = state.h3WindowPlan.windows.map(window => window.prompt)
         params.h3_window_plan_signature = state.h3WindowPlan.signature
         params.h3_window_plan = state.h3WindowPlan
@@ -5078,7 +5168,9 @@ export const useStore = create<AppState>((set, get) => ({
       step: 0,
       totalSteps: 0,
       phase: '',
-      message: h3WindowStoryboardActive ? 'Planning H3 windows...' : 'Submitting...',
+      message: h3PlanActive
+        ? `Planning H3 ${h3ReferenceSequenceActive ? 'reference sequence' : 'windows'}...`
+        : 'Submitting...',
       outputFiles: [],
       error: null,
       oomInfo: null,
@@ -5096,11 +5188,22 @@ export const useStore = create<AppState>((set, get) => ({
         const planFps = state.modelOptions?.fps ?? 24
         const effectiveWindowFrames = h3_window_plan.effective_window_frames
           || h3_window_plan.window_frames
-        set(s => ({
-          h3WindowPlan: h3_window_plan,
-          slidingWindowSeconds: effectiveWindowFrames / planFps,
-          params: { ...s.params, sliding_window_size: effectiveWindowFrames },
-        }))
+        if (h3_window_plan.plan_kind === 'reference_sequence') {
+          set(s => ({
+            h3WindowPlan: h3_window_plan,
+            slidingWindowSeconds: effectiveWindowFrames / planFps,
+            params: {
+              ...s.params,
+              minimax_h3_sequence_clip_frames: effectiveWindowFrames,
+            },
+          }))
+        } else {
+          set(s => ({
+            h3WindowPlan: h3_window_plan,
+            slidingWindowSeconds: effectiveWindowFrames / planFps,
+            params: { ...s.params, sliding_window_size: effectiveWindowFrames },
+          }))
+        }
       }
 
       // Update the job with its server-assigned ID
@@ -5712,7 +5815,13 @@ export const useStore = create<AppState>((set, get) => ({
       const nativeMaximumDuration = options.frames_maximum
         ? options.frames_maximum / fps
         : null
-      const maximumDuration = !options.sliding_window && nativeMaximumDuration
+      const h3ReferenceSequence = (
+        options.omni_reference === true
+        && activeState.params.minimax_h3_reference_sequence === true
+      )
+      const maximumDuration = !options.sliding_window
+        && nativeMaximumDuration
+        && !h3ReferenceSequence
         ? nativeMaximumDuration
         : Number.POSITIVE_INFINITY
       let nextDurationSeconds = Math.min(
@@ -5742,9 +5851,11 @@ export const useStore = create<AppState>((set, get) => ({
           Math.min(swDefaults.window_max ?? nextWindowFrames, nextWindowFrames),
         )
       } else if (!options.sliding_window) {
-        nextWindowFrames = Math.round(nextDurationSeconds * fps)
+        nextWindowFrames = h3ReferenceSequence && options.frames_maximum
+          ? options.frames_maximum
+          : Math.round(nextDurationSeconds * fps)
       }
-      const nextWindowSeconds = nextWindowFrames / fps
+      let nextWindowSeconds = nextWindowFrames / fps
       const paramUpdates: Record<string, unknown> = {
         guidance_phases: options.guidance_max_phases,
         video_length: Math.round(nextDurationSeconds * fps),
@@ -5784,6 +5895,23 @@ export const useStore = create<AppState>((set, get) => ({
           nextResolutionPreset,
           nextAspectRatio,
         )
+      }
+      if (h3ReferenceSequence) {
+        const sequenceRecommendation = recommendedH3OmniSequenceProfile(
+          options.omni_sequence_memory_policy,
+          String(paramUpdates.resolution || activeState.params.resolution || ''),
+          activeState.systemStats?.gpu.vram_total_gb ?? 0,
+          options.frames_minimum ?? 124,
+          options.frames_maximum ?? 345,
+          options.frames_steps ?? 17,
+        )
+        if (sequenceRecommendation?.frames != null) {
+          nextWindowFrames = sequenceRecommendation.frames
+          nextWindowSeconds = nextWindowFrames / fps
+          paramUpdates.sliding_window_size = nextWindowFrames
+          paramUpdates.minimax_h3_sequence_clip_frames = nextWindowFrames
+        }
+        paramUpdates.minimax_h3_sequence_memory_override = false
       }
       // Apply model defaults for inference steps and guidance scale
       if (options.default_num_inference_steps != null) {
@@ -6101,6 +6229,57 @@ export const useStore = create<AppState>((set, get) => ({
       const windowCount = supportsSlidingWindows && stride > 0 && state.durationSeconds > state.slidingWindowSeconds
         ? 1 + Math.ceil((state.durationSeconds - state.slidingWindowSeconds + discardSec) / stride)
         : 1
+      const totalFrames = Math.max(1, Math.round(state.durationSeconds * fps))
+      const h3NativeMaximumFrames = state.modelOptions?.frames_maximum ?? null
+      const h3SequenceBudget = (
+        isOmniReference
+        && params.minimax_h3_reference_sequence === true
+        && h3NativeMaximumFrames != null
+      ) ? effectiveH3OmniSequenceFrames({
+          policy: state.modelOptions?.omni_sequence_memory_policy,
+          resolution: String(params.resolution || ''),
+          totalVramGb: state.systemStats?.gpu.vram_total_gb ?? 0,
+          minimumFrames: state.modelOptions?.frames_minimum ?? 124,
+          maximumFrames: h3NativeMaximumFrames,
+          frameStep: state.modelOptions?.frames_steps ?? 17,
+          selectedFrames: Math.round(state.slidingWindowSeconds * fps),
+          manualOverride: state.slidingWindowLocked,
+        }) : null
+      const h3SequenceClipFrames = h3SequenceBudget?.frames
+        ?? h3NativeMaximumFrames
+      const shouldPlanH3Sequence = (
+        generationMode === 'video'
+        && isOmniReference
+        && params.minimax_h3_reference_sequence === true
+        && h3SequenceClipFrames != null
+        && totalFrames > h3SequenceClipFrames
+      )
+
+      if (shouldPlanH3Sequence) {
+        const plan = await api.planH3Sequence({
+          prompt: params.prompt,
+          model_type: params.model_type,
+          resolution: params.resolution,
+          total_frames: totalFrames,
+          references: params.minimax_h3_references ?? [],
+          sequence_clip_frames: h3SequenceClipFrames,
+          sequence_memory_override: state.slidingWindowLocked,
+          camera_coverage: params.minimax_h3_camera_coverage || 'auto',
+        })
+        const effectiveClipFrames = plan.effective_window_frames
+          || plan.window_frames
+        set(s => ({
+          h3WindowPlan: plan,
+          slidingWindowSeconds: effectiveClipFrames / fps,
+          params: {
+            ...s.params,
+            minimax_h3_sequence_clip_frames: effectiveClipFrames,
+            minimax_h3_sequence_memory_override: state.slidingWindowLocked,
+          },
+          isEnhancing: false,
+        }))
+        return
+      }
 
       const shouldPlanH3Windows = (
         generationMode === 'video'
@@ -6125,7 +6304,7 @@ export const useStore = create<AppState>((set, get) => ({
           prompt: params.prompt,
           model_type: params.model_type,
           resolution: params.resolution,
-          total_frames: Math.max(1, Math.round(state.durationSeconds * fps)),
+          total_frames: totalFrames,
           window_frames: Math.max(1, Math.round(state.slidingWindowSeconds * fps)),
           overlap_frames: state.slidingWindowOverlap,
           discard_frames: discardFrames,
@@ -6133,6 +6312,7 @@ export const useStore = create<AppState>((set, get) => ({
           has_start_image: !!(startImage || params.image_start),
           has_end_image: !!(endImage || params.image_end),
           image_paths: imagePaths.length > 0 ? imagePaths : undefined,
+          camera_coverage: params.minimax_h3_camera_coverage || 'auto',
         })
         const effectiveWindowFrames = plan.effective_window_frames || plan.window_frames
         set(s => ({
@@ -8006,6 +8186,18 @@ export const useStore = create<AppState>((set, get) => ({
       repeat_generation: 1,
       activated_loras: (p.activated_loras as string[]) || [],
       loras_multipliers: (p.loras_multipliers as string) || '',
+      minimax_h3_references: Array.isArray(p.minimax_h3_references)
+        ? (p.minimax_h3_references as GenerateParams['minimax_h3_references'])?.filter(
+            reference => !(
+              reference as { _maestro_generated_continuity?: boolean }
+            )._maestro_generated_continuity,
+          )
+        : undefined,
+      minimax_h3_reference_detail: (
+        p.minimax_h3_reference_detail === 'max'
+          ? 'max'
+          : (p.minimax_h3_reference_detail === 'match' ? 'match' : undefined)
+      ),
       settings_version: p.settings_version as number,
     }
 
@@ -8068,6 +8260,18 @@ export const useStore = create<AppState>((set, get) => ({
     (newParams as Record<string, unknown>).temperature = (p.temperature as number) ?? undefined;
     (newParams as Record<string, unknown>).audio_guidance_scale = (p.audio_guidance_scale as number) ?? undefined
     newParams.minimax_h3_window_storyboard = (p.minimax_h3_window_storyboard as boolean) ?? undefined
+    newParams.minimax_h3_reference_sequence = (p.minimax_h3_reference_sequence as boolean) ?? undefined
+    newParams.minimax_h3_sequence_continuity = (p.minimax_h3_sequence_continuity as boolean) ?? undefined
+    newParams.minimax_h3_sequence_clip_frames = (
+      p.minimax_h3_sequence_clip_frames as number
+    ) ?? undefined
+    newParams.minimax_h3_sequence_memory_override = (
+      p.minimax_h3_sequence_memory_override as boolean
+    ) ?? undefined
+    newParams.minimax_h3_camera_coverage = (
+      p.minimax_h3_camera_coverage === 'continuous'
+      || p.minimax_h3_camera_coverage === 'multi_shot'
+    ) ? p.minimax_h3_camera_coverage : 'auto'
     const restoredH3WindowPlan = (
       p.h3_window_plan
       && typeof p.h3_window_plan === 'object'
@@ -8278,8 +8482,15 @@ export const useStore = create<AppState>((set, get) => ({
     const fps = model?.fps || 16
     const frames = newParams.video_length || 81
     set({ durationSeconds: Math.round((frames / fps) * 10) / 10 })
-    if (newParams.sliding_window_size) {
-      set({ slidingWindowSeconds: Math.round((newParams.sliding_window_size / fps) * 10) / 10 })
+    const restoredNativePassFrames = newParams.minimax_h3_sequence_clip_frames
+      ?? newParams.sliding_window_size
+    if (restoredNativePassFrames) {
+      set({
+        slidingWindowSeconds: restoredNativePassFrames / fps,
+        slidingWindowLocked: newParams.minimax_h3_reference_sequence === true
+          ? newParams.minimax_h3_sequence_memory_override === true
+          : get().slidingWindowLocked,
+      })
     }
     if (newParams.sliding_window_overlap != null) {
       set({ slidingWindowOverlap: newParams.sliding_window_overlap })

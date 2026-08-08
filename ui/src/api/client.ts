@@ -1,4 +1,4 @@
-import type { DirectorModelCompatibility, H3WindowPlan, ScailResolutionProfile } from '../types'
+import type { DirectorModelCompatibility, H3WindowPlan, MiniMaxH3Reference, ScailResolutionProfile } from '../types'
 
 const BASE = ''  // same origin in production; Vite proxy handles /api in dev
 
@@ -178,6 +178,7 @@ export async function planH3Windows(params: {
   has_start_image?: boolean
   has_end_image?: boolean
   image_paths?: string[]
+  camera_coverage?: 'auto' | 'continuous' | 'multi_shot'
 }): Promise<H3WindowPlan> {
   const res = await fetch(`${BASE}/api/v1/llm/plan-h3-windows`, {
     method: 'POST',
@@ -187,6 +188,28 @@ export async function planH3Windows(params: {
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'H3 window planning failed' }))
     throw new Error(err.detail || 'H3 window planning failed')
+  }
+  return res.json()
+}
+
+export async function planH3Sequence(params: {
+  prompt: string
+  model_type: string
+  resolution: string
+  total_frames: number
+  references: MiniMaxH3Reference[]
+  sequence_clip_frames?: number
+  sequence_memory_override?: boolean
+  camera_coverage?: 'auto' | 'continuous' | 'multi_shot'
+}): Promise<H3WindowPlan> {
+  const res = await fetch(`${BASE}/api/v1/llm/plan-h3-sequence`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'H3 sequence planning failed' }))
+    throw new Error(err.detail || 'H3 sequence planning failed')
   }
   return res.json()
 }

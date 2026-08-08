@@ -121,8 +121,10 @@ def _load_h3_memory_helpers():
         "_h3_resolution_pixels",
         "recommended_h3_window_profile",
         "recommended_h3_window_frames",
+        "recommended_h3_omni_sequence_profile",
         "h3_runtime_preflight",
         "apply_h3_window_memory_policy",
+        "apply_h3_omni_sequence_memory_policy",
         "pace_h3_sliding_window_prompt",
     }
     tree = ast.parse(_read(_HANDLER_PATH), filename=str(_HANDLER_PATH))
@@ -510,6 +512,63 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         )
         self.assertEqual(omni["sliding_window_size"], 345)
 
+    def test_h3_omni_sequence_recomputes_native_clip_budget(self):
+        helpers = _load_h3_memory_helpers()
+        recommend = helpers["recommended_h3_omni_sequence_profile"]
+        apply_policy = helpers["apply_h3_omni_sequence_memory_policy"]
+        omni = {
+            "architecture": "minimax_h3_ref2va",
+            "omni_reference": True,
+            "minimax_h3_full_checkpoint": False,
+            "frames_minimum": 124,
+            "frames_maximum": 345,
+            "frames_steps": 17,
+            "omni_sequence_memory_policy": {
+                "reference_margin_steps": 1,
+            },
+        }
+
+        # Auto tracks canvas pressure and reserves one legal Ref2VA step.
+        self.assertEqual(recommend(24, "960x544", omni)["frames"], 328)
+        self.assertEqual(recommend(24, "1280x704", omni)["frames"], 226)
+        self.assertEqual(recommend(24, "1920x1088", omni)["frames"], 124)
+
+        params = {
+            "resolution": "1280x704",
+            "video_length": 960,
+            "minimax_h3_sequence_clip_frames": 345,
+        }
+        adjustment = apply_policy(params, omni, {"gpu_vram_gb": 24})
+        self.assertEqual(params["video_length"], 960)
+        self.assertEqual(params["minimax_h3_sequence_clip_frames"], 226)
+        self.assertEqual(adjustment["effective_clip_frames"], 226)
+        self.assertEqual(adjustment["reference_margin_frames"], 17)
+
+        manual = dict(
+            params,
+            minimax_h3_sequence_clip_frames=345,
+            minimax_h3_sequence_memory_override=True,
+        )
+        manual_adjustment = apply_policy(
+            manual,
+            omni,
+            {"gpu_vram_gb": 24},
+        )
+        self.assertEqual(manual["minimax_h3_sequence_clip_frames"], 345)
+        self.assertTrue(manual_adjustment["manual_override"])
+
+        unsupported = {
+            "resolution": "1920x1088",
+            "video_length": 960,
+        }
+        rejection = apply_policy(
+            unsupported,
+            omni,
+            {"gpu_vram_gb": 12},
+        )
+        self.assertTrue(rejection["unsupported"])
+        self.assertIn("Sequence Clip Length", rejection["message"])
+
     def test_full_h3_preflight_recommends_pruned_turbo_without_blocking(self):
         preflight = _load_h3_memory_helpers()["h3_runtime_preflight"]
         full_first_last = {
@@ -745,6 +804,14 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertFalse(model_def["director_endpoint_continuity"])
         self.assertEqual(model_def["director_memory_policy"]["checkpoint"], "pruned")
         self.assertNotIn("sliding_window_memory_policy", model_def)
+        self.assertEqual(
+            model_def["omni_sequence_memory_policy"]["checkpoint"],
+            "pruned",
+        )
+        self.assertEqual(
+            model_def["omni_sequence_memory_policy"]["reference_margin_steps"],
+            1,
+        )
         self.assertIn("OMNI REFERENCES", model_def["selector_help"])
         self.assertIn("audio references", model_def["selector_help"])
 
@@ -832,7 +899,10 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             duration,
         )
         self.assertIn("modelOptions?.frames_maximum", duration)
-        self.assertIn("if (!supportsSlidingWindows) return null", duration)
+        self.assertIn(
+            "if (!supportsSlidingWindows && !omniReferenceSequence) return null",
+            duration,
+        )
         self.assertIn("modelOptions?.sliding_window", advanced)
         self.assertIn("if (!supportsSlidingWindows && maximumFrames != null)", store)
         self.assertIn("delete params.sliding_window_size", store)
@@ -845,6 +915,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("sliding_window_memory_override", store)
         self.assertIn("full prompt auto-paced", duration)
         self.assertIn('"sliding_window_memory_policy": md.get(', launch)
+        self.assertIn('"omni_sequence_memory_policy": md.get(', launch)
         self.assertIn('h3_window_adjustment.get("unsupported")', launch)
 
     def test_h3_is_enabled_for_existing_and_fresh_installs(self):
