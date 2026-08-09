@@ -20,6 +20,7 @@ _APP = _ROOT / "app"
 _HANDLER_PATH = _APP / "models" / "minimax_h3" / "minimax_h3_handler.py"
 _MAIN_PATH = _APP / "models" / "minimax_h3" / "minimax_h3_main.py"
 _PACKING_PATH = _APP / "models" / "minimax_h3" / "packing.py"
+_VIDEO_VAE_PATH = _APP / "models" / "minimax_h3" / "video_vae.py"
 _REF2VA_PATH = _APP / "models" / "minimax_h3" / "ref2va.py"
 _TRANSFORMER_PATH = _APP / "models" / "minimax_h3" / "transformer.py"
 _CONDITIONER_PATH = _APP / "models" / "minimax_h3" / "conditioner.py"
@@ -79,6 +80,7 @@ def _load_handler_class():
             "_hf_url",
             "_text_encoder_variants",
             "_recommend_text_encoder",
+            "normalize_h3_overlap_frames",
             "pace_h3_sliding_window_prompt",
         }:
             selected.append(node)
@@ -125,6 +127,7 @@ def _load_h3_memory_helpers():
         "h3_runtime_preflight",
         "apply_h3_window_memory_policy",
         "apply_h3_omni_sequence_memory_policy",
+        "normalize_h3_overlap_frames",
         "pace_h3_sliding_window_prompt",
     }
     tree = ast.parse(_read(_HANDLER_PATH), filename=str(_HANDLER_PATH))
@@ -304,12 +307,15 @@ class TestMiniMaxH3Definition(unittest.TestCase):
                 "window_step": 17,
                 "window_default": 345,
                 "overlap_min": 1,
-                "overlap_max": 1,
-                "overlap_step": 0,
-                "overlap_default": 1,
+                "overlap_max": 103,
+                "overlap_step": 17,
+                "overlap_offset": 1,
+                "overlap_default": 18,
                 "discard_last_frames": 0,
             },
         )
+        self.assertTrue(model_def["audio_guide_window_slicing"])
+        self.assertTrue(model_def["sliding_window_audio_history"])
         self.assertEqual(model_def["director_video_strategy"], "bounded_start_end")
         self.assertEqual(model_def["director_shot_image_support"], "optional")
         self.assertEqual(model_def["director_audio_input_mode"], "none")
@@ -408,6 +414,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         recommend = helpers["recommended_h3_window_frames"]
         profile = helpers["recommended_h3_window_profile"]
         apply_policy = helpers["apply_h3_window_memory_policy"]
+        normalize_overlap = helpers["normalize_h3_overlap_frames"]
         pruned = {
             "architecture": "minimax_h3",
             "omni_reference": False,
@@ -418,6 +425,10 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             "omni_reference": False,
             "minimax_h3_full_checkpoint": True,
         }
+        self.assertEqual(normalize_overlap(1), 1)
+        self.assertEqual(normalize_overlap(20), 18)
+        self.assertEqual(normalize_overlap(35), 35)
+        self.assertEqual(normalize_overlap(120, window_frames=124), 103)
 
         # Pruned carries lower weight-streaming pressure, so it can use fewer
         # continuation passes than Full on the same GPU and canvas.
@@ -639,9 +650,9 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         size_next = namespace["compute_next_sliding_window_length"]
         model_def = {"sliding_window_exact_total_frames": True}
         # After a 124-frame first pass, H3 has 221 output frames left plus
-        # its one-frame continuation context. The aligned remainder is 226,
-        # but pass two must remain at the selected 124-frame safe cap.
-        self.assertEqual(size_next(222, 124, 17, model_def), 124)
+        # its 18-frame continuation overlap. The next pass must still remain
+        # at the selected 124-frame safe cap.
+        self.assertEqual(size_next(239, 124, 17, model_def), 124)
         self.assertEqual(size_next(99, 124, 17, model_def), 124)
 
     def test_h3_single_prompt_is_paced_and_dialogue_partitioned_per_window(self):
@@ -660,7 +671,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             current_video_length=124,
             requested_frames_to_generate=345,
             num_frames_generated=0,
-            reuse_frames=1,
+            reuse_frames=18,
         )
         middle = pace(
             prompt,
@@ -670,7 +681,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             current_video_length=124,
             requested_frames_to_generate=345,
             num_frames_generated=124,
-            reuse_frames=1,
+            reuse_frames=18,
         )
         final = pace(
             prompt,
@@ -679,8 +690,8 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             fps=24,
             current_video_length=124,
             requested_frames_to_generate=345,
-            num_frames_generated=247,
-            reuse_frames=1,
+            num_frames_generated=230,
+            reuse_frames=18,
         )
         self.assertIn("continuation window 1 of 3", first)
         self.assertIn("Opening line", first)
@@ -1010,7 +1021,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn('"minimax_h3_references": minimax_h3_references', wgp)
         self.assertIn('multi_clip_info.get("concat_audio_path")', wgp)
         self.assertIn("build_ref2va_packed_sequence", main)
-        self.assertIn("duration_seconds=frame_num / MINIMAX_H3_FPS", main)
+        self.assertIn("duration_seconds=frame_num / fps", main)
         self.assertIn("num_condition_video_rows", main)
         self.assertIn("const omniReferences = state.params.minimax_h3_references ?? []", store)
         self.assertIn("delete params.minimax_h3_references", store)
@@ -1184,19 +1195,40 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
         main = _read(_MAIN_PATH)
         self.assertIn("MiniMaxH3Scheduler(shift=12.0)", main)
         self.assertIn("MiniMaxH3Scheduler(shift=3.0)", main)
-        self.assertIn("audio_sampling_rate\": 32000", main)
+        self.assertIn('"audio_sampling_rate": MINIMAX_H3_AUDIO_SAMPLE_RATE', main)
         self.assertIn("MINIMAX_H3_KEYFRAME_ENCODE_SEED", main)
         self.assertIn("prepare_keyframe_image", main)
 
     def test_first_last_runtime_uses_previous_window_as_next_anchor(self):
         main = _read(_MAIN_PATH)
         wgp = _read(_WGP_PATH)
-        self.assertIn("def _last_continuation_frame", main)
+        store = _read(_STORE_PATH)
+        self.assertIn("def _split_continuation_video", main)
         self.assertIn("input_video=None", main)
+        self.assertIn("input_waveform=None", main)
         self.assertIn("prefix_frames_count: int = 0", main)
-        self.assertIn("image_start = _last_continuation_frame", main)
+        self.assertIn('"anchor": "history"', main)
+        self.assertIn('"keep_all_latents": True', main)
+        self.assertIn("_encode_continuation_audio", main)
+        self.assertIn("pre_audio_guide_sample_rate", wgp)
+        self.assertIn('model_def.get("audio_guide_window_slicing", False)', wgp)
+        self.assertIn("_normalizeSlidingWindowOverlap", store)
+        self.assertIn('"sliding_window_audio_history": md.get(', _read(_LAUNCH_PATH))
+        self.assertNotIn(
+            "params.sliding_window_overlap = swDefaults?.overlap_default",
+            store,
+        )
         self.assertIn('"sliding_window_trim_to_requested"', wgp)
         self.assertIn('"sliding_window_end_image_at_final"', wgp)
+
+    def test_continuation_uses_streaming_vae_tiles_and_migrates_legacy_overlap(self):
+        handler = _read(_HANDLER_PATH)
+        video_vae = _read(_VIDEO_VAE_PATH)
+        self.assertIn("settings_version < 2.58", handler)
+        self.assertIn("normalize_h3_overlap_frames", handler)
+        self.assertIn("Decode one tile at a time", video_vae)
+        self.assertIn("new_tails.append", video_vae)
+        self.assertIn("keep_all_latents", video_vae)
 
     def test_turbo_lora_uses_h3_specific_validation_and_step_contract(self):
         main = _read(_MAIN_PATH)
@@ -1423,6 +1455,8 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
         self.assertIn("fec7846aef352e58a1cfb699455e3d104281e68b", provenance)
         self.assertIn("4ed4c744a396e43294f851f35cab769e11a89f2d", provenance)
         self.assertIn("b382d0940cdbab29cff5d33301b34b337ad5517e", provenance)
+        self.assertIn("5c8b4ac3c5e15135b6510d9b6d4d57002e4bb5e4", provenance)
+        self.assertIn("639ee1351e5b57c5992903690199719607c3700e", provenance)
         self.assertIn("Apache-2.0", provenance)
 
 
@@ -1493,6 +1527,95 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
     def tearDownClass(cls):
         if sys.path and sys.path[0] == str(_APP):
             sys.path.pop(0)
+
+    def test_fl2va_overlap_splits_motion_history_and_boundary_frame(self):
+        from models.minimax_h3.minimax_h3_main import (
+            _prepare_stereo_waveform,
+            _split_continuation_video,
+        )
+
+        video = self.torch.arange(3 * 35 * 2 * 2).reshape(3, 35, 2, 2)
+        history, boundary, count = _split_continuation_video(video, 20)
+        self.assertEqual(count, 18)
+        self.assertEqual(tuple(history.shape), (3, 17, 2, 2))
+        self.assertTrue(self.torch.equal(history, video[:, -18:-1]))
+        self.assertTrue(self.torch.equal(boundary, video[:, -1:]))
+
+        no_history = _split_continuation_video(video, 0)
+        self.assertEqual(no_history, (None, None, 0))
+        explicit = _split_continuation_video(
+            video,
+            18,
+            has_explicit_start=True,
+        )
+        self.assertEqual(explicit, (None, None, 0))
+
+        sample_major = self.torch.stack(
+            [self.torch.arange(100), self.torch.arange(100) + 100],
+            dim=1,
+        ).float()
+        stereo = _prepare_stereo_waveform(sample_major, 32000, 120)
+        self.assertEqual(tuple(stereo.shape), (2, 120))
+        self.assertTrue(self.torch.equal(stereo[0, :100], sample_major[:, 0]))
+        self.assertTrue(self.torch.equal(stereo[1, :100], sample_major[:, 1]))
+        self.assertEqual(float(stereo[:, 100:].abs().sum()), 0.0)
+
+    def test_packed_sequence_places_visual_and_audio_history_before_target(self):
+        from models.minimax_h3.packing import (
+            MINIMAX_H3_AUDIO_TAG,
+            MINIMAX_H3_VIDEO_TAG,
+            build_packed_sequence,
+            build_row_timesteps,
+        )
+
+        layout = build_packed_sequence(
+            self.torch.tensor([1, 1]),
+            num_latent_frames=7,
+            latent_height=4,
+            latent_width=4,
+            num_audio_latents=4,
+            patch_size=(1, 2, 2),
+            keyframe_anchors=(("history", 5), ("first", 1)),
+            audio_condition_anchors=(("history", 27), ("first", 2)),
+        )
+        self.assertEqual(layout.sequence_length, 120)
+        self.assertEqual(layout.num_condition_video_rows, 24)
+        self.assertEqual(layout.num_condition_audio_rows, 58)
+        self.assertEqual(int(layout.video_indices[0]), 2)
+        self.assertEqual(int(layout.video_indices[24]), 92)
+        self.assertEqual(int(layout.audio_indices[0]), 26)
+        self.assertEqual(int(layout.audio_indices[58]), 84)
+        self.assertTrue(
+            self.torch.all(
+                layout.token_tags[layout.video_indices] == MINIMAX_H3_VIDEO_TAG
+            )
+        )
+        self.assertTrue(
+            self.torch.all(
+                layout.token_tags[layout.audio_indices] == MINIMAX_H3_AUDIO_TAG
+            )
+        )
+        target_origin = layout.position_ids[92, 0]
+        self.assertAlmostEqual(
+            float(layout.position_ids[84, 0]),
+            float(target_origin),
+        )
+        self.assertGreater(float(target_origin), 2.0)
+
+        unique, inverse = build_row_timesteps(
+            layout,
+            video_timestep=0.5,
+            audio_timestep=0.25,
+            condition_video_timestep=0.999,
+            condition_audio_timestep=1.0,
+        )
+        self.assertTrue(
+            self.torch.allclose(
+                unique,
+                self.torch.tensor([0.25, 0.5, 0.999, 1.0]),
+            )
+        )
+        self.assertEqual(inverse.shape[0], layout.sequence_length)
 
     def test_ref2va_manifest_limits_and_visual_reference_requirement(self):
         from models.minimax_h3.ref2va import validate_reference_manifest

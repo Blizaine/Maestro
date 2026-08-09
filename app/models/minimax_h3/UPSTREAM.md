@@ -68,6 +68,19 @@ batched Diffusers-style row layout, uses the exact generated-row boundary for
 FL2VA and Ref2VA cache residuals, and keeps First Block Cache experimental and
 disabled by default.
 
+The full FL2VA sliding-window continuation contract is adapted from WanGP
+v12.44's H3 feature commit
+`5c8b4ac3c5e15135b6510d9b6d4d57002e4bb5e4`, with follow-up fixes through
+`639ee1351e5b57c5992903690199719607c3700e` (WanGP 12.441). A legal
+`17*n+1` overlap is split into complete 17-frame visual-history chunks and one
+regenerated boundary frame; the matching generated stereo-audio tail is VAE
+encoded on the same rotary timeline. Maestro retains its exact-duration outer
+assembler, prompt planner, and VRAM-aware pass limits around that native H3
+conditioning. The same upstream follow-up also supplies the streaming video
+VAE tile decoder used here, which decodes one tile at a time and preserves
+already blended horizontal/vertical tails to reduce peak VRAM and avoid
+multi-tile corner seams.
+
 The one-click experimental Turbo preset pins the Maestro-validated
 `minimax_h3_turbo_4step_ckpt500.safetensors` file at repository revision
 `7a44622816e16032cb0b6d044d8820da39a1dfdc` (SHA-256

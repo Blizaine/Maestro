@@ -148,6 +148,34 @@ class H3ReferenceSequencePlannerTests(unittest.TestCase):
             result["window_count"],
         )
 
+    @patch("services.llm_service.generate", side_effect=RuntimeError("offline"))
+    def test_planner_can_enhance_before_omni_references_are_added(self, _generate):
+        result = plan_h3_reference_sequence(
+            "Alex crosses town and confronts the person following them",
+            model_type="minimax_h3_ref2va",
+            resolution="864x480",
+            total_frames=720,
+            references=[],
+            camera_coverage="multi_shot",
+        )
+        self.assertEqual(result["plan_kind"], "reference_sequence")
+        self.assertEqual(result["planned_by"], "deterministic_fallback")
+        self.assertGreater(result["window_count"], 1)
+        self.assertEqual(len(result["window_prompts"]), result["window_count"])
+
+    def test_sequence_endpoint_uses_planning_not_generation_reference_rules(self):
+        launch = (APP / "launch.py").read_text(encoding="utf-8")
+        store = (ROOT / "ui" / "src" / "stores" / "useStore.ts").read_text(
+            encoding="utf-8"
+        )
+        prompt_input = (
+            ROOT / "ui" / "src" / "components" / "Sidebar" / "PromptInput.tsx"
+        ).read_text(encoding="utf-8")
+        self.assertIn("allow_empty=True", launch)
+        self.assertIn("require_visual=False", launch)
+        self.assertIn("promptEnhanceError", store)
+        self.assertIn('role="alert"', prompt_input)
+
     @patch("services.llm_service.generate")
     def test_staged_omni_planner_assigns_each_event_to_one_clip(self, generate):
         prompt = (

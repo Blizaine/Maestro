@@ -115,6 +115,7 @@ export function PromptInput() {
   const editSubMode = useStore(s => s.editSubMode)
   const enhancePrompt = useStore(s => s.enhancePrompt)
   const isEnhancing = useStore(s => s.isEnhancing)
+  const promptEnhanceError = useStore(s => s.promptEnhanceError)
   const durationSeconds = useStore(s => s.durationSeconds)
   const slidingWindowSeconds = useStore(s => s.slidingWindowSeconds)
   const slidingWindowOverlap = useStore(s => s.slidingWindowOverlap)
@@ -272,6 +273,14 @@ export function PromptInput() {
               <span>Writing...</span>
             </>
           )}
+        </div>
+      )}
+      {!isEnhancing && promptEnhanceError && (
+        <div
+          role="alert"
+          className="mb-1.5 rounded-lg border border-indicator-error/40 bg-indicator-error/10 px-2.5 py-1.5 text-[10px] text-indicator-error"
+        >
+          {promptEnhanceError}
         </div>
       )}
       {usesH3Plan && h3WindowPlan && (

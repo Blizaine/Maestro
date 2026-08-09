@@ -356,6 +356,11 @@ export function WindowSettings() {
             value={overlap}
             onChange={e => setOverlap(Number(e.target.value))}
           />
+          {modelOptions?.sliding_window_audio_history === true && (
+            <div className="text-[10px] text-text-muted mt-1">
+              Carries recent motion and matching stereo audio into each new window. 18 frames is recommended.
+            </div>
+          )}
         </div>
       )}
     </div>

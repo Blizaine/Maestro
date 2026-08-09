@@ -27,6 +27,19 @@ let _dashboardPipelineListLoadToken = 0
 
 type OutpaintAspect = 'source' | '16:9' | '9:16' | '1:1' | '4:3' | '3:4'
 
+function _normalizeSlidingWindowOverlap(
+  value: number,
+  defaults?: Record<string, number> | null,
+): number {
+  if (!defaults) return Math.max(0, Math.round(value))
+  const minimum = defaults.overlap_min ?? 1
+  const maximum = defaults.overlap_max ?? Math.max(minimum, value)
+  const step = Math.max(1, defaults.overlap_step ?? 1)
+  const offset = defaults.overlap_offset ?? minimum
+  const normalized = offset + Math.round((value - offset) / step) * step
+  return Math.max(minimum, Math.min(maximum, normalized))
+}
+
 const _OUTPAINT_ASPECT_RATIOS: Array<[Exclude<OutpaintAspect, 'source'>, number]> = [
   ['16:9', 16 / 9],
   ['9:16', 9 / 16],
@@ -1438,6 +1451,7 @@ interface AppState {
 
   // Prompt enhancement
   isEnhancing: boolean
+  promptEnhanceError: string | null
   enhancePrompt: (ttsMode?: string) => Promise<void>
   h3WindowPlan: H3WindowPlan | null
   updateH3WindowPrompt: (index: number, prompt: string) => void
@@ -2388,6 +2402,7 @@ export const useStore = create<AppState>((set, get) => ({
     set(s => ({
       params: { ...s.params, [key]: value },
       ...(invalidatesH3Plan ? { h3WindowPlan: null } : {}),
+      ...(key === 'prompt' ? { promptEnhanceError: null } : {}),
     }))
     // Auto-parse speaker names from prompt whenever audio mode has at least
     // one voice slot. Previously gated on audio_prompt_type.includes('B')
@@ -3446,11 +3461,17 @@ export const useStore = create<AppState>((set, get) => ({
 
   slidingWindowOverlap: 5,
   setSlidingWindowOverlap: (frames) => {
-    set(state => ({
-      slidingWindowOverlap: frames,
-      params: { ...state.params, sliding_window_overlap: frames },
-      h3WindowPlan: null,
-    }))
+    set(state => {
+      const normalized = _normalizeSlidingWindowOverlap(
+        frames,
+        state.modelOptions?.sliding_window_defaults,
+      )
+      return {
+        slidingWindowOverlap: normalized,
+        params: { ...state.params, sliding_window_overlap: normalized },
+        h3WindowPlan: null,
+      }
+    })
   },
   slidingWindowLocked: false,
   setSlidingWindowLocked: (locked) => set(state => ({
@@ -4556,8 +4577,10 @@ export const useStore = create<AppState>((set, get) => ({
           )
         }
         params.sliding_window_size = windowFrames
-        params.sliding_window_overlap = swDefaults?.overlap_default
-          ?? state.slidingWindowOverlap
+        params.sliding_window_overlap = _normalizeSlidingWindowOverlap(
+          state.slidingWindowOverlap,
+          swDefaults,
+        )
         params.sliding_window_discard_last_frames = swDefaults?.discard_last_frames ?? 0
         if (state.modelOptions?.sliding_window_memory_policy?.manual_override) {
           params.sliding_window_memory_override = state.slidingWindowLocked
@@ -6143,6 +6166,7 @@ export const useStore = create<AppState>((set, get) => ({
 
   // Prompt enhancement
   isEnhancing: false,
+  promptEnhanceError: null,
   h3WindowPlan: null,
   updateH3WindowPrompt: (index, prompt) => set(s => {
     if (!s.h3WindowPlan || index < 0 || index >= s.h3WindowPlan.windows.length) return {}
@@ -6162,7 +6186,7 @@ export const useStore = create<AppState>((set, get) => ({
     const state = get()
     const { params, generationMode, startImage, endImage, imageRefs } = state
     if (!params.prompt.trim()) return
-    set({ isEnhancing: true })
+    set({ isEnhancing: true, promptEnhanceError: null })
     try {
       // Collect images relevant to the CURRENT mode only
       const imagePaths: string[] = []
@@ -6365,7 +6389,11 @@ export const useStore = create<AppState>((set, get) => ({
       }
     } catch (e) {
       console.error('Failed to enhance prompt:', e)
-      set({ isEnhancing: false })
+      const message = e instanceof Error ? e.message : 'Prompt enhancement failed'
+      set({
+        isEnhancing: false,
+        promptEnhanceError: `Prompt enhancement failed: ${message}`,
+      })
     }
   },
 

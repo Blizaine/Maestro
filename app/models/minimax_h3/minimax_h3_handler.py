@@ -40,10 +40,14 @@ _TRANSFORMER_WORKING_VRAM_MB = 10 * 1024
 # H3's video VAE accepts 17*n+5 pixel frames. 345 is the final valid
 # frame count at or below the official 15-second limit (14.375s at 24fps).
 # First/Last may continue beyond that duration, but every individual model
-# pass remains inside this native limit and reuses exactly one boundary frame.
+# pass remains inside this native limit. Continuation uses a 17*n+1 overlap:
+# complete 17-frame chunks carry motion history and the final frame is the
+# ordinary FL2VA boundary anchor.
 _H3_MIN_FRAMES = 124
 _H3_MAX_FRAMES = 345
 _H3_FRAME_STEP = 17
+_H3_OVERLAP_DEFAULT = 18
+_H3_OVERLAP_MAX = 103
 # Ref2VA appends its ordered reference context to the target sequence. Keep
 # Auto sequence clips one legal H3 frame step below the ordinary FL2VA pass
 # recommendation so reference conditioning has a small activation cushion.
@@ -55,11 +59,36 @@ _H3_SLIDING_WINDOW_DEFAULTS = {
     "window_step": _H3_FRAME_STEP,
     "window_default": _H3_MAX_FRAMES,
     "overlap_min": 1,
-    "overlap_max": 1,
-    "overlap_step": 0,
-    "overlap_default": 1,
+    "overlap_max": _H3_OVERLAP_MAX,
+    "overlap_step": _H3_FRAME_STEP,
+    "overlap_offset": 1,
+    "overlap_default": _H3_OVERLAP_DEFAULT,
     "discard_last_frames": 0,
 }
+
+
+def normalize_h3_overlap_frames(value, *, window_frames=None) -> int:
+    """Round and safely cap an FL2VA overlap on the 17*n+1 lattice."""
+
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        value = _H3_OVERLAP_DEFAULT
+    if value <= 0:
+        value = 1
+    value = (
+        ((value - 1 + _H3_FRAME_STEP // 2) // _H3_FRAME_STEP)
+        * _H3_FRAME_STEP
+        + 1
+    )
+    maximum = _H3_OVERLAP_MAX
+    if window_frames is not None:
+        available = max(1, int(window_frames) - _H3_FRAME_STEP)
+        maximum = min(
+            maximum,
+            ((available - 1) // _H3_FRAME_STEP) * _H3_FRAME_STEP + 1,
+        )
+    return max(1, min(maximum, value))
 
 # First Block Cache is intentionally opt-in. It compares a compact signature
 # from block one and can reuse the remaining 49-block residual when adjacent
@@ -1120,7 +1149,8 @@ class family_handler:
             "Generate from text alone, a first frame, a last frame, or both. H3 "
             "generates synchronized stereo audio, but this workflow does not accept "
             "reference audio. Longer videos continue through native 14.4-second "
-            "windows using the prior window's last frame."
+            "windows while carrying recent motion and matching stereo audio into "
+            "the next window."
         )
         checkpoint_help = (
             "FULL 33B\n"
@@ -1158,6 +1188,11 @@ class family_handler:
             "sliding_window_trim_to_requested": not omni_reference,
             "sliding_window_end_image_at_final": not omni_reference,
             "sliding_window_auto_prompt_pacing": not omni_reference,
+            # The rolling FL2VA contract consumes the exact generated audio
+            # tail alongside its multi-frame visual history.  The generic
+            # scheduler supplies that tail through ``input_waveform``.
+            "audio_guide_window_slicing": not omni_reference,
+            "sliding_window_audio_history": not omni_reference,
             # Director renders H3 as independent native-duration shots rather
             # than pretending it supports the rolling-window contract.
             "director_video_strategy": (
@@ -1377,7 +1412,9 @@ class family_handler:
                     if omni_reference
                     else _H3_MAX_FRAMES
                 ),
-                "sliding_window_overlap": 0 if omni_reference else 1,
+                "sliding_window_overlap": (
+                    0 if omni_reference else _H3_OVERLAP_DEFAULT
+                ),
                 "sliding_window_discard_last_frames": 0,
                 "skip_steps_cache_type": "",
                 "skip_steps_multiplier": 0.08,
@@ -1428,7 +1465,22 @@ class family_handler:
                 max(_H3_MIN_FRAMES, aligned_window),
             )
         )
-        ui_defaults["sliding_window_overlap"] = 0 if omni_reference else 1
+        if omni_reference:
+            ui_defaults["sliding_window_overlap"] = 0
+        else:
+            raw_overlap = ui_defaults.get(
+                "sliding_window_overlap",
+                _H3_OVERLAP_DEFAULT,
+            )
+            # Existing Maestro H3 presets used a one-frame anchor. Upgrade
+            # that legacy default once, while preserving intentional larger
+            # overlaps and every setting saved after this migration.
+            if settings_version < 2.58 and raw_overlap in (None, 0, 1, "1"):
+                raw_overlap = _H3_OVERLAP_DEFAULT
+            ui_defaults["sliding_window_overlap"] = normalize_h3_overlap_frames(
+                raw_overlap,
+                window_frames=ui_defaults["sliding_window_size"],
+            )
         ui_defaults["sliding_window_discard_last_frames"] = 0
         ui_defaults["resolution"] = _normalize_h3_resolution(
             ui_defaults.get("resolution", "864x480")
@@ -1527,7 +1579,13 @@ class family_handler:
                     align_num_frames(max(1, requested_window)),
                 ),
             )
-            inputs["sliding_window_overlap"] = 1
+            inputs["sliding_window_overlap"] = normalize_h3_overlap_frames(
+                inputs.get(
+                    "sliding_window_overlap",
+                    _H3_OVERLAP_DEFAULT,
+                ),
+                window_frames=inputs["sliding_window_size"],
+            )
 
         inputs["sliding_window_discard_last_frames"] = 0
         inputs["sliding_window_overlap_noise"] = 0
@@ -1555,5 +1613,16 @@ class family_handler:
                 f"{adjustment['requested_window_frames']} -> "
                 f"{adjustment['effective_window_frames']} frames. "
                 "Requested output duration is unchanged."
+            )
+        if not omni_reference:
+            # The memory policy may shorten the pass after the first overlap
+            # validation. Re-cap it so history always leaves at least one
+            # legal 17*n+5 target chunk for the model to generate.
+            inputs["sliding_window_overlap"] = normalize_h3_overlap_frames(
+                inputs.get(
+                    "sliding_window_overlap",
+                    _H3_OVERLAP_DEFAULT,
+                ),
+                window_frames=inputs["sliding_window_size"],
             )
         return None

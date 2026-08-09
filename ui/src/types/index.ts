@@ -429,6 +429,8 @@ export interface ModelOptions {
   self_refiner_max_plans: number
   sliding_window_defaults: Record<string, number> | null
   sliding_window_auto_prompt_pacing?: boolean
+  /** Carries generated video and stereo-audio history between native passes. */
+  sliding_window_audio_history?: boolean
   sliding_window_memory_policy?: SlidingWindowMemoryPolicy | null
   /** Native per-clip policy for independent H3 Omni reference sequences. */
   omni_sequence_memory_policy?: SlidingWindowMemoryPolicy | null

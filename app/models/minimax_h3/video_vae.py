@@ -753,20 +753,74 @@ class AutoencoderKLMiniMaxH3(ModelMixin, ConfigMixin, AttentionMixin, Autoencode
             width, self.tile_sample_min_width, self.tile_sample_min_overlap_width
         )
 
+        # Decode one tile at a time instead of materializing every decoded
+        # tile together. Besides lowering the VAE peak, retaining the already
+        # blended bottom/right tails preserves both-axis contributions at
+        # corners and when three spatial tiles overlap.
         ratio = self.spatial_compression_ratio
-        rows = []
-        for i_pos, i_len in zip(y_indices, y_lengths):
-            row = []
-            for j_pos, j_len in zip(x_indices, x_lengths):
+        canvas = None
+        row_tails: list[torch.Tensor] = []
+        out_y = 0
+        for i, (i_pos, i_len) in enumerate(zip(y_indices, y_lengths)):
+            new_tails: list[torch.Tensor] = []
+            left_tail = None
+            out_x = 0
+            for j, (j_pos, j_len) in enumerate(zip(x_indices, x_lengths)):
                 tile = z[
                     ...,
                     i_pos // ratio : i_pos // ratio + i_len // ratio,
                     j_pos // ratio : j_pos // ratio + j_len // ratio,
                 ]
-                row.append(self.decoder(self.post_quant_conv(tile)))
-            rows.append(row)
+                hidden_states = self.post_quant_conv(tile)
+                del tile
+                tile = self.decoder(hidden_states)
+                del hidden_states
 
-        return self._stitch_tiles(rows, y_overlaps, x_overlaps)
+                if i > 0:
+                    tile = self._blend(
+                        row_tails[j],
+                        tile,
+                        y_overlaps[i - 1],
+                        dim=-2,
+                    )
+                if j > 0:
+                    tile = self._blend(
+                        left_tail,
+                        tile,
+                        x_overlaps[j - 1],
+                        dim=-1,
+                    )
+
+                if i < len(y_indices) - 1:
+                    new_tails.append(tile[..., -y_overlaps[i] :, :].clone())
+                next_left_tail = (
+                    tile[..., :, -x_overlaps[j] :].clone()
+                    if j < len(x_indices) - 1
+                    else None
+                )
+                left_tail = next_left_tail
+
+                if i < len(y_indices) - 1:
+                    tile = tile[..., : -y_overlaps[i], :]
+                if j < len(x_indices) - 1:
+                    tile = tile[..., :, : -x_overlaps[j]]
+                if canvas is None:
+                    canvas = torch.empty(
+                        *tile.shape[:-2],
+                        height,
+                        width,
+                        dtype=tile.dtype,
+                        device=tile.device,
+                    )
+                canvas[
+                    ...,
+                    out_y : out_y + tile.shape[-2],
+                    out_x : out_x + tile.shape[-1],
+                ].copy_(tile)
+                out_x += tile.shape[-1]
+            row_tails = new_tails
+            out_y += tile.shape[-2]
+        return canvas
 
     @apply_forward_hook
     def _encode(self, x: torch.Tensor) -> torch.Tensor:
@@ -793,6 +847,35 @@ class AutoencoderKLMiniMaxH3(ModelMixin, ConfigMixin, AttentionMixin, Autoencode
         if self.config.token_drop > 0:
             moments = moments[:, :, : -self.config.token_drop]
         return moments
+
+    def encode_condition(
+        self,
+        x: torch.Tensor,
+        *,
+        keep_all_latents: bool = False,
+    ) -> DiagonalGaussianDistribution:
+        r"""Encode a clean H3 visual condition.
+
+        A one-frame keyframe follows the ordinary non-temporal condition
+        path. Sliding-window history consists of complete 17-frame chunks;
+        ``keep_all_latents`` retains every chunk's condition latents instead
+        of applying the target/reference tail drop across the combined clip.
+        """
+
+        if x.shape[2] == 1:
+            moments = self._encode_clip(x)
+        elif keep_all_latents:
+            clip_length = int(self.config.clip_length)
+            moments = torch.cat(
+                [
+                    self._encode_clip(x[:, :, start : start + clip_length])
+                    for start in range(0, x.shape[2], clip_length)
+                ],
+                dim=2,
+            )
+        else:
+            moments = self._encode(x)
+        return DiagonalGaussianDistribution(moments)
 
     def _decode(self, z: torch.Tensor) -> torch.Tensor:
         r"""

@@ -78,10 +78,24 @@ class MiniMaxH3PreparedReference:
         return self.num_audio_latents * MINIMAX_H3_AUDIO_CHANNELS
 
 
-def validate_reference_manifest(references, *, require_files: bool = True) -> list[dict]:
-    """Validate and canonicalize Maestro's JSON Ref2VA manifest."""
+def validate_reference_manifest(
+    references,
+    *,
+    require_files: bool = True,
+    require_visual: bool = True,
+    allow_empty: bool = False,
+) -> list[dict]:
+    """Validate and canonicalize Maestro's JSON Ref2VA manifest.
+
+    Generation keeps the strict defaults: it needs an uploaded image or
+    video whose files still exist. Prompt planning is intentionally looser;
+    it can describe an Omni sequence before media is added, while the user is
+    still building an audio-first manifest, or after a saved file moved.
+    """
 
     if not isinstance(references, list) or not references:
+        if allow_empty and (references is None or references == []):
+            return []
         raise ValueError("MiniMax H3 Omni Reference needs at least one image or video reference.")
     if len(references) > MINIMAX_H3_MAX_REFERENCES:
         raise ValueError(
@@ -152,7 +166,7 @@ def validate_reference_manifest(references, *, require_files: bool = True) -> li
     ):
         if counts[kind] > limit:
             raise ValueError(f"MiniMax H3 accepts at most {limit} {kind} references, got {counts[kind]}.")
-    if counts["image"] + counts["video"] == 0:
+    if require_visual and counts["image"] + counts["video"] == 0:
         raise ValueError("Audio references cannot be used alone; add at least one image or video reference.")
     return normalized
 

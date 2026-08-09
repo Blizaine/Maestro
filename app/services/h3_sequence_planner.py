@@ -129,7 +129,15 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
 
     from models.minimax_h3.ref2va import validate_reference_manifest
 
-    items = validate_reference_manifest(references, require_files=False)
+    # Enhancement is useful before the generation manifest is complete. The
+    # actual Ref2VA generation path still performs strict file + visual-media
+    # validation; planning only needs whatever labels are currently present.
+    items = validate_reference_manifest(
+        references,
+        require_files=False,
+        require_visual=False,
+        allow_empty=True,
+    )
     picture = video = audio = 0
     relationships: list[str] = []
     retention: list[str] = []

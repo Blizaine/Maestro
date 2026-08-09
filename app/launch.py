@@ -5300,6 +5300,9 @@ def get_model_options(model_type: str):
         "sliding_window_auto_prompt_pacing": md.get(
             "sliding_window_auto_prompt_pacing", False
         ),
+        "sliding_window_audio_history": md.get(
+            "sliding_window_audio_history", False
+        ),
 
         # Timing
         "fps": md.get("fps", 16),
@@ -7059,16 +7062,26 @@ async def llm_plan_h3_windows(request: Request):
     if model_def.get("omni_reference"):
         raise HTTPException(status_code=400, detail="MiniMax H3 Omni does not use sliding windows.")
 
+    sliding_defaults = model_def.get("sliding_window_defaults") or {}
     planning_inputs = {
         "model_type": model_type,
         "resolution": body.get("resolution") or "864x480",
         "video_length": body.get("total_frames") or body.get("video_length") or 124,
         "sliding_window_size": body.get("window_frames") or body.get("sliding_window_size") or 345,
-        "sliding_window_overlap": body.get("overlap_frames", body.get("sliding_window_overlap", 1)),
+        "sliding_window_overlap": body.get(
+            "overlap_frames",
+            body.get(
+                "sliding_window_overlap",
+                sliding_defaults.get("overlap_default", 18),
+            ),
+        ),
         "sliding_window_discard_last_frames": body.get("discard_frames", body.get("sliding_window_discard_last_frames", 0)),
         "sliding_window_memory_override": bool(body.get("sliding_window_memory_override", False)),
     }
-    from models.minimax_h3.minimax_h3_handler import apply_h3_window_memory_policy
+    from models.minimax_h3.minimax_h3_handler import (
+        apply_h3_window_memory_policy,
+        normalize_h3_overlap_frames,
+    )
 
     adjustment = apply_h3_window_memory_policy(
         planning_inputs,
@@ -7077,6 +7090,10 @@ async def llm_plan_h3_windows(request: Request):
     )
     if adjustment and adjustment.get("unsupported"):
         raise HTTPException(status_code=400, detail=adjustment["message"])
+    planning_inputs["sliding_window_overlap"] = normalize_h3_overlap_frames(
+        planning_inputs.get("sliding_window_overlap"),
+        window_frames=planning_inputs.get("sliding_window_size"),
+    )
 
     from services import llm_service
     from services.h3_window_planner import plan_h3_sliding_windows
@@ -7150,8 +7167,10 @@ async def llm_plan_h3_sequence(request: Request):
 
     try:
         references = validate_reference_manifest(
-            body.get("references") or body.get("minimax_h3_references"),
-            require_files=True,
+            body.get("references") or body.get("minimax_h3_references") or [],
+            require_files=False,
+            require_visual=False,
+            allow_empty=True,
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error

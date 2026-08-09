@@ -100,7 +100,7 @@ CONFIG_FILENAME = "wgp_config.json"
 PROMPT_VARS_MAX = 10
 target_mmgp_version = "3.7.6"
 WanGP_version = "10.9875"
-settings_version = 2.57
+settings_version = 2.58
 max_source_video_frames = 15000  # raised to support frame injection in long sliding-window videos (e.g. 9 windows × 20s × 25fps = 4500 frames)
 prompt_enhancer_image_caption_model, prompt_enhancer_image_caption_processor, prompt_enhancer_llm_model, prompt_enhancer_llm_tokenizer = None, None, None, None
 image_names_list = ["image_start", "image_end", "image_refs"]
@@ -8315,6 +8315,7 @@ def generate_video(
             aligned_guide_start_frame = guide_start_frame - alignment_shift
             aligned_guide_end_frame = guide_end_frame - alignment_shift
             aligned_window_start_frame = window_start_frame - alignment_shift  
+            input_waveform, input_waveform_sample_rate = None, 0
             if audio_guide is not None and model_def.get("audio_guide_window_slicing", False):
                 audio_start_frame = aligned_window_start_frame
                 if reset_control_aligment:
@@ -8335,6 +8336,43 @@ def generate_video(
                 if audio_frame_offset > 0:
                     audio_energy = float(np.abs(input_waveform).mean()) if input_waveform is not None else 0
                     print(f"[Multi-Clip] clip audio_start_frame={audio_start_frame} (offset={audio_frame_offset}), frames={current_video_length}, audio_energy={audio_energy:.6f}")
+            elif model_def.get("audio_guide_window_slicing", False):
+                # Native-audio models such as MiniMax H3 continue from the
+                # exact stereo tail they generated in the preceding window.
+                # If the first pass itself begins with source-video overlap,
+                # seed that history with the source soundtrack instead.
+                if pre_audio_guide is not None and pre_audio_guide.shape[0] > 0:
+                    input_waveform, input_waveform_sample_rate = (
+                        pre_audio_guide,
+                        pre_audio_guide_sample_rate,
+                    )
+                elif (
+                    window_no == 1
+                    and source_video_overlap_frames_count > 0
+                    and len(source_audio_tracks) > 0
+                ):
+                    source_audio_start_frame = max(
+                        0,
+                        source_video_frames_count
+                        - source_video_overlap_frames_count,
+                    )
+                    input_waveform, input_waveform_sample_rate = (
+                        slice_audio_window(
+                            source_audio_tracks[0],
+                            source_audio_start_frame,
+                            source_video_overlap_frames_count,
+                            fps,
+                            save_path,
+                            suffix=f"_source_overlap_win{window_no}",
+                            pad_head=False,
+                            pad_tail=False,
+                        )
+                    )
+                    if (
+                        input_waveform is not None
+                        and input_waveform.shape[0] == 0
+                    ):
+                        input_waveform, input_waveform_sample_rate = None, 0
             if fantasy and audio_guide is not None:
                 audio_proj_split , audio_context_lens = parse_audio(audio_guide, start_frame = aligned_window_start_frame, num_frames= current_video_length, fps= fps,  device= processing_device  )
             if multitalk:
@@ -8960,9 +8998,9 @@ def generate_video(
                         if generated_audio is not None:
                             generated_audio = truncate_audio( generated_audio, 0, discard_last_frames, fps, output_audio_sampling_rate,)
                     # Sliding-window audio continuity: capture the trailing
-                    # reuse_frames worth of generated audio so the next window
-                    # can use it as a clean prefix (via AudioConditionByLatentPrefix
-                    # in ltx2.py) when source audio runs out.
+                    # reuse_frames worth of generated audio so native-audio
+                    # models can encode the exact matching soundtrack history
+                    # alongside their visual continuation frames.
                     if generated_audio is not None and reuse_frames > 0:
                         pre_audio_guide = generated_audio[-int(round(reuse_frames * output_audio_sampling_rate / fps)):]
                         pre_audio_guide_sample_rate = output_audio_sampling_rate

@@ -13,6 +13,7 @@ from contextlib import nullcontext
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from accelerate import init_empty_weights
 from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
 from diffusers.utils.torch_utils import randn_tensor
@@ -34,6 +35,7 @@ from .convrot_layout import restore_interleaved_h3_qkv
 from .packing import (
     MINIMAX_H3_AUDIO_CHANNELS,
     MINIMAX_H3_FPS,
+    MINIMAX_H3_FRAMES_PER_CHUNK,
     MINIMAX_H3_KEYFRAME_ENCODE_SEED,
     MINIMAX_H3_KEYFRAME_NOISE_AUG,
     MINIMAX_H3_MAX_DURATION,
@@ -193,6 +195,39 @@ AUDIO_LATENTS_STD = (
     1.5613768203168363,
 )
 
+MINIMAX_H3_AUDIO_SAMPLE_RATE = 32000
+
+
+def normalize_h3_overlap_frames(frame_count: int) -> int:
+    """Round an overlap to H3's legal ``17 * n + 1`` lattice."""
+
+    frame_count = int(frame_count or 0)
+    if frame_count < 0:
+        raise ValueError("MiniMax H3 overlap must be zero or a positive frame count.")
+    if frame_count == 0:
+        return 0
+    return max(
+        1,
+        ((frame_count - 1 + MINIMAX_H3_FRAMES_PER_CHUNK // 2)
+         // MINIMAX_H3_FRAMES_PER_CHUNK)
+        * MINIMAX_H3_FRAMES_PER_CHUNK
+        + 1,
+    )
+
+
+def floor_h3_overlap_frames(frame_count: int) -> int:
+    """Floor a short continuation to the nearest usable H3 overlap."""
+
+    frame_count = int(frame_count or 0)
+    if frame_count <= 0:
+        return 0
+    return max(
+        1,
+        ((frame_count - 1) // MINIMAX_H3_FRAMES_PER_CHUNK)
+        * MINIMAX_H3_FRAMES_PER_CHUNK
+        + 1,
+    )
+
 
 def _keyframe_latent_stats_cpu() -> tuple[torch.Tensor, torch.Tensor]:
     """Return the official FL2VA keyframe normalization tensors on CPU.
@@ -242,8 +277,8 @@ def _tensor_to_pil(image) -> Image.Image | None:
     return Image.fromarray(pixels).convert("RGB")
 
 
-def _last_continuation_frame(input_video, prefix_frames_count: int):
-    """Return the final committed frame supplied by the window engine."""
+def _as_video_tensor(input_video) -> torch.Tensor | None:
+    """Normalize a continuation tensor to channel/time/height/width form."""
 
     if input_video is None or not isinstance(input_video, torch.Tensor):
         return None
@@ -252,14 +287,105 @@ def _last_continuation_frame(input_video, prefix_frames_count: int):
         continuation = continuation.unsqueeze(1)
     if continuation.ndim != 4 or continuation.shape[1] < 1:
         return None
+    return continuation
+
+
+def _split_continuation_video(
+    input_video,
+    prefix_frames_count: int,
+    *,
+    has_explicit_start: bool = False,
+) -> tuple[torch.Tensor | None, torch.Tensor | None, int]:
+    """Split a legal overlap into exact history and a regenerated boundary.
+
+    H3's overlap lattice is ``17*n+1``. The first ``17*n`` frames become
+    clean multi-frame history conditions; the final frame remains the normal
+    FL2VA first-frame anchor. The outer window assembler later removes the
+    complete overlap, so only newly generated frames enter the joined movie.
+    """
+
+    if has_explicit_start:
+        return None, None, 0
+    continuation = _as_video_tensor(input_video)
+    if continuation is None:
+        return None, None, 0
     try:
-        prefix_frames_count = int(prefix_frames_count or 0)
+        requested_raw = int(prefix_frames_count or 0)
     except (TypeError, ValueError):
-        prefix_frames_count = 0
-    if prefix_frames_count <= 0:
+        requested_raw = 0
+    if requested_raw <= 0:
+        return None, None, 0
+    requested = normalize_h3_overlap_frames(requested_raw)
+    continuation_count = min(requested, int(continuation.shape[1]))
+    if continuation_count < requested:
+        continuation_count = floor_h3_overlap_frames(continuation_count)
+    if continuation_count <= 0:
+        return None, None, 0
+    boundary = continuation[:, -1:]
+    history = (
+        continuation[:, -continuation_count:-1]
+        if continuation_count > 1
+        else None
+    )
+    return history, boundary, continuation_count
+
+
+def _last_continuation_frame(input_video, prefix_frames_count: int):
+    """Compatibility helper returning the regenerated overlap boundary."""
+
+    _, boundary, _ = _split_continuation_video(
+        input_video,
+        prefix_frames_count,
+    )
+    return boundary
+
+
+def _prepare_stereo_waveform(
+    waveform,
+    sample_rate: int | None,
+    sample_count: int,
+) -> torch.Tensor | None:
+    """Convert sample-major or channel-major audio to padded 32 kHz stereo."""
+
+    if waveform is None or sample_count <= 0:
         return None
-    frame_index = min(prefix_frames_count, int(continuation.shape[1])) - 1
-    return continuation[:, frame_index : frame_index + 1]
+    audio = torch.as_tensor(waveform, dtype=torch.float32, device="cpu")
+    if audio.ndim == 1:
+        audio = audio.unsqueeze(0)
+    elif audio.ndim == 2:
+        if audio.shape[0] not in (1, MINIMAX_H3_AUDIO_CHANNELS):
+            if audio.shape[1] in (1, MINIMAX_H3_AUDIO_CHANNELS):
+                audio = audio.transpose(0, 1)
+            else:
+                raise ValueError(
+                    "MiniMax H3 continuation audio must be mono or stereo; "
+                    f"got {tuple(audio.shape)}."
+                )
+    else:
+        raise ValueError(
+            "MiniMax H3 continuation audio must be one- or two-dimensional; "
+            f"got {tuple(audio.shape)}."
+        )
+    if audio.shape[0] == 1:
+        audio = audio.expand(MINIMAX_H3_AUDIO_CHANNELS, -1).contiguous()
+    elif audio.shape[0] != MINIMAX_H3_AUDIO_CHANNELS:
+        audio = audio[:MINIMAX_H3_AUDIO_CHANNELS]
+
+    sample_rate = int(sample_rate or MINIMAX_H3_AUDIO_SAMPLE_RATE)
+    if sample_rate <= 0:
+        raise ValueError("MiniMax H3 continuation audio needs a positive sample rate.")
+    if sample_rate != MINIMAX_H3_AUDIO_SAMPLE_RATE:
+        import torchaudio.functional as audio_functional
+
+        audio = audio_functional.resample(
+            audio,
+            sample_rate,
+            MINIMAX_H3_AUDIO_SAMPLE_RATE,
+        )
+    audio = audio[..., :sample_count]
+    if audio.shape[-1] < sample_count:
+        audio = F.pad(audio, (0, sample_count - audio.shape[-1]))
+    return audio.contiguous()
 
 
 def _strip_transformer_wrappers(
@@ -601,6 +727,120 @@ class MiniMaxH3Model:
     def patch_size(self) -> tuple[int, int, int]:
         return tuple(self.transformer.config.patch_size)
 
+    def _condition_pixels(
+        self,
+        source,
+        height: int,
+        width: int,
+    ) -> torch.Tensor:
+        """Convert a PIL keyframe or CTHW window history to normalized pixels."""
+
+        if isinstance(source, Image.Image):
+            pixels = torch.from_numpy(np.array(source.convert("RGB"), dtype=np.uint8))
+            video = pixels.permute(2, 0, 1)[:, None].to(self.device)
+            video = video.float().div(255.0)
+        else:
+            video = _as_video_tensor(source)
+            if video is None:
+                raise ValueError("MiniMax H3 received an invalid visual condition.")
+            video = video.to(self.device)
+            if video.dtype == torch.uint8:
+                video = video.float().div(255.0)
+            else:
+                video = video.float()
+                if float(video.amin()) < -0.01:
+                    video = video.add(1.0).mul(0.5)
+                video = video.clamp(0.0, 1.0)
+
+        if tuple(video.shape[-2:]) != (height, width):
+            video = F.interpolate(
+                video.permute(1, 0, 2, 3),
+                size=(height, width),
+                mode="bilinear",
+                align_corners=False,
+            ).permute(1, 0, 2, 3)
+        pixel_mean = torch.tensor(
+            MINIMAX_H3_PIXEL_MEAN,
+            device=self.device,
+        ).view(1, -1, 1, 1, 1)
+        pixel_std = torch.tensor(
+            MINIMAX_H3_PIXEL_STD,
+            device=self.device,
+        ).view(1, -1, 1, 1, 1)
+        return (video[None] - pixel_mean) / pixel_std
+
+    def _encode_visual_conditions(
+        self,
+        conditions: list[dict],
+        latent_height: int,
+        latent_width: int,
+        generator: torch.Generator,
+        *,
+        height: int,
+        width: int,
+    ) -> tuple[torch.Tensor | None, tuple]:
+        """Encode clean keyframes and multi-frame history in packed order."""
+
+        if not conditions:
+            return None, ()
+
+        means, stds = _keyframe_latent_stats_cpu()
+        rows: list[torch.Tensor] = []
+        condition_shapes: list[tuple[int, int, int]] = []
+        anchors: list[tuple] = []
+        for condition in conditions:
+            if self._interrupt:
+                return None, ()
+            pixels = self._condition_pixels(
+                condition["source"],
+                height,
+                width,
+            )
+            posterior = self.vae.encode_condition(
+                pixels,
+                keep_all_latents=bool(condition.get("keep_all_latents", False)),
+            )
+            encoded = posterior.sample(
+                generator=torch.Generator().manual_seed(
+                    MINIMAX_H3_KEYFRAME_ENCODE_SEED
+                )
+            )
+            encoded = encoded.to(torch.float16).float().cpu()
+            latent_frames = int(encoded.shape[2])
+            condition_shapes.append(
+                (latent_frames, int(encoded.shape[3]), int(encoded.shape[4]))
+            )
+            rows.append(
+                patchify_video_latents(
+                    (encoded - means) / stds,
+                    self.patch_size,
+                )
+            )
+            anchor = str(condition["anchor"])
+            if anchor == "frame":
+                anchors.append(
+                    (anchor, latent_frames, int(condition["frame_index"]))
+                )
+            else:
+                anchors.append((anchor, latent_frames))
+
+        clean_rows = torch.cat(rows).to(self.device)
+        noise = keyframe_condition_noise(
+            tuple(condition_shapes),
+            self.patch_size,
+            24,
+            generator=generator,
+            device=self.device,
+        )
+        return (
+            self.scheduler.scale_noise(
+                clean_rows,
+                MINIMAX_H3_KEYFRAME_NOISE_AUG,
+                noise,
+            ),
+            tuple(anchors),
+        )
+
     def _encode_keyframes(
         self,
         images: list[Image.Image],
@@ -608,35 +848,86 @@ class MiniMaxH3Model:
         latent_width: int,
         generator: torch.Generator,
     ) -> torch.Tensor | None:
-        if not images:
-            return None
+        """Backward-compatible one-frame wrapper used by focused tests."""
 
-        means, stds = _keyframe_latent_stats_cpu()
-        pixel_mean = torch.tensor(MINIMAX_H3_PIXEL_MEAN, device=self.device).view(1, -1, 1, 1, 1)
-        pixel_std = torch.tensor(MINIMAX_H3_PIXEL_STD, device=self.device).view(1, -1, 1, 1, 1)
-
-        rows = []
-        for image in images:
-            if self._interrupt:
-                return None
-            pixels = torch.from_numpy(np.array(image, dtype=np.uint8)).to(self.device)
-            pixels = pixels.permute(2, 0, 1)[None, :, None]
-            pixels = (pixels.float().div(255.0) - pixel_mean) / pixel_std
-            moments = self.vae._encode_clip(pixels)
-            posterior = DiagonalGaussianDistribution(moments)
-            encoded = posterior.sample(generator=torch.Generator().manual_seed(MINIMAX_H3_KEYFRAME_ENCODE_SEED))
-            encoded = encoded.to(torch.float16).float().cpu()
-            rows.append(patchify_video_latents((encoded - means) / stds, self.patch_size))
-
-        clean_rows = torch.cat(rows).to(self.device)
-        noise = keyframe_condition_noise(
-            ((1, latent_height, latent_width),) * len(images),
-            self.patch_size,
-            24,
-            generator=generator,
-            device=self.device,
+        rows, _ = self._encode_visual_conditions(
+            [
+                {"anchor": "first", "source": image}
+                for image in images
+            ],
+            latent_height,
+            latent_width,
+            generator,
+            height=latent_height * self.vae.spatial_compression_ratio,
+            width=latent_width * self.vae.spatial_compression_ratio,
         )
-        return self.scheduler.scale_noise(clean_rows, MINIMAX_H3_KEYFRAME_NOISE_AUG, noise)
+        return rows
+
+    def _encode_continuation_audio(
+        self,
+        waveform,
+        sample_rate: int | None,
+        continuation_count: int,
+        history_count: int,
+        fps: float,
+    ) -> tuple[torch.Tensor | None, tuple, torch.Tensor | None]:
+        """Encode the previous window's matching audio as history/boundary rows."""
+
+        overlap_samples = int(
+            round(continuation_count / fps * MINIMAX_H3_AUDIO_SAMPLE_RATE)
+        )
+        stereo = _prepare_stereo_waveform(
+            waveform,
+            sample_rate,
+            overlap_samples,
+        )
+        if stereo is None:
+            return None, (), None
+
+        posterior = self.audio_vae.encode(
+            stereo.to(self.device)[:, None],
+            return_dict=False,
+        )[0]
+        latents = posterior.mode().float().cpu().transpose(1, 2)
+        audio_mean = torch.tensor(
+            AUDIO_LATENTS_MEAN,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
+        ).view(1, 1, -1)
+        audio_std = torch.tensor(
+            AUDIO_LATENTS_STD,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
+        ).view(1, 1, -1)
+        normalized = (latents - audio_mean) / audio_std
+
+        boundary_latents = (
+            int(normalized.shape[1])
+            if history_count <= 0
+            else min(
+                int(normalized.shape[1]),
+                max(1, round(40 / fps)),
+            )
+        )
+        history_latents = int(normalized.shape[1]) - boundary_latents
+        blocks: list[torch.Tensor] = []
+        anchors: list[tuple[str, int]] = []
+        if history_latents > 0:
+            blocks.append(normalized[:, :history_latents].reshape(-1, 32))
+            anchors.append(("history", history_latents))
+        if boundary_latents > 0:
+            blocks.append(normalized[:, history_latents:].reshape(-1, 32))
+            anchors.append(("first", boundary_latents))
+
+        history_samples = int(
+            round(history_count / fps * MINIMAX_H3_AUDIO_SAMPLE_RATE)
+        )
+        history_waveform = stereo[..., :history_samples] if history_samples else None
+        return (
+            torch.cat(blocks).to(self.device) if blocks else None,
+            tuple(anchors),
+            history_waveform,
+        )
 
     def _encode_references(
         self,
@@ -727,10 +1018,13 @@ class MiniMaxH3Model:
         image_start=None,
         image_end=None,
         input_video=None,
+        input_waveform=None,
+        input_waveform_sample_rate: int | None = None,
         prefix_frames_count: int = 0,
         frame_num: int = 124,
         height: int = 480,
         width: int = 864,
+        fps: float = MINIMAX_H3_FPS,
         sampling_steps: int = 20,
         seed: int | None = None,
         callback=None,
@@ -744,8 +1038,13 @@ class MiniMaxH3Model:
         if height % 32 or width % 32:
             raise ValueError(f"MiniMax H3 dimensions must be multiples of 32, got {width}x{height}.")
 
+        fps = float(fps or MINIMAX_H3_FPS)
+        if abs(fps - MINIMAX_H3_FPS) > 1e-6:
+            raise ValueError(
+                f"MiniMax H3 generates at {MINIMAX_H3_FPS} fps, got {fps:g}."
+            )
         frame_num = align_num_frames(int(frame_num))
-        duration = frame_num / MINIMAX_H3_FPS
+        duration = frame_num / fps
         if not MINIMAX_H3_MIN_DURATION <= duration <= MINIMAX_H3_MAX_DURATION:
             raise ValueError(
                 f"MiniMax H3 supports {MINIMAX_H3_MIN_DURATION:g}-{MINIMAX_H3_MAX_DURATION:g}s at 24 fps; "
@@ -760,43 +1059,78 @@ class MiniMaxH3Model:
                 f"received {int(sampling_steps)}."
             )
 
-        if self.omni_reference:
-            keyframes = []
-            anchors = ()
-        else:
-            # Wan2GP's FL2VA continuation contract: the generic window
-            # engine supplies its committed boundary frame as input_video;
-            # make that the next pass's first-frame condition. The one-frame
-            # duplicate is removed when the window chunks are joined.
-            if image_start is None:
-                image_start = _last_continuation_frame(
+        history_video = boundary_video = None
+        continuation_count = history_count = 0
+        history_waveform = None
+        keyframes: list[Image.Image] = []
+        visual_conditions: list[dict] = []
+        if not self.omni_reference:
+            history_video, boundary_video, continuation_count = (
+                _split_continuation_video(
                     input_video,
                     prefix_frames_count,
+                    has_explicit_start=image_start is not None,
                 )
-            keyframes = [item for item in (_tensor_to_pil(image_start), _tensor_to_pil(image_end)) if item is not None]
-            anchors = tuple(
-                anchor
-                for anchor, item in (("first", image_start), ("last", image_end))
-                if item is not None
             )
-            keyframes = [
-                prepare_keyframe_image(image, height, width, stretch=index == 0)
-                for index, image in enumerate(keyframes)
+            history_count = (
+                int(history_video.shape[1])
+                if history_video is not None
+                else 0
+            )
+            if history_video is not None:
+                visual_conditions.append(
+                    {
+                        "anchor": "history",
+                        "source": history_video,
+                        "keep_all_latents": True,
+                    }
+                )
+
+            start_source = image_start if image_start is not None else boundary_video
+            keyframe_sources = [
+                ("first", start_source),
+                ("last", image_end),
             ]
+            for anchor, source in keyframe_sources:
+                image = _tensor_to_pil(source)
+                if image is None:
+                    continue
+                image = prepare_keyframe_image(
+                    image,
+                    height,
+                    width,
+                    stretch=len(keyframes) == 0,
+                )
+                keyframes.append(image)
+                visual_conditions.append(
+                    {"anchor": anchor, "source": image}
+                )
+
+        target_frame_num = frame_num - history_count
+        if target_frame_num <= 0:
+            raise ValueError(
+                "MiniMax H3 sliding-window overlap leaves no frames to generate."
+            )
+        if align_num_frames(target_frame_num) != target_frame_num:
+            raise ValueError(
+                "MiniMax H3 overlap must leave a target on the 17*n+5 frame lattice; "
+                f"{frame_num} total frames minus {history_count} history frames leaves "
+                f"{target_frame_num}."
+            )
 
         request_seed = int(torch.seed() if seed is None else seed)
         generator = torch.Generator(device=self.device).manual_seed(request_seed)
-        num_latent_frames = video_latent_num_frames(frame_num)
+        num_latent_frames = video_latent_num_frames(target_frame_num)
         latent_height = height // self.vae.spatial_compression_ratio
         latent_width = width // self.vae.spatial_compression_ratio
-        num_audio_latents = audio_latent_num_frames(frame_num)
+        num_audio_latents = audio_latent_num_frames(target_frame_num)
 
         audio_condition_rows = None
         if self.omni_reference:
             conditioned_prompt = ensure_ref2va_prompt_relationships(
                 input_prompt,
                 minimax_h3_references,
-                duration_seconds=frame_num / MINIMAX_H3_FPS,
+                duration_seconds=frame_num / fps,
             )
             if conditioned_prompt != str(input_prompt or "").strip():
                 print(
@@ -834,6 +1168,25 @@ class MiniMaxH3Model:
             prompt_embeds, text_tags = self.conditioner(input_prompt, self.device, keyframes or None)
             if prompt_embeds is None or self._interrupt:
                 return None
+            condition_rows, anchors = self._encode_visual_conditions(
+                visual_conditions,
+                latent_height,
+                latent_width,
+                generator,
+                height=height,
+                width=width,
+            )
+            audio_condition_rows, audio_anchors, history_waveform = (
+                self._encode_continuation_audio(
+                    input_waveform,
+                    input_waveform_sample_rate,
+                    continuation_count,
+                    history_count,
+                    fps,
+                )
+                if continuation_count > 0
+                else (None, (), None)
+            )
             layout = build_packed_sequence(
                 text_tags,
                 num_latent_frames,
@@ -842,13 +1195,18 @@ class MiniMaxH3Model:
                 num_audio_latents,
                 self.patch_size,
                 anchors,
+                audio_condition_anchors=audio_anchors,
             )
-            condition_rows = self._encode_keyframes(
-                keyframes,
-                latent_height,
-                latent_width,
-                generator,
-            )
+            if continuation_count > 1:
+                print(
+                    "[MiniMax H3] Continuing with "
+                    f"{history_count} motion-history frames + one boundary frame"
+                    + (
+                        " and matching stereo audio."
+                        if audio_condition_rows is not None
+                        else "."
+                    )
+                )
         if self._interrupt:
             return None
 
@@ -1047,6 +1405,13 @@ class MiniMaxH3Model:
         pixel_mean = torch.tensor(MINIMAX_H3_PIXEL_MEAN, device=self.device).view(1, -1, 1, 1, 1)
         pixel_std = torch.tensor(MINIMAX_H3_PIXEL_STD, device=self.device).view(1, -1, 1, 1, 1)
         video = (video.float() * pixel_std + pixel_mean).clamp(0, 1).mul(2).sub(1)
+        video = video[:, :, :target_frame_num]
+        output_video = video[0]
+        if history_video is not None:
+            output_video = torch.cat(
+                [history_video.to(output_video), output_video],
+                dim=1,
+            )
 
         audio_latents = unpack_audio_tokens(
             audio_rows[layout.num_condition_audio_rows :],
@@ -1056,9 +1421,39 @@ class MiniMaxH3Model:
         audio_std = torch.tensor(AUDIO_LATENTS_STD, device=self.device).view(1, -1, 1)
         audio_latents = audio_latents * audio_std + audio_mean
         audio = self.audio_vae.decode(audio_latents, return_dict=False)[0]
-        audio = audio.float().permute(1, 0, 2)[0].transpose(0, 1).cpu().numpy()
+        audio = audio.float()[:, 0]
+        target_samples = int(
+            round(target_frame_num / fps * MINIMAX_H3_AUDIO_SAMPLE_RATE)
+        )
+        audio = audio[..., :target_samples]
+        if audio.shape[-1] < target_samples:
+            audio = F.pad(audio, (0, target_samples - audio.shape[-1]))
+        if history_count > 0:
+            history_samples = int(
+                round(history_count / fps * MINIMAX_H3_AUDIO_SAMPLE_RATE)
+            )
+            prefix_audio = (
+                history_waveform.to(audio)
+                if history_waveform is not None
+                else torch.zeros(
+                    (MINIMAX_H3_AUDIO_CHANNELS, history_samples),
+                    dtype=audio.dtype,
+                    device=audio.device,
+                )
+            )
+            prefix_audio = prefix_audio[..., :history_samples]
+            if prefix_audio.shape[-1] < history_samples:
+                prefix_audio = F.pad(
+                    prefix_audio,
+                    (0, history_samples - prefix_audio.shape[-1]),
+                )
+            audio = torch.cat([prefix_audio, audio], dim=-1)
+        total_samples = int(
+            round(frame_num / fps * MINIMAX_H3_AUDIO_SAMPLE_RATE)
+        )
+        audio = audio[..., :total_samples].transpose(0, 1).cpu().numpy()
         return {
-            "x": video[0],
+            "x": output_video,
             "audio": audio,
-            "audio_sampling_rate": 32000,
+            "audio_sampling_rate": MINIMAX_H3_AUDIO_SAMPLE_RATE,
         }
