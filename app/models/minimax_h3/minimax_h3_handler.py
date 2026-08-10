@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import os
 
-import torch
-
 
 _MODEL_TYPE = "minimax_h3"
 _REF2VA_MODEL_TYPE = "minimax_h3_ref2va"
@@ -65,6 +63,16 @@ _H3_SLIDING_WINDOW_DEFAULTS = {
     "overlap_default": _H3_OVERLAP_DEFAULT,
     "discard_last_frames": 0,
 }
+
+
+def align_h3_num_frames(num_frames: int) -> int:
+    """Snap a request to the next ``17 * n + 5`` H3 frame count."""
+
+    if num_frames < 1:
+        raise ValueError(f"`num_frames` must be positive, got {num_frames}.")
+    while num_frames % _H3_FRAME_STEP != 5:
+        num_frames += 1
+    return num_frames
 
 
 def normalize_h3_overlap_frames(value, *, window_frames=None) -> int:
@@ -1515,10 +1523,14 @@ class family_handler:
         model_type=None,
         base_model_type=None,
         model_def=None,
-        dtype=torch.bfloat16,
+        dtype=None,
         text_encoder_filename=None,
         **kwargs,
     ):
+        if dtype is None:
+            import torch
+
+            dtype = torch.bfloat16
         from .minimax_h3_main import MiniMaxH3Model
 
         model = MiniMaxH3Model(
@@ -1822,8 +1834,6 @@ class family_handler:
                     f"received {len(image_refs)} images and "
                     f"{len(frame_positions)} positions."
                 )
-        from .packing import align_num_frames
-
         try:
             requested_frames = int(inputs.get("video_length", _H3_MIN_FRAMES))
         except (TypeError, ValueError):
@@ -1836,7 +1846,7 @@ class family_handler:
         if omni_reference and not omni_sequence:
             inputs["video_length"] = min(
                 _H3_MAX_FRAMES,
-                max(_H3_MIN_FRAMES, align_num_frames(max(1, requested_frames))),
+                max(_H3_MIN_FRAMES, align_h3_num_frames(max(1, requested_frames))),
             )
             inputs["sliding_window_size"] = inputs["video_length"]
         else:
@@ -1845,7 +1855,7 @@ class family_handler:
                     _H3_MAX_FRAMES,
                     max(
                         _H3_MIN_FRAMES,
-                        align_num_frames(max(1, requested_frames)),
+                        align_h3_num_frames(max(1, requested_frames)),
                     ),
                 )
             else:
@@ -1862,7 +1872,7 @@ class family_handler:
                 _H3_MAX_FRAMES,
                 max(
                     _H3_MIN_FRAMES,
-                    align_num_frames(max(1, requested_window)),
+                    align_h3_num_frames(max(1, requested_window)),
                 ),
             )
             if (
@@ -1894,6 +1904,8 @@ class family_handler:
         inputs["sliding_window_overlap_noise"] = 0
         inputs["sliding_window_color_correction_strength"] = 0
         try:
+            import torch
+
             detected_vram_gb = (
                 torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
                 if torch.cuda.is_available()

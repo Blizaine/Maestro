@@ -84,6 +84,7 @@ def _load_handler_class():
             "_hf_url",
             "_text_encoder_variants",
             "_recommend_text_encoder",
+            "align_h3_num_frames",
             "normalize_h3_overlap_frames",
             "pace_h3_sliding_window_prompt",
         }:

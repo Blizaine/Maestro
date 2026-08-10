@@ -332,7 +332,7 @@ def build_manual_h3_reference_sequence_plan(
 def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]:
     """Return relationship, retention, and official task-type summaries."""
 
-    from models.minimax_h3.ref2va import validate_reference_manifest
+    from models.minimax_h3.reference_manifest import validate_reference_manifest
 
     # Enhancement is useful before the generation manifest is complete. The
     # actual Ref2VA generation path still performs strict file + visual-media
