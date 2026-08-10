@@ -117,12 +117,14 @@ export function InputsPanel() {
   const [injectedFrames, setInjectedFrames] = useState<InjectedFrame[]>([])
   const [frameUploading, setFrameUploading] = useState(false)
   const [videoGuideFilename, setVideoGuideFilename] = useState<string | null>(null)
+  const [videoMaskFilename, setVideoMaskFilename] = useState<string | null>(null)
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null)
   const [frameDragKey, setFrameDragKey] = useState<string | null>(null)
   const [frameDragOverKey, setFrameDragOverKey] = useState<string | null>(null)
 
   // ── Inject capability + window layout ──────────────────────────────
   const supportsInject = useMemo(() => {
+    if (modelOptions?.custom_frames_injection === true) return true
     const cfg = (modelOptions?.guide_preprocessing || modelOptions?.guide_custom_choices) as
       { choices?: [string, string][]; selection?: string[] } | undefined
     if (!cfg) return false
@@ -149,6 +151,8 @@ export function InputsPanel() {
     { choices?: [string, string][]; selection?: string[]; default?: string } | undefined
   const audioVals = audioCfg ? (audioCfg.choices ? audioCfg.choices.map(([, v]) => v) : (audioCfg.selection || [])) : []
   const audioOnly = !!modelOptions?.audio_only
+  const h3MediaSources = modelOptions?.minimax_h3_media_sources === true
+  const h3VideoEditing = modelOptions?.video_to_video_inpaint === true
   const soundtrackVal = audioVals.find(v => typeof v === 'string' && v.includes('A'))
   const supportsSoundtrack = !!soundtrackVal && !audioOnly
   const supportsControlVid = audioVals.includes('K')
@@ -162,6 +166,15 @@ export function InputsPanel() {
   const hasControlVid = supportsControlVid && !!params.video_guide
   const soundtrackName = audioGuideFilename || (params.audio_guide ? basename(params.audio_guide as string) : null)
   const controlVidName = videoGuideFilename || (params.video_guide ? basename(params.video_guide as string) : null)
+  const controlMaskName = videoMaskFilename || (params.video_mask ? basename(params.video_mask as string) : null)
+  const h3ControlVisualMode = (() => {
+    if (params.minimax_h3_control_visual_mode) return params.minimax_h3_control_visual_mode
+    const process = String(params.video_prompt_type || '')
+    if (process.includes('A') && process.includes('N')) return 'outside'
+    if (process.includes('A')) return 'inside'
+    if (Number(params.denoising_strength ?? 1) < 1) return 'whole'
+    return 'prompt'
+  })()
 
   // ── Guide video (motion source) for guide_custom_choices models ────
   // Models like SCAIL-2 take a Control Video as the motion/scene guide
@@ -172,7 +185,9 @@ export function InputsPanel() {
   const guideCfg = modelOptions?.guide_custom_choices as { choices?: [string, string][]; default?: string } | undefined
   const guideDefault = guideCfg?.default || ''
   const guideValues = guideCfg?.choices?.map(([, value]) => value) || []
-  const rawControlProcess = guideValues.find(value => value === 'VG' || value === 'V') || ''
+  const rawControlProcess = guideValues.find(value => (
+    value === 'V' || (value.includes('V') && value.includes('G'))
+  )) || ''
   const guideProcess = ((params.video_prompt_type as string) || guideDefault).replace(/T$/, '')
   const supportsGuideVid = !!guideCfg && !modelOptions?.guide_preprocessing && !supportsControlVid && guideProcess.includes('V')
   const hasGuideVid = supportsGuideVid && !!params.video_guide
@@ -310,20 +325,23 @@ export function InputsPanel() {
   // ── Unified, window-aware "Frame" model (one concept, pipeline invisible) ──
   // Every frame is just a (window, offset). Its designation picks the pipe:
   //   W1 Start  -> native i2v start frame (image_start)
-  //   W1 End    -> native end frame (image_end)
-  //   everything else (W1 25/Mid/75, and ALL of W2+) -> injected keyframe
+  //   final window End -> native end frame when the model carries it forward
+  //   everything else -> an injected keyframe
   // All tiles share the same controls (window + offset) — start/end aren't
   // special-cased. Extend mode: the source video is the anchor, so all inject.
   const offsetLabel = (offset: string) => OFFSET_PRESETS.find(p => p.value === offset)?.label ?? offset
   const offsetPct = (offset: string) => OFFSET_PRESETS.find(p => p.value === offset)?.pct ?? 1
   const lastWindow = Math.max(0, windowInfo.windowCount - 1)
+  const nativeEndWindow = modelOptions?.sliding_window_end_image_at_final === true
+    ? lastWindow
+    : 0
   const hasStart = !!startImage || (!isExtend && !!params.image_start)
   const hasEnd = !!endImage || (!isExtend && !!params.image_end)
 
   const frameRoleFor = (window: number, offset: string): 'start' | 'end' | 'inject' => {
     if (isExtend) return 'inject'
     if (window <= 0 && offset === 'start') return 'start'
-    if (supportsEndFrame && window <= 0 && offset === 'end') return 'end'
+    if (supportsEndFrame && window === nativeEndWindow && offset === 'end') return 'end'
     return 'inject'
   }
   // Position along the whole timeline (window + within-window fraction) — used
@@ -345,26 +363,28 @@ export function InputsPanel() {
     if (!isExtend) {
       const endPreview = endImage ? URL.createObjectURL(endImage)
         : (params.image_end ? `/api/v1/uploads/${basename(params.image_end as string)}` : null)
-      if (endPreview) out.push({ key: 'frame-end', kind: 'end', preview: endPreview, offset: 'end', window: 0, sortKey: frameKey(0, 'end') })
+      if (endPreview) out.push({ key: 'frame-end', kind: 'end', preview: endPreview, offset: 'end', window: nativeEndWindow, sortKey: frameKey(nativeEndWindow, 'end') })
     }
     out.sort((a, b) => a.sortKey - b.sortKey)
     return out
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [startImage, endImage, injectedFrames, params.image_start, params.image_end, isExtend, supportsEndFrame, lastWindow])
+  }, [startImage, endImage, injectedFrames, params.image_start, params.image_end, isExtend, supportsEndFrame, lastWindow, nativeEndWindow])
 
   const canAddFrame = isExtend ? supportsInject : (!hasStart || (supportsEndFrame && !hasEnd) || supportsInject)
 
   // "+ Frame": smart default — 1st image = start, 2nd = end (where supported),
   // the rest injected keyframes that walk forward through the windows: in a
-  // multi-window clip the next inject lands at the END of the next window
-  // (3rd frame -> window 2 End), never on the native last-window end. Single
-  // window -> Mid.
+  // multi-window H3 clip, intermediate additions fill each earlier window
+  // end in order while reserving the native final-window destination. Single
+  // window additions default to Mid.
   const handleAddFrameSmart = async (file: File) => {
     if (!isExtend && !hasStart) { setStartImage(file); return }
     if (!isExtend && supportsEndFrame && !hasEnd) { setEndImage(file); return }
     let w = 0, off = 'middle'
     if (lastWindow >= 1) {
-      w = Math.min(injectedFrames.length + 1, lastWindow)
+      w = modelOptions?.sliding_window_end_image_at_final === true
+        ? Math.min(injectedFrames.length, Math.max(0, lastWindow - 1))
+        : Math.min(injectedFrames.length + 1, lastWindow)
       off = 'end'
     }
     await addInjectFrame(file, null, URL.createObjectURL(file), off, w)
@@ -460,7 +480,7 @@ export function InputsPanel() {
       const result = await api.uploadAudio(file)
       setParam('audio_guide', result.path)
       setAudioGuideFilename(file.name)
-      setParam('audio_prompt_type', (soundtrackVal || 'A') + audioFlags)
+      setParam('audio_prompt_type', (soundtrackVal || 'A') + (h3MediaSources ? '' : audioFlags))
       const dur = await getMediaDuration(file)
       if (dur && dur > 0) setDurationSeconds(Math.round(dur * 10) / 10)
     } catch (e) {
@@ -482,23 +502,70 @@ export function InputsPanel() {
       setVideoGuideFilename(file.name)
       // Preserve an explicit Pose/Depth/etc. process; otherwise make a
       // dropped LTX control video immediately usable as raw control.
-      if (!((params.video_prompt_type as string) || '').includes('V') && rawControlProcess) {
+      if (h3VideoEditing) {
+        const processByMode = {
+          prompt: 'GV',
+          whole: 'GV',
+          inside: 'GVA',
+          outside: 'GVNA',
+        } as const
+        setParam('video_prompt_type', processByMode[h3ControlVisualMode])
+      } else if (!((params.video_prompt_type as string) || '').includes('V') && rawControlProcess) {
         setParam('video_prompt_type', rawControlProcess)
       }
       // Source audio remains the default, with alternatives exposed in the
       // selected control tile instead of replacing the motion input.
-      setParam('audio_prompt_type', `K${audioFlags}`)
+      setParam('audio_prompt_type', `K${h3MediaSources ? '' : audioFlags}`)
+      const dur = await getMediaDuration(file)
+      if (dur && dur > 0) setDurationSeconds(Math.round(dur * 10) / 10)
     } catch (e) {
       console.error('Control video upload failed:', e)
     }
   }
   const removeControlVid = () => {
     setParam('video_guide', undefined)
+    setParam('video_mask', undefined)
     setVideoGuideFilename(null)
+    setVideoMaskFilename(null)
     if (audioBase === 'K' || audioBase === '2') {
       setParam('audio_prompt_type', audioFlags)
     }
+    if (h3VideoEditing) {
+      setParam('video_prompt_type', '')
+      setParam('minimax_h3_control_visual_mode', 'prompt')
+      setParam('denoising_strength', 1.0)
+      setParam('masking_strength', 1.0)
+    } else if (rawControlProcess && params.video_prompt_type === rawControlProcess) {
+      setParam('video_prompt_type', '')
+    }
     if (selected === 'ctrlvid') setSelected(null)
+  }
+  const handleAddControlMask = async (file: File) => {
+    try {
+      const result = await api.uploadImage(file)
+      setParam('video_mask', result.path)
+      setVideoMaskFilename(file.name)
+    } catch (e) {
+      console.error('Control mask upload failed:', e)
+    }
+  }
+  const setH3ControlVisualMode = (mode: 'prompt' | 'whole' | 'inside' | 'outside') => {
+    const processByMode = {
+      prompt: 'GV',
+      whole: 'GV',
+      inside: 'GVA',
+      outside: 'GVNA',
+    } as const
+    setParam('minimax_h3_control_visual_mode', mode)
+    setParam('video_prompt_type', processByMode[mode])
+    if (mode === 'prompt') {
+      setParam('denoising_strength', 1.0)
+    } else if (mode === 'whole' && Number(params.denoising_strength ?? 1) >= 1) {
+      setParam('denoising_strength', 0.7)
+    }
+    if (mode === 'inside' || mode === 'outside') {
+      setParam('masking_strength', Number(params.masking_strength ?? 1.0))
+    }
   }
   const handleAddGuideVid = async (file: File) => {
     try {
@@ -710,23 +777,98 @@ export function InputsPanel() {
       {/* Option strip — soundtrack: audio strength + processing flags */}
       {selected === 'audio' && hasSoundtrack && (
         <Strip>
-          <Row label={modelOptions?.audio_scale_name || 'Audio strength'} value={(((params as unknown as Record<string, unknown>).modality_scale as number) ?? 1.0).toFixed(1)} />
-          <input type="range" min={0.1} max={3.0} step={0.1} value={((params as unknown as Record<string, unknown>).modality_scale as number) ?? 1.0}
-            onChange={e => setParam('modality_scale' as keyof typeof params, parseFloat(e.target.value) as never)} className="w-full h-1 accent-accent-blue" />
-          <label className="flex items-center gap-2 cursor-pointer pt-1">
-            <input type="checkbox" checked={audioPT.includes('N')} onChange={() => toggleAudioFlag('N')} className="accent-accent-blue" />
-            <span className="text-[10px] text-text-secondary">Normalize audio volume</span>
-          </label>
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input type="checkbox" checked={audioPT.includes('V')} onChange={() => toggleAudioFlag('V')} className="accent-accent-blue" />
-            <span className="text-[10px] text-text-secondary">Remove background music</span>
-          </label>
+          {h3MediaSources ? (
+            <p className="text-[9px] text-text-muted">
+              H3 preserves this soundtrack and uses it to condition the new video.
+            </p>
+          ) : (
+            <>
+              <Row label={modelOptions?.audio_scale_name || 'Audio strength'} value={(((params as unknown as Record<string, unknown>).modality_scale as number) ?? 1.0).toFixed(1)} />
+              <input type="range" min={0.1} max={3.0} step={0.1} value={((params as unknown as Record<string, unknown>).modality_scale as number) ?? 1.0}
+                onChange={e => setParam('modality_scale' as keyof typeof params, parseFloat(e.target.value) as never)} className="w-full h-1 accent-accent-blue" />
+              <label className="flex items-center gap-2 cursor-pointer pt-1">
+                <input type="checkbox" checked={audioPT.includes('N')} onChange={() => toggleAudioFlag('N')} className="accent-accent-blue" />
+                <span className="text-[10px] text-text-secondary">Normalize audio volume</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" checked={audioPT.includes('V')} onChange={() => toggleAudioFlag('V')} className="accent-accent-blue" />
+                <span className="text-[10px] text-text-secondary">Remove background music</span>
+              </label>
+            </>
+          )}
         </Strip>
       )}
 
       {/* Option strip — control-video audio stays independent from motion. */}
       {selected === 'ctrlvid' && hasControlVid && (
         <Strip>
+          {h3VideoEditing && audioBase !== '2' && (
+            <>
+              <label className="text-[10px] text-text-muted uppercase tracking-wider">
+                Visual behavior
+              </label>
+              <select
+                value={h3ControlVisualMode}
+                onChange={event => setH3ControlVisualMode(event.target.value as 'prompt' | 'whole' | 'inside' | 'outside')}
+                className="w-full bg-bg-secondary border border-border rounded-lg px-2 py-1.5 text-[11px] text-text-primary focus:outline-none focus:border-accent-blue"
+              >
+                <option value="prompt">Generate new visuals from prompt</option>
+                <option value="whole">Edit the whole source video</option>
+                <option value="inside">Edit inside a white mask</option>
+                <option value="outside">Edit outside a white mask</option>
+              </select>
+              {h3ControlVisualMode !== 'prompt' && (
+                <>
+                  <Row label="Denoising strength" value={Number(params.denoising_strength ?? 0.7).toFixed(2)} />
+                  <input
+                    type="range" min={0} max={1} step={0.05}
+                    value={Number(params.denoising_strength ?? 0.7)}
+                    onChange={event => setParam('denoising_strength', parseFloat(event.target.value))}
+                    className="w-full h-1 accent-accent-blue"
+                  />
+                  <p className="text-[9px] text-text-muted">0 preserves the source; 1 gives the prompt full freedom.</p>
+                </>
+              )}
+              {(h3ControlVisualMode === 'inside' || h3ControlVisualMode === 'outside') && (
+                <>
+                  <div className="flex items-center justify-between gap-2 rounded-lg border border-border bg-bg-secondary px-2 py-1.5">
+                    <span className="min-w-0 truncate text-[10px] text-text-secondary">
+                      {controlMaskName || 'No mask video selected'}
+                    </span>
+                    <div className="flex shrink-0 items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => pickFile('.mp4,.webm,.mkv,.mov', handleAddControlMask)}
+                        className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-accent-blue hover:bg-bg-hover"
+                      >
+                        <Upload size={11} /> {controlMaskName ? 'Replace' : 'Add mask'}
+                      </button>
+                      {params.video_mask && (
+                        <button
+                          type="button"
+                          onClick={() => { setParam('video_mask', undefined); setVideoMaskFilename(null) }}
+                          className="rounded p-0.5 text-text-muted hover:bg-bg-hover hover:text-text-primary"
+                          aria-label="Remove mask"
+                        >
+                          <X size={11} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <p className={`text-[9px] ${params.video_mask ? 'text-text-muted' : 'text-red-400'}`}>
+                    White marks the selection. Add a tracked mask video matching the source duration.
+                  </p>
+                  <Row label="Mask protection duration" value={Number(params.masking_strength ?? 1.0).toFixed(2)} />
+                  <input
+                    type="range" min={0} max={1} step={0.05}
+                    value={Number(params.masking_strength ?? 1.0)}
+                    onChange={event => setParam('masking_strength', parseFloat(event.target.value))}
+                    className="w-full h-1 accent-accent-blue"
+                  />
+                </>
+              )}
+            </>
+          )}
           <label className="text-[10px] text-text-muted uppercase tracking-wider">
             Audio behavior
           </label>
@@ -739,12 +881,32 @@ export function InputsPanel() {
                   : ''
             }
             onChange={event => {
-              setParam('audio_prompt_type', `${event.target.value}${audioFlags}`)
+              const nextAudioMode = event.target.value
+              setParam('audio_prompt_type', `${nextAudioMode}${h3MediaSources ? '' : audioFlags}`)
+              if (h3VideoEditing) {
+                const processByMode = {
+                  prompt: 'GV',
+                  whole: 'GV',
+                  inside: 'GVA',
+                  outside: 'GVNA',
+                } as const
+                // Video-to-audio freezes the source pictures and never uses
+                // an edit mask. Keep the friendly selection remembered, but
+                // submit the unmasked Control Video contract while active.
+                setParam(
+                  'video_prompt_type',
+                  nextAudioMode === '2' ? 'GV' : processByMode[h3ControlVisualMode],
+                )
+              }
             }}
             className="w-full bg-bg-secondary border border-border rounded-lg px-2 py-1.5 text-[11px] text-text-primary focus:outline-none focus:border-accent-blue"
           >
             <option value="K">Use control video's audio</option>
-            <option value="">Generate soundtrack from text prompt</option>
+            {h3MediaSources ? (
+              <option value="">Generate new audio from text</option>
+            ) : (
+              <option value="">Generate soundtrack from text prompt</option>
+            )}
             {audioVals.includes('2') && (
               <option value="2">Generate new audio from control video</option>
             )}
@@ -753,7 +915,13 @@ export function InputsPanel() {
             )}
           </select>
           <p className="text-[9px] text-text-muted">
-            The control video remains attached as the motion guide in every mode.
+            {h3MediaSources
+              ? (audioBase === '2'
+                ? 'The source pictures remain unchanged while H3 creates synchronized audio.'
+                : h3ControlVisualMode === 'prompt'
+                  ? 'The source pictures are not copied; H3 generates new visuals from the prompt.'
+                  : 'H3 edits the source pictures and generates synchronized stereo audio using the selected audio behavior.')
+              : 'The control video remains attached as the motion guide in every mode.'}
           </p>
         </Strip>
       )}

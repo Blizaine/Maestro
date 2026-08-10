@@ -18,11 +18,13 @@ from services.h3_story_ledger import (
     H3_STORY_LEDGER_VERSION,
     UNREQUESTED_SPECTACLE_PATTERNS,
     plan_h3_story_segments,
+    recover_h3_plain_story,
     sanitize_h3_prompt_text,
 )
 
-_H3_WINDOW_PLANNER_VERSION = 3 + H3_STORY_LEDGER_VERSION
+_H3_WINDOW_PLANNER_VERSION = 4 + H3_STORY_LEDGER_VERSION
 _CAMERA_COVERAGE_VALUES = {"auto", "continuous", "multi_shot"}
+_H3_INJECTED_POSITION_RE = re.compile(r"^[Ww](\d+):(\d{1,3})$")
 
 
 def normalize_h3_camera_coverage(value: Any) -> str:
@@ -73,6 +75,97 @@ def compute_h3_window_boundaries(
     return boundaries
 
 
+def normalize_h3_injected_keyframes(
+    injected_keyframes: Iterable[dict[str, Any]] | None,
+    boundaries: Iterable[dict[str, Any]],
+    *,
+    fps: float = 24.0,
+) -> list[dict[str, Any]]:
+    """Resolve UI frame tokens onto the exact committed H3 timeline.
+
+    The Studio UI stores symbolic ``W<n>:<percent>`` positions so the backend,
+    rather than browser-side seconds math, owns the final quantized placement.
+    Numeric positions remain the legacy one-based absolute-frame form and
+    ``L`` advances across successive window ends.
+    """
+
+    spans = list(boundaries)
+    if not spans:
+        return []
+    fps_value = max(1.0, float(fps))
+    total_frames = max(1, int(spans[-1]["end_frame"]))
+    normalized: list[dict[str, Any]] = []
+    legacy_end_window = 0
+
+    for source_index, item in enumerate(injected_keyframes or []):
+        if not isinstance(item, dict):
+            raise ValueError("Every H3 injected keyframe must be an object.")
+        path = str(item.get("path") or "").strip()
+        token = str(item.get("position") or "").strip()
+        if not path:
+            raise ValueError("Every H3 injected keyframe needs an image path.")
+        if not token:
+            raise ValueError("Every H3 injected keyframe needs a timeline position.")
+
+        match = _H3_INJECTED_POSITION_RE.fullmatch(token)
+        if match:
+            window_index = min(
+                len(spans) - 1,
+                max(0, int(match.group(1)) - 1),
+            )
+            percentage = min(100, max(0, int(match.group(2))))
+            span = spans[window_index]
+            first = int(span["start_frame"])
+            last = max(first, int(span["end_frame"]) - 1)
+            absolute_frame = first + int(round((last - first) * percentage / 100.0))
+        elif token.casefold() == "l":
+            window_index = min(legacy_end_window, len(spans) - 1)
+            legacy_end_window += 1
+            span = spans[window_index]
+            absolute_frame = max(
+                int(span["start_frame"]),
+                int(span["end_frame"]) - 1,
+            )
+        else:
+            try:
+                absolute_frame = int(token) - 1
+            except ValueError as error:
+                raise ValueError(
+                    f"Invalid H3 injected-frame position {token!r}."
+                ) from error
+            if not 0 <= absolute_frame < total_frames:
+                raise ValueError(
+                    f"H3 injected-frame position {token!r} is outside the "
+                    f"{total_frames}-frame output."
+                )
+            window_index = next(
+                (
+                    index
+                    for index, span in enumerate(spans)
+                    if int(span["start_frame"])
+                    <= absolute_frame
+                    < int(span["end_frame"])
+                ),
+                len(spans) - 1,
+            )
+            span = spans[window_index]
+
+        local_frame = absolute_frame - int(span["start_frame"])
+        normalized.append(
+            {
+                "source_index": source_index,
+                "path": path,
+                "position": token,
+                "absolute_frame": absolute_frame,
+                "global_seconds": round(absolute_frame / fps_value, 3),
+                "window": window_index + 1,
+                "local_frame": local_frame,
+                "local_seconds": round(local_frame / fps_value, 3),
+            }
+        )
+    return normalized
+
+
 def h3_window_plan_signature(
     prompt: str,
     *,
@@ -86,6 +179,7 @@ def h3_window_plan_signature(
     has_start_image: bool,
     has_end_image: bool,
     camera_coverage: str = "auto",
+    injected_keyframes: list[dict[str, Any]] | None = None,
 ) -> str:
     """Fingerprint every input that can change a window plan."""
 
@@ -102,6 +196,14 @@ def h3_window_plan_signature(
         "has_start_image": bool(has_start_image),
         "has_end_image": bool(has_end_image),
         "camera_coverage": normalize_h3_camera_coverage(camera_coverage),
+        "injected_keyframes": [
+            {
+                "path": str(item.get("path") or ""),
+                "position": str(item.get("position") or ""),
+            }
+            for item in (injected_keyframes or [])
+            if isinstance(item, dict)
+        ],
     }
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:24]
@@ -278,6 +380,7 @@ def compile_h3_window_prompts(
     *,
     has_start_image: bool = False,
     has_end_image: bool = False,
+    injected_keyframes: Iterable[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Compile a planner JSON object into complete, window-local H3 prompts."""
 
@@ -297,6 +400,7 @@ def compile_h3_window_prompts(
     shared_visual = ". ".join(item for item in (subjects, setting, visual) if item)
     speaker_ids: dict[str, str] = {}
     compiled: list[dict[str, Any]] = []
+    timed_keyframes = list(injected_keyframes or [])
     previous_closing = initial_state or "The requested scene is established in its opening composition"
 
     for position, (span, item) in enumerate(zip(spans, windows)):
@@ -346,14 +450,36 @@ def compile_h3_window_prompts(
         )
 
         picture_instructions: list[str] = []
+        next_picture_index = 1
         if position > 0 or has_start_image:
             picture_instructions.append(
-                "For the target video, at 0.00 seconds into the target video, <Picture 1> is fully referenced."
+                f"For the target video, at 0.00 seconds into the target video, "
+                f"<Picture {next_picture_index}> is fully referenced."
             )
+            next_picture_index += 1
         if has_end_image and position + 1 == len(spans):
             picture_instructions.append(
-                f"At {duration:.2f} seconds, <Picture 2> is the required final-frame destination."
+                f"At {duration:.2f} seconds, <Picture {next_picture_index}> "
+                "is the required final-frame destination."
             )
+            next_picture_index += 1
+        window_keyframes: list[dict[str, Any]] = []
+        for keyframe in timed_keyframes:
+            if not isinstance(keyframe, dict) or int(keyframe.get("window") or 0) != position + 1:
+                continue
+            local_seconds = max(0.0, float(keyframe.get("local_seconds") or 0.0))
+            mapped = {
+                **keyframe,
+                "picture_index": next_picture_index,
+            }
+            window_keyframes.append(mapped)
+            picture_instructions.append(
+                f"At {local_seconds:.2f} seconds into this window, "
+                f"<Picture {next_picture_index}> is fully referenced as an exact "
+                "injected frame; the visible action must arrive at it naturally "
+                "and continue from it without an unrequested cut."
+            )
+            next_picture_index += 1
 
         coverage = _compact(item.get("coverage") or "auto cinematic coverage", 80)
         pacing = _compact(item.get("pacing") or "natural real-time pacing", 100)
@@ -403,6 +529,7 @@ def compile_h3_window_prompts(
                 "pacing": pacing,
                 "shot_count": len(shots),
                 "shots": shots,
+                "injected_keyframes": window_keyframes,
                 "prompt": prompt,
             }
         )
@@ -818,10 +945,19 @@ def plan_h3_sliding_windows(
     has_start_image: bool = False,
     has_end_image: bool = False,
     image_paths: list[str] | None = None,
+    injected_keyframes: list[dict[str, Any]] | None = None,
     nsfw: bool = False,
     camera_coverage: str = "auto",
 ) -> dict[str, Any]:
     """Use Maestro's configured LLM to create and compile an H3 window plan."""
+
+    raw_prompt = str(prompt or "").strip()
+    prompt = recover_h3_plain_story(raw_prompt)
+    if prompt != raw_prompt:
+        print(
+            "[MiniMax H3] Recovered the original story from an existing "
+            "single-clip Context-IR prompt before sliding-window planning."
+        )
 
     boundaries = compute_h3_window_boundaries(
         total_frames,
@@ -831,6 +967,11 @@ def plan_h3_sliding_windows(
         discard_frames=discard_frames,
     )
     camera_coverage = normalize_h3_camera_coverage(camera_coverage)
+    normalized_keyframes = normalize_h3_injected_keyframes(
+        injected_keyframes,
+        boundaries,
+        fps=fps,
+    )
     signature = h3_window_plan_signature(
         prompt,
         model_type=model_type,
@@ -843,6 +984,7 @@ def plan_h3_sliding_windows(
         has_start_image=has_start_image,
         has_end_image=has_end_image,
         camera_coverage=camera_coverage,
+        injected_keyframes=injected_keyframes,
     )
     if len(boundaries) <= 1:
         return {
@@ -854,6 +996,7 @@ def plan_h3_sliding_windows(
             "window_count": 1,
             "plan_kind": "sliding_window",
             "camera_coverage": camera_coverage,
+            "injected_keyframes": normalized_keyframes,
             "windows": [],
             "window_prompts": [],
         }
@@ -864,6 +1007,14 @@ def plan_h3_sliding_windows(
     if has_end_image:
         picture_index = 2 if has_start_image else 1
         media_context.append(f"<Picture {picture_index}> is the required final frame destination.")
+    attachment_picture_index = int(has_start_image) + int(has_end_image)
+    for keyframe in normalized_keyframes:
+        attachment_picture_index += 1
+        media_context.append(
+            f"<Picture {attachment_picture_index}> is an exact injected visual "
+            f"anchor at {keyframe['global_seconds']:.3f}s on the full timeline "
+            f"(window {keyframe['window']}, {keyframe['local_seconds']:.3f}s local)."
+        )
     expect_dialogue = _narrative_dialogue_expected(prompt, len(boundaries))
     resolved_coverage = _infer_camera_coverage(prompt, camera_coverage)
     story_ledger: dict[str, Any] | None = None
@@ -904,6 +1055,7 @@ def plan_h3_sliding_windows(
             boundaries,
             has_start_image=has_start_image,
             has_end_image=has_end_image,
+            injected_keyframes=normalized_keyframes,
         )
     except Exception as error:
         print(f"[MiniMax H3] Window planner fallback: {error}")
@@ -922,6 +1074,7 @@ def plan_h3_sliding_windows(
             boundaries,
             has_start_image=has_start_image,
             has_end_image=has_end_image,
+            injected_keyframes=normalized_keyframes,
         )
 
     return {
@@ -935,6 +1088,7 @@ def plan_h3_sliding_windows(
         "camera_coverage": camera_coverage,
         "resolution": str(resolution or ""),
         "model_type": str(model_type or ""),
+        "injected_keyframes": normalized_keyframes,
         "subject_continuity": plan.get("subject_continuity", ""),
         "setting_continuity": plan.get("setting_continuity", ""),
         "editing_style": plan.get("editing_style", ""),

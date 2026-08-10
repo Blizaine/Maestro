@@ -107,6 +107,13 @@ def _detect_kernel_support(gpu_cap: Optional[tuple]) -> dict:
     if major >= 12:
         try:
             import torch  # noqa: F401
+            # The Lightx2v package registers custom torch.ops at import time.
+            # Merely checking torch.ops before importing it incorrectly reports
+            # a healthy RTX 50 install as lacking NVFP4 support.
+            try:
+                import lightx2v_kernel  # noqa: F401
+            except Exception:
+                pass
             has_kitchen = hasattr(getattr(__import__("torch").ops, "comfy_kitchen", None) or object(), "scaled_mm_nvfp4")
             has_lightx2v = hasattr(getattr(__import__("torch").ops, "lightx2v_kernel", None) or object(), "cutlass_scaled_nvfp4_mm_sm120")
             out["supports_nvfp4"] = bool(has_kitchen or has_lightx2v)

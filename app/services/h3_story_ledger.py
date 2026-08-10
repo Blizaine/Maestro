@@ -17,7 +17,7 @@ import re
 from typing import Any, Callable
 
 
-H3_STORY_LEDGER_VERSION = 1
+H3_STORY_LEDGER_VERSION = 2
 
 UNREQUESTED_SPECTACLE_PATTERNS = (
     r"\bgolden\s+energy\b",
@@ -34,6 +34,11 @@ _CONTEXT_IR_LABEL = re.compile(
     r"\b(subject_definitions|summary|retention_analysis|detailed_description|"
     r"overall_soundscape|non_diegetic_music)\s*:",
     flags=re.IGNORECASE,
+)
+_CONTEXT_IR_FIELD = re.compile(
+    r"^[ \t]*(subject_definitions|summary|retention_analysis|"
+    r"detailed_description|overall_soundscape|non_diegetic_music)\s*:\s*",
+    flags=re.IGNORECASE | re.MULTILINE,
 )
 _SPEECH_VERB = re.compile(
     r"\b(?:says?|said|asks?|asked|replies?|replied|responds?|responded|"
@@ -72,6 +77,61 @@ def sanitize_h3_prompt_text(value: Any) -> str:
     )
     text = _CONTEXT_IR_LABEL.sub(lambda match: f"{match.group(1)} -", text)
     return " ".join(text.split())
+
+
+def recover_h3_plain_story(value: Any) -> str:
+    """Unwrap an already-enhanced Context-IR prompt for story planning.
+
+    Studio can legitimately enhance one native H3 clip before the user later
+    enables a longer sequence. Feeding that six-field runtime prompt into the
+    sequence planner treats reference contracts and timestamps as plot beats.
+    Recover its human-readable summary and exact tagged dialogue instead.
+    Plain user concepts pass through unchanged.
+    """
+
+    source = str(value or "").strip()
+    matches = list(_CONTEXT_IR_FIELD.finditer(source))
+    labels = {match.group(1).casefold() for match in matches}
+    if not {"summary", "detailed_description", "retention_analysis"}.issubset(labels):
+        return source
+    fields: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(source)
+        fields[match.group(1).casefold()] = source[match.end():end].strip()
+    summary = re.sub(
+        r"^\s*\[[^\]\r\n]{1,160}\]\s*",
+        "",
+        fields.get("summary", ""),
+    )
+    summary = sanitize_h3_prompt_text(summary)
+    if not summary:
+        return source
+
+    detailed = fields.get("detailed_description", "")
+    dialogue_events: list[str] = []
+    for match in re.finditer(
+        r"<d>\s*(?:\[[^\]]+\]\s*)?(.*?)\s*</d>",
+        detailed,
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        text = sanitize_h3_prompt_text(match.group(1)).strip()
+        if not text or _PLACEHOLDER_DIALOGUE.fullmatch(text):
+            continue
+        prefix = detailed[max(0, match.start() - 260):match.start()]
+        speaker = "Speaker"
+        name_first = re.search(
+            r"([A-Z][A-Za-z0-9_'â€™-]*(?:\s+[A-Z][A-Za-z0-9_'â€™-]*){0,3})"
+            r"\s*\(S\d+\)[^.!?<>]{0,190}$",
+            prefix,
+        )
+        id_first = re.search(r"\bS\d+\s*\(([^)]+)\)[^.!?<>]{0,190}$", prefix)
+        if name_first:
+            speaker = sanitize_h3_prompt_text(name_first.group(1))
+        elif id_first:
+            speaker = sanitize_h3_prompt_text(id_first.group(1))
+        if text.casefold() not in summary.casefold():
+            dialogue_events.append(f'{speaker} says "{text}".')
+    return " ".join([summary, *dialogue_events]).strip()
 
 
 def _normalize_key(value: Any) -> str:
@@ -139,7 +199,12 @@ def extract_locked_dialogue(prompt: str) -> list[dict[str, Any]]:
 
 
 def _story_fragments(prompt: str) -> list[str]:
-    source = sanitize_h3_prompt_text(prompt)
+    # A user-authored line break is often the only boundary between two
+    # actions in Studio's prompt box. Preserve it as sentence punctuation
+    # before the general sanitizer collapses whitespace.
+    source = sanitize_h3_prompt_text(
+        re.sub(r"(?:\r?\n)+", ". ", str(prompt or ""))
+    )
     # Preserve a sentence boundary where quoted dialogue was removed so a
     # following physical event cannot collapse into the preceding speech cue.
     for item in reversed(extract_locked_dialogue(source)):
@@ -149,8 +214,10 @@ def _story_fragments(prompt: str) -> list[str]:
             + source[int(item["source_end"]):]
         )
     pieces = re.split(
-        r"(?<=[.!?])\s+|\s*;\s*|\s+(?:and\s+then|then|after\s+that|next)\s+|"
-        r",\s+(?:but|and)\s+",
+        r"(?<=[.!?])\s+|\s*;\s*|"
+        r"\s+(?:(?:and\s+)?then(?:\s+then)*|after\s+that|next)\s+|"
+        r",\s+(?:but|and)\s+|"
+        r"\s+(?=(?:hard\s+cut|smash\s+cut|match\s+cut|cut\s+to|whip\s+pan)\b)",
         source,
         flags=re.IGNORECASE,
     )
@@ -158,6 +225,12 @@ def _story_fragments(prompt: str) -> list[str]:
     for piece in pieces:
         value = piece.strip(" ,;:-.!?")
         if not value:
+            continue
+        if re.fullmatch(
+            r"(?:and\s+)?then|after\s+that|next",
+            value,
+            flags=re.IGNORECASE,
+        ):
             continue
         if re.fullmatch(
             r"(?:dark\s+)?cinematic|(?:[A-Za-z]+verse|[A-Za-z]+)\s+style|"
@@ -440,9 +513,19 @@ def _deterministic_ledger(
     beats: list[dict[str, Any]] = []
     event_buckets: list[list[dict[str, str]]] = [[] for _ in range(segment_count)]
     for index, event in enumerate(source_events):
-        target = min(
-            segment_count - 1,
-            int(round(index * (segment_count - 1) / max(1, len(source_events) - 1))),
+        # A single compound outcome belongs at the end; earlier segments can
+        # then build toward it instead of performing it repeatedly. With two
+        # or more events, anchor the first and last to the timeline ends.
+        target = (
+            segment_count - 1
+            if len(source_events) == 1
+            else min(
+                segment_count - 1,
+                int(round(
+                    index * (segment_count - 1)
+                    / max(1, len(source_events) - 1)
+                )),
+            )
         )
         event_buckets[target].append(event)
     source_length = max(1, len(str(prompt or "")))
@@ -463,25 +546,76 @@ def _deterministic_ledger(
         dialogue_by_segment.setdefault(segment, []).append(dialogue_id)
     for index in range(segment_count):
         assigned_events = event_buckets[index]
-        fragment_index = min(len(fragments) - 1, int(index * len(fragments) / segment_count))
-        fragment = " Then ".join(item["text"] for item in assigned_events) or fragments[fragment_index]
-        if index == 0:
+        fragment = " Then ".join(item["text"] for item in assigned_events)
+        next_event = next(
+            (
+                bucket[0]["text"]
+                for bucket in event_buckets[index + 1:]
+                if bucket
+            ),
+            "",
+        )
+        previous_event = next(
+            (
+                bucket[-1]["text"]
+                for bucket in reversed(event_buckets[:index])
+                if bucket
+            ),
+            "",
+        )
+        if fragment and index == 0:
             description = f"Establish the requested scene and begin this event: {fragment}"
-        elif index + 1 == segment_count:
-            description = f"Complete the requested story and final outcome: {fragments[-1]}"
-        else:
+        elif fragment and index + 1 == segment_count:
+            description = f"Complete the requested story and final outcome: {fragment}"
+        elif fragment:
             description = f"Advance the requested story without repeating or finishing early: {fragment}"
+        elif next_event and previous_event:
+            description = (
+                "Show a new intermediate progression from the preceding beat "
+                "toward the next requested event, without replaying or "
+                f"completing either endpoint: {next_event}"
+            )
+        elif next_event:
+            phase = "Begin" if index == 0 else "Continue"
+            description = (
+                f"{phase} a new visible buildup toward the upcoming requested "
+                f"event without completing it yet: {next_event}"
+            )
+        elif previous_event:
+            description = (
+                "Show new physical consequences of the preceding requested "
+                f"event without replaying it: {previous_event}"
+            )
+        else:
+            description = "Advance to a new visible story state without replaying an earlier action"
+
+        if index + 1 == segment_count:
+            state_after = (
+                "The final frame clearly shows the completed requested outcome: "
+                f"{fragment or fragments[-1]}"
+            )
+        elif fragment:
+            state_after = (
+                "The final frame shows the immediate visible result of this beat: "
+                f"{fragment}"
+            )
+        elif next_event:
+            state_after = (
+                "The final frame shows a new intermediate state leading toward, "
+                f"but not yet completing: {next_event}"
+            )
+        else:
+            state_after = (
+                "The final frame shows new consequences after the preceding beat: "
+                f"{previous_event}"
+            )
         beats.append({
             "beat_id": f"B{index + 1}",
             "segment": index + 1,
             "description": description,
             "source_event_ids": [item["event_id"] for item in assigned_events],
             "dialogue_ids": dialogue_by_segment.get(index + 1, []),
-            "state_after": (
-                "The requested final outcome has visibly completed"
-                if index + 1 == segment_count
-                else f"The subjects hold a concrete continuation state after beat {index + 1}"
-            ),
+            "state_after": state_after,
             "sound_effects": "Natural synchronized effects for the visible action",
         })
     # A quote whose offset landed in an otherwise unexpected segment remains
@@ -1000,13 +1134,22 @@ def plan_h3_story_segments(
             for item in catalog
             if str(item.get("dialogue_id") or "").upper() in assigned_dialogue_ids
         ]
-        mode_instruction = (
-            "This is a frame-linked continuation. Its opening must exactly match the supplied previous frame/state. "
-            "Do not restart or recap. Internal motivated cuts are allowed, but the segment boundary itself is not a story cut."
-            if mode == "sliding_window"
-            else "This is an independently generated editorial clip. Restate a complete readable opening composition, "
-            "use the canonical references for identity, and advance only this clip's assigned beats."
-        )
+        if mode == "sliding_window":
+            mode_instruction = (
+                "This is a frame-linked continuation. Its opening must exactly match the supplied previous frame/state. "
+                "Do not restart or recap. Internal motivated cuts are allowed, but the segment boundary itself is not a story cut."
+            )
+        elif mode == "reference_sequence_continuation":
+            mode_instruction = (
+                "This is a native Ref2VA motion-and-audio overlap continuation. The canonical references remain identity guidance, "
+                "not opening keyframes. Continue from the supplied previous state without restarting, restaging, or replaying an action. "
+                "Internal motivated cuts are allowed, but the window boundary itself is not a story cut."
+            )
+        else:
+            mode_instruction = (
+                "This is an independently generated editorial clip. Restate a complete readable opening composition, "
+                "use the canonical references for identity, and advance only this clip's assigned beats."
+            )
         segment_prompt = (
             f"Segment {segment_number} of {segment_count}; local duration 0.000 to {duration:.3f} seconds.\n"
             f"{mode_instruction}\n\n"

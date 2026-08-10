@@ -47,6 +47,31 @@ PROFILE_DESCRIPTIONS = {
 }
 
 
+def recommend_h3_reserved_ram_fraction(
+    requested_fraction: float,
+    total_ram_gb: float,
+    *,
+    full_checkpoint: bool,
+) -> float:
+    """Raise MMGP's reserved-RAM ceiling only when H3 Full can fit safely.
+
+    H3 Full's complete pinned working set is roughly 53-55 GB. MMGP's
+    implicit 40% ceiling leaves a 128 GB workstation just short, forcing
+    partial pinning and avoidable CPU/RAM transfers. Reserve a 60 GB ceiling
+    on systems with at least 96 GB RAM, while retaining at least 36 GB for the
+    OS, decoded media, and transient allocations. This is a ceiling, not an
+    eager allocation. Explicit user values always win.
+    """
+    requested = max(0.0, float(requested_fraction or 0.0))
+    ram_gb = max(0.0, float(total_ram_gb or 0.0))
+    if requested > 0.0 or not full_checkpoint or ram_gb < 96.0:
+        return requested
+
+    target_fraction = 60.0 / ram_gb
+    safe_fraction = min(0.65, max(0.50, target_fraction))
+    return round(safe_fraction, 3)
+
+
 def _pick_profile(ram_tier: str, vram_tier: str) -> float:
     """Pick the mmgp profile number for a (ram, vram) tier pair.
 

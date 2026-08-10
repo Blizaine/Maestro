@@ -77,6 +77,33 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.7.0 (2026-08-10)
+
+**MiniMax H3 native multi-window generation**
+- Added native multi-window continuation to both First / Last and Omni, carrying recent motion and synchronized stereo audio into each following window for smoother transitions.
+- Added shared Multi-window controls with total duration, editable per-window prompts, optional AI planning, and independent hard-cut sequences.
+- Improved H3 sequence planning so actions, dialogue, camera cuts, sound, and story events advance across windows instead of repeating or finishing in the first clip.
+- Added exact-duration assembly, model-aware overlap handling, and saved runtime prompts so long generations can be reviewed, edited, and reproduced.
+
+**New H3 media workflows**
+- Added multiple timed frame injection for First / Last generations.
+- Added audio-driven video from an uploaded soundtrack or a control video's audio.
+- Added video-to-audio generation that preserves the source pictures while creating a new synchronized soundtrack.
+- Added H3 video-to-video editing for the whole frame, inside a mask, or outside a mask, with adjustable denoise and mask strength.
+- Fixed Omni music and performance references restarting from the beginning in every sequence clip; each window now receives the correct timeline segment while voice references remain reusable.
+
+**Memory, performance, and RTX 50 support**
+- Added VRAM-, model-, and resolution-aware H3 window recommendations with a native 14.4-second ceiling and saveable user overrides for proven hardware combinations.
+- Improved transformer residency, activation workspace, streaming VAE decoding, RAM budgeting, and LoRA fallback behavior for Full and Pruned H3 models.
+- Added a dedicated RTX 50 / Blackwell runtime with Python 3.11, PyTorch 2.10, CUDA 13, compatible acceleration kernels, automatic migration, startup diagnostics, and one-click repair.
+- Preserved the established runtime for RTX 20/30/40 systems while applying hardware-specific setup only where required.
+
+**Workflow and interface reliability**
+- Added early validation for incompatible H3 media, prompt counts, durations, and sequence settings before expensive model loading begins.
+- Fixed Omni reference uploads on iPhone and iPad so supported audio files are selectable even when iOS reports unusual file types.
+- Generation cards now show active generation time in minutes and seconds, excluding time spent waiting in the queue or loading models.
+- Expanded regression coverage for H3 continuation, reference packing, audio timing, frame injection, video editing, memory recommendations, RTX 50 setup, and the shared multi-window interface.
+
 ### v1.6.5 (2026-08-08)
 
 **MiniMax H3 performance and lower-VRAM support**
@@ -485,12 +512,14 @@ The first video is always the slow one: install is ~10–20 min, then the first 
 1. Install [Pinokio](https://pinokio.computer).
 2. In Pinokio, open the **Discover** tab and search for *Maestro* — or click the **Download** button on the [Maestro repo page](https://github.com/Blizaine/Maestro) and paste the URL.
 3. Click **Install**. The launcher will:
-   - Create a Python virtual environment in `app/env/`
+   - Create a Python virtual environment in `app/env/` (`app/env-rtx50/` on RTX 50-series GPUs)
    - Install all Python dependencies (torch, xformers, transformers, fastapi, …)
    - Build the React UI in `ui/`
 4. When install finishes, click **Start**. The first generation in each model triggers a one-time weight download.
 
 The install (without model downloads) typically takes **10–20 minutes** depending on internet speed. SAM 3.1 (used only for the experimental Inpaint feature) is **not installed by default** — install it on demand via Pinokio menu → "Install Inpaint Support (SAM 3.1)" if you want to use Inpaint.
+
+RTX 50-series cards use a dedicated Python 3.11, PyTorch 2.10, CUDA 13 environment with native SageAttention and Lightx2v NVFP4 kernels. Existing RTX 50 installs migrate automatically the next time **Update** is run; the older environment is retained as a recovery point. Maestro prints a short runtime audit at startup. If that audit reports a missing RTX 50 kernel after Update completed, use **Advanced → Repair RTX 50 Runtime** in the Pinokio menu.
 
 ### Updating
 
@@ -498,7 +527,7 @@ Click **Update** in the launcher menu. This pulls the latest launcher scripts an
 
 ### Resetting
 
-Click **Reset** to wipe the install and start over. Removes `app/env/`, `ui/node_modules/`, `ui/dist/`, and the SAM venv if installed. Model checkpoints in `app/ckpts/` are NOT removed by default — delete them manually if you want a true fresh start.
+Click **Reset** to wipe the install and start over. Removes `app/env/`, `app/env-rtx50/`, `ui/node_modules/`, `ui/dist/`, and the SAM venv if installed. Model checkpoints in `app/ckpts/` are NOT removed by default — delete them manually if you want a true fresh start.
 
 ## Usage
 

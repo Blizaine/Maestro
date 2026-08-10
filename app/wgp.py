@@ -145,6 +145,15 @@ from shared.qtypes import gguf as gguf_handler
 quant_router.register_file_extension("gguf", gguf_handler)
 from shared.kernels.quanto_int8_inject import maybe_enable_quanto_int8_kernel, disable_quanto_int8_kernel
 
+# All heavyweight runtime modules are already imported at this point. Report
+# their real ABI/kernel status in this same process so startup diagnostics add
+# no second PyTorch/CUDA initialization delay.
+try:
+    from scripts.runtime_preflight import main as _runtime_preflight
+    _runtime_preflight()
+except Exception as _runtime_preflight_error:
+    print(f"[Runtime] Preflight skipped: {_runtime_preflight_error}")
+
 
 def apply_int8_kernel_setting(enabled: int, notify_disabled = False) -> bool:
     global enable_int8_kernels, verbose_level
@@ -209,22 +218,10 @@ def format_time(seconds):
         return f"{seconds:.1f}s"
 
 def format_generation_time(seconds):
-    """Format generation time showing raw seconds with human-readable time in parentheses when over 60s"""
-    raw_seconds = f"{int(seconds)}s"
-    
-    if seconds < 60:
-        return raw_seconds
-    
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    
-    if hours > 0:
-        human_readable = f"{hours}h {minutes}m {secs}s"
-    else:
-        human_readable = f"{minutes}m {secs}s"
-    
-    return f"{raw_seconds} ({human_readable})"
+    """Format gallery generation time consistently as minutes + seconds."""
+    total_seconds = max(0, int(round(float(seconds))))
+    minutes, secs = divmod(total_seconds, 60)
+    return f"{minutes}m {secs}s"
 
 def pil_to_base64_uri(pil_image, format="png", quality=75):
     if pil_image is None:
@@ -4247,6 +4244,31 @@ def load_models(model_type, override_profile = -1, output_type="video", **model_
         transformer_dtype = torch.bfloat16 if "bf16" in model_filename or "BF16" in model_filename else transformer_dtype
         transformer_dtype = torch.float16 if "fp16" in model_filename or"FP16" in model_filename else transformer_dtype
     perc_reserved_mem_max = args.perc_reserved_mem_max
+    # A Full H3 working set is just larger than MMGP's implicit 40% reserved
+    # RAM ceiling on a 128 GB workstation. That tiny shortfall forces partial
+    # pinning and can make a 5090 dramatically slower than a 4090. Raise only
+    # the ceiling (not an eager allocation) when the machine has enough RAM;
+    # explicit CLI values and lower-RAM systems remain untouched.
+    try:
+        import psutil
+        from services.perf_recommend import recommend_h3_reserved_ram_fraction
+
+        total_ram_gb = psutil.virtual_memory().total / (1024 ** 3)
+        recommended_reserved = recommend_h3_reserved_ram_fraction(
+            perc_reserved_mem_max,
+            total_ram_gb,
+            full_checkpoint=bool((model_def or {}).get("minimax_h3_full_checkpoint", False)),
+        )
+        if recommended_reserved != perc_reserved_mem_max:
+            perc_reserved_mem_max = recommended_reserved
+            ceiling_gb = total_ram_gb * perc_reserved_mem_max
+            print(
+                f"[MiniMax H3 Memory] Full checkpoint reserved-RAM ceiling: "
+                f"{perc_reserved_mem_max:.1%} ({ceiling_gb:.1f} GB of "
+                f"{total_ram_gb:.1f} GB)."
+            )
+    except Exception as exc:
+        print(f"[MiniMax H3 Memory] Automatic reserved-RAM sizing skipped: {exc}")
     vram_safety_coefficient = args.vram_safety_coefficient 
     model_file_list = [model_filename]
     model_type_list = [model_type]
@@ -7269,11 +7291,19 @@ def generate_video(
     # preparation policy. Other model runtimes ignore these kwargs.
     minimax_h3_references=None,
     minimax_h3_reference_detail="match",
+    minimax_h3_multi_window=False,
+    minimax_h3_reference_sequence=False,
+    minimax_h3_sequence_prompt_mode="auto",
+    minimax_h3_sequence_continuity=True,
+    minimax_h3_sequence_clip_frames=None,
+    minimax_h3_sequence_memory_override=False,
     minimax_h3_text_encoder="nvfp4_awq",
-    # Complete Context-IR prompts compiled by Maestro's H3 sliding-window
-    # planner. Kept as a real list so semantic newlines inside each prompt are
-    # never mistaken for prompt boundaries.
+    # Exact per-pass prompts from Maestro's H3 planner or manual sequence UI.
+    # Kept as a real list so semantic newlines inside an automatic Context-IR
+    # prompt are never mistaken for prompt boundaries.
     h3_window_prompts=None,
+    h3_window_plan_signature=None,
+    h3_window_plan=None,
 ):
 
 
@@ -7639,7 +7669,7 @@ def generate_video(
         else:
             print(
                 f"[MiniMax H3] Using {len(prompts)} explicit "
-                "window-local Context-IR prompts."
+                "window-local prompts."
             )
     elif multi_prompts_gen_type == 2:
         prompts = [prompt]
@@ -7701,16 +7731,69 @@ def generate_video(
         pinnedLora = loaded_profile !=5  # and transformer_loras_filenames == None False # # # 
         preprocess_target = trans_lora if trans_lora is not None else trans
         split_linear_modules_map = getattr(preprocess_target, "split_linear_modules_map", None)
-        offload.load_loras_into_model(
-            trans_lora,
-            loras_selected,
-            loras_list_mult_choices_nums,
-            activate_all_loras=True,
-            preprocess_sd=get_loras_preprocessor(preprocess_target, base_model_type),
-            pinnedLora=pinnedLora,
-            maxReservedLoras=server_config.get("max_reserved_loras", -1),
-            split_linear_modules_map=split_linear_modules_map,
+        from services.runtime_compat import (
+            is_mmgp_lora_pinning_assertion,
+            recommend_h3_lora_pin_budget_mb,
         )
+
+        is_h3_full_checkpoint = bool(
+            (model_def or {}).get("minimax_h3_full_checkpoint", False)
+        )
+        configured_lora_pin_budget = server_config.get("max_reserved_loras", -1)
+        lora_pin_budget = recommend_h3_lora_pin_budget_mb(
+            configured_lora_pin_budget,
+            full_checkpoint=is_h3_full_checkpoint,
+            platform_name=os.name,
+        )
+        pin_loaded_loras = pinnedLora and lora_pin_budget != 0
+        if pinnedLora and is_h3_full_checkpoint and lora_pin_budget == 0:
+            print(
+                "[MiniMax H3 Memory] Loading Full-checkpoint LoRA weights "
+                "from regular system RAM so the 33B pipeline retains its "
+                "page-locked-memory budget."
+            )
+
+        lora_load_kwargs = {
+            "activate_all_loras": True,
+            "preprocess_sd": get_loras_preprocessor(preprocess_target, base_model_type),
+            "pinnedLora": pin_loaded_loras,
+            "maxReservedLoras": lora_pin_budget,
+            "split_linear_modules_map": split_linear_modules_map,
+        }
+        retry_loras_unpinned = False
+        try:
+            offload.load_loras_into_model(
+                trans_lora,
+                loras_selected,
+                loras_list_mult_choices_nums,
+                **lora_load_kwargs,
+            )
+        except AssertionError as exc:
+            if not (
+                pin_loaded_loras
+                and is_mmgp_lora_pinning_assertion(exc)
+            ):
+                raise
+            retry_loras_unpinned = True
+
+        if retry_loras_unpinned:
+            # MMGP 3.7.6 can exhaust the host's page-locked pool after Full
+            # H3 is loaded, then assert while attempting its documented
+            # slower fallback.  Let the failed call unwind before retrying so
+            # any partially allocated pinned blocks can be reclaimed.
+            print(
+                "[MiniMax H3 Memory] Reserved RAM could not pin the selected "
+                "LoRA(s); retrying from regular system RAM."
+            )
+            gc.collect()
+            lora_load_kwargs["pinnedLora"] = False
+            lora_load_kwargs["maxReservedLoras"] = 0
+            offload.load_loras_into_model(
+                trans_lora,
+                loras_selected,
+                loras_list_mult_choices_nums,
+                **lora_load_kwargs,
+            )
         errors = trans_lora._loras_errors
         if len(errors) > 0:
             error_files = [msg for _ ,  msg  in errors]
@@ -8226,6 +8309,7 @@ def generate_video(
             gen["window_no"] = window_no
             return_latent_slice = None 
             frames_relative_positions_list = []
+            frames_to_inject_for_model = None
             if reuse_frames > 0:                
                 return_latent_slice = slice(- max(1, (reuse_frames + discard_last_frames ) // latent_size) , None if discard_last_frames == 0 else -(discard_last_frames // latent_size) )
             refresh_preview  = {"image_guide" : image_guide, "image_mask" : image_mask} if image_mode >= 1 else {}
@@ -8443,6 +8527,15 @@ def generate_video(
                 # Build a filtered ref images list matching the positions for this window
                 _window_ref_indices = [p[1] for p in _window_pairs]
                 if image_refs is not None and len(_window_ref_indices) > 0:
+                    # Keep model-native injections paired with their exact
+                    # positions. The generic reference path below may resize
+                    # or replace src_ref_images, so it cannot be the payload
+                    # for H3's frame anchors.
+                    frames_to_inject_for_model = [
+                        image_refs[idx]
+                        for idx in _window_ref_indices
+                        if idx < len(image_refs)
+                    ]
                     src_ref_images = [image_refs[idx] for idx in _window_ref_indices if idx < len(image_refs)]
                 print(f"  [FrameInject] Window {window_no}: range=[{window_start_frame},{window_end}), positions={frames_relative_positions_list}, ref_indices={_window_ref_indices}")
 
@@ -8632,7 +8725,8 @@ def generate_video(
                                                                         None if dont_cat_preguide or fake_start_image and window_no==1 else pre_video_guide,
                                                                         image_size, current_video_length, latent_size,
                                                                         any_mask, any_guide_padding, guide_inpaint_color, 
-                                                                        keep_frames_parsed, frames_to_inject_parsed , outpainting_dims)
+                                                                        keep_frames_parsed, frames_to_inject_parsed , outpainting_dims,
+                                                                        frame_offset=model_def.get("frame_alignment_remainder", 1))
                 video_guide_processed = video_guide_processed2 = video_mask_processed = video_mask_processed2 = None
                 if len(src_videos) == 1:
                     src_video, src_video2, src_mask, src_mask2 = src_videos[0], None, src_masks[0], None 
@@ -8854,6 +8948,7 @@ def generate_video(
                     set_progress_status=set_progress_status,
                     loras_selected=loras_selected,
                     frames_relative_positions_list = frames_relative_positions_list,
+                    frames_to_inject = frames_to_inject_for_model,
                     voice_reference_waveform=voice_ref_waveform,
                     voice_reference_sample_rate=voice_ref_sr,
                     identity_guidance_scale=identity_guidance_scale,
@@ -9312,6 +9407,21 @@ def generate_video(
                     BGRA_frames = None
 
                 end_time = time.time()
+                generation_elapsed_seconds = max(
+                    0,
+                    int(round(end_time - start_time)),
+                )
+                # The API worker starts its own job timer before queue wait and
+                # model loading. Send WGP's narrower timer alongside the exact
+                # artifacts it produced so gallery sidecars can display real
+                # generation time without inheriting that outer delay.
+                send_cmd(
+                    "generation_time",
+                    {
+                        "seconds": generation_elapsed_seconds,
+                        "outputs": list(saved_artifacts),
+                    },
+                )
 
                 inputs.pop("send_cmd")
                 inputs.pop("task")
@@ -9336,7 +9446,8 @@ def generate_video(
                 configs["prompt"] = "\n".join(original_prompts)
                 if prompt_enhancer_image_caption_model != None and prompt_enhancer !=None and len(prompt_enhancer)>0 and enhancer_mode != 1:
                     configs["enhanced_prompt"] = "\n".join(prompts)
-                configs["generation_time"] = round(end_time-start_time)
+                configs["generation_time"] = generation_elapsed_seconds
+                configs["generation_time_basis"] = "active"
                 configs["creation_date"] = datetime.fromtimestamp(end_time).isoformat(timespec="seconds")
                 configs["creation_timestamp"] = int(end_time)
                 # if sample_is_image: configs["is_image"] = True

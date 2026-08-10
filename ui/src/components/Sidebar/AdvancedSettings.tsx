@@ -127,17 +127,12 @@ export function useAdvancedActiveItems(): string[] {
   if (params.seed !== -1) items.push(`Seed ${params.seed}`)
   if (params.minimax_h3_turbo_mode) items.push('H3 Turbo')
   if (
-    modelOptions?.omni_reference === true
-    && params.minimax_h3_reference_sequence === true
+    String(modelOptions?.architecture || '').startsWith('minimax_h3')
     && slidingWindowLocked
-  ) items.push('H3 Omni clip override')
+  ) items.push('H3 window override')
   if (params.skip_steps_cache_type === 'first_block') {
     items.push(`H3 cache ${params.skip_steps_multiplier ?? 0.08}`)
   }
-  if (
-    modelOptions?.sliding_window_auto_prompt_pacing === true
-    && params.minimax_h3_window_storyboard === false
-  ) items.push('H3 window planning off')
   if (
     (
       modelOptions?.sliding_window_auto_prompt_pacing === true
@@ -239,6 +234,7 @@ export function AdvancedSettings() {
     params.minimax_h3_turbo_mode === true
     && modelOptions?.minimax_h3_turbo != null
   )
+  const isH3 = String(modelOptions?.architecture || '').startsWith('minimax_h3')
   const showInferenceSteps = (
     !isAudioOnly
     && (isScailEdit || !modelOptions?.lock_inference_steps)
@@ -424,6 +420,7 @@ export function AdvancedSettings() {
               {(isVideo || (isAvatar && !isScailEdit))
                 && (
                   modelOptions?.sliding_window
+                  || isH3
                   || (
                     isVideo
                     && modelOptions?.omni_reference === true
@@ -432,22 +429,15 @@ export function AdvancedSettings() {
                 )
                 && <WindowSettings />}
 
-              {isVideo && modelOptions?.sliding_window_auto_prompt_pacing === true && (
+              {isVideo
+                && modelOptions?.sliding_window_auto_prompt_pacing === true
+                && (
+                  modelOptions?.omni_reference === true
+                    ? params.minimax_h3_reference_sequence === true
+                    : params.minimax_h3_multi_window === true
+                )
+                && (
                 <div className="space-y-2">
-                  <label className="flex items-center gap-2 cursor-pointer group">
-                    <input
-                      type="checkbox"
-                      checked={params.minimax_h3_window_storyboard !== false}
-                      onChange={e => setParam('minimax_h3_window_storyboard', e.target.checked)}
-                      className="accent-accent-blue"
-                    />
-                    <span className="text-[11px] text-text-muted uppercase tracking-wider group-hover:text-text-secondary transition-colors">
-                      Plan Prompt Across Windows
-                    </span>
-                  </label>
-                  <p className="text-[9px] text-text-muted">
-                    H3 expands one idea into complete window-local visual and audio prompts. Enhance enables this automatically; disable afterward only to supply manual line-per-window prompts.
-                  </p>
                   <div>
                     <label className="text-[10px] text-text-muted block mb-1">
                       Camera Coverage
@@ -1064,7 +1054,7 @@ export function AdvancedSettings() {
               {/* Dedicated SCAIL edit endpoints own their source video,
                   edited/reference frames, masks, and process selection. */}
               {(modelOptions?.guide_preprocessing || modelOptions?.guide_custom_choices) &&
-                !isScailEdit && (
+                !isScailEdit && !modelOptions?.minimax_h3_media_sources && (
                 <ControlVideoSection />
               )}
 

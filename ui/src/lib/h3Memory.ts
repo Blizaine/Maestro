@@ -8,6 +8,11 @@ export type H3MemoryRecommendation = {
   fallbackResolution?: string
 }
 
+/** Stable key for a user-saved H3 native-pass override. */
+export function h3WindowOverrideKey(modelType: string, resolution: string): string {
+  return `${String(modelType || '').trim()}::${String(resolution || '').trim().toLowerCase()}`
+}
+
 export function recommendedH3PassProfile(
   policy: SlidingWindowMemoryPolicy | null | undefined,
   resolution: string,
@@ -120,4 +125,49 @@ export function effectiveH3OmniSequenceFrames({
       : recommendation.frames,
     recommendation,
   }
+}
+
+/**
+ * Return the number of Ref2VA passes needed for an Omni sequence.
+ *
+ * Native continuation owns an overlap prefix on every pass after the first,
+ * so each later window advances by `windowFrames - overlapFrames`. Hard-cut
+ * sequences are independent clips and therefore advance by the full pass.
+ * Keep this small helper shared by the duration UI, prompt editor, and submit
+ * validation so "3 windows" always means the same thing everywhere.
+ */
+export function h3OmniSequenceWindowCount({
+  totalFrames,
+  windowFrames,
+  overlapFrames,
+  nativeContinuation,
+}: {
+  totalFrames: number
+  windowFrames: number
+  overlapFrames: number
+  nativeContinuation: boolean
+}): number {
+  const total = Math.max(1, Math.round(totalFrames))
+  const window = Math.max(1, Math.round(windowFrames))
+  if (total <= window) return 1
+  if (!nativeContinuation) return Math.max(1, Math.ceil(total / window))
+  const overlap = Math.max(0, Math.min(window - 1, Math.round(overlapFrames)))
+  const stride = Math.max(1, window - overlap)
+  return 1 + Math.ceil((total - window) / stride)
+}
+
+/** Treat H3's UI-rounded 14.4s endpoint as the native 345-frame pass. */
+export function h3TimelineFrames(
+  durationSeconds: number,
+  fps: number,
+  nativeMaximumFrames?: number | null,
+): number {
+  const raw = Math.max(1, Math.round(durationSeconds * Math.max(1, fps)))
+  if (
+    nativeMaximumFrames != null
+    && raw <= Math.max(1, Math.round(nativeMaximumFrames)) + 1
+  ) {
+    return Math.min(Math.max(1, Math.round(nativeMaximumFrames)), raw)
+  }
+  return raw
 }

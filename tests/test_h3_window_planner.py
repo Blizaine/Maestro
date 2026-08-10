@@ -22,9 +22,14 @@ from services.h3_window_planner import (  # noqa: E402
     compile_h3_window_prompts,
     compute_h3_window_boundaries,
     h3_window_plan_signature,
+    normalize_h3_injected_keyframes,
     plan_h3_sliding_windows,
 )
-from services.h3_story_ledger import extract_source_events  # noqa: E402
+from services.h3_story_ledger import (  # noqa: E402
+    extract_source_events,
+    plan_h3_story_segments,
+    recover_h3_plain_story,
+)
 
 
 def _staged_ledger(
@@ -117,6 +122,81 @@ def _staged_segment(
 
 
 class H3WindowPlannerTests(unittest.TestCase):
+    def test_context_ir_is_unwrapped_before_sequence_planning(self):
+        recovered = recover_h3_plain_story(
+            "subject_definitions: <Picture 1> defines Superman.\n\n"
+            "summary: [reference generation] Superman crosses the city, then confronts Thanos.\n\n"
+            "retention_analysis: <Picture 1>: reference\n\n"
+            "detailed_description: Superman (S1) faces Thanos and speaks: "
+            "<d>[English] Enough.</d>\n\n"
+            "overall_soundscape: Wind.\n\n"
+            "non_diegetic_music: N/A"
+        )
+        self.assertEqual(
+            recovered,
+            'Superman crosses the city, then confronts Thanos. Superman says "Enough.".',
+        )
+        self.assertNotIn("Picture 1", recovered)
+
+    def test_source_event_parser_preserves_user_line_breaks_and_camera_cuts(self):
+        events = extract_source_events(
+            "Superman fights Thanos\n"
+            "Superman accelerates through the ruined city\n"
+            "Cut to Superman striking Thanos at street level"
+        )
+        self.assertEqual(len(events), 3)
+        self.assertEqual(
+            [item["text"] for item in events],
+            [
+                "Superman fights Thanos",
+                "Superman accelerates through the ruined city",
+                "Cut to Superman striking Thanos at street level",
+            ],
+        )
+        repeated_then = extract_source_events(
+            "Superman crosses the city Then then cut to Superman striking Thanos"
+        )
+        self.assertEqual(
+            [item["text"] for item in repeated_then],
+            ["Superman crosses the city", "cut to Superman striking Thanos"],
+        )
+
+    @patch("services.llm_service.generate", side_effect=RuntimeError("offline"))
+    def test_story_fallback_uses_concrete_unique_handoff_states(self, _generate):
+        result = plan_h3_story_segments(
+            "Superman crosses the ruined city\nSuperman strikes Thanos",
+            segment_durations=[10.0, 10.0, 10.0],
+            mode="reference_sequence_continuation",
+            camera_coverage="multi_shot",
+        )
+        descriptions = [item["description"] for item in result["ledger"]["beats"]]
+        closing_states = [item["closing_state"] for item in result["segments"]]
+        self.assertEqual(len(descriptions), len(set(descriptions)))
+        self.assertNotIn(
+            "concrete continuation state",
+            " ".join(closing_states).casefold(),
+        )
+        self.assertIn("Superman strikes Thanos", closing_states[-1])
+
+    def test_native_reference_segment_instruction_rejects_keyframe_restaging(self):
+        calls = []
+
+        def offline_generate(**kwargs):
+            calls.append(kwargs)
+            raise RuntimeError("offline")
+
+        plan_h3_story_segments(
+            "Superman crosses the city. Superman strikes Thanos.",
+            segment_durations=[10.0, 10.0],
+            mode="reference_sequence_continuation",
+            camera_coverage="multi_shot",
+            llm_generate=offline_generate,
+        )
+        first_segment_prompt = calls[1]["prompt"]
+        self.assertIn("native Ref2VA motion-and-audio overlap continuation", first_segment_prompt)
+        self.assertIn("not opening keyframes", first_segment_prompt)
+        self.assertIn("without restarting, restaging, or replaying", first_segment_prompt)
+
     def test_compaction_keeps_complete_sentences_or_clauses(self):
         value = (
             "Clark walks along Smallville's main street in his familiar everyday clothes. "
@@ -242,6 +322,57 @@ class H3WindowPlannerTests(unittest.TestCase):
         self.assertIn("<Picture 1>", compiled[-1]["prompt"])
         self.assertIn("<Picture 2>", compiled[-1]["prompt"])
 
+    def test_injected_keyframes_resolve_on_exact_committed_window_spans(self):
+        spans = compute_h3_window_boundaries(
+            999,
+            345,
+            fps=24,
+            overlap_frames=18,
+        )
+        resolved = normalize_h3_injected_keyframes(
+            [
+                {"path": "a.png", "position": "W1:50"},
+                {"path": "b.png", "position": "W2:0"},
+                {"path": "c.png", "position": "W2:100"},
+                {"path": "d.png", "position": "W99:50"},
+            ],
+            spans,
+            fps=24,
+        )
+        self.assertEqual(
+            [item["absolute_frame"] for item in resolved],
+            [172, 345, 671, 835],
+        )
+        self.assertEqual([item["window"] for item in resolved], [1, 2, 2, 3])
+        self.assertEqual(resolved[1]["local_frame"], 0)
+
+    def test_compiler_numbers_injected_pictures_after_local_boundaries(self):
+        spans = compute_h3_window_boundaries(999, 345, fps=24, overlap_frames=18)
+        plan = _fallback_plan("A traveler crosses three rooms", 3)
+        resolved = normalize_h3_injected_keyframes(
+            [
+                {"path": "opening-detail.png", "position": "W1:50"},
+                {"path": "middle-door.png", "position": "W2:50"},
+                {"path": "final-pose.png", "position": "W3:50"},
+            ],
+            spans,
+            fps=24,
+        )
+        compiled = compile_h3_window_prompts(
+            plan,
+            spans,
+            has_start_image=True,
+            has_end_image=True,
+            injected_keyframes=resolved,
+        )
+        # First pass: start is Picture 1, injection is Picture 2.
+        self.assertIn("<Picture 2> is fully referenced as an exact injected frame", compiled[0]["prompt"])
+        # Middle pass: continuation boundary is Picture 1, injection is Picture 2.
+        self.assertIn("<Picture 2> is fully referenced as an exact injected frame", compiled[1]["prompt"])
+        # Final pass: boundary Picture 1 + end Picture 2 + injection Picture 3.
+        self.assertIn("<Picture 3> is fully referenced as an exact injected frame", compiled[2]["prompt"])
+        self.assertEqual(compiled[2]["injected_keyframes"][0]["picture_index"], 3)
+
     @patch("services.llm_service.generate")
     def test_planner_compiles_a_valid_llm_storyboard(self, generate):
         source_prompt = "A three-beat continuous action"
@@ -315,6 +446,13 @@ class H3WindowPlannerTests(unittest.TestCase):
         self.assertEqual(base, h3_window_plan_signature(**common))
         self.assertNotEqual(base, h3_window_plan_signature(**{**common, "window_frames": 175}))
         self.assertNotEqual(base, h3_window_plan_signature(**{**common, "has_start_image": True}))
+        self.assertNotEqual(
+            base,
+            h3_window_plan_signature(
+                **common,
+                injected_keyframes=[{"path": "anchor.png", "position": "W2:50"}],
+            ),
+        )
 
     def test_fallback_holds_an_obligation_out_of_the_opening_window(self):
         plan = _fallback_plan(
@@ -514,6 +652,7 @@ class H3WindowPlannerTests(unittest.TestCase):
         launch = (APP / "launch.py").read_text(encoding="utf-8")
         store = (ROOT / "ui" / "src" / "stores" / "useStore.ts").read_text(encoding="utf-8")
         advanced = (ROOT / "ui" / "src" / "components" / "Sidebar" / "AdvancedSettings.tsx").read_text(encoding="utf-8")
+        multi_window = (ROOT / "ui" / "src" / "components" / "Sidebar" / "H3MultiWindowControls.tsx").read_text(encoding="utf-8")
         prompt_input = (ROOT / "ui" / "src" / "components" / "Sidebar" / "PromptInput.tsx").read_text(encoding="utf-8")
         main_content = (ROOT / "ui" / "src" / "components" / "MainContent" / "MainContent.tsx").read_text(encoding="utf-8")
         guide = APP / "services" / "llm_guides" / "enhance" / "minimax_h3_sliding_windows.md"
@@ -522,7 +661,8 @@ class H3WindowPlannerTests(unittest.TestCase):
         self.assertIn('/api/v1/llm/plan-h3-windows', launch)
         self.assertIn("h3_window_plan_signature", launch)
         self.assertIn("api.planH3Windows", store)
-        self.assertIn("Plan Prompt Across Windows", advanced)
+        self.assertNotIn("Plan Prompt Across Windows", advanced)
+        self.assertIn("Window prompts", multi_window)
         self.assertIn("Exact H3 prompts", prompt_input)
         self.assertIn("H3WindowPromptTextarea", prompt_input)
         self.assertIn("textarea.scrollHeight", prompt_input)

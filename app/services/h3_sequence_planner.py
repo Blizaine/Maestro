@@ -1,9 +1,9 @@
 """Reference-driven multi-clip planning for MiniMax H3 Omni.
 
-Ref2VA has no native sliding-window contract. Maestro therefore plans bounded
-native clips, runs each with the same canonical references, and joins them as
-an editorial sequence. Generated continuity pictures are injected later by
-the queue worker and never replace the user's identity references.
+Ref2VA can run either as native continuation windows or as independent
+editorial clips. Native continuation carries recent motion and synchronized
+audio while repeating the same canonical references; hard-cut mode retains
+Maestro's independent-clip path.
 """
 
 from __future__ import annotations
@@ -14,7 +14,11 @@ import math
 import re
 from typing import Any
 
-from services.h3_story_ledger import H3_STORY_LEDGER_VERSION, plan_h3_story_segments
+from services.h3_story_ledger import (
+    H3_STORY_LEDGER_VERSION,
+    plan_h3_story_segments,
+    recover_h3_plain_story,
+)
 from services.h3_window_planner import (
     _UNREQUESTED_SPECTACLE_PATTERNS,
     _compact,
@@ -23,11 +27,56 @@ from services.h3_window_planner import (
     _narrative_dialogue_expected,
     _normalized_window_shots,
     _shot_prompt_sentence,
+    compute_h3_window_boundaries,
     normalize_h3_camera_coverage,
 )
 
 
-_H3_SEQUENCE_PLANNER_VERSION = 2 + H3_STORY_LEDGER_VERSION
+_H3_SEQUENCE_PLANNER_VERSION = 3 + H3_STORY_LEDGER_VERSION
+_H3_CLIP_BOUNDARY = "\n---CLIP_BOUNDARY---\n"
+
+
+def resolve_h3_sequence_source_prompt(
+    current_prompt: str,
+    cached_plan: dict[str, Any] | None,
+    cached_prompts: list[str] | None,
+) -> str:
+    """Recover the user's story prompt from a serialized H3 sequence.
+
+    Generation sidecars retain the compiled per-window Context-IR so a run is
+    reproducible.  In hard-cut mode that compiled text also becomes the task's
+    runtime ``prompt``.  If settings are reloaded and the sequence geometry
+    changes, feeding that runtime prompt back to the planner makes reference
+    declarations look like story actions.  Restore ``source_prompt`` only
+    when the current value is demonstrably the cached runtime serialization;
+    a genuinely edited user prompt must always win.
+    """
+
+    current = str(current_prompt or "").replace("\r\n", "\n").replace(
+        "\r", "\n"
+    ).strip()
+    if not isinstance(cached_plan, dict):
+        return current
+    source = str(cached_plan.get("source_prompt") or "").replace(
+        "\r\n", "\n"
+    ).replace("\r", "\n").strip()
+    if not source:
+        return current
+    if current == source:
+        return source
+    if not isinstance(cached_prompts, list):
+        return current
+    prompts = [
+        str(item).replace("\r\n", "\n").replace("\r", "\n").strip()
+        for item in cached_prompts
+        if isinstance(item, str) and item.strip()
+    ]
+    if not prompts:
+        return current
+    serialized = _H3_CLIP_BOUNDARY.join(prompts)
+    if current == serialized or (len(prompts) == 1 and current == prompts[0]):
+        return source
+    return current
 
 
 def compute_h3_sequence_clips(
@@ -81,6 +130,33 @@ def compute_h3_sequence_clips(
     return clips, max(0, cursor - total)
 
 
+def compute_h3_native_sequence_windows(
+    total_frames: int,
+    *,
+    window_frames: int = 345,
+    overlap_frames: int = 18,
+    fps: float = 24.0,
+) -> list[dict[str, Any]]:
+    """Describe the committed timeline owned by native Ref2VA passes."""
+
+    boundaries = compute_h3_window_boundaries(
+        total_frames,
+        window_frames,
+        fps=fps,
+        overlap_frames=overlap_frames,
+        discard_frames=0,
+    )
+    clips: list[dict[str, Any]] = []
+    for item in boundaries:
+        frames = max(1, int(item["end_frame"]) - int(item["start_frame"]))
+        clips.append({
+            **item,
+            "frames": frames,
+            "duration_seconds": round(frames / max(1.0, float(fps)), 3),
+        })
+    return clips
+
+
 def h3_sequence_plan_signature(
     prompt: str,
     *,
@@ -93,6 +169,8 @@ def h3_sequence_plan_signature(
     fps: float,
     references: list[dict[str, Any]],
     camera_coverage: str = "auto",
+    overlap_frames: int = 0,
+    native_continuation: bool = False,
 ) -> str:
     reference_contract = [
         {
@@ -119,9 +197,136 @@ def h3_sequence_plan_signature(
         "fps": round(float(fps), 6),
         "references": reference_contract,
         "camera_coverage": normalize_h3_camera_coverage(camera_coverage),
+        "overlap_frames": int(overlap_frames),
+        "native_continuation": bool(native_continuation),
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:24]
+
+
+def parse_h3_manual_sequence_prompts(
+    prompt: str,
+    *,
+    expected_count: int,
+    native_continuation: bool,
+) -> list[str]:
+    """Parse and strictly validate one user-authored prompt per H3 pass."""
+
+    lines = [
+        line.strip()
+        for line in str(prompt or "").replace("\r\n", "\n").replace(
+            "\r", "\n"
+        ).split("\n")
+        if line.strip()
+    ]
+    expected = max(1, int(expected_count))
+    if len(lines) != expected:
+        unit = "window" if native_continuation else "clip"
+        raise ValueError(
+            "Manual MiniMax H3 Omni sequence needs exactly "
+            f"{expected} non-empty prompt "
+            f"{'line' if expected == 1 else 'lines'} "
+            f"({unit} 1 through {unit} {expected}); received {len(lines)}. "
+            "Add or remove prompt lines, or adjust Duration / Sequence Window "
+            "Length."
+        )
+    return lines
+
+
+def build_manual_h3_reference_sequence_plan(
+    prompt: str,
+    *,
+    model_type: str,
+    resolution: str,
+    total_frames: int,
+    references: list[dict[str, Any]],
+    min_clip_frames: int = 124,
+    max_clip_frames: int = 345,
+    frame_step: int = 17,
+    fps: float = 24.0,
+    camera_coverage: str = "auto",
+    overlap_frames: int = 0,
+    native_continuation: bool = False,
+) -> dict[str, Any]:
+    """Build a reproducible Ref2VA plan without invoking an LLM.
+
+    Each non-empty source line is passed to the matching native continuation
+    window (or independent hard-cut clip) exactly as authored.
+    """
+
+    if native_continuation:
+        clips = compute_h3_native_sequence_windows(
+            total_frames,
+            window_frames=max_clip_frames,
+            overlap_frames=overlap_frames,
+            fps=fps,
+        )
+        trim_tail_frames = 0
+    else:
+        clips, trim_tail_frames = compute_h3_sequence_clips(
+            total_frames,
+            min_clip_frames=min_clip_frames,
+            max_clip_frames=max_clip_frames,
+            frame_step=frame_step,
+            fps=fps,
+        )
+
+    prompts = parse_h3_manual_sequence_prompts(
+        prompt,
+        expected_count=len(clips),
+        native_continuation=native_continuation,
+    )
+    source_prompt = "\n".join(prompts)
+    camera_coverage = normalize_h3_camera_coverage(camera_coverage)
+    signature = h3_sequence_plan_signature(
+        source_prompt,
+        model_type=model_type,
+        resolution=resolution,
+        total_frames=total_frames,
+        min_clip_frames=min_clip_frames,
+        max_clip_frames=max_clip_frames,
+        frame_step=frame_step,
+        fps=fps,
+        references=references,
+        camera_coverage=camera_coverage,
+        overlap_frames=overlap_frames,
+        native_continuation=native_continuation,
+    )
+    label = "Window" if native_continuation else "Clip"
+    windows = [
+        {
+            **geometry,
+            "title": f"Manual {label} {geometry['index']}",
+            "opening_state": "",
+            "closing_state": "",
+            "coverage": "manual",
+            "pacing": "manual",
+            "shot_count": 0,
+            "prompt": window_prompt,
+        }
+        for geometry, window_prompt in zip(clips, prompts)
+    ]
+    return {
+        "source_prompt": source_prompt,
+        "signature": signature,
+        "planned_by": "manual",
+        "plan_kind": "reference_sequence",
+        "camera_coverage": camera_coverage,
+        "total_frames": int(total_frames),
+        "window_frames": int(max_clip_frames),
+        "window_count": len(windows),
+        "resolution": str(resolution or ""),
+        "model_type": str(model_type or ""),
+        "per_clip_frames": [int(item["frames"]) for item in clips],
+        "trim_tail_frames": int(trim_tail_frames),
+        "overlap_frames": int(overlap_frames),
+        "native_continuation": bool(native_continuation),
+        "subject_continuity": "",
+        "setting_continuity": "",
+        "story_ledger": None,
+        "windows": windows,
+        "window_prompts": prompts,
+    }
 
 
 def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]:
@@ -331,12 +536,70 @@ def compile_h3_reference_sequence_prompts(
     if not isinstance(planned_clips, list) or len(planned_clips) != len(clips):
         raise ValueError("H3 Omni sequence plan does not match its clip geometry.")
 
-    subjects = _compact(plan.get("subject_definitions") or reference_relationships, 700)
-    if reference_relationships and reference_relationships not in subjects:
-        subjects = f"{subjects}. {reference_relationships}" if subjects else reference_relationships
-    retention = _compact(plan.get("retention_analysis") or default_retention, 600)
-    if default_retention and default_retention not in retention:
-        retention = f"{retention}; {default_retention}" if retention else default_retention
+    reference_slot_pattern = re.compile(
+        r"<(?:Picture|Video|Audio)\s+\d+>",
+        flags=re.IGNORECASE,
+    )
+
+    def dedupe_sentences(text: str) -> str:
+        clauses = re.split(r"(?<=[.!?])\s+", str(text or "").strip())
+        kept: list[str] = []
+        seen: set[str] = set()
+        for clause in clauses:
+            clause = clause.strip()
+            key = re.sub(r"[^a-z0-9<>]+", " ", clause.casefold()).strip()
+            if clause and key not in seen:
+                kept.append(clause)
+                seen.add(key)
+        return " ".join(kept)
+
+    # The model may echo Maestro's canonical Picture/Video/Audio contracts,
+    # sometimes twice and sometimes with subtly different wording. Treat
+    # those contracts as application-owned data: retain only the model's
+    # subject/voice identity mapping, then append the canonical relationships
+    # exactly once. This is structural rather than wording-based deduplication.
+    raw_subjects = str(plan.get("subject_definitions") or "").strip()
+    subject_identity_clauses: list[str] = []
+    for clause in re.split(r"(?<=[.!?])\s+", raw_subjects):
+        match = reference_slot_pattern.search(clause)
+        if match:
+            prefix = clause[:match.start()].strip(" ;,.-")
+            if prefix:
+                subject_identity_clauses.append(prefix + ".")
+            continue
+        if clause.strip():
+            subject_identity_clauses.append(clause.strip())
+    subjects = _compact(
+        dedupe_sentences(" ".join(
+            part for part in (
+                " ".join(subject_identity_clauses),
+                dedupe_sentences(reference_relationships),
+            ) if part
+        )),
+        1100,
+    )
+
+    # Reference retention is likewise owned by the manifest. Keep any
+    # non-reference analysis the planner supplied, then add each canonical
+    # slot contract once.
+    raw_plan_retention = str(plan.get("retention_analysis") or "").strip()
+    non_reference_retention = "; ".join(
+        clause.strip()
+        for clause in re.split(r"\s*;\s*", raw_plan_retention)
+        if clause.strip() and not reference_slot_pattern.search(clause)
+    )
+    raw_retention = "; ".join(
+        part for part in (non_reference_retention, str(default_retention or "").strip())
+        if part
+    )
+    retention_clauses: list[str] = []
+    seen_retention: set[str] = set()
+    for clause in re.split(r"\s*;\s*", raw_retention):
+        key = re.sub(r"[^a-z0-9<>]+", " ", clause.casefold()).strip()
+        if clause and key not in seen_retention:
+            retention_clauses.append(clause.strip())
+            seen_retention.add(key)
+    retention = _compact("; ".join(retention_clauses), 600)
     setting = _compact(plan.get("setting_continuity"), 260)
     style = _compact(plan.get("visual_style"), 220)
     ambient = _compact(plan.get("ambient_audio") or "Natural location ambience", 190)
@@ -465,17 +728,36 @@ def plan_h3_reference_sequence(
     camera_coverage: str = "auto",
     image_paths: list[str] | None = None,
     nsfw: bool = False,
+    overlap_frames: int = 0,
+    native_continuation: bool = False,
 ) -> dict[str, Any]:
-    """Plan independent H3 Omni clips that share canonical references."""
+    """Plan H3 Omni windows that share canonical references."""
+
+    raw_prompt = str(prompt or "").strip()
+    prompt = recover_h3_plain_story(raw_prompt)
+    if prompt != raw_prompt:
+        print(
+            "[MiniMax H3 Omni] Recovered the original story from an existing "
+            "single-clip Context-IR prompt before sequence planning."
+        )
 
     camera_coverage = normalize_h3_camera_coverage(camera_coverage)
-    clips, trim_tail_frames = compute_h3_sequence_clips(
-        total_frames,
-        min_clip_frames=min_clip_frames,
-        max_clip_frames=max_clip_frames,
-        frame_step=frame_step,
-        fps=fps,
-    )
+    if native_continuation:
+        clips = compute_h3_native_sequence_windows(
+            total_frames,
+            window_frames=max_clip_frames,
+            overlap_frames=overlap_frames,
+            fps=fps,
+        )
+        trim_tail_frames = 0
+    else:
+        clips, trim_tail_frames = compute_h3_sequence_clips(
+            total_frames,
+            min_clip_frames=min_clip_frames,
+            max_clip_frames=max_clip_frames,
+            frame_step=frame_step,
+            fps=fps,
+        )
     relationships, default_retention, task_types = _reference_context(references)
     signature = h3_sequence_plan_signature(
         prompt,
@@ -488,6 +770,8 @@ def plan_h3_reference_sequence(
         fps=fps,
         references=references,
         camera_coverage=camera_coverage,
+        overlap_frames=overlap_frames,
+        native_continuation=native_continuation,
     )
     if len(clips) <= 1:
         return {
@@ -501,6 +785,8 @@ def plan_h3_reference_sequence(
             "window_count": 1,
             "per_clip_frames": [clips[0]["frames"]],
             "trim_tail_frames": trim_tail_frames,
+            "overlap_frames": int(overlap_frames),
+            "native_continuation": bool(native_continuation),
             "windows": [],
             "window_prompts": [],
         }
@@ -512,11 +798,16 @@ def plan_h3_reference_sequence(
         staged = plan_h3_story_segments(
             prompt,
             segment_durations=[float(item["duration_seconds"]) for item in clips],
-            mode="reference_sequence",
-            camera_coverage=resolved_coverage,
-            reference_context=" ".join(
-                part for part in (relationships, default_retention) if part
+            mode=(
+                "reference_sequence_continuation"
+                if native_continuation
+                else "reference_sequence"
             ),
+            camera_coverage=resolved_coverage,
+            # Retention belongs in retention_analysis. Putting it into the
+            # subject field made every fallback prompt repeat the same
+            # fully_preserved/reference list twice.
+            reference_context=relationships,
             expect_dialogue=expect_dialogue,
             image_paths=image_paths,
             nsfw=nsfw,
@@ -576,6 +867,8 @@ def plan_h3_reference_sequence(
         "model_type": str(model_type or ""),
         "per_clip_frames": [int(item["frames"]) for item in clips],
         "trim_tail_frames": int(trim_tail_frames),
+        "overlap_frames": int(overlap_frames),
+        "native_continuation": bool(native_continuation),
         "subject_continuity": plan.get("subject_definitions", ""),
         "setting_continuity": plan.get("setting_continuity", ""),
         "story_ledger": story_ledger,

@@ -9,9 +9,14 @@ const VIDEO_RE = /\.(mp4|mov|mkv|webm|avi|m4v)$/i
 const AUDIO_RE = /\.(wav|mp3|flac|ogg|m4a|aac)$/i
 
 function mediaType(file: File): MiniMaxH3ReferenceType | null {
-  if (file.type.startsWith('image/') || IMAGE_RE.test(file.name)) return 'image'
-  if (file.type.startsWith('video/') || VIDEO_RE.test(file.name)) return 'video'
-  if (file.type.startsWith('audio/') || AUDIO_RE.test(file.name)) return 'audio'
+  // Prefer a recognized extension. Some iOS document providers expose M4A
+  // files with a generic or video/mp4 MIME type even though they are audio.
+  if (IMAGE_RE.test(file.name)) return 'image'
+  if (VIDEO_RE.test(file.name)) return 'video'
+  if (AUDIO_RE.test(file.name)) return 'audio'
+  if (file.type.startsWith('image/')) return 'image'
+  if (file.type.startsWith('video/')) return 'video'
+  if (file.type.startsWith('audio/')) return 'audio'
   return null
 }
 
@@ -106,6 +111,11 @@ export function OmniReferenceSection() {
 
   const attachAudio = async (referenceId: string, file: File | undefined) => {
     if (!file || uploading) return
+    const type = mediaType(file)
+    if (type !== 'audio' && type !== 'video') {
+      setError(`${file.name} is not a supported audio file or a video with an audio track.`)
+      return
+    }
     setUploading(true)
     setError('')
     try {
@@ -152,43 +162,6 @@ export function OmniReferenceSection() {
         <span className="text-[9px] text-text-muted">{references.length}/{limits.total}</span>
       </div>
 
-      <div className="rounded-lg border border-border bg-bg-tertiary/50 px-2.5 py-2 space-y-1.5">
-        <label className="flex items-center gap-2 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={params.minimax_h3_reference_sequence === true}
-            onChange={event => setParam('minimax_h3_reference_sequence', event.target.checked)}
-            className="accent-accent-blue"
-          />
-          <span className="text-[10px] text-text-secondary">Reference Sequence</span>
-          <span className="text-[8px] text-amber-300/90 border border-amber-400/30 rounded px-1 py-0.5">
-            Experimental
-          </span>
-          <span
-            title="Extends the Duration control beyond one native Omni clip. Maestro plans independent editorial clips, repeats your canonical references, and joins the results."
-            className="text-text-muted cursor-help"
-          >
-            <Info size={11} />
-          </span>
-        </label>
-        {params.minimax_h3_reference_sequence === true && (
-          <label className="flex items-start gap-2 text-[9px] text-text-muted cursor-pointer">
-            <input
-              type="checkbox"
-              checked={params.minimax_h3_sequence_continuity !== false}
-              onChange={event => setParam('minimax_h3_sequence_continuity', event.target.checked)}
-              className="accent-accent-blue mt-0.5"
-            />
-            <span>
-              Carry scene continuity between clips
-              <span className="block text-[8px] mt-0.5">
-                Canonical references stay authoritative; generated frames guide only scene look and blocking.
-              </span>
-            </span>
-          </label>
-        )}
-      </div>
-
       <div
         className="rounded-lg border border-dashed border-border hover:border-border-light px-3 py-2.5 flex items-center justify-center gap-2 cursor-pointer transition-colors"
         onClick={() => inputRef.current?.click()}
@@ -200,10 +173,12 @@ export function OmniReferenceSection() {
       >
         {uploading ? <Loader2 size={14} className="animate-spin text-accent-blue" /> : <Plus size={14} className="text-text-muted" />}
         <span className="text-[10px] text-text-secondary">{uploading ? 'Uploading references…' : 'Add images, videos, or audio'}</span>
+        {/* Do not add a mixed-media `accept` filter here. iOS/WebKit can
+            grey out valid audio files when audio, image, and video types are
+            combined. Maestro validates the selected files in addFiles(). */}
         <input
           ref={inputRef}
           type="file"
-          accept="image/*,video/*,audio/*,.mkv,.m4v,.flac,.m4a,.aac"
           multiple
           className="hidden"
           onChange={event => void addFiles(Array.from(event.target.files ?? []))}
@@ -257,21 +232,22 @@ export function OmniReferenceSection() {
                     onChange={event => patchReference(index, {
                       audio_intent: event.target.value as MiniMaxH3AudioIntent,
                     })}
-                    title="Voice reference conditions a new voice without copying the recording. Drive/reuse follows the recording's audible timeline. Style reference borrows only musical or sound character."
+                    title="Voice reference is reused for identity in every clip. Music/performance timeline advances through the recording across sequence clips. Style-only advances through long references but borrows character rather than exact audio or timing."
                     className="w-full bg-bg-primary border border-border rounded px-2 py-1 text-[10px] text-text-secondary focus:outline-none focus:border-accent-blue"
                   >
                     <option value="voice">Voice reference</option>
-                    <option value="drive">Drive / reuse audio</option>
-                    <option value="style">Sound / music style</option>
+                    <option value="drive">Music / performance timeline</option>
+                    <option value="style">Music / sound style only</option>
                   </select>
                 )}
                 {reference.type === 'video' && (
                   <div className="flex items-center gap-1.5 text-[9px] text-text-secondary">
                     <label className="cursor-pointer hover:text-text-primary">
                       {reference.audio_path ? 'Replace audio' : 'Attach audio'}
+                      {/* iOS has also shipped audio-only picker regressions.
+                          Browse freely, then validate in attachAudio(). */}
                       <input
                         type="file"
-                        accept="audio/*,.flac,.m4a,.aac"
                         className="hidden"
                         onChange={event => {
                           void attachAudio(reference.id, event.target.files?.[0])

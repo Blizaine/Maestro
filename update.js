@@ -1,5 +1,11 @@
-module.exports = {
-  run: [{
+const { runtimeProfile } = require("./launcher_profile")
+
+module.exports = async (kernel) => {
+  const runtime = runtimeProfile(kernel)
+  const alreadyCurrentAndReady =
+    `{{/already up[- ]to[- ]date/i.test(input.stdout) && exists('${runtime.marker}') ? 'uptodate' : 'build'}}`
+  return {
+    run: [{
     // Pull the latest launcher + app code (single monorepo, so this one
     // pull covers both `ui/` and `app/`). The NEXT step inspects this
     // pull's output: if the repo was already current, there is nothing
@@ -22,7 +28,10 @@ module.exports = {
     // never a wrongly-skipped rebuild.
     method: "jump",
     params: {
-      id: "{{/already up[- ]to[- ]date/i.test(input.stdout) ? 'uptodate' : 'build'}}"
+      // An already-current checkout still enters the build path when its
+      // hardware-specific runtime marker is missing. This makes the RTX 50
+      // CUDA 13 migration resumable after an interrupted Update.
+      id: alreadyCurrentAndReady
     }
   }, {
     // Reached ONLY when the repo was already current (the "build" path
@@ -57,7 +66,8 @@ module.exports = {
   }, {
     method: "shell.run",
     params: {
-      venv: "env",
+      venv: runtime.env,
+      venv_python: runtime.python,
       path: "app",
       message: "uv pip install -r requirements.txt"
     }
@@ -67,24 +77,21 @@ module.exports = {
     // are already installed at the versions torch.js wants to install.
     // Saves ~60-120s + ~3 GB of redundant downloads on routine updates.
     //
-    // When bumping ANY of those package versions inside torch.js, ALSO
-    // bump the `_v1` suffix here AND in torch.js's fs.write step. The
-    // old marker becomes stale, this `!exists(new_marker)` gate evaluates
-    // true on the next update, torch.js runs, and the new marker is
-    // written. Old marker stays as harmless cruft until reset.js (which
-    // wipes app/env entirely).
+    // Each hardware profile owns its marker. Bumping the marker in
+    // launcher_profile.js makes this gate reinstall that profile on Update;
+    // old markers remain harmless until Reset removes the environment.
     //
     // Recovery path: if torch ever ends up in a broken state (e.g. CPU
     // wheel installed where CUDA is expected) AND the marker is still
-    // present, the user can manually delete
-    // `app/env/.maestro_torch_v1.installed` and re-run Update to force
-    // a full reinstall — or run Reset for a clean slate.
-    when: "{{!exists('app/env/.maestro_torch_v1.installed')}}",
+    // present, RTX 50 users can choose Advanced > Repair RTX 50 Runtime;
+    // any user can delete their profile marker and re-run Update, or run
+    // Reset for a clean slate.
+    when: `{{!exists('${runtime.marker}')}}`,
     method: "script.start",
     params: {
       uri: "torch.js",
       params: {
-        venv: "env",
+        venv: runtime.env,
         path: "app",
         xformers: true
       }
@@ -95,7 +102,8 @@ module.exports = {
     // up to the new behavior without forcing a reinstall.
     method: "shell.run",
     params: {
-      venv: "env",
+      venv: runtime.env,
+      venv_python: runtime.python,
       path: "app",
       message: "python scripts/install_gguf_kernels.py"
     }
@@ -126,5 +134,6 @@ module.exports = {
     params: {
       uri: "sam_install.js"
     }
-  }]
+    }]
+  }
 }

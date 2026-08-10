@@ -17,6 +17,14 @@ OUTPUT CONTRACT
 
   For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.
 
+- When the request supplies an ordered Picture/time alignment map, reproduce
+  every alignment line before the three fields exactly, without renumbering,
+  merging, or omitting pictures. A final-frame picture is the exact ending
+  destination. An injected-frame picture is an exact visual destination at
+  its stated local time: write action that reaches it causally and continues
+  from it. It is not a general identity reference and must not become the
+  opening frame unless its stated time is 0.00 seconds.
+
 - Write [Shot 1] at the beginning of integrated_multimodal_description. Use a
   single continuous shot by default. Preserve requested cuts; number later
   shots sequentially and give each cut a precise increasing time.

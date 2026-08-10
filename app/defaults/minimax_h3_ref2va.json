@@ -2,7 +2,7 @@
     "model": {
         "name": "H3 Omni — Pruned",
         "architecture": "minimax_h3_ref2va",
-        "description": "Recommended lighter MiniMax H3 Omni model. Ordered image, video, and audio references can guide identity, appearance, motion, scenes, voices, or sound while H3 generates one synchronized video-and-audio shot up to 14.4 seconds. H3 LoRAs, including Turbo, are converted automatically when needed.",
+        "description": "Recommended lighter MiniMax H3 Omni model. Ordered image, video, and audio references can guide identity, appearance, motion, scenes, voices, or sound. Multi-window sequence supports AI-planned or manual per-window prompts while carrying recent motion and synchronized stereo audio with the same canonical references. H3 LoRAs, including Turbo, are converted automatically when needed.",
         "URLs": [
             "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/0543966fbdce5ba05709a8f2031c94bdba629b4a/diffusion_models/minimax_h3_ref2va_pruned_fp8_scaled.safetensors"
         ]
@@ -10,6 +10,9 @@
     "prompt": "Use the ordered references to create a coherent cinematic scene with faithful identities, appearance, motion, and sound.",
     "num_inference_steps": 20,
     "video_length": 124,
+    "sliding_window_size": 345,
+    "sliding_window_overlap": 18,
+    "sliding_window_discard_last_frames": 0,
     "resolution": "864x480",
     "guidance_scale": 1.0,
     "image_prompt_type": "",

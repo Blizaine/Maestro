@@ -29,8 +29,11 @@ from .packing import (
     MiniMaxH3PackedSequence,
     _ROPE_FRAME_RESCALE,
     _ROPE_FRAMES_PER_LATENT,
+    _fill_audio_condition_positions,
     _spatial_position_grid,
     _temporal_position_grid,
+    _temporal_position_span,
+    _unpack_condition_anchor,
     resolve_canvas_size,
 )
 
@@ -49,6 +52,7 @@ _AUDIO_EXTENSIONS = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav"}
 _AUDIO_INTENTS = {"voice", "drive", "style"}
 _IMAGE_INTENTS = {"identity", "scene", "style", "composition"}
 _REFERENCE_TAG_RE = re.compile(r"<(?:Picture|Video|Audio)\s+\d+>", re.IGNORECASE)
+_PICTURE_TAG_RE = re.compile(r"<Picture\s+(\d+)>", re.IGNORECASE)
 
 
 @dataclass
@@ -334,6 +338,66 @@ def ensure_ref2va_prompt_relationships(
     )
 
 
+def add_ref2va_continuation_context(
+    prompt: str,
+    *,
+    picture_offset: int = 1,
+) -> str:
+    """Reserve leading Picture labels for native Ref2VA continuation frames.
+
+    Ref2VA presents a carried boundary frame to Qwen before the user's
+    canonical references, exactly as upstream does for start/end conditions.
+    The boundary therefore becomes ``<Picture 1>`` and only the user's
+    Picture labels shift; Video and Audio numbering is unaffected. The
+    transformer still receives the boundary as an exact keyframe condition,
+    not as a general identity reference.
+    """
+
+    offset = max(0, int(picture_offset or 0))
+    normalized = str(prompt or "").strip()
+    if not normalized or offset <= 0:
+        return normalized
+
+    shifted = _PICTURE_TAG_RE.sub(
+        lambda match: f"<Picture {int(match.group(1)) + offset}>",
+        normalized,
+    )
+    continuity = (
+        "<Picture 1> is the exact final frame carried from the preceding "
+        "window. Use it only as the opening composition and motion boundary; "
+        "continue forward without restaging it or treating it as a new "
+        "identity reference."
+    )
+    retention = "<Picture 1>: exact opening-boundary continuity"
+
+    subject_pattern = re.compile(
+        r"(^\s*subject_definitions\s*:\s*)",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    if subject_pattern.search(shifted):
+        shifted = subject_pattern.sub(
+            lambda match: f"{match.group(1)}{continuity} ",
+            shifted,
+            count=1,
+        )
+    else:
+        shifted = f"subject_definitions: {continuity}\n\n{shifted}"
+
+    retention_pattern = re.compile(
+        r"(^\s*retention_analysis\s*:\s*)",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    if retention_pattern.search(shifted):
+        shifted = retention_pattern.sub(
+            lambda match: f"{match.group(1)}{retention}; ",
+            shifted,
+            count=1,
+        )
+    else:
+        shifted = f"{shifted}\n\nretention_analysis: {retention}"
+    return shifted
+
+
 def _decode_audio_stream(av, container, stream) -> tuple[torch.Tensor, int]:
     sample_rate = int(stream.codec_context.sample_rate)
     resampler = av.audio.resampler.AudioResampler(format="fltp", layout=stream.layout, rate=sample_rate)
@@ -519,6 +583,9 @@ def prepare_reference_waveform(
     sample_rate: int,
     target_sample_rate: int,
     max_duration: float,
+    *,
+    start_time: float = 0.0,
+    pad_to_duration: bool = False,
 ) -> torch.Tensor:
     waveform = torch.as_tensor(waveform, device=torch.device("cpu"))
     if waveform.ndim != 2 or waveform.shape[0] not in (1, MINIMAX_H3_AUDIO_CHANNELS):
@@ -528,13 +595,28 @@ def prepare_reference_waveform(
         )
     if sample_rate <= 0:
         raise ValueError(f"A reference soundtrack must have a positive sample rate, got {sample_rate}.")
-    waveform = waveform.to(torch.float32)[:, : int(max_duration * sample_rate)]
+    duration_samples = max(1, int(round(max_duration * sample_rate)))
+    start_sample = max(0, int(round(max(0.0, float(start_time)) * sample_rate)))
+    waveform = waveform.to(torch.float32)[:, start_sample : start_sample + duration_samples]
+    if pad_to_duration and waveform.shape[-1] < duration_samples:
+        waveform = torch.nn.functional.pad(
+            waveform,
+            (0, duration_samples - waveform.shape[-1]),
+        )
     if waveform.shape[0] == 1:
         waveform = waveform.expand(MINIMAX_H3_AUDIO_CHANNELS, -1).contiguous()
     if sample_rate != target_sample_rate:
         import torchaudio
 
         waveform = torchaudio.transforms.Resample(sample_rate, target_sample_rate)(waveform)
+    if pad_to_duration:
+        target_samples = max(1, int(round(max_duration * target_sample_rate)))
+        waveform = waveform[:, :target_samples]
+        if waveform.shape[-1] < target_samples:
+            waveform = torch.nn.functional.pad(
+                waveform,
+                (0, target_samples - waveform.shape[-1]),
+            )
     return waveform.contiguous()
 
 
@@ -546,11 +628,14 @@ def prepare_references(
     target_width: int,
     audio_sample_rate: int = 32000,
     detail: str = "match",
+    timeline_start_frame: int = 0,
 ) -> list[MiniMaxH3PreparedReference]:
     """Decode and prepare every reference without changing target geometry."""
 
     items = validate_reference_manifest(manifest, require_files=True)
     max_duration = num_frames / MINIMAX_H3_FPS
+    timeline_start_frame = max(0, int(timeline_start_frame or 0))
+    timeline_start_time = timeline_start_frame / MINIMAX_H3_FPS
     prepared: list[MiniMaxH3PreparedReference] = []
 
     for item in items:
@@ -603,10 +688,25 @@ def prepare_references(
                     reference.has_audio = reference.waveform.shape[-1] > 0
         else:
             waveform, sample_rate = decode_reference_audio(item["path"])
+            intent = item.get("audio_intent", "voice")
+            follows_sequence_timeline = intent in {"drive", "style"}
+            segment_start_time = timeline_start_time if follows_sequence_timeline else 0.0
             reference.waveform = prepare_reference_waveform(
-                waveform, sample_rate, audio_sample_rate, max_duration
+                waveform,
+                sample_rate,
+                audio_sample_rate,
+                max_duration,
+                start_time=segment_start_time,
+                pad_to_duration=follows_sequence_timeline,
             )
             reference.has_audio = True
+            if follows_sequence_timeline:
+                print(
+                    "[MiniMax H3 Ref2VA] Prepared "
+                    f"{intent} audio timeline segment "
+                    f"{segment_start_time:.2f}-{segment_start_time + max_duration:.2f}s "
+                    f"from {os.path.basename(item['path'])}."
+                )
 
         prepared.append(reference)
     return prepared
@@ -720,17 +820,49 @@ def build_ref2va_packed_sequence(
     latent_width: int,
     num_audio_latents: int,
     patch_size: tuple[int, int, int],
+    keyframe_anchors=(),
+    audio_condition_anchors=(),
+    target_condition_audio_latents: int = 0,
+    target_condition_video_frames: int = 0,
 ) -> MiniMaxH3PackedSequence:
-    """Build text, ordered reference blocks, target audio, target video."""
+    """Build Ref2VA references plus optional native continuation history.
+
+    The packed order mirrors WanGP 12.44: keyframe video, keyframe audio,
+    canonical ordered references, target audio, then target video. Rotary
+    time still places canonical references before the carried history and the
+    newly generated target, so the references remain authoritative while the
+    history supplies local motion and sound continuity.
+    """
 
     _, patch_h, patch_w = patch_size
     num_text_tokens = text_token_tags.shape[0]
-    num_target_video_rows = num_latent_frames * (latent_height // patch_h) * (latent_width // patch_w)
+    target_frame_grid, target_width_grid = _frame_position_grid(
+        latent_height,
+        latent_width,
+        patch_h,
+        patch_w,
+    )
+    rows_per_target_frame = target_frame_grid.shape[0]
+    num_target_video_rows = num_latent_frames * rows_per_target_frame
     num_target_audio_rows = num_audio_latents * MINIMAX_H3_AUDIO_CHANNELS
+    keyframe_frames = sum(
+        _unpack_condition_anchor(anchor)[1]
+        for anchor in keyframe_anchors
+    )
+    keyframe_video_rows = keyframe_frames * rows_per_target_frame
+    keyframe_audio_latents = sum(
+        int(anchor[1]) if isinstance(anchor, tuple) else 1
+        for anchor in audio_condition_anchors
+    )
+    keyframe_audio_rows = (
+        keyframe_audio_latents * MINIMAX_H3_AUDIO_CHANNELS
+    )
     num_reference_video_rows = sum(reference.num_video_rows for reference in references if reference.kind != "audio")
     num_reference_audio_rows = sum(reference.num_audio_rows for reference in references)
     sequence_length = (
         num_text_tokens
+        + keyframe_video_rows
+        + keyframe_audio_rows
         + num_reference_video_rows
         + num_reference_audio_rows
         + num_target_audio_rows
@@ -738,11 +870,21 @@ def build_ref2va_packed_sequence(
     )
     position_ids = torch.zeros(sequence_length, 3, dtype=torch.float64)
     position_ids[:num_text_tokens, 0] = torch.arange(num_text_tokens, dtype=torch.float64)
-    target_frame_grid, target_width_grid = _frame_position_grid(latent_height, latent_width, patch_h, patch_w)
 
-    video_indices: list[torch.Tensor] = []
-    audio_indices: list[torch.Tensor] = []
-    cursor = num_text_tokens
+    keyframe_start = num_text_tokens
+    keyframe_audio_start = keyframe_start + keyframe_video_rows
+    reference_start = keyframe_audio_start + keyframe_audio_rows
+    video_indices: list[torch.Tensor] = (
+        [torch.arange(keyframe_start, keyframe_audio_start)]
+        if keyframe_video_rows
+        else []
+    )
+    audio_indices: list[torch.Tensor] = (
+        [torch.arange(keyframe_audio_start, reference_start)]
+        if keyframe_audio_rows
+        else []
+    )
+    cursor = reference_start
     rotary_time = float(num_text_tokens)
     for reference in references:
         if reference.kind == "image":
@@ -776,11 +918,84 @@ def build_ref2va_packed_sequence(
         else:
             raise ValueError(f"A reference must be an 'image', a 'video' or an 'audio', got {reference.kind!r}.")
 
+    history_frames = sum(
+        _unpack_condition_anchor(anchor)[1]
+        for anchor in keyframe_anchors
+        if _unpack_condition_anchor(anchor)[0] == "history"
+    )
+    target_origin = rotary_time + _temporal_position_span(history_frames)
+    target_times = _temporal_position_grid(
+        num_latent_frames,
+        target_origin,
+    )
+    condition_cursor = keyframe_start
+    history_time = rotary_time
+    for entry in keyframe_anchors:
+        anchor, condition_frames, frame_index = _unpack_condition_anchor(entry)
+        if condition_frames <= 0:
+            raise ValueError(
+                "MiniMax H3 Ref2VA condition anchors must contain at least "
+                f"one latent frame, got {entry!r}."
+            )
+        rows = slice(
+            condition_cursor,
+            condition_cursor + condition_frames * rows_per_target_frame,
+        )
+        condition = position_ids[rows].view(
+            condition_frames,
+            rows_per_target_frame,
+            3,
+        )
+        if anchor == "history":
+            condition[:, :, 0] = _temporal_position_grid(
+                condition_frames,
+                history_time,
+            )[:, None]
+            history_time += _temporal_position_span(condition_frames)
+        elif anchor == "first":
+            condition[:, :, 0] = target_times[:condition_frames, None]
+        elif anchor == "last":
+            condition[:, :, 0] = (
+                target_origin
+                + _temporal_position_span(num_latent_frames)
+                - _ROPE_FRAME_RESCALE
+            )
+        elif anchor == "frame":
+            if frame_index is None:
+                raise ValueError(
+                    "A MiniMax H3 Ref2VA 'frame' condition needs a target "
+                    "frame index."
+                )
+            condition[:, :, 0] = (
+                target_origin + frame_index * _ROPE_FRAME_RESCALE
+            )
+        else:
+            raise ValueError(
+                f"Unknown MiniMax H3 Ref2VA keyframe anchor {anchor!r}."
+            )
+        condition[:, :, 1:] = target_frame_grid[None]
+        condition_cursor = rows.stop
+
+    _fill_audio_condition_positions(
+        position_ids,
+        keyframe_audio_start,
+        audio_condition_anchors,
+        rotary_time,
+        target_origin,
+        target_width_grid,
+    )
     audio_start = cursor
     video_start = audio_start + num_target_audio_rows
-    _fill_audio_positions(position_ids, slice(audio_start, video_start), num_audio_latents, rotary_time, target_width_grid)
-    frame_time = _temporal_position_grid(num_latent_frames, rotary_time)
-    position_ids[video_start:, 0] = frame_time.repeat_interleave(target_frame_grid.shape[0])
+    _fill_audio_positions(
+        position_ids,
+        slice(audio_start, video_start),
+        num_audio_latents,
+        target_origin,
+        target_width_grid,
+    )
+    position_ids[video_start:, 0] = target_times.repeat_interleave(
+        target_frame_grid.shape[0]
+    )
     position_ids[video_start:, 1:] = target_frame_grid.repeat(num_latent_frames, 1)
 
     video_indices = torch.cat(video_indices + [torch.arange(video_start, sequence_length)])
@@ -797,6 +1012,18 @@ def build_ref2va_packed_sequence(
         video_indices=video_indices,
         audio_indices=audio_indices,
         text_indices=text_indices,
-        num_condition_video_rows=num_reference_video_rows,
-        num_condition_audio_rows=num_reference_audio_rows,
+        num_condition_video_rows=(
+            keyframe_video_rows + num_reference_video_rows
+        ),
+        num_condition_audio_rows=(
+            keyframe_audio_rows + num_reference_audio_rows
+        ),
+        num_target_condition_audio_latents=max(
+            0,
+            int(target_condition_audio_latents),
+        ),
+        num_target_condition_video_rows=(
+            max(0, int(target_condition_video_frames))
+            * rows_per_target_frame
+        ),
     )

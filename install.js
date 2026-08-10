@@ -1,8 +1,12 @@
-module.exports = {
-  requires: {
-    bundle: "ai"
-  },
-  run: [
+const { runtimeProfile } = require("./launcher_profile")
+
+module.exports = async (kernel) => {
+  const runtime = runtimeProfile(kernel)
+  return {
+    requires: {
+      bundle: "ai"
+    },
+    run: [
     {
       when: "{{gpu !== 'nvidia'}}",
       method: "notify",
@@ -24,7 +28,8 @@ module.exports = {
     {
       method: "shell.run",
       params: {
-        venv: "env",
+        venv: runtime.env,
+        venv_python: runtime.python,
         path: "app",
         message: [
           "uv pip install -r requirements.txt --index-strategy unsafe-best-match",
@@ -37,7 +42,7 @@ module.exports = {
       params: {
         uri: "torch.js",
         params: {
-          venv: "env",
+          venv: runtime.env,
           path: "app",
           xformers: true
         }
@@ -47,14 +52,15 @@ module.exports = {
     // wheel matches the current Python / PyTorch / CUDA combo. Without
     // this, mmgp prints "[GGUF][llama.cpp CUDA] kernels unavailable,
     // using fallback" at every startup. The helper script is a soft
-    // no-op when no matching wheel exists (e.g. Linux, or unreleased
-    // version combo) — the fallback path still works for GGUF models,
+    // no-op when no matching wheel exists (e.g. an unreleased version
+    // combo) — the fallback path still works for GGUF models,
     // and the default INT8 / BF16 variants don't use these kernels at
     // all. Idempotent on re-runs.
     {
       method: "shell.run",
       params: {
-        venv: "env",
+        venv: runtime.env,
+        venv_python: runtime.python,
         path: "app",
         message: "python scripts/install_gguf_kernels.py"
       }
@@ -98,5 +104,6 @@ module.exports = {
         description: 'Click "Start" to get started'
       }
     }
-  ]
+    ]
+  }
 }

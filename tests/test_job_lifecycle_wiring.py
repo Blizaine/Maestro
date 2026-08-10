@@ -204,6 +204,42 @@ class TestJobLifecycleWiring(unittest.TestCase):
             and isinstance(node.value, str)
         })
 
+    def test_gallery_sidecars_use_active_generation_time(self):
+        generation = _function(self.launch, "_run_generation")
+        with open(
+            os.path.join(_ROOT, "app", "launch.py"), "r", encoding="utf-8",
+        ) as handle:
+            launch_source = handle.read()
+        source = ast.get_source_segment(launch_source, generation)
+        self.assertIsNotNone(source)
+        self.assertIn('cmd == "generation_time"', source)
+        self.assertIn("active_generation_seconds_by_output", source)
+        self.assertIn('"job_elapsed_time":', source)
+        self.assertNotIn(
+            '"generation_time": round(time.time() - start_time)',
+            source,
+        )
+
+        generate_video = _function(_parse("app/wgp.py"), "generate_video")
+        with open(
+            os.path.join(_ROOT, "app", "wgp.py"), "r", encoding="utf-8",
+        ) as handle:
+            wgp_source = handle.read()
+        wgp_body = ast.get_source_segment(wgp_source, generate_video)
+        self.assertIsNotNone(wgp_body)
+        self.assertIn('"generation_time",', wgp_body)
+        self.assertIn('configs["generation_time_basis"] = "active"', wgp_body)
+
+    def test_generation_duration_is_minutes_and_seconds(self):
+        formatter = _load_isolated_function(
+            "app/wgp.py",
+            "format_generation_time",
+            {},
+        )
+        self.assertEqual(formatter(128), "2m 8s")
+        self.assertEqual(formatter(8), "0m 8s")
+        self.assertEqual(formatter(3601), "60m 1s")
+
     def test_continuation_accepts_all_generated_video_containers(self):
         generation = _function(self.launch, "_run_generation")
         with open(

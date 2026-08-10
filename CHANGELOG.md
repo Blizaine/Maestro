@@ -5,6 +5,45 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-08-10
+
+MiniMax H3 native continuation: First / Last and Omni can now build long
+multi-window sequences while carrying a configurable span of recent video
+motion and matching stereo audio into the next window. Shared Studio controls
+support total duration, one editable prompt per window, optional AI planning,
+and independent hard-cut sequences. The sequence planner now uses a persistent
+story ledger to assign actions, dialogue, camera coverage, sound, and concrete
+handoffs once across the timeline instead of repeating or prematurely
+completing them. Exact-duration assembly and saved runtime prompts keep the
+result reproducible.
+
+H3 source-media workflows: added multiple timed frame injection for FL2VA,
+soundtrack- and control-audio-driven video, video-to-audio generation that
+preserves the source pictures, and video-to-video editing over the whole frame,
+inside a white mask, or outside a white mask with denoise and masking controls.
+Ref2VA music and performance references now advance through the source timeline
+across sequence clips instead of replaying the first segment, while reusable
+voice references retain their intended behavior.
+
+H3 memory and hardware support: window recommendations now account for the
+checkpoint family, output resolution, and detected VRAM, expose the native
+14.4-second ceiling, and allow durable per-combination overrides. Transformer
+residency, activation workspace, streaming VAE decoding, system-RAM ceilings,
+and pageable LoRA fallback were refined for Full and Pruned checkpoints. RTX 50
+/ Blackwell systems now use a dedicated Python 3.11, PyTorch 2.10, CUDA 13
+runtime with compatible acceleration kernels, automatic Update migration,
+startup compatibility diagnostics, and a launcher repair action; earlier RTX
+families retain the established runtime.
+
+Interface and reliability: invalid H3 media, prompt counts, durations, and
+sequence combinations fail before expensive model loading. Omni's mixed-media
+picker no longer prevents valid audio selection on iOS, and file extensions are
+used when mobile document providers report ambiguous MIME types. Output cards
+now report active generation time in minutes and seconds without including
+queue or model-loading time. Regression coverage was expanded across native
+continuation, reference packing, audio offsets, frame injection, video editing,
+memory policy, RTX 50 setup, and the shared multi-window interface.
+
 ## [1.6.5] - 2026-08-08
 
 MiniMax H3 performance and memory: rebalanced transformer residency and

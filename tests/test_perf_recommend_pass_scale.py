@@ -303,6 +303,19 @@ class TestMiniMaxH3ActivationBudget(unittest.TestCase):
             places=6,
         )
 
+    def test_measured_pruned_1080p_158_frame_pass_keeps_streaming_headroom(self):
+        budget = compute_h3_weight_budget(
+            24.0,
+            "1920x1088",
+            158,
+            runtime_workspace_gb=10.0,
+        )
+        self.assertTrue(budget["runtime_scaling_active"])
+        self.assertGreater(budget["activation_reserve_gb"], 19.0)
+        self.assertLess(budget["activation_reserve_gb"], 19.5)
+        self.assertGreater(budget["weight_budget_gb"], 4.5)
+        self.assertLess(budget["weight_budget_gb"], 5.0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

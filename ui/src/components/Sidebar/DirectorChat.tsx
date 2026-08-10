@@ -2128,7 +2128,7 @@ function DirectorAdvancedAccordion() {
   const framesMinimum = activeDirectorVideoOptions?.frames_minimum ?? 1
   const framesMaximum = activeDirectorVideoOptions?.frames_maximum ?? framesMinimum
   const framesStep = activeDirectorVideoOptions?.frames_steps ?? 1
-  const nativeShotChoices = [124, 175, 243, 345].filter(frames => (
+  const nativeShotChoices = [124, 158, 175, 243, 345].filter(frames => (
     frames >= framesMinimum
     && frames <= framesMaximum
     && (frames - framesMinimum) % Math.max(1, framesStep) === 0

@@ -494,6 +494,45 @@ def list_models():
 
 _MODEL_VISIBILITY_CONFIG_KEY = "maestro_model_visibility"
 _MODEL_VISIBILITY_WRITE_LOCK = threading.RLock()
+_H3_WINDOW_OVERRIDES_CONFIG_KEY = "maestro_h3_window_overrides"
+
+
+def _persist_model_visibility_config():
+    """Backward-compatible wrapper for the original visibility writer."""
+    _persist_server_config()
+
+
+def _normalize_h3_window_overrides(values):
+    if values is None:
+        return {}
+    if not isinstance(values, dict):
+        raise ValueError("H3 window overrides must be an object.")
+    normalized = {}
+    for raw_key, raw_frames in values.items():
+        if not isinstance(raw_key, str):
+            raise ValueError("H3 window override keys must be strings.")
+        key = raw_key.strip()
+        if not key or len(key) > 300 or "::" not in key:
+            raise ValueError("An H3 window override key is invalid.")
+        try:
+            frames = int(raw_frames)
+        except (TypeError, ValueError) as error:
+            raise ValueError("H3 window override values must be integers.") from error
+        if frames < 1 or frames > 345:
+            raise ValueError("H3 window override values must be between 1 and 345 frames.")
+        normalized[key] = frames
+    if len(normalized) > 500:
+        raise ValueError("Too many H3 window overrides.")
+    return normalized
+
+
+def _h3_window_overrides_response():
+    raw = wgp.server_config.get(_H3_WINDOW_OVERRIDES_CONFIG_KEY, {})
+    try:
+        overrides = _normalize_h3_window_overrides(raw)
+    except ValueError:
+        overrides = {}
+    return {"overrides": overrides}
 
 
 def _normalize_model_visibility_ids(values):
@@ -555,8 +594,8 @@ def _model_visibility_response():
     }
 
 
-def _persist_model_visibility_config():
-    """Atomically persist visibility across Pinokio's changing UI ports."""
+def _persist_server_config():
+    """Atomically persist Maestro UI preferences across changing ports."""
     config_path = os.path.abspath(wgp.server_config_filename)
     temp_path = (
         f"{config_path}.{os.getpid()}.{threading.get_ident()}.tmp"
@@ -614,6 +653,31 @@ async def update_model_visibility(request: Request):
         }
         _persist_model_visibility_config()
         return _model_visibility_response()
+
+
+@api.get("/api/v1/h3-window-overrides")
+def get_h3_window_overrides():
+    """Return durable H3 model/resolution native-pass preferences."""
+    return _h3_window_overrides_response()
+
+
+@api.put("/api/v1/h3-window-overrides")
+async def update_h3_window_overrides(request: Request):
+    """Persist H3 native-pass preferences independently of browser origin."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="H3 window override payload must be an object.",
+        )
+    try:
+        overrides = _normalize_h3_window_overrides(body.get("overrides"))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    with _MODEL_VISIBILITY_WRITE_LOCK:
+        wgp.server_config[_H3_WINDOW_OVERRIDES_CONFIG_KEY] = overrides
+        _persist_server_config()
+        return _h3_window_overrides_response()
 
 
 @api.get("/api/v1/models/{model_type}/debug")
@@ -1068,6 +1132,34 @@ def _normalize_video_prompt_type(body: dict) -> None:
 
     if new_vpt != vpt:
         body["video_prompt_type"] = new_vpt
+
+
+def _h3_injected_keyframes_from_body(body: dict) -> list[dict]:
+    """Return the stable path/position contract used by H3 prompt planning."""
+
+    explicit = body.get("injected_keyframes")
+    if isinstance(explicit, list):
+        return [
+            {
+                "path": str(item.get("path") or "").strip(),
+                "position": str(item.get("position") or "").strip(),
+            }
+            for item in explicit
+            if isinstance(item, dict)
+            and str(item.get("path") or "").strip()
+            and str(item.get("position") or "").strip()
+        ]
+    if "F" not in str(body.get("video_prompt_type") or ""):
+        return []
+    refs = body.get("image_refs")
+    if not isinstance(refs, (list, tuple)):
+        return []
+    positions = str(body.get("frames_positions") or "").replace(",", " ").split()
+    return [
+        {"path": str(path), "position": str(position)}
+        for path, position in zip(refs, positions)
+        if path and position
+    ]
 
 
 # ── image_prompt_type normalization ──────────────────────────────────
@@ -5242,6 +5334,7 @@ def get_model_options(model_type: str):
         "t2v_class": md.get("t2v_class", False),
         "image_outputs": md.get("image_outputs", False),
         "supports_end_frame": "E" in md.get("image_prompt_types_allowed", ""),
+        "custom_frames_injection": md.get("custom_frames_injection", False),
         "omni_reference": md.get("omni_reference", False),
         "omni_reference_limits": md.get("omni_reference_limits"),
         "omni_reference_detail_choices": md.get("omni_reference_detail_choices"),
@@ -5262,6 +5355,12 @@ def get_model_options(model_type: str):
         "minimax_h3_text_encoder_default": _h3_encoder_default,
         "minimax_h3_turbo": _minimax_h3_turbo_option(md),
         "minimax_h3_runtime_advisory": _minimax_h3_runtime_advisory(md),
+        "minimax_h3_media_sources": md.get(
+            "minimax_h3_media_sources", False
+        ),
+        "video_to_video_inpaint": md.get(
+            "video_to_video_inpaint", False
+        ),
         "resolution_presets": md.get("resolution_presets"),
         "resolution_preset_order": md.get("resolution_preset_order"),
         "supports_auto_aspect": md.get("supports_auto_aspect", False),
@@ -5269,6 +5368,7 @@ def get_model_options(model_type: str):
         # Choice configs
         "guide_preprocessing": extract_choice("guide_preprocessing"),
         "guide_custom_choices": extract_choice("guide_custom_choices"),
+        "mask_preprocessing": extract_choice("mask_preprocessing"),
         "image_ref_choices": extract_choice("image_ref_choices"),
         "audio_prompt_type_sources": extract_choice("audio_prompt_type_sources"),
 
@@ -5299,6 +5399,9 @@ def get_model_options(model_type: str):
         "director_memory_policy": md.get("director_memory_policy"),
         "sliding_window_auto_prompt_pacing": md.get(
             "sliding_window_auto_prompt_pacing", False
+        ),
+        "sliding_window_end_image_at_final": md.get(
+            "sliding_window_end_image_at_final", False
         ),
         "sliding_window_audio_history": md.get(
             "sliding_window_audio_history", False
@@ -7060,7 +7163,13 @@ async def llm_plan_h3_windows(request: Request):
     if not str(model_def.get("architecture") or "").startswith("minimax_h3"):
         raise HTTPException(status_code=400, detail="H3 window planning requires a MiniMax H3 model.")
     if model_def.get("omni_reference"):
-        raise HTTPException(status_code=400, detail="MiniMax H3 Omni does not use sliding windows.")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "MiniMax H3 Omni uses the Reference Sequence planner; "
+                "this endpoint is for First / Last models."
+            ),
+        )
 
     sliding_defaults = model_def.get("sliding_window_defaults") or {}
     planning_inputs = {
@@ -7112,6 +7221,11 @@ async def llm_plan_h3_windows(request: Request):
         path for path in (body.get("image_paths") or [])
         if isinstance(path, str) and path and os.path.isfile(path)
     ]
+    injected_keyframes = _h3_injected_keyframes_from_body(body)
+    for keyframe in injected_keyframes:
+        path = keyframe["path"]
+        if os.path.isfile(path) and path not in image_paths:
+            image_paths.append(path)
     total_frames = int(planning_inputs["video_length"])
     window_frames = int(planning_inputs["sliding_window_size"])
     overlap_frames = int(planning_inputs["sliding_window_overlap"] or 0)
@@ -7130,6 +7244,7 @@ async def llm_plan_h3_windows(request: Request):
             has_start_image=bool(body.get("has_start_image")),
             has_end_image=bool(body.get("has_end_image")),
             image_paths=image_paths or None,
+            injected_keyframes=injected_keyframes or None,
             nsfw=bool(nsfw),
             camera_coverage=str(body.get("camera_coverage") or "auto"),
         )
@@ -7142,7 +7257,7 @@ async def llm_plan_h3_windows(request: Request):
 
 @api.post("/api/v1/llm/plan-h3-sequence")
 async def llm_plan_h3_sequence(request: Request):
-    """Expand one H3 Omni concept into independent reference-driven clips."""
+    """Expand one H3 Omni concept into reference-driven windows."""
 
     body = await request.json()
     prompt = str(body.get("prompt") or "").strip()
@@ -7162,6 +7277,7 @@ async def llm_plan_h3_sequence(request: Request):
     from models.minimax_h3.ref2va import validate_reference_manifest
     from models.minimax_h3.minimax_h3_handler import (
         apply_h3_omni_sequence_memory_policy,
+        normalize_h3_overlap_frames,
     )
     from services.h3_sequence_planner import plan_h3_reference_sequence
 
@@ -7200,6 +7316,24 @@ async def llm_plan_h3_sequence(request: Request):
         or model_def.get("frames_maximum")
         or 345
     )
+    native_continuation = body.get("sequence_continuity", True) is not False
+    overlap_frames = (
+        normalize_h3_overlap_frames(
+            body.get(
+                "overlap_frames",
+                body.get(
+                    "sliding_window_overlap",
+                    (model_def.get("sliding_window_defaults") or {}).get(
+                        "overlap_default",
+                        18,
+                    ),
+                ),
+            ),
+            window_frames=effective_clip_frames,
+        )
+        if native_continuation
+        else 0
+    )
     try:
         _ensure_llm_loaded()
     except Exception as load_error:
@@ -7232,6 +7366,8 @@ async def llm_plan_h3_sequence(request: Request):
             camera_coverage=str(body.get("camera_coverage") or "auto"),
             image_paths=image_paths or None,
             nsfw=bool(nsfw),
+            overlap_frames=overlap_frames,
+            native_continuation=native_continuation,
         )
         result["effective_window_frames"] = effective_clip_frames
         if sequence_adjustment:
@@ -8600,6 +8736,7 @@ async def generate(request: Request):
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
         from models.minimax_h3.minimax_h3_handler import (
+            apply_h3_native_omni_memory_policy,
             apply_h3_window_memory_policy,
             h3_runtime_preflight,
         )
@@ -8635,16 +8772,47 @@ async def generate(request: Request):
                 "Requested output duration is unchanged."
             )
 
-        # Ref2VA has no native sliding windows. Studio's experimental
-        # Reference Sequence instead plans independent native clips, repeats
-        # the canonical manifest for each one, and lets the existing
-        # multi-clip worker join them. The worker may add a tiny, generated
-        # composition-only continuity pack between clips; original references
-        # always remain first and authoritative.
+        h3_native_omni_adjustment = apply_h3_native_omni_memory_policy(
+            body,
+            _generation_model_def,
+            h3_hardware,
+        )
+        if h3_native_omni_adjustment:
+            if h3_native_omni_adjustment.get("unsupported"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=h3_native_omni_adjustment["message"],
+                )
+            print(
+                "[MiniMax H3] VRAM-aware Omni one-shot clip: "
+                f"{h3_native_omni_adjustment['checkpoint'].title()} "
+                "checkpoint, "
+                f"{h3_native_omni_adjustment['gpu_vram_gb']:.1f} GB, "
+                f"{h3_native_omni_adjustment['resolution']}, "
+                f"{h3_native_omni_adjustment['requested_frames']} -> "
+                f"{h3_native_omni_adjustment['effective_frames']} frames."
+            )
+
+        # Omni Reference Sequence can now use Ref2VA's native continuation:
+        # every pass keeps the canonical manifest while carrying recent
+        # generated motion and matching stereo audio. Turning scene continuity
+        # off deliberately retains Maestro's independent hard-cut clip path.
         h3_reference_sequence_active = False
         h3_sequence_enabled = (
             bool(_generation_model_def.get("omni_reference"))
             and body.get("minimax_h3_reference_sequence") is True
+        )
+        h3_sequence_prompt_mode = (
+            "manual"
+            if body.get("minimax_h3_sequence_prompt_mode") == "manual"
+            else "auto"
+        )
+        h3_manual_sequence = (
+            h3_sequence_enabled and h3_sequence_prompt_mode == "manual"
+        )
+        h3_native_sequence = (
+            h3_sequence_enabled
+            and body.get("minimax_h3_sequence_continuity") is not False
         )
         try:
             h3_sequence_total_frames = int(body.get("video_length") or 0)
@@ -8656,6 +8824,7 @@ async def generate(request: Request):
         if h3_sequence_enabled:
             from models.minimax_h3.minimax_h3_handler import (
                 apply_h3_omni_sequence_memory_policy,
+                normalize_h3_overlap_frames,
             )
 
             h3_sequence_adjustment = apply_h3_omni_sequence_memory_policy(
@@ -8682,6 +8851,17 @@ async def generate(request: Request):
                 h3_sequence_total_frames or h3_sequence_max_frames,
                 h3_sequence_max_frames,
             )
+            if h3_native_sequence:
+                body["sliding_window_overlap"] = normalize_h3_overlap_frames(
+                    body.get(
+                        "sliding_window_overlap",
+                        (_generation_model_def.get("sliding_window_defaults") or {}).get(
+                            "overlap_default",
+                            18,
+                        ),
+                    ),
+                    window_frames=body["sliding_window_size"],
+                )
             if h3_sequence_adjustment:
                 override_label = (
                     "manual"
@@ -8689,7 +8869,7 @@ async def generate(request: Request):
                     else "Auto"
                 )
                 print(
-                    f"[MiniMax H3 Omni] {override_label} native clip: "
+                    f"[MiniMax H3 Omni] {override_label} native window: "
                     f"{h3_sequence_adjustment['checkpoint'].title()} "
                     f"checkpoint, "
                     f"{h3_sequence_adjustment['gpu_vram_gb']:.1f} GB, "
@@ -8697,11 +8877,17 @@ async def generate(request: Request):
                     f"{h3_sequence_max_frames} frames maximum. "
                     "Requested sequence duration is unchanged."
                 )
-        if h3_sequence_enabled and h3_sequence_total_frames > h3_sequence_max_frames:
+        if h3_sequence_enabled and (
+            h3_sequence_total_frames > h3_sequence_max_frames
+            or h3_manual_sequence
+        ):
             from services.h3_sequence_planner import (
+                build_manual_h3_reference_sequence_plan,
+                compute_h3_native_sequence_windows,
                 compute_h3_sequence_clips,
                 h3_sequence_plan_signature,
                 plan_h3_reference_sequence,
+                resolve_h3_sequence_source_prompt,
             )
 
             h3_sequence_min_frames = int(
@@ -8711,9 +8897,30 @@ async def generate(request: Request):
                 _generation_model_def.get("frames_steps") or 17
             )
             h3_sequence_fps = float(_generation_model_def.get("fps") or 24)
+            h3_sequence_overlap = int(
+                body.get("sliding_window_overlap") or 0
+            ) if h3_native_sequence else 0
             h3_sequence_refs = list(body.get("minimax_h3_references") or [])
+            h3_sequence_source_prompt = (
+                str(body.get("prompt") or "").strip()
+                if h3_manual_sequence
+                else resolve_h3_sequence_source_prompt(
+                    str(body.get("prompt") or ""),
+                    body.get("h3_window_plan"),
+                    body.get("h3_window_prompts"),
+                )
+            )
+            if (
+                not h3_manual_sequence
+                and h3_sequence_source_prompt
+                != str(body.get("prompt") or "").strip()
+            ):
+                print(
+                    "[MiniMax H3 Omni] Restored the original story prompt "
+                    "from the saved sequence plan."
+                )
             h3_sequence_signature = h3_sequence_plan_signature(
-                str(body.get("prompt") or ""),
+                h3_sequence_source_prompt,
                 model_type=str(body.get("model_type") or ""),
                 resolution=str(body.get("resolution") or ""),
                 total_frames=h3_sequence_total_frames,
@@ -8725,14 +8932,24 @@ async def generate(request: Request):
                 camera_coverage=str(
                     body.get("minimax_h3_camera_coverage") or "auto"
                 ),
+                overlap_frames=h3_sequence_overlap,
+                native_continuation=h3_native_sequence,
             )
-            h3_sequence_geometry, _ = compute_h3_sequence_clips(
-                h3_sequence_total_frames,
-                min_clip_frames=h3_sequence_min_frames,
-                max_clip_frames=h3_sequence_max_frames,
-                frame_step=h3_sequence_step,
-                fps=h3_sequence_fps,
-            )
+            if h3_native_sequence:
+                h3_sequence_geometry = compute_h3_native_sequence_windows(
+                    h3_sequence_total_frames,
+                    window_frames=h3_sequence_max_frames,
+                    overlap_frames=h3_sequence_overlap,
+                    fps=h3_sequence_fps,
+                )
+            else:
+                h3_sequence_geometry, _ = compute_h3_sequence_clips(
+                    h3_sequence_total_frames,
+                    min_clip_frames=h3_sequence_min_frames,
+                    max_clip_frames=h3_sequence_max_frames,
+                    frame_step=h3_sequence_step,
+                    fps=h3_sequence_fps,
+                )
             cached_prompts = body.get("h3_window_prompts")
             cached_plan = body.get("h3_window_plan")
             cached_is_valid = (
@@ -8744,13 +8961,53 @@ async def generate(request: Request):
                 )
                 and isinstance(cached_plan, dict)
                 and cached_plan.get("plan_kind") == "reference_sequence"
+                and (
+                    (h3_manual_sequence and cached_plan.get("planned_by") == "manual")
+                    or (
+                        not h3_manual_sequence
+                        and cached_plan.get("planned_by") != "manual"
+                    )
+                )
                 and body.get("h3_window_plan_signature") == h3_sequence_signature
             )
-            if cached_is_valid:
+            if h3_manual_sequence:
+                try:
+                    h3_window_plan_response = (
+                        build_manual_h3_reference_sequence_plan(
+                            h3_sequence_source_prompt,
+                            model_type=str(body.get("model_type") or ""),
+                            resolution=str(body.get("resolution") or ""),
+                            total_frames=h3_sequence_total_frames,
+                            references=h3_sequence_refs,
+                            min_clip_frames=h3_sequence_min_frames,
+                            max_clip_frames=h3_sequence_max_frames,
+                            frame_step=h3_sequence_step,
+                            fps=h3_sequence_fps,
+                            camera_coverage=str(
+                                body.get("minimax_h3_camera_coverage") or "auto"
+                            ),
+                            overlap_frames=h3_sequence_overlap,
+                            native_continuation=h3_native_sequence,
+                        )
+                    )
+                except ValueError as error:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=str(error),
+                    ) from error
+                cached_prompts = h3_window_plan_response["window_prompts"]
+                h3_sequence_signature = h3_window_plan_response["signature"]
+                print(
+                    f"[MiniMax H3 Omni] Using {len(cached_prompts)} exact "
+                    f"manual {'window' if h3_native_sequence else 'clip'} prompts; "
+                    "the sequence planner LLM is bypassed."
+                )
+            elif cached_is_valid:
                 h3_window_plan_response = cached_plan
                 print(
                     "[MiniMax H3 Omni] Reusing reviewed "
-                    f"{len(cached_prompts)}-clip sequence plan."
+                    f"{len(cached_prompts)}-"
+                    f"{'window' if h3_native_sequence else 'clip'} sequence plan."
                 )
             else:
                 from services import llm_service
@@ -8779,11 +9036,15 @@ async def generate(request: Request):
                 ]
                 print(
                     f"[MiniMax H3 Omni] Planning {len(h3_sequence_geometry)} "
-                    "independent reference-driven clips."
+                    + (
+                        "native reference-continuation windows."
+                        if h3_native_sequence
+                        else "independent reference-driven clips."
+                    )
                 )
                 h3_window_plan_response = await asyncio.to_thread(
                     plan_h3_reference_sequence,
-                    str(body.get("prompt") or ""),
+                    h3_sequence_source_prompt,
                     model_type=str(body.get("model_type") or ""),
                     resolution=str(body.get("resolution") or ""),
                     total_frames=h3_sequence_total_frames,
@@ -8797,6 +9058,8 @@ async def generate(request: Request):
                     ),
                     image_paths=h3_sequence_images or None,
                     nsfw=bool(nsfw),
+                    overlap_frames=h3_sequence_overlap,
+                    native_continuation=h3_native_sequence,
                 )
                 cached_prompts = h3_window_plan_response["window_prompts"]
                 if not llm_was_loaded and llm_service.is_loaded():
@@ -8810,28 +9073,59 @@ async def generate(request: Request):
                         )
 
             h3_reference_sequence_active = True
-            per_clip_frames = list(
-                h3_window_plan_response.get("per_clip_frames")
-                or [item["frames"] for item in h3_sequence_geometry]
-            )
-            body["prompt"] = "\n---CLIP_BOUNDARY---\n".join(cached_prompts)
-            body["multi_prompts_gen_type"] = 3
-            body["per_clip_frames"] = per_clip_frames
-            body["per_clip_minimax_h3_references"] = [
-                [dict(reference) for reference in h3_sequence_refs]
-                for _ in per_clip_frames
-            ]
-            body["_omni_sequence_continuity"] = (
-                body.get("minimax_h3_sequence_continuity") is not False
-            )
-            body["_omni_sequence_target_frames"] = h3_sequence_total_frames
             body["h3_window_prompts"] = list(cached_prompts)
             body["h3_window_plan_signature"] = h3_sequence_signature
             body["h3_window_plan"] = h3_window_plan_response
+            if len(cached_prompts) == 1:
+                body["multi_prompts_gen_type"] = 0
+                body["sliding_window_size"] = min(
+                    h3_sequence_total_frames,
+                    h3_sequence_max_frames,
+                )
+                body.pop("per_clip_frames", None)
+                body.pop("per_clip_minimax_h3_references", None)
+                body.pop("_omni_sequence_continuity", None)
+                body.pop("_omni_sequence_target_frames", None)
+                print("[MiniMax H3 Omni] Manual one-pass prompt ready.")
+            elif h3_native_sequence:
+                # Keep one Ref2VA task. wgp's native scheduler feeds the
+                # generated video/audio overlap into the next pass while the
+                # model runtime repeats the canonical references every time.
+                body["multi_prompts_gen_type"] = 0
+                body["sliding_window_size"] = h3_sequence_max_frames
+                body["sliding_window_overlap"] = h3_sequence_overlap
+                body.pop("per_clip_frames", None)
+                body.pop("per_clip_minimax_h3_references", None)
+                body.pop("_omni_sequence_continuity", None)
+                body.pop("_omni_sequence_target_frames", None)
+                print(
+                    f"[MiniMax H3 Omni] Native sequence ready: "
+                    f"{len(cached_prompts)} windows, "
+                    f"{h3_sequence_overlap}-frame motion/audio overlap."
+                )
+            else:
+                # Hard-cut mode intentionally remains independent. This is
+                # useful when the user wants editorial cuts without motion or
+                # soundtrack leakage between adjacent clips.
+                per_clip_frames = list(
+                    h3_window_plan_response.get("per_clip_frames")
+                    or [item["frames"] for item in h3_sequence_geometry]
+                )
+                body["prompt"] = "\n---CLIP_BOUNDARY---\n".join(cached_prompts)
+                body["multi_prompts_gen_type"] = 3
+                body["per_clip_frames"] = per_clip_frames
+                body["per_clip_minimax_h3_references"] = [
+                    [dict(reference) for reference in h3_sequence_refs]
+                    for _ in per_clip_frames
+                ]
+                body["_omni_sequence_continuity"] = False
+                body["_omni_sequence_target_frames"] = h3_sequence_total_frames
             try:
                 from services import llm_service as _h3_sequence_llm
 
                 if (
+                    not h3_manual_sequence
+                    and
                     _h3_sequence_llm.is_loaded()
                     and _h3_sequence_llm.get_status().get("provider") == "local"
                 ):
@@ -8848,6 +9142,7 @@ async def generate(request: Request):
         # policy has finalized the real pass length, then pass an explicit
         # prompt array to wgp's existing per-window selector.
         h3_storyboard_enabled = body.get("minimax_h3_window_storyboard", True) is not False
+        h3_multi_window_enabled = body.get("minimax_h3_multi_window", False) is True
         h3_is_multi_clip = int(body.get("multi_prompts_gen_type") or 0) == 3
         try:
             h3_total_frames = int(body.get("video_length") or 0)
@@ -8858,6 +9153,7 @@ async def generate(request: Request):
             h3_total_frames = h3_window_frames = h3_overlap_frames = h3_discard_frames = 0
         h3_needs_storyboard = (
             h3_storyboard_enabled
+            and h3_multi_window_enabled
             and not _generation_model_def.get("omni_reference")
             and not h3_is_multi_clip
             and h3_total_frames > h3_window_frames > 0
@@ -8874,6 +9170,7 @@ async def generate(request: Request):
             h3_end_value = body.get("image_end")
             h3_has_start = bool(h3_start_value)
             h3_has_end = bool(h3_end_value)
+            h3_injected_keyframes = _h3_injected_keyframes_from_body(body)
             h3_expected_signature = h3_window_plan_signature(
                 str(body.get("prompt") or ""),
                 model_type=str(body.get("model_type") or ""),
@@ -8888,6 +9185,7 @@ async def generate(request: Request):
                 camera_coverage=str(
                     body.get("minimax_h3_camera_coverage") or "auto"
                 ),
+                injected_keyframes=h3_injected_keyframes or None,
             )
             h3_expected_count = len(
                 compute_h3_window_boundaries(
@@ -8927,6 +9225,10 @@ async def generate(request: Request):
                         value = value[0] if value else None
                     if isinstance(value, str) and value and os.path.isfile(value):
                         h3_images.append(value)
+                for keyframe in h3_injected_keyframes:
+                    value = keyframe["path"]
+                    if value and os.path.isfile(value):
+                        h3_images.append(value)
                 print(
                     f"[MiniMax H3] Planning {h3_expected_count} window-local prompts "
                     f"after VRAM-safe geometry ({h3_window_frames} frames/window)."
@@ -8944,6 +9246,7 @@ async def generate(request: Request):
                     has_start_image=h3_has_start,
                     has_end_image=h3_has_end,
                     image_paths=h3_images or None,
+                    injected_keyframes=h3_injected_keyframes or None,
                     nsfw=bool(nsfw),
                     camera_coverage=str(
                         body.get("minimax_h3_camera_coverage") or "auto"
@@ -21339,6 +21642,9 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     _mc_model_def = wgp.get_model_def(_mc_model_type) or {}
                 except Exception:
                     _mc_model_def = {}
+                _mc_is_h3 = str(
+                    _mc_model_def.get("architecture") or ""
+                ).startswith("minimax_h3")
                 _mc_bounded_director = str(
                     _mc_model_def.get("director_video_strategy") or "rolling_window"
                 ) in {"bounded_start_end", "omni_reference"}
@@ -21366,6 +21672,14 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     wgp.task_id += 1
                     clip_params = raw_params.copy()
                     clip_params["prompt"] = prompt_lines[i] if i < len(prompt_lines) else (prompt_lines[-1] if prompt_lines else "")
+                    if _mc_is_h3:
+                        # Each bounded H3 task starts at local window zero.
+                        # Keeping the parent request's full prompt array here
+                        # made every independent clip select prompt zero and
+                        # repeat the first clip's action.
+                        clip_params["h3_window_prompts"] = [
+                            clip_params["prompt"]
+                        ]
                     clip_params["image_start"] = image_starts[i] if i < len(image_starts) else None
                     clip_end = image_ends[i] if i < len(image_ends) else None
                     clip_params["image_end"] = clip_end if clip_end else None
@@ -21444,7 +21758,9 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     # If the clip prompt has newlines (window_prompts), use mode 1 (per-window)
                     # Otherwise mode 0 (single task)
                     clip_prompt = clip_params.get("prompt", "")
-                    clip_params["multi_prompts_gen_type"] = 1 if "\n" in clip_prompt else 0
+                    clip_params["multi_prompts_gen_type"] = (
+                        0 if _mc_is_h3 else (1 if "\n" in clip_prompt else 0)
+                    )
                     # Keyframe injection: add image_refs and frames_positions for this clip
                     if per_clip_keyframes and i < len(per_clip_keyframes) and per_clip_keyframes[i]:
                         kf_paths = per_clip_keyframes[i]
@@ -21480,6 +21796,10 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     tail_params = raw_params.copy()
                     # Use last clip's prompt and last clip's end image as start frame
                     tail_params["prompt"] = prompt_lines[-1] if prompt_lines else ""
+                    if _mc_is_h3:
+                        tail_params["h3_window_prompts"] = [
+                            tail_params["prompt"]
+                        ]
                     tail_params["image_start"] = last_se_clip_end_image
                     tail_params["image_end"] = None
                     tail_params["image_prompt_type"] = "S"  # start-only, no SE distortion
@@ -21575,6 +21895,8 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
             cancelled = False
             clip_output_files: dict[int, str] = {}
             join_output_file = None
+            active_generation_seconds_by_output: dict[str, int] = {}
+            active_generation_seconds_by_task: dict[int, int] = {}
 
             def _write_output_sidecars(file_names):
                 """Stamp every produced media file, including abort leftovers.
@@ -21621,7 +21943,9 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     "upload_filenames": upload_filenames,
                     "generation_mode": job["params"].get("generation_mode"),
                     "job_id": job_id,
-                    "generation_time": round(time.time() - start_time),
+                    # Keep submit-to-write elapsed time for diagnostics, but
+                    # do not present it as generation time in the gallery.
+                    "job_elapsed_time": round(time.time() - start_time),
                     "created_at": time.time(),
                 }
                 dpid = job["params"].get("_director_pipeline_id")
@@ -21654,6 +21978,46 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     meta_path = os.path.join(
                         out_dir, os.path.splitext(fname)[0] + ".meta.json",
                     )
+                    active_seconds = active_generation_seconds_by_output.get(
+                        os.path.basename(fname)
+                    )
+                    if active_seconds is None and os.path.isfile(meta_path):
+                        # Sidecars are refreshed after optional post-processing.
+                        # Preserve the first write's active duration when a
+                        # final filename was not part of WGP's artifact event.
+                        try:
+                            with open(meta_path, "r", encoding="utf-8") as f:
+                                existing_sidecar = json.load(f)
+                            if (
+                                existing_sidecar.get("generation_time_basis")
+                                == "active"
+                            ):
+                                active_seconds = int(round(float(
+                                    existing_sidecar.get("generation_time", 0)
+                                )))
+                        except (
+                            OSError,
+                            TypeError,
+                            ValueError,
+                            json.JSONDecodeError,
+                        ):
+                            pass
+                    if (
+                        active_seconds is None
+                        and active_generation_seconds_by_task
+                        and (total_tasks == 1 or fname == join_output_file)
+                    ):
+                        # A joined output represents every generated task; a
+                        # single-task post-process represents that one task.
+                        active_seconds = sum(
+                            active_generation_seconds_by_task.values()
+                        )
+                    if active_seconds is not None:
+                        file_sidecar["generation_time"] = max(
+                            0,
+                            int(round(active_seconds)),
+                        )
+                        file_sidecar["generation_time_basis"] = "active"
                     try:
                         with open(meta_path, "w", encoding="utf-8") as f:
                             json.dump(file_sidecar, f, indent=2)
@@ -21722,6 +22086,7 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
 
                 # Process stream — update job dict with live progress
                 task_error = False
+                task_generation_time = None
                 last_msg_len = 0
                 in_status_line = False
                 while True:
@@ -21827,6 +22192,27 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     elif cmd == "info":
                         print(f"\n  [INFO] {data}")
                         in_status_line = False
+                    elif cmd == "generation_time":
+                        try:
+                            if isinstance(data, dict):
+                                task_generation_time = max(
+                                    0,
+                                    int(round(float(data.get("seconds", 0)))),
+                                )
+                                timing_outputs = data.get("outputs") or []
+                            else:
+                                task_generation_time = max(
+                                    0,
+                                    int(round(float(data))),
+                                )
+                                timing_outputs = []
+                            for output_path in timing_outputs:
+                                if isinstance(output_path, str) and output_path:
+                                    active_generation_seconds_by_output[
+                                        os.path.basename(output_path)
+                                    ] = task_generation_time
+                        except (TypeError, ValueError):
+                            task_generation_time = None
 
                 # WGP may emit several cumulative sliding-window files for a
                 # single clip. Bind only the latest file from this task to its
@@ -21838,6 +22224,16 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                 ):
                     if output_path not in task_files:
                         task_files.append(output_path)
+                if task_generation_time is not None:
+                    active_generation_seconds_by_task[
+                        task_idx
+                    ] = task_generation_time
+                    for output_path in task_files:
+                        if isinstance(output_path, str) and output_path:
+                            active_generation_seconds_by_output.setdefault(
+                                os.path.basename(output_path),
+                                task_generation_time,
+                            )
                 clip_info = (task.get("params") or {}).get("multi_clip_info")
                 if isinstance(clip_info, dict) and "index" in clip_info:
                     latest_clip_file = None
@@ -22086,7 +22482,6 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                         os.remove(temp_path)
                 except OSError:
                     pass
-
             # Publish any files that finished before an abort. Director waits
             # for this worker to settle and persists these partial outputs.
             new_files = []

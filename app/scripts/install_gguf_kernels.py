@@ -14,8 +14,7 @@ The wheels are published as a GitHub release by deepbeepmeep at
 https://github.com/deepbeepmeep/kernels/releases. They're built per
 (Python minor, PyTorch major.minor, CUDA major.minor, OS) combination,
 so we detect the runtime env and pick the matching wheel. If no entry
-matches -an unreleased combo, or Linux where wheels aren't published
-yet -this is a soft no-op. Maestro keeps working with the slower
+matches -an unreleased combo -this is a soft no-op. Maestro keeps working with the slower
 fallback path; only GGUF-variant generation is affected, and the
 default INT8 / BF16 model variants don't use these kernels at all.
 
@@ -64,6 +63,14 @@ _WHEELS_WINDOWS: dict[tuple[int, str, str], str] = {
     ),
 }
 
+_WHEELS_LINUX: dict[tuple[int, str, str], str] = {
+    (11, "2.10", "13.0"): (
+        "https://github.com/deepbeepmeep/kernels/releases/download/"
+        "GGUF_Kernels/llamacpp_gguf_cuda-1.0.2+torch210cu13py311-"
+        "cp311-cp311-linux_x86_64.whl"
+    ),
+}
+
 
 def _already_installed() -> bool:
     try:
@@ -98,11 +105,12 @@ def _detect_env() -> tuple[int, str, str, str]:
 
 
 def _pick_wheel_url(py_minor: int, torch_short: str, cuda: str, os_name: str) -> str | None:
-    if os_name != "windows":
-        # No Linux/macOS wheels published yet. Return None to skip
-        # silently -the fallback path still works.
-        return None
-    return _WHEELS_WINDOWS.get((py_minor, torch_short, cuda))
+    key = (py_minor, torch_short, cuda)
+    if os_name == "windows":
+        return _WHEELS_WINDOWS.get(key)
+    if os_name == "linux":
+        return _WHEELS_LINUX.get(key)
+    return None
 
 
 def main() -> int:
