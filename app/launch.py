@@ -8831,6 +8831,22 @@ async def generate(request: Request):
             bool(_generation_model_def.get("omni_reference"))
             and body.get("minimax_h3_reference_sequence") is True
         )
+        if (
+            bool(_generation_model_def.get("omni_reference"))
+            and not h3_sequence_enabled
+            and "\n" in str(body.get("prompt") or "")
+            and body.get("multi_prompts_gen_type") in (None, 0, 1, "0", "1")
+        ):
+            # A single native Omni pass consumes one complete Context-IR
+            # prompt. Its subject definitions, summary, retention analysis,
+            # detailed description, and soundscape are semantic sections,
+            # not separate continuation-window prompts. Keep this backend
+            # guard for cached/pre-fix web assets as well as API callers.
+            body["multi_prompts_gen_type"] = 2
+            print(
+                "[MiniMax H3 Omni] Preserving the complete multiline "
+                "prompt for one native pass."
+            )
         h3_sequence_prompt_mode = (
             "manual"
             if body.get("minimax_h3_sequence_prompt_mode") == "manual"

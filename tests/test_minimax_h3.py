@@ -742,12 +742,48 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         params = {
             "resolution": "1920x1088",
             "video_length": 345,
-            "sliding_window_size": 345,
+            # Auto's 24 GB / 1080p recommendation. A larger matching window
+            # is an intentional native-pass override, tested below.
+            "sliding_window_size": 158,
         }
         adjustment = apply_policy(params, pruned, {"gpu_vram_gb": 24})
         self.assertEqual(params["video_length"], 158)
         self.assertEqual(params["sliding_window_size"], 158)
         self.assertEqual(adjustment["effective_frames"], 158)
+
+        # Issue #64: v1.7.0-v1.7.2 could lose the explicit override boolean
+        # while leaving the selected native Duration and Window Length in
+        # sync. That request must not be silently shortened to 124 frames.
+        legacy_manual = {
+            "resolution": "704x1280",
+            "video_length": 359,
+            "sliding_window_size": 345,
+        }
+        self.assertIsNone(
+            apply_policy(legacy_manual, pruned, {"gpu_vram_gb": 12})
+        )
+        self.assertEqual(legacy_manual["video_length"], 359)
+        self.assertEqual(legacy_manual["sliding_window_size"], 345)
+        self.assertTrue(legacy_manual["sliding_window_memory_override"])
+        self.assertEqual(
+            helpers["normalize_h3_clip_frame_count"](
+                legacy_manual["video_length"]
+            ),
+            345,
+        )
+
+        legacy_ten_seconds = {
+            "resolution": "704x1280",
+            "video_length": 240,
+            "sliding_window_size": 240,
+        }
+        self.assertIsNone(
+            apply_policy(legacy_ten_seconds, pruned, {"gpu_vram_gb": 12})
+        )
+        self.assertEqual(legacy_ten_seconds["video_length"], 240)
+        self.assertTrue(
+            legacy_ten_seconds["sliding_window_memory_override"]
+        )
 
         safe = {
             "resolution": "1920x1088",
@@ -1313,6 +1349,9 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("unsupportedAutoResolution", duration)
         self.assertIn("fallbackResolution", duration)
         self.assertIn("sliding_window_memory_override", store)
+        self.assertIn("const h3DirectOmniPass = (", store)
+        self.assertIn("let windowFrames = h3DirectOmniPass", store)
+        self.assertIn("directOmniDurationOverride", store)
         self.assertIn("full prompt auto-paced", duration)
         self.assertIn('"sliding_window_memory_policy": md.get(', launch)
         self.assertIn('"omni_sequence_memory_policy": md.get(', launch)
@@ -1451,6 +1490,25 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("supportsSlidingWindows = modelOptions?.sliding_window === true", prompt_input)
         self.assertIn("(!isH3FirstLast || h3FirstLastMultiWindow)", prompt_input)
         self.assertIn("&& stride > 0", prompt_input)
+
+    def test_single_pass_omni_multiline_prompt_stays_one_prompt(self):
+        store = _read(_STORE_PATH)
+        launch = _read(_LAUNCH_PATH)
+
+        self.assertIn("const h3WindowPromptRoutingEnabled = !isH3Model", store)
+        self.assertIn("&& h3WindowPromptRoutingEnabled", store)
+        self.assertIn(
+            "params.minimax_h3_reference_sequence === true",
+            store,
+        )
+        self.assertIn(
+            "[MiniMax H3 Omni] Preserving the complete multiline ",
+            launch,
+        )
+        self.assertIn(
+            'and body.get("multi_prompts_gen_type") in (None, 0, 1, "0", "1")',
+            launch,
+        )
 
     def test_ref2va_enhance_cleanup_preserves_structured_reference_reuse(self):
         helpers = _load_llm_enhance_helpers()

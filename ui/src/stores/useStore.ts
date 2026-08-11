@@ -4675,6 +4675,10 @@ export const useStore = create<AppState>((set, get) => ({
         && !isOmniReference
         && params.minimax_h3_multi_window === true
       )
+      const h3DirectOmniPass = (
+        isOmniReference
+        && !h3ReferenceSequenceRequested
+      )
       effectiveH3SequenceClipFrames = maximumFrames
       if (h3ReferenceSequenceRequested && maximumFrames != null) {
         const sequenceBudget = effectiveH3OmniSequenceFrames({
@@ -4698,14 +4702,12 @@ export const useStore = create<AppState>((set, get) => ({
         minimumFrames,
         Math.round(state.durationSeconds * fps),
       )
-      if (isOmniReference && maximumFrames != null && !h3ReferenceSequenceRequested) {
-        // Ref2VA advertises native sliding-window capability for Reference
-        // Sequence, but ordinary Omni generation remains one native pass.
-        requestedFrames = Math.min(
-          maximumFrames,
-          Math.max(minimumFrames, Math.round(state.slidingWindowSeconds * fps)),
-          requestedFrames,
-        )
+      if (h3DirectOmniPass && maximumFrames != null) {
+        // Ordinary Omni generation is one native pass. Duration is the
+        // user's requested pass length; Window Length is only the VRAM-aware
+        // default. Never silently shorten a visible Duration merely because
+        // the saved/automatic window state is smaller.
+        requestedFrames = Math.min(maximumFrames, requestedFrames)
       } else if (
         isH3Model
         && !isOmniReference
@@ -4744,7 +4746,9 @@ export const useStore = create<AppState>((set, get) => ({
 
       if (supportsSlidingWindows) {
         const swDefaults = state.modelOptions?.sliding_window_defaults
-        let windowFrames = Math.round(state.slidingWindowSeconds * fps)
+        let windowFrames = h3DirectOmniPass
+          ? requestedFrames
+          : Math.round(state.slidingWindowSeconds * fps)
         if (swDefaults) {
           const windowMinimum = swDefaults.window_min ?? 1
           const windowMaximum = swDefaults.window_max ?? windowFrames
@@ -4763,7 +4767,28 @@ export const useStore = create<AppState>((set, get) => ({
         )
         params.sliding_window_discard_last_frames = swDefaults?.discard_last_frames ?? 0
         if (isH3Model) {
-          params.sliding_window_memory_override = state.slidingWindowLocked
+          const nativeRecommendation = h3DirectOmniPass
+            ? recommendedH3PassProfile(
+                state.modelOptions?.omni_sequence_memory_policy,
+                String(params.resolution || ''),
+                state.systemStats?.gpu.vram_total_gb ?? 0,
+              )
+            : null
+          const directOmniDurationOverride = h3DirectOmniPass && (
+            state.slidingWindowLocked
+            || nativeRecommendation?.supported === false
+            || (
+              nativeRecommendation?.frames != null
+              && requestedFrames > nativeRecommendation.frames
+            )
+          )
+          // Raising the visible one-pass Omni Duration above Auto's
+          // recommendation is itself an intentional override. Derive this
+          // again at submit time so model switches, loaded sidecars, or a
+          // cached UI state cannot lose the user's selection.
+          params.sliding_window_memory_override = (
+            state.slidingWindowLocked || directOmniDurationOverride
+          )
         } else if (state.modelOptions?.sliding_window_memory_policy?.manual_override) {
           params.sliding_window_memory_override = state.slidingWindowLocked
         } else {
@@ -4964,7 +4989,13 @@ export const useStore = create<AppState>((set, get) => ({
     // When there IS sliding window, each line becomes a window prompt (mode 1).
     if (state.generationMode === 'video' && (isOmniReference || state.params.image_mode !== 2)) {
       const prompt = (params.prompt as string) || ''
+      const h3WindowPromptRoutingEnabled = !isH3Model || (
+        isOmniReference
+          ? params.minimax_h3_reference_sequence === true
+          : params.minimax_h3_multi_window === true
+      )
       const hasSlidingWindow = state.modelOptions?.sliding_window === true
+        && h3WindowPromptRoutingEnabled
         && state.durationSeconds > state.slidingWindowSeconds
       if (
         hasSlidingWindow

@@ -894,13 +894,15 @@ def apply_h3_native_omni_memory_policy(
     model_def: dict,
     hardware: dict | None,
 ) -> dict | None:
-    """Cap an ordinary one-shot Ref2VA clip to its safe native pass.
+    """Keep an automatic one-shot Ref2VA clip within its safe native pass.
 
     Unlike Omni Reference Sequence, a one-shot Ref2VA request cannot divide
     the requested duration into continuation windows. Auto therefore reduces
-    the output duration itself when the selected canvas exceeds this GPU's
-    measured-safe native pass. Sequence mode is handled separately and keeps
-    its full requested timeline.
+    the output duration only when the request still carries Auto's shorter
+    Window Length. A matching native window is an intentional user override
+    and must be honored, including requests from cached v1.7.x frontends that
+    predate the explicit memory-override flag. Sequence mode is handled
+    separately and keeps its full requested timeline.
     """
 
     if (
@@ -918,9 +920,47 @@ def apply_h3_native_omni_memory_policy(
     try:
         total_vram_gb = float(hardware.get("gpu_vram_gb") or 0)
         requested_frames = int(inputs.get("video_length") or _H3_MIN_FRAMES)
+        requested_window_frames = int(
+            inputs.get("sliding_window_size") or _H3_MIN_FRAMES
+        )
     except (TypeError, ValueError):
         return None
     if total_vram_gb <= 0:
+        return None
+
+    minimum_frames = max(
+        1,
+        int((model_def or {}).get("frames_minimum") or _H3_MIN_FRAMES),
+    )
+    maximum_frames = max(
+        minimum_frames,
+        int((model_def or {}).get("frames_maximum") or _H3_MAX_FRAMES),
+    )
+    requested_native_frames = normalize_h3_clip_frame_count(
+        requested_frames,
+        minimum_frames=minimum_frames,
+        maximum_frames=maximum_frames,
+        frame_step=int(
+            (model_def or {}).get("frames_steps") or _H3_FRAME_STEP
+        ),
+    )
+    requested_native_window_frames = normalize_h3_clip_frame_count(
+        requested_window_frames,
+        minimum_frames=minimum_frames,
+        maximum_frames=maximum_frames,
+        frame_step=int(
+            (model_def or {}).get("frames_steps") or _H3_FRAME_STEP
+        ),
+    )
+    if (
+        requested_frames > minimum_frames
+        and requested_native_window_frames >= requested_native_frames
+    ):
+        # v1.7.0-v1.7.2 could lose the explicit boolean during model-option
+        # or restored-sidecar state changes even though Duration and Window
+        # Length still visibly matched. Treat that unambiguous request shape
+        # as the same manual override instead of silently returning 5.2s.
+        inputs["sliding_window_memory_override"] = True
         return None
 
     resolution = _normalize_h3_resolution(
