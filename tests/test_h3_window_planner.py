@@ -23,6 +23,7 @@ from services.h3_window_planner import (  # noqa: E402
     compute_h3_window_boundaries,
     h3_window_plan_signature,
     normalize_h3_injected_keyframes,
+    parse_h3_manual_window_prompts,
     plan_h3_sliding_windows,
 )
 from services.h3_story_ledger import (  # noqa: E402
@@ -223,6 +224,39 @@ class H3WindowPlannerTests(unittest.TestCase):
         )
         self.assertAlmostEqual(spans[1]["start_seconds"], 124 / 24, places=3)
         self.assertAlmostEqual(spans[-1]["end_seconds"], 345 / 24, places=3)
+
+    def test_manual_first_last_prompts_remain_local_to_their_windows(self):
+        spans = compute_h3_window_boundaries(
+            998,
+            345,
+            fps=24,
+            overlap_frames=17,
+        )
+        self.assertEqual(len(spans), 3)
+        self.assertEqual(
+            parse_h3_manual_window_prompts(
+                "First action only\nSecond action only\nThird action only",
+                expected_count=len(spans),
+            ),
+            ["First action only", "Second action only", "Third action only"],
+        )
+
+    def test_manual_first_last_prompts_accept_the_ui_array(self):
+        self.assertEqual(
+            parse_h3_manual_window_prompts(
+                "This fallback must not replace the explicit array",
+                expected_count=3,
+                window_prompts=[" Window one ", "Window two", "Window three"],
+            ),
+            ["Window one", "Window two", "Window three"],
+        )
+
+    def test_manual_first_last_prompt_count_mismatch_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "exactly 3 non-empty prompt lines"):
+            parse_h3_manual_window_prompts(
+                "first window\nsecond window",
+                expected_count=3,
+            )
 
     def test_compiler_keeps_actions_and_dialogue_local_to_each_window(self):
         spans = compute_h3_window_boundaries(345, 124, fps=24, overlap_frames=1)

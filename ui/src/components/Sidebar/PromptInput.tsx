@@ -220,6 +220,13 @@ export function PromptInput() {
     && h3SequenceTotalFrames > sequenceClipFrames
   )
   const usesH3ManualSequence = h3SequenceEnabled && h3ManualSequencePrompts
+  const usesH3ManualFirstLast = (
+    usesWindows
+    && isH3FirstLast
+    && h3FirstLastMultiWindow
+    && !h3WindowPlanningEnabled
+  )
+  const usesH3ManualPrompts = usesH3ManualSequence || usesH3ManualFirstLast
   const usesH3SequencePlanner = h3SequenceNeedsMultiplePasses && !h3ManualSequencePrompts
   const sequenceClipCount = h3SequenceEnabled && sequenceClipFrames
     ? h3OmniSequenceWindowCount({
@@ -230,6 +237,10 @@ export function PromptInput() {
       })
     : 1
   const manualPromptLineCount = prompt.split('\n').filter(line => line.trim()).length
+  const manualPromptCount = usesH3ManualFirstLast ? windowCount : sequenceClipCount
+  const manualPromptUnit = usesH3ManualFirstLast
+    ? 'window'
+    : (h3NativeSequence ? 'window' : 'clip')
   const usesH3Plan = usesH3WindowPlanner || usesH3SequencePlanner
   const expectedPlanCount = usesH3SequencePlanner ? sequenceClipCount : windowCount
   const expectedWindowFrames = usesH3SequencePlanner
@@ -378,19 +389,19 @@ export function PromptInput() {
           )}
         </div>
       )}
-      {usesH3ManualSequence && (
+      {usesH3ManualPrompts && (
         <div className="mb-1.5 flex items-center justify-between gap-2 text-[10px] text-text-muted">
-          <span>One non-empty line per {h3NativeSequence ? 'window' : 'clip'}</span>
-          <span className={manualPromptLineCount === sequenceClipCount ? 'text-text-secondary' : 'text-amber-400'}>
-            {manualPromptLineCount}/{sequenceClipCount} prompts
+          <span>One non-empty line per {manualPromptUnit}</span>
+          <span className={manualPromptLineCount === manualPromptCount ? 'text-text-secondary' : 'text-amber-400'}>
+            {manualPromptLineCount}/{manualPromptCount} prompts
           </span>
         </div>
       )}
       <textarea
         value={prompt}
         onChange={e => setParam('prompt', e.target.value)}
-        placeholder={usesH3ManualSequence
-          ? `Line 1 = ${h3NativeSequence ? 'window' : 'clip'} 1, line 2 = ${h3NativeSequence ? 'window' : 'clip'} 2... (${sequenceClipCount} total)`
+        placeholder={usesH3ManualPrompts
+          ? `Line 1 = ${manualPromptUnit} 1, line 2 = ${manualPromptUnit} 2... (${manualPromptCount} total)`
           : usesH3Plan
           ? `Describe the complete video idea—Maestro will plan ${expectedPlanCount} H3 ${usesH3SequencePlanner ? 'reference clips' : 'windows'}.`
           : usesWindows
@@ -399,7 +410,7 @@ export function PromptInput() {
         className="w-full flex-1 bg-bg-tertiary border border-border rounded-lg px-3 py-2 pr-10 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue transition-colors"
         style={{ resize: 'none', minHeight: 112 }}
       />
-      {prompt.trim() && !usesH3ManualSequence && (
+      {prompt.trim() && !usesH3ManualPrompts && (
         isAudioOnly ? (
           /* TTS: mode-aware split button. Main button uses default mode based
              on voice-slot count; dropdown exposes both Speech and Dialogue

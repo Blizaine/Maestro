@@ -6,6 +6,9 @@ import {
   effectiveH3OmniSequenceFrames,
   h3WindowOverrideKey,
   h3OmniSequenceWindowCount,
+  h3SlidingWindowCount,
+  normalizeH3ClipFrameSchedule,
+  normalizeH3ClipFrames,
   normalizeH3NativeFrames,
   recommendedH3PassProfile,
   recommendedH3OmniSequenceProfile,
@@ -4642,6 +4645,7 @@ export const useStore = create<AppState>((set, get) => ({
     const params: Record<string, unknown> = { ...state.params, generation_mode: state.generationMode, workspace: state.activeWorkspace }
     let effectiveH3SequenceClipFrames: number | null = null
     let h3ManualSequencePrompts: string[] | null = null
+    let h3ManualFirstLastPrompts: string[] | null = null
 
     // H3 video-to-audio freezes the Control Video's pictures, so any
     // remembered V2V mask/edit controls are irrelevant. Normalize the request
@@ -4720,6 +4724,22 @@ export const useStore = create<AppState>((set, get) => ({
       ) {
         requestedFrames = Math.min(maximumFrames, requestedFrames)
       }
+      if (
+        isH3Model
+        && maximumFrames != null
+        && requestedFrames <= maximumFrames + 1
+      ) {
+        // Uploaded audio/video and old sidecars describe ordinary seconds.
+        // Convert values such as 5.0s = 120 frames to H3's first legal clip
+        // (124), and do this after all single-pass clamps so an old 5.0s
+        // window preference cannot reintroduce the invalid value.
+        requestedFrames = normalizeH3ClipFrames(
+          requestedFrames,
+          minimumFrames,
+          maximumFrames,
+          state.modelOptions?.frames_steps ?? 17,
+        )
+      }
       params.video_length = requestedFrames
 
       if (supportsSlidingWindows) {
@@ -4754,6 +4774,31 @@ export const useStore = create<AppState>((set, get) => ({
         delete params.sliding_window_overlap
         delete params.sliding_window_discard_last_frames
         delete params.sliding_window_memory_override
+      }
+
+      if (
+        h3FirstLastMultiWindowRequested
+        && params.minimax_h3_window_storyboard === false
+        && requestedFrames > Number(params.sliding_window_size || 0)
+      ) {
+        h3ManualFirstLastPrompts = String(params.prompt || '')
+          .replace(/\r\n?/g, '\n')
+          .split('\n')
+          .map(line => line.trim())
+          .filter(Boolean)
+        const expectedPromptCount = h3SlidingWindowCount({
+          totalFrames: requestedFrames,
+          windowFrames: Number(params.sliding_window_size || requestedFrames),
+          overlapFrames: Number(params.sliding_window_overlap || 0),
+          discardFrames: Number(params.sliding_window_discard_last_frames || 0),
+        })
+        if (h3ManualFirstLastPrompts.length !== expectedPromptCount) {
+          set({
+            promptEnhanceError: `Manual First / Last sequence needs exactly ${expectedPromptCount} non-empty prompt ${expectedPromptCount === 1 ? 'line' : 'lines'} (window 1 through window ${expectedPromptCount}); found ${h3ManualFirstLastPrompts.length}.`,
+          })
+          return
+        }
+        params.h3_window_prompts = h3ManualFirstLastPrompts
       }
 
       if (
@@ -5354,10 +5399,23 @@ export const useStore = create<AppState>((set, get) => ({
       && params.minimax_h3_reference_sequence === true
       && params.minimax_h3_sequence_prompt_mode === 'manual'
     )
+    const h3ManualFirstLastSequence = (
+      state.generationMode === 'video'
+      && isH3Model
+      && !isOmniReference
+      && params.minimax_h3_multi_window === true
+      && params.minimax_h3_window_storyboard === false
+      && Number(params.video_length || 0) > Number(params.sliding_window_size || 0)
+    )
     const h3PlanActive = h3WindowStoryboardActive || (
       h3ReferenceSequenceActive && !h3ManualReferenceSequence
     )
-    if (h3ManualReferenceSequence) {
+    if (h3ManualFirstLastSequence) {
+      params.minimax_h3_window_storyboard = false
+      params.h3_window_prompts = h3ManualFirstLastPrompts ?? []
+      delete params.h3_window_plan_signature
+      delete params.h3_window_plan
+    } else if (h3ManualReferenceSequence) {
       delete params.minimax_h3_window_storyboard
       params.h3_window_prompts = h3ManualSequencePrompts ?? []
       delete params.h3_window_plan_signature
@@ -7608,7 +7666,11 @@ export const useStore = create<AppState>((set, get) => ({
     if (directorSteps != null) videoParams.num_inference_steps = directorSteps
     const videoLora = savedLoraPerMode.video
 
-    const fps = get().modelOptions?.fps ?? 16
+    const directorVideoOptions = get().modelOptions?.model_type === videoModel
+      ? get().modelOptions
+      : null
+    const isH3Video = videoModel.startsWith('minimax_h3')
+    const fps = isH3Video ? (directorVideoOptions?.fps ?? 24) : (directorVideoOptions?.fps ?? 16)
     const totalDuration = directorAnalysis?.duration ?? 180
     const totalDurationCapped = Math.min(totalDuration, 300)
 
@@ -7635,7 +7697,17 @@ export const useStore = create<AppState>((set, get) => ({
     })
 
     // Build per-clip frame counts for variable-duration support
-    const perClipFrames = clips.map(c => c.durationFrames ?? Math.round(5 * fps))
+    const requestedClipFrames = clips.map(
+      c => c.durationFrames ?? Math.round(5 * fps),
+    )
+    const perClipFrames = isH3Video
+      ? normalizeH3ClipFrameSchedule(
+          requestedClipFrames,
+          directorVideoOptions?.frames_minimum ?? 124,
+          directorVideoOptions?.frames_maximum ?? 345,
+          directorVideoOptions?.frames_steps ?? 17,
+        )
+      : requestedClipFrames
     const totalFrames = perClipFrames.reduce((sum, f) => sum + f, 0)
     const maxClipFrames = Math.max(...perClipFrames)
 
@@ -7689,7 +7761,11 @@ export const useStore = create<AppState>((set, get) => ({
     if (directorSteps != null) videoParams.num_inference_steps = directorSteps
     const videoLora = savedLoraPerMode.video
 
-    const fps = get().modelOptions?.fps ?? 16
+    const directorVideoOptions = get().modelOptions?.model_type === videoModel
+      ? get().modelOptions
+      : null
+    const isH3Video = videoModel.startsWith('minimax_h3')
+    const fps = isH3Video ? (directorVideoOptions?.fps ?? 24) : (directorVideoOptions?.fps ?? 16)
     const totalDuration = directorAnalysis?.duration ?? 180
     const totalDurationCapped = Math.min(totalDuration, 300)
 
@@ -7714,7 +7790,17 @@ export const useStore = create<AppState>((set, get) => ({
       }
     })
 
-    const perClipFrames = clips.map(c => c.durationFrames ?? Math.round(5 * fps))
+    const requestedClipFrames = clips.map(
+      c => c.durationFrames ?? Math.round(5 * fps),
+    )
+    const perClipFrames = isH3Video
+      ? normalizeH3ClipFrameSchedule(
+          requestedClipFrames,
+          directorVideoOptions?.frames_minimum ?? 124,
+          directorVideoOptions?.frames_maximum ?? 345,
+          directorVideoOptions?.frames_steps ?? 17,
+        )
+      : requestedClipFrames
     const totalFrames = perClipFrames.reduce((sum, f) => sum + f, 0)
     const maxClipFrames = Math.max(...perClipFrames)
 
@@ -8527,6 +8613,12 @@ export const useStore = create<AppState>((set, get) => ({
       get().loadLoras(modelType)
       await get().loadModelOptions(modelType)
     }
+    const restoredModelOptions = get().modelOptions?.model_type === modelType
+      ? get().modelOptions
+      : null
+    const restoredIsH3 = String(
+      restoredModelOptions?.architecture || modelType,
+    ).startsWith('minimax_h3')
 
     // Detect I2V: if image_start was used or image_prompt_type contains "S"
     const hadStartImage = !!(p.image_start || (p.image_prompt_type as string || '').includes('S'))
@@ -8716,7 +8808,24 @@ export const useStore = create<AppState>((set, get) => ({
       // Saved by app/launch.py as part of raw_params before per-clip split;
       // survives onto the concat multiclip sidecar (see real sidecar example
       // in app/outputs/Testing04/...multiclip.meta.json line 13-26).
-      const perClipFrames = Array.isArray(p.per_clip_frames) ? (p.per_clip_frames as number[]) : []
+      const rawPerClipFrames = Array.isArray(p.per_clip_frames)
+        ? (p.per_clip_frames as number[])
+        : []
+      const perClipFrames = restoredIsH3
+        ? normalizeH3ClipFrameSchedule(
+            rawPerClipFrames,
+            restoredModelOptions?.frames_minimum ?? 124,
+            restoredModelOptions?.frames_maximum ?? 345,
+            restoredModelOptions?.frames_steps ?? 17,
+          )
+        : rawPerClipFrames
+      if (perClipFrames.length > 0) {
+        newParams.per_clip_frames = perClipFrames
+        newParams.video_length = perClipFrames.reduce((total, value) => total + value, 0)
+        newParams.sliding_window_size = Math.max(...perClipFrames)
+      } else {
+        newParams.per_clip_frames = undefined
+      }
       // Per-clip keyframe images (Director Mode KFI feature). Array of arrays
       // — each inner array holds the keyframe paths for that clip. Studio
       // Mode multi-shot generations don't use this field today.

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+from contextlib import nullcontext
 import importlib.util
 import json
 import os
@@ -133,6 +134,8 @@ def _load_h3_memory_helpers():
         "apply_h3_window_memory_policy",
         "apply_h3_omni_sequence_memory_policy",
         "apply_h3_native_omni_memory_policy",
+        "normalize_h3_clip_frame_count",
+        "normalize_h3_clip_frame_schedule",
         "normalize_h3_overlap_frames",
         "pace_h3_sliding_window_prompt",
     }
@@ -496,6 +499,24 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertEqual(normalize("auto_540p"), "auto_540p")
         self.assertEqual(normalize("900x1600"), "768x1344")
         self.assertEqual(normalize("not-a-size"), "864x480")
+
+    def test_legacy_and_media_clip_lengths_snap_up_to_the_h3_lattice(self):
+        helpers = _load_h3_memory_helpers()
+        normalize = helpers["normalize_h3_clip_frame_count"]
+        schedule = helpers["normalize_h3_clip_frame_schedule"]
+
+        self.assertEqual(normalize(120), 124)
+        self.assertEqual(normalize(124), 124)
+        self.assertEqual(normalize(125), 141)
+        self.assertEqual(normalize(144), 158)
+        self.assertEqual(normalize(345), 345)
+        self.assertEqual(normalize(360), 345)
+        self.assertEqual(normalize(None), 124)
+        self.assertEqual(normalize(340, maximum_frames=340), 328)
+        self.assertEqual(
+            schedule([120, 124, 144, "175", None]),
+            [124, 124, 141, 175, 124],
+        )
 
     def test_h3_window_recommendations_are_checkpoint_aware(self):
         helpers = _load_h3_memory_helpers()
@@ -1133,6 +1154,19 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("build_manual_h3_reference_sequence_plan", launch)
         self.assertIn("the sequence planner LLM is bypassed", launch)
         self.assertIn('minimax_h3_sequence_prompt_mode="auto"', wgp)
+
+    def test_first_last_manual_sequence_routes_one_prompt_per_window(self):
+        launch = _read(_LAUNCH_PATH)
+        store = _read(_STORE_PATH)
+        prompt_input = _read(_PROMPT_INPUT_PATH)
+
+        self.assertIn("h3ManualFirstLastPrompts", store)
+        self.assertIn("h3SlidingWindowCount", store)
+        self.assertIn("h3ManualFirstLastSequence", store)
+        self.assertIn("parse_h3_manual_window_prompts", launch)
+        self.assertIn("Manual First / Last sequence ready", launch)
+        self.assertIn("usesH3ManualFirstLast", prompt_input)
+        self.assertIn("usesH3ManualPrompts", prompt_input)
 
     def test_shared_h3_window_ui_and_durable_overrides_are_wired(self):
         controls = _read(_H3_MULTI_WINDOW_CONTROLS_PATH)
@@ -1880,6 +1914,7 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
 
     def test_conditioner_loader_preserves_mixed_quantization_contract(self):
         main = _read(_MAIN_PATH)
+        conditioner = _read(_CONDITIONER_PATH)
         checkpoint = _read(_CHECKPOINT_PATH)
         self.assertIn("_normalize_conditioner_checkpoint_namespaces", main)
         self.assertIn('if variant == "nvfp4_awq":', main)
@@ -1888,6 +1923,11 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
         self.assertIn("consumer_quantized=variant == \"nvfp4_awq\"", main)
         self.assertIn("qwen.model._model_dtype = dtype", main)
         self.assertIn("qwen.visual._model_dtype = dtype", main)
+        self.assertIn('gguf_vision_autocast=variant.startswith("gguf_")', main)
+        self.assertIn('torch.autocast(device_type="cuda", dtype=torch.float16)', conditioner)
+        self.assertIn("image_embeds, image_deepstack = self._encode_visual(", conditioner)
+        self.assertIn("video_embeds, video_deepstack = self._encode_visual(", conditioner)
+        self.assertIn("image_embeds, deepstack = self._encode_visual(", conditioner)
         self.assertIn("with init_empty_weights(include_buffers=False):", main)
         self.assertIn('descriptor.get("format") != "int8_tensorwise"', checkpoint)
         self.assertIn('state_dict.pop(f"{prefix}.comfy_quant", None)', checkpoint)
@@ -1979,6 +2019,69 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
     def tearDownClass(cls):
         if sys.path and sys.path[0] == str(_APP):
             sys.path.pop(0)
+
+    def test_gguf_vision_forward_uses_cuda_fp16_autocast(self):
+        from models.minimax_h3.conditioner import MiniMaxH3Conditioner
+
+        visual = mock.Mock(return_value=("image embeds", ["deepstack"]))
+        qwen = types.SimpleNamespace(visual=visual)
+        conditioner = MiniMaxH3Conditioner(
+            qwen,
+            tokenizer=None,
+            processor=None,
+            gguf_vision_autocast=True,
+        )
+        pixels = mock.Mock()
+        pixels.to.return_value = pixels
+        grid = mock.Mock()
+        grid.to.return_value = grid
+        device = self.torch.device("cuda")
+
+        with mock.patch(
+            "models.minimax_h3.conditioner.torch.autocast",
+            return_value=nullcontext(),
+        ) as autocast:
+            result = conditioner._encode_visual(pixels, grid, device)
+
+        autocast.assert_called_once_with(
+            device_type="cuda",
+            dtype=self.torch.float16,
+        )
+        pixels.to.assert_called_once_with(
+            device=device,
+            dtype=self.torch.float32,
+        )
+        grid.to.assert_called_once_with(device)
+        visual.assert_called_once_with(pixels, grid_thw=grid)
+        self.assertEqual(result, ("image embeds", ["deepstack"]))
+
+    def test_non_gguf_vision_forward_keeps_existing_precision_path(self):
+        from models.minimax_h3.conditioner import MiniMaxH3Conditioner
+
+        visual = mock.Mock(return_value=("image embeds", []))
+        conditioner = MiniMaxH3Conditioner(
+            types.SimpleNamespace(visual=visual),
+            tokenizer=None,
+            processor=None,
+            gguf_vision_autocast=False,
+        )
+        pixels = mock.Mock()
+        pixels.to.return_value = pixels
+        grid = mock.Mock()
+        grid.to.return_value = grid
+
+        with mock.patch(
+            "models.minimax_h3.conditioner.torch.autocast",
+        ) as autocast:
+            result = conditioner._encode_visual(
+                pixels,
+                grid,
+                self.torch.device("cuda"),
+            )
+
+        autocast.assert_not_called()
+        visual.assert_called_once_with(pixels, grid_thw=grid)
+        self.assertEqual(result, ("image embeds", []))
 
     def test_fl2va_overlap_splits_motion_history_and_boundary_frame(self):
         from models.minimax_h3.minimax_h3_main import (

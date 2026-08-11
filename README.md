@@ -77,6 +77,15 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.7.2 (2026-08-11)
+
+**MiniMax H3 sequence and compatibility fixes**
+- Fixed legacy Director projects and uploaded audio/video producing ordinary frame counts that H3 rejected as outside its native frame lattice.
+- H3 now repairs those clip schedules without accumulating timeline drift, and saved Director projects mark affected clips for safe Dashboard regeneration.
+- Fixed manual First / Last multi-window generation applying the complete multiline prompt to every window; each line now drives exactly one window, with prompt-count validation before model loading.
+- Fixed H3 GGUF image and video reference conditioning failing on mixed FP16/FP32 vision-encoder weights, without changing the established NVFP4/AWQ path.
+- Expanded regression coverage for saved-project timing repair, media-derived clip lengths, manual window routing, and GGUF visual references.
+
 ### v1.7.1 (2026-08-10)
 
 **MiniMax H3 memory stability**

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -157,12 +159,28 @@ def _tag_vision_spans(input_ids: torch.Tensor) -> torch.Tensor:
 
 
 class MiniMaxH3Conditioner(nn.Module):
-    def __init__(self, qwen: MiniMaxH3Qwen3VL, tokenizer, processor, max_text_tokens: int = 512):
+    def __init__(
+        self,
+        qwen: MiniMaxH3Qwen3VL,
+        tokenizer,
+        processor,
+        max_text_tokens: int = 512,
+        *,
+        gguf_vision_autocast: bool = False,
+    ):
         super().__init__()
         self.qwen = qwen
         self.tokenizer = tokenizer
         self.processor = processor
         self.max_text_tokens = max_text_tokens
+        # GGUF Qwen3-VL vision checkpoints deliberately mix FP16 projection
+        # and quantized attention weights with FP32 LayerNorm parameters. A
+        # single input cast cannot satisfy that tower: patch embedding forces
+        # hidden states back to FP16, then an un-autocast FP32 LayerNorm raises
+        # ``expected scalar type Half but found Float``. CUDA FP16 autocast is
+        # the checkpoint's intended execution contract; keep it scoped to
+        # GGUF so the known-good NVFP4/AWQ path remains unchanged.
+        self.gguf_vision_autocast = bool(gguf_vision_autocast)
         self._interrupt = False
 
     @property
@@ -205,6 +223,24 @@ class MiniMaxH3Conditioner(nn.Module):
         input_ids = encoded["input_ids"]
         attention_mask = encoded["attention_mask"].bool()
         return input_ids, attention_mask, None, encoded
+
+    def _encode_visual(
+        self,
+        pixel_values: torch.Tensor,
+        grid_thw: torch.Tensor,
+        device: torch.device,
+    ) -> tuple[torch.Tensor | None, list[torch.Tensor] | None]:
+        """Run the independently offloaded Qwen vision tower safely."""
+
+        pixels = pixel_values.to(device=device, dtype=torch.float32)
+        grid = grid_thw.to(device)
+        autocast = (
+            torch.autocast(device_type="cuda", dtype=torch.float16)
+            if self.gguf_vision_autocast and device.type == "cuda"
+            else nullcontext()
+        )
+        with autocast:
+            return self.qwen.visual(pixels, grid_thw=grid)
 
     @staticmethod
     def _merge_deepstack(
@@ -290,9 +326,10 @@ class MiniMaxH3Conditioner(nn.Module):
         image_mask = video_mask = None
         image_deepstack = video_deepstack = None
         if pixel_values is not None:
-            image_embeds, image_deepstack = self.qwen.visual(
-                pixel_values.to(device=device, dtype=torch.float32),
-                grid_thw=image_grid_thw.to(device),
+            image_embeds, image_deepstack = self._encode_visual(
+                pixel_values,
+                image_grid_thw,
+                device,
             )
             if image_embeds is None or self._interrupt:
                 return None, None
@@ -302,9 +339,10 @@ class MiniMaxH3Conditioner(nn.Module):
                 image_embeds.to(inputs_embeds.dtype),
             )
         if pixel_values_videos is not None:
-            video_embeds, video_deepstack = self.qwen.visual(
-                pixel_values_videos.to(device=device, dtype=torch.float32),
-                grid_thw=video_grid_thw.to(device),
+            video_embeds, video_deepstack = self._encode_visual(
+                pixel_values_videos,
+                video_grid_thw,
+                device,
             )
             if video_embeds is None or self._interrupt:
                 return None, None
@@ -349,8 +387,11 @@ class MiniMaxH3Conditioner(nn.Module):
         if images:
             input_ids, attention_mask, position_ids, processor_inputs = self._vision_inputs(prompt, images, device)
             grid = processor_inputs["image_grid_thw"]
-            pixels = processor_inputs["pixel_values"].to(device=device, dtype=torch.float32)
-            image_embeds, deepstack = self.qwen.visual(pixels, grid_thw=grid)
+            image_embeds, deepstack = self._encode_visual(
+                processor_inputs["pixel_values"],
+                grid,
+                device,
+            )
             if image_embeds is None or self._interrupt:
                 return None, None
             inputs_embeds = self.qwen.model.embed_tokens(input_ids)

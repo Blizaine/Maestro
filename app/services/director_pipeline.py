@@ -1114,6 +1114,149 @@ def _require_video_start_images(
     )
 
 
+def _repair_saved_h3_frame_lattice(state: dict) -> bool:
+    """Upgrade legacy Director clip timing to H3's native frame lattice.
+
+    Older projects and generic media-duration fallbacks can contain ordinary
+    24-fps counts such as 120 frames for five seconds. H3 requires 124 frames
+    followed by 17-frame increments. Repair the complete saved timeline as a
+    unit, mark any already-rendered affected clips stale, and let Dashboard
+    repair regenerate them instead of failing before a job can be queued.
+    """
+
+    if not isinstance(state, dict):
+        return False
+    snapshot = state.get("_params_snapshot")
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    video_model = str(
+        state.get("video_model") or snapshot.get("video_model") or ""
+    )
+    model_def = {}
+    try:
+        getter = getattr(_wgp, "get_model_def", None)
+        if callable(getter):
+            model_def = getter(video_model) or {}
+    except Exception:
+        model_def = {}
+    architecture = str(model_def.get("architecture") or video_model).lower()
+    if not architecture.startswith("minimax_h3"):
+        return False
+
+    try:
+        fps = float(model_def.get("fps") or snapshot.get("fps") or 24)
+        if not math.isfinite(fps) or fps <= 0:
+            raise ValueError("invalid fps")
+    except (TypeError, ValueError):
+        fps = 24.0
+    minimum = int(model_def.get("frames_minimum") or 124)
+    maximum = int(model_def.get("frames_maximum") or 345)
+    frame_step = int(model_def.get("frames_steps") or 17)
+    clips = state.get("clips") or []
+    if not isinstance(clips, list) or not clips:
+        return False
+
+    from models.minimax_h3.minimax_h3_handler import (
+        normalize_h3_clip_frame_schedule,
+    )
+
+    requested: list[int] = []
+    metadata_missing: list[bool] = []
+    for clip in clips:
+        planned = clip.get("planned_clip") if isinstance(clip, dict) else None
+        planned = planned if isinstance(planned, dict) else {}
+        raw_frames = planned.get("duration_frames")
+        missing = raw_frames in (None, "", 0, "0")
+        try:
+            frame_count = int(round(float(raw_frames)))
+        except (TypeError, ValueError, OverflowError):
+            frame_count = 0
+        if frame_count <= 0:
+            try:
+                duration = float(planned.get("duration_sec") or 0)
+            except (TypeError, ValueError):
+                duration = 0.0
+            if duration <= 0:
+                try:
+                    duration = float(planned.get("end") or 0) - float(
+                        planned.get("start") or 0
+                    )
+                except (TypeError, ValueError):
+                    duration = 0.0
+            if duration <= 0 and isinstance(clip, dict):
+                try:
+                    duration = float(clip.get("_director_duration_sec") or 0)
+                except (TypeError, ValueError):
+                    duration = 0.0
+            frame_count = round(max(0.0, duration) * fps)
+        requested.append(frame_count)
+        metadata_missing.append(missing)
+
+    repaired = normalize_h3_clip_frame_schedule(
+        requested,
+        minimum_frames=minimum,
+        maximum_frames=maximum,
+        frame_step=frame_step,
+    )
+    changed_indices = [
+        index
+        for index, (before, after, missing) in enumerate(
+            zip(requested, repaired, metadata_missing)
+        )
+        if missing or before != after
+    ]
+    if not changed_indices:
+        return False
+    # Retiming one clip shifts the source-media start time of every clip that
+    # follows it. Regenerate that entire suffix so old audio/video slices are
+    # never reused against the repaired timeline.
+    stale_indices = set(range(min(changed_indices), len(clips)))
+
+    first_plan = clips[0].get("planned_clip") or {}
+    try:
+        cursor = float(first_plan.get("start") or 0.0)
+    except (TypeError, ValueError):
+        cursor = 0.0
+    snapshot_plans = snapshot.get("planned_clips")
+    if not isinstance(snapshot_plans, list):
+        snapshot_plans = []
+
+    for index, (clip, frame_count) in enumerate(zip(clips, repaired)):
+        if not isinstance(clip, dict):
+            continue
+        planned = clip.get("planned_clip")
+        if not isinstance(planned, dict):
+            planned = {}
+            clip["planned_clip"] = planned
+        duration = frame_count / fps
+        planned.update({
+            "start": cursor,
+            "end": cursor + duration,
+            "duration_sec": duration,
+            "duration_frames": frame_count,
+        })
+        clip["_director_duration_sec"] = duration
+        if index in stale_indices:
+            clip["video_stale"] = True
+        if index < len(snapshot_plans) and isinstance(snapshot_plans[index], dict):
+            snapshot_plans[index].update(planned)
+        cursor += duration
+
+    if snapshot:
+        snapshot["planned_clips"] = snapshot_plans
+    state["_h3_frame_lattice_repair"] = {
+        "version": 1,
+        "clip_indices": [index + 1 for index in changed_indices],
+        "stale_clip_indices": [index + 1 for index in sorted(stale_indices)],
+        "original_frames": requested,
+        "repaired_frames": repaired,
+    }
+    print(
+        f"[Director {state.get('id') or 'saved'}] Repaired legacy H3 clip "
+        f"frame schedule: {requested} -> {repaired}."
+    )
+    return True
+
+
 def load_pipeline_state(out_dir: str, pid: str) -> Optional[dict]:
     """Load a saved state while serialized against deletion/replacement."""
     with _pipeline_file_lock:
@@ -1129,7 +1272,9 @@ def _load_pipeline_state_locked(out_dir: str, pid: str) -> Optional[dict]:
         with _pipeline_file_lock:
             with open(filepath, "r", encoding="utf-8") as f:
                 state = json.load(f)
-            if _normalize_interrupted_repair(state, pid):
+            state_changed = _normalize_interrupted_repair(state, pid)
+            state_changed = _repair_saved_h3_frame_lattice(state) or state_changed
+            if state_changed:
                 _write_pipeline_json_unlocked(filepath, state)
             return _backfill_clip_video_filenames(state, out_dir)
     # Search subdirectories (workspaces)
@@ -1140,7 +1285,11 @@ def _load_pipeline_state_locked(out_dir: str, pid: str) -> Optional[dict]:
                 with _pipeline_file_lock:
                     with open(sub, "r", encoding="utf-8") as f:
                         state = json.load(f)
-                    if _normalize_interrupted_repair(state, pid):
+                    state_changed = _normalize_interrupted_repair(state, pid)
+                    state_changed = (
+                        _repair_saved_h3_frame_lattice(state) or state_changed
+                    )
+                    if state_changed:
                         _write_pipeline_json_unlocked(sub, state)
                     return _backfill_clip_video_filenames(
                         state, os.path.join(out_dir, name),
@@ -3445,6 +3594,8 @@ def _resume_pipeline_reserved(pid: str, out_dir: str) -> tuple[bool, str]:
         with _pipeline_file_lock:
             with open(state_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            if _repair_saved_h3_frame_lattice(data):
+                _write_pipeline_json_unlocked(state_path, data)
     except Exception as e:
         return False, f"Could not read saved pipeline state: {e}"
 
@@ -5345,6 +5496,21 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
         image_end_paths = []
         per_clip_frames = []
         has_sliding_window = False
+        h3_timing_repaired = False
+        is_minimax_h3 = str(
+            model_def.get("architecture") or video_model
+        ).lower().startswith("minimax_h3")
+        bounded_director = director_strategy in {
+            BOUNDED_START_END,
+            OMNI_REFERENCE,
+        }
+        bounded_minimum = int(model_def.get("frames_minimum") or _min_f)
+        bounded_maximum = int(
+            execution_profile.get("effective_max_frames")
+            or model_def.get("frames_maximum")
+            or bounded_minimum
+        )
+        bounded_step = int(model_def.get("frames_steps") or _fs or 1)
 
         for i, plan in enumerate(clip_plans):
             wp = plan.get("window_prompts") or []
@@ -5385,7 +5551,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                         end_path = candidate
             image_end_paths.append(end_path)
 
-            if director_strategy in {BOUNDED_START_END, OMNI_REFERENCE}:
+            if bounded_director:
                 try:
                     clip_frames = int(
                         pc.get("duration_frames")
@@ -5399,27 +5565,23 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                         pc.get("end", 0) - pc.get("start", 0)
                     )
                     clip_frames = round(float(duration or 0) * fps)
-                minimum = int(model_def.get("frames_minimum") or _min_f)
-                maximum = int(
-                    execution_profile.get("effective_max_frames")
-                    or model_def.get("frames_maximum")
-                    or clip_frames
-                )
-                step = int(model_def.get("frames_steps") or _fs or 1)
-                if not (
-                    minimum <= clip_frames <= maximum
-                    and (clip_frames - minimum) % max(1, step) == 0
+                if not is_minimax_h3 and not (
+                    bounded_minimum <= clip_frames <= bounded_maximum
+                    and (clip_frames - bounded_minimum)
+                    % max(1, bounded_step) == 0
                 ):
                     raise RuntimeError(
                         f"Director shot {i + 1} has {clip_frames} frames, outside "
-                        f"{video_model}'s native {minimum}-{maximum} frame lattice "
-                        f"(step {step}). Re-plan the project before generation."
+                        f"{video_model}'s native {bounded_minimum}-{bounded_maximum} "
+                        f"frame lattice (step {bounded_step}). Re-plan the project "
+                        "before generation."
                     )
-                validate_director_execution_frames(
-                    execution_profile,
-                    clip_frames,
-                    label=f"Director shot {i + 1}",
-                )
+                if not is_minimax_h3:
+                    validate_director_execution_frames(
+                        execution_profile,
+                        clip_frames,
+                        label=f"Director shot {i + 1}",
+                    )
                 per_clip_frames.append(clip_frames)
                 continue
 
@@ -5456,6 +5618,70 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                 if clip_frames > round(32 * fps):
                     has_sliding_window = True
                 per_clip_frames.append(max(clip_frames, round(5 * fps)))
+
+        if is_minimax_h3 and bounded_director:
+            from models.minimax_h3.minimax_h3_handler import (
+                normalize_h3_clip_frame_schedule,
+            )
+
+            requested_h3_schedule = list(per_clip_frames)
+            per_clip_frames = normalize_h3_clip_frame_schedule(
+                requested_h3_schedule,
+                minimum_frames=bounded_minimum,
+                maximum_frames=bounded_maximum,
+                frame_step=bounded_step,
+            )
+            h3_timing_repaired = per_clip_frames != requested_h3_schedule
+            if h3_timing_repaired:
+                print(
+                    f"[Pipeline {pid}] Repaired Director H3 frame schedule "
+                    f"before queueing: {requested_h3_schedule} -> "
+                    f"{per_clip_frames}."
+                )
+            for clip_index, frame_count in enumerate(per_clip_frames):
+                validate_director_execution_frames(
+                    execution_profile,
+                    frame_count,
+                    label=f"Director shot {clip_index + 1}",
+                )
+
+        if h3_timing_repaired:
+            # Keep uploaded-audio/video slicing and every later Dashboard
+            # repair on the same continuous timeline as the repaired frame
+            # schedule. Carried residual rounding prevents each small lattice
+            # adjustment from accumulating into A/V drift across the project.
+            try:
+                timeline_cursor = float(
+                    (planned_clips[0] if planned_clips else {}).get("start")
+                    or 0.0
+                )
+            except (TypeError, ValueError):
+                timeline_cursor = 0.0
+            for clip_index, frame_count in enumerate(per_clip_frames):
+                if clip_index >= len(planned_clips):
+                    break
+                duration_sec = frame_count / float(fps)
+                planned_clip = planned_clips[clip_index]
+                planned_clip.update({
+                    "start": timeline_cursor,
+                    "end": timeline_cursor + duration_sec,
+                    "duration_sec": duration_sec,
+                    "duration_frames": frame_count,
+                })
+                if clip_index < len(clip_plans):
+                    clip_plans[clip_index]["_director_generation_frames"] = (
+                        frame_count
+                    )
+                    clip_plans[clip_index]["_director_duration_sec"] = (
+                        duration_sec
+                    )
+                timeline_cursor += duration_sec
+            params["planned_clips"] = planned_clips
+            _update_pipeline(
+                pid,
+                _planned_clips=planned_clips,
+                clip_plans=clip_plans,
+            )
 
         # Quantize to the model's (latent*n + 1) frame lattice WITHOUT letting
         # the error compound. Floor-snapping each clip independently lost 0-7

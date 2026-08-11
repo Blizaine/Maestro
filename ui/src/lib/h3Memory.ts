@@ -55,6 +55,59 @@ export function normalizeH3NativeFrames(
   )
 }
 
+/**
+ * Repair an independently generated H3 clip without shortening source media.
+ *
+ * H3's native clips start at 124 frames and advance in 17-frame steps. Media
+ * durations and pre-H3 sidecars can instead contain ordinary 24-fps counts
+ * such as 120 (exactly five seconds), so round upward to the next legal clip.
+ */
+export function normalizeH3ClipFrames(
+  requestedFrames: number,
+  minimumFrames: number,
+  maximumFrames: number,
+  frameStep: number,
+): number {
+  const minimum = Math.max(1, Math.round(minimumFrames))
+  const step = Math.max(1, Math.round(frameStep))
+  const rawMaximum = Math.max(minimum, Math.round(maximumFrames))
+  const maximum = minimum + Math.floor((rawMaximum - minimum) / step) * step
+  const requested = Number.isFinite(requestedFrames)
+    ? Math.round(requestedFrames)
+    : minimum
+  if (requested <= minimum) return minimum
+  const latticeSteps = Math.ceil((requested - minimum) / step)
+  return Math.min(maximum, minimum + latticeSteps * step)
+}
+
+/** Repair a multi-clip H3 schedule without accumulating timing drift. */
+export function normalizeH3ClipFrameSchedule(
+  requestedFrames: number[],
+  minimumFrames: number,
+  maximumFrames: number,
+  frameStep: number,
+): number[] {
+  const minimum = Math.max(1, Math.round(minimumFrames))
+  const step = Math.max(1, Math.round(frameStep))
+  const rawMaximum = Math.max(minimum, Math.round(maximumFrames))
+  const maximum = minimum + Math.floor((rawMaximum - minimum) / step) * step
+  const valid: number[] = []
+  for (let value = minimum; value <= maximum; value += step) valid.push(value)
+  let residual = 0
+  return requestedFrames.map(rawValue => {
+    const requested = Number.isFinite(rawValue) ? Math.round(rawValue) : minimum
+    const target = Math.max(1, requested) + residual
+    let chosen = valid[0]
+    for (const candidate of valid) {
+      const candidateDistance = Math.abs(candidate - target)
+      const chosenDistance = Math.abs(chosen - target)
+      if (candidateDistance < chosenDistance) chosen = candidate
+    }
+    residual = target - chosen
+    return chosen
+  })
+}
+
 export function recommendedH3OmniSequenceProfile(
   policy: SlidingWindowMemoryPolicy | null | undefined,
   resolution: string,
@@ -151,9 +204,35 @@ export function h3OmniSequenceWindowCount({
   const window = Math.max(1, Math.round(windowFrames))
   if (total <= window) return 1
   if (!nativeContinuation) return Math.max(1, Math.ceil(total / window))
+  return h3SlidingWindowCount({
+    totalFrames: total,
+    windowFrames: window,
+    overlapFrames,
+  })
+}
+
+/** Match the backend's committed-output geometry for rolling H3 windows. */
+export function h3SlidingWindowCount({
+  totalFrames,
+  windowFrames,
+  overlapFrames,
+  discardFrames = 0,
+}: {
+  totalFrames: number
+  windowFrames: number
+  overlapFrames: number
+  discardFrames?: number
+}): number {
+  const total = Math.max(1, Math.round(totalFrames))
+  const window = Math.max(1, Math.round(windowFrames))
+  if (total <= window) return 1
   const overlap = Math.max(0, Math.min(window - 1, Math.round(overlapFrames)))
-  const stride = Math.max(1, window - overlap)
-  return 1 + Math.ceil((total - window) / stride)
+  const discard = Math.max(
+    0,
+    Math.min(window - overlap - 1, Math.round(discardFrames)),
+  )
+  const stride = Math.max(1, window - overlap - discard)
+  return 1 + Math.ceil((total - window + discard) / stride)
 }
 
 /** Treat H3's UI-rounded 14.4s endpoint as the native 345-frame pass. */

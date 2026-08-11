@@ -75,6 +75,47 @@ def compute_h3_window_boundaries(
     return boundaries
 
 
+def parse_h3_manual_window_prompts(
+    prompt: str,
+    *,
+    expected_count: int,
+    window_prompts: Iterable[Any] | None = None,
+) -> list[str]:
+    """Return exactly one non-empty user-authored prompt per FL2VA pass.
+
+    Newer Studio clients submit the already-split ``h3_window_prompts``
+    array. Older saved settings and API clients may only carry newline-
+    separated ``prompt`` text, so retain that as a durable fallback instead
+    of letting the complete multi-line story reach every continuation pass.
+    """
+
+    if isinstance(window_prompts, (list, tuple)):
+        prompts = [
+            item.strip()
+            for item in window_prompts
+            if isinstance(item, str) and item.strip()
+        ]
+    else:
+        prompts = [
+            line.strip()
+            for line in str(prompt or "").replace("\r\n", "\n").replace(
+                "\r", "\n"
+            ).split("\n")
+            if line.strip()
+        ]
+
+    expected = max(1, int(expected_count))
+    if len(prompts) != expected:
+        raise ValueError(
+            "Manual MiniMax H3 First / Last sequence needs exactly "
+            f"{expected} non-empty prompt "
+            f"{'line' if expected == 1 else 'lines'} "
+            f"(window 1 through window {expected}); received {len(prompts)}. "
+            "Add or remove prompt lines, or adjust Duration / Window Length."
+        )
+    return prompts
+
+
 def normalize_h3_injected_keyframes(
     injected_keyframes: Iterable[dict[str, Any]] | None,
     boundaries: Iterable[dict[str, Any]],

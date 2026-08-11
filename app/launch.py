@@ -8739,7 +8739,36 @@ async def generate(request: Request):
             apply_h3_native_omni_memory_policy,
             apply_h3_window_memory_policy,
             h3_runtime_preflight,
+            normalize_h3_clip_frame_schedule,
         )
+
+        raw_h3_clip_frames = body.get("per_clip_frames")
+        if (
+            int(body.get("multi_prompts_gen_type") or 0) == 3
+            and isinstance(raw_h3_clip_frames, list)
+            and raw_h3_clip_frames
+        ):
+            repaired_h3_clip_frames = normalize_h3_clip_frame_schedule(
+                raw_h3_clip_frames,
+                minimum_frames=int(
+                    _generation_model_def.get("frames_minimum") or 124
+                ),
+                maximum_frames=int(
+                    _generation_model_def.get("frames_maximum") or 345
+                ),
+                frame_step=int(
+                    _generation_model_def.get("frames_steps") or 17
+                ),
+            )
+            if repaired_h3_clip_frames != raw_h3_clip_frames:
+                print(
+                    "[MiniMax H3] Repaired legacy/media multi-clip frame "
+                    f"schedule: {raw_h3_clip_frames} -> "
+                    f"{repaired_h3_clip_frames}."
+                )
+            body["per_clip_frames"] = repaired_h3_clip_frames
+            body["video_length"] = sum(repaired_h3_clip_frames)
+            body["sliding_window_size"] = max(repaired_h3_clip_frames)
 
         h3_hardware = _get_cached_hardware()
         h3_runtime_advisory = h3_runtime_preflight(
@@ -9158,7 +9187,51 @@ async def generate(request: Request):
             and not h3_is_multi_clip
             and h3_total_frames > h3_window_frames > 0
         )
-        if h3_needs_storyboard:
+        h3_manual_first_last = (
+            not h3_storyboard_enabled
+            and h3_multi_window_enabled
+            and not _generation_model_def.get("omni_reference")
+            and not h3_is_multi_clip
+            and h3_total_frames > h3_window_frames > 0
+        )
+        if h3_manual_first_last:
+            from services.h3_window_planner import (
+                compute_h3_window_boundaries,
+                parse_h3_manual_window_prompts,
+            )
+
+            h3_fps = float(_generation_model_def.get("fps", 24) or 24)
+            h3_expected_count = len(
+                compute_h3_window_boundaries(
+                    h3_total_frames,
+                    h3_window_frames,
+                    fps=h3_fps,
+                    overlap_frames=h3_overlap_frames,
+                    discard_frames=h3_discard_frames,
+                )
+            )
+            try:
+                h3_manual_prompts = parse_h3_manual_window_prompts(
+                    str(body.get("prompt") or ""),
+                    expected_count=h3_expected_count,
+                    window_prompts=body.get("h3_window_prompts"),
+                )
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
+
+            # Keep this as one rolling generation. The explicit array is
+            # selected by wgp one prompt at a time; the original multiline
+            # prompt must never be split into independent queue tasks or sent
+            # wholesale to every continuation pass.
+            body["multi_prompts_gen_type"] = 2
+            body["h3_window_prompts"] = h3_manual_prompts
+            body.pop("h3_window_plan_signature", None)
+            body.pop("h3_window_plan", None)
+            print(
+                f"[MiniMax H3] Manual First / Last sequence ready: "
+                f"{h3_expected_count} explicit window-local prompts."
+            )
+        elif h3_needs_storyboard:
             from services.h3_window_planner import (
                 compute_h3_window_boundaries,
                 h3_window_plan_signature,
@@ -21651,6 +21724,35 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                 _mc_trim_end_frames = bool(
                     _mc_model_def.get("director_trim_end_frames", True)
                 )
+                if _mc_is_h3 and _mc_bounded_director:
+                    from models.minimax_h3.minimax_h3_handler import (
+                        normalize_h3_clip_frame_schedule,
+                    )
+
+                    raw_h3_schedule = [
+                        (
+                            per_clip_frames[index]
+                            if per_clip_frames and index < len(per_clip_frames)
+                            else sw_size
+                        )
+                        for index in range(clip_count)
+                    ]
+                    repaired_h3_schedule = normalize_h3_clip_frame_schedule(
+                        raw_h3_schedule,
+                        minimum_frames=_mc_min_f,
+                        maximum_frames=int(
+                            _mc_model_def.get("frames_maximum") or 345
+                        ),
+                        frame_step=_mc_fs,
+                    )
+                    if repaired_h3_schedule != raw_h3_schedule:
+                        print(
+                            "[MiniMax H3] Worker repaired multi-clip frame "
+                            f"schedule: {raw_h3_schedule} -> "
+                            f"{repaired_h3_schedule}."
+                        )
+                    per_clip_frames = repaired_h3_schedule
+                    sw_size = max(repaired_h3_schedule)
 
                 manifest = []
                 # Director timelines can begin after a silent intro. Preserve

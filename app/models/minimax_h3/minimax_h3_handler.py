@@ -75,6 +75,73 @@ def align_h3_num_frames(num_frames: int) -> int:
     return num_frames
 
 
+def normalize_h3_clip_frame_count(
+    value,
+    *,
+    minimum_frames: int = _H3_MIN_FRAMES,
+    maximum_frames: int = _H3_MAX_FRAMES,
+    frame_step: int = _H3_FRAME_STEP,
+) -> int:
+    """Repair one bounded H3 clip onto its native frame lattice.
+
+    Uploaded media and legacy Director metadata commonly describe duration in
+    ordinary seconds. At H3's 24 fps, an exact five-second clip becomes 120
+    frames even though the model's first legal duration is 124 frames. Round
+    upward so source audio/video is never shortened merely to satisfy the
+    lattice, and clamp to the model's published one-pass bounds.
+    """
+
+    minimum = max(1, int(minimum_frames or _H3_MIN_FRAMES))
+    step = max(1, int(frame_step or _H3_FRAME_STEP))
+    maximum = max(minimum, int(maximum_frames or _H3_MAX_FRAMES))
+    # A hardware/profile ceiling may be expressed as an ordinary frame count.
+    # Keep the returned value legal even when that ceiling is not itself one
+    # of H3's ``minimum + n * step`` values.
+    maximum = minimum + ((maximum - minimum) // step) * step
+    try:
+        requested = int(round(float(value)))
+    except (TypeError, ValueError, OverflowError):
+        requested = minimum
+    if requested <= minimum:
+        return minimum
+    lattice_steps = (requested - minimum + step - 1) // step
+    return min(maximum, minimum + lattice_steps * step)
+
+
+def normalize_h3_clip_frame_schedule(
+    values,
+    *,
+    minimum_frames: int = _H3_MIN_FRAMES,
+    maximum_frames: int = _H3_MAX_FRAMES,
+    frame_step: int = _H3_FRAME_STEP,
+) -> list[int]:
+    """Repair an H3 clip schedule while preserving cumulative media timing.
+
+    A single clip rounds upward so it cannot lose source content. For a series
+    of audio/video-derived clips, carry each rounding residual into the next
+    choice instead; this prevents a small lattice adjustment from accumulating
+    into visible A/V drift across a long sequence.
+    """
+
+    minimum = max(1, int(minimum_frames or _H3_MIN_FRAMES))
+    step = max(1, int(frame_step or _H3_FRAME_STEP))
+    maximum = max(minimum, int(maximum_frames or _H3_MAX_FRAMES))
+    maximum = minimum + ((maximum - minimum) // step) * step
+    valid = list(range(minimum, maximum + 1, step))
+    residual = 0.0
+    schedule: list[int] = []
+    for value in (values or []):
+        try:
+            requested = int(round(float(value)))
+        except (TypeError, ValueError, OverflowError):
+            requested = minimum
+        target = max(1.0, float(requested)) + residual
+        chosen = min(valid, key=lambda candidate: (abs(candidate - target), candidate))
+        residual = target - chosen
+        schedule.append(chosen)
+    return schedule
+
+
 def normalize_h3_overlap_frames(value, *, window_frames=None) -> int:
     """Round and safely cap an FL2VA overlap on the 17*n+1 lattice."""
 

@@ -804,7 +804,12 @@ def _load_conditioner(
     qwen.model._model_dtype = dtype
     qwen.visual._model_dtype = dtype
     qwen.eval().requires_grad_(False)
-    conditioner = MiniMaxH3Conditioner(qwen, tokenizer, processor).eval().requires_grad_(False)
+    conditioner = MiniMaxH3Conditioner(
+        qwen,
+        tokenizer,
+        processor,
+        gguf_vision_autocast=variant.startswith("gguf_"),
+    ).eval().requires_grad_(False)
     conditioner._model_dtype = dtype
     return conditioner
 
