@@ -22,3 +22,10 @@ export function formatAge(iso: string | null | undefined): string {
   if (days < 365) return `${Math.min(11, Math.floor(days / 30))}mo`
   return `${Math.floor(days / 365)}y`
 }
+
+/** Gallery generation duration as whole minutes + seconds: "2m 8s". */
+export function formatGenerationDuration(seconds: number): string {
+  const rounded = Number.isFinite(seconds) ? Math.max(0, Math.round(seconds)) : 0
+  const minutes = Math.floor(rounded / 60)
+  return `${minutes}m ${rounded % 60}s`
+}

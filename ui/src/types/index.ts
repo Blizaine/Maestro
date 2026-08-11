@@ -101,6 +101,11 @@ export interface GenerateParams {
   audio_guide?: string
   audio_scale?: number
   video_guide?: string
+  video_mask?: string
+  denoising_strength?: number
+  masking_strength?: number
+  /** Maestro's friendly UI state for MiniMax H3 FL2VA control-video editing. */
+  minimax_h3_control_visual_mode?: 'prompt' | 'whole' | 'inside' | 'outside'
   image_refs?: string[]
   frames_positions?: string
   injection_strength?: number
@@ -160,15 +165,31 @@ export interface GenerateParams {
   // MiniMax H3 Ref2VA ordered Omni-reference manifest.
   minimax_h3_references?: MiniMaxH3Reference[]
   minimax_h3_reference_detail?: 'match' | 'max'
+  /** Experimental long-form Omni orchestration using native continuation or hard-cut clips. */
+  minimax_h3_reference_sequence?: boolean
+  /** Enable native multi-window continuation for H3 First / Last. Defaults on. */
+  minimax_h3_multi_window?: boolean
+  /** Choose AI story planning or one user-authored prompt line per Omni pass. */
+  minimax_h3_sequence_prompt_mode?: 'auto' | 'manual'
+  /** Native Ref2VA clip ceiling selected by Auto or the Advanced override. */
+  minimax_h3_sequence_clip_frames?: number
+  /** Honor the user's locked Omni clip length above Auto's recommendation. */
+  minimax_h3_sequence_memory_override?: boolean
+  /** Add bounded generated look/blocking references between sequence clips. */
+  minimax_h3_sequence_continuity?: boolean
   minimax_h3_text_encoder?: 'nvfp4_awq' | 'gguf_q2_k' | 'gguf_q4_k_m' | 'int8' | 'bf16'
   /** One-click managed H3 Turbo recipe for Full or Pruned H3. */
   minimax_h3_turbo_mode?: boolean
   /** Automatically expand one long H3 concept into window-local prompts. */
   minimax_h3_window_storyboard?: boolean
+  /** H3 First/Last edit grammar used by the automatic window planner. */
+  minimax_h3_camera_coverage?: 'auto' | 'continuous' | 'multi_shot'
   /** Compiled Context-IR prompts, one per continuation pass. */
   h3_window_prompts?: string[]
   h3_window_plan_signature?: string
   h3_window_plan?: H3WindowPlan
+  /** Plain user concept retained when a one-clip H3 prompt is enhanced. */
+  _h3_original_prompt?: string
 }
 
 export type MiniMaxH3ReferenceType = 'image' | 'video' | 'audio'
@@ -182,12 +203,25 @@ export interface MiniMaxH3Reference {
   url?: string
   role?: string
   audio_intent?: MiniMaxH3AudioIntent
+  image_intent?: 'identity' | 'scene' | 'style' | 'composition'
   include_audio?: boolean
   has_audio?: boolean
   audio_path?: string
   audio_filename?: string
   audio_duration_seconds?: number | null
   duration_seconds?: number | null
+}
+
+export interface H3InjectedKeyframe {
+  path: string
+  position: string
+  source_index?: number
+  absolute_frame?: number
+  global_seconds?: number
+  window?: number
+  local_frame?: number
+  local_seconds?: number
+  picture_index?: number
 }
 
 export interface H3WindowPlanWindow {
@@ -199,21 +233,32 @@ export interface H3WindowPlanWindow {
   end_seconds: number
   opening_state: string
   closing_state: string
+  coverage?: string
+  pacing?: string
+  shot_count?: number
+  injected_keyframes?: H3InjectedKeyframe[]
   prompt: string
 }
 
 export interface H3WindowPlan {
   source_prompt: string
   signature: string
-  planned_by: 'llm' | 'deterministic_fallback' | 'not_needed'
+  planned_by: 'llm' | 'deterministic_fallback' | 'not_needed' | 'manual'
+  plan_kind?: 'sliding_window' | 'reference_sequence'
+  camera_coverage?: 'auto' | 'continuous' | 'multi_shot'
   total_frames: number
   window_frames: number
   effective_window_frames?: number
   window_count: number
+  per_clip_frames?: number[]
+  trim_tail_frames?: number
+  overlap_frames?: number
+  native_continuation?: boolean
   resolution: string
   model_type: string
   subject_continuity?: string
   setting_continuity?: string
+  injected_keyframes?: H3InjectedKeyframe[]
   windows: H3WindowPlanWindow[]
   window_prompts: string[]
 }
@@ -314,6 +359,8 @@ export interface ChoiceConfig {
 export interface SlidingWindowMemoryPolicy {
   checkpoint?: 'full' | 'pruned'
   manual_override?: boolean
+  /** Legal H3 frame steps reserved for Ref2VA reference-context headroom. */
+  reference_margin_steps?: number
   auto_resolution_pixels?: Record<string, number>
   resolution_bands: Array<{
     min_pixels: number
@@ -350,6 +397,8 @@ export interface ModelOptions {
   t2v_class: boolean
   image_outputs: boolean
   supports_end_frame: boolean
+  /** Model accepts additional pictures pinned to exact target-frame positions. */
+  custom_frames_injection?: boolean
   omni_reference?: boolean
   omni_reference_limits?: {
     image: number
@@ -390,6 +439,9 @@ export interface ModelOptions {
     supports_triton?: boolean | null
     blocking: boolean
   } | null
+  minimax_h3_media_sources?: boolean
+  /** FL2VA can edit a source video globally or through a white selection mask. */
+  video_to_video_inpaint?: boolean
   resolution_presets?: Partial<Record<ResolutionPreset, {
     label: string
     experimental?: boolean
@@ -400,6 +452,7 @@ export interface ModelOptions {
   supports_auto_aspect?: boolean
   guide_preprocessing: ChoiceConfig | null
   guide_custom_choices: ChoiceConfig | null
+  mask_preprocessing?: ChoiceConfig | null
   image_ref_choices: ChoiceConfig | null
   audio_prompt_type_sources: ChoiceConfig | null
   background_removal_label: string | null
@@ -409,7 +462,13 @@ export interface ModelOptions {
   self_refiner_max_plans: number
   sliding_window_defaults: Record<string, number> | null
   sliding_window_auto_prompt_pacing?: boolean
+  /** Native end image belongs to the last continuation window. */
+  sliding_window_end_image_at_final?: boolean
+  /** Carries generated video and stereo-audio history between native passes. */
+  sliding_window_audio_history?: boolean
   sliding_window_memory_policy?: SlidingWindowMemoryPolicy | null
+  /** Native per-window policy for H3 Omni reference sequences. */
+  omni_sequence_memory_policy?: SlidingWindowMemoryPolicy | null
   /** Native one-pass policy used by Director. Omni publishes this without
    * exposing Studio sliding-window controls. */
   director_memory_policy?: SlidingWindowMemoryPolicy | null
@@ -475,6 +534,8 @@ export interface OutputMetadata {
   upload_filenames?: Record<string, string>
   job_id?: string
   generation_time?: number
+  generation_time_basis?: 'active' | 'elapsed'
+  job_elapsed_time?: number
   created_at?: number
 }
 

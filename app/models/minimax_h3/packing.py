@@ -22,7 +22,8 @@ MiniMax-H3 runs its transformer over a single packed 1-D sequence that holds eve
 text/keyframe tasks the row order is
 
 ```
-[ text (L) | keyframe conditions (C) | target audio (A) | target video (V) ]
+[ text (L) | visual conditions (Cv) | audio conditions (Ca) |
+  target audio (A) | target video (V) ]
 ```
 
 and every piece of geometry in this module exists to place a row in that sequence and to give it its `(t, h, w)`
@@ -116,6 +117,10 @@ class MiniMaxH3PackedSequence:
             How many leading entries of `video_indices` are conditioning rows rather than generated rows.
         num_condition_audio_rows (`int`):
             How many leading entries of `audio_indices` are reference rows rather than generated rows.
+        num_target_condition_audio_latents (`int`):
+            How many leading target-audio latents are frozen conditioning rather than generated rows.
+        num_target_condition_video_rows (`int`):
+            How many trailing target-video rows are frozen conditioning rather than generated rows.
     """
 
     sequence_length: int
@@ -126,6 +131,8 @@ class MiniMaxH3PackedSequence:
     text_indices: torch.Tensor
     num_condition_video_rows: int
     num_condition_audio_rows: int
+    num_target_condition_audio_latents: int = 0
+    num_target_condition_video_rows: int = 0
 
 
 def resolve_canvas_size(aspect_width: float, aspect_height: float) -> tuple[int, int]:
@@ -366,6 +373,69 @@ def _temporal_position_span(num_latent_frames: int) -> float:
     return float(spans.sum())
 
 
+def _unpack_condition_anchor(entry) -> tuple[str, int, int | None]:
+    """Normalize a visual condition anchor into ``(kind, latent_frames, frame_index)``."""
+
+    if not isinstance(entry, tuple):
+        return str(entry), 1, None
+    if len(entry) == 2:
+        anchor, latent_frames = entry
+        return str(anchor), int(latent_frames), None
+    if len(entry) == 3:
+        anchor, latent_frames, frame_index = entry
+        return str(anchor), int(latent_frames), int(frame_index)
+    raise ValueError(f"Invalid MiniMax H3 condition anchor {entry!r}.")
+
+
+def _fill_audio_positions(
+    position_ids: torch.Tensor,
+    rows: slice,
+    length: int,
+    origin: float,
+    width_grid: torch.Tensor,
+) -> None:
+    """Place one channel-major stereo audio block on the shared rotary clock."""
+
+    if length <= 0:
+        return
+    time = origin + torch.arange(length, dtype=torch.float64)
+    position_ids[rows, 0] = time.repeat(MINIMAX_H3_AUDIO_CHANNELS)
+    position_ids[rows, 2] = torch.cat(
+        [
+            torch.full((length,), float(width_grid[0]), dtype=torch.float64),
+            torch.full((length,), float(width_grid[-1]), dtype=torch.float64),
+        ]
+    )
+
+
+def _fill_audio_condition_positions(
+    position_ids: torch.Tensor,
+    start: int,
+    anchors,
+    history_origin: float,
+    target_origin: float,
+    width_grid: torch.Tensor,
+) -> None:
+    """Place clean history and boundary-audio conditions before target audio."""
+
+    cursor = int(start)
+    history_time = float(history_origin)
+    for entry in anchors:
+        anchor, length = entry if isinstance(entry, tuple) else (entry, 1)
+        anchor = str(anchor)
+        length = int(length)
+        rows = slice(cursor, cursor + length * MINIMAX_H3_AUDIO_CHANNELS)
+        if anchor == "history":
+            origin = history_time
+            history_time += length
+        elif anchor == "first":
+            origin = target_origin
+        else:
+            raise ValueError(f"Unknown MiniMax H3 audio condition anchor {anchor!r}.")
+        _fill_audio_positions(position_ids, rows, length, origin, width_grid)
+        cursor = rows.stop
+
+
 def build_packed_sequence(
     text_token_tags: torch.Tensor,
     num_latent_frames: int,
@@ -373,7 +443,10 @@ def build_packed_sequence(
     latent_width: int,
     num_audio_latents: int,
     patch_size: tuple[int, int, int],
-    keyframe_anchors: tuple[str, ...] = (),
+    keyframe_anchors=(),
+    audio_condition_anchors=(),
+    target_condition_audio_latents: int = 0,
+    target_condition_video_frames: int = 0,
 ) -> MiniMaxH3PackedSequence:
     r"""
     Build the `[text | keyframe conditions | target audio | target video]` layout used by the `t2va` and `fl2va`
@@ -388,9 +461,14 @@ def build_packed_sequence(
         latent_width (`int`): Target latent width.
         num_audio_latents (`int`): Number of target audio latents per channel.
         patch_size (`tuple[int, int, int]`): The transformer's `(t, h, w)` patch.
-        keyframe_anchors (`tuple[str, ...]`):
-            One entry per keyframe conditioning block, in packed order: `"first"` anchors the block at the first
-            latent frame, `"last"` at the last one.
+        keyframe_anchors:
+            One entry per visual condition block. Legacy string anchors describe a single latent frame. Tuples add
+            the condition's latent-frame count and, for ``"frame"``, its target pixel-frame index. ``"history"``
+            blocks advance the rotary clock before the generated target; ``"first"`` and ``"last"`` anchor clean
+            boundary images to that target.
+        audio_condition_anchors:
+            Clean channel-major audio blocks, expressed as ``(anchor, latent_count)`` tuples. History precedes the
+            target clock and ``"first"`` is aligned to its boundary.
 
     Returns:
         [`MiniMaxH3PackedSequence`]
@@ -398,13 +476,26 @@ def build_packed_sequence(
     _, patch_h, patch_w = patch_size
     rows_per_frame = (latent_height // patch_h) * (latent_width // patch_w)
     num_text_tokens = text_token_tags.shape[0]
-    num_condition_rows = len(keyframe_anchors) * rows_per_frame
+    num_condition_rows = sum(
+        _unpack_condition_anchor(anchor)[1] for anchor in keyframe_anchors
+    ) * rows_per_frame
+    num_condition_audio_rows = sum(
+        int(anchor[1]) if isinstance(anchor, tuple) else 1
+        for anchor in audio_condition_anchors
+    ) * MINIMAX_H3_AUDIO_CHANNELS
     num_audio_rows = num_audio_latents * MINIMAX_H3_AUDIO_CHANNELS
     num_video_rows = num_latent_frames * rows_per_frame
-    sequence_length = num_text_tokens + num_condition_rows + num_audio_rows + num_video_rows
+    sequence_length = (
+        num_text_tokens
+        + num_condition_rows
+        + num_condition_audio_rows
+        + num_audio_rows
+        + num_video_rows
+    )
 
     condition_start = num_text_tokens
-    audio_start = condition_start + num_condition_rows
+    condition_audio_start = condition_start + num_condition_rows
+    audio_start = condition_audio_start + num_condition_audio_rows
     video_start = audio_start + num_audio_rows
 
     # 1. The (t, h, w) grid. Text rows sit on the time axis at their row index, and the media rows continue the time
@@ -417,36 +508,78 @@ def build_packed_sequence(
     width_grid = _spatial_position_grid(latent_width, patch_w, sqrt_area)
     frame_grid = torch.stack([grid.reshape(-1) for grid in torch.meshgrid(height_grid, width_grid, indexing="ij")], -1)
 
-    for index, anchor in enumerate(keyframe_anchors):
+    history_latent_frames = sum(
+        _unpack_condition_anchor(anchor)[1]
+        for anchor in keyframe_anchors
+        if _unpack_condition_anchor(anchor)[0] == "history"
+    )
+    target_origin = float(num_text_tokens) + _temporal_position_span(history_latent_frames)
+    target_times = _temporal_position_grid(num_latent_frames, target_origin)
+    condition_cursor = condition_start
+    history_time = float(num_text_tokens)
+    for entry in keyframe_anchors:
+        anchor, condition_frames, frame_index = _unpack_condition_anchor(entry)
+        if condition_frames <= 0:
+            raise ValueError(f"MiniMax H3 condition anchors must contain at least one latent frame, got {entry!r}.")
+        rows = slice(
+            condition_cursor,
+            condition_cursor + condition_frames * rows_per_frame,
+        )
+        condition = position_ids[rows].view(condition_frames, rows_per_frame, 3)
+        if anchor == "history":
+            condition[:, :, 0] = _temporal_position_grid(
+                condition_frames,
+                history_time,
+            )[:, None]
+            history_time += _temporal_position_span(condition_frames)
         if anchor == "first":
-            anchor_time = float(num_text_tokens)
+            condition[:, :, 0] = target_times[:condition_frames, None]
         elif anchor == "last":
-            anchor_time = float(num_text_tokens) + _temporal_position_span(num_latent_frames) - _ROPE_FRAME_RESCALE
-        else:
-            raise ValueError(f"A keyframe anchor must be 'first' or 'last', got {anchor!r}.")
-        rows = slice(condition_start + index * rows_per_frame, condition_start + (index + 1) * rows_per_frame)
-        position_ids[rows, 0] = anchor_time
-        position_ids[rows, 1:] = frame_grid
+            condition[:, :, 0] = (
+                target_origin
+                + _temporal_position_span(num_latent_frames)
+                - _ROPE_FRAME_RESCALE
+            )
+        elif anchor == "frame":
+            if frame_index is None:
+                raise ValueError("A MiniMax H3 'frame' condition needs a target frame index.")
+            condition[:, :, 0] = target_origin + frame_index * _ROPE_FRAME_RESCALE
+        elif anchor != "history":
+            raise ValueError(f"Unknown MiniMax H3 keyframe anchor {anchor!r}.")
+        condition[:, :, 1:] = frame_grid[None]
+        condition_cursor = rows.stop
 
-    # Audio rows are channel-major and share the video's rotary clock: one unit per latent at 40 latents/s equals
-    # 24 fps * 5/3. They carry no height coordinate and are pinned to the two extremes of the width grid.
-    audio_time = float(num_text_tokens) + torch.arange(num_audio_latents, dtype=torch.float64)
-    position_ids[audio_start:video_start, 0] = audio_time.repeat(MINIMAX_H3_AUDIO_CHANNELS)
-    position_ids[audio_start:video_start, 2] = torch.cat(
-        [
-            torch.full((num_audio_latents,), float(width_grid[0]), dtype=torch.float64),
-            torch.full((num_audio_rows - num_audio_latents,), float(width_grid[-1]), dtype=torch.float64),
-        ]
+    _fill_audio_condition_positions(
+        position_ids,
+        condition_audio_start,
+        audio_condition_anchors,
+        float(num_text_tokens),
+        target_origin,
+        width_grid,
+    )
+
+    # Target audio and video share the target clock after any carried history.
+    _fill_audio_positions(
+        position_ids,
+        slice(audio_start, video_start),
+        num_audio_latents,
+        target_origin,
+        width_grid,
     )
 
     video_position_ids = torch.empty(num_latent_frames, rows_per_frame, 3, dtype=torch.float64)
-    video_position_ids[:, :, 0] = _temporal_position_grid(num_latent_frames, float(num_text_tokens))[:, None]
+    video_position_ids[:, :, 0] = target_times[:, None]
     video_position_ids[:, :, 1:] = frame_grid[None]
     position_ids[video_start:] = video_position_ids.reshape(-1, 3)
 
-    # 2. Row indices and modality tags.
-    video_indices = torch.cat([torch.arange(condition_start, audio_start), torch.arange(video_start, sequence_length)])
-    audio_indices = torch.arange(audio_start, video_start)
+    # 2. Row indices and modality tags. Conditioning video/audio rows lead their corresponding target rows.
+    video_indices = torch.cat(
+        [
+            torch.arange(condition_start, condition_audio_start),
+            torch.arange(video_start, sequence_length),
+        ]
+    )
+    audio_indices = torch.arange(condition_audio_start, video_start)
     text_indices = torch.arange(num_text_tokens)
 
     token_tags = torch.empty(sequence_length, dtype=torch.long)
@@ -462,7 +595,11 @@ def build_packed_sequence(
         audio_indices=audio_indices,
         text_indices=text_indices,
         num_condition_video_rows=num_condition_rows,
-        num_condition_audio_rows=0,
+        num_condition_audio_rows=num_condition_audio_rows,
+        num_target_condition_audio_latents=max(0, int(target_condition_audio_latents)),
+        num_target_condition_video_rows=(
+            max(0, int(target_condition_video_frames)) * rows_per_frame
+        ),
     )
 
 
@@ -472,6 +609,7 @@ def build_row_timesteps(
     audio_timestep: float,
     condition_video_timestep: float,
     condition_audio_timestep: float,
+    target_condition_timestep: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Assign a timestep to every row of the packed sequence and reduce it to the transformer's `(timestep,
@@ -493,8 +631,23 @@ def build_row_timesteps(
     """
     row_timesteps = torch.full((layout.sequence_length,), video_timestep, dtype=torch.float32)
     row_timesteps[layout.video_indices[: layout.num_condition_video_rows]] = condition_video_timestep
+    if layout.num_target_condition_video_rows:
+        row_timesteps[
+            layout.video_indices[-layout.num_target_condition_video_rows :]
+        ] = target_condition_timestep
     row_timesteps[layout.audio_indices[layout.num_condition_audio_rows :]] = audio_timestep
     row_timesteps[layout.audio_indices[: layout.num_condition_audio_rows]] = condition_audio_timestep
+    if layout.num_target_condition_audio_latents:
+        target_audio_indices = layout.audio_indices[layout.num_condition_audio_rows :]
+        channel_latents = target_audio_indices.numel() // MINIMAX_H3_AUDIO_CHANNELS
+        conditioned = min(
+            int(layout.num_target_condition_audio_latents),
+            int(channel_latents),
+        )
+        row_timesteps[target_audio_indices[:conditioned]] = target_condition_timestep
+        row_timesteps[
+            target_audio_indices[channel_latents : channel_latents + conditioned]
+        ] = target_condition_timestep
     return torch.unique(row_timesteps, sorted=True, return_inverse=True)
 
 

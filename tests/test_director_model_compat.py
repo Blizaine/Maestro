@@ -1355,6 +1355,70 @@ class TestDirectorH3GenerationContract(unittest.TestCase):
             get_lora_dir=lambda selected: os.path.join(self.temp_dir.name, "loras"),
         )
 
+    def test_fl2va_repairs_media_derived_lengths_before_queueing(self):
+        model_type = "minimax_h3"
+        model_def = {
+            "name": "H3 FL2VA",
+            "architecture": "minimax_h3",
+            "fps": 24,
+            "frames_minimum": 124,
+            "frames_maximum": 345,
+            "frames_steps": 17,
+            "latent_size": 17,
+            "image_prompt_types_allowed": "TSE",
+            "returns_audio": True,
+            "director_video_strategy": "bounded_start_end",
+            "director_audio_input_mode": "none",
+            "director_trim_end_frames": False,
+        }
+        self._install_registry(model_type, model_def)
+        plans = [
+            {"video_prompt": "first media-derived shot"},
+            {"video_prompt": "second media-derived shot"},
+        ]
+        clips = [
+            {
+                "start": 0.0,
+                "end": 5.0,
+                "duration_sec": 5.0,
+                "duration_frames": 120,
+            },
+            {
+                "start": 5.0,
+                "end": 11.0,
+                "duration_sec": 6.0,
+                "duration_frames": 144,
+            },
+        ]
+        captured = {}
+
+        def submit(params, **kwargs):
+            captured.update(params)
+            return ["joined.mp4"]
+
+        with patch.object(pipeline, "_submit_and_wait", side_effect=submit):
+            pipeline._run_video_generation(
+                "h3-media",
+                {
+                    "video_model": model_type,
+                    "pipeline_type": "short_film_story",
+                    "seamless": False,
+                    "video_params": {},
+                    "_director_shot_image_policy": "prompt_only",
+                },
+                plans,
+                clips,
+                ["", ""],
+                out_dir=self.temp_dir.name,
+            )
+
+        self.assertEqual(captured["per_clip_frames"], [124, 141])
+        self.assertAlmostEqual(clips[0]["end"], 124 / 24)
+        self.assertAlmostEqual(clips[1]["start"], 124 / 24)
+        self.assertAlmostEqual(clips[1]["end"], (124 + 141) / 24)
+        self.assertEqual(plans[0]["_director_generation_frames"], 124)
+        self.assertEqual(plans[1]["_director_generation_frames"], 141)
+
     def test_fl2va_uses_native_lengths_and_endpoints_only_within_one_scene(self):
         model_type = "minimax_h3"
         model_def = {
@@ -1790,6 +1854,142 @@ class TestDirectorUICatalogContract(unittest.TestCase):
         self.assertIn('"director_memory_policy": md.get', launch)
         self.assertIn("per_clip_continue_from_previous", launch)
         self.assertIn('"_continuation_tail_skip", 8', launch)
+
+
+class TestLegacyH3DirectorTimingRepair(unittest.TestCase):
+    def test_saved_five_second_clips_are_repaired_and_persisted(self):
+        first_plan = {
+            "start": 0.0,
+            "end": 5.0,
+            "duration_sec": 5.0,
+            "duration_frames": 120,
+        }
+        second_plan = {
+            "start": 5.0,
+            "end": 11.0,
+            "duration_sec": 6.0,
+            "duration_frames": 144,
+        }
+        state = {
+            "id": "legacy-h3",
+            "video_model": "minimax_h3",
+            "_params_snapshot": {
+                "video_model": "minimax_h3",
+                "fps": 24,
+                "planned_clips": [dict(first_plan), dict(second_plan)],
+            },
+            "clips": [
+                {
+                    "index": 0,
+                    "planned_clip": first_plan,
+                    "video_filename": "clip-1.mp4",
+                    "video_stale": False,
+                },
+                {
+                    "index": 1,
+                    "planned_clip": second_plan,
+                    "video_filename": "clip-2.mp4",
+                    "video_stale": False,
+                },
+            ],
+        }
+        model_def = {
+            "architecture": "minimax_h3",
+            "fps": 24,
+            "frames_minimum": 124,
+            "frames_maximum": 345,
+            "frames_steps": 17,
+        }
+
+        with tempfile.TemporaryDirectory() as output_dir, patch.object(
+            pipeline,
+            "_wgp",
+            SimpleNamespace(get_model_def=lambda _model_type: model_def),
+        ):
+            state_path = os.path.join(
+                output_dir,
+                "_director_pipeline_legacy-h3.json",
+            )
+            with open(state_path, "w", encoding="utf-8") as handle:
+                json.dump(state, handle)
+
+            loaded = pipeline.load_pipeline_state(output_dir, "legacy-h3")
+            with open(state_path, encoding="utf-8") as handle:
+                persisted = json.load(handle)
+
+        repaired_frames = [
+            clip["planned_clip"]["duration_frames"]
+            for clip in loaded["clips"]
+        ]
+        self.assertEqual(repaired_frames, [124, 141])
+        self.assertAlmostEqual(
+            loaded["clips"][1]["planned_clip"]["start"],
+            124 / 24,
+        )
+        self.assertTrue(all(clip["video_stale"] for clip in loaded["clips"]))
+        self.assertEqual(
+            persisted["_h3_frame_lattice_repair"]["original_frames"],
+            [120, 144],
+        )
+        self.assertEqual(
+            persisted["_h3_frame_lattice_repair"]["repaired_frames"],
+            [124, 141],
+        )
+        self.assertFalse(pipeline._repair_saved_h3_frame_lattice(loaded))
+
+    def test_repair_marks_every_clip_after_a_shift_stale(self):
+        state = {
+            "id": "legacy-h3-suffix",
+            "video_model": "minimax_h3",
+            "clips": [
+                {
+                    "planned_clip": {
+                        "start": 0.0,
+                        "end": 124 / 24,
+                        "duration_frames": 124,
+                    },
+                    "video_stale": False,
+                },
+                {
+                    "planned_clip": {
+                        "start": 124 / 24,
+                        "end": 124 / 24 + 6.0,
+                        "duration_frames": 144,
+                    },
+                    "video_stale": False,
+                },
+                {
+                    "planned_clip": {
+                        "start": 124 / 24 + 6.0,
+                        "end": 124 / 24 + 6.0 + 175 / 24,
+                        "duration_frames": 175,
+                    },
+                    "video_stale": False,
+                },
+            ],
+        }
+        model_def = {
+            "architecture": "minimax_h3",
+            "fps": 24,
+            "frames_minimum": 124,
+            "frames_maximum": 345,
+            "frames_steps": 17,
+        }
+
+        with patch.object(
+            pipeline,
+            "_wgp",
+            SimpleNamespace(get_model_def=lambda _model_type: model_def),
+        ):
+            self.assertTrue(pipeline._repair_saved_h3_frame_lattice(state))
+
+        self.assertFalse(state["clips"][0]["video_stale"])
+        self.assertTrue(state["clips"][1]["video_stale"])
+        self.assertTrue(state["clips"][2]["video_stale"])
+        self.assertEqual(
+            state["_h3_frame_lattice_repair"]["stale_clip_indices"],
+            [2, 3],
+        )
 
 
 if __name__ == "__main__":

@@ -136,6 +136,23 @@ T2V, I2V, and Ref2VA share the same H3 transformer core in Maestro. A correctly 
 
 ## Current local compatibility snapshot
 
+### August 11, 2026 upstream status update
+
+- Maestro does **not** currently include or expose Sol-Attn. Its selectable
+  attention backends remain SDPA, FlashAttention, and SageAttention; First
+  Block Cache is a separate optimization.
+- Current WanGP `main` now vendors an Apache-2.0 Sol-Attn backend under
+  `shared/sol_attn` and wires it into MiniMax H3. WanGP's optimized INT8-QK
+  path requires compute capability SM89 or newer, BF16 head-dimension-128
+  attention, PyTorch 2.10+, and Triton 3.6+.
+- The current Pinokio WanGP launcher migrated RTX 20/30/40/50 systems to
+  Python 3.11, PyTorch 2.10, and CUDA 13. Maestro still deliberately keeps
+  RTX 20/30/40 on its tested Python 3.10 / PyTorch 2.7.1 / CUDA 12.8 runtime.
+- Therefore Sol support should remain a separate, checkpointed runtime and
+  model-integration project. It is unrelated to a broken optional
+  FlashAttention DLL on an RTX 3090, and WanGP's present optimized Sol path
+  would not enable on that SM86 GPU.
+
 Test machine:
 
 - GPU: NVIDIA RTX 4090, compute capability 8.9, 24 GB VRAM

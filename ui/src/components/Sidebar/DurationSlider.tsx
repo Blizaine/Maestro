@@ -1,44 +1,23 @@
-import { useEffect } from 'react'
-import { Lock, Unlock } from 'lucide-react'
+import { useEffect, useRef } from 'react'
+import { Lock, Save, Unlock } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
-import type { ModelOptions } from '../../types'
+import {
+  effectiveH3OmniSequenceFrames,
+  h3OmniSequenceWindowCount,
+  h3TimelineFrames,
+  h3WindowOverrideKey,
+  normalizeH3NativeFrames,
+  recommendedH3PassProfile,
+  recommendedH3OmniSequenceProfile,
+} from '../../lib/h3Memory'
 
 export const formatSeconds = (seconds: number) => {
   const rounded = Math.round(seconds * 10) / 10
   return Number.isInteger(rounded) ? `${rounded}s` : `${rounded.toFixed(1)}s`
 }
 
-export type WindowRecommendation = {
-  supported: boolean
-  frames: number | null
-  fallbackResolution?: string
-}
-
-export const recommendedWindowProfile = (
-  policy: ModelOptions['sliding_window_memory_policy'],
-  resolution: string,
-  totalVramGb: number,
-): WindowRecommendation | null => {
-  if (!policy || !Number.isFinite(totalVramGb) || totalVramGb <= 0) return null
-  const normalizedResolution = String(resolution || '').trim().toLowerCase()
-  let pixels = policy.auto_resolution_pixels?.[normalizedResolution]
-  if (!pixels) {
-    const match = normalizedResolution.match(/^(\d+)x(\d+)$/)
-    if (match) pixels = Number(match[1]) * Number(match[2])
-  }
-  if (!pixels) return null
-  const band = policy.resolution_bands.find(item => pixels! >= item.min_pixels)
-  const tier = band?.vram_tiers.find(item => (
-    item.max_vram_gb == null || totalVramGb <= item.max_vram_gb
-  ))
-  if (!tier) return null
-  const frames = tier.frames != null && tier.frames > 0 ? tier.frames : null
-  return {
-    supported: frames != null,
-    frames,
-    fallbackResolution: tier.fallback_resolution,
-  }
-}
+// Kept as a public alias because Director shares the same pass-level table.
+export const recommendedWindowProfile = recommendedH3PassProfile
 
 export function DurationSlider() {
   const duration = useStore(s => s.durationSeconds)
@@ -47,20 +26,53 @@ export function DurationSlider() {
   const setWindowSize = useStore(s => s.setSlidingWindowSeconds)
   const overlap = useStore(s => s.slidingWindowOverlap)
   const locked = useStore(s => s.slidingWindowLocked)
+  const setLocked = useStore(s => s.setSlidingWindowLocked)
   const modelOptions = useStore(s => s.modelOptions)
+  const omniReferenceSequence = useStore(s => (
+    s.modelOptions?.omni_reference === true
+    && s.params.minimax_h3_reference_sequence === true
+  ))
+  const nativeOmniContinuation = useStore(s => (
+    s.params.minimax_h3_sequence_continuity !== false
+  ))
+  const manualOmniPrompts = useStore(s => (
+    s.params.minimax_h3_sequence_prompt_mode === 'manual'
+  ))
   const resolution = useStore(s => s.params.resolution)
+  const modelType = useStore(s => s.params.model_type)
+  const h3FirstLastMultiWindow = useStore(s => s.params.minimax_h3_multi_window === true)
+  const manualFirstLastPrompts = useStore(s => s.params.minimax_h3_window_storyboard === false)
+  const h3WindowOverrides = useStore(s => s.h3WindowOverrides)
   const totalVramGb = useStore(s => s.systemStats?.gpu.vram_total_gb ?? 0)
-  const windowRecommendation = recommendedWindowProfile(
-    modelOptions?.sliding_window_memory_policy,
-    resolution,
-    totalVramGb,
-  )
-  const safeWindowFrames = windowRecommendation?.frames ?? null
-  const unsupportedAutoResolution = windowRecommendation?.supported === false
-
   const fps = modelOptions?.fps ?? 16
   const swDefaults = (modelOptions as Record<string, unknown> | null)?.sliding_window_defaults as Record<string, number> | undefined
   const supportsSlidingWindows = modelOptions?.sliding_window === true
+  const minimumFrames = modelOptions?.frames_minimum ?? Math.round(fps)
+  const maximumFrames = modelOptions?.frames_maximum ?? Math.round(300 * fps)
+  const frameStep = modelOptions?.frames_steps ?? Math.round(fps)
+  const isOmniReference = modelOptions?.omni_reference === true
+  const isH3 = String(modelOptions?.architecture || '').startsWith('minimax_h3')
+  const h3MultiWindowEnabled = isOmniReference
+    ? omniReferenceSequence
+    : h3FirstLastMultiWindow
+  const overrideKey = h3WindowOverrideKey(modelType, resolution)
+  const savedOverrideFrames = isH3 ? h3WindowOverrides[overrideKey] : undefined
+  const directOmni = isOmniReference && !omniReferenceSequence
+  const memoryPolicy = isOmniReference
+    ? modelOptions?.omni_sequence_memory_policy
+    : modelOptions?.sliding_window_memory_policy
+  const windowRecommendation = omniReferenceSequence
+    ? recommendedH3OmniSequenceProfile(
+        memoryPolicy,
+        resolution,
+        totalVramGb,
+        minimumFrames,
+        maximumFrames,
+        frameStep,
+      )
+    : recommendedWindowProfile(memoryPolicy, resolution, totalVramGb)
+  const safeWindowFrames = windowRecommendation?.frames ?? null
+  const unsupportedAutoResolution = windowRecommendation?.supported === false
   const nativeMinSeconds = modelOptions?.frames_minimum
     ? modelOptions.frames_minimum / fps
     : 1
@@ -68,18 +80,117 @@ export function DurationSlider() {
     ? modelOptions.frames_maximum / fps
     : null
   const minDuration = Math.max(1, nativeMinSeconds)
-  const maxDuration = !supportsSlidingWindows && nativeMaxSeconds
-    ? nativeMaxSeconds
-    : 300
+  const maxDuration = isH3
+    ? (h3MultiWindowEnabled
+        ? (isOmniReference ? 120 : 300)
+        : Math.max(minDuration, nativeMaxSeconds ?? minDuration))
+    : (omniReferenceSequence
+      ? 120
+      : (directOmni && nativeMaxSeconds
+        ? Math.min(
+            nativeMaxSeconds,
+            unsupportedAutoResolution || safeWindowFrames == null
+              ? nativeMaxSeconds
+              : safeWindowFrames / fps,
+          )
+        : (!supportsSlidingWindows && nativeMaxSeconds ? nativeMaxSeconds : 300)))
   const durationStep = nativeMaxSeconds ? 0.1 : 1
+  const h3NativeDurationSlider = isH3 && !h3MultiWindowEnabled
+  const durationSliderMin = h3NativeDurationSlider ? minimumFrames : minDuration
+  const durationSliderMax = h3NativeDurationSlider ? maximumFrames : maxDuration
+  const durationSliderStep = h3NativeDurationSlider ? frameStep : durationStep
+  const durationSliderValue = h3NativeDurationSlider
+    ? normalizeH3NativeFrames(
+        Math.round(duration * fps),
+        minimumFrames,
+        maximumFrames,
+        frameStep,
+      )
+    : duration
   const discardFrames = swDefaults?.discard_last_frames ?? 0
   const overlapSeconds = overlap / fps
   const discardSeconds = discardFrames / fps
   const stride = windowSize - discardSeconds - overlapSeconds
-  const windowCount = stride > 0 && duration > windowSize
+  const windowCount = h3MultiWindowEnabled && stride > 0 && duration > windowSize
     ? 1 + Math.ceil((duration - windowSize + discardSeconds) / stride)
     : 1
-  const showSlidingWindow = supportsSlidingWindows && duration > windowSize
+  const showSlidingWindow = supportsSlidingWindows
+    && h3MultiWindowEnabled
+    && duration > windowSize
+    && !omniReferenceSequence
+  const { frames: omniSequenceClipFrames } = effectiveH3OmniSequenceFrames({
+    policy: modelOptions?.omni_sequence_memory_policy,
+    resolution,
+    totalVramGb,
+    minimumFrames,
+    maximumFrames,
+    frameStep,
+    selectedFrames: Math.round(windowSize * fps),
+    manualOverride: locked,
+  })
+  const totalFrames = h3TimelineFrames(
+    duration,
+    fps,
+    modelOptions?.frames_maximum,
+  )
+  const omniSequenceClipCount = omniReferenceSequence
+    ? h3OmniSequenceWindowCount({
+        totalFrames,
+        windowFrames: omniSequenceClipFrames,
+        overlapFrames: overlap,
+        nativeContinuation: nativeOmniContinuation,
+      })
+    : 1
+  const showOmniSequence = omniReferenceSequence && omniSequenceClipCount > 1
+  const previousH3DefaultSelection = useRef<string | null>(null)
+  const previousH3Recommendation = useRef<number | null>(null)
+  const h3DefaultAppliedThisPass = useRef(false)
+
+  // A saved override belongs to one exact model/canvas pair. Switching model
+  // or resolution starts both the visible Duration and native Window Length
+  // at that saved value, or at Auto's VRAM recommendation. The recommendation
+  // is a starting point, not a ceiling; subsequent user movement does not
+  // retrigger this initialization.
+  useEffect(() => {
+    h3DefaultAppliedThisPass.current = false
+    if (!isH3) {
+      previousH3DefaultSelection.current = null
+      previousH3Recommendation.current = null
+      return
+    }
+    const selectionChanged = previousH3DefaultSelection.current !== overrideKey
+    const recommendationChanged = (
+      savedOverrideFrames == null
+      && previousH3Recommendation.current !== safeWindowFrames
+    )
+    previousH3DefaultSelection.current = overrideKey
+    previousH3Recommendation.current = safeWindowFrames
+    if (!selectionChanged && !recommendationChanged) return
+
+    const preferredFrames = savedOverrideFrames ?? safeWindowFrames
+    if (preferredFrames != null) {
+      const preferredSeconds = preferredFrames / fps
+      if (Math.abs(preferredSeconds - windowSize) > 0.0001) {
+        setWindowSize(preferredSeconds)
+      }
+      if (Math.abs(preferredSeconds - duration) > 0.0001) {
+        setDuration(preferredSeconds)
+      }
+    }
+    setLocked(savedOverrideFrames != null)
+    h3DefaultAppliedThisPass.current = true
+  }, [
+    isH3,
+    overrideKey,
+    savedOverrideFrames,
+    safeWindowFrames,
+    fps,
+    duration,
+    windowSize,
+    setDuration,
+    setWindowSize,
+    setLocked,
+  ])
 
   // Auto-track: window size follows duration with a small model-native
   // buffer until it reaches that model's declared per-window ceiling.
@@ -94,8 +205,28 @@ export function DurationSlider() {
   // "Window: 20s" for a 19s clip — is trivial; the benefit is
   // single-window generation always works as intended.
   useEffect(() => {
+    if (h3DefaultAppliedThisPass.current) {
+      h3DefaultAppliedThisPass.current = false
+      return
+    }
     if (duration > maxDuration) {
       setDuration(maxDuration)
+      return
+    }
+    if (isH3) {
+      if (locked || savedOverrideFrames != null || safeWindowFrames == null) return
+      const nextWindowSize = safeWindowFrames / fps
+      if (Math.abs(nextWindowSize - windowSize) > 0.0001) {
+        setWindowSize(nextWindowSize)
+      }
+      return
+    }
+    if (omniReferenceSequence) {
+      if (locked || safeWindowFrames == null) return
+      const nextWindowSize = safeWindowFrames / fps
+      if (Math.abs(nextWindowSize - windowSize) > 0.0001) {
+        setWindowSize(nextWindowSize)
+      }
       return
     }
     if (!supportsSlidingWindows || locked) return
@@ -125,13 +256,14 @@ export function DurationSlider() {
     if (Math.abs(nextWindowSize - windowSize) > 0.0001) {
       setWindowSize(nextWindowSize)
     }
-  }, [duration, locked, supportsSlidingWindows, maxDuration, fps, swDefaults, safeWindowFrames, unsupportedAutoResolution, windowSize, setDuration, setWindowSize])
+  }, [duration, locked, supportsSlidingWindows, omniReferenceSequence, maxDuration, fps, swDefaults, safeWindowFrames, unsupportedAutoResolution, windowSize, setDuration, setWindowSize, isH3, savedOverrideFrames, overrideKey])
 
   const imageMode = useStore(s => s.params.image_mode)
   const isMultiClip = imageMode === 2
   const promptLineCount = useStore(s => s.params.prompt.split('\n').filter((l: string) => l.trim()).length)
   const automaticPromptPacing = (
     modelOptions?.sliding_window_auto_prompt_pacing === true
+    && !manualFirstLastPrompts
   )
 
   return (
@@ -143,15 +275,38 @@ export function DurationSlider() {
           {showSlidingWindow && (
             <span className="text-text-muted ml-1">({windowCount} win)</span>
           )}
+          {showOmniSequence && (
+            <span className="text-text-muted ml-1">
+              ({omniSequenceClipCount} {nativeOmniContinuation ? 'win' : 'clips'})
+            </span>
+          )}
         </span>
       </div>
       <input
         type="range"
-        min={minDuration}
-        max={maxDuration}
-        step={durationStep}
-        value={duration}
-        onChange={e => setDuration(Number(e.target.value))}
+        min={durationSliderMin}
+        max={durationSliderMax}
+        step={durationSliderStep}
+        value={durationSliderValue}
+        onChange={e => {
+          const sliderValue = Number(e.target.value)
+          const nextSeconds = h3NativeDurationSlider
+            ? sliderValue / fps
+            : sliderValue
+          if (
+            isH3
+            && nativeMaxSeconds != null
+            && nextSeconds <= nativeMaxSeconds + 0.0001
+            && nextSeconds > windowSize + 0.0001
+          ) {
+            // Raising Duration above Auto's recommendation is an intentional
+            // native-pass override. Keep Window Length in sync so the request
+            // does not silently split or clamp back to the recommendation.
+            if (!locked) setLocked(true)
+            setWindowSize(nextSeconds)
+          }
+          setDuration(nextSeconds)
+        }}
       />
       {showSlidingWindow && !isMultiClip && (
         <div className="text-[10px] text-text-muted mt-1">
@@ -161,11 +316,30 @@ export function DurationSlider() {
             : <>{promptLineCount}/{windowCount} prompts{promptLineCount < windowCount && ' (last reused)'}</>}
         </div>
       )}
+      {showOmniSequence && (
+        <div className="text-[10px] text-text-muted mt-1">
+          {omniSequenceClipCount} {nativeOmniContinuation ? 'native Omni windows' : 'independent Omni clips'} &middot;{' '}
+          {locked ? 'manual' : 'Auto'} max {formatSeconds(omniSequenceClipFrames / fps)} &middot;{' '}
+          {nativeOmniContinuation ? 'motion + audio carried' : 'hard cuts joined'} &middot;{' '}
+          {manualOmniPrompts
+            ? <span className={promptLineCount === omniSequenceClipCount ? '' : 'text-amber-400'}>
+                {promptLineCount}/{omniSequenceClipCount} manual prompts
+              </span>
+            : 'AI-planned prompts'}
+        </div>
+      )}
       {unsupportedAutoResolution && (
         <div className="text-[10px] text-amber-400 mt-1">
-          {locked
+          {directOmni
+            ? `For ${totalVramGb.toFixed(0)} GB, H3 Omni Auto recommends ${windowRecommendation?.fallbackResolution ?? 'a lower resolution'} instead of ${resolution}. Multi-window sequence can divide longer output into VRAM-aware windows.`
+            : locked
             ? `Manual VRAM override: ${resolution} may run out of memory on this ${totalVramGb.toFixed(0)} GB GPU.`
-            : `For ${totalVramGb.toFixed(0)} GB, H3 Auto recommends ${windowRecommendation?.fallbackResolution ?? 'a lower resolution'} instead of ${resolution}. Lock Window Size in Advanced to override.`}
+            : `For ${totalVramGb.toFixed(0)} GB, H3 Auto recommends ${windowRecommendation?.fallbackResolution ?? 'a lower resolution'} instead of ${resolution}. Lock Window Length in Advanced to override.`}
+        </div>
+      )}
+      {directOmni && !unsupportedAutoResolution && safeWindowFrames != null && nativeMaxSeconds != null && safeWindowFrames / fps < nativeMaxSeconds && (
+        <div className="text-[10px] text-text-muted mt-1">
+          VRAM-aware default: {formatSeconds(safeWindowFrames / fps)}. You can manually raise the native pass to {formatSeconds(nativeMaxSeconds)}; longer timelines use Multi-window sequence.
         </div>
       )}
     </div>
@@ -186,7 +360,19 @@ export function WindowSettings() {
   const setOverlap = useStore(s => s.setSlidingWindowOverlap)
   const locked = useStore(s => s.slidingWindowLocked)
   const setLocked = useStore(s => s.setSlidingWindowLocked)
+  const h3WindowOverrides = useStore(s => s.h3WindowOverrides)
+  const saveH3WindowOverride = useStore(s => s.saveH3WindowOverride)
+  const clearH3WindowOverride = useStore(s => s.clearH3WindowOverride)
   const modelOptions = useStore(s => s.modelOptions)
+  const omniReferenceSequence = useStore(s => (
+    s.modelOptions?.omni_reference === true
+    && s.params.minimax_h3_reference_sequence === true
+  ))
+  const nativeOmniContinuation = useStore(s => (
+    s.params.minimax_h3_sequence_continuity !== false
+  ))
+  const h3FirstLastMultiWindow = useStore(s => s.params.minimax_h3_multi_window === true)
+  const modelType = useStore(s => s.params.model_type)
   const resolution = useStore(s => s.params.resolution)
   const totalVramGb = useStore(s => s.systemStats?.gpu.vram_total_gb ?? 0)
   const isOutpaint = generationMode === 'avatar' && editSubMode === 'outpaint'
@@ -198,9 +384,29 @@ export function WindowSettings() {
   const fps = modelOptions?.fps ?? 16
   const swDefaults = (modelOptions as Record<string, unknown> | null)?.sliding_window_defaults as Record<string, number> | undefined
   const supportsSlidingWindows = modelOptions?.sliding_window === true
-  const windowMinSeconds = (swDefaults?.window_min ?? Math.round(3 * fps)) / fps
-  const windowMaxSeconds = (swDefaults?.window_max ?? Math.round(40 * fps)) / fps
-  const windowStepSeconds = Math.max(1, swDefaults?.window_step ?? fps) / fps
+  const isH3 = String(modelOptions?.architecture || '').startsWith('minimax_h3')
+  const isOmniReference = modelOptions?.omni_reference === true
+  const h3MultiWindowEnabled = isOmniReference
+    ? omniReferenceSequence
+    : h3FirstLastMultiWindow
+  const minimumFrames = isH3
+    ? (modelOptions?.frames_minimum ?? 124)
+    : omniReferenceSequence
+    ? (modelOptions?.frames_minimum ?? Math.round(3 * fps))
+    : (swDefaults?.window_min ?? Math.round(3 * fps))
+  const maximumFrames = isH3
+    ? (modelOptions?.frames_maximum ?? 345)
+    : omniReferenceSequence
+    ? (modelOptions?.frames_maximum ?? Math.round(15 * fps))
+    : (swDefaults?.window_max ?? Math.round(40 * fps))
+  const frameStep = isH3
+    ? (modelOptions?.frames_steps ?? 17)
+    : omniReferenceSequence
+    ? (modelOptions?.frames_steps ?? fps)
+    : (swDefaults?.window_step ?? fps)
+  const windowMinSeconds = minimumFrames / fps
+  const windowMaxSeconds = maximumFrames / fps
+  const windowStepSeconds = Math.max(1, frameStep) / fps
   const overlapMin = swDefaults?.overlap_min ?? 1
   const overlapMax = swDefaults?.overlap_max ?? 97
   const overlapStep = swDefaults?.overlap_step ?? 4
@@ -208,41 +414,80 @@ export function WindowSettings() {
   const overlapSeconds = overlap / fps
   const discardSeconds = discardFrames / fps
   const stride = windowSize - discardSeconds - overlapSeconds
-  const windowCount = stride > 0 && duration > windowSize
-    ? 1 + Math.ceil((duration - windowSize + discardSeconds) / stride)
-    : 1
-  const showSlidingWindow = duration > windowSize
-  const windowRecommendation = recommendedWindowProfile(
-    modelOptions?.sliding_window_memory_policy,
-    resolution,
-    totalVramGb,
-  )
+  const windowCount = !h3MultiWindowEnabled && isH3
+    ? 1
+    : omniReferenceSequence
+    ? h3OmniSequenceWindowCount({
+        totalFrames: h3TimelineFrames(
+          duration,
+          fps,
+          modelOptions?.frames_maximum,
+        ),
+        windowFrames: Math.max(1, Math.round(windowSize * fps)),
+        overlapFrames: overlap,
+        nativeContinuation: nativeOmniContinuation,
+      })
+    : (stride > 0 && duration > windowSize
+        ? 1 + Math.ceil((duration - windowSize + discardSeconds) / stride)
+        : 1)
+  const showSlidingWindow = h3MultiWindowEnabled && duration > windowSize
+  const memoryPolicy = isOmniReference
+    ? modelOptions?.omni_sequence_memory_policy
+    : modelOptions?.sliding_window_memory_policy
+  const windowRecommendation = omniReferenceSequence
+    ? recommendedH3OmniSequenceProfile(
+        memoryPolicy,
+        resolution,
+        totalVramGb,
+        minimumFrames,
+        maximumFrames,
+        frameStep,
+      )
+    : recommendedWindowProfile(memoryPolicy, resolution, totalVramGb)
   const safeWindowFrames = windowRecommendation?.frames ?? null
   const safeWindowSeconds = safeWindowFrames != null
     ? safeWindowFrames / fps
     : null
   const unsupportedAutoResolution = windowRecommendation?.supported === false
+  const overrideKey = h3WindowOverrideKey(modelType, resolution)
+  const savedOverrideFrames = isH3 ? h3WindowOverrides[overrideKey] : undefined
+  const currentWindowFrames = normalizeH3NativeFrames(
+    Math.round(windowSize * fps),
+    minimumFrames,
+    maximumFrames,
+    frameStep,
+  )
   const exceedsSafeRecommendation = (
     locked
     && safeWindowSeconds != null
     && windowSize > safeWindowSeconds + 0.0001
   )
 
-  if (!supportsSlidingWindows) return null
+  if (
+    !isH3 && !supportsSlidingWindows && !omniReferenceSequence
+  ) return null
 
   return (
     <div className="space-y-3">
       <div>
         <div className="flex items-center justify-between mb-1.5">
           <div className="flex items-center gap-1.5">
-            <label className="text-[11px] text-text-muted uppercase tracking-wider">Window Size</label>
+            <label className="text-[11px] text-text-muted uppercase tracking-wider">
+              {isH3 ? 'Window Length' : 'Window Size'}
+            </label>
+            {isH3 && safeWindowSeconds != null && (
+              <span className="text-[9px] text-text-muted normal-case">
+                Recommended {formatSeconds(safeWindowSeconds)}
+              </span>
+            )}
             <button
               onClick={() => {
                 if (locked) {
-                  // Unlocking — let auto-track resume
+                  if (savedOverrideFrames != null) {
+                    clearH3WindowOverride(modelType, resolution)
+                  }
                   setLocked(false)
                 } else {
-                  // Locking — freeze current window size
                   setLocked(true)
                 }
               }}
@@ -251,31 +496,55 @@ export function WindowSettings() {
                   ? 'text-accent-blue hover:text-accent-blue/70'
                   : 'text-text-muted hover:text-text-secondary'
               }`}
-              title={locked ? 'Window size locked — click to unlock (auto-track)' : 'Click to lock window size'}
+              title={locked
+                ? `${savedOverrideFrames != null ? 'Saved override' : 'Temporary override'} - click to resume Auto`
+                : 'Click to temporarily override the recommended window length'}
             >
               {locked ? <Lock size={10} /> : <Unlock size={10} />}
             </button>
+            {isH3 && (
+              <button
+                onClick={() => {
+                  saveH3WindowOverride(modelType, resolution, currentWindowFrames)
+                  setLocked(true)
+                }}
+                disabled={savedOverrideFrames === currentWindowFrames}
+                className={`p-0.5 rounded transition-colors disabled:cursor-default ${
+                  savedOverrideFrames === currentWindowFrames
+                    ? 'text-emerald-400/70'
+                    : 'text-text-muted hover:text-accent-blue'
+                }`}
+                title={savedOverrideFrames === currentWindowFrames
+                  ? `Saved for ${modelType} at ${resolution}`
+                  : `Save ${formatSeconds(currentWindowFrames / fps)} for this model and resolution`}
+              >
+                <Save size={10} />
+              </button>
+            )}
           </div>
           <span className="text-xs text-text-secondary">
             {formatSeconds(windowSize)}
-            {locked && <span className="text-accent-blue/60 ml-1 text-[9px]">locked</span>}
+            {savedOverrideFrames === currentWindowFrames
+              ? <span className="text-emerald-400/70 ml-1 text-[9px]">saved</span>
+              : locked && <span className="text-accent-blue/60 ml-1 text-[9px]">manual</span>}
           </span>
         </div>
         <input
           type="range"
-          min={windowMinSeconds}
-          max={windowMaxSeconds}
-          step={windowStepSeconds}
-          value={windowSize}
+          min={isH3 ? minimumFrames : windowMinSeconds}
+          max={isH3 ? maximumFrames : windowMaxSeconds}
+          step={isH3 ? frameStep : windowStepSeconds}
+          value={isH3 ? currentWindowFrames : windowSize}
           onChange={e => {
-            setWindowSize(Number(e.target.value))
             // Any manual change to window size automatically locks it
             if (!locked) setLocked(true)
+            const sliderValue = Number(e.target.value)
+            setWindowSize(isH3 ? sliderValue / fps : sliderValue)
           }}
         />
         {showSlidingWindow && (
           <div className="text-[10px] text-text-muted mt-1">
-            {windowCount} window{windowCount > 1 ? 's' : ''} of {formatSeconds(windowSize)}
+            {windowCount} {omniReferenceSequence && !nativeOmniContinuation ? 'independent clip' : 'window'}{windowCount > 1 ? 's' : ''} of up to {formatSeconds(windowSize)}
           </div>
         )}
         {windowRecommendation != null && (
@@ -283,15 +552,15 @@ export function WindowSettings() {
             {unsupportedAutoResolution
               ? (locked
                 ? `Manual override enabled: ${resolution} is above the automatic profile for ${totalVramGb.toFixed(0)} GB and may run out of VRAM.`
-                : `Auto does not recommend ${resolution} on ${totalVramGb.toFixed(0)} GB. Choose ${windowRecommendation.fallbackResolution ?? 'a lower resolution'}, or lock Window Size to try it experimentally.`)
+                : `Auto does not recommend ${resolution} on ${totalVramGb.toFixed(0)} GB. Choose ${windowRecommendation.fallbackResolution ?? 'a lower resolution'}, or manually set Window Length to try it experimentally.`)
               : (exceedsSafeRecommendation
                 ? `Manual override exceeds the ${formatSeconds(safeWindowSeconds!)} recommendation for ${totalVramGb.toFixed(0)} GB at this resolution and may run out of VRAM.`
-                : `Auto max: ${formatSeconds(safeWindowSeconds!)} for ${totalVramGb.toFixed(0)} GB at this resolution.`)}
+                : `Recommended: ${formatSeconds(safeWindowSeconds!)} for ${totalVramGb.toFixed(0)} GB at this resolution. The slider remains available through ${formatSeconds(maximumFrames / fps)}.${omniReferenceSequence && (windowRecommendation.referenceMarginFrames ?? 0) > 0 ? ' Includes Ref2VA reference headroom.' : ''}`)}
           </div>
         )}
       </div>
 
-      {showSlidingWindow && overlapStep > 0 && (
+      {supportsSlidingWindows && showSlidingWindow && overlapStep > 0 && (!omniReferenceSequence || nativeOmniContinuation) && (
         <div>
           <div className="flex items-center justify-between mb-1.5">
             <label className="text-[11px] text-text-muted uppercase tracking-wider">Window Overlap</label>
@@ -305,6 +574,11 @@ export function WindowSettings() {
             value={overlap}
             onChange={e => setOverlap(Number(e.target.value))}
           />
+          {modelOptions?.sliding_window_audio_history === true && (
+            <div className="text-[10px] text-text-muted mt-1">
+              Carries recent motion and matching stereo audio into each new window. 18 frames is recommended.
+            </div>
+          )}
         </div>
       )}
     </div>

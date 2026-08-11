@@ -41,7 +41,7 @@ MODALITY_COUNT = 3
 # for attention plus MMGP's streamed transformer blocks on consumer GPUs.
 MINIMAX_H3_ACTIVATION_CHUNK_TOKENS = 8192
 MINIMAX_H3_ADAPTIVE_CHUNK_MAX_TOKENS = 32768
-MINIMAX_H3_LARGE_SEQUENCE_TOKENS = 80000
+MINIMAX_H3_LARGE_SEQUENCE_TOKENS = 50000
 
 
 def _activation_chunk_tokens(
@@ -67,11 +67,14 @@ def _activation_chunk_tokens(
         return min(length, configured)
     if length <= configured:
         return length
-    # A measured 1280x704 / 345-frame request packs about 91K rows. Expanding
-    # its fused QKV chunk from 8K to ~23K consumed the last allocator
-    # headroom on a 24 GB RTX 4090 before denoising step zero. Keep the
-    # known-safe chunk for that class of full-duration sequence; shorter
-    # windows still receive the adaptive launch-count optimization below.
+    # A measured 960x544 / 345-frame Full request packs about 54K rows.
+    # Expanding its independently streamed Q/K/V projections to a 32K-row
+    # chunk consumed the remaining allocator headroom late in denoising and
+    # pushed Windows into shared-memory copies, while the larger 720p path
+    # remained stable because its 91K-row sequence already selected 8K
+    # chunks. Keep the known-safe chunk for both full-duration classes;
+    # genuinely shorter sequences still receive the adaptive launch-count
+    # optimization below.
     if length >= MINIMAX_H3_LARGE_SEQUENCE_TOKENS:
         return min(length, configured)
     input_width = max(1, int(input_width))

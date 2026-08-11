@@ -2,7 +2,7 @@
     "model": {
         "name": "H3 First / Last — Full",
         "architecture": "minimax_h3_full",
-        "description": "Full 33B MiniMax H3 First / Last model. Creates video from text alone or with a first frame, last frame, or both, and generates synchronized stereo audio. Longer Studio clips continue through native 14.4-second windows. It does not accept reference audio. Turbo works with both Full and Pruned; use Full only when you specifically want its larger checkpoint.",
+        "description": "Full 33B MiniMax H3 First / Last model. Creates video from text, first/last/timed frames, an uploaded soundtrack, or a Control Video soundtrack, with synchronized stereo audio. It can also preserve a Control Video's pictures while generating a new soundtrack. Longer Studio clips carry motion and matching audio through native 14.4-second windows. Voice references belong in H3 Omni. Turbo works with both Full and Pruned; use Full only when you specifically want its larger checkpoint.",
         "minimax_h3_qkv_layout": "interleaved",
         "URLs": [
             "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/fec7846aef352e58a1cfb699455e3d104281e68b/MiniMax-H3-FL2VA_bf16.safetensors",
@@ -13,7 +13,7 @@
     "num_inference_steps": 20,
     "video_length": 124,
     "sliding_window_size": 345,
-    "sliding_window_overlap": 1,
+    "sliding_window_overlap": 18,
     "sliding_window_discard_last_frames": 0,
     "resolution": "864x480",
     "guidance_scale": 1.0,

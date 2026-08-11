@@ -1,5 +1,17 @@
+const { isRtx50, runtimeProfile } = require("./launcher_profile")
+
 module.exports = async (kernel) => {
   let port = await kernel.port()
+  const runtime = runtimeProfile(kernel)
+  const runtimeGuard = isRtx50(kernel) ? [{
+    when: `{{!exists('${runtime.marker}')}}`,
+    method: "input",
+    params: {
+      title: "RTX 50 runtime upgrade required",
+      description: "Run Update once to install Maestro's Python 3.11 / CUDA 13 acceleration environment, then start Maestro again. Your existing environment is preserved."
+    },
+    next: null
+  }] : []
   // SERVER_NAME intentionally not set — wgp.py defaults to "localhost"
   // when SERVER_NAME isn't in the env. The classic UI is the legacy
   // secondary surface (Gradio); we don't surface a PINOKIO_SHARE_LOCAL
@@ -14,10 +26,12 @@ module.exports = async (kernel) => {
     },
     daemon: true,
     run: [
+      ...runtimeGuard,
       {
         method: "shell.run",
         params: {
-          venv: "env",
+          venv: runtime.env,
+          venv_python: runtime.python,
           env: {
             SERVER_PORT: port
           },

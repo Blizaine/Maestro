@@ -116,6 +116,7 @@ export function useAdvancedActiveItems(): string[] {
   const filmGrainIntensity = useStore(s => s.filmGrainIntensity)
   const generationMode = useStore(s => s.generationMode)
   const editSubMode = useStore(s => s.editSubMode)
+  const slidingWindowLocked = useStore(s => s.slidingWindowLocked)
   const isScailEdit = (
     generationMode === 'avatar'
     && (editSubMode === 'recast' || editSubMode === 'restyle')
@@ -125,13 +126,30 @@ export function useAdvancedActiveItems(): string[] {
   const items: string[] = []
   if (params.seed !== -1) items.push(`Seed ${params.seed}`)
   if (params.minimax_h3_turbo_mode) items.push('H3 Turbo')
+  if (
+    String(modelOptions?.architecture || '').startsWith('minimax_h3')
+    && slidingWindowLocked
+  ) items.push('H3 window override')
   if (params.skip_steps_cache_type === 'first_block') {
     items.push(`H3 cache ${params.skip_steps_multiplier ?? 0.08}`)
   }
   if (
-    modelOptions?.sliding_window_auto_prompt_pacing === true
-    && params.minimax_h3_window_storyboard === false
-  ) items.push('H3 window planning off')
+    (
+      modelOptions?.sliding_window_auto_prompt_pacing === true
+      || (
+        modelOptions?.omni_reference === true
+        && params.minimax_h3_reference_sequence === true
+      )
+    )
+    && params.minimax_h3_camera_coverage
+    && params.minimax_h3_camera_coverage !== 'auto'
+  ) {
+    items.push(
+      params.minimax_h3_camera_coverage === 'continuous'
+        ? 'H3 continuous take'
+        : 'H3 multi-shot coverage',
+    )
+  }
   if (
     (params.negative_prompt?.length ?? 0) > 0
     && (!isScailEdit || isScailHq)
@@ -216,6 +234,7 @@ export function AdvancedSettings() {
     params.minimax_h3_turbo_mode === true
     && modelOptions?.minimax_h3_turbo != null
   )
+  const isH3 = String(modelOptions?.architecture || '').startsWith('minimax_h3')
   const showInferenceSteps = (
     !isAudioOnly
     && (isScailEdit || !modelOptions?.lock_inference_steps)
@@ -399,27 +418,70 @@ export function AdvancedSettings() {
 
               {/* Window Settings */}
               {(isVideo || (isAvatar && !isScailEdit))
-                && modelOptions?.sliding_window
+                && (
+                  modelOptions?.sliding_window
+                  || isH3
+                  || (
+                    isVideo
+                    && modelOptions?.omni_reference === true
+                    && params.minimax_h3_reference_sequence === true
+                  )
+                )
                 && <WindowSettings />}
 
-              {isVideo && modelOptions?.sliding_window_auto_prompt_pacing === true && (
-                <div className="space-y-1">
-                  <label className="flex items-center gap-2 cursor-pointer group">
-                    <input
-                      type="checkbox"
-                      checked={params.minimax_h3_window_storyboard !== false}
-                      onChange={e => setParam('minimax_h3_window_storyboard', e.target.checked)}
-                      className="accent-accent-blue"
-                    />
-                    <span className="text-[11px] text-text-muted uppercase tracking-wider group-hover:text-text-secondary transition-colors">
-                      Plan Prompt Across Windows
-                    </span>
-                  </label>
-                  <p className="text-[9px] text-text-muted">
-                    H3 expands one idea into complete window-local visual and audio prompts. Enhance enables this automatically; disable afterward only to supply manual line-per-window prompts.
-                  </p>
+              {isVideo
+                && modelOptions?.sliding_window_auto_prompt_pacing === true
+                && (
+                  modelOptions?.omni_reference === true
+                    ? params.minimax_h3_reference_sequence === true
+                    : params.minimax_h3_multi_window === true
+                )
+                && (
+                <div className="space-y-2">
+                  <div>
+                    <label className="text-[10px] text-text-muted block mb-1">
+                      Camera Coverage
+                    </label>
+                    <select
+                      value={params.minimax_h3_camera_coverage || 'auto'}
+                      onChange={e => setParam(
+                        'minimax_h3_camera_coverage',
+                        e.target.value as 'auto' | 'continuous' | 'multi_shot',
+                      )}
+                      title="Auto chooses an editing grammar from the prompt. Continuous preserves a single take. Multi-shot allows timed H3 camera cuts inside every native window."
+                      className="w-full bg-bg-tertiary border border-border rounded px-2 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent-blue"
+                    >
+                      <option value="auto">Auto</option>
+                      <option value="continuous">Continuous take</option>
+                      <option value="multi_shot">Cinematic multi-shot</option>
+                    </select>
+                  </div>
                 </div>
               )}
+
+              {isVideo
+                && modelOptions?.omni_reference === true
+                && params.minimax_h3_reference_sequence === true
+                && (
+                  <div>
+                    <label className="text-[10px] text-text-muted block mb-1">
+                      Sequence Camera Coverage
+                    </label>
+                    <select
+                      value={params.minimax_h3_camera_coverage || 'auto'}
+                      onChange={e => setParam(
+                        'minimax_h3_camera_coverage',
+                        e.target.value as 'auto' | 'continuous' | 'multi_shot',
+                      )}
+                      title="Auto chooses action, conversation, or atmospheric coverage from the prompt."
+                      className="w-full bg-bg-tertiary border border-border rounded px-2 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent-blue"
+                    >
+                      <option value="auto">Auto</option>
+                      <option value="continuous">Continuous take per clip</option>
+                      <option value="multi_shot">Cinematic multi-shot</option>
+                    </select>
+                  </div>
+                )}
 
               {/* TTS Settings */}
               {isAudioOnly && (
@@ -992,7 +1054,7 @@ export function AdvancedSettings() {
               {/* Dedicated SCAIL edit endpoints own their source video,
                   edited/reference frames, masks, and process selection. */}
               {(modelOptions?.guide_preprocessing || modelOptions?.guide_custom_choices) &&
-                !isScailEdit && (
+                !isScailEdit && !modelOptions?.minimax_h3_media_sources && (
                 <ControlVideoSection />
               )}
 

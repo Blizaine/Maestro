@@ -2358,6 +2358,15 @@ def enhance_prompt(
                 "evidence and are not automatically an opening frame.\n\n"
                 f"{reference_context or 'Use the supplied ordered reference labels.'}\n\n{user_prompt}"
             )
+        elif is_h3_context_ir and reference_context:
+            user_prompt = (
+                "I have attached the ordered timeline images for a MiniMax H3 "
+                "First / Last request. Preserve the exact Picture numbering and "
+                "time alignment map below before the three Context-IR fields. "
+                "Each injected picture is a frame-exact visual destination, not "
+                "a general identity reference.\n\n"
+                f"{reference_context}\n\n{user_prompt}"
+            )
         elif mode == "image":
             user_prompt = f"I have attached a reference image. Enhance this prompt based on what you see in the image:\n\n{user_prompt}"
         else:
@@ -2365,6 +2374,8 @@ def enhance_prompt(
         print(f"[Enhance] Sending {len(image_paths)} image(s) to vision LLM")
     elif is_h3_ref2va and reference_context:
         user_prompt = f"Ordered Omni-reference label map:\n{reference_context}\n\n{user_prompt}"
+    elif is_h3_context_ir and reference_context:
+        user_prompt = f"Ordered H3 timeline-picture map:\n{reference_context}\n\n{user_prompt}"
 
     # Inject LoRA hints into system prompt (NOT user prompt) so LLM treats them as instructions
     if lora_system_hint:
@@ -2545,7 +2556,11 @@ def enhance_prompt(
                 if is_h3_ref2va
                 else _build_h3_context_fallback(
                     prompt,
-                    has_start_image=bool(image_paths),
+                    has_start_image=(
+                        bool(image_paths)
+                        and not bool(reference_context)
+                    ),
+                    reference_context=reference_context,
                     duration_seconds=duration_seconds,
                 )
             )
@@ -3038,15 +3053,18 @@ def _build_h3_context_fallback(
     prompt: str,
     *,
     has_start_image: bool,
+    reference_context: Optional[str] = None,
     duration_seconds: Optional[float] = None,
 ) -> str:
     """Create a deterministic three-field fallback for ordinary H3 Base."""
-    alignment = (
-        "For the target video, at 0.00 seconds into the target video, <Picture 1> "
-        "(from [Shot 1]) is fully referenced.\n\n"
-        if has_start_image
-        else ""
-    )
+    alignment = str(reference_context or "").strip()
+    if alignment:
+        alignment += "\n\n"
+    elif has_start_image:
+        alignment = (
+            "For the target video, at 0.00 seconds into the target video, <Picture 1> "
+            "(from [Shot 1]) is fully referenced.\n\n"
+        )
     request = _compile_h3_explicit_dialogue(prompt)
     timed_clause = _build_h3_timed_silence_clause(prompt, duration_seconds)
     return (

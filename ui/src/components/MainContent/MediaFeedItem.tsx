@@ -4,6 +4,7 @@ import { SaveRecipeDialog } from '../Recipes/SaveRecipeDialog'
 import { useStore } from '../../stores/useStore'
 import { getUploadUrl, fetchOutputMetadata, getFileUrl, moveOutput, uploadImage } from '../../api/client'
 import type { OutputFile, OutputMetadata } from '../../types'
+import { formatGenerationDuration } from '../../lib/format'
 import { modelDisplayName } from '../../lib/modelDisplay'
 
 interface Props {
@@ -458,7 +459,16 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
                 {modelLabel && <span className="font-medium" title={modelType}>{modelLabel}</span>}
                 {resolution && <span className="text-text-muted"> &middot; {resolution}</span>}
                 {seed != null && seed >= 0 && <span className="text-text-muted"> &middot; seed {seed}</span>}
-                {generationTime != null && <span className="text-text-muted"> &middot; {generationTime}s</span>}
+                {generationTime != null && (
+                  <span
+                  className="text-text-muted"
+                  title={meta?.generation_time_basis === 'active'
+                    ? 'Generation time (excluding queue wait and model loading)'
+                    : 'Recorded generation time'}
+                  >
+                    {' '}&middot; {formatGenerationDuration(generationTime)}
+                  </span>
+                )}
                 {clipIndex != null && clipTotal != null && (
                   <span className="text-accent-blue"> &middot; clip {clipIndex + 1}/{clipTotal}</span>
                 )}

@@ -1,6 +1,7 @@
 # Python virtual environment
 env/
 app/env/
+app/env-rtx50/
 
 # Node.js dependencies
 ui/node_modules/

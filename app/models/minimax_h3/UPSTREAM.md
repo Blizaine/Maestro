@@ -68,6 +68,57 @@ batched Diffusers-style row layout, uses the exact generated-row boundary for
 FL2VA and Ref2VA cache residuals, and keeps First Block Cache experimental and
 disabled by default.
 
+The full FL2VA sliding-window continuation contract is adapted from WanGP
+v12.44's H3 feature commit
+`5c8b4ac3c5e15135b6510d9b6d4d57002e4bb5e4`, with follow-up fixes through
+`639ee1351e5b57c5992903690199719607c3700e` (WanGP 12.441). A legal
+`17*n+1` overlap is split into complete 17-frame visual-history chunks and one
+regenerated boundary frame; the matching generated stereo-audio tail is VAE
+encoded on the same rotary timeline. Maestro retains its exact-duration outer
+assembler, prompt planner, and VRAM-aware pass limits around that native H3
+conditioning. The same upstream follow-up also supplies the streaming video
+VAE tile decoder used here, which decodes one tile at a time and preserves
+already blended horizontal/vertical tails to reduce peak VRAM and avoid
+multi-tile corner seams.
+
+Phase 3 extends that v12.44 contract to Ref2VA. Each continuation pass keeps
+the user's canonical ordered image/video/audio references, presents the prior
+window boundary as an additional leading picture to Qwen, and packs clean
+multi-frame video plus matching stereo-audio history ahead of the reference
+rows. Picture labels in the generated Context-IR are shifted only for that
+temporary boundary; canonical Video and Audio numbering remains stable.
+Maestro's Multi-window sequence toggle uses this native path when continuity is
+enabled and retains independent hard-cut clips when it is disabled. Window
+prompts may come from the story-planning LLM or from an exact user-authored
+one-non-empty-line-per-window mapping; the latter never loads the planner.
+
+Phase 4 adapts WanGP v12.44's FL2VA multiple-frame injection contract. Extra
+Studio Frame tiles are paired with exact target-frame anchors after carried
+visual history is removed, while the H3 window planner gives those same images
+window-local Picture numbers and timestamps. Start, final-end, continuation,
+and injected pictures therefore share one deterministic presentation order
+between Qwen conditioning, packed model conditions, saved plans, and resumed
+jobs. Ref2VA deliberately does not advertise this FL2VA-only capability.
+
+Phase 5 adapts WanGP v12.44's FL2VA media-source contract. An uploaded
+soundtrack or the soundtrack extracted from a Control Video is VAE encoded
+into clean, frozen target-audio rows so it can drive newly generated video.
+The reciprocal video-to-audio mode VAE encodes the complete Control Video as
+frozen target-video rows, skips visual denoising and decoding, and generates a
+new synchronized soundtrack while returning the source pictures unchanged.
+Maestro keeps its ordinary multi-window assembler around both paths,
+de-duplicates the carried visual overlap from each combined guide window, and
+uses H3's `17*n+5` frame offset when preparing Control Video windows.
+
+Phase 6 adapts WanGP v12.44's FL2VA video-to-video editing contract. A Control
+Video is VAE encoded as a clean reconstruction target and re-injected at the
+matching scheduler noise level. Whole-frame mode uses denoising strength to
+choose how late generation begins; masked modes use a white-edit/black-preserve
+mask and masking strength to control how long protected pixels remain locked.
+The same source can retain its soundtrack, generate a new synchronized stereo
+track, or be driven by a separate soundtrack. Ref2VA remains reference-guided
+and deliberately does not advertise this FL2VA-only editing pipeline.
+
 The one-click experimental Turbo preset pins the Maestro-validated
 `minimax_h3_turbo_4step_ckpt500.safetensors` file at repository revision
 `7a44622816e16032cb0b6d044d8820da39a1dfdc` (SHA-256
