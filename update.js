@@ -1,7 +1,14 @@
-const { runtimeProfile } = require("./launcher_profile")
+const {
+  isRtx50,
+  isSolCapable,
+  runtimeProfile,
+  solRuntimeProfile,
+} = require("./launcher_profile")
 
 module.exports = async (kernel) => {
   const runtime = runtimeProfile(kernel)
+  const maintainSeparateSolRuntime = isSolCapable(kernel) && !isRtx50(kernel)
+  const solRuntime = solRuntimeProfile(kernel)
   const alreadyCurrentAndReady =
     `{{/already up[- ]to[- ]date/i.test(input.stdout) && exists('${runtime.marker}') && exists('${runtime.flashMarker}') ? 'uptodate' : 'build'}}`
   return {
@@ -71,7 +78,29 @@ module.exports = async (kernel) => {
       path: "app",
       message: "uv pip install -r requirements.txt"
     }
+  }, ...(maintainSeparateSolRuntime ? [{
+    // Keep an already-installed optional RTX 40 Sol environment aligned with
+    // application dependencies without migrating the proven default runtime.
+    when: "{{exists('app/env-sol')}}",
+    method: "shell.run",
+    params: {
+      venv: solRuntime.env,
+      venv_python: solRuntime.python,
+      path: "app",
+      message: "uv pip install -r requirements.txt"
+    }
   }, {
+    when: `{{exists('app/env-sol') && !exists('${solRuntime.marker}')}}`,
+    method: "script.start",
+    params: {
+      uri: "sol_torch.js",
+      params: {
+        venv: solRuntime.env,
+        path: "app",
+        xformers: true
+      }
+    }
+  }] : []), {
     // Existing installs may have the main runtime marker but still contain a
     // Windows FlashAttention wheel whose CUDA DLL cannot load. Repair only
     // that optional wheel once; a normal torch.js run writes both markers.

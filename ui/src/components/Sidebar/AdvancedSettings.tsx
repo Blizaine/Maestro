@@ -127,6 +127,10 @@ export function useAdvancedActiveItems(): string[] {
   if (params.seed !== -1) items.push(`Seed ${params.seed}`)
   if (params.minimax_h3_turbo_mode) items.push('H3 Turbo')
   if (
+    modelOptions?.sol_attention
+    && params.override_attention === 'sol'
+  ) items.push('H3 Sol Engine')
+  if (
     String(modelOptions?.architecture || '').startsWith('minimax_h3')
     && slidingWindowLocked
   ) items.push('H3 window override')
@@ -347,6 +351,45 @@ export function AdvancedSettings() {
                   </p>
                 </div>
               ) : null}
+
+              {modelOptions?.sol_attention && (
+                <div className="space-y-2 p-2.5 bg-bg-tertiary/40 rounded-lg border border-border/60">
+                  <label
+                    className={`flex items-center gap-2 group ${
+                      modelOptions.sol_attention_status?.supported
+                        ? 'cursor-pointer'
+                        : 'cursor-not-allowed opacity-70'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={params.override_attention === 'sol'}
+                      disabled={!modelOptions.sol_attention_status?.supported}
+                      onChange={e => setParam(
+                        'override_attention',
+                        e.target.checked ? 'sol' : '',
+                      )}
+                      className="accent-accent-blue"
+                    />
+                    <span className="text-[11px] text-text-muted uppercase tracking-wider group-hover:text-text-secondary transition-colors">
+                      Sol Engine
+                    </span>
+                    <span className="text-[9px] text-amber-300/90 border border-amber-400/30 rounded px-1 py-0.5">
+                      Experimental
+                    </span>
+                  </label>
+                  {modelOptions.sol_attention_status?.supported ? (
+                    <p className="text-[9px] text-text-muted">
+                      Uses H3-aware sparse attention with exact reference and audio conditioning. The first run compiles kernels and can start more slowly; unsupported calls fall back automatically.
+                    </p>
+                  ) : (
+                    <p className="text-[9px] text-amber-200/80">
+                      {modelOptions.sol_attention_status?.reason || 'Sol Engine is unavailable in this runtime.'}
+                      {' '}On supported RTX 40 systems, install and use Maestro's optional Sol Engine runtime from Pinokio.
+                    </p>
+                  )}
+                </div>
+              )}
 
               {modelOptions?.first_block_cache && (
                 <div className="space-y-2 p-2.5 bg-bg-tertiary/40 rounded-lg border border-border/60">

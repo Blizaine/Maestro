@@ -1448,6 +1448,9 @@ class family_handler:
             "guidance_max_phases": 0,
             "visible_phases": 0,
             "compile": False,
+            # H3's packed BF16 head-dimension-128 attention can use the
+            # bundled Sol Engine from a compatible SM89+ / Triton 3.6 runtime.
+            "sol_attention": True,
             "first_block_cache": True,
             "first_block_cache_thresholds": _FIRST_BLOCK_CACHE_THRESHOLDS,
             "skip_steps_multiplier_choices": _FIRST_BLOCK_CACHE_STRENGTHS,

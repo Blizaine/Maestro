@@ -1548,6 +1548,8 @@ interface AppState {
   directorVideoMaxShotFramesByModel: Record<string, number>
   /** Director-owned H3 Turbo choices, separate from Studio's active mode. */
   directorH3TurboModeByModel: Record<string, boolean>
+  /** Director-owned experimental H3 Sol Engine choices. */
+  directorH3SolModeByModel: Record<string, boolean>
   setDirectorAutoMode: (v: boolean) => void
   setDirectorSeamless: (v: boolean) => void
   setDirectorShotImageGuidance: (v: DirectorShotImageGuidance) => void
@@ -1557,6 +1559,7 @@ interface AppState {
   setDirectorVideoInferenceSteps: (modelType: string, steps: number | null) => void
   setDirectorVideoMaxShotFrames: (modelType: string, frames: number | null) => void
   setDirectorH3TurboMode: (modelType: string, enabled: boolean) => void
+  setDirectorH3SolMode: (modelType: string, enabled: boolean) => void
   selectDirectorImageModel: (modelType: string) => void
   selectDirectorVideoModel: (modelType: string) => void
   directorSetLora: (mode: 'image' | 'video', activated_loras: string[], loras_multipliers: string, loraWeights: Record<string, number[]>, availableLoras: string[]) => void
@@ -4879,6 +4882,16 @@ export const useStore = create<AppState>((set, get) => ({
     if (!state.modelOptions?.minimax_h3_text_encoder_choices?.length) {
       delete params.minimax_h3_text_encoder
     }
+    if (
+      state.modelOptions?.sol_attention
+      && state.modelOptions.sol_attention_status?.supported
+    ) {
+      params.override_attention = (
+        params.override_attention === 'sol' ? 'sol' : ''
+      )
+    } else {
+      delete params.override_attention
+    }
     if (state.modelOptions?.first_block_cache) {
       const allowedThresholds = (
         state.modelOptions.skip_steps_multiplier_choices || []
@@ -6895,6 +6908,7 @@ export const useStore = create<AppState>((set, get) => ({
   directorVideoInferenceStepsByModel: {},
   directorVideoMaxShotFramesByModel: {},
   directorH3TurboModeByModel: {},
+  directorH3SolModeByModel: {},
   shortFilmCharacters: [],
   shortFilmPath: null,
   shortFilmTargetDuration: 30,
@@ -6959,6 +6973,12 @@ export const useStore = create<AppState>((set, get) => ({
   setDirectorH3TurboMode: (modelType, enabled) => set(s => ({
     directorH3TurboModeByModel: {
       ...s.directorH3TurboModeByModel,
+      [modelType]: enabled,
+    },
+  })),
+  setDirectorH3SolMode: (modelType, enabled) => set(s => ({
+    directorH3SolModeByModel: {
+      ...s.directorH3SolModeByModel,
       [modelType]: enabled,
     },
   })),
@@ -8792,6 +8812,7 @@ export const useStore = create<AppState>((set, get) => ({
     (newParams as Record<string, unknown>).keyframe_inject_mode = (p.keyframe_inject_mode as string) ?? undefined;
     (newParams as Record<string, unknown>).temperature = (p.temperature as number) ?? undefined;
     (newParams as Record<string, unknown>).audio_guidance_scale = (p.audio_guidance_scale as number) ?? undefined
+    newParams.override_attention = p.override_attention === 'sol' ? 'sol' : undefined
     newParams.minimax_h3_window_storyboard = (p.minimax_h3_window_storyboard as boolean) ?? undefined
     newParams.minimax_h3_multi_window = (p.minimax_h3_multi_window as boolean) ?? undefined
     newParams.minimax_h3_reference_sequence = (p.minimax_h3_reference_sequence as boolean) ?? undefined
@@ -9443,6 +9464,7 @@ export const useStore = create<AppState>((set, get) => ({
             directorAutoMode, directorSeamless, directorShotImageGuidance,
             directorResolution, directorAspectRatio,
             directorVideoMaxShotFramesByModel, directorH3TurboModeByModel,
+            directorH3SolModeByModel,
             selectedModelPerMode, savedParamsPerMode, savedLoraPerMode,
             directorSpeakerMappings, directorImageSpatialUpsampling,
             directorImageFilmGrainIntensity, directorImageFilmGrainSaturation,
@@ -9512,6 +9534,11 @@ export const useStore = create<AppState>((set, get) => ({
       && savedDirectorVideoLoras?.activated_loras?.includes(directorTurboOption.filename)
     )
     if (directorTurboEnabled) directorVideoSteps = directorTurboOption!.steps
+    const directorSolEnabled = Boolean(
+      directorVideoOptions?.sol_attention
+      && directorVideoOptions.sol_attention_status?.supported
+      && directorH3SolModeByModel[selectedVideoModel] === true
+    )
     const directorMaxShotFrames = directorVideoMaxShotFramesByModel[selectedVideoModel]
 
     // Upload all reference images (main + character + location) if not already uploaded
@@ -9633,6 +9660,7 @@ export const useStore = create<AppState>((set, get) => ({
         num_inference_steps: directorVideoSteps,
         resolution: directorVideoResolution,
         minimax_h3_turbo_mode: directorTurboEnabled,
+        override_attention: directorSolEnabled ? 'sol' : '',
       },
       video_loras: savedLoraPerMode.video || {},
       video_spatial_upsampling: directorVideoSpatialUpsampling,

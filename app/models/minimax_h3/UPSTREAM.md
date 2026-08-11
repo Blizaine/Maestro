@@ -68,6 +68,18 @@ batched Diffusers-style row layout, uses the exact generated-row boundary for
 FL2VA and Ref2VA cache residuals, and keeps First Block Cache experimental and
 disabled by default.
 
+The optional H3 Sol Engine integration is adapted from WanGP commit
+`7e45fe7e21105807b43f6285827d9ebb5fa72906`. The portable kernels under
+`shared/sol_attn/triton_kernels` track NVIDIA Sana Sol-Attn commit
+`46031940ba8af5d18054217e571149579424c0b1`; the optimized INT8-QK kernels
+under `shared/sol_attn/saganaki` track ComfyUI-sol-attn v0.5.2 commit
+`e2fc225`. Both sources are Apache-2.0 and retain their source headers and
+bundled license. Maestro restricts this backend to compatible MiniMax H3
+main-DiT attention, protects the complete packed conditioning prefix, and
+falls back to the selected dense Sage/SDPA backend on unsupported calls or
+kernel failure. RTX 40 users receive it through an isolated optional runtime;
+the proven RTX 20/30/40 default environment is not upgraded in place.
+
 The full FL2VA sliding-window continuation contract is adapted from WanGP
 v12.44's H3 feature commit
 `5c8b4ac3c5e15135b6510d9b6d4d57002e4bb5e4`, with follow-up fixes through

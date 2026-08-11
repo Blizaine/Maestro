@@ -2035,6 +2035,8 @@ function DirectorAdvancedAccordion() {
   const setMaxShotFrames = useStore(s => s.setDirectorVideoMaxShotFrames)
   const turboModeByModel = useStore(s => s.directorH3TurboModeByModel)
   const setTurboMode = useStore(s => s.setDirectorH3TurboMode)
+  const solModeByModel = useStore(s => s.directorH3SolModeByModel)
+  const setSolMode = useStore(s => s.setDirectorH3SolMode)
   const savedVideoLoras = useStore(s => s.savedLoraPerMode.video)
   const directorSetLora = useStore(s => s.directorSetLora)
   const directorResolution = useStore(s => s.directorResolution)
@@ -2138,6 +2140,12 @@ function DirectorAdvancedAccordion() {
     turboOption
     && turboModeByModel[videoModel] === true
     && savedVideoLoras?.activated_loras?.includes(turboOption.filename)
+  )
+  const solStatus = activeDirectorVideoOptions?.sol_attention_status
+  const solSelected = Boolean(
+    activeDirectorVideoOptions?.sol_attention
+    && solStatus?.supported
+    && solModeByModel[videoModel] === true
   )
 
   const setDirectorTurbo = (checked: boolean) => {
@@ -2291,6 +2299,36 @@ function DirectorAdvancedAccordion() {
                 </label>
                 <p className="mt-1 text-[10px] text-text-muted">
                   Enables the managed LoRA at {turboOption.weight.toFixed(2)} and uses {turboOption.steps} steps. Adjust its strength under Video LoRAs.
+                </p>
+              </div>
+            )}
+
+            {activeDirectorVideoOptions?.sol_attention && (
+              <div className={`rounded-lg border px-2.5 py-2 ${
+                solSelected
+                  ? 'border-accent-blue/50 bg-accent-blue/10'
+                  : 'border-border bg-bg-tertiary/50'
+              }`}>
+                <label className={`flex items-center gap-2 ${
+                  solStatus?.supported ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'
+                }`}>
+                  <input
+                    type="checkbox"
+                    checked={solSelected}
+                    disabled={!solStatus?.supported}
+                    onChange={event => setSolMode(videoModel, event.target.checked)}
+                    className="accent-accent-blue"
+                  />
+                  <Zap size={12} className={solSelected ? 'text-accent-blue' : 'text-text-muted'} />
+                  <span className="text-[11px] font-medium text-text-primary">H3 Sol Engine</span>
+                  <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[8px] font-medium uppercase tracking-wider text-indicator-warning">
+                    Experimental
+                  </span>
+                </label>
+                <p className="mt-1 text-[10px] text-text-muted">
+                  {solStatus?.supported
+                    ? 'Uses H3-aware sparse attention for every newly generated shot; unsupported calls fall back automatically.'
+                    : solStatus?.reason || 'Unavailable in this runtime.'}
                 </p>
               </div>
             )}

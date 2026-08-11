@@ -92,6 +92,8 @@ export interface GenerateParams {
   skip_steps_multiplier?: number
   /** Percentage of denoising steps to run before caching may begin. */
   skip_steps_start_step_perc?: number
+  /** Per-generation attention override. Sol is H3-only and experimental. */
+  override_attention?: '' | 'sol'
   guidance_phases?: number
   video_prompt_type?: string
   audio_prompt_type?: string
@@ -383,6 +385,16 @@ export interface ModelOptions {
   flow_shift: boolean
   tea_cache: boolean
   first_block_cache?: boolean
+  sol_attention?: boolean
+  sol_attention_status?: {
+    installed: boolean
+    supported: boolean
+    reason?: string | null
+    capability?: string
+    triton_version?: string | null
+    minimum_triton?: string
+    first_run_compiles_kernels?: boolean
+  } | null
   skip_steps_multiplier_choices?: [string, number][] | null
   skip_steps_multiplier_label?: string
   default_skip_steps_multiplier?: number

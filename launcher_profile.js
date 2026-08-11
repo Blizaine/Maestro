@@ -11,6 +11,23 @@ const isRtx50 = (kernel = {}) => {
   )
 }
 
+const isRtx40 = (kernel = {}) => {
+  const target = String(kernel.gpu_target || "").toLowerCase()
+  const model = String(kernel.gpu_model || "").toLowerCase()
+  return kernel.gpu === "nvidia" && (
+    target === "sm_89" || /(?:geforce\s+)?rtx\s*40\d{2}/i.test(model)
+  )
+}
+
+const isSolCapable = (kernel = {}) => {
+  const target = String(kernel.gpu_target || "").toLowerCase()
+  return kernel.gpu === "nvidia" && (
+    ["sm_89", "sm_90", "sm_100", "sm_120"].includes(target)
+    || isRtx40(kernel)
+    || isRtx50(kernel)
+  )
+}
+
 const runtimeProfile = (kernel = {}) => {
   if (isRtx50(kernel)) {
     return {
@@ -30,4 +47,21 @@ const runtimeProfile = (kernel = {}) => {
   }
 }
 
-module.exports = { isRtx50, runtimeProfile }
+const solRuntimeProfile = (kernel = {}) => {
+  if (isRtx50(kernel)) return runtimeProfile(kernel)
+  return {
+    env: "env-sol",
+    python: "3.11",
+    marker: "app/env-sol/.maestro_sol_runtime_v1.installed",
+    flashMarker: "app/env-sol/.maestro_sol_flash_2_8_3_v1.installed",
+    label: "H3 Sol Engine / CUDA 13",
+  }
+}
+
+module.exports = {
+  isRtx40,
+  isRtx50,
+  isSolCapable,
+  runtimeProfile,
+  solRuntimeProfile,
+}

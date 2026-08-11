@@ -46,7 +46,12 @@ from shared.utils.audio_video import save_image_metadata, read_image_metadata, e
 from shared.utils.audio_metadata import save_audio_metadata, read_audio_metadata, extract_creation_datetime_from_metadata, resolve_audio_creation_datetime
 from shared.utils.video_metadata import save_video_metadata
 from shared.match_archi import match_nvidia_architecture
-from shared.attention import get_attention_modes, get_supported_attention_modes
+from shared.attention import (
+    get_attention_modes,
+    get_override_attention_modes,
+    get_supported_attention_modes,
+    get_supported_override_attention_modes,
+)
 from shared.utils.utils import truncate_for_filesystem, sanitize_file_name, process_images_multithread, get_default_workers
 from shared.utils.process_locks import acquire_GPU_ressources, release_GPU_ressources, any_GPU_process_running, gen_lock
 from shared.loras_migration import migrate_loras_layout
@@ -2542,6 +2547,8 @@ def resolve_lora_path(model_type, lora_file):
 
 attention_modes_installed = get_attention_modes()
 attention_modes_supported = get_supported_attention_modes()
+override_attention_modes_installed = get_override_attention_modes()
+override_attention_modes_supported = get_supported_override_attention_modes()
 args = _parse_args()
 migrate_loras_layout()
 
@@ -7476,7 +7483,14 @@ def generate_video(
     attn = overridden_attention if overridden_attention is not None else attention_mode
     if attn == "auto":
         attn = get_auto_attention()
-    elif not attn in attention_modes_supported:
+    elif attn == "sol" and not model_def.get("sol_attention", False):
+        send_cmd(
+            "info",
+            "Sol Engine is available only for compatible MiniMax H3 models.",
+        )
+        send_cmd("exit")
+        return True
+    elif attn not in override_attention_modes_supported:
         send_cmd("info", f"You have selected attention mode '{attn}'. However it is not installed or supported on your system. You should either install it or switch to the default 'sdpa' attention.")
         send_cmd("exit")
         return True

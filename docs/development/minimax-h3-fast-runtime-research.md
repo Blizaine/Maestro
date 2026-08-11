@@ -1,11 +1,19 @@
 # MiniMax H3 Fast Runtime Research and Integration Plan
 
-Status: research complete; implementation deferred
+Status: phases 1-3 implemented; benchmark/combination tuning remains
 
 Research date: 2026-08-07
 
 Maestro checkpoint before this note: `6707da2` (`feat: add MiniMax H3 LoRA browser routing`)
-Checkpoint verification: `58` MiniMax H3 regression tests passed
+Checkpoint verification at original research point: `58` MiniMax H3 regression tests passed
+
+Implementation update (2026-08-11): Maestro now routes H3 through its shared
+SageAttention backend, includes optional First Block Cache, and bundles an
+H3-scoped Sol Engine. Sol remains experimental and opt-in. It requires a
+compatible SM89/SM90/SM100/SM120 GPU and a PyTorch 2.10 / Triton 3.6 runtime;
+RTX 40 uses an isolated `env-sol` launcher environment and RTX 50 uses its
+existing CUDA 13 environment. Unsupported calls and kernel failures recover
+to Maestro's normal dense attention backend.
 
 ## Purpose
 
@@ -111,7 +119,7 @@ Therefore:
 - EasyCache can bypass both by avoiding an entire model evaluation.
 - Their individual speedup factors cannot be multiplied together because their savings overlap.
 
-## Comparison with Maestro's current H3 runtime
+## Comparison captured at the original research checkpoint
 
 | Area | Maestro Turbo | Supplied ComfyUI fast workflows |
 |---|---|---|
@@ -119,28 +127,28 @@ Therefore:
 | Sampling | 6 model evaluations | 20 model evaluations |
 | Main acceleration | Distillation LoRA | Attention kernels, sparse attention, and output reuse |
 | Turbo LoRA | Yes, weight `0.70` | None |
-| SageAttention | Installed globally, but H3 bypasses it | Used as dense/fallback attention |
-| Sparse attention | None | Sol-Attn |
-| Model-call cache | None for H3 | EasyCache |
+| SageAttention | Installed globally, but H3 bypassed it at this checkpoint | Used as dense/fallback attention |
+| Sparse attention | None at this checkpoint | Sol-Attn |
+| Model-call cache | None for H3 at this checkpoint | EasyCache |
 | Approximation risk | Distillation | Quantized attention, sparse attention, and cached output |
 
 Relevant Maestro code:
 
 - `app/models/minimax_h3/turbo.py`: Turbo LoRA selection, six-step preset, and `0.70` default weight.
-- `app/models/minimax_h3/transformer.py`: H3 attention currently calls `torch.nn.functional.scaled_dot_product_attention` directly.
-- `app/shared/attention.py`: Maestro's existing SageAttention backends, currently bypassed by H3.
+- `app/models/minimax_h3/transformer.py`: at the research checkpoint, H3 attention called `torch.nn.functional.scaled_dot_product_attention` directly.
+- `app/shared/attention.py`: at the research checkpoint, Maestro's existing SageAttention backends were bypassed by H3.
 - `app/models/minimax_h3/minimax_h3_main.py`: each denoising evaluation invokes the transformer once and jointly predicts video and audio velocities.
 - `app/models/minimax_h3/minimax_h3_handler.py`: FL2VA/Ref2VA model selection, Full/Pruned behavior, and sliding-window limits.
 
 T2V, I2V, and Ref2VA share the same H3 transformer core in Maestro. A correctly designed acceleration layer can therefore serve all three modes, with stricter conditioning rules for Ref2VA.
 
-## Current local compatibility snapshot
+## Pre-implementation compatibility snapshot
 
 ### August 11, 2026 upstream status update
 
-- Maestro does **not** currently include or expose Sol-Attn. Its selectable
-  attention backends remain SDPA, FlashAttention, and SageAttention; First
-  Block Cache is a separate optimization.
+- At this checkpoint Maestro did **not** yet include or expose Sol-Attn. Its
+  selectable attention backends were SDPA, FlashAttention, and SageAttention;
+  First Block Cache was a separate optimization.
 - Current WanGP `main` now vendors an Apache-2.0 Sol-Attn backend under
   `shared/sol_attn` and wires it into MiniMax H3. WanGP's optimized INT8-QK
   path requires compute capability SM89 or newer, BF16 head-dimension-128
@@ -148,8 +156,8 @@ T2V, I2V, and Ref2VA share the same H3 transformer core in Maestro. A correctly 
 - The current Pinokio WanGP launcher migrated RTX 20/30/40/50 systems to
   Python 3.11, PyTorch 2.10, and CUDA 13. Maestro still deliberately keeps
   RTX 20/30/40 on its tested Python 3.10 / PyTorch 2.7.1 / CUDA 12.8 runtime.
-- Therefore Sol support should remain a separate, checkpointed runtime and
-  model-integration project. It is unrelated to a broken optional
+- Therefore the implementation uses a separate, checkpointed runtime and
+  model-scoped integration. It is unrelated to a broken optional
   FlashAttention DLL on an RTX 3090, and WanGP's present optimized Sol path
   would not enable on that SM86 GPU.
 
@@ -166,7 +174,7 @@ Implications:
 - SageAttention can be integrated into H3 without introducing a new package on this machine.
 - The community ComfyUI Sol-Attn extension reports successful H3 testing on RTX 4090 and RTX 5090, but describes itself as experimental and compiles Triton kernels on first use.
 - NVIDIA's current official Sol-Engine sparse backend documents newer PyTorch and Triton requirements than Maestro currently ships. Dropping it directly into Maestro would require a potentially disruptive runtime upgrade.
-- The community Sol-Attn repository's license must be confirmed before copying implementation code. Prefer an independently written integration against appropriately licensed primary code.
+- The implemented backend uses the Apache-2.0 NVIDIA/WanGP Sol sources recorded in `app/models/minimax_h3/UPSTREAM.md`; no unverified community implementation was copied.
 
 ## Primary-source findings
 
@@ -304,7 +312,7 @@ Record separately:
 
 Preserve output pairs for blind visual/audio review.
 
-### Phase 1: Wire SageAttention into H3
+### Phase 1: Wire SageAttention into H3 (completed)
 
 1. Add an H3 attention-backend abstraction around `MiniMaxH3Attention`.
 2. Retain PyTorch SDPA as the guaranteed fallback.
@@ -315,7 +323,7 @@ Preserve output pairs for blind visual/audio review.
 
 This is the safest first implementation because SageAttention is already installed and H3 currently bypasses it.
 
-### Phase 2: Add H3-aware caching
+### Phase 2: Add H3-aware caching (completed)
 
 1. Implement caching at the H3 model-evaluation level.
 2. Cache and reuse video and audio velocities as an inseparable pair.
@@ -327,7 +335,7 @@ This is the safest first implementation because SageAttention is already install
 
 Evaluate both EasyCache-style output-delta reuse and NVIDIA's H3-oriented FirstBlockCache design before choosing the final algorithm.
 
-### Phase 3: Add optional Sol-Attn
+### Phase 3: Add optional Sol-Attn (implemented; runtime generation validation pending)
 
 1. Resolve implementation licensing and dependency strategy first.
 2. Avoid a mandatory PyTorch/Triton upgrade for all users if possible.

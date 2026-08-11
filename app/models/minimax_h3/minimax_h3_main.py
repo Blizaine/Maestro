@@ -1944,6 +1944,11 @@ class MiniMaxH3Model:
         target_start_index = (
             min(target_starts) if target_starts else layout.sequence_length
         )
+        video_sink_tokens = (
+            int(video_indices[layout.num_condition_video_rows].item())
+            if video_indices.numel() > layout.num_condition_video_rows
+            else layout.sequence_length
+        )
         target_video_row_count = (
             int(video_rows.shape[0]) - layout.num_condition_video_rows
         )
@@ -2055,6 +2060,7 @@ class MiniMaxH3Model:
                         return_dict=False,
                         first_block_cache=first_block_cache,
                         target_start_index=target_start_index,
+                        video_sink_tokens=video_sink_tokens,
                     )
                     if prediction is None or self._interrupt:
                         return None

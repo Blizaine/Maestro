@@ -1,4 +1,9 @@
-const { isRtx50, runtimeProfile } = require("./launcher_profile")
+const {
+  isRtx50,
+  isSolCapable,
+  runtimeProfile,
+  solRuntimeProfile,
+} = require("./launcher_profile")
 module.exports = {
   version: "8.0",
   title: "Maestro",
@@ -7,25 +12,31 @@ module.exports = {
   menu: async (kernel, info) => {
     const runtime = runtimeProfile(kernel)
     const rtx50 = isRtx50(kernel)
+    const solCapable = isSolCapable(kernel)
+    const solRuntime = solRuntimeProfile(kernel)
+    const separateSolRuntime = solCapable && !rtx50
     // Do not gate this menu on kernel.gpu. Pinokio can render an app menu
     // before its hardware inventory has populated that property, which would
     // hide Start from supported systems. install.js retains the documented
     // execution-time NVIDIA check for fresh installations.
-    let installed = info.exists("app/env") || info.exists("app/env-rtx50")
+    let installed = info.exists("app/env") || info.exists("app/env-rtx50") || info.exists("app/env-sol")
     let runtimeReady = info.exists(runtime.marker)
+    let solRuntimeReady = info.exists(solRuntime.marker)
     let running = {
       install: info.running("install.js"),
+      sol_install: info.running("sol_install.js"),
       start: info.running("start.js"),
+      start_sol: info.running("start_sol.js"),
       start_classic: info.running("start_classic.js"),
       update: info.running("update.js"),
       reset: info.running("reset.js")
     }
-    if (running.install) {
+    if (running.install || running.sol_install) {
       return [{
         default: true,
         icon: "fa-solid fa-plug",
-        text: "Installing",
-        href: "install.js",
+        text: running.sol_install ? "Installing H3 Sol Engine Runtime" : "Installing",
+        href: running.sol_install ? "sol_install.js" : "install.js",
       }]
     } else if (running.update) {
       return [{
@@ -71,6 +82,25 @@ module.exports = {
             href: "start.js",
           }]
         }
+      } else if (running.start_sol) {
+        let local = info.local("start_sol.js")
+        if (local && local.url) {
+          return [{
+            default: true,
+            icon: "fa-solid fa-bolt",
+            text: "Open Web UI (Sol Runtime)",
+            href: local.url,
+          }, {
+            icon: 'fa-solid fa-terminal',
+            text: "Sol Runtime Terminal",
+            href: "start_sol.js",
+          }]
+        }
+        return [{
+          icon: 'fa-solid fa-terminal',
+          text: "Sol Runtime Terminal",
+          href: "start_sol.js",
+        }]
       } else if (running.start_classic) {
         let local = info.local("start_classic.js")
         if (local && local.url) {
@@ -103,7 +133,11 @@ module.exports = {
           icon: "fa-solid fa-power-off",
           text: "Start",
           href: "start.js",
-        }, {
+        }, ...(separateSolRuntime && solRuntimeReady ? [{
+          icon: "fa-solid fa-bolt",
+          text: "Start with H3 Sol Engine (Experimental)",
+          href: "start_sol.js",
+        }] : []), {
           icon: "fa-solid fa-display",
           text: "Start (Classic UI)",
           href: "start_classic.js",
@@ -133,6 +167,12 @@ module.exports = {
               path: "app",
               xformers: true
             }
+          }] : []), ...(separateSolRuntime ? [{
+            icon: "fa-solid fa-bolt",
+            text: solRuntimeReady
+              ? "Repair H3 Sol Engine Runtime"
+              : "Install H3 Sol Engine Runtime",
+            href: "sol_install.js",
           }] : [])]
         }, {
           icon: "fa-regular fa-folder-open",
@@ -152,7 +192,13 @@ module.exports = {
           icon: "fa-solid fa-plug",
           text: "Install",
           href: "install.js",
-        }, {
+        }, ...(separateSolRuntime ? [{
+          icon: "fa-solid fa-bolt",
+          text: solRuntimeReady
+            ? "Repair H3 Sol Engine Runtime (Experimental)"
+            : "Install H3 Sol Engine Runtime (Experimental)",
+          href: "sol_install.js",
+        }] : []), {
           // Install / re-install the SAM 3.1 segmentation service
           // (separate Python 3.12 conda env, takes ~5 min). Only
           // needed for the experimental Inpaint feature in Edit

@@ -2,6 +2,7 @@
 env/
 app/env/
 app/env-rtx50/
+app/env-sol/
 
 # Node.js dependencies
 ui/node_modules/

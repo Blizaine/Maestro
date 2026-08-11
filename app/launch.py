@@ -5293,6 +5293,18 @@ def get_model_options(model_type: str):
         if _h3_encoder_variants
         else None
     )
+    _sol_attention_status = None
+    if md.get("sol_attention", False):
+        try:
+            from shared.attention import get_sol_attention_status
+
+            _sol_attention_status = get_sol_attention_status()
+        except Exception as error:
+            _sol_attention_status = {
+                "installed": False,
+                "supported": False,
+                "reason": f"Sol Engine runtime detection failed: {error}",
+            }
 
     return {
         "model_type": model_type,
@@ -5307,6 +5319,8 @@ def get_model_options(model_type: str):
         "flow_shift": bool(md.get("flow_shift", False)),
         "tea_cache": md.get("tea_cache", False),
         "first_block_cache": md.get("first_block_cache", False),
+        "sol_attention": md.get("sol_attention", False),
+        "sol_attention_status": _sol_attention_status,
         "skip_steps_multiplier_choices": [
             [str(choice[0]), float(choice[1])]
             for choice in md.get("skip_steps_multiplier_choices", [])

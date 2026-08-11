@@ -537,11 +537,15 @@ The install (without model downloads) typically takes **10–20 minutes** depend
 
 RTX 50-series cards use a dedicated Python 3.11, PyTorch 2.10, CUDA 13 environment with native SageAttention and Lightx2v NVFP4 kernels. Existing RTX 50 installs migrate automatically the next time **Update** is run; the older environment is retained as a recovery point. Maestro prints a short runtime audit at startup. If that audit reports a missing RTX 50 kernel after Update completed, use **Advanced → Repair RTX 50 Runtime** in the Pinokio menu.
 
+MiniMax H3 also offers an optional **Sol Engine (Experimental)** sparse-attention backend. RTX 50-series systems can enable it directly in H3 Advanced settings after Update. RTX 40-series systems keep Maestro's proven default runtime and can add a separate `app/env-sol/` environment through **Pinokio menu -> Install H3 Sol Engine Runtime**, then launch with **Start with H3 Sol Engine**. The first Sol generation compiles Triton kernels and can start more slowly. RTX 20/30-series GPUs remain on SageAttention because the optimized Sol kernels do not support their compute architecture. If Sol cannot handle a call, Maestro reports it once and falls back to the normal dense H3 attention path.
+
 ### Updating
 
 Click **Update** in the launcher menu. This pulls the latest launcher scripts and app code, reinstalls any new Python dependencies, and rebuilds the React UI.
 
 ### Resetting
+
+The optional `app/env-sol/` environment is removed along with the standard Maestro environments.
 
 Click **Reset** to wipe the install and start over. Removes `app/env/`, `app/env-rtx50/`, `ui/node_modules/`, `ui/dist/`, and the SAM venv if installed. Model checkpoints in `app/ckpts/` are NOT removed by default — delete them manually if you want a true fresh start.
 
