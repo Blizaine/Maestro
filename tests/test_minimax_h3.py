@@ -2760,14 +2760,18 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
     def test_h3_projection_chunks_expand_only_below_large_sequence_guard(self):
         from models.minimax_h3.transformer import _activation_chunk_tokens
 
-        qkv_chunk = _activation_chunk_tokens(60_000, 5_376, 21_504)
-        mlp_chunk = _activation_chunk_tokens(60_000, 5_376, 28_672)
+        qkv_chunk = _activation_chunk_tokens(48_000, 5_376, 21_504)
+        mlp_chunk = _activation_chunk_tokens(48_000, 5_376, 28_672)
         self.assertGreater(qkv_chunk, 8_192)
         self.assertGreater(mlp_chunk, 8_192)
         self.assertLessEqual(qkv_chunk, 32_768)
         self.assertLessEqual(mlp_chunk, 32_768)
         self.assertEqual(qkv_chunk % 256, 0)
         self.assertEqual(mlp_chunk % 256, 0)
+        self.assertEqual(
+            _activation_chunk_tokens(54_203, 5_376, 7_168),
+            8_192,
+        )
         self.assertEqual(
             _activation_chunk_tokens(91_278, 5_376, 21_504),
             8_192,

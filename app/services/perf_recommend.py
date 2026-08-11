@@ -378,22 +378,27 @@ _H3_MIN_ACTIVATION_RESERVE_GB = 5.0
 _H3_MAX_WEIGHT_BUDGET_GB = 18.0
 _H3_MIN_WEIGHT_BUDGET_GB = 3.5
 _H3_VIDEO_REFERENCE_RESERVE_GB = 10.0
-# MMGP applies the transformer's fixed ``workingVRAM`` reserve independently,
-# so there is no reason to repeat it for baseline 540p jobs.  Once the packed
-# sequence grows materially beyond that baseline, however, the fixed reserve
-# no longer represents H3's Q/K/V and residual peak. Native 768p x 345 frames
-# is almost 2x the baseline token load and hard-OOMed a 24 GB 4090 while MMGP
-# kept 13.35 GB of weights resident. H3 now routes through the shared
-# allocation-efficient attention backend and bounds projection temporaries.
+# MMGP receives the transformer's fixed ``workingVRAM`` reserve independently,
+# but its preload plan is also constrained by the per-job residency
+# coefficient. Letting the coefficient retain 17 GB at baseline 540p left
+# only 7 GB of actual device headroom and triggered Windows shared-memory
+# paging. Blend the measured workspace into that coefficient as packed load
+# approaches baseline. Native 768p x 345 frames is almost 2x the baseline
+# token load and hard-OOMed a 24 GB 4090 while MMGP kept 13.35 GB of weights
+# resident. H3 also routes through the allocation-efficient attention backend
+# and bounds projection temporaries.
 # A subsequent 1280x704 x 345-frame measurement still filled 24.0/24.6 GB at
 # a 9.9 GB transformer cap, before denoising step zero. Preserve enough room
 # for that measured full-window peak while shorter recommended windows retain
 # more transformer residency and therefore run faster.
-# Begin dynamic residency before the native packed sequence is 25% above
-# baseline. The measured 720p / 243-frame recommendation is already 1.22x;
-# relying on the generic cap there leaves too little real-world allocator
-# margin on display-attached cards.
-_H3_RUNTIME_SCALING_MIN_RATIO = 1.10
+# Blend the measured runtime workspace into the residency cap as a request
+# approaches the native full-window baseline. The previous 1.10x hard gate
+# left only 7 GB outside model residency at exactly 540p / 345 frames, then
+# abruptly reserved more than 12 GB immediately above the gate. On Windows,
+# that made the smaller 540p job spill into shared GPU memory while 720p ran
+# normally. A blended ramp keeps short jobs fast without that inversion.
+_H3_RUNTIME_BLEND_START_RATIO = 0.75
+_H3_RUNTIME_BLEND_FULL_RATIO = 1.0
 _H3_LARGE_CANVAS_MIN_PIXELS = 1_400_000
 _H3_NATIVE_RUNTIME_EXCESS_SCALE = 0.70
 _H3_NATIVE_RUNTIME_SAFETY_MARGIN_GB = 1.0
@@ -443,11 +448,12 @@ def compute_h3_weight_budget(
     step.  The same class of jobs had worked under the old incidental
     two-stage reserve at roughly a 17.5 GB cap.
 
-    ``runtime_workspace_gb`` is MMGP's transformer's fixed working-VRAM
-    allowance. It is already supplied to MMGP independently, so baseline jobs
-    do not count it twice. When packed-token load materially exceeds the
-    baseline, the excess is scaled to cover the larger Q/K/V and residual
-    tensors. Native canvases use partial scaling to retain useful model
+    ``runtime_workspace_gb`` is MMGP's transformer's measured working-VRAM
+    allowance. MMGP receives it independently, while this function also uses
+    it to keep the residency coefficient from occupying that same device
+    headroom. The allowance blends in near the baseline rather than penalizing
+    short previews, then scales to cover larger Q/K/V and residual tensors.
+    Native canvases use partial excess scaling to retain useful model
     residency; experimental large canvases retain the stricter measured
     scaling that prevents the observed 1080p OOM.
 
@@ -500,20 +506,37 @@ def compute_h3_weight_budget(
         runtime_workspace_gb = max(0.0, float(runtime_workspace_gb or 0.0))
     except (TypeError, ValueError):
         runtime_workspace_gb = 0.0
-    runtime_scaling_active = (
-        runtime_workspace_gb > 0.0
-        and compute_ratio >= _H3_RUNTIME_SCALING_MIN_RATIO
-    )
     large_canvas = pixels >= _H3_LARGE_CANVAS_MIN_PIXELS
     runtime_excess_scale = (
         1.0 if large_canvas else _H3_NATIVE_RUNTIME_EXCESS_SCALE
     )
-    scaled_runtime_workspace_gb = (
-        runtime_workspace_gb
-        * (1.0 + (compute_ratio - 1.0) * runtime_excess_scale)
-        if runtime_scaling_active
-        else 0.0
-    )
+    scaled_runtime_workspace_gb = 0.0
+    runtime_blend = 0.0
+    if runtime_workspace_gb > 0.0 and compute_ratio > _H3_RUNTIME_BLEND_START_RATIO:
+        runtime_blend = min(
+            1.0,
+            max(
+                0.0,
+                (compute_ratio - _H3_RUNTIME_BLEND_START_RATIO)
+                / (
+                    _H3_RUNTIME_BLEND_FULL_RATIO
+                    - _H3_RUNTIME_BLEND_START_RATIO
+                ),
+            ),
+        )
+        raw_runtime_workspace_gb = runtime_workspace_gb * (
+            compute_ratio
+            if compute_ratio <= 1.0
+            else 1.0 + (compute_ratio - 1.0) * runtime_excess_scale
+        )
+        if runtime_blend < 1.0:
+            # Meet the analytical reserve continuously at the beginning of
+            # the ramp instead of introducing another piecewise jump.
+            scaled_runtime_workspace_gb = base_reserve_gb + (
+                raw_runtime_workspace_gb - base_reserve_gb
+            ) * runtime_blend
+        else:
+            scaled_runtime_workspace_gb = raw_runtime_workspace_gb
     try:
         additional_reserve_gb = max(0.0, float(additional_reserve_gb or 0.0))
     except (TypeError, ValueError):
@@ -524,20 +547,24 @@ def compute_h3_weight_budget(
     # margin; native canvases use a smaller one to preserve useful residency.
     runtime_safety_margin_gb = 0.0
     if scaled_runtime_workspace_gb > 0:
-        runtime_safety_margin_gb = (
+        runtime_safety_margin_gb = runtime_blend * (
             _H3_LARGE_CANVAS_RUNTIME_SAFETY_MARGIN_GB
             if large_canvas
             else _H3_NATIVE_RUNTIME_SAFETY_MARGIN_GB
         )
     # The analytical reserve already includes any reference-video surcharge.
-    # Treat the runtime measurement as a lower bound rather than adding it a
-    # second time.  At the ordinary H3 canvas this mirrors MMGP's workingVRAM
-    # cap; at 1080p it tightens model residency in proportion to the larger
-    # packed sequence.
+    # Treat the runtime measurement as an alternative lower bound rather than
+    # adding both estimates together. At 1080p it tightens model residency in
+    # proportion to the larger packed sequence.
+    analytical_reserve_gb = base_reserve_gb + reference_reserve_gb
+    runtime_reserve_gb = (
+        scaled_runtime_workspace_gb + runtime_safety_margin_gb
+    )
+    runtime_scaling_active = runtime_reserve_gb > analytical_reserve_gb
     requested_reserve_gb = max(
-        base_reserve_gb + reference_reserve_gb,
-        scaled_runtime_workspace_gb,
-    ) + runtime_safety_margin_gb + additional_reserve_gb
+        analytical_reserve_gb,
+        runtime_reserve_gb,
+    ) + additional_reserve_gb
 
     # Always leave enough room to stream at least a small transformer slice.
     max_reserve_gb = max(0.0, total_vram_gb - _H3_MIN_WEIGHT_BUDGET_GB)

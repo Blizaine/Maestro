@@ -5,6 +5,17 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-08-10
+
+MiniMax H3 memory stability: fixed a workload inversion where a full-duration
+540p generation could retain too many transformer weights, use oversized
+projection chunks, spill into Windows shared GPU memory, and eventually run
+out of VRAM even though the corresponding 720p job completed normally. H3 now
+blends its measured runtime-workspace requirement smoothly into the residency
+budget as clip load approaches a full native window and uses allocation-safe
+chunks for long sequences. The corrected policy was validated with Full and
+Pruned checkpoints in First / Last and Omni workflows.
+
 ## [1.7.0] - 2026-08-10
 
 MiniMax H3 native continuation: First / Last and Omni can now build long

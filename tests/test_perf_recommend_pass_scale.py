@@ -180,9 +180,14 @@ class TestPassOverheadResolutionScaling(unittest.TestCase):
 
 class TestMiniMaxH3ActivationBudget(unittest.TestCase):
     def test_long_540p_job_restores_known_good_4090_headroom(self):
-        budget = compute_h3_weight_budget(24.0, "960x544", 336)
-        self.assertLessEqual(budget["weight_budget_gb"], 17.1)
-        self.assertGreaterEqual(budget["activation_reserve_gb"], 6.9)
+        budget = compute_h3_weight_budget(
+            24.0,
+            "960x544",
+            336,
+            runtime_workspace_gb=10.0,
+        )
+        self.assertLessEqual(budget["weight_budget_gb"], 14.0)
+        self.assertGreaterEqual(budget["activation_reserve_gb"], 10.0)
 
     def test_portrait_and_landscape_have_the_same_budget(self):
         landscape = compute_h3_weight_budget(24.0, "960x544", 336)
@@ -200,21 +205,47 @@ class TestMiniMaxH3ActivationBudget(unittest.TestCase):
         self.assertAlmostEqual(budget["weight_budget_gb"], 7.0, places=2)
 
     def test_lower_vram_card_streams_more_transformer_weights(self):
-        budget = compute_h3_weight_budget(16.0, "960x544", 345)
-        self.assertAlmostEqual(budget["activation_reserve_gb"], 7.0, places=2)
-        self.assertAlmostEqual(budget["weight_budget_gb"], 9.0, places=2)
+        budget = compute_h3_weight_budget(
+            16.0,
+            "960x544",
+            345,
+            runtime_workspace_gb=10.0,
+        )
+        self.assertAlmostEqual(budget["activation_reserve_gb"], 11.0, places=2)
+        self.assertAlmostEqual(budget["weight_budget_gb"], 5.0, places=2)
 
-    def test_fixed_mmgp_workspace_is_not_double_counted_at_native_size(self):
+    def test_native_full_window_residency_honors_runtime_workspace(self):
         budget = compute_h3_weight_budget(
             24.0,
             "960x544",
             345,
             runtime_workspace_gb=10.0,
         )
-        self.assertFalse(budget["runtime_scaling_active"])
-        self.assertEqual(budget["scaled_runtime_workspace_gb"], 0.0)
-        self.assertAlmostEqual(budget["activation_reserve_gb"], 7.0, places=2)
-        self.assertAlmostEqual(budget["weight_budget_gb"], 17.0, places=2)
+        self.assertTrue(budget["runtime_scaling_active"])
+        self.assertAlmostEqual(budget["scaled_runtime_workspace_gb"], 10.0, places=2)
+        self.assertAlmostEqual(budget["activation_reserve_gb"], 11.0, places=2)
+        self.assertAlmostEqual(budget["weight_budget_gb"], 13.0, places=2)
+
+    def test_runtime_workspace_blend_has_no_large_threshold_jump(self):
+        below = compute_h3_weight_budget(
+            24.0,
+            "960x544",
+            310,
+            runtime_workspace_gb=10.0,
+        )
+        above = compute_h3_weight_budget(
+            24.0,
+            "960x544",
+            311,
+            runtime_workspace_gb=10.0,
+        )
+        self.assertLess(
+            abs(
+                above["activation_reserve_gb"]
+                - below["activation_reserve_gb"]
+            ),
+            0.1,
+        )
 
     def test_pruned_768p_full_window_preserves_step_zero_headroom_on_4090(self):
         budget = compute_h3_weight_budget(

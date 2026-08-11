@@ -77,6 +77,13 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.7.1 (2026-08-10)
+
+**MiniMax H3 memory stability**
+- Fixed long 540p H3 generations becoming slower and exhausting VRAM while the same 720p workload succeeded.
+- Rebalanced transformer residency and activation workspace smoothly across clip lengths and resolutions to avoid Windows shared-GPU-memory paging and excessive Copy activity.
+- Added safer full-duration projection chunking for Full and Pruned checkpoints, validated in both First / Last and Omni workflows.
+
 ### v1.7.0 (2026-08-10)
 
 **MiniMax H3 native multi-window generation**
