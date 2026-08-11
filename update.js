@@ -3,7 +3,7 @@ const { runtimeProfile } = require("./launcher_profile")
 module.exports = async (kernel) => {
   const runtime = runtimeProfile(kernel)
   const alreadyCurrentAndReady =
-    `{{/already up[- ]to[- ]date/i.test(input.stdout) && exists('${runtime.marker}') ? 'uptodate' : 'build'}}`
+    `{{/already up[- ]to[- ]date/i.test(input.stdout) && exists('${runtime.marker}') && exists('${runtime.flashMarker}') ? 'uptodate' : 'build'}}`
   return {
     run: [{
     // Pull the latest launcher + app code (single monorepo, so this one
@@ -28,9 +28,9 @@ module.exports = async (kernel) => {
     // never a wrongly-skipped rebuild.
     method: "jump",
     params: {
-      // An already-current checkout still enters the build path when its
-      // hardware-specific runtime marker is missing. This makes the RTX 50
-      // CUDA 13 migration resumable after an interrupted Update.
+      // An already-current checkout still enters the build path when either
+      // its hardware runtime or optional FlashAttention repair marker is
+      // missing. This keeps interrupted installs and one-time repairs resumable.
       id: alreadyCurrentAndReady
     }
   }, {
@@ -72,9 +72,23 @@ module.exports = async (kernel) => {
       message: "uv pip install -r requirements.txt"
     }
   }, {
-    // Skip torch.js when the marker file written by torch.js's last
-    // successful run is still present — `torch + triton + sage + flash`
-    // are already installed at the versions torch.js wants to install.
+    // Existing installs may have the main runtime marker but still contain a
+    // Windows FlashAttention wheel whose CUDA DLL cannot load. Repair only
+    // that optional wheel once; a normal torch.js run writes both markers.
+    when: `{{exists('${runtime.marker}') && !exists('${runtime.flashMarker}')}}`,
+    method: "script.start",
+    params: {
+      uri: "torch.js",
+      params: {
+        venv: runtime.env,
+        path: "app",
+        flash_only: true
+      }
+    }
+  }, {
+    // Skip the full torch.js path when its main runtime marker is present.
+    // FlashAttention has a separate marker and targeted repair step above,
+    // so an optional DLL problem never forces a multi-gigabyte Torch reinstall.
     // Saves ~60-120s + ~3 GB of redundant downloads on routine updates.
     //
     // Each hardware profile owns its marker. Bumping the marker in

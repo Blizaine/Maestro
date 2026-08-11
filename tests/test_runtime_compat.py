@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _APP_DIR = os.path.abspath(os.path.join(_HERE, "..", "app"))
@@ -17,6 +19,7 @@ from services.runtime_compat import (  # noqa: E402
     version_tuple,
 )
 from services.perf_recommend import recommend_h3_reserved_ram_fraction  # noqa: E402
+from services.optional_acceleration import prepare_optional_flash_attention  # noqa: E402
 from scripts.install_gguf_kernels import _pick_wheel_url  # noqa: E402
 
 
@@ -69,6 +72,47 @@ class TestRuntimeCompatibility(unittest.TestCase):
         self.assertTrue(is_rtx50_capability("sm_120"))
         self.assertFalse(is_rtx50_capability("sm_89"))
         self.assertEqual(version_tuple("2.10.0+cu130"), (2, 10))
+
+
+class TestOptionalAccelerationCompatibility(unittest.TestCase):
+    def test_working_flash_attention_remains_available(self):
+        flash = SimpleNamespace(
+            flash_attn_func=object(),
+            flash_attn_varlen_func=object(),
+        )
+        messages = []
+
+        self.assertTrue(
+            prepare_optional_flash_attention(
+                import_module=lambda name: flash,
+                emit=messages.append,
+            )
+        )
+        self.assertEqual(messages, [])
+
+    def test_broken_flash_attention_disables_diffusers_and_falls_back(self):
+        diffusers_imports = SimpleNamespace(_flash_attn_available=True)
+        messages = []
+
+        def fake_import(name):
+            if name == "flash_attn":
+                raise ImportError("DLL load failed while importing flash_attn_2_cuda")
+            if name == "diffusers.utils.import_utils":
+                return diffusers_imports
+            raise AssertionError(f"unexpected import: {name}")
+
+        with patch.dict(sys.modules, {}, clear=False):
+            self.assertFalse(
+                prepare_optional_flash_attention(
+                    import_module=fake_import,
+                    emit=messages.append,
+                )
+            )
+            self.assertIsNone(sys.modules.get("flash_attn"))
+
+        self.assertFalse(diffusers_imports._flash_attn_available)
+        self.assertEqual(len(messages), 1)
+        self.assertIn("continuing with SageAttention/SDPA", messages[0])
 
 
 class TestH3ReservedRamRecommendation(unittest.TestCase):

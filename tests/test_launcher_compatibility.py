@@ -43,11 +43,22 @@ class TestPinokioGpuCompatibility(unittest.TestCase):
         menu = (_ROOT / "pinokio.js").read_text(encoding="utf-8")
         self.assertIn("Repair RTX 50 Runtime", menu)
 
+    def test_legacy_windows_flash_wheel_matches_wangp_documented_abi(self):
+        torch_script = (_ROOT / "torch.js").read_text(encoding="utf-8")
+
+        self.assertIn("flash_attn-2.7.4.post1+cu128torch2.7.0", torch_script)
+        self.assertNotIn("flash_attn-2.8.2%2Bcu128torch2.7", torch_script)
+        self.assertIn("--force-reinstall --no-deps", torch_script)
+
     def test_update_can_resume_a_missing_hardware_runtime(self):
+        profile = (_ROOT / "launcher_profile.js").read_text(encoding="utf-8")
         updater = (_ROOT / "update.js").read_text(encoding="utf-8")
 
         self.assertIn("alreadyCurrentAndReady", updater)
         self.assertIn("exists('${runtime.marker}')", updater)
+        self.assertIn("flashMarker", profile)
+        self.assertIn("exists('${runtime.flashMarker}')", updater)
+        self.assertIn("flash_only: true", updater)
         self.assertIn("venv: runtime.env", updater)
 
     def test_runtime_diagnostics_run_inside_the_loaded_engine(self):
@@ -55,6 +66,13 @@ class TestPinokioGpuCompatibility(unittest.TestCase):
 
         self.assertIn("from scripts.runtime_preflight import main", engine)
         self.assertIn("_runtime_preflight()", engine)
+
+    def test_broken_optional_flash_is_guarded_before_mmgp_import(self):
+        engine = (_ROOT / "app" / "wgp.py").read_text(encoding="utf-8")
+
+        guard = engine.index("prepare_optional_flash_attention()")
+        mmgp_import = engine.index("from mmgp import")
+        self.assertLess(guard, mmgp_import)
 
 
 if __name__ == "__main__":

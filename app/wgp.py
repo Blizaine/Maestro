@@ -22,6 +22,8 @@ import threading
 import argparse
 import warnings
 warnings.filterwarnings('ignore', message='Failed to find.*', module='triton')
+from services.optional_acceleration import prepare_optional_flash_attention
+prepare_optional_flash_attention()
 from mmgp import offload, safetensors2, profile_type , quant_router
 try:
     import triton
