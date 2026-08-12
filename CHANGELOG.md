@@ -5,6 +5,43 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [Unreleased]
 
+## [1.7.5] - 2026-08-11
+
+MiniMax H3 performance controls: added an optional experimental Sol Engine
+sparse-attention path for supported RTX 40- and 50-series GPUs. Studio now
+groups Turbo, Sol Engine, and First Block Cache in one collapsible H3
+Optimizations panel and allows the three accelerators to be used independently
+or together. Unsupported Sol calls fail safely to the normal attention path,
+the startup audit reports runtime readiness, and the first compilation is
+cached for later generations.
+
+Director optimization parity: H3 Director projects now expose the same Turbo
+preset, Sol Engine, and First Block Cache controls as Studio. The selected
+recipe and cache tuning are persisted with the project and applied consistently
+to initial shots, Dashboard regeneration, repair, and resume. Projects saved by
+older Maestro versions remain compatible and default the new options off.
+
+Managed H3 Turbo presets: updated the default to the upstream v4-600 EMA LoRA
+at six steps and strength 1.0, while retaining the earlier v1-500 preset as a
+rollback choice. Managed assets are revision-pinned, size- and SHA-256-verified,
+published atomically, and recorded with local receipts. A scheduled GitHub
+workflow detects upstream repository changes and opens a review issue rather
+than silently replacing a validated adapter.
+
+Runtime and update reliability: RTX 50's CUDA 13 runtime now pins the tested
+Triton 3.6 series required by Sol. RTX 40 systems retain their established
+default environment and can install a separate opt-in `env-sol`; Update now
+detects and repairs interrupted optional-runtime and FlashAttention installs.
+RTX 20/30 systems continue to use the existing SageAttention path. Bundled Sol
+sources include pinned upstream provenance and Apache-2.0 notices.
+
+## [1.7.2] - 2026-08-11
+
+H3 compatibility fixes: repaired legacy Director and uploaded-media frame
+counts onto H3's native frame lattice without timeline drift. Fixed manual
+First / Last multi-window prompts being repeated wholesale in every window,
+and corrected mixed FP16/FP32 visual conditioning for H3 GGUF text encoders.
+
 ## [1.7.1] - 2026-08-10
 
 MiniMax H3 memory stability: fixed a workload inversion where a full-duration

@@ -27,6 +27,7 @@ _TRANSFORMER_PATH = _APP / "models" / "minimax_h3" / "transformer.py"
 _CONDITIONER_PATH = _APP / "models" / "minimax_h3" / "conditioner.py"
 _CHECKPOINT_PATH = _APP / "models" / "minimax_h3" / "checkpoint.py"
 _TURBO_PATH = _APP / "models" / "minimax_h3" / "turbo.py"
+_TURBO_MANIFEST_PATH = _APP / "models" / "minimax_h3" / "turbo_presets.json"
 _NVFP4_PATH = _APP / "shared" / "qtypes" / "nvfp4.py"
 _INT8_CONVROT_PATH = _APP / "shared" / "qtypes" / "int8_convrot.py"
 _WGP_PATH = _APP / "wgp.py"
@@ -41,8 +42,8 @@ _PROMPT_INPUT_PATH = _ROOT / "ui" / "src" / "components" / "Sidebar" / "PromptIn
 _DURATION_SLIDER_PATH = _ROOT / "ui" / "src" / "components" / "Sidebar" / "DurationSlider.tsx"
 _ADVANCED_SETTINGS_PATH = _ROOT / "ui" / "src" / "components" / "Sidebar" / "AdvancedSettings.tsx"
 _INPUTS_PANEL_PATH = _ROOT / "ui" / "src" / "components" / "Sidebar" / "InputsPanel.tsx"
-_TURBO_TOGGLE_PATH = (
-    _ROOT / "ui" / "src" / "components" / "Sidebar" / "MiniMaxH3TurboToggle.tsx"
+_H3_OPTIMIZATIONS_PATH = (
+    _ROOT / "ui" / "src" / "components" / "Sidebar" / "MiniMaxH3Optimizations.tsx"
 )
 _SIDEBAR_PATH = _ROOT / "ui" / "src" / "components" / "Sidebar" / "Sidebar.tsx"
 _TYPES_PATH = _ROOT / "ui" / "src" / "types" / "index.ts"
@@ -1851,11 +1852,34 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
                 turbo.MINIMAX_H3_TURBO_LORA_FILENAME,
             ],
         )
-        self.assertEqual(body["loras_multipliers"], "1.15 0.65")
+        self.assertEqual(body["loras_multipliers"], "1.15 1.00")
         self.assertEqual(
             turbo.MINIMAX_H3_TURBO_LORA_SHA256,
-            "82d0acff583b04ad9a4238a7440b584b56094bfb7c4fdb2981f67c7a4784b62d",
+            "5f3a626cd72c93a8b9318d6760c510bc5092d2ab13aaba1f932c5bab07a416d3",
         )
+
+        candidate = {
+            "minimax_h3_turbo_mode": True,
+            "minimax_h3_turbo_preset": "v4-step600-ema",
+            "activated_loras": [
+                turbo.MINIMAX_H3_TURBO_LORA_FILENAME,
+                "minimax_h3_turbo_v4_step600_ema.safetensors",
+            ],
+            "loras_multipliers": "0.50 0.70",
+        }
+        self.assertTrue(
+            turbo.normalize_minimax_h3_turbo_request(
+                candidate,
+                full_checkpoint=True,
+            )
+        )
+        self.assertEqual(candidate["minimax_h3_turbo_preset"], "v4-step600-ema")
+        self.assertEqual(
+            candidate["activated_loras"],
+            ["minimax_h3_turbo_v4_step600_ema.safetensors"],
+        )
+        self.assertEqual(candidate["loras_multipliers"], "0.70")
+        self.assertEqual(candidate["num_inference_steps"], 6)
 
         disabled = {"minimax_h3_turbo_mode": False, "num_inference_steps": 20}
         self.assertFalse(
@@ -1877,7 +1901,7 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
                 full_checkpoint=True,
             )
         )
-        self.assertEqual(missing_selection["loras_multipliers"], "0.50")
+        self.assertEqual(missing_selection["loras_multipliers"], "1.00")
 
         pruned = {"minimax_h3_turbo_mode": True}
         self.assertTrue(
@@ -1887,31 +1911,41 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
             )
         )
         self.assertEqual(pruned["num_inference_steps"], 6)
-        self.assertEqual(pruned["loras_multipliers"], "0.50")
+        self.assertEqual(pruned["loras_multipliers"], "1.00")
 
     def test_managed_turbo_choice_is_discoverable_for_full_and_pruned(self):
         launch = _read(_LAUNCH_PATH)
-        toggle = _read(_TURBO_TOGGLE_PATH)
+        optimizations = _read(_H3_OPTIMIZATIONS_PATH)
         sidebar = _read(_SIDEBAR_PATH)
         advanced = _read(_ADVANCED_SETTINGS_PATH)
         types_source = _read(_TYPES_PATH)
 
         self.assertIn("def _minimax_h3_turbo_option", launch)
-        self.assertIn('names.add(turbo_option["filename"])', launch)
-        self.assertIn("MINIMAX_H3_TURBO_LORA_FILENAME: {", launch)
+        self.assertIn('preset["filename"] for preset in turbo_option.get("presets", [])', launch)
+        self.assertIn("for _turbo_preset in MINIMAX_H3_TURBO_PRESETS", launch)
         self.assertIn('"minimax_h3_turbo": _minimax_h3_turbo_option(md)', launch)
         self.assertIn('"minimax_h3_runtime_advisory":', launch)
         self.assertIn("_minimax_h3_runtime_advisory", launch)
         self.assertIn("normalize_minimax_h3_turbo_request", launch)
-        self.assertIn("<MiniMaxH3TurboToggle />", sidebar)
-        self.assertIn("Experimental", toggle)
-        self.assertIn("setParam('num_inference_steps', option.steps)", toggle)
-        self.assertIn("toggleLora(option.filename)", toggle)
-        self.assertIn("setLoraWeight(option.filename, 0, option.weight)", toggle)
-        self.assertIn("Use Pruned Turbo", toggle)
-        self.assertIn("recommended_model_type", toggle)
+        self.assertIn("<MiniMaxH3Optimizations />", sidebar)
+        self.assertIn("H3 Optimizations", optimizations)
+        self.assertIn("aria-expanded={expanded}", optimizations)
+        self.assertIn("setExpanded(value => !value)", optimizations)
+        self.assertIn("Experimental", optimizations)
+        self.assertIn("setParam('num_inference_steps', selectedTurboPreset.steps)", optimizations)
+        self.assertIn("handleTurboPresetChange", optimizations)
+        self.assertIn("Turbo checkpoint", optimizations)
+        self.assertIn("selectedTurboPreset.filename", optimizations)
+        self.assertIn("selectedTurboPreset.weight", optimizations)
+        self.assertIn("Use Pruned Turbo", optimizations)
+        self.assertIn("recommended_model_type", optimizations)
+        self.assertIn("Sol Engine", optimizations)
+        self.assertIn("First Block Cache", optimizations)
+        self.assertIn("'skip_steps_cache_type', checked ? 'first_block' : ''", optimizations)
+        self.assertIn("First Block Cache Tuning", advanced)
         self.assertIn("disabled={h3TurboMode}", advanced)
         self.assertIn("minimax_h3_turbo_mode?: boolean", types_source)
+        self.assertIn("minimax_h3_turbo_preset?: string", types_source)
         self.assertIn("minimax_h3_runtime_advisory?:", types_source)
 
         option = _load_source_function(_LAUNCH_PATH, "_minimax_h3_turbo_option")
@@ -1929,10 +1963,24 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
             if sys.path and sys.path[0] == str(_APP):
                 sys.path.pop(0)
         self.assertEqual(pruned["steps"], 6)
-        self.assertEqual(pruned["weight"], 0.50)
+        self.assertEqual(pruned["weight"], 1.0)
         self.assertEqual(full["steps"], 6)
-        self.assertEqual(full["weight"], 0.50)
+        self.assertEqual(full["weight"], 1.0)
         self.assertTrue(full["experimental"])
+        self.assertEqual(full["preset_id"], "v4-step600-ema")
+        self.assertEqual(len(full["presets"]), 2)
+        current_option = next(
+            preset for preset in full["presets"]
+            if preset["id"] == "v4-step600-ema"
+        )
+        self.assertEqual(current_option["status"], "validated")
+        self.assertEqual(current_option["weight"], 1.0)
+        manifest = json.loads(_read(_TURBO_MANIFEST_PATH))
+        self.assertEqual(manifest["default_preset_id"], "v4-step600-ema")
+        self.assertEqual(
+            current_option["revision"],
+            "afc0346516372a17162c14df3c5264de1d9aa1c0",
+        )
 
     def test_consumer_checkpoint_shapes_are_kept_native(self):
         transformer = _read(_TRANSFORMER_PATH)

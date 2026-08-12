@@ -24,6 +24,9 @@ module.exports = async (kernel) => {
     TORCH_CUDA_ARCH_LIST: cudaArch,
     MAX_JOBS: "4",
   } : undefined
+  const flashMessage = windows
+    ? "uv pip install https://github.com/deepbeepmeep/kernels/releases/download/Flash2/flash_attn-2.8.3-cp311-cp311-win_amd64.whl --force-reinstall --no-deps"
+    : "uv pip install flash-attn --no-build-isolation"
   const message = windows ? [
     "uv pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu130 --force-reinstall --no-deps",
     "{{args && args.xformers ? 'uv pip install xformers==0.0.35 --index-url https://download.pytorch.org/whl/cu130 --force-reinstall --no-deps' : ''}}",
@@ -31,7 +34,6 @@ module.exports = async (kernel) => {
     "uv pip install https://github.com/woct0rdho/SageAttention/releases/download/v2.2.0-windows.post4/sageattention-2.2.0+cu130torch2.9.0andhigher.post4-cp39-abi3-win_amd64.whl --force-reinstall --no-deps",
     "uv pip install https://github.com/deepbeepmeep/kernels/releases/download/Light2xv/lightx2v_kernel-0.0.2+torch2.10.0-cp311-abi3-win_amd64.whl --force-reinstall --no-deps",
     "uv pip install https://github.com/nunchaku-ai/nunchaku/releases/download/v1.2.1/nunchaku-1.2.1+cu13.0torch2.10-cp311-cp311-win_amd64.whl --force-reinstall --no-deps",
-    "uv pip install https://github.com/deepbeepmeep/kernels/releases/download/Flash2/flash_attn-2.8.3-cp311-cp311-win_amd64.whl --force-reinstall --no-deps",
   ] : [
     "uv pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu130 --force-reinstall --no-deps",
     "{{args && args.xformers ? 'uv pip install xformers==0.0.35 --index-url https://download.pytorch.org/whl/cu130 --force-reinstall --no-deps' : ''}}",
@@ -40,7 +42,6 @@ module.exports = async (kernel) => {
     "uv pip install --no-build-isolation git+https://github.com/thu-ml/SageAttention.git",
     "uv pip install https://github.com/deepbeepmeep/kernels/releases/download/Light2xv/lightx2v_kernel-0.0.2+torch2.10.0-cp311-abi3-linux_x86_64.whl --force-reinstall --no-deps",
     "uv pip install https://github.com/nunchaku-ai/nunchaku/releases/download/v1.2.1/nunchaku-1.2.1+cu13.0torch2.10-cp311-cp311-linux_x86_64.whl --force-reinstall --no-deps",
-    "uv pip install flash-attn --no-build-isolation",
   ]
 
   return {
@@ -51,14 +52,25 @@ module.exports = async (kernel) => {
       },
     }, {
       method: "shell.run",
+      when: "{{!args || !args.flash_only}}",
       params: {
         venv: "{{args && args.venv ? args.venv : null}}",
         path: "{{args && args.path ? args.path : '.'}}",
         ...(env ? { env } : {}),
-        message,
+        message: [...message, flashMessage],
+      },
+    }, {
+      method: "shell.run",
+      when: "{{args && args.flash_only}}",
+      params: {
+        venv: "{{args && args.venv ? args.venv : null}}",
+        path: "{{args && args.path ? args.path : '.'}}",
+        ...(env ? { env } : {}),
+        message: flashMessage,
       },
     }, {
       method: "fs.write",
+      when: "{{!args || !args.flash_only}}",
       params: {
         path: runtime.marker,
         text: "Maestro H3 Sol Engine runtime installed. Delete this file and run the Sol repair action to reinstall it.",

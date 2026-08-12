@@ -1548,8 +1548,14 @@ interface AppState {
   directorVideoMaxShotFramesByModel: Record<string, number>
   /** Director-owned H3 Turbo choices, separate from Studio's active mode. */
   directorH3TurboModeByModel: Record<string, boolean>
+  /** Director-owned managed H3 Turbo checkpoint choice. */
+  directorH3TurboPresetByModel: Record<string, string>
   /** Director-owned experimental H3 Sol Engine choices. */
   directorH3SolModeByModel: Record<string, boolean>
+  /** Director-owned H3 First Block Cache choices and tuning. */
+  directorH3FirstBlockCacheByModel: Record<string, boolean>
+  directorH3FirstBlockCacheMultiplierByModel: Record<string, number>
+  directorH3FirstBlockCacheWarmupByModel: Record<string, number>
   setDirectorAutoMode: (v: boolean) => void
   setDirectorSeamless: (v: boolean) => void
   setDirectorShotImageGuidance: (v: DirectorShotImageGuidance) => void
@@ -1559,7 +1565,11 @@ interface AppState {
   setDirectorVideoInferenceSteps: (modelType: string, steps: number | null) => void
   setDirectorVideoMaxShotFrames: (modelType: string, frames: number | null) => void
   setDirectorH3TurboMode: (modelType: string, enabled: boolean) => void
+  setDirectorH3TurboPreset: (modelType: string, presetId: string) => void
   setDirectorH3SolMode: (modelType: string, enabled: boolean) => void
+  setDirectorH3FirstBlockCache: (modelType: string, enabled: boolean) => void
+  setDirectorH3FirstBlockCacheMultiplier: (modelType: string, value: number) => void
+  setDirectorH3FirstBlockCacheWarmup: (modelType: string, value: number) => void
   selectDirectorImageModel: (modelType: string) => void
   selectDirectorVideoModel: (modelType: string) => void
   directorSetLora: (mode: 'image' | 'video', activated_loras: string[], loras_multipliers: string, loraWeights: Record<string, number[]>, availableLoras: string[]) => void
@@ -5865,10 +5875,13 @@ export const useStore = create<AppState>((set, get) => ({
     // the shared Wan model family advertises support for up to three phases.
     const recastSinglePhase = generationMode === 'avatar' && editSubMode === 'recast'
     const phases = recastSinglePhase ? 1 : Math.max(1, modelOptions?.guidance_max_phases ?? 1)
-    const removedTurboPreset = (
-      idx >= 0
-      && filename === modelOptions?.minimax_h3_turbo?.filename
+    const managedTurboFilenames = new Set(
+      modelOptions?.minimax_h3_turbo?.presets?.map(preset => preset.filename)
+      || (modelOptions?.minimax_h3_turbo?.filename
+        ? [modelOptions.minimax_h3_turbo.filename]
+        : []),
     )
+    const removedTurboPreset = idx >= 0 && managedTurboFilenames.has(filename)
 
     if (idx >= 0) {
       current.splice(idx, 1)
@@ -6304,16 +6317,31 @@ export const useStore = create<AppState>((set, get) => ({
         }
       }
       if (options.minimax_h3_turbo) {
+        const turboPresets = options.minimax_h3_turbo.presets?.length
+          ? options.minimax_h3_turbo.presets
+          : [{
+              id: options.minimax_h3_turbo.preset_id,
+              filename: options.minimax_h3_turbo.filename,
+              steps: options.minimax_h3_turbo.steps,
+            }]
+        const requestedPresetId = get().params.minimax_h3_turbo_preset
+        const selectedPreset = (
+          turboPresets.find(preset => preset.id === requestedPresetId)
+          || turboPresets.find(preset => preset.id === options.minimax_h3_turbo?.preset_id)
+          || turboPresets[0]
+        )
+        paramUpdates.minimax_h3_turbo_preset = selectedPreset.id
         // A restored Turbo preset always displays the same step count the
         // backend will enforce. This also closes a race where model defaults
         // (20 steps) arrive after the user checks Turbo (6 steps).
         if (get().params.minimax_h3_turbo_mode === true) {
-          paramUpdates.num_inference_steps = options.minimax_h3_turbo.steps
+          paramUpdates.num_inference_steps = selectedPreset.steps
         }
       } else {
         // Model switches preserve most Studio params. Never carry the Full-H3
         // Turbo flag invisibly into a Pruned H3 or unrelated model.
         paramUpdates.minimax_h3_turbo_mode = false
+        paramUpdates.minimax_h3_turbo_preset = undefined
       }
       // TTS default duration. Prefer the model's declared `default` (DramaBox
       // uses 0 = auto-derive from prompt); fall back to `max` (legacy behavior
@@ -6908,7 +6936,11 @@ export const useStore = create<AppState>((set, get) => ({
   directorVideoInferenceStepsByModel: {},
   directorVideoMaxShotFramesByModel: {},
   directorH3TurboModeByModel: {},
+  directorH3TurboPresetByModel: {},
   directorH3SolModeByModel: {},
+  directorH3FirstBlockCacheByModel: {},
+  directorH3FirstBlockCacheMultiplierByModel: {},
+  directorH3FirstBlockCacheWarmupByModel: {},
   shortFilmCharacters: [],
   shortFilmPath: null,
   shortFilmTargetDuration: 30,
@@ -6976,10 +7008,34 @@ export const useStore = create<AppState>((set, get) => ({
       [modelType]: enabled,
     },
   })),
+  setDirectorH3TurboPreset: (modelType, presetId) => set(s => ({
+    directorH3TurboPresetByModel: {
+      ...s.directorH3TurboPresetByModel,
+      [modelType]: presetId,
+    },
+  })),
   setDirectorH3SolMode: (modelType, enabled) => set(s => ({
     directorH3SolModeByModel: {
       ...s.directorH3SolModeByModel,
       [modelType]: enabled,
+    },
+  })),
+  setDirectorH3FirstBlockCache: (modelType, enabled) => set(s => ({
+    directorH3FirstBlockCacheByModel: {
+      ...s.directorH3FirstBlockCacheByModel,
+      [modelType]: enabled,
+    },
+  })),
+  setDirectorH3FirstBlockCacheMultiplier: (modelType, value) => set(s => ({
+    directorH3FirstBlockCacheMultiplierByModel: {
+      ...s.directorH3FirstBlockCacheMultiplierByModel,
+      [modelType]: value,
+    },
+  })),
+  setDirectorH3FirstBlockCacheWarmup: (modelType, value) => set(s => ({
+    directorH3FirstBlockCacheWarmupByModel: {
+      ...s.directorH3FirstBlockCacheWarmupByModel,
+      [modelType]: Math.max(0, Math.min(75, Math.round(value / 5) * 5)),
     },
   })),
 
@@ -8288,6 +8344,7 @@ export const useStore = create<AppState>((set, get) => ({
         activated_loras: [],
         loras_multipliers: '',
         minimax_h3_turbo_mode: false,
+        minimax_h3_turbo_preset: undefined,
       },
       selectedModelPerMode: { ...s.selectedModelPerMode, [currentMode]: modelType },
       h3WindowPlan: null,
@@ -9464,7 +9521,10 @@ export const useStore = create<AppState>((set, get) => ({
             directorAutoMode, directorSeamless, directorShotImageGuidance,
             directorResolution, directorAspectRatio,
             directorVideoMaxShotFramesByModel, directorH3TurboModeByModel,
-            directorH3SolModeByModel,
+            directorH3TurboPresetByModel, directorH3SolModeByModel,
+            directorH3FirstBlockCacheByModel,
+            directorH3FirstBlockCacheMultiplierByModel,
+            directorH3FirstBlockCacheWarmupByModel,
             selectedModelPerMode, savedParamsPerMode, savedLoraPerMode,
             directorSpeakerMappings, directorImageSpatialUpsampling,
             directorImageFilmGrainIntensity, directorImageFilmGrainSaturation,
@@ -9527,18 +9587,66 @@ export const useStore = create<AppState>((set, get) => ({
       ? defaultVideoSteps
       : (configuredVideoSteps ?? defaultVideoSteps)
     const directorTurboOption = directorVideoOptions?.minimax_h3_turbo
+    const directorTurboPresets = directorTurboOption?.presets?.length
+      ? directorTurboOption.presets
+      : directorTurboOption
+        ? [{
+            id: directorTurboOption.preset_id,
+            label: directorTurboOption.version_label,
+            status: 'validated',
+            filename: directorTurboOption.filename,
+            steps: directorTurboOption.steps,
+            weight: directorTurboOption.weight,
+            weight_min: 0.5,
+            weight_max: 1.0,
+            description: directorTurboOption.guide,
+            revision: '',
+          }]
+        : []
+    const directorTurboPreset = (
+      directorTurboPresets.find(
+        preset => preset.id === directorH3TurboPresetByModel[selectedVideoModel],
+      )
+      || directorTurboPresets.find(
+        preset => preset.id === directorTurboOption?.preset_id,
+      )
+      || directorTurboPresets[0]
+    )
     const savedDirectorVideoLoras = savedLoraPerMode.video
     const directorTurboEnabled = Boolean(
-      directorTurboOption
+      directorTurboOption && directorTurboPreset
       && directorH3TurboModeByModel[selectedVideoModel] === true
-      && savedDirectorVideoLoras?.activated_loras?.includes(directorTurboOption.filename)
+      && savedDirectorVideoLoras?.activated_loras?.includes(directorTurboPreset.filename)
     )
-    if (directorTurboEnabled) directorVideoSteps = directorTurboOption!.steps
+    if (directorTurboEnabled) directorVideoSteps = directorTurboPreset!.steps
     const directorSolEnabled = Boolean(
       directorVideoOptions?.sol_attention
       && directorVideoOptions.sol_attention_status?.supported
       && directorH3SolModeByModel[selectedVideoModel] === true
     )
+    const directorFirstBlockCacheEnabled = Boolean(
+      directorVideoOptions?.first_block_cache
+      && directorH3FirstBlockCacheByModel[selectedVideoModel] === true
+    )
+    const cacheChoices = directorVideoOptions?.skip_steps_multiplier_choices || []
+    const requestedCacheMultiplier = (
+      directorH3FirstBlockCacheMultiplierByModel[selectedVideoModel]
+      ?? directorVideoOptions?.default_skip_steps_multiplier
+      ?? 0.08
+    )
+    const directorCacheMultiplier = cacheChoices.length
+      ? cacheChoices.reduce((closest, choice) => (
+          Math.abs(choice[1] - requestedCacheMultiplier)
+            < Math.abs(closest - requestedCacheMultiplier)
+            ? choice[1]
+            : closest
+        ), cacheChoices[0][1])
+      : requestedCacheMultiplier
+    const directorCacheWarmup = Math.max(0, Math.min(75, Math.round((
+      directorH3FirstBlockCacheWarmupByModel[selectedVideoModel]
+      ?? directorVideoOptions?.default_skip_steps_start_step_perc
+      ?? 25
+    ) / 5) * 5))
     const directorMaxShotFrames = directorVideoMaxShotFramesByModel[selectedVideoModel]
 
     // Upload all reference images (main + character + location) if not already uploaded
@@ -9660,7 +9768,11 @@ export const useStore = create<AppState>((set, get) => ({
         num_inference_steps: directorVideoSteps,
         resolution: directorVideoResolution,
         minimax_h3_turbo_mode: directorTurboEnabled,
+        minimax_h3_turbo_preset: directorTurboPreset?.id,
         override_attention: directorSolEnabled ? 'sol' : '',
+        skip_steps_cache_type: directorFirstBlockCacheEnabled ? 'first_block' : '',
+        skip_steps_multiplier: directorCacheMultiplier,
+        skip_steps_start_step_perc: directorCacheWarmup,
       },
       video_loras: savedLoraPerMode.video || {},
       video_spatial_upsampling: directorVideoSpatialUpsampling,

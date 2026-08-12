@@ -12,26 +12,73 @@ import json
 import os
 import struct
 from functools import lru_cache
+from pathlib import Path
 
 
 MINIMAX_H3_TURBO_MIN_STEPS = 4
 
-# Maestro intentionally pins the checkpoint that was validated in its native
-# H3 runtime instead of following the publisher repository's mutable ``main``
-# branch.  The managed preset is optional and downloads this file on first use.
-MINIMAX_H3_TURBO_LORA_FILENAME = (
-    "minimax_h3_turbo_4step_ckpt500.safetensors"
+_TURBO_PRESETS_PATH = Path(__file__).with_name("turbo_presets.json")
+
+
+def _load_turbo_manifest() -> dict:
+    try:
+        manifest = json.loads(_TURBO_PRESETS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(
+            f"Could not load MiniMax H3 Turbo presets: {error}"
+        ) from error
+    if not isinstance(manifest, dict) or not isinstance(
+        manifest.get("presets"), list
+    ):
+        raise RuntimeError("MiniMax H3 Turbo preset manifest is malformed")
+    default_id = str(manifest.get("default_preset_id") or "")
+    ids = {
+        str(item.get("id") or "")
+        for item in manifest["presets"]
+        if isinstance(item, dict)
+    }
+    if not default_id or default_id not in ids:
+        raise RuntimeError("MiniMax H3 Turbo default preset is missing")
+    return manifest
+
+
+MINIMAX_H3_TURBO_MANIFEST = _load_turbo_manifest()
+MINIMAX_H3_TURBO_DEFAULT_PRESET_ID = str(
+    MINIMAX_H3_TURBO_MANIFEST["default_preset_id"]
 )
-MINIMAX_H3_TURBO_LORA_REPO_ID = "larryvrh/MiniMax-H3-Turbo-Lora"
-MINIMAX_H3_TURBO_LORA_REVISION = (
-    "7a44622816e16032cb0b6d044d8820da39a1dfdc"
+MINIMAX_H3_TURBO_PRESETS = tuple(
+    dict(item)
+    for item in MINIMAX_H3_TURBO_MANIFEST["presets"]
+    if isinstance(item, dict)
 )
-MINIMAX_H3_TURBO_LORA_SHA256 = (
-    "82d0acff583b04ad9a4238a7440b584b56094bfb7c4fdb2981f67c7a4784b62d"
-)
-MINIMAX_H3_TURBO_LORA_SIZE = 779_849_872
-MINIMAX_H3_TURBO_PRESET_STEPS = 6
-MINIMAX_H3_TURBO_PRESET_WEIGHT = 0.50
+_MINIMAX_H3_TURBO_PRESETS_BY_ID = {
+    str(item["id"]): item for item in MINIMAX_H3_TURBO_PRESETS
+}
+
+
+def minimax_h3_turbo_preset(preset_id: str | None = None) -> dict:
+    """Return a copy of a pinned Turbo preset, defaulting to Maestro's current one."""
+
+    resolved_id = str(preset_id or MINIMAX_H3_TURBO_DEFAULT_PRESET_ID)
+    preset = _MINIMAX_H3_TURBO_PRESETS_BY_ID.get(resolved_id)
+    if preset is None:
+        choices = ", ".join(_MINIMAX_H3_TURBO_PRESETS_BY_ID)
+        raise ValueError(
+            f"Unknown MiniMax H3 Turbo preset '{resolved_id}'. "
+            f"Choose one of: {choices}."
+        )
+    return dict(preset)
+
+
+# Backward-compatible constants always describe Maestro's current default.
+_DEFAULT_TURBO_PRESET = minimax_h3_turbo_preset()
+MINIMAX_H3_TURBO_LORA_FILENAME = str(_DEFAULT_TURBO_PRESET["filename"])
+MINIMAX_H3_TURBO_LORA_REPO_ID = str(MINIMAX_H3_TURBO_MANIFEST["repo_id"])
+MINIMAX_H3_TURBO_LORA_REVISION = str(_DEFAULT_TURBO_PRESET["revision"])
+MINIMAX_H3_TURBO_LORA_SHA256 = str(_DEFAULT_TURBO_PRESET["sha256"])
+MINIMAX_H3_TURBO_LORA_SIZE = int(_DEFAULT_TURBO_PRESET["size"])
+MINIMAX_H3_TURBO_PRESET_STEPS = int(_DEFAULT_TURBO_PRESET["steps"])
+MINIMAX_H3_TURBO_PRESET_WEIGHT = float(_DEFAULT_TURBO_PRESET["weight"])
 _MAX_SAFETENSORS_HEADER_BYTES = 16 * 1024 * 1024
 
 
@@ -106,8 +153,8 @@ def normalize_minimax_h3_turbo_request(
     The checkbox is deliberately separate from the generic LoRA selector: it
     provides a reproducible low-step recipe while Advanced remains available
     for users who want to select or tune Turbo adapters manually.  Any manually
-    selected H3 Turbo variant is replaced by the pinned managed checkpoint so a
-    checked preset can never stack two accelerator adapters accidentally.
+    selected H3 Turbo variant is replaced by the chosen pinned manifest entry
+    so a checked preset can never stack two accelerator adapters accidentally.
 
     Returns ``True`` when the preset was applied and ``False`` when it was not
     requested. Full and Pruned H3 checkpoints share the same adapter after
@@ -117,6 +164,10 @@ def normalize_minimax_h3_turbo_request(
     if not isinstance(body, dict) or body.get("minimax_h3_turbo_mode") is not True:
         return False
     del full_checkpoint  # Retained for request/API compatibility with v1.6.1.
+
+    preset = minimax_h3_turbo_preset(body.get("minimax_h3_turbo_preset"))
+    preset_filename = str(preset["filename"])
+    body["minimax_h3_turbo_preset"] = str(preset["id"])
 
     raw_loras = body.get("activated_loras")
     source_loras = (
@@ -141,7 +192,7 @@ def normalize_minimax_h3_turbo_request(
         # strength the user adjusted there instead of resetting it on submit.
         if is_minimax_h3_turbo_lora(lora):
             selected_name = os.path.basename(lora.replace("\\", "/"))
-            if selected_name.lower() == MINIMAX_H3_TURBO_LORA_FILENAME.lower():
+            if selected_name.lower() == preset_filename.lower():
                 token = (
                     source_multipliers[index].split(";", 1)[0]
                     if index < len(source_multipliers)
@@ -161,14 +212,14 @@ def normalize_minimax_h3_turbo_request(
             else "1.00"
         )
 
-    normalized_loras.append(MINIMAX_H3_TURBO_LORA_FILENAME)
+    normalized_loras.append(preset_filename)
     normalized_multipliers.append(
         selected_turbo_multiplier
-        or f"{MINIMAX_H3_TURBO_PRESET_WEIGHT:.2f}"
+        or f"{float(preset['weight']):.2f}"
     )
     body["activated_loras"] = normalized_loras
     body["loras_multipliers"] = " ".join(normalized_multipliers)
-    body["num_inference_steps"] = MINIMAX_H3_TURBO_PRESET_STEPS
+    body["num_inference_steps"] = int(preset["steps"])
     return True
 
 
@@ -185,12 +236,16 @@ __all__ = [
     "MINIMAX_H3_TURBO_LORA_REVISION",
     "MINIMAX_H3_TURBO_LORA_SHA256",
     "MINIMAX_H3_TURBO_LORA_SIZE",
+    "MINIMAX_H3_TURBO_DEFAULT_PRESET_ID",
+    "MINIMAX_H3_TURBO_MANIFEST",
     "MINIMAX_H3_TURBO_MIN_STEPS",
+    "MINIMAX_H3_TURBO_PRESETS",
     "MINIMAX_H3_TURBO_PRESET_STEPS",
     "MINIMAX_H3_TURBO_PRESET_WEIGHT",
     "find_minimax_h3_turbo_loras",
     "h3_scheduler_grid_points",
     "is_minimax_h3_turbo_lora",
+    "minimax_h3_turbo_preset",
     "normalize_minimax_h3_turbo_request",
     "safetensors_metadata",
 ]

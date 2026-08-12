@@ -50,10 +50,36 @@ class TestSolEngineSourceContracts(unittest.TestCase):
         self.assertIn('env: "env-sol"', profile)
         self.assertIn('target === "sm_89"', profile)
         self.assertIn("triton-windows==3.3.1.post19", torch_script)
+        self.assertIn("triton-windows==3.6.0.post25", torch_script)
         self.assertIn("triton-windows==3.6.0.post25", sol_script)
         self.assertIn("torch==2.10.0", sol_script)
         self.assertIn("Start with H3 Sol Engine", menu)
         self.assertIn('path: "app/env-sol"', reset)
+
+    def test_update_repairs_an_interrupted_optional_sol_runtime(self):
+        updater = (ROOT / "update.js").read_text(encoding="utf-8")
+        sol_script = (ROOT / "sol_torch.js").read_text(encoding="utf-8")
+
+        self.assertIn("optionalSolReady", updater)
+        self.assertIn("exists('${solRuntime.marker}')", updater)
+        self.assertIn("exists('${solRuntime.flashMarker}')", updater)
+        self.assertIn('uri: "sol_torch.js"', updater)
+        self.assertIn("flash_only: true", updater)
+        self.assertIn('{{args && args.flash_only}}', sol_script)
+
+    def test_runtime_preflight_reports_sol_readiness(self):
+        preflight = (APP / "scripts" / "runtime_preflight.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("H3 Sol Engine=", preflight)
+        self.assertIn("triton-windows", preflight)
+
+    def test_sol_upstream_notice_is_bundled(self):
+        notice = (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+
+        self.assertIn("46031940ba8af5d18054217e571149579424c0b1", notice)
+        self.assertIn("ComfyUI-sol-attn", notice)
 
     def test_sol_start_uses_required_url_capture_contract(self):
         start = (ROOT / "start_sol.js").read_text(encoding="utf-8")
@@ -64,12 +90,15 @@ class TestSolEngineSourceContracts(unittest.TestCase):
 
     def test_ui_persists_and_strips_model_scoped_override(self):
         types = (ROOT / "ui" / "src" / "types" / "index.ts").read_text(encoding="utf-8")
+        optimizations = (ROOT / "ui" / "src" / "components" / "Sidebar" / "MiniMaxH3Optimizations.tsx").read_text(encoding="utf-8")
         advanced = (ROOT / "ui" / "src" / "components" / "Sidebar" / "AdvancedSettings.tsx").read_text(encoding="utf-8")
         store = (ROOT / "ui" / "src" / "stores" / "useStore.ts").read_text(encoding="utf-8")
 
         self.assertIn("override_attention?: '' | 'sol'", types)
-        self.assertIn("Sol Engine", advanced)
-        self.assertIn("params.override_attention === 'sol'", advanced)
+        self.assertIn("H3 Optimizations", optimizations)
+        self.assertIn("Sol Engine", optimizations)
+        self.assertIn("params.override_attention === 'sol'", optimizations)
+        self.assertNotIn("modelOptions?.sol_attention && (", advanced)
         self.assertIn("delete params.override_attention", store)
         self.assertIn("p.override_attention === 'sol'", store)
 

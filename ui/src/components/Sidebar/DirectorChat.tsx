@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from 'react'
-import { Upload, Loader2, Music, RotateCcw, Check, X, ChevronRight, ChevronDown, ImageIcon, Play, Film, Mic, Sparkles, Send, Users, FileText, Clock, Zap } from 'lucide-react'
+import { Upload, Loader2, Music, RotateCcw, Check, X, ChevronRight, ChevronDown, ImageIcon, Play, Film, Mic, Sparkles, Send, Users, FileText, Clock, Gauge, Layers, Zap } from 'lucide-react'
 import { useStore, getFamiliesForMode, getModelsForFamily, resolveResolution } from '../../stores/useStore'
 import { fetchModelOptions, getFileUrl } from '../../api/client'
 import { DirectorLoraSelector } from '../SettingsDrawer/DirectorLoraSelector'
@@ -2035,8 +2035,16 @@ function DirectorAdvancedAccordion() {
   const setMaxShotFrames = useStore(s => s.setDirectorVideoMaxShotFrames)
   const turboModeByModel = useStore(s => s.directorH3TurboModeByModel)
   const setTurboMode = useStore(s => s.setDirectorH3TurboMode)
+  const turboPresetByModel = useStore(s => s.directorH3TurboPresetByModel)
+  const setTurboPreset = useStore(s => s.setDirectorH3TurboPreset)
   const solModeByModel = useStore(s => s.directorH3SolModeByModel)
   const setSolMode = useStore(s => s.setDirectorH3SolMode)
+  const firstBlockCacheByModel = useStore(s => s.directorH3FirstBlockCacheByModel)
+  const setFirstBlockCache = useStore(s => s.setDirectorH3FirstBlockCache)
+  const cacheMultiplierByModel = useStore(s => s.directorH3FirstBlockCacheMultiplierByModel)
+  const setCacheMultiplier = useStore(s => s.setDirectorH3FirstBlockCacheMultiplier)
+  const cacheWarmupByModel = useStore(s => s.directorH3FirstBlockCacheWarmupByModel)
+  const setCacheWarmup = useStore(s => s.setDirectorH3FirstBlockCacheWarmup)
   const savedVideoLoras = useStore(s => s.savedLoraPerMode.video)
   const directorSetLora = useStore(s => s.directorSetLora)
   const directorResolution = useStore(s => s.directorResolution)
@@ -2136,10 +2144,31 @@ function DirectorAdvancedAccordion() {
     && (frames - framesMinimum) % Math.max(1, framesStep) === 0
   ))
   const turboOption = activeDirectorVideoOptions?.minimax_h3_turbo
+  const turboPresets = turboOption?.presets?.length
+    ? turboOption.presets
+    : turboOption
+      ? [{
+          id: turboOption.preset_id,
+          label: turboOption.version_label,
+          status: 'validated',
+          filename: turboOption.filename,
+          steps: turboOption.steps,
+          weight: turboOption.weight,
+          weight_min: 0.5,
+          weight_max: 1.0,
+          description: turboOption.guide,
+          revision: '',
+        }]
+      : []
+  const selectedTurboPreset = (
+    turboPresets.find(preset => preset.id === turboPresetByModel[videoModel])
+    || turboPresets.find(preset => preset.id === turboOption?.preset_id)
+    || turboPresets[0]
+  )
   const turboSelected = Boolean(
-    turboOption
+    turboOption && selectedTurboPreset
     && turboModeByModel[videoModel] === true
-    && savedVideoLoras?.activated_loras?.includes(turboOption.filename)
+    && savedVideoLoras?.activated_loras?.includes(selectedTurboPreset.filename)
   )
   const solStatus = activeDirectorVideoOptions?.sol_attention_status
   const solSelected = Boolean(
@@ -2147,37 +2176,80 @@ function DirectorAdvancedAccordion() {
     && solStatus?.supported
     && solModeByModel[videoModel] === true
   )
+  const cacheSelected = Boolean(
+    activeDirectorVideoOptions?.first_block_cache
+    && firstBlockCacheByModel[videoModel] === true
+  )
+  const cacheMultiplierChoices = activeDirectorVideoOptions?.skip_steps_multiplier_choices || []
+  const cacheMultiplier = (
+    cacheMultiplierByModel[videoModel]
+    ?? activeDirectorVideoOptions?.default_skip_steps_multiplier
+    ?? 0.08
+  )
+  const cacheWarmup = (
+    cacheWarmupByModel[videoModel]
+    ?? activeDirectorVideoOptions?.default_skip_steps_start_step_perc
+    ?? 25
+  )
+  const h3OptimizationCount = [turboSelected, solSelected, cacheSelected].filter(Boolean).length
 
   const setDirectorTurbo = (checked: boolean) => {
-    if (!turboOption) return
+    if (!turboOption || !selectedTurboPreset) return
     const current = savedVideoLoras || {
       activated_loras: [],
       loras_multipliers: '',
       loraWeights: {},
       availableLoras: [],
     }
-    const nextLoras = current.activated_loras.filter(
-      filename => filename !== turboOption.filename,
-    )
+    const managedTurboFiles = new Set(turboPresets.map(preset => preset.filename))
+    const nextLoras = current.activated_loras.filter(filename => !managedTurboFiles.has(filename))
     const nextWeights = { ...current.loraWeights }
-    delete nextWeights[turboOption.filename]
+    for (const filename of managedTurboFiles) delete nextWeights[filename]
     if (checked) {
-      nextLoras.push(turboOption.filename)
-      nextWeights[turboOption.filename] = [turboOption.weight]
+      nextLoras.push(selectedTurboPreset.filename)
+      nextWeights[selectedTurboPreset.filename] = [selectedTurboPreset.weight]
     }
-    const nextAvailable = current.availableLoras.includes(turboOption.filename)
+    const nextAvailable = current.availableLoras.includes(selectedTurboPreset.filename)
       ? current.availableLoras
-      : [...current.availableLoras, turboOption.filename]
+      : [...current.availableLoras, selectedTurboPreset.filename]
     const multipliers = nextLoras.map(filename => (
       (nextWeights[filename] || [1]).map(value => value.toFixed(2)).join(';')
     )).join(' ')
     directorSetLora('video', nextLoras, multipliers, nextWeights, nextAvailable)
     setTurboMode(videoModel, checked)
+    setTurboPreset(videoModel, selectedTurboPreset.id)
     if (checked) {
-      setVideoSteps(videoModel, turboOption.steps)
-    } else if (videoSteps === turboOption.steps && defaultVideoSteps != null) {
+      setVideoSteps(videoModel, selectedTurboPreset.steps)
+    } else if (videoSteps === selectedTurboPreset.steps && defaultVideoSteps != null) {
       setVideoSteps(videoModel, defaultVideoSteps)
     }
+  }
+
+  const changeDirectorTurboPreset = (presetId: string) => {
+    const nextPreset = turboPresets.find(preset => preset.id === presetId)
+    if (!nextPreset) return
+    setTurboPreset(videoModel, nextPreset.id)
+    if (!turboSelected) return
+    const current = savedVideoLoras || {
+      activated_loras: [],
+      loras_multipliers: '',
+      loraWeights: {},
+      availableLoras: [],
+    }
+    const managedTurboFiles = new Set(turboPresets.map(preset => preset.filename))
+    const nextLoras = current.activated_loras.filter(filename => !managedTurboFiles.has(filename))
+    nextLoras.push(nextPreset.filename)
+    const nextWeights = { ...current.loraWeights }
+    for (const filename of managedTurboFiles) delete nextWeights[filename]
+    nextWeights[nextPreset.filename] = [nextPreset.weight]
+    const nextAvailable = current.availableLoras.includes(nextPreset.filename)
+      ? current.availableLoras
+      : [...current.availableLoras, nextPreset.filename]
+    const multipliers = nextLoras.map(filename => (
+      (nextWeights[filename] || [1]).map(value => value.toFixed(2)).join(';')
+    )).join(' ')
+    directorSetLora('video', nextLoras, multipliers, nextWeights, nextAvailable)
+    setVideoSteps(videoModel, nextPreset.steps)
   }
 
   const upsamplingOptions = [
@@ -2277,6 +2349,20 @@ function DirectorAdvancedAccordion() {
           <div className="space-y-2 pt-1 border-t border-border">
             <div className="text-[10px] text-text-muted uppercase tracking-wider pt-2">Video</div>
 
+            {(turboOption || activeDirectorVideoOptions?.sol_attention || activeDirectorVideoOptions?.first_block_cache) && (
+              <div className="flex items-center justify-between pt-0.5">
+                <div className="flex items-center gap-1.5 text-[10px] font-medium text-text-secondary">
+                  <Layers size={11} />
+                  H3 optimizations
+                </div>
+                {h3OptimizationCount > 0 && (
+                  <span className="rounded-full bg-accent-blue/15 px-1.5 py-0.5 text-[9px] font-medium text-accent-blue">
+                    {h3OptimizationCount} active
+                  </span>
+                )}
+              </div>
+            )}
+
             {turboOption && (
               <div className={`rounded-lg border px-2.5 py-2 ${
                 turboSelected
@@ -2298,8 +2384,20 @@ function DirectorAdvancedAccordion() {
                   <InfoTooltip label="About Director H3 Turbo" text={turboOption.guide} />
                 </label>
                 <p className="mt-1 text-[10px] text-text-muted">
-                  Enables the managed LoRA at {turboOption.weight.toFixed(2)} and uses {turboOption.steps} steps. Adjust its strength under Video LoRAs.
+                  Enables the managed LoRA at {(selectedTurboPreset?.weight ?? turboOption.weight).toFixed(2)} and uses {selectedTurboPreset?.steps ?? turboOption.steps} steps. Adjust its strength under Video LoRAs.
                 </p>
+                {turboPresets.length > 1 && (
+                  <select
+                    value={selectedTurboPreset?.id || ''}
+                    onChange={event => changeDirectorTurboPreset(event.target.value)}
+                    className="mt-1.5 w-full rounded border border-border bg-bg-secondary px-2 py-1 text-[10px] text-text-primary focus:border-accent-blue focus:outline-none"
+                    aria-label="Director H3 Turbo preset"
+                  >
+                    {turboPresets.map(preset => (
+                      <option key={preset.id} value={preset.id}>{preset.label}</option>
+                    ))}
+                  </select>
+                )}
               </div>
             )}
 
@@ -2330,6 +2428,62 @@ function DirectorAdvancedAccordion() {
                     ? 'Uses H3-aware sparse attention for every newly generated shot; unsupported calls fall back automatically.'
                     : solStatus?.reason || 'Unavailable in this runtime.'}
                 </p>
+              </div>
+            )}
+
+            {activeDirectorVideoOptions?.first_block_cache && (
+              <div className={`rounded-lg border px-2.5 py-2 ${
+                cacheSelected
+                  ? 'border-accent-blue/50 bg-accent-blue/10'
+                  : 'border-border bg-bg-tertiary/50'
+              }`}>
+                <label className="flex cursor-pointer items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={cacheSelected}
+                    onChange={event => setFirstBlockCache(videoModel, event.target.checked)}
+                    className="accent-accent-blue"
+                  />
+                  <Gauge size={12} className={cacheSelected ? 'text-accent-blue' : 'text-text-muted'} />
+                  <span className="text-[11px] font-medium text-text-primary">First Block Cache</span>
+                  <InfoTooltip
+                    label="About Director First Block Cache"
+                    text="Reuses stable transformer work between nearby denoising steps. It can substantially reduce render time, with a possible quality tradeoff at aggressive thresholds."
+                  />
+                </label>
+                {cacheSelected && (
+                  <div className="mt-2 space-y-2 border-t border-border/70 pt-2">
+                    {cacheMultiplierChoices.length > 0 && (
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="text-[10px] text-text-muted">Change threshold</label>
+                        <select
+                          value={cacheMultiplier}
+                          onChange={event => setCacheMultiplier(videoModel, Number(event.target.value))}
+                          className="rounded border border-border bg-bg-secondary px-1.5 py-0.5 text-[10px] text-text-primary focus:border-accent-blue focus:outline-none"
+                        >
+                          {cacheMultiplierChoices.map(([label, value]) => (
+                            <option key={value} value={value}>{label}</option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                    <div>
+                      <div className="mb-1 flex items-center justify-between">
+                        <label className="text-[10px] text-text-muted">Warmup</label>
+                        <span className="text-[10px] tabular-nums text-text-muted">{cacheWarmup}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={75}
+                        step={5}
+                        value={cacheWarmup}
+                        onChange={event => setCacheWarmup(videoModel, Number(event.target.value))}
+                        className="w-full"
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -2374,7 +2528,7 @@ function DirectorAdvancedAccordion() {
               />
               <p className="text-[10px] text-text-muted mt-0.5">
                 {turboSelected
-                  ? `H3 Turbo uses its ${turboOption?.steps ?? 6}-step recipe.`
+                  ? `H3 Turbo uses its ${selectedTurboPreset?.steps ?? turboOption?.steps ?? 6}-step recipe.`
                   : videoStepsLocked
                   ? 'Fixed by this model.'
                   : videoSteps == null

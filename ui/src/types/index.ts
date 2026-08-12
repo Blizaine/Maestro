@@ -182,6 +182,8 @@ export interface GenerateParams {
   minimax_h3_text_encoder?: 'nvfp4_awq' | 'gguf_q2_k' | 'gguf_q4_k_m' | 'int8' | 'bf16'
   /** One-click managed H3 Turbo recipe for Full or Pruned H3. */
   minimax_h3_turbo_mode?: boolean
+  /** Immutable validated/candidate Turbo checkpoint selected by its manifest id. */
+  minimax_h3_turbo_preset?: string
   /** Automatically expand one long H3 concept into window-local prompts. */
   minimax_h3_window_storyboard?: boolean
   /** H3 First/Last edit grammar used by the automatic window planner. */
@@ -431,8 +433,23 @@ export interface ModelOptions {
     filename: string
     label: string
     experimental: boolean
+    preset_id: string
+    version_label: string
     steps: number
     weight: number
+    presets: Array<{
+      id: string
+      label: string
+      status: 'validated' | 'candidate' | 'legacy' | string
+      filename: string
+      steps: number
+      weight: number
+      weight_min: number
+      weight_max: number
+      description: string
+      revision: string
+    }>
+    upstream_url: string
     guide: string
   } | null
   minimax_h3_runtime_advisory?: {

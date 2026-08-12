@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "repo_id": "larryvrh/MiniMax-H3-Turbo-Lora",
+  "default_preset_id": "v4-step600-ema",
+  "upstream_watch": {
+    "observed_main_revision": "43a74557ac3f6539db8e0f2a959d03feb7a81480",
+    "observed_last_modified": "2026-08-08T20:07:30Z",
+    "model_card_url": "https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora"
+  },
+  "presets": [
+    {
+      "id": "v1-ckpt500",
+      "label": "Legacy v1-500",
+      "status": "legacy",
+      "filename": "minimax_h3_turbo_4step_ckpt500.safetensors",
+      "remote_path": "minimax_h3_turbo_4step_ckpt500.safetensors",
+      "revision": "7a44622816e16032cb0b6d044d8820da39a1dfdc",
+      "sha256": "82d0acff583b04ad9a4238a7440b584b56094bfb7c4fdb2981f67c7a4784b62d",
+      "size": 779849872,
+      "steps": 6,
+      "weight": 0.5,
+      "weight_min": 0.5,
+      "weight_max": 1.0,
+      "released_at": "2026-08-06T07:46:09Z",
+      "description": "Maestro's previous six-step default, retained as a rollback option for comparisons or prompts that worked better with the earlier adapter."
+    },
+    {
+      "id": "v4-step600-ema",
+      "label": "Current v4-600 EMA",
+      "status": "validated",
+      "filename": "minimax_h3_turbo_v4_step600_ema.safetensors",
+      "remote_path": "minimax_h3_turbo_v4_step600_ema.safetensors",
+      "revision": "afc0346516372a17162c14df3c5264de1d9aa1c0",
+      "sha256": "5f3a626cd72c93a8b9318d6760c510bc5092d2ab13aaba1f932c5bab07a416d3",
+      "size": 779849816,
+      "steps": 6,
+      "weight": 1.0,
+      "weight_min": 0.5,
+      "weight_max": 1.2,
+      "released_at": "2026-08-07T22:46:18Z",
+      "description": "Maestro's current default and the upstream-recommended EMA checkpoint. It targets stronger faces, fingers, fine texture, and static or small-motion detail, using six evaluations at strength 1.0 by default."
+    }
+  ]
+}

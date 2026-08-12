@@ -9,8 +9,11 @@ module.exports = async (kernel) => {
   const runtime = runtimeProfile(kernel)
   const maintainSeparateSolRuntime = isSolCapable(kernel) && !isRtx50(kernel)
   const solRuntime = solRuntimeProfile(kernel)
+  const optionalSolReady = maintainSeparateSolRuntime
+    ? `(!exists('app/env-sol') || (exists('${solRuntime.marker}') && exists('${solRuntime.flashMarker}')))`
+    : "true"
   const alreadyCurrentAndReady =
-    `{{/already up[- ]to[- ]date/i.test(input.stdout) && exists('${runtime.marker}') && exists('${runtime.flashMarker}') ? 'uptodate' : 'build'}}`
+    `{{/already up[- ]to[- ]date/i.test(input.stdout) && exists('${runtime.marker}') && exists('${runtime.flashMarker}') && ${optionalSolReady} ? 'uptodate' : 'build'}}`
   return {
     run: [{
     // Pull the latest launcher + app code (single monorepo, so this one
@@ -98,6 +101,19 @@ module.exports = async (kernel) => {
         venv: solRuntime.env,
         path: "app",
         xformers: true
+      }
+    }
+  }, {
+    // Repair only FlashAttention when the optional Sol runtime completed but
+    // its wheel install was interrupted. Avoids another Torch/Triton download.
+    when: `{{exists('${solRuntime.marker}') && !exists('${solRuntime.flashMarker}')}}`,
+    method: "script.start",
+    params: {
+      uri: "sol_torch.js",
+      params: {
+        venv: solRuntime.env,
+        path: "app",
+        flash_only: true
       }
     }
   }] : []), {

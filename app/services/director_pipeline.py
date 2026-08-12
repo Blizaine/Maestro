@@ -130,9 +130,14 @@ def _create_director_video_execution_profile(
     if normalized_resolution:
         video_params["resolution"] = normalized_resolution
     if profile.get("turbo_mode"):
-        from models.minimax_h3.turbo import MINIMAX_H3_TURBO_PRESET_STEPS
+        from models.minimax_h3.turbo import minimax_h3_turbo_preset
 
-        video_params["num_inference_steps"] = MINIMAX_H3_TURBO_PRESET_STEPS
+        turbo_preset = minimax_h3_turbo_preset(
+            video_params.get("minimax_h3_turbo_preset")
+        )
+        video_params["minimax_h3_turbo_preset"] = turbo_preset["id"]
+        video_params["num_inference_steps"] = int(turbo_preset["steps"])
+        profile["turbo_preset"] = turbo_preset["id"]
     params["video_params"] = video_params
     params["_director_video_execution_profile"] = profile
     return profile
@@ -141,6 +146,64 @@ def _create_director_video_execution_profile(
 def _director_video_execution_profile(params: dict) -> dict:
     profile = params.get("_director_video_execution_profile")
     return dict(profile) if isinstance(profile, dict) else {}
+
+
+def _apply_director_h3_optimizations(
+    gen_params: dict,
+    video_params: dict,
+    execution_profile: dict,
+) -> None:
+    """Copy Director's saved H3 optimization contract to one child job.
+
+    Initial generation, Dashboard regeneration, repair, and resume all pass
+    through this helper so a saved project cannot silently lose its Turbo,
+    Sol attention, or First Block Cache settings.
+    """
+
+    if not execution_profile.get("is_minimax_h3"):
+        return
+
+    gen_params["_director_video_execution_profile"] = execution_profile
+    turbo_enabled = video_params.get("minimax_h3_turbo_mode") is True
+    gen_params["minimax_h3_turbo_mode"] = turbo_enabled
+    turbo_preset = str(
+        video_params.get("minimax_h3_turbo_preset") or ""
+    ).strip()
+    if turbo_enabled and turbo_preset:
+        gen_params["minimax_h3_turbo_preset"] = turbo_preset
+
+    if video_params.get("override_attention") == "sol":
+        supported_modes = getattr(
+            _wgp, "override_attention_modes_supported", None
+        )
+        if supported_modes is None or "sol" in supported_modes:
+            gen_params["override_attention"] = "sol"
+        else:
+            print(
+                "[Director] Saved H3 Sol Engine setting is unavailable in "
+                "this runtime; using the default attention backend."
+            )
+
+    if video_params.get("skip_steps_cache_type") == "first_block":
+        gen_params["skip_steps_cache_type"] = "first_block"
+        try:
+            cache_multiplier = float(
+                video_params.get("skip_steps_multiplier", 0.08)
+            )
+        except (TypeError, ValueError):
+            cache_multiplier = 0.08
+        gen_params["skip_steps_multiplier"] = min(
+            1.0, max(0.0, cache_multiplier)
+        )
+        try:
+            cache_warmup = int(
+                video_params.get("skip_steps_start_step_perc", 25)
+            )
+        except (TypeError, ValueError):
+            cache_warmup = 25
+        gen_params["skip_steps_start_step_perc"] = min(
+            100, max(0, cache_warmup)
+        )
 
 
 def _director_effective_max_frames(
@@ -2285,11 +2348,12 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
         ),
         "_director_pipeline_id": pid,
         "_director_detached_operation": True,
-        "_director_video_execution_profile": execution_profile,
-        "minimax_h3_turbo_mode": bool(
-            video_params.get("minimax_h3_turbo_mode")
-        ),
     }
+    _apply_director_h3_optimizations(
+        gen_params,
+        video_params,
+        execution_profile,
+    )
     with _pipeline_lock:
         repair_control = _pipeline_repairs.get(pid)
         repair_operation_id = (
@@ -5995,11 +6059,11 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                 print(f"[Pipeline {pid}] Keyframe injection: {[len(p) for p in per_clip_kf_paths]} keyframes per clip")
 
     # Common params
-    if execution_profile.get("is_minimax_h3"):
-        gen_params["_director_video_execution_profile"] = execution_profile
-        gen_params["minimax_h3_turbo_mode"] = bool(
-            video_params.get("minimax_h3_turbo_mode")
-        )
+    _apply_director_h3_optimizations(
+        gen_params,
+        video_params,
+        execution_profile,
+    )
     voice_ref = params.get("voice_reference")
     if voice_ref and director_strategy != OMNI_REFERENCE:
         gen_params["voice_reference"] = voice_ref

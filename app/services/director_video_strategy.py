@@ -342,6 +342,19 @@ def build_director_video_execution_profile(
             (recommendation or {}).get("fallback_resolution")
         ),
         "turbo_mode": bool(video_params.get("minimax_h3_turbo_mode")),
+        "turbo_preset": str(
+            video_params.get("minimax_h3_turbo_preset") or ""
+        ),
+        "sol_attention": video_params.get("override_attention") == "sol",
+        "first_block_cache": (
+            video_params.get("skip_steps_cache_type") == "first_block"
+        ),
+        "first_block_cache_multiplier": video_params.get(
+            "skip_steps_multiplier"
+        ),
+        "first_block_cache_warmup": video_params.get(
+            "skip_steps_start_step_perc"
+        ),
         "activated_lora_count": len(
             video_params.get("activated_loras") or []
         ),

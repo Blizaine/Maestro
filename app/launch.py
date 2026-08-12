@@ -89,11 +89,8 @@ if _hf_token_path:
 print("[Maestro] Importing WanGP engine...")
 import wgp
 from models.minimax_h3.turbo import (
-    MINIMAX_H3_TURBO_LORA_FILENAME,
-    MINIMAX_H3_TURBO_LORA_REPO_ID,
-    MINIMAX_H3_TURBO_LORA_REVISION,
-    MINIMAX_H3_TURBO_LORA_SHA256,
-    MINIMAX_H3_TURBO_LORA_SIZE,
+    MINIMAX_H3_TURBO_MANIFEST,
+    MINIMAX_H3_TURBO_PRESETS,
 )
 print(f"[Maestro] WanGP loaded: {len(wgp.displayed_model_types)} models available")
 # Base save path always comes from server_config["save_path"] (never from wgp.save_path which gets workspace-modified)
@@ -1587,7 +1584,11 @@ def delete_lora_file(directory: str, filename: str):
         raise HTTPException(status_code=423, detail="The file is locked by another process. Try again in a moment.")
     base = os.path.splitext(target)[0]
     extras_removed = []
-    extras = [base + ".civitai.json", base + ".guide.md"]
+    extras = [
+        base + ".civitai.json",
+        base + ".guide.md",
+        target + ".maestro-managed.json",
+    ]
     extras += [base + f"_preview1{ext}" for ext in (".mp4", ".png", ".jpg", ".webp")]
     for extra in extras:
         try:
@@ -1617,23 +1618,44 @@ def _minimax_h3_turbo_option(model_def: dict) -> dict | None:
         return None
 
     from models.minimax_h3.turbo import (
-        MINIMAX_H3_TURBO_LORA_FILENAME,
-        MINIMAX_H3_TURBO_PRESET_STEPS,
-        MINIMAX_H3_TURBO_PRESET_WEIGHT,
+        MINIMAX_H3_TURBO_DEFAULT_PRESET_ID,
+        MINIMAX_H3_TURBO_MANIFEST,
+        MINIMAX_H3_TURBO_PRESETS,
+        minimax_h3_turbo_preset,
     )
 
+    default_preset = minimax_h3_turbo_preset()
+    presets = [
+        {
+            "id": str(preset["id"]),
+            "label": str(preset["label"]),
+            "status": str(preset["status"]),
+            "filename": str(preset["filename"]),
+            "steps": int(preset["steps"]),
+            "weight": float(preset["weight"]),
+            "weight_min": float(preset.get("weight_min", 0.0)),
+            "weight_max": float(preset.get("weight_max", 2.0)),
+            "description": str(preset.get("description") or ""),
+            "revision": str(preset["revision"]),
+        }
+        for preset in MINIMAX_H3_TURBO_PRESETS
+    ]
+    upstream = MINIMAX_H3_TURBO_MANIFEST.get("upstream_watch") or {}
     return {
-        "filename": MINIMAX_H3_TURBO_LORA_FILENAME,
+        "filename": str(default_preset["filename"]),
         "label": "Turbo mode",
         "experimental": True,
-        "steps": MINIMAX_H3_TURBO_PRESET_STEPS,
-        "weight": MINIMAX_H3_TURBO_PRESET_WEIGHT,
+        "preset_id": MINIMAX_H3_TURBO_DEFAULT_PRESET_ID,
+        "version_label": str(default_preset["label"]),
+        "steps": int(default_preset["steps"]),
+        "weight": float(default_preset["weight"]),
+        "presets": presets,
+        "upstream_url": str(upstream.get("model_card_url") or ""),
         "guide": (
             "Experimental MiniMax H3 accelerator for Full and Pruned "
-            "checkpoints. Maestro's one-click preset uses 6 steps and starts "
-            "at strength 0.50. Adjust its active LoRA strength in Advanced; "
-            "the managed adapter and small compatibility data download "
-            "automatically on first use. Pruned is recommended on 16 GB GPUs."
+            "checkpoints. Choose a pinned Maestro-validated version or an "
+            "explicit candidate; mutable Hugging Face main is never loaded "
+            "silently. Adjust the selected adapter strength in Advanced."
         ),
     }
 
@@ -1669,7 +1691,9 @@ def list_loras(model_type: str):
     # filename in the catalog makes it discoverable on a fresh install; the
     # generation preflight below performs the verified one-time download.
     if turbo_option:
-        names.add(turbo_option["filename"])
+        names.update(
+            preset["filename"] for preset in turbo_option.get("presets", [])
+        )
     loras = sorted(names)
 
     return {
@@ -1829,34 +1853,36 @@ def list_loras_details(model_type: str):
         loras.append(info)
 
     if turbo_option:
-        filename = turbo_option["filename"]
-        info = next((item for item in loras if item["filename"] == filename), None)
-        if info is None:
-            info = {
-                "filename": filename,
-                "trained_words": [],
-                "preview_url": None,
-                "civitai_model_id": None,
-                "recommended_weights": None,
-                "has_guide": False,
-                "nsfw": False,
-                "downloaded_at": None,
-                "released_at": None,
-                "lora_id": f"managed:{filename}",
-            }
-            loras.append(info)
-        info.update({
-            "managed": True,
-            "recommended_weights": {
-                "source": "default",
-                "default": turbo_option["weight"],
-                "min": 0.50,
-                "max": 1.00,
-            },
-            "has_guide": True,
-            "guide": turbo_option["guide"],
-            "update_status": "current",
-        })
+        for preset in turbo_option.get("presets", []):
+            filename = preset["filename"]
+            info = next((item for item in loras if item["filename"] == filename), None)
+            if info is None:
+                info = {
+                    "filename": filename,
+                    "trained_words": [],
+                    "preview_url": None,
+                    "civitai_model_id": None,
+                    "recommended_weights": None,
+                    "has_guide": False,
+                    "nsfw": False,
+                    "downloaded_at": None,
+                    "released_at": None,
+                    "lora_id": f"managed:{filename}",
+                }
+                loras.append(info)
+            info.update({
+                "managed": True,
+                "managed_channel": preset["status"],
+                "recommended_weights": {
+                    "source": "default",
+                    "default": preset["weight"],
+                    "min": preset["weight_min"],
+                    "max": preset["weight_max"],
+                },
+                "has_guide": True,
+                "guide": preset["description"],
+                "update_status": "current",
+            })
         loras.sort(key=lambda item: item["filename"])
     return {
         "loras": loras,
@@ -8744,6 +8770,7 @@ async def generate(request: Request):
             ):
                 print(
                     "[MiniMax H3 Turbo] Experimental preset enabled: "
+                    f"{body.get('minimax_h3_turbo_preset', 'default')}, "
                     f"{body['num_inference_steps']} steps, "
                     f"LoRA strength {body['loras_multipliers'].split()[-1]}."
                 )
@@ -9853,19 +9880,23 @@ _MANAGED_LORAS = {
         "label": "SCAIL-2 Relighting",
         "support_url": "https://huggingface.co/zai-org/SCAIL-2/blob/main/model/relighting-lora.pt",
     },
-    MINIMAX_H3_TURBO_LORA_FILENAME: {
-        "repo_id": MINIMAX_H3_TURBO_LORA_REPO_ID,
-        "revision": MINIMAX_H3_TURBO_LORA_REVISION,
-        "remote_path": MINIMAX_H3_TURBO_LORA_FILENAME,
-        "sha256": MINIMAX_H3_TURBO_LORA_SHA256,
-        "size": MINIMAX_H3_TURBO_LORA_SIZE,
-        "label": "MiniMax H3 Turbo (Experimental)",
-        "support_url": (
-            "https://huggingface.co/"
-            f"{MINIMAX_H3_TURBO_LORA_REPO_ID}"
-        ),
-    },
 }
+
+for _turbo_preset in MINIMAX_H3_TURBO_PRESETS:
+    _MANAGED_LORAS[str(_turbo_preset["filename"])] = {
+        "repo_id": str(MINIMAX_H3_TURBO_MANIFEST["repo_id"]),
+        "revision": str(_turbo_preset["revision"]),
+        "remote_path": str(_turbo_preset["remote_path"]),
+        "sha256": str(_turbo_preset["sha256"]),
+        "size": int(_turbo_preset["size"]),
+        "label": f"MiniMax H3 Turbo — {_turbo_preset['label']}",
+        "support_url": str(
+            (MINIMAX_H3_TURBO_MANIFEST.get("upstream_watch") or {}).get(
+                "model_card_url"
+            )
+            or f"https://huggingface.co/{MINIMAX_H3_TURBO_MANIFEST['repo_id']}"
+        ),
+    }
 
 
 def _ensure_managed_loras_present(activated_loras, model_type, progress=None):
@@ -9910,6 +9941,19 @@ def _ensure_managed_loras_present(activated_loras, model_type, progress=None):
                     match = dict(rec)
             return match
 
+    from services.managed_assets import (
+        managed_asset_matches,
+        write_managed_asset_receipt,
+    )
+
+    def _managed_file_matches(path, spec):
+        # Converted assets (currently SCAIL-2's SAT .pt -> safetensors) carry
+        # source-file integrity metadata, not a hash/size for the converted
+        # destination. Their converter performs its own pinned-source check.
+        if spec.get("converter"):
+            return os.path.isfile(path)
+        return managed_asset_matches(path, spec)
+
     downloaded = []
     for fname in activated_loras:
         base = os.path.basename(str(fname))
@@ -9926,7 +9970,12 @@ def _ensure_managed_loras_present(activated_loras, model_type, progress=None):
         except Exception:
             resolved_path = save_path
         if os.path.isfile(resolved_path):
-            continue
+            if _managed_file_matches(resolved_path, spec):
+                continue
+            print(
+                f"[ManagedLoRA] {label} local copy does not match its pinned "
+                "manifest; downloading a verified replacement."
+            )
 
         # If another part of the app is already fetching this exact file (the
         # frontend pre-downloads it when the panel mounts), wait for that to
@@ -9956,7 +10005,7 @@ def _ensure_managed_loras_present(activated_loras, model_type, progress=None):
                 except Exception:
                     pass
 
-        if os.path.isfile(save_path):
+        if os.path.isfile(save_path) and _managed_file_matches(save_path, spec):
             continue
 
         os.makedirs(target_dir, exist_ok=True)
@@ -10020,6 +10069,18 @@ def _ensure_managed_loras_present(activated_loras, model_type, progress=None):
             elif source_tmp_path != tmp_path:
                 os.replace(source_tmp_path, tmp_path)
             os.replace(tmp_path, save_path)
+            if not spec.get("converter"):
+                try:
+                    write_managed_asset_receipt(
+                        save_path,
+                        spec,
+                        actual_sha256=actual_sha256,
+                    )
+                except OSError as receipt_error:
+                    print(
+                        f"[ManagedLoRA] Could not cache verification receipt for "
+                        f"{label}: {receipt_error}"
+                    )
             downloaded.append(base)
             print(f"[ManagedLoRA] {label} downloaded -> {save_path}")
         except Exception as e:
@@ -10030,6 +10091,19 @@ def _ensure_managed_loras_present(activated_loras, model_type, progress=None):
                 except Exception:
                     pass
             support_url = spec.get("support_url", f"https://huggingface.co/{spec['repo_id']}")
+            error_text = str(e)
+            integrity_failure = (
+                "sha-256 mismatch" in error_text.casefold()
+                or "download size mismatch" in error_text.casefold()
+            )
+            if integrity_failure:
+                raise RuntimeError(
+                    f"Could not verify the {label} model automatically: {e}. "
+                    "Maestro rejected the download before installation because "
+                    "its bytes did not match the pinned release metadata. Update "
+                    "Maestro and retry; if the error remains, report it so the "
+                    f"manifest can be reviewed. Source: {support_url}."
+                ) from e
             if spec.get("converter"):
                 recovery_hint = (
                     f"Retry the automatic setup, or download the official source from "

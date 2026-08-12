@@ -38,6 +38,8 @@ class TestPinokioGpuCompatibility(unittest.TestCase):
         self.assertIn('python: "3.11"', profile)
         self.assertIn("venv_python: runtime.python", installer)
         self.assertIn("torch==2.10.0", torch_script)
+        self.assertIn("maestro_torch_rtx50_v2", profile)
+        self.assertIn("triton-windows==3.6.0.post25", torch_script)
         self.assertIn("/whl/cu130", torch_script)
         self.assertIn("lightx2v_kernel-0.0.2+torch2.10.0", torch_script)
         menu = (_ROOT / "pinokio.js").read_text(encoding="utf-8")

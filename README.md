@@ -77,6 +77,16 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.7.5 (2026-08-11)
+
+**MiniMax H3 Performance Update**
+- Added the experimental H3 Sol Engine sparse-attention backend for supported RTX 40- and 50-series GPUs, with cached kernel compilation and an automatic safe fallback.
+- Added one collapsible H3 Optimizations panel for Turbo, Sol Engine, and First Block Cache; each can be enabled independently or combined.
+- Updated the managed Turbo default to the newer v4-600 EMA LoRA at six steps and strength 1.0, while retaining the previous preset for rollback and comparison.
+- Added pinned checksums, atomic downloads, local receipts, and a scheduled upstream-change monitor for managed H3 Turbo releases.
+- Added the same Turbo preset, Sol Engine, and First Block Cache controls to Director. Settings now survive project saves, Dashboard regeneration, repair, and resume.
+- Hardened RTX 50's CUDA 13/Triton runtime and made interrupted optional RTX 40 Sol installations repairable through Update without replacing the normal runtime.
+
 ### v1.7.2 (2026-08-11)
 
 **MiniMax H3 sequence and compatibility fixes**
@@ -538,6 +548,8 @@ The install (without model downloads) typically takes **10–20 minutes** depend
 RTX 50-series cards use a dedicated Python 3.11, PyTorch 2.10, CUDA 13 environment with native SageAttention and Lightx2v NVFP4 kernels. Existing RTX 50 installs migrate automatically the next time **Update** is run; the older environment is retained as a recovery point. Maestro prints a short runtime audit at startup. If that audit reports a missing RTX 50 kernel after Update completed, use **Advanced → Repair RTX 50 Runtime** in the Pinokio menu.
 
 MiniMax H3 also offers an optional **Sol Engine (Experimental)** sparse-attention backend. RTX 50-series systems can enable it directly in H3 Advanced settings after Update. RTX 40-series systems keep Maestro's proven default runtime and can add a separate `app/env-sol/` environment through **Pinokio menu -> Install H3 Sol Engine Runtime**, then launch with **Start with H3 Sol Engine**. The first Sol generation compiles Triton kernels and can start more slowly. RTX 20/30-series GPUs remain on SageAttention because the optimized Sol kernels do not support their compute architecture. If Sol cannot handle a call, Maestro reports it once and falls back to the normal dense H3 attention path.
+
+On one RTX 4090 test system, a 14.4-second 720p H3 generation at 30 steps measured 23m43s with neither optimization, 19m30s with Sol, 17m54s with First Block Cache, and 12m59s with both. Treat these as a directional example only: model choice, prompt/reference load, resolution, drivers, cache threshold, and hardware all affect speed and quality.
 
 ### Updating
 

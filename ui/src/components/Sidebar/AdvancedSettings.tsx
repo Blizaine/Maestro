@@ -125,18 +125,10 @@ export function useAdvancedActiveItems(): string[] {
 
   const items: string[] = []
   if (params.seed !== -1) items.push(`Seed ${params.seed}`)
-  if (params.minimax_h3_turbo_mode) items.push('H3 Turbo')
-  if (
-    modelOptions?.sol_attention
-    && params.override_attention === 'sol'
-  ) items.push('H3 Sol Engine')
   if (
     String(modelOptions?.architecture || '').startsWith('minimax_h3')
     && slidingWindowLocked
   ) items.push('H3 window override')
-  if (params.skip_steps_cache_type === 'first_block') {
-    items.push(`H3 cache ${params.skip_steps_multiplier ?? 0.08}`)
-  }
   if (
     (
       modelOptions?.sliding_window_auto_prompt_pacing === true
@@ -352,109 +344,49 @@ export function AdvancedSettings() {
                 </div>
               ) : null}
 
-              {modelOptions?.sol_attention && (
+              {modelOptions?.first_block_cache && params.skip_steps_cache_type === 'first_block' && (
                 <div className="space-y-2 p-2.5 bg-bg-tertiary/40 rounded-lg border border-border/60">
-                  <label
-                    className={`flex items-center gap-2 group ${
-                      modelOptions.sol_attention_status?.supported
-                        ? 'cursor-pointer'
-                        : 'cursor-not-allowed opacity-70'
-                    }`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={params.override_attention === 'sol'}
-                      disabled={!modelOptions.sol_attention_status?.supported}
-                      onChange={e => setParam(
-                        'override_attention',
-                        e.target.checked ? 'sol' : '',
-                      )}
-                      className="accent-accent-blue"
-                    />
-                    <span className="text-[11px] text-text-muted uppercase tracking-wider group-hover:text-text-secondary transition-colors">
-                      Sol Engine
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] text-text-muted uppercase tracking-wider">
+                      First Block Cache Tuning
                     </span>
-                    <span className="text-[9px] text-amber-300/90 border border-amber-400/30 rounded px-1 py-0.5">
-                      Experimental
-                    </span>
-                  </label>
-                  {modelOptions.sol_attention_status?.supported ? (
-                    <p className="text-[9px] text-text-muted">
-                      Uses H3-aware sparse attention with exact reference and audio conditioning. The first run compiles kernels and can start more slowly; unsupported calls fall back automatically.
-                    </p>
-                  ) : (
-                    <p className="text-[9px] text-amber-200/80">
-                      {modelOptions.sol_attention_status?.reason || 'Sol Engine is unavailable in this runtime.'}
-                      {' '}On supported RTX 40 systems, install and use Maestro's optional Sol Engine runtime from Pinokio.
-                    </p>
-                  )}
-                </div>
-              )}
-
-              {modelOptions?.first_block_cache && (
-                <div className="space-y-2 p-2.5 bg-bg-tertiary/40 rounded-lg border border-border/60">
-                  <label className="flex items-center gap-2 cursor-pointer group">
-                    <input
-                      type="checkbox"
-                      checked={params.skip_steps_cache_type === 'first_block'}
-                      onChange={e => {
-                        setParam(
-                          'skip_steps_cache_type',
-                          e.target.checked ? 'first_block' : '',
-                        )
-                        if (e.target.checked && params.skip_steps_multiplier == null) {
-                          setParam(
-                            'skip_steps_multiplier',
-                            modelOptions.default_skip_steps_multiplier ?? 0.08,
-                          )
-                        }
-                      }}
-                      className="accent-accent-blue"
-                    />
-                    <span className="text-[11px] text-text-muted uppercase tracking-wider group-hover:text-text-secondary transition-colors">
-                      First Block Cache
-                    </span>
-                    <span className="text-[9px] text-amber-300/90 border border-amber-400/30 rounded px-1 py-0.5">
-                      Experimental
-                    </span>
-                  </label>
-                  {params.skip_steps_cache_type === 'first_block' && (
-                    <div className="space-y-2 pl-1 border-l border-border ml-1">
-                      <div>
-                        <label className="text-[10px] text-text-muted block mb-1">
-                          {modelOptions.skip_steps_multiplier_label || 'Cache Threshold'}
-                        </label>
-                        <select
-                          value={params.skip_steps_multiplier ?? modelOptions.default_skip_steps_multiplier ?? 0.08}
-                          onChange={e => setParam('skip_steps_multiplier', Number(e.target.value))}
-                          className="w-full bg-bg-tertiary border border-border rounded px-2 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent-blue"
-                        >
-                          {(modelOptions.skip_steps_multiplier_choices || []).map(([label, value]) => (
-                            <option key={value} value={value}>{label}</option>
-                          ))}
-                        </select>
-                      </div>
-                      <div>
-                        <div className="flex items-center justify-between mb-1">
-                          <label className="text-[10px] text-text-muted">Warmup</label>
-                          <span className="text-[10px] text-text-secondary">
-                            {params.skip_steps_start_step_perc ?? modelOptions.default_skip_steps_start_step_perc ?? 25}%
-                          </span>
-                        </div>
-                        <input
-                          type="range"
-                          min={0}
-                          max={75}
-                          step={5}
-                          value={params.skip_steps_start_step_perc ?? modelOptions.default_skip_steps_start_step_perc ?? 25}
-                          onChange={e => setParam('skip_steps_start_step_perc', Number(e.target.value))}
-                          className="w-full"
-                        />
-                      </div>
+                    <span className="text-[9px] text-accent-blue">Enabled in Studio</span>
+                  </div>
+                  <div className="space-y-2 pl-1 border-l border-border ml-1">
+                    <div>
+                      <label className="text-[10px] text-text-muted block mb-1">
+                        {modelOptions.skip_steps_multiplier_label || 'Cache Threshold'}
+                      </label>
+                      <select
+                        value={params.skip_steps_multiplier ?? modelOptions.default_skip_steps_multiplier ?? 0.08}
+                        onChange={e => setParam('skip_steps_multiplier', Number(e.target.value))}
+                        className="w-full bg-bg-tertiary border border-border rounded px-2 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent-blue"
+                      >
+                        {(modelOptions.skip_steps_multiplier_choices || []).map(([label, value]) => (
+                          <option key={value} value={value}>{label}</option>
+                        ))}
+                      </select>
                     </div>
-                  )}
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-[10px] text-text-muted">Warmup</label>
+                        <span className="text-[10px] text-text-secondary">
+                          {params.skip_steps_start_step_perc ?? modelOptions.default_skip_steps_start_step_perc ?? 25}%
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={75}
+                        step={5}
+                        value={params.skip_steps_start_step_perc ?? modelOptions.default_skip_steps_start_step_perc ?? 25}
+                        onChange={e => setParam('skip_steps_start_step_perc', Number(e.target.value))}
+                        className="w-full"
+                      />
+                    </div>
+                  </div>
                   <p className="text-[9px] text-text-muted">
-                    Reuses stable transformer work after warmup. Best suited to 15-20 step H3 runs; higher thresholds can change motion or fine detail.
+                    Higher thresholds reuse more work but can change motion or fine detail.
                   </p>
                 </div>
               )}

@@ -1224,9 +1224,75 @@ class TestDirectorVideoExecutionProfile(unittest.TestCase):
         self.assertEqual(params["num_inference_steps"], 6)
         self.assertEqual(
             params["activated_loras"],
-            ["minimax_h3_turbo_4step_ckpt500.safetensors"],
+            ["minimax_h3_turbo_v4_step600_ema.safetensors"],
         )
-        self.assertEqual(params["loras_multipliers"], "0.50")
+        self.assertEqual(params["loras_multipliers"], "1.00")
+
+    def test_execution_profile_persists_all_h3_optimizations(self):
+        profile = build_director_video_execution_profile(
+            "minimax_h3",
+            self._h3_model(),
+            {
+                "resolution": "1280x704",
+                "minimax_h3_turbo_mode": True,
+                "minimax_h3_turbo_preset": "v4-step600-ema",
+                "override_attention": "sol",
+                "skip_steps_cache_type": "first_block",
+                "skip_steps_multiplier": 0.08,
+                "skip_steps_start_step_perc": 25,
+            },
+            {"gpu_vram_gb": 24},
+        )
+
+        self.assertTrue(profile["turbo_mode"])
+        self.assertEqual(profile["turbo_preset"], "v4-step600-ema")
+        self.assertTrue(profile["sol_attention"])
+        self.assertTrue(profile["first_block_cache"])
+        self.assertEqual(profile["first_block_cache_multiplier"], 0.08)
+        self.assertEqual(profile["first_block_cache_warmup"], 25)
+
+    def test_h3_optimizations_are_applied_to_every_director_child(self):
+        profile = {"is_minimax_h3": True}
+        video_params = {
+            "minimax_h3_turbo_mode": True,
+            "minimax_h3_turbo_preset": "v4-step600-ema",
+            "override_attention": "sol",
+            "skip_steps_cache_type": "first_block",
+            "skip_steps_multiplier": "0.08",
+            "skip_steps_start_step_perc": "25",
+        }
+        child = {}
+
+        with patch.object(
+            pipeline,
+            "_wgp",
+            SimpleNamespace(override_attention_modes_supported=["sdpa", "sol"]),
+        ):
+            pipeline._apply_director_h3_optimizations(
+                child,
+                video_params,
+                profile,
+            )
+
+        self.assertIs(child["_director_video_execution_profile"], profile)
+        self.assertTrue(child["minimax_h3_turbo_mode"])
+        self.assertEqual(child["minimax_h3_turbo_preset"], "v4-step600-ema")
+        self.assertEqual(child["override_attention"], "sol")
+        self.assertEqual(child["skip_steps_cache_type"], "first_block")
+        self.assertEqual(child["skip_steps_multiplier"], 0.08)
+        self.assertEqual(child["skip_steps_start_step_perc"], 25)
+
+    def test_legacy_h3_project_defaults_optimizations_off(self):
+        child = {}
+        pipeline._apply_director_h3_optimizations(
+            child,
+            {},
+            {"is_minimax_h3": True},
+        )
+
+        self.assertFalse(child["minimax_h3_turbo_mode"])
+        self.assertNotIn("override_attention", child)
+        self.assertNotIn("skip_steps_cache_type", child)
 
 
 class TestDirectorBackendValidation(unittest.TestCase):
@@ -1839,10 +1905,15 @@ class TestDirectorUICatalogContract(unittest.TestCase):
         self.assertIn("director_max_shot_frames: directorMaxShotFrames", store)
         self.assertIn("resolution: directorVideoResolution", store)
         self.assertIn("minimax_h3_turbo_mode: directorTurboEnabled", store)
+        self.assertIn("minimax_h3_turbo_preset: directorTurboPreset?.id", store)
+        self.assertIn("override_attention: directorSolEnabled ? 'sol' : ''", store)
+        self.assertIn("skip_steps_cache_type: directorFirstBlockCacheEnabled", store)
         self.assertIn("shot_image_support?", types)
         self.assertIn("Shot image guidance", chat)
         self.assertIn("Maximum planned shot", chat)
         self.assertIn("H3 Turbo", chat)
+        self.assertIn("H3 Sol Engine", chat)
+        self.assertIn("First Block Cache", chat)
         self.assertIn("director_memory_policy", chat)
         self.assertIn("LoRA strength", lora_selector)
         self.assertIn('type="number"', lora_selector)
@@ -1851,6 +1922,10 @@ class TestDirectorUICatalogContract(unittest.TestCase):
         self.assertIn("SHOT_IMAGE_PROMPT_ONLY", pipeline_source)
         self.assertIn("_director_video_execution_profile", pipeline_source)
         self.assertIn("sliding_window_memory_override", pipeline_source)
+        self.assertGreaterEqual(
+            pipeline_source.count("_apply_director_h3_optimizations("),
+            3,
+        )
         self.assertIn('"director_memory_policy": md.get', launch)
         self.assertIn("per_clip_continue_from_previous", launch)
         self.assertIn('"_continuation_tail_skip", 8', launch)

@@ -33,7 +33,9 @@ const runtimeProfile = (kernel = {}) => {
     return {
       env: "env-rtx50",
       python: "3.11",
-      marker: "app/env-rtx50/.maestro_torch_rtx50_v1.installed",
+      // v2 pins Triton 3.6 for the integrated H3 Sol Engine path. The marker
+      // bump makes v1.7.5 Update migrate existing RTX 50 environments once.
+      marker: "app/env-rtx50/.maestro_torch_rtx50_v2.installed",
       flashMarker: "app/env-rtx50/.maestro_flash_2_8_3_v1.installed",
       label: "RTX 50 / CUDA 13",
     }
