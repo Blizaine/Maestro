@@ -5,6 +5,7 @@ import importlib.util
 import json
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -52,6 +53,23 @@ class LTX25HandlerTests(unittest.TestCase):
                 "LTX-2.5 runtime integration tests require PyTorch"
             )
         cls.handler_module = _load_module("ltx25_handler_test", HANDLER_PATH)
+
+    def test_missing_managed_component_does_not_require_an_account(self):
+        with mock.patch.object(
+            self.handler_module.fl,
+            "locate_file",
+            return_value=None,
+        ):
+            with self.assertRaisesRegex(
+                FileNotFoundError,
+                "public and require no account",
+            ) as raised:
+                self.handler_module._locate_component(
+                    "transformer",
+                    "missing-test-component.safetensors",
+                )
+
+        self.assertNotIn("repository is gated", str(raised.exception))
 
     def test_model_definition_uses_separate_architecture(self):
         payload = json.loads(DEFAULT_PATH.read_text(encoding="utf-8"))

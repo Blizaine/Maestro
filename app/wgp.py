@@ -3691,6 +3691,43 @@ def get_local_model_filename(model_filename, use_locator = True, extra_paths = N
                 if filename is not None: return filename
         local_model_filename = fl.locate_file(local_model_filename, error_if_none= False )
     return local_model_filename
+
+
+def get_compatible_local_model_filename(
+    model_filename,
+    model_type,
+    file_type=0,
+    extra_paths=None,
+):
+    """Resolve a canonical model file or a declared load-compatible alias.
+
+    Compatibility aliases are intentionally opt-in per model family.  They
+    are used for artifacts that are semantically compatible but differ in
+    filename or folder layout across linked installations.  Exact canonical
+    matches always win, and aliases are read-only fallbacks; download targets
+    remain the model definition's canonical Maestro path.
+    """
+    if model_filename is None or len(str(model_filename)) == 0:
+        return None
+    exact = get_local_model_filename(model_filename, extra_paths=extra_paths)
+    if exact is not None:
+        return exact
+
+    model_def = get_model_def(model_type) or {}
+    if file_type == 0:
+        compatibility = model_def.get("compatible_model_paths", {})
+    elif file_type == 2:
+        compatibility = model_def.get("compatible_text_encoder_paths", {})
+    else:
+        compatibility = {}
+    aliases = compatibility.get(os.path.basename(str(model_filename)), [])
+    if isinstance(aliases, str):
+        aliases = [aliases]
+    for alias in aliases:
+        located = get_local_model_filename(alias)
+        if located is not None:
+            return located
+    return None
     
 
 
@@ -3940,7 +3977,12 @@ def download_models(model_filename = None, model_type= None, file_type = 0, subm
     model_type_handler = model_types_handlers[base_model_type]
  
     if not (any_source and file_type==0 or any_module_source and file_type==1):
-        local_model_filename = get_local_model_filename(model_filename, extra_paths= force_path)
+        local_model_filename = get_compatible_local_model_filename(
+            model_filename,
+            model_type,
+            file_type=file_type,
+            extra_paths=force_path,
+        )
         if local_model_filename is None and len(model_filename) > 0:
             local_model_filename = fl.get_smart_download_location(os.path.basename(model_filename), force_path= force_path)
             url = model_filename
@@ -4327,7 +4369,11 @@ def load_models(model_type, override_profile = -1, output_type="video", **model_
     for filename, file_model_type, file_source_type, submodel_no in zip(model_file_list, model_type_list, source_type_list, model_submodel_no_list):
         if len(filename) == 0: continue 
         download_models(filename, file_model_type, file_source_type, submodel_no)
-        local_file_name = get_local_model_filename(filename )
+        local_file_name = get_compatible_local_model_filename(
+            filename,
+            file_model_type,
+            file_type=file_source_type,
+        )
         local_model_file_list.append( os.path.basename(filename) if local_file_name is None else local_file_name )
     if len(local_model_file_list) == 0:
         download_models("", model_type, 0, -1)
@@ -4371,9 +4417,14 @@ def load_models(model_type, override_profile = -1, output_type="video", **model_
     if text_encoder_filename is not None and len(text_encoder_filename):
         text_encoder_folder = model_def.get("text_encoder_folder", None)
         if text_encoder_filename is not None:
-            download_models(text_encoder_filename, file_model_type, 2, -1, force_path =text_encoder_folder)
+            download_models(text_encoder_filename, model_type, 2, -1, force_path =text_encoder_folder)
             _te_remote = text_encoder_filename
-            text_encoder_filename =  get_local_model_filename(text_encoder_filename, extra_paths=text_encoder_folder)
+            text_encoder_filename = get_compatible_local_model_filename(
+                text_encoder_filename,
+                model_type,
+                file_type=2,
+                extra_paths=text_encoder_folder,
+            )
             # Fail loudly. A None here used to print "Loading Text Encoder
             # 'None'" and crash deep inside the handler with an unrelated
             # TypeError (issue #15) — the actual problem is always that the

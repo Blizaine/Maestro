@@ -5,6 +5,23 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-08-13
+
+MiniMax H3 model sharing: linked WanGP installations can now supply their
+pruned FL2VA and Ref2VA rank-8 INT8 ConvRot transformers as load-compatible
+alternatives to Maestro's scaled-FP8 exports. Maestro also resolves the shared
+Qwen3-VL encoder variants from WanGP's folder layout, prefers an exact Maestro
+asset when both exist, detects the checkpoint's QKV layout before loading, and
+prints the source of every H3 component. Differently published VAE artifacts
+remain separate rather than being treated as unsafe duplicates.
+
+Account-free installation: Install no longer starts Pinokio's Hugging Face
+device-login flow. Maestro's default managed models download anonymously from
+public sources. A clearly labeled optional menu action remains available for
+custom gated assets or higher download limits, and missing LTX-2.5 components
+now report the relevant public-download checks instead of incorrectly telling
+users that an account is required.
+
 ## [1.8.0] - 2026-08-13
 
 LTX-2.5: added native local support for the official Distilled workflow with

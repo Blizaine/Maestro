@@ -7,7 +7,7 @@ class PluginManagerUIPlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
         self.name = "Plugin Manager UI"
-        self.version = "1.8.0"
+        self.version = "1.8.1"
         self.description = "A built-in UI for managing, installing, and updating Wan2GP plugins"
         self.WanGP_version = ""
         self.quit_application = None

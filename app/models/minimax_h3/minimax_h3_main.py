@@ -32,7 +32,7 @@ from .checkpoint import (
     preprocess_video_vae_state_dict,
 )
 from .conditioner import MiniMaxH3Conditioner, MiniMaxH3Qwen3VL, build_h3_processor, load_h3_qwen_config
-from .convrot_layout import restore_interleaved_h3_qkv
+from .convrot_layout import has_convrot_layout, restore_interleaved_h3_qkv
 from .packing import (
     MINIMAX_H3_AUDIO_CHANNELS,
     MINIMAX_H3_FPS,
@@ -680,7 +680,11 @@ def _normalize_conditioner_checkpoint_namespaces(
 def probe_h3_checkpoint(filename: str) -> dict[str, int | bool | None]:
     """Inspect H3 tensor headers before allocating its 20B/33B network."""
 
-    state_dict, _ = quant_router.load_metadata_state_dict(filename)
+    state_dict, metadata = quant_router.load_metadata_state_dict(filename)
+    quantization_format = str(
+        (metadata or {}).get("quantization_format", "")
+    ).lower()
+    convrot = "convrot" in quantization_format or has_convrot_layout(state_dict)
     table = None
     for key, tensor in state_dict.items():
         for prefix in ("model.diffusion_model.", "diffusion_model."):
@@ -695,6 +699,7 @@ def probe_h3_checkpoint(filename: str) -> dict[str, int | bool | None]:
             "compressed_modulation": False,
             "adaln_curve_grid": None,
             "time_embed_dim": 2688,
+            "convrot": convrot,
         }
     if len(table.shape) != 2 or int(table.shape[0]) < 2:
         raise ValueError(f"Invalid H3 AdaLN curve table shape: {tuple(table.shape)}")
@@ -702,6 +707,7 @@ def probe_h3_checkpoint(filename: str) -> dict[str, int | bool | None]:
         "compressed_modulation": True,
         "adaln_curve_grid": int(table.shape[0]),
         "time_embed_dim": int(table.shape[1]),
+        "convrot": convrot,
     }
 
 
@@ -712,6 +718,12 @@ def _load_transformer(
     qkv_layout: str = "contiguous",
 ) -> MiniMaxH3Transformer:
     checkpoint = probe_h3_checkpoint(filename)
+    # Current WanGP pruned checkpoints use the same compressed rank-8 model
+    # as Maestro's scaled-FP8 export, but publish it as an interleaved-QKV
+    # INT8 ConvRot file. Detect the tensor format from checkpoint metadata so
+    # a linked alternate receives the same split/reorder path as Full H3.
+    if checkpoint["convrot"]:
+        qkv_layout = "interleaved"
     with init_empty_weights(include_buffers=True):
         transformer = MiniMaxH3Transformer(
             curve_grid=checkpoint["adaln_curve_grid"],
@@ -852,6 +864,23 @@ def _load_audio_vae(filename: str) -> AutoencoderKLMiniMaxH3Audio:
     return vae.eval().requires_grad_(False)
 
 
+def _log_h3_asset_sources(components: dict[str, str]) -> None:
+    """Print an actionable component-by-component sharing diagnostic."""
+
+    print("[MiniMax H3 Assets] Resolved component sources:")
+    for component, path in components.items():
+        source = fl.describe_file_source(path)
+        kind = source["kind"]
+        installation = source.get("installation")
+        if kind == "linked":
+            origin = f"linked install '{installation}'"
+        elif kind == "primary":
+            origin = f"primary install '{installation}'"
+        else:
+            origin = kind
+        print(f"[MiniMax H3 Assets]   {component}: {origin} -> {source['path']}")
+
+
 class MiniMaxH3Model:
     """Maestro generation wrapper for the H3 Base FL2VA/Ref2VA checkpoints."""
 
@@ -883,11 +912,27 @@ class MiniMaxH3Model:
             os.path.join(self.assets_root, "vae", "minimax_h3_audio_vae_fp32.safetensors")
         )
 
+        _log_h3_asset_sources(
+            {
+                "transformer": transformer_path,
+                "text/vision encoder": text_encoder_filename,
+                "video VAE": video_vae_path,
+                "audio VAE": audio_vae_path,
+            }
+        )
+
         self.text_encoder_variant = str(minimax_h3_text_encoder or "nvfp4_awq")
+        qkv_layout = str(model_def.get("minimax_h3_qkv_layout") or "contiguous")
+        qkv_layout = str(
+            model_def.get("compatible_model_qkv_layouts", {}).get(
+                os.path.basename(transformer_path),
+                qkv_layout,
+            )
+        )
         self.transformer = _load_transformer(
             transformer_path,
             dtype,
-            qkv_layout=str(model_def.get("minimax_h3_qkv_layout") or "contiguous"),
+            qkv_layout=qkv_layout,
         )
         self.conditioner = _load_conditioner(
             text_encoder_filename,

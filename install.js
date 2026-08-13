@@ -27,16 +27,6 @@ module.exports = async (kernel) => {
       },
       next: null
     },
-    // Optional HuggingFace login. Maestro's default models are all on
-    // PUBLIC repos, so this is NOT required — but a token lifts HuggingFace's
-    // anonymous rate limits (helpful for the large model downloads) and
-    // unlocks any gated models you add later. Non-blocking (wait: false):
-    // Pinokio stores the token at HF_TOKEN_PATH; skip it and downloads fall
-    // back to anonymous (launch.py is tolerant of an absent/blocked token).
-    {
-      method: "hf.login",
-      params: { wait: false }
-    },
     {
       method: "shell.run",
       params: {

@@ -25,6 +25,7 @@ module.exports = {
       start_sol: info.running("start_sol.js"),
       start_classic: info.running("start_classic.js"),
       update: info.running("update.js"),
+      huggingface_login: info.running("huggingface_login.js"),
       reset: info.running("reset.js")
     }
     if (running.install || running.sol_install) {
@@ -44,6 +45,13 @@ module.exports = {
         icon: 'fa-solid fa-terminal',
         text: "Updating",
         href: "update.js",
+      }]
+    } else if (running.huggingface_login) {
+      return [{
+        default: true,
+        icon: "fa-solid fa-key",
+        text: "Connecting Hugging Face",
+        href: "huggingface_login.js",
       }]
     } else if (installed && solCapable && !cuda13DriverUpdateRequired && !runtimeReady) {
       return [{
@@ -203,6 +211,10 @@ module.exports = {
           text: "Install",
           href: "install.js",
         }, {
+          icon: "fa-solid fa-key",
+          text: "<div><strong>Connect Hugging Face (Optional)</strong><div>For custom gated models or higher download limits. Not required for Maestro.</div></div>",
+          href: "huggingface_login.js",
+        }, {
           // Install / re-install the SAM 3.1 segmentation service
           // (separate Python 3.12 conda env, takes ~5 min). Only
           // needed for the experimental Inpaint feature in Edit
@@ -228,6 +240,10 @@ module.exports = {
         icon: "fa-solid fa-plug",
         text: "Install",
         href: "install.js",
+      }, {
+        icon: "fa-solid fa-key",
+        text: "<div><strong>Connect Hugging Face (Optional)</strong><div>For custom gated models or higher download limits. Not required for Maestro.</div></div>",
+        href: "huggingface_login.js",
       }]
     }
   }

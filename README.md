@@ -77,6 +77,18 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.8.1 (2026-08-13)
+
+**MiniMax H3 model sharing**
+- Maestro can now reuse WanGP's compatible pruned FL2VA and Ref2VA INT8 ConvRot checkpoints instead of downloading separate scaled-FP8 copies.
+- Shared Qwen3-VL text/vision encoders are detected across both folder layouts, while non-identical VAE files remain separate for safety.
+- Added checkpoint-layout detection and component-source diagnostics so shared H3 installations load the correct tensor format and clearly report which app supplied each asset.
+
+**Account-free installation**
+- Maestro no longer opens a Hugging Face sign-in flow during Install. Installation and default managed-model downloads require no Maestro or Hugging Face account.
+- Added an explicit **Connect Hugging Face (Optional)** launcher action for custom gated models or higher download limits.
+- Fixed the missing LTX-2.5 component message incorrectly claiming that its managed repository was gated.
+
 ### v1.8.0 (2026-08-13)
 
 **LTX-2.5 and next-generation LTX workflows**
@@ -564,6 +576,8 @@ The first video is always the slow one: install is ~10–20 min, then the first 
 4. When install finishes, click **Start**. The first generation in each model triggers a one-time weight download.
 
 The install (without model downloads) typically takes **10–20 minutes** depending on internet speed. SAM 3.1 (used only for the experimental Inpaint feature) is **not installed by default** — install it on demand via Pinokio menu → "Install Inpaint Support (SAM 3.1)" if you want to use Inpaint.
+
+Maestro does **not** require a Maestro account or a Hugging Face account. Its default managed models download anonymously from public sources. If you intentionally use custom gated assets or want higher Hugging Face download limits, choose **Connect Hugging Face (Optional)** in the Pinokio launcher menu.
 
 Supported RTX 40- and 50-series cards use Maestro's standard Python 3.11, PyTorch 2.10, CUDA 13 H3 performance runtime. NVIDIA driver 580 or newer is required for that runtime. Existing installations migrate automatically through the normal **Update** action; RTX 40 migrations are created alongside the prior `app/env/` environment so a failed or interrupted upgrade can still launch the compatibility runtime. Maestro prints a short runtime audit at startup. If it reports a missing H3 kernel after Update completes, use **Advanced → Repair H3 Performance Runtime** in the Pinokio menu.
 

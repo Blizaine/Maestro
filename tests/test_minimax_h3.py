@@ -360,6 +360,29 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             set(model_def["minimax_h3_text_encoder_variants"]),
             {"nvfp4_awq", "gguf_q2_k", "gguf_q4_k_m", "int8", "bf16"},
         )
+        self.assertEqual(
+            model_def["compatible_model_paths"][
+                "minimax_h3_fl2va_pruned_fp8_scaled.safetensors"
+            ],
+            ["MiniMax-H3-FL2VA-pruned_rank8_int8_convrot.safetensors"],
+        )
+        self.assertEqual(
+            model_def["compatible_model_qkv_layouts"][
+                "MiniMax-H3-FL2VA-pruned_rank8_int8_convrot.safetensors"
+            ],
+            "interleaved",
+        )
+        self.assertEqual(
+            model_def["compatible_text_encoder_paths"][
+                "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+            ],
+            [
+                os.path.join(
+                    "Qwen3-VL-32B-Instruct",
+                    "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+                )
+            ],
+        )
 
     def test_fl2va_media_source_validation_fails_before_generation(self):
         model_def = self.handler.query_model_def("minimax_h3", {})
@@ -1036,6 +1059,18 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertTrue(model_def["t2v_class"])
         self.assertFalse(model_def["i2v_class"])
         self.assertFalse(model_def["end_frames_always_enabled"])
+        self.assertEqual(
+            model_def["compatible_model_paths"][
+                "minimax_h3_ref2va_pruned_fp8_scaled.safetensors"
+            ],
+            ["MiniMax-H3-Ref2VA-pruned_rank8_int8_convrot.safetensors"],
+        )
+        self.assertEqual(
+            model_def["compatible_model_qkv_layouts"][
+                "MiniMax-H3-Ref2VA-pruned_rank8_int8_convrot.safetensors"
+            ],
+            "interleaved",
+        )
         self.assertTrue(model_def["sliding_window"])
         self.assertTrue(model_def["video_continuation"])
         self.assertTrue(model_def["sliding_window_exact_total_frames"])

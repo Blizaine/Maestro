@@ -230,9 +230,10 @@ def _locate_component(folder: str, filename: str) -> str:
             return located
     raise FileNotFoundError(
         f"LTX-2.5 component '{filename}' is missing. Maestro searched the "
-        f"managed checkpoint folders for: {', '.join(candidates)}. The model "
-        "repository is gated; accept its terms on Hugging Face and sign in "
-        "with a read token, then retry."
+        f"managed checkpoint folders for: {', '.join(candidates)}. Maestro's "
+        "managed LTX-2.5 files are public and require no account. Check the "
+        "earlier download error, internet connection, and free disk space, "
+        "then retry the model download or run Update."
     )
 
 

@@ -23,6 +23,22 @@ class TestPinokioGpuCompatibility(unittest.TestCase):
         self.assertIn("{{gpu !== 'nvidia'}}", installer)
         self.assertIn("This app requires an NVIDIA GPU", installer)
 
+    def test_fresh_install_never_requests_hugging_face_login(self):
+        installer = (_ROOT / "install.js").read_text(encoding="utf-8")
+
+        self.assertNotIn('method: "hf.login"', installer)
+
+    def test_hugging_face_login_is_an_explicit_optional_menu_action(self):
+        login = (_ROOT / "huggingface_login.js").read_text(encoding="utf-8")
+        menu = (_ROOT / "pinokio.js").read_text(encoding="utf-8")
+
+        self.assertIn('method: "hf.login"', login)
+        self.assertIn("force: true", login)
+        self.assertIn("wait: true", login)
+        self.assertEqual(menu.count('href: "huggingface_login.js"'), 3)
+        self.assertEqual(menu.count("Connect Hugging Face (Optional)"), 2)
+        self.assertIn("Not required for Maestro", menu)
+
     def test_start_url_uses_the_required_capture_object(self):
         start = (_ROOT / "start.js").read_text(encoding="utf-8")
 

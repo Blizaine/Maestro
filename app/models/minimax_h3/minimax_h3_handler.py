@@ -26,6 +26,13 @@ _TEXT_ENCODER_GGUF_Q2 = "qwen3vl-32B-MiniMax-H3-Q2_K.gguf"
 _TEXT_ENCODER_GGUF_Q4 = "qwen3vl-32B-MiniMax-H3-Q4_K_M.gguf"
 _VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
 _AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
+_WANGP_TEXT_ENCODER_FOLDER = "Qwen3-VL-32B-Instruct"
+_WANGP_FL2VA_PRUNED_TRANSFORMER = (
+    "MiniMax-H3-FL2VA-pruned_rank8_int8_convrot.safetensors"
+)
+_WANGP_REF2VA_PRUNED_TRANSFORMER = (
+    "MiniMax-H3-Ref2VA-pruned_rank8_int8_convrot.safetensors"
+)
 
 # H3 packs video, audio, and text into one unusually long transformer
 # sequence.  At 480p / 10 seconds the token-wise activations alone need
@@ -1468,6 +1475,54 @@ class family_handler:
             "text_encoder_URLs": text_encoder_variants["nvfp4_awq"]["URLs"],
             "minimax_h3_text_encoder_default": "nvfp4_awq",
             "minimax_h3_text_encoder_variants": text_encoder_variants,
+            # Maestro's original pruned checkpoints are Comfy scaled-FP8;
+            # current WanGP publishes the same rank-8 H3 architecture as an
+            # INT8 ConvRot export. They are not byte duplicates, but this
+            # runtime supports both tensor formats. Treat an existing WanGP
+            # file as a verified load-compatible alternative so linked
+            # installs do not download a second ~20B transformer.
+            "compatible_model_paths": (
+                {}
+                if full_checkpoint
+                else {
+                    (
+                        _REF2VA_TRANSFORMER
+                        if omni_reference
+                        else _TRANSFORMER
+                    ): [
+                        (
+                            _WANGP_REF2VA_PRUNED_TRANSFORMER
+                            if omni_reference
+                            else _WANGP_FL2VA_PRUNED_TRANSFORMER
+                        )
+                    ]
+                }
+            ),
+            "compatible_model_qkv_layouts": (
+                {}
+                if full_checkpoint
+                else {
+                    (
+                        _WANGP_REF2VA_PRUNED_TRANSFORMER
+                        if omni_reference
+                        else _WANGP_FL2VA_PRUNED_TRANSFORMER
+                    ): "interleaved"
+                }
+            ),
+            # WanGP stores every Qwen variant in its upstream folder while
+            # Maestro keeps the weight beside its other H3 assets. These are
+            # the same published files (the Comfy NVFP4 artifact is also
+            # byte-identical), so support both relative layouts.
+            "compatible_text_encoder_paths": {
+                filename: [os.path.join(_WANGP_TEXT_ENCODER_FOLDER, filename)]
+                for filename in (
+                    _TEXT_ENCODER,
+                    _TEXT_ENCODER_BF16,
+                    _TEXT_ENCODER_INT8,
+                    _TEXT_ENCODER_GGUF_Q2,
+                    _TEXT_ENCODER_GGUF_Q4,
+                )
+            },
             "minimax_h3_full_checkpoint": full_checkpoint,
             "minimax_h3_transformer_working_vram_gb": (
                 _TRANSFORMER_WORKING_VRAM_MB / 1024
