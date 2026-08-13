@@ -4587,12 +4587,36 @@ def release_RAM():
         release_model()
         gr.Info("Models stored in RAM have been released")
 
+_GENERATION_STATUS_DEFAULTS = {
+    "prompt_no": 0,
+    "prompts_max": 0,
+    "repeat_no": 0,
+    "total_generation": 1,
+    "window_no": 0,
+    "total_windows": 0,
+    "progress_status": "",
+}
+
+
+def initialize_gen_info(gen=None):
+    """Return generation state with every status field initialized.
+
+    Gradio sessions can outlive a server update, so this also upgrades
+    partial state dictionaries created by older Classic UI versions.
+    """
+    if gen is None:
+        gen = {}
+    for key, value in _GENERATION_STATUS_DEFAULTS.items():
+        gen.setdefault(key, value)
+    return gen
+
+
 def get_gen_info(state):
     cache = state.get("gen", None)
     if cache == None:
-        cache = dict()
+        cache = initialize_gen_info()
         state["gen"] = cache
-    return cache
+    return initialize_gen_info(cache)
 
 def build_callback(state, pipe, send_cmd, status, num_inference_steps, preview_meta=None):
     gen = get_gen_info(state)
@@ -10433,7 +10457,9 @@ def process_tasks_cli(queue, state):
 
 
 def get_generation_status(prompt_no, prompts_max, repeat_no, repeat_max, window_no, total_windows):
-    if prompts_max == 1:        
+    if prompts_max <= 0:
+        status = ""
+    elif prompts_max == 1:
         if repeat_max <= 1:
             status = ""
         else:
@@ -10481,7 +10507,7 @@ def clear_status(state):
 
 def get_latest_status(state, context=""):
     gen = get_gen_info(state)
-    prompt_no = gen["prompt_no"] 
+    prompt_no = gen.get("prompt_no", 0)
     prompts_max = gen.get("prompts_max",0)
     total_generation = gen.get("total_generation", 1)
     repeat_no = gen.get("repeat_no",0)
@@ -12582,8 +12608,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
         state_dict["last_model_per_family"] = server_config.get("last_model_per_family", {})
         state_dict["last_model_per_type"] = server_config.get("last_model_per_type", {})
         state_dict["last_resolution_per_group"] = server_config.get("last_resolution_per_group", {})
-        gen = dict()
-        gen["queue"] = []
+        gen = initialize_gen_info({"queue": []})
         state_dict["gen"] = gen
 
     def ui_get(key, default = None):
