@@ -148,7 +148,21 @@ class TestMiniMaxH3AssetSharing(unittest.TestCase):
             source,
         )
 
-    def test_convrot_metadata_selects_interleaved_qkv_loader(self):
+    def test_convrot_loader_wiring_is_dependency_free(self):
+        convrot_source = _CONVROT_PATH.read_text(encoding="utf-8")
+        self.assertIn("def has_convrot_layout(", convrot_source)
+        self.assertIn('key.endswith(".comfy_quant")', convrot_source)
+        self.assertIn("and _is_convrot_config(value)", convrot_source)
+
+        main_source = _H3_MAIN_PATH.read_text(encoding="utf-8")
+        self.assertIn('if checkpoint["convrot"]:', main_source)
+        self.assertIn('qkv_layout = "interleaved"', main_source)
+        self.assertIn("[MiniMax H3 Assets] Resolved component sources:", main_source)
+
+    def test_convrot_metadata_payload_is_detected_when_torch_is_available(self):
+        if importlib.util.find_spec("torch") is None:
+            self.skipTest("tensor-level ConvRot probe requires PyTorch")
+
         convrot = _load_module(
             _CONVROT_PATH,
             f"maestro_h3_convrot_sharing_{id(self)}",
@@ -160,10 +174,6 @@ class TestMiniMaxH3AssetSharing(unittest.TestCase):
         self.assertTrue(
             convrot.has_convrot_layout({"blocks.0.attn.qkv_proj.comfy_quant": payload})
         )
-        main_source = _H3_MAIN_PATH.read_text(encoding="utf-8")
-        self.assertIn('if checkpoint["convrot"]:', main_source)
-        self.assertIn('qkv_layout = "interleaved"', main_source)
-        self.assertIn("[MiniMax H3 Assets] Resolved component sources:", main_source)
 
 
 if __name__ == "__main__":
