@@ -47,6 +47,10 @@ def _load_module(name: str, path: Path):
 class LTX25HandlerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        if importlib.util.find_spec("torch") is None:
+            raise unittest.SkipTest(
+                "LTX-2.5 runtime integration tests require PyTorch"
+            )
         cls.handler_module = _load_module("ltx25_handler_test", HANDLER_PATH)
 
     def test_model_definition_uses_separate_architecture(self):

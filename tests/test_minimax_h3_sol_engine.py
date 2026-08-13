@@ -114,7 +114,12 @@ class TestSolEngineSourceContracts(unittest.TestCase):
 class TestSolAttentionRouting(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        import torch
+        try:
+            import torch
+        except ModuleNotFoundError as exc:
+            raise unittest.SkipTest(
+                "MiniMax H3 Sol routing tests require PyTorch"
+            ) from exc
 
         cls.torch = torch
 
