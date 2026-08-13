@@ -5,6 +5,49 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-08-13
+
+LTX-2.5: added native local support for the official Distilled workflow with
+synchronized audio and WanGP/MMGP memory management. The recommended model
+runs the official eight-step base pass, learned latent upscaling, and
+three-step full-resolution refinement, with persistent model reuse for faster
+follow-up jobs. Optional Dev and NVFP4 variants are available through Settings
+without crowding the default model list, and Advanced offers the fast video
+decoder or optional NAD diffusion decoder.
+
+Complete LTX workflows: LTX-2.5 supports text and image generation, first and
+last frames, timed frame injection, soundtrack and control-video audio
+conditioning, sliding-window continuation, synchronized native audio, and
+compatible LTX-2/2.3 LoRAs from the existing shared LoRA library. The model is
+available to compatible Music Video, Short Film, and seamless Director paths.
+INT8 ConvRot LoRA application now preserves the native linear forwards instead
+of producing noise, and loaded LTX-2.5 profiles remain resident between jobs.
+
+LTX long-form generation: every LTX video family now shares an explicit
+Multi-window Sequence workflow with single-pass, AI-planned, and exact manual
+prompt modes. Maestro computes the real overlap/discard geometry, validates one
+manual prompt per window before loading a model, expands an overall idea into
+chronological window-local prompts, and displays the reviewed prompts in the
+main editor. Full temporal prefix frames and matching audio history now carry
+across LTX-2.5 windows without the distorted seam or motion stall seen in the
+initial implementation.
+
+Audio and saved-settings reliability: corrected generated-audio sample-rate
+handling that could make H3 and LTX sound slowed down, repaired standalone
+soundtrack routing for loaded sidecars, and made audio strength use the actual
+backend parameter. Load Settings now restores LTX window mode and geometry,
+LTX-2.5 decoder choice, H3 Turbo preset, Sol Engine, First Block Cache, text
+encoder, and their associated tuning values instead of leaking the prior
+clip's state.
+
+Runtime and interface polish: compatible RTX 40- and 50-series systems now
+receive the tested Python 3.11 / PyTorch 2.10 / CUDA 13 Sol-capable runtime
+through the normal Install, Update, and Start actions. The Studio sidecar is
+ordered as Duration, inputs or Omni references, H3 Optimizations, then
+Multi-window Sequence. Install, update, reset, recovery, and startup checks
+cover the new runtime and LTX-2.5 assets while retaining safe compatibility
+fallbacks.
+
 ## [1.7.5] - 2026-08-11
 
 MiniMax H3 performance controls: added an optional experimental Sol Engine
@@ -28,12 +71,15 @@ published atomically, and recorded with local receipts. A scheduled GitHub
 workflow detects upstream repository changes and opens a review issue rather
 than silently replacing a validated adapter.
 
-Runtime and update reliability: RTX 50's CUDA 13 runtime now pins the tested
-Triton 3.6 series required by Sol. RTX 40 systems retain their established
-default environment and can install a separate opt-in `env-sol`; Update now
-detects and repairs interrupted optional-runtime and FlashAttention installs.
-RTX 20/30 systems continue to use the existing SageAttention path. Bundled Sol
-sources include pinned upstream provenance and Apache-2.0 notices.
+Runtime and update reliability: the tested Python 3.11 / PyTorch 2.10 / CUDA
+13 runtime is now the standard Install, Update, and Start path on compatible
+RTX 40- and 50-series systems. Existing RTX 40 installs migrate automatically
+to `env-sol` while retaining `env` as an emergency compatibility fallback; the
+separate Sol Start and installer choices are no longer required. Interrupted
+runtime and FlashAttention installs remain resumable, NVIDIA drivers older
+than 580 are handled safely, and RTX 20/30 systems continue to use the existing
+SageAttention path. Bundled Sol sources include pinned upstream provenance and
+Apache-2.0 notices.
 
 ## [1.7.2] - 2026-08-11
 

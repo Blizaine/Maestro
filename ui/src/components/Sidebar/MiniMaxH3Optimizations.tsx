@@ -134,7 +134,7 @@ export function MiniMaxH3Optimizations() {
 
   const solHelp = solSupported
     ? 'Uses H3-aware sparse attention with exact reference and audio conditioning. Its compiled kernels are cached across restarts, and unsupported calls fall back automatically.'
-    : `${modelOptions?.sol_attention_status?.reason || 'Sol Engine is unavailable in this runtime.'} On supported RTX 40 systems, install and start Maestro with the optional Sol Engine runtime from Pinokio.`
+    : `${modelOptions?.sol_attention_status?.reason || 'Sol Engine is unavailable in this runtime.'} On supported hardware, run Maestro's normal Pinokio Update to install or repair the H3 performance runtime.`
 
   return (
     <div className="space-y-2">

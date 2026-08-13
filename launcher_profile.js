@@ -28,7 +28,13 @@ const isSolCapable = (kernel = {}) => {
   )
 }
 
-const runtimeProfile = (kernel = {}) => {
+const needsCuda13DriverUpdate = (kernel = {}) => {
+  if (kernel.gpu !== "nvidia" || !kernel.gpu_driver) return false
+  const driver = Number.parseFloat(String(kernel.gpu_driver))
+  return Number.isFinite(driver) && driver < 580
+}
+
+const legacyRuntimeProfile = (kernel = {}) => {
   if (isRtx50(kernel)) {
     return {
       env: "env-rtx50",
@@ -50,7 +56,7 @@ const runtimeProfile = (kernel = {}) => {
 }
 
 const solRuntimeProfile = (kernel = {}) => {
-  if (isRtx50(kernel)) return runtimeProfile(kernel)
+  if (isRtx50(kernel)) return legacyRuntimeProfile(kernel)
   return {
     env: "env-sol",
     python: "3.11",
@@ -60,10 +66,22 @@ const solRuntimeProfile = (kernel = {}) => {
   }
 }
 
+// The tested CUDA 13 / Python 3.11 environment is now Maestro's preferred
+// runtime on GPUs supported by H3 Sol Engine. Existing RTX 40 installations
+// retain app/env as a recovery path; start.js falls back to it automatically
+// until the normal Update flow finishes this side-by-side migration.
+const runtimeProfile = (kernel = {}) => (
+  isSolCapable(kernel) && !needsCuda13DriverUpdate(kernel)
+    ? solRuntimeProfile(kernel)
+    : legacyRuntimeProfile(kernel)
+)
+
 module.exports = {
   isRtx40,
   isRtx50,
   isSolCapable,
+  needsCuda13DriverUpdate,
+  legacyRuntimeProfile,
   runtimeProfile,
   solRuntimeProfile,
 }

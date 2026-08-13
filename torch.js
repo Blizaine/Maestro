@@ -1,22 +1,40 @@
-const { isRtx50, runtimeProfile } = require("./launcher_profile")
+const {
+  isSolCapable,
+  needsCuda13DriverUpdate,
+  runtimeProfile,
+} = require("./launcher_profile")
 
 module.exports = async (kernel) => {
   const runtime = runtimeProfile(kernel)
-  const rtx50 = isRtx50(kernel)
+  const solCapable = isSolCapable(kernel)
   const windows = kernel.platform === "win32"
   const linux = kernel.platform === "linux"
 
   if (!windows && !linux) {
     throw new Error("Maestro's NVIDIA runtime is supported on Windows and Linux.")
   }
+  if (solCapable && needsCuda13DriverUpdate(kernel)) {
+    throw new Error(
+      `NVIDIA driver ${kernel.gpu_driver} is too old for Maestro's CUDA 13 H3 runtime. ` +
+      "Install NVIDIA driver 580 or newer, then run Update again."
+    )
+  }
 
   let message
   let flashMessage
   let env = undefined
 
-  if (rtx50 && windows) {
+  const cudaArch = ({
+    sm_89: "8.9",
+    sm_90: "9.0",
+    sm_100: "10.0",
+    sm_120: "12.0",
+  })[String(kernel.gpu_target || "").toLowerCase()] || "8.9"
+
+  if (solCapable && windows) {
     message = [
-      // Blackwell's native NVFP4 path requires the CUDA 13 / Torch 2.10 ABI.
+      // H3 Sol Engine and Blackwell's native NVFP4 path share this tested
+      // Python 3.11 / CUDA 13 / Torch 2.10 ABI.
       "uv pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu130 --force-reinstall --no-deps",
       "{{args && args.xformers ? 'uv pip install xformers==0.0.35 --index-url https://download.pytorch.org/whl/cu130 --force-reinstall --no-deps' : ''}}",
       "uv pip install triton-windows==3.6.0.post25 --force-reinstall",
@@ -25,7 +43,7 @@ module.exports = async (kernel) => {
       "uv pip install https://github.com/nunchaku-ai/nunchaku/releases/download/v1.2.1/nunchaku-1.2.1+cu13.0torch2.10-cp311-cp311-win_amd64.whl --force-reinstall --no-deps",
     ]
     flashMessage = "uv pip install https://github.com/deepbeepmeep/kernels/releases/download/Flash2/flash_attn-2.8.3-cp311-cp311-win_amd64.whl --force-reinstall --no-deps"
-  } else if (rtx50 && linux) {
+  } else if (solCapable && linux) {
     message = [
       "uv pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu130 --force-reinstall --no-deps",
       "{{args && args.xformers ? 'uv pip install xformers==0.0.35 --index-url https://download.pytorch.org/whl/cu130 --force-reinstall --no-deps' : ''}}",
@@ -37,7 +55,7 @@ module.exports = async (kernel) => {
     ]
     flashMessage = "uv pip install flash-attn --no-build-isolation"
     env = {
-      TORCH_CUDA_ARCH_LIST: "12.0",
+      TORCH_CUDA_ARCH_LIST: cudaArch,
       MAX_JOBS: "4",
     }
   } else if (windows) {

@@ -26,6 +26,11 @@ class family_handler():
         extra_model_def["frames_minimum"] = 17
         extra_model_def["frames_steps"] = 8
         extra_model_def["sliding_window"] = True
+        # Maestro Studio exposes one shared long-form sequence contract for
+        # every LTX video generation.  The engine already supports rolling
+        # windows; this flag tells the React UI that it may offer the same
+        # single-pass / AI-planned / manual-window controls used by H3.
+        extra_model_def["multi_window_sequence_controls"] = True
         extra_model_def["image_prompt_types_allowed"] = "TSEV"
 
         extra_model_def["guide_preprocessing"] = {

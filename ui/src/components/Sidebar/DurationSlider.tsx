@@ -42,6 +42,8 @@ export function DurationSlider() {
   const modelType = useStore(s => s.params.model_type)
   const h3FirstLastMultiWindow = useStore(s => s.params.minimax_h3_multi_window === true)
   const manualFirstLastPrompts = useStore(s => s.params.minimax_h3_window_storyboard === false)
+  const ltxMultiWindow = useStore(s => s.params.ltx_multi_window === true)
+  const manualLtxPrompts = useStore(s => s.params.ltx_window_prompt_mode === 'manual')
   const h3WindowOverrides = useStore(s => s.h3WindowOverrides)
   const totalVramGb = useStore(s => s.systemStats?.gpu.vram_total_gb ?? 0)
   const fps = modelOptions?.fps ?? 16
@@ -52,9 +54,15 @@ export function DurationSlider() {
   const frameStep = modelOptions?.frames_steps ?? Math.round(fps)
   const isOmniReference = modelOptions?.omni_reference === true
   const isH3 = String(modelOptions?.architecture || '').startsWith('minimax_h3')
+  const isLtx = modelOptions?.multi_window_sequence_controls === true
   const h3MultiWindowEnabled = isOmniReference
     ? omniReferenceSequence
     : h3FirstLastMultiWindow
+  const rollingSequenceEnabled = isH3
+    ? h3MultiWindowEnabled
+    : isLtx
+      ? ltxMultiWindow
+      : supportsSlidingWindows
   const overrideKey = h3WindowOverrideKey(modelType, resolution)
   const savedOverrideFrames = isH3 ? h3WindowOverrides[overrideKey] : undefined
   const directOmni = isOmniReference && !omniReferenceSequence
@@ -80,11 +88,19 @@ export function DurationSlider() {
     ? modelOptions.frames_maximum / fps
     : null
   const minDuration = Math.max(1, nativeMinSeconds)
+  const ltxSinglePassMax = isLtx
+    ? Math.max(
+        minDuration,
+        (swDefaults?.window_max ?? Math.round(20 * fps)) / fps,
+      )
+    : null
   const maxDuration = isH3
     ? (h3MultiWindowEnabled
         ? (isOmniReference ? 120 : 300)
         : Math.max(minDuration, nativeMaxSeconds ?? minDuration))
-    : (omniReferenceSequence
+    : isLtx
+      ? (ltxMultiWindow ? 300 : (ltxSinglePassMax ?? 20))
+      : (omniReferenceSequence
       ? 120
       : (directOmni && nativeMaxSeconds
         ? Math.min(
@@ -111,11 +127,11 @@ export function DurationSlider() {
   const overlapSeconds = overlap / fps
   const discardSeconds = discardFrames / fps
   const stride = windowSize - discardSeconds - overlapSeconds
-  const windowCount = h3MultiWindowEnabled && stride > 0 && duration > windowSize
+  const windowCount = rollingSequenceEnabled && stride > 0 && duration > windowSize
     ? 1 + Math.ceil((duration - windowSize + discardSeconds) / stride)
     : 1
   const showSlidingWindow = supportsSlidingWindows
-    && h3MultiWindowEnabled
+    && rollingSequenceEnabled
     && duration > windowSize
     && !omniReferenceSequence
   const { frames: omniSequenceClipFrames } = effectiveH3OmniSequenceFrames({
@@ -221,6 +237,10 @@ export function DurationSlider() {
       }
       return
     }
+    // In LTX long-form mode Window Length is an intentional native-pass
+    // choice. Extending the total Duration must add windows instead of
+    // silently growing the native pass until it reaches the engine ceiling.
+    if (isLtx && ltxMultiWindow) return
     if (omniReferenceSequence) {
       if (locked || safeWindowFrames == null) return
       const nextWindowSize = safeWindowFrames / fps
@@ -256,14 +276,15 @@ export function DurationSlider() {
     if (Math.abs(nextWindowSize - windowSize) > 0.0001) {
       setWindowSize(nextWindowSize)
     }
-  }, [duration, locked, supportsSlidingWindows, omniReferenceSequence, maxDuration, fps, swDefaults, safeWindowFrames, unsupportedAutoResolution, windowSize, setDuration, setWindowSize, isH3, savedOverrideFrames, overrideKey])
+  }, [duration, locked, supportsSlidingWindows, omniReferenceSequence, maxDuration, fps, swDefaults, safeWindowFrames, unsupportedAutoResolution, windowSize, setDuration, setWindowSize, isH3, isLtx, ltxMultiWindow, savedOverrideFrames, overrideKey])
 
   const imageMode = useStore(s => s.params.image_mode)
   const isMultiClip = imageMode === 2
   const promptLineCount = useStore(s => s.params.prompt.split('\n').filter((l: string) => l.trim()).length)
   const automaticPromptPacing = (
-    modelOptions?.sliding_window_auto_prompt_pacing === true
-    && !manualFirstLastPrompts
+    (modelOptions?.sliding_window_auto_prompt_pacing === true
+      && !manualFirstLastPrompts)
+    || (isLtx && ltxMultiWindow && !manualLtxPrompts)
   )
 
   return (
@@ -305,6 +326,16 @@ export function DurationSlider() {
             if (!locked) setLocked(true)
             setWindowSize(nextSeconds)
           }
+          if (
+            isLtx
+            && !ltxMultiWindow
+            && nextSeconds > windowSize + 0.0001
+          ) {
+            // Single-pass LTX keeps Duration and Window Length together. The
+            // long timeline becomes available only after the explicit toggle.
+            const maxWindow = ltxSinglePassMax ?? nextSeconds
+            setWindowSize(Math.min(maxWindow, nextSeconds))
+          }
           setDuration(nextSeconds)
         }}
       />
@@ -312,8 +343,10 @@ export function DurationSlider() {
         <div className="text-[10px] text-text-muted mt-1">
           {windowCount} windows of {formatSeconds(windowSize)} &middot;{' '}
           {automaticPromptPacing
-            ? 'full prompt auto-paced'
-            : <>{promptLineCount}/{windowCount} prompts{promptLineCount < windowCount && ' (last reused)'}</>}
+            ? (isLtx ? 'AI-planned window prompts' : 'full prompt auto-paced')
+            : <span className={promptLineCount === windowCount ? '' : 'text-amber-400'}>
+                {promptLineCount}/{windowCount} prompts
+              </span>}
         </div>
       )}
       {showOmniSequence && (
@@ -372,6 +405,7 @@ export function WindowSettings() {
     s.params.minimax_h3_sequence_continuity !== false
   ))
   const h3FirstLastMultiWindow = useStore(s => s.params.minimax_h3_multi_window === true)
+  const ltxMultiWindow = useStore(s => s.params.ltx_multi_window === true)
   const modelType = useStore(s => s.params.model_type)
   const resolution = useStore(s => s.params.resolution)
   const totalVramGb = useStore(s => s.systemStats?.gpu.vram_total_gb ?? 0)
@@ -385,10 +419,16 @@ export function WindowSettings() {
   const swDefaults = (modelOptions as Record<string, unknown> | null)?.sliding_window_defaults as Record<string, number> | undefined
   const supportsSlidingWindows = modelOptions?.sliding_window === true
   const isH3 = String(modelOptions?.architecture || '').startsWith('minimax_h3')
+  const isLtx = modelOptions?.multi_window_sequence_controls === true
   const isOmniReference = modelOptions?.omni_reference === true
   const h3MultiWindowEnabled = isOmniReference
     ? omniReferenceSequence
     : h3FirstLastMultiWindow
+  const rollingSequenceEnabled = isH3
+    ? h3MultiWindowEnabled
+    : isLtx
+      ? ltxMultiWindow
+      : false
   const minimumFrames = isH3
     ? (modelOptions?.frames_minimum ?? 124)
     : omniReferenceSequence
@@ -414,7 +454,7 @@ export function WindowSettings() {
   const overlapSeconds = overlap / fps
   const discardSeconds = discardFrames / fps
   const stride = windowSize - discardSeconds - overlapSeconds
-  const windowCount = !h3MultiWindowEnabled && isH3
+  const windowCount = !rollingSequenceEnabled && (isH3 || isLtx)
     ? 1
     : omniReferenceSequence
     ? h3OmniSequenceWindowCount({
@@ -430,7 +470,7 @@ export function WindowSettings() {
     : (stride > 0 && duration > windowSize
         ? 1 + Math.ceil((duration - windowSize + discardSeconds) / stride)
         : 1)
-  const showSlidingWindow = h3MultiWindowEnabled && duration > windowSize
+  const showSlidingWindow = rollingSequenceEnabled && duration > windowSize
   const memoryPolicy = isOmniReference
     ? modelOptions?.omni_sequence_memory_policy
     : modelOptions?.sliding_window_memory_policy
@@ -473,7 +513,7 @@ export function WindowSettings() {
         <div className="flex items-center justify-between mb-1.5">
           <div className="flex items-center gap-1.5">
             <label className="text-[11px] text-text-muted uppercase tracking-wider">
-              {isH3 ? 'Window Length' : 'Window Size'}
+              {isH3 || isLtx ? 'Window Length' : 'Window Size'}
             </label>
             {isH3 && safeWindowSeconds != null && (
               <span className="text-[9px] text-text-muted normal-case">

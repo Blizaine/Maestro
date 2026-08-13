@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import unittest
 
 
@@ -27,6 +28,23 @@ class TestPinokioGpuCompatibility(unittest.TestCase):
 
         self.assertIn('"event": "/(http:\\/\\/[0-9.:]+)/"', start)
         self.assertIn('url: "{{input.event[1]}}"', start)
+        self.assertIn('"event": "/Incorrect version of mmgp/i"', start)
+        self.assertIn('"break": true', start)
+
+    def test_mmgp_startup_guard_matches_the_pinned_requirement(self):
+        requirements = (_ROOT / "app" / "requirements.txt").read_text(
+            encoding="utf-8"
+        )
+        engine = (_ROOT / "app" / "wgp.py").read_text(encoding="utf-8")
+        pinned = re.search(r"(?m)^mmgp==([^\s#]+)", requirements)
+        guarded = re.search(
+            r'^target_mmgp_version\s*=\s*["\']([^"\']+)["\']',
+            engine,
+            re.MULTILINE,
+        )
+        self.assertIsNotNone(pinned)
+        self.assertIsNotNone(guarded)
+        self.assertEqual(guarded.group(1), pinned.group(1))
 
     def test_rtx50_uses_an_isolated_cuda13_runtime(self):
         profile = (_ROOT / "launcher_profile.js").read_text(encoding="utf-8")
@@ -43,7 +61,7 @@ class TestPinokioGpuCompatibility(unittest.TestCase):
         self.assertIn("/whl/cu130", torch_script)
         self.assertIn("lightx2v_kernel-0.0.2+torch2.10.0", torch_script)
         menu = (_ROOT / "pinokio.js").read_text(encoding="utf-8")
-        self.assertIn("Repair RTX 50 Runtime", menu)
+        self.assertIn("Repair H3 Performance Runtime", menu)
 
     def test_legacy_windows_flash_wheel_matches_wangp_documented_abi(self):
         torch_script = (_ROOT / "torch.js").read_text(encoding="utf-8")

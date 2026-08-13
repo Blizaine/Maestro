@@ -330,6 +330,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertTrue(model_def["any_audio_prompt"])
         self.assertTrue(model_def["audio_prompt_choices"])
         self.assertTrue(model_def["output_audio_is_input_audio"])
+        self.assertTrue(model_def["infer_audio_prompt_from_guide"])
         self.assertTrue(model_def["minimax_h3_media_sources"])
         self.assertTrue(model_def["video_to_video_inpaint"])
         self.assertEqual(
@@ -1039,6 +1040,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertTrue(model_def["video_continuation"])
         self.assertTrue(model_def["sliding_window_exact_total_frames"])
         self.assertTrue(model_def["sliding_window_audio_history"])
+        self.assertNotIn("infer_audio_prompt_from_guide", model_def)
         self.assertEqual(model_def["image_prompt_types_allowed"], "")
         self.assertEqual(
             model_def["omni_reference_limits"],
@@ -1205,6 +1207,41 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("usesH3ManualFirstLast", prompt_input)
         self.assertIn("usesH3ManualPrompts", prompt_input)
 
+    def test_studio_load_settings_round_trips_h3_window_mode_and_optimizations(self):
+        store = _read(_STORE_PATH)
+        controls = _read(_H3_MULTI_WINDOW_CONTROLS_PATH)
+
+        # New First / Last clips persist an explicit mode; existing clips infer
+        # the same choice from their saved storyboard switch.
+        self.assertIn("setParam('minimax_h3_sequence_prompt_mode', mode)", controls)
+        self.assertIn("const restoredH3SequencePromptMode", store)
+        self.assertIn("p.minimax_h3_window_storyboard === false ? 'manual' : 'auto'", store)
+        self.assertIn(
+            "newParams.minimax_h3_sequence_prompt_mode = restoredH3SequencePromptMode",
+            store,
+        )
+        non_omni_cleanup = store.split("if (isOmniReference) {", 1)[1].split(
+            "if (!isH3Model) {", 1
+        )[0]
+        self.assertNotIn("delete params.minimax_h3_sequence_prompt_mode", non_omni_cleanup)
+
+        # Disabled values are as important as enabled values: they clear a
+        # different clip's optimization state instead of leaking it forward.
+        for field in (
+            "override_attention",
+            "skip_steps_cache_type",
+            "skip_steps_multiplier",
+            "skip_steps_start_step_perc",
+            "minimax_h3_turbo_mode",
+            "minimax_h3_turbo_preset",
+            "minimax_h3_text_encoder",
+            "sliding_window_memory_override",
+            "sliding_window_discard_last_frames",
+        ):
+            self.assertIn(f"newParams.{field}", store, field)
+        self.assertIn("const activeTurboPreset", store)
+        self.assertIn("const legacyTurboEnabled", store)
+
     def test_shared_h3_window_ui_and_durable_overrides_are_wired(self):
         controls = _read(_H3_MULTI_WINDOW_CONTROLS_PATH)
         sidebar = _read(_SIDEBAR_PATH)
@@ -1369,7 +1406,10 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("'minimax_h3_full'", default_block)
         self.assertIn("'minimax_h3_ref2va'", default_block)
         self.assertIn("'minimax_h3_ref2va_full'", default_block)
-        self.assertIn("const DEFAULTS_VERSION = 8", store)
+        defaults_version = int(
+            store.split("const DEFAULTS_VERSION = ", 1)[1].splitlines()[0]
+        )
+        self.assertGreaterEqual(defaults_version, 8)
         self.assertIn("6: ['minimax_h3']", store)
         self.assertIn("7: ['minimax_h3_ref2va']", store)
         self.assertIn("8: ['minimax_h3_full', 'minimax_h3_ref2va_full']", store)

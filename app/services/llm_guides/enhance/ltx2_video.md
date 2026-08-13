@@ -22,9 +22,15 @@ per window — no line breaks inside a window, no bullet points, no labels.
 WINDOWS:
 - SINGLE WINDOW (no sliding-window info, or 1 window): one paragraph total.
 - MULTIPLE WINDOWS (2+): one paragraph per window, separated by blank lines.
-  Each window is rendered independently with no memory of prior windows, so
-  re-state characters and setting in EVERY window. Each paragraph should be
-  a complete standalone scene description hitting all seven elements above.
+  Distribute the requested story chronologically across the exact number of
+  windows. Every paragraph contains ONLY its own local actions: never repeat
+  the complete user story in every window and never reveal or perform a later
+  beat early. Window 1 establishes and begins; middle windows continue and
+  advance; the final window resolves the requested ending. Later windows use
+  rolling visual continuity, but the text model does not see the earlier text,
+  so briefly re-state stable identities, wardrobe, location, lighting, and
+  screen direction while opening from the prior window's closing state. Do not
+  restart the action or describe a fresh establishing pose unless requested.
 
 START IMAGE AWARENESS:
 WHEN A START IMAGE IS ATTACHED (the user prompt will say so):
@@ -78,7 +84,9 @@ Applies to ALL video prompts, regardless of content type.
 NEVER USE:
 - Montage / quick cuts / cut to / series of shots — LTX-2 produces ONE
   continuous shot per generation. Multi-shot language confuses the model.
-- Ambient sound descriptions — LTX-2 doesn't generate audio.
+- Unrequested ambient sound inventories. When the active LTX generation has
+  native audio and the user requests dialogue, music, or synchronized sound,
+  preserve and time those requested audible events inside the correct window.
 - Abstract emotional adjectives without visible cues ("passionate", "intense",
   "ethereal").
 - Vague camera moves ("the camera moves") — always pick a specific verb.

@@ -1,233 +1,235 @@
-# LTX-2.5 Research and Maestro Integration Plan
+# LTX-2.5 Integration Plan
 
-Status: research complete; implementation deferred until the MiniMax H3 Sol Engine work is tested and checkpointed
+Status: Native persistent WanGP/MMGP integration implemented locally. The
+two-stage T2V/I2V/audio workflow, decoder selection, shared LTX-2/2.3 LoRAs,
+managed upscaling, and warm model reuse are wired as of 2026-08-13; hands-on
+output and timing parity remain the release gate.
 
-Research date: 2026-08-11
+Research baseline: 2026-08-11
 
-## Recommendation
+WanGP v12.50 decoder audit: 2026-08-12
 
-Add LTX-2.5 as a parallel Maestro model family instead of replacing LTX-2.3.
-Ship a focused Studio implementation of the distilled model first, follow it
-with native multi-shot generation, and preserve the existing LTX-2.3 Retake,
-Outpaint, control, and Director workflows until each one is explicitly
-validated against 2.5.
+Pinned references:
 
-The native multi-shot pipeline is the feature with the highest Maestro value.
-Unlike separately generated clips that Maestro later joins, LTX-2.5 can place
-multiple camera shots and cuts in one model generation while maintaining
-identity, environment, lighting, style, voice, and audio continuity.
+- Lightricks `LTX-2` commit `fd4ded7f2d88d3da713abcdd4ad41ecc4a9314ca`
+- ComfyUI-LTXVideo commit `ac4d99839020b983e956a8ab67ec38aec1b6e65a`
+- LTX-2.5 model revision `28dac7acdc1f78a70e98687db261a949754f8941`
+- Official Python packages `ltx-core==1.2.0` and `ltx-pipelines==1.2.0`
+- WanGP native LTX-2.5 baseline `37f9111` (v12.50-era implementation)
 
-## Official upstream findings
+## Architecture decision
 
-The initial release includes:
+LTX-2.5 is a parallel Maestro family (`ltx2_25`), not an in-place upgrade of
+LTX-2.3. Existing 2.3 models, saved jobs, Retake, Outpaint, Director, and custom
+MMGP behavior remain unchanged.
 
-- native multi-shot video and synchronized audio generation;
-- a custom Gemma 4 12B text encoder and bundled projection;
-- a lighter convolutional video decoder and a higher-quality diffusion video
-  decoder;
-- an improved distilled transformer with its prescribed low-step schedule;
-- a Dev transformer and optional distilled LoRA for higher-quality pipelines;
-- DFR (Diffusion Fidelity Rendering), including spatial upscaling and optional
-  temporal refinement;
-- an optional duration predictor; and
-- official T2V, I2V, audio-driven, Retake, interpolation, IC-LoRA, DubIt, and
-  HDR/EXR pipeline references.
+The first validation bridge used the official Transformers 5.x runtime in an
+isolated per-generation process. It proved the workflow but reloaded the full
+BF16 stack for every job, bypassed MMGP's normal dynamic LoRA path, and made
+warm follow-up generations impossible.
 
-LTX-2.5 is not a checkpoint-only update. Its transformer, custom text encoder,
-video decoder, audio components, and upscalers are separate components. The
-current LTX-2.3 Gemma 3 encoder and decoder path cannot be substituted.
+That bridge is now retired. Maestro ports WanGP's native LTX-2.5 additions into
+its existing LTX2 engine, loads the INT8 ConvRot checkpoint by default, profiles
+all components through MMGP, applies LoRAs dynamically, and retains the loaded
+model between compatible jobs. LTX-2.5 remains a separate Maestro family, so
+the native port does not replace LTX-2.3 or its saved model definitions.
 
-The official Python implementation supports BF16 checkpoints with runtime FP8
-casting and CPU offload. The supplied INT8 ConvRot artifacts are currently
-documented for ComfyUI and should not be exposed through Maestro until a
-verified Python/MMGP loader exists.
+## Official workflow audit
 
-The approximate shared quality component pack is 66 GiB. Installing both Dev
-and Distilled transformers can push the total beyond 110 GiB, so model download
-UX and Storage Manager accounting are release requirements rather than later
-polish.
+Lightricks currently publishes nine 2.5 example workflows:
 
-Official generation constraints include dimensions divisible by 32 and a
-frame lattice of `8n + 1`. The initial official examples use 24 FPS. Maestro
-must represent these as a separate model family's constraints so saved LTX-2.3
-runs and timing are not changed.
+1. T2V/I2V single-stage distilled
+2. T2V/I2V two-stage distilled
+3. text-to-audio single-stage distilled
+4. Ingredients IC-LoRA
+5. inpainting IC-LoRA
+6. outpainting IC-LoRA
+7. motion-track IC-LoRA
+8. union-control IC-LoRA
+9. general V2V IC-LoRA
 
-## Access and license requirements
+The official single-stage distilled workflow uses:
 
-The Hugging Face repository is gated. Before downloading, Maestro should:
+- the split 2.5 Distilled transformer;
+- the LTX-specific Gemma 4 12B encoder with bundled projection;
+- the fast convolutional video VAE by default, the optional NAD diffusion
+  video VAE, and the audio VAE;
+- 24 FPS;
+- dimensions divisible by 32;
+- an `8n+1` frame lattice;
+- nine fixed sigma points/eight denoising evaluations: `1.0, 0.99375,
+  0.9875, 0.98125, 0.975,
+  0.909375, 0.725, 0.421875, 0.0`;
+- Euler ancestral sampling with CFG 1; and
+- image conditioning strength 0.7 in the published I2V example.
 
-1. Explain that the user must accept the model terms on Hugging Face.
-2. Verify that a read token can access the repository.
-3. Convert HTTP 401/403 responses into a useful authentication message.
-4. Estimate required disk space before starting.
-5. Download atomically so interrupted files never appear installed.
+LTX-2.5's distilled release uses the ancestral stage-one sampler. Reusing the
+deterministic 2.3 sampler is not equivalent.
 
-The current LTX-2.x Community License permits commercial use without a paid
-license below its stated annual-revenue threshold and requires a paid license
-for larger entities. Maestro should present and link the upstream terms rather
-than interpreting them for users.
+The official Comfy workflows explicitly reuse a tested subset of 2.3 IC-LoRAs
+with the 2.5 distilled transformer: Ingredients, In/Outpainting, Motion Track,
+Union Control, and Instant Shave/V2V. Maestro will whitelist these by workflow;
+it will not infer compatibility for every 2.3 LoRA from its filename.
 
-## Maestro compatibility audit
+The Python and Comfy examples expose both direct and multiscale variants. The
+production Maestro path now follows the official Python `DistilledPipeline`:
+eight ancestral evaluations at half resolution, learned latent x2 spatial
+upscaling, then three deterministic evaluations at target resolution. This is
+also the successful high-resolution structure used by current WanGP. Saved
+single-stage request payloads are migrated to this supported path.
 
-Maestro's existing LTX implementation already has useful reusable boundaries:
+## Components and access
 
-- component-based checkpoint paths;
-- separate transformer, text encoder, VAE, vocoder, connector, and upscaler
-  loading;
-- MMGP profiling and CPU/GPU offload;
-- model-aware Studio and Director options;
-- native audio/video output handling; and
-- download, cancellation, progress, and storage infrastructure.
+The native runtime downloads:
 
-However, `app/models/ltx2` also contains extensive LTX-2.3-specific behavior,
-including Retake, Outpaint blending, union-control IC-LoRAs, ID-LoRA,
-transition handling, and decoder assumptions. Updating that namespace in
-place would create a high regression risk.
+- `ltx-2.5-22b-distilled_diffusion_model_int8_convrot.safetensors`
+- `gemma4-12b-ltx-v1` (INT8 encoder plus tokenizer files)
+- split video/audio embedding connectors matching the transformer quantization
+- `ltx-2.5-22b_video_vae_bf16.safetensors` (Fast VAE)
+- `ltx-2.5-22b_diffusion_video_vae_bf16.safetensors` (optional NAD decoder)
+- the native audio VAE, vocoder, text projection, and spatial upscaler
 
-Recommended internal structure:
+The Hugging Face repository is gated. Users must accept its terms and sign in
+with a read token. Maestro's existing Hugging Face downloader supplies the
+saved token and its LTX-2.5 error path explains 401/403 access failures.
 
-- a new architecture key such as `ltx2_25`;
-- a parallel implementation namespace such as `app/models/ltx25`;
-- an exact pinned Lightricks source revision recorded in `UPSTREAM.md`;
-- a versioned, hashed component manifest under an LTX-2.5 checkpoint folder;
-- reuse of Maestro's MMGP adapter and job lifecycle instead of relying on an
-  unreleased Diffusers build; and
-- shared 2.5 components reused between Distilled and Dev without mixing them
-  with 2.3 files.
+Later phases add the temporal upscaler, Dev transformer, distilled LoRA, DFR
+detailing LoRA, and optional duration head only when their workflow needs them.
 
-Suggested public names:
+## Phase 1 — implemented locally
 
-- `LTX 2.5 — Distilled`
-- `LTX 2.5 — Dev`
-- Advanced decoder choice: `Fast (Conv)` or `Quality (Diffusion)`
+- New `LTX-2.5 — Distilled` Studio model.
+- Initial official direct distilled T2V baseline (superseded by Phase 2 for
+  production generation).
+- Start-image and end-image conditioning.
+- Synchronized native audio generation.
+- Official 8-step ancestral sampler and fixed CFG 1.
+- Automatic `8n+1` repair for saved/raw frame counts.
+- 64-pixel two-stage resolution alignment and 24 FPS.
+- Native INT8 ConvRot transformer plus MMGP profiling/offload.
+- Fast convolutional VAE is the default decoder, matching WanGP v12.50 and the
+  official memory-efficient ConvVAE path.
+- Optional experimental NAD Diffusion VAE remains selectable in Advanced;
+  only NAD receives the diffusion-specific tiling, allocator, NATTEN, and
+  Triton compatibility path.
+- Persistent in-process model reuse across compatible follow-up jobs.
+- Shared LTX-2/2.3 LoRA discovery and WanGP-compatible dynamic key mapping.
+- Cancellation uses Maestro's normal sticky interrupt lifecycle.
+- Compatible Director workflows are exposed through the existing model audit.
 
-Keep LTX-2.3 installed, selectable, and the default until 2.5 clears the full
-regression matrix.
+Phase 1 release gates:
 
-## Phased implementation
+1. Install the gated assets successfully with a valid HF read token.
+2. Generate 576p T2V at 121 frames.
+3. Repeat with a start image and confirm 0.7 conditioning behavior.
+4. Confirm native audio exists and remains synchronized.
+5. Test portrait output.
+6. Cancel during model loading and during denoising.
+7. Switch back to LTX-2.3 and MiniMax H3 without restarting.
+8. Record peak VRAM, RAM, load time, and denoise time on the RTX 4090.
 
-### Phase 0 — Upstream and download foundation
+Local engineering validation completed before the first interactive Studio
+test:
 
-1. Recheck Lightricks, WanGP, ComfyUI, and Diffusers immediately before coding;
-   release-day manifests and documentation may change quickly.
-2. Pin exact `ltx-core` and `ltx-pipelines` revisions and resolve any discrepancy
-   about whether 2.3 or 2.5 upscalers are expected.
-3. Add the model-family identifier and component metadata without exposing a
-   generation option yet.
-4. Implement gated Hugging Face authentication, disk estimates, hashes,
-   resumable downloads, and atomic publication.
-5. Integrate the files with Storage Manager and duplicate/shared-file
-   accounting.
+- official T2V worker: 256x256, 9 frames, 24 FPS, all 8 evaluations;
+- official start-image I2V and combined first/last-frame workers at
+  conditioning strength 0.7;
+- H.264 MP4 with exactly 9 frames plus 48 kHz stereo AAC audio; and
+- complete Maestro subprocess bridge returning a
+  `(1, 9, 256, 256, 3)` frame tensor and `(16384, 2)` native-audio array.
 
-### Phase 1 — Studio distilled MVP
+The 576p/121-frame quality, memory, cancellation, portrait, model-switching,
+and timing checks above remain the first hands-on release gates.
 
-Support:
+## Phase 1.1 — persistence and UX
 
-- text-to-video;
-- start-image-to-video;
-- native synchronized audio;
-- the official distilled sampling schedule and CFG behavior;
-- 24 FPS, `8n + 1` frames, and dimensions divisible by 32;
-- Maestro cancellation, progress, download, and output metadata; and
-- calibrated MMGP offload profiles for 16, 24, and 32 GB GPUs.
+1. **Completed:** replace the per-generation worker with the native persistent
+   MMGP model lifecycle.
+2. Add a gated-repository preflight before the large downloads begin.
+3. Add disk-space estimates and component-by-component Storage Manager labels.
+4. Benchmark the implemented Fast VAE / NAD Diffusion VAE selector across 16,
+   24, and 32 GB cards. Fast is the default; NAD is explicitly experimental.
 
-Use the ConvVAE as the default stability/performance decoder. Hide LTX-2.3-only
-controls such as existing Outpaint, Retake, union control, ID-LoRA, and
-transition LoRA until separately validated. Use BF16 weights with FP8 casting
-and offload instead of the ComfyUI-only INT8 checkpoints.
+## Phase 2 — two-stage implemented; native multi-shot next
 
-### Phase 2 — Native multi-shot and quality decoder
+Completed locally:
 
-1. Add the diffusion decoder as an optional Quality mode.
-2. Add a native multi-shot generation mode that remains one model call.
-3. Build an LTX-2.5 prompt enhancer that writes chronological natural prose,
-   explicit transitions, recurring subject identifiers, re-established
-   composition after cuts, and continuous or intentionally changed audio.
-4. Target two to four shots per generation by default.
-5. Show the enhanced prompt before generation.
-6. Add duration prediction as an optional Auto Duration control while keeping
-   manual duration available for reproducibility.
+- Official 8-step half-resolution base pass.
+- Official LTX-2.5 learned latent x2 spatial upscaler as a managed gated asset.
+- Official 3-step deterministic full-resolution refinement pass.
+- Pass-aware 11-step progress and explicit upscaler/decode status.
+- Existing aggressive transformer-to-VAE cleanup retained after refinement.
+- LTX-2.5-specific 64-pixel-aligned 480p, 540p, 720p, portrait, square, and
+  experimental 1080p canvases.
+- Standard, Sol, and RTX 50 launches share the normal Maestro runtime path;
+  there is no LTX-2.5-specific sidecar lifecycle.
 
-### Phase 3 — Dev model and DFR
+Next:
 
-1. Add the Dev transformer and its official guided/two-stage schedules.
-2. Add the optional distilled LoRA where the official pipeline calls for it.
-3. Add DFR spatial refinement.
-4. Add optional temporal x2/x4 refinement only after spatial DFR is stable.
-5. Benchmark Dev versus Distilled and ConvVAE versus DiffVAE across each
-   supported runtime.
-6. Consider NVFP4 only after an official Python path or a verified MMGP loader
-   is available.
+1. Add native multi-shot prompting as one model call, preserving identity,
+   environment, lighting, voice, and audio across internal cuts.
+2. Build a 2.5 prompt enhancer for chronological prose, explicit cut timing,
+   recurring subject identifiers, and continuous sound design.
+3. Show the enhanced prompt before generation.
+4. Add the optional duration head only after manual durations are stable.
 
-### Phase 4 — Editing and control validation
+## Phase 3 — Dev and DFR
 
-Validate and expose features individually:
+1. Add the Dev transformer and official guidance schedules.
+2. Add the 2.5 distilled LoRA where the upstream pipeline requires it.
+3. Add DFR spatial refinement and its official pixel-detailing IC-LoRA.
+4. Add optional temporal x2/x4 refinement.
+5. Benchmark BF16+FP8 cast, full BF16, and any official prequantized path that
+   becomes available on 16, 24, and 32 GB GPUs.
 
-1. audio-driven video;
-2. Retake and DubIt;
-3. keyframe interpolation;
-4. inpainting and outpainting;
-5. control-video and other IC-LoRAs;
-6. HDR/EXR output; and
-7. LTX-2.3 LoRA compatibility.
+## Phase 4 — official editing/control workflows
 
-Do not list every 2.3 adapter for 2.5 based only on its filename. Record target
-architecture metadata and enable only tested combinations. Current upstream
-compatibility wording is not consistent enough to treat all older adapters as
-safe automatically.
+Add and validate independently:
 
-### Phase 5 — Director integration
+1. Ingredients/reference composition;
+2. inpainting;
+3. outpainting;
+4. motion tracking;
+5. union pose/depth/edge control;
+6. general V2V/Instant Shave;
+7. audio-to-video and text-to-audio;
+8. Retake and DubIt;
+9. keyframe interpolation; and
+10. HDR/EXR.
+
+Only the exact IC-LoRAs demonstrated by Lightricks are eligible for the initial
+2.5 whitelist. Each Maestro workflow still needs mask polarity, conditioning
+strength, colour, timing, and output regression tests.
+
+## Phase 5 — Director
 
 First add Distilled as a normal per-shot renderer. Then add native multi-shot
-groups:
+blocks:
 
-1. Group two to four adjacent shots that share cast, location, time, and visual
-   world.
-2. Render the group in a single LTX-2.5 call with explicit cuts and audio
-   continuity.
-3. Save the native multi-shot result as a first-class Director block.
-4. Store expected internal cut boundaries and source shot IDs.
-5. Make Dashboard repair group-aware. Until internal-shot replacement is proven,
-   repairing one embedded shot should regenerate its entire native block.
-6. Enable Music Video audio-driven use only after the 2.5 A2V path passes timing
-   and rejoin regression tests.
+1. Group adjacent shots sharing cast, location, time, and visual world.
+2. Render each group in one native 2.5 call with internal cuts and continuous
+   audio.
+3. Save the native block, its source shot IDs, and expected cut boundaries.
+4. Make Dashboard repair group-aware; initially regenerate the whole block.
+5. Enable Music Video audio-driven use only after the 2.5 A2V timing path
+   passes rejoin regression tests.
 
-### Phase 6 — Validation and release gates
+## Full validation matrix
 
-Test at minimum:
-
-- 16 GB, RTX 4090 24 GB, and RTX 5090 32 GB systems;
-- Maestro's standard runtime and the Sol/CUDA 13 runtime;
-- T2V, I2V, audio, both aspect ratios, frame-lattice boundaries, and supported
-  durations;
-- model switching between 2.3 and 2.5 in the same process;
-- cancellation, restart, interrupted downloads, storage cleanup, and missing
-  gated credentials;
-- native multi-shot identity, dialogue, audio, location, and lighting
-  continuity; and
-- Director save, resume, repair, regeneration, and final joining.
-
-Compare a fixed prompt/seed/resolution matrix against the official LTX Python
-or ComfyUI workflow wherever exact parity is possible. Release only when 2.3
-regressions remain at zero and incomplete 2.5 component sets cannot be selected.
-
-## Recommended release order
-
-1. Distilled Studio T2V/I2V/audio.
-2. Native multi-shot and the dedicated prompt enhancer.
-3. Quality diffusion decoder.
-4. Dev and DFR.
-5. Editing/control features.
-6. Director native multi-shot groups.
-
-This order puts LTX-2.5's genuinely new cinematic capability into Maestro
-early without coupling the first release to every advanced 2.3 workflow.
+- Windows RTX 4090 24 GB and RTX 5090 32 GB first; 16 GB after memory tuning.
+- Standard CUDA 12.8 runtime and CUDA 13/Sol host runtimes.
+- T2V, I2V, first/last frames, both aspect ratios, lattice boundaries, and
+  supported durations.
+- Model switching between LTX-2.3, LTX-2.5, and MiniMax H3.
+- Cancellation, restart, interrupted downloads, missing gated credentials,
+  update, repair, reset, and storage cleanup.
+- Fixed prompt/seed/resolution comparisons against the pinned official Comfy
+  workflow.
 
 ## Primary references
 
+- Workflows: <https://github.com/Lightricks/ComfyUI-LTXVideo/tree/master/example_workflows/2.5>
 - Model card and gated weights: <https://huggingface.co/Lightricks/LTX-2.5>
 - Official source: <https://github.com/Lightricks/LTX-2>
 - Prompting guide: <https://docs.ltx.io/open-source-model/usage-guides/prompting-guide>
 - Community license: <https://github.com/Lightricks/LTX-2/blob/main/LICENSE.md>
-- DFR reference pipeline: <https://github.com/Lightricks/LTX-2/blob/main/packages/ltx-pipelines/src/ltx_pipelines/dfr_pipeline.py>
-- WanGP status to recheck before implementation: <https://github.com/deepbeepmeep/Wan2GP>

@@ -1,8 +1,20 @@
-const { isRtx50, runtimeProfile } = require("./launcher_profile")
+const {
+  isRtx50,
+  legacyRuntimeProfile,
+  runtimeProfile,
+} = require("./launcher_profile")
 
 module.exports = async (kernel) => {
   let port = await kernel.port()
   const runtime = runtimeProfile(kernel)
+  const legacyRuntime = legacyRuntimeProfile(kernel)
+  const hasRecoveryRuntime = runtime.env !== legacyRuntime.env
+  const selectedEnv = hasRecoveryRuntime
+    ? `{{exists('${runtime.marker}') ? '${runtime.env}' : '${legacyRuntime.env}'}}`
+    : runtime.env
+  const selectedPython = hasRecoveryRuntime
+    ? `{{exists('${runtime.marker}') ? '${runtime.python}' : '${legacyRuntime.python}'}}`
+    : runtime.python
   const runtimeGuard = isRtx50(kernel) ? [{
     when: `{{!exists('${runtime.marker}')}}`,
     method: "input",
@@ -26,13 +38,20 @@ module.exports = async (kernel) => {
     daemon: true,
     run: [
       ...runtimeGuard,
+      ...(hasRecoveryRuntime ? [{
+        when: `{{!exists('${runtime.marker}')}}`,
+        method: "log",
+        params: {
+          raw: "The preferred H3 acceleration runtime is not ready; starting the preserved compatibility runtime. Run Update to finish the automatic migration.",
+        },
+      }] : []),
       // SAM service starts on demand (launched by the backend when inpaint is used)
       // — not started here to avoid holding a CUDA context that wastes VRAM
       {
         method: "shell.run",
         params: {
-          venv: runtime.env,
-          venv_python: runtime.python,
+          venv: selectedEnv,
+          venv_python: selectedPython,
           env: {
             SERVER_PORT: port
           },
@@ -41,6 +60,9 @@ module.exports = async (kernel) => {
             "python launch.py {{args.compile ? '--compile' : ''}}"
           ],
           on: [{
+            "event": "/Incorrect version of mmgp/i",
+            "break": true
+          }, {
             "event": "/(http:\/\/[0-9.:]+)/",
             "done": true
           }]

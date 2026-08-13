@@ -1,8 +1,7 @@
 const {
-  isRtx50,
   isSolCapable,
+  needsCuda13DriverUpdate,
   runtimeProfile,
-  solRuntimeProfile,
 } = require("./launcher_profile")
 module.exports = {
   version: "8.0",
@@ -11,17 +10,14 @@ module.exports = {
   icon: "maestro_simplified_icon_alpha.png",
   menu: async (kernel, info) => {
     const runtime = runtimeProfile(kernel)
-    const rtx50 = isRtx50(kernel)
     const solCapable = isSolCapable(kernel)
-    const solRuntime = solRuntimeProfile(kernel)
-    const separateSolRuntime = solCapable && !rtx50
+    const cuda13DriverUpdateRequired = solCapable && needsCuda13DriverUpdate(kernel)
     // Do not gate this menu on kernel.gpu. Pinokio can render an app menu
     // before its hardware inventory has populated that property, which would
     // hide Start from supported systems. install.js retains the documented
     // execution-time NVIDIA check for fresh installations.
     let installed = info.exists("app/env") || info.exists("app/env-rtx50") || info.exists("app/env-sol")
-    let runtimeReady = info.exists(runtime.marker)
-    let solRuntimeReady = info.exists(solRuntime.marker)
+    let runtimeReady = info.exists(runtime.marker) && info.exists(runtime.flashMarker)
     let running = {
       install: info.running("install.js"),
       sol_install: info.running("sol_install.js"),
@@ -35,8 +31,12 @@ module.exports = {
       return [{
         default: true,
         icon: "fa-solid fa-plug",
-        text: running.sol_install ? "Installing H3 Sol Engine Runtime" : "Installing",
-        href: running.sol_install ? "sol_install.js" : "install.js",
+        text: running.sol_install
+          ? "Installing H3 Sol Engine Runtime"
+          : "Installing",
+        href: running.sol_install
+          ? "sol_install.js"
+          : "install.js",
       }]
     } else if (running.update) {
       return [{
@@ -45,12 +45,32 @@ module.exports = {
         text: "Updating",
         href: "update.js",
       }]
-    } else if (installed && rtx50 && !runtimeReady) {
+    } else if (installed && solCapable && !cuda13DriverUpdateRequired && !runtimeReady) {
       return [{
         default: true,
         icon: "fa-solid fa-bolt",
-        text: "Finish RTX 50 Runtime Upgrade",
+        text: "Finish H3 Performance Runtime Upgrade",
         href: "update.js",
+      }, ...(info.exists("app/env") ? [{
+        icon: "fa-solid fa-shield-halved",
+        text: "Start with Compatibility Runtime",
+        href: "start.js",
+      }] : []), {
+        icon: "fa-regular fa-circle-xmark",
+        text: "<div><strong>Reset</strong><div>Revert to pre-install state</div></div>",
+        href: "reset.js",
+        confirm: "Are you sure you wish to reset the app?"
+      }]
+    } else if (installed && solCapable && cuda13DriverUpdateRequired && !runtimeReady) {
+      return [...(info.exists("app/env") ? [{
+        default: true,
+        icon: "fa-solid fa-shield-halved",
+        text: "Start with Compatibility Runtime",
+        href: "start.js",
+      }] : []), {
+        icon: "fa-solid fa-triangle-exclamation",
+        text: `NVIDIA Driver 580+ Required (found ${kernel.gpu_driver})`,
+        href: "https://www.nvidia.com/Download/index.aspx",
       }, {
         icon: "fa-regular fa-circle-xmark",
         text: "<div><strong>Reset</strong><div>Revert to pre-install state</div></div>",
@@ -133,11 +153,7 @@ module.exports = {
           icon: "fa-solid fa-power-off",
           text: "Start",
           href: "start.js",
-        }, ...(separateSolRuntime && solRuntimeReady ? [{
-          icon: "fa-solid fa-bolt",
-          text: "Start with H3 Sol Engine (Experimental)",
-          href: "start_sol.js",
-        }] : []), {
+        }, {
           icon: "fa-solid fa-display",
           text: "Start (Classic UI)",
           href: "start_classic.js",
@@ -158,21 +174,15 @@ module.exports = {
             params: {
               compile: true
             }
-          }, ...(rtx50 ? [{
+          }, ...(solCapable && !cuda13DriverUpdateRequired ? [{
             icon: "fa-solid fa-bolt",
-            text: "Repair RTX 50 Runtime",
+            text: "Repair H3 Performance Runtime",
             href: "torch.js",
             params: {
               venv: runtime.env,
               path: "app",
               xformers: true
             }
-          }] : []), ...(separateSolRuntime ? [{
-            icon: "fa-solid fa-bolt",
-            text: solRuntimeReady
-              ? "Repair H3 Sol Engine Runtime"
-              : "Install H3 Sol Engine Runtime",
-            href: "sol_install.js",
           }] : [])]
         }, {
           icon: "fa-regular fa-folder-open",
@@ -192,13 +202,7 @@ module.exports = {
           icon: "fa-solid fa-plug",
           text: "Install",
           href: "install.js",
-        }, ...(separateSolRuntime ? [{
-          icon: "fa-solid fa-bolt",
-          text: solRuntimeReady
-            ? "Repair H3 Sol Engine Runtime (Experimental)"
-            : "Install H3 Sol Engine Runtime (Experimental)",
-          href: "sol_install.js",
-        }] : []), {
+        }, {
           // Install / re-install the SAM 3.1 segmentation service
           // (separate Python 3.12 conda env, takes ~5 min). Only
           // needed for the experimental Inpaint feature in Edit

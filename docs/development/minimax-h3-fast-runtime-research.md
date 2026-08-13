@@ -7,13 +7,14 @@ Research date: 2026-08-07
 Maestro checkpoint before this note: `6707da2` (`feat: add MiniMax H3 LoRA browser routing`)
 Checkpoint verification at original research point: `58` MiniMax H3 regression tests passed
 
-Implementation update (2026-08-11): Maestro now routes H3 through its shared
+Implementation update (2026-08-12): Maestro now routes H3 through its shared
 SageAttention backend, includes optional First Block Cache, and bundles an
-H3-scoped Sol Engine. Sol remains experimental and opt-in. It requires a
-compatible SM89/SM90/SM100/SM120 GPU and a PyTorch 2.10 / Triton 3.6 runtime;
-RTX 40 uses an isolated `env-sol` launcher environment and RTX 50 uses its
-existing CUDA 13 environment. Unsupported calls and kernel failures recover
-to Maestro's normal dense attention backend.
+H3-scoped Sol Engine. The Sol optimization remains an explicit rendering
+choice, while its tested PyTorch 2.10 / Triton 3.6 / CUDA 13 runtime is now the
+default Install, Update, and Start path on compatible SM89/SM90/SM100/SM120
+GPUs. RTX 40 uses `env-sol`, RTX 50 uses `env-rtx50`, and existing RTX 40
+`env` installs remain available as a migration fallback. Unsupported calls and
+kernel failures recover to Maestro's normal dense attention backend.
 
 ## Purpose
 
@@ -335,7 +336,7 @@ This is the safest first implementation because SageAttention is already install
 
 Evaluate both EasyCache-style output-delta reuse and NVIDIA's H3-oriented FirstBlockCache design before choosing the final algorithm.
 
-### Phase 3: Add optional Sol-Attn (implemented; runtime generation validation pending)
+### Phase 3: Add optional Sol-Attn (implemented and runtime-validated)
 
 1. Resolve implementation licensing and dependency strategy first.
 2. Avoid a mandatory PyTorch/Triton upgrade for all users if possible.

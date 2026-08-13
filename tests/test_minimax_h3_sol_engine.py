@@ -1,4 +1,4 @@
-"""Regression coverage for Maestro's optional MiniMax H3 Sol Engine path."""
+"""Regression coverage for Maestro's MiniMax H3 Sol Engine path."""
 
 from __future__ import annotations
 
@@ -40,32 +40,40 @@ class TestSolEngineSourceContracts(unittest.TestCase):
             (package / "interface.py").read_text(encoding="utf-8"),
         )
 
-    def test_legacy_runtime_is_preserved_and_sol_runtime_is_opt_in(self):
+    def test_sol_runtime_is_default_on_supported_hardware_with_legacy_fallback(self):
         profile = (ROOT / "launcher_profile.js").read_text(encoding="utf-8")
         torch_script = (ROOT / "torch.js").read_text(encoding="utf-8")
         sol_script = (ROOT / "sol_torch.js").read_text(encoding="utf-8")
         menu = (ROOT / "pinokio.js").read_text(encoding="utf-8")
+        start = (ROOT / "start.js").read_text(encoding="utf-8")
         reset = (ROOT / "reset.js").read_text(encoding="utf-8")
 
         self.assertIn('env: "env-sol"', profile)
         self.assertIn('target === "sm_89"', profile)
+        self.assertIn("needsCuda13DriverUpdate", profile)
+        self.assertIn("isSolCapable(kernel) && !needsCuda13DriverUpdate(kernel)", profile)
         self.assertIn("triton-windows==3.3.1.post19", torch_script)
         self.assertIn("triton-windows==3.6.0.post25", torch_script)
-        self.assertIn("triton-windows==3.6.0.post25", sol_script)
-        self.assertIn("torch==2.10.0", sol_script)
-        self.assertIn("Start with H3 Sol Engine", menu)
+        self.assertIn("torch==2.10.0", torch_script)
+        self.assertIn('module.exports = require("./torch")', sol_script)
+        self.assertNotIn("Start with H3 Sol Engine", menu)
+        self.assertIn("Finish H3 Performance Runtime Upgrade", menu)
+        self.assertIn("Start with Compatibility Runtime", menu)
+        self.assertIn("Repair H3 Performance Runtime", menu)
+        self.assertIn("legacyRuntimeProfile", start)
+        self.assertIn("exists('${runtime.marker}') ? '${runtime.env}'", start)
         self.assertIn('path: "app/env-sol"', reset)
 
-    def test_update_repairs_an_interrupted_optional_sol_runtime(self):
+    def test_update_repairs_the_active_sol_runtime(self):
         updater = (ROOT / "update.js").read_text(encoding="utf-8")
         sol_script = (ROOT / "sol_torch.js").read_text(encoding="utf-8")
 
-        self.assertIn("optionalSolReady", updater)
-        self.assertIn("exists('${solRuntime.marker}')", updater)
-        self.assertIn("exists('${solRuntime.flashMarker}')", updater)
-        self.assertIn('uri: "sol_torch.js"', updater)
+        self.assertIn("exists('${runtime.marker}')", updater)
+        self.assertIn("exists('${runtime.flashMarker}')", updater)
+        self.assertIn('uri: "torch.js"', updater)
+        self.assertNotIn('uri: "sol_torch.js"', updater)
         self.assertIn("flash_only: true", updater)
-        self.assertIn('{{args && args.flash_only}}', sol_script)
+        self.assertIn('module.exports = require("./torch")', sol_script)
 
     def test_runtime_preflight_reports_sol_readiness(self):
         preflight = (APP / "scripts" / "runtime_preflight.py").read_text(

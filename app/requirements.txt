@@ -4,7 +4,10 @@
 # re-test Studio + Director end-to-end before committing. Do NOT loosen
 # pins without testing — many of these have known breakage on newer releases
 # (HuggingFace tokenizers/accelerate, torch/torchcodec/xformers ABI, etc).
-mmgp==3.7.6
+# 3.7.12 preserves custom native linear forwards while applying LoRAs.
+# LTX-2.5 INT8 ConvRot checkpoints require that path; older MMGP releases
+# produce corrupted/noise video whenever an otherwise-compatible LoRA is active.
+mmgp==3.7.12
 
 # Core AI stack
 diffusers==0.36.0

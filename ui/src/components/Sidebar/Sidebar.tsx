@@ -166,8 +166,6 @@ export function Sidebar() {
             start/end anchors — so the generic Duration slider and
             start/end ImageUpload don't apply there. */}
         {isVideo && !isBlend && <DurationSlider />}
-        {isVideo && <MiniMaxH3Optimizations />}
-        {isVideo && <H3MultiWindowControls />}
         {/* Frames (image_mode 0) AND Extend (image_mode 3) both use the unified
             InputsPanel. In Extend mode its first tile is the source video to
             continue from; otherwise it's the start frame. */}
@@ -182,6 +180,8 @@ export function Sidebar() {
           </div>
         )}
         {isOmniReference && <OmniReferenceSection />}
+        {isVideo && <MiniMaxH3Optimizations />}
+        {isVideo && <H3MultiWindowControls />}
         {isBlend && <BlendControls />}
 
         {/* Image mode: reference images */}

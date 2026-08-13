@@ -77,6 +77,26 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.8.0 (2026-08-13)
+
+**LTX-2.5 and next-generation LTX workflows**
+- Added native local LTX-2.5 with synchronized audio. Distilled is enabled by default, while Dev and NVFP4 variants can be enabled in Settings.
+- Added the official Distilled 8-step base pass, learned latent upscaling, and 3-step full-resolution refinement, with persistent model reuse for faster follow-up generations.
+- Added first and last frames, timed frame injection, audio-driven video, control-video audio, native audio, and compatible LTX-2/2.3 LoRAs from the existing shared library.
+- Added LTX-2.5 to compatible Director Music Video, Short Film, and seamless-generation workflows.
+- Fixed LTX-2.5 LoRAs producing noise on INT8 ConvRot checkpoints and added a choice between the fast video decoder and optional NAD diffusion decoder.
+
+**LTX multi-window sequences**
+- Added one consistent Multi-window Sequence workflow to all LTX video models, with AI-planned or exact one-prompt-per-window manual modes.
+- Added duration and window counts, early prompt validation, editable generated window prompts, and chronological prompt planning that advances the story instead of repeating it.
+- Improved LTX-2.5 continuation so full motion and matching audio history cross each window boundary cleanly without distorted seams or a slowdown in camera movement.
+
+**Audio, saved settings, and performance runtime**
+- Fixed slowed-down generated audio across MiniMax H3 and LTX and repaired standalone soundtrack routing when loading older settings.
+- Load Settings now restores LTX window choices and geometry plus H3 Turbo, Sol Engine, First Block Cache, text encoder, and their associated values.
+- Made the tested Sol-capable Python 3.11 / PyTorch 2.10 / CUDA 13 environment the normal Install, Update, and Start runtime on compatible RTX 40- and 50-series systems, while retaining safe fallbacks.
+- Reordered the Studio sidecar to Duration, inputs or Omni references, H3 Optimizations, then Multi-window Sequence.
+
 ### v1.7.5 (2026-08-11)
 
 **MiniMax H3 Performance Update**
@@ -538,28 +558,28 @@ The first video is always the slow one: install is ~10–20 min, then the first 
 1. Install [Pinokio](https://pinokio.computer).
 2. In Pinokio, open the **Discover** tab and search for *Maestro* — or click the **Download** button on the [Maestro repo page](https://github.com/Blizaine/Maestro) and paste the URL.
 3. Click **Install**. The launcher will:
-   - Create a Python virtual environment in `app/env/` (`app/env-rtx50/` on RTX 50-series GPUs)
+   - Create the hardware-matched Python environment: `app/env-sol/` on supported RTX 40-class GPUs, `app/env-rtx50/` on RTX 50-series GPUs, or `app/env/` on other supported NVIDIA GPUs
    - Install all Python dependencies (torch, xformers, transformers, fastapi, …)
    - Build the React UI in `ui/`
 4. When install finishes, click **Start**. The first generation in each model triggers a one-time weight download.
 
 The install (without model downloads) typically takes **10–20 minutes** depending on internet speed. SAM 3.1 (used only for the experimental Inpaint feature) is **not installed by default** — install it on demand via Pinokio menu → "Install Inpaint Support (SAM 3.1)" if you want to use Inpaint.
 
-RTX 50-series cards use a dedicated Python 3.11, PyTorch 2.10, CUDA 13 environment with native SageAttention and Lightx2v NVFP4 kernels. Existing RTX 50 installs migrate automatically the next time **Update** is run; the older environment is retained as a recovery point. Maestro prints a short runtime audit at startup. If that audit reports a missing RTX 50 kernel after Update completed, use **Advanced → Repair RTX 50 Runtime** in the Pinokio menu.
+Supported RTX 40- and 50-series cards use Maestro's standard Python 3.11, PyTorch 2.10, CUDA 13 H3 performance runtime. NVIDIA driver 580 or newer is required for that runtime. Existing installations migrate automatically through the normal **Update** action; RTX 40 migrations are created alongside the prior `app/env/` environment so a failed or interrupted upgrade can still launch the compatibility runtime. Maestro prints a short runtime audit at startup. If it reports a missing H3 kernel after Update completes, use **Advanced → Repair H3 Performance Runtime** in the Pinokio menu.
 
-MiniMax H3 also offers an optional **Sol Engine (Experimental)** sparse-attention backend. RTX 50-series systems can enable it directly in H3 Advanced settings after Update. RTX 40-series systems keep Maestro's proven default runtime and can add a separate `app/env-sol/` environment through **Pinokio menu -> Install H3 Sol Engine Runtime**, then launch with **Start with H3 Sol Engine**. The first Sol generation compiles Triton kernels and can start more slowly. RTX 20/30-series GPUs remain on SageAttention because the optimized Sol kernels do not support their compute architecture. If Sol cannot handle a call, Maestro reports it once and falls back to the normal dense H3 attention path.
+MiniMax H3 offers an optional **Sol Engine (Experimental)** sparse-attention backend inside the H3 Optimizations panel. Its runtime support is installed and launched by default on compatible hardware; there is no separate Sol installer or Start mode. The optimization toggle remains per-generation so existing projects do not silently change their rendering recipe. The first Sol generation compiles Triton kernels and can start more slowly. RTX 20/30-series GPUs remain on SageAttention because the optimized Sol kernels do not support their compute architecture. If Sol cannot handle a call, Maestro reports it once and falls back to the normal dense H3 attention path.
 
 On one RTX 4090 test system, a 14.4-second 720p H3 generation at 30 steps measured 23m43s with neither optimization, 19m30s with Sol, 17m54s with First Block Cache, and 12m59s with both. Treat these as a directional example only: model choice, prompt/reference load, resolution, drivers, cache threshold, and hardware all affect speed and quality.
 
 ### Updating
 
-Click **Update** in the launcher menu. This pulls the latest launcher scripts and app code, reinstalls any new Python dependencies, and rebuilds the React UI.
+Click **Update** in the launcher menu. This pulls the latest launcher scripts and app code, migrates or repairs the active hardware runtime when needed, reinstalls new Python dependencies, and rebuilds the React UI. When an older RTX 40 installation first receives the unified H3 runtime, Pinokio automatically continues into the one-time migration after the code pull.
 
 ### Resetting
 
-The optional `app/env-sol/` environment is removed along with the standard Maestro environments.
+The `app/env-sol/` H3 performance environment is removed along with the other Maestro environments.
 
-Click **Reset** to wipe the install and start over. Removes `app/env/`, `app/env-rtx50/`, `ui/node_modules/`, `ui/dist/`, and the SAM venv if installed. Model checkpoints in `app/ckpts/` are NOT removed by default — delete them manually if you want a true fresh start.
+Click **Reset** to wipe the install and start over. Removes `app/env/`, `app/env-sol/`, `app/env-rtx50/`, `ui/node_modules/`, `ui/dist/`, and the SAM venv if installed. Model checkpoints in `app/ckpts/` are NOT removed by default — delete them manually if you want a true fresh start.
 
 ## Usage
 

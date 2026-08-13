@@ -282,6 +282,15 @@ def assess_director_model(
         ("generic_audio_guide" if model_def.get("any_audio_prompt") else "none")
     )
     native_voice_reference = strategy == OMNI_REFERENCE
+    configured_voice_mode = model_def.get("director_voice_reference_mode")
+    if configured_voice_mode is None:
+        voice_reference_mode = (
+            "native_reference" if native_voice_reference
+            else "id_lora" if architecture_key.startswith("ltx2")
+            else "none"
+        )
+    else:
+        voice_reference_mode = str(configured_voice_mode or "none")
     return {
         "image": image,
         "video": {
@@ -298,14 +307,8 @@ def assess_director_model(
             or audio_input_mode == "reference_manifest"
         ),
         "generates_audio": bool(model_def.get("returns_audio")),
-        "supports_voice_reference": bool(
-            architecture_key.startswith("ltx2") or native_voice_reference
-        ),
-        "voice_reference_mode": (
-            "native_reference" if native_voice_reference
-            else "id_lora" if architecture_key.startswith("ltx2")
-            else "none"
-        ),
+        "supports_voice_reference": voice_reference_mode != "none",
+        "voice_reference_mode": voice_reference_mode,
         "video_strategy": strategy,
         "audio_input_mode": audio_input_mode,
         "reference_mode": str(model_def.get("director_reference_mode") or "start_frame"),

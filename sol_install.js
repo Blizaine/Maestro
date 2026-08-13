@@ -1,4 +1,9 @@
-const { isRtx50, isSolCapable, solRuntimeProfile } = require("./launcher_profile")
+const {
+  isRtx50,
+  isSolCapable,
+  needsCuda13DriverUpdate,
+  solRuntimeProfile,
+} = require("./launcher_profile")
 
 module.exports = async (kernel) => {
   if (!isSolCapable(kernel)) {
@@ -9,6 +14,12 @@ module.exports = async (kernel) => {
   if (isRtx50(kernel)) {
     throw new Error(
       "RTX 50 systems already receive the compatible CUDA 13 / Triton runtime through Maestro Update."
+    )
+  }
+  if (needsCuda13DriverUpdate(kernel)) {
+    throw new Error(
+      `NVIDIA driver ${kernel.gpu_driver} is too old for Maestro's CUDA 13 H3 runtime. ` +
+      "Install NVIDIA driver 580 or newer, then run Update again."
     )
   }
   const runtime = solRuntimeProfile(kernel)
@@ -48,8 +59,8 @@ module.exports = async (kernel) => {
     }, {
       method: "input",
       params: {
-        title: "H3 Sol Engine runtime installed",
-        description: "Start Maestro with the Sol Engine runtime, then enable Sol Engine in H3 Advanced settings.",
+        title: "H3 performance runtime repaired",
+        description: "Use the normal Start button. Sol Engine is available from Maestro's H3 Optimizations panel.",
       },
     }],
   }

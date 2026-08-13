@@ -105,7 +105,7 @@ AUTOSAVE_ERROR_FILENAME = "error_queue.zip"
 AUTOSAVE_TEMPLATE_PATH = AUTOSAVE_FILENAME
 CONFIG_FILENAME = "wgp_config.json"
 PROMPT_VARS_MAX = 10
-target_mmgp_version = "3.7.6"
+target_mmgp_version = "3.7.12"
 WanGP_version = "10.9875"
 settings_version = 2.58
 max_source_video_frames = 15000  # raised to support frame injection in long sliding-window videos (e.g. 9 windows × 20s × 25fps = 4500 frames)
@@ -878,6 +878,7 @@ def validate_settings(state, model_type, single_prompt, inputs):
     image_prompt_type = inputs["image_prompt_type"]
     audio_prompt_type = inputs["audio_prompt_type"]
     if image_prompt_type == None: image_prompt_type = ""
+    if audio_prompt_type == None: audio_prompt_type = ""
     video_prompt_type = inputs["video_prompt_type"]
     if video_prompt_type == None: video_prompt_type = ""
     force_fps = inputs["force_fps"]
@@ -923,6 +924,23 @@ def validate_settings(state, model_type, single_prompt, inputs):
     self_refiner_plan = inputs["self_refiner_plan"]
     model_mode = inputs["model_mode"]
     medium = "Videos" if image_mode == 0 else "Images"
+
+    if (
+        image_mode == 0
+        and model_def.get("infer_audio_prompt_from_guide", False)
+        and audio_guide is not None
+        and (video_guide is None or "V" not in video_prompt_type)
+        and not any(letter in audio_prompt_type for letter in "AK2")
+    ):
+        # Direct/non-HTTP callers need the same repair as launch.py. Without
+        # the A selector the generic validation below nulls audio_guide before
+        # a native Audio-to-Video model can slice it for conditioning.
+        audio_prompt_type = f"A{audio_prompt_type}"
+        inputs["audio_prompt_type"] = audio_prompt_type
+        print(
+            "[Audio Input] Restored missing Audio-to-Video selector for "
+            f"the attached soundtrack ({model_type})."
+        )
 
     if image_start is not None and not isinstance(image_start, list): image_start = [image_start]
     outpainting_modes = model_def.get("video_guide_outpainting", [])
@@ -2114,7 +2132,7 @@ def update_generation_status(html_content):
     if(html_content):
         return gr.update(value=html_content)
 
-family_handlers = ["models.wan.wan_handler", "models.wan.ovi_handler", "models.wan.df_handler", "models.hyvideo.hunyuan_handler", "models.ltx_video.ltxv_handler", "models.ltx2.ltx2_handler", "models.ltx2.scenema_audio_handler", "models.ltx2.ltx_audio_tts_handler", "models.minimax_h3.minimax_h3_handler", "models.longcat.longcat_handler", "models.flux.flux_handler", "models.qwen.qwen_handler", "models.kandinsky5.kandinsky_handler",  "models.z_image.z_image_handler", "models.krea2.krea2_handler", "models.hidream.hidream_handler", "models.TTS.ace_step_handler", "models.TTS.chatterbox_handler", "models.TTS.qwen3_handler", "models.TTS.yue_handler", "models.TTS.heartmula_handler", "models.TTS.kugelaudio_handler", "models.TTS.index_tts2_handler"]
+family_handlers = ["models.wan.wan_handler", "models.wan.ovi_handler", "models.wan.df_handler", "models.hyvideo.hunyuan_handler", "models.ltx_video.ltxv_handler", "models.ltx2.ltx2_handler", "models.ltx25.ltx25_handler", "models.ltx2.scenema_audio_handler", "models.ltx2.ltx_audio_tts_handler", "models.minimax_h3.minimax_h3_handler", "models.longcat.longcat_handler", "models.flux.flux_handler", "models.qwen.qwen_handler", "models.kandinsky5.kandinsky_handler",  "models.z_image.z_image_handler", "models.krea2.krea2_handler", "models.hidream.hidream_handler", "models.TTS.ace_step_handler", "models.TTS.chatterbox_handler", "models.TTS.qwen3_handler", "models.TTS.yue_handler", "models.TTS.heartmula_handler", "models.TTS.kugelaudio_handler", "models.TTS.index_tts2_handler"]
 DEFAULT_LORA_ROOT = "loras"
 
 def register_family_lora_args(parser, lora_root):
@@ -4378,6 +4396,25 @@ def load_models(model_type, override_profile = -1, output_type="video", **model_
     wan_model, pipe = model_type_handler.load_model(
                 local_model_file_list, model_type, base_model_type, model_def, quantizeTransformer = quantizeTransformer, text_encoder_quantization = text_encoder_quantization,
                 dtype = transformer_dtype, VAE_dtype = VAE_dtype, mixed_precision_transformer = mixed_precision_transformer, save_quantized = save_quantized, submodel_no_list   = model_submodel_no_list, text_encoder_filename = text_encoder_filename, profile=profile, lm_decoder_engine=lm_decoder_engine_obtained, **model_kwargs )
+
+    # LTX-2.5 ships against Transformers 5.x while Maestro's established
+    # model families still share Transformers 4.x. Its handler therefore owns
+    # an isolated official subprocess runtime instead of exposing PyTorch
+    # modules to MMGP. Keep the normal model lifecycle contract through a
+    # tiny offload adapter so cancellation/release remain generic.
+    if isinstance(pipe, dict) and pipe.pop("external_runtime", False):
+        offload_adapter = pipe.pop("offload_adapter", None)
+        if offload_adapter is None:
+            raise RuntimeError(
+                f"External runtime model '{model_type}' did not provide an "
+                "offload lifecycle adapter."
+            )
+        offloadobj = offload_adapter(wan_model)
+        if len(args.gpu) > 0:
+            torch.set_default_device(args.gpu)
+        transformer_type = model_type
+        loaded_profile = profile
+        return wan_model, offloadobj
 
     kwargs = {}
     if "pipe" in pipe:
@@ -6910,6 +6947,25 @@ def slice_audio_window(audio_path, start_frame, num_frames, fps, output_dir, suf
     return data, sample_rate
 
 
+def _audio_waveform_sample_count(waveform):
+    """Return samples for either channel-first or channel-last audio.
+
+    ``slice_audio_window`` returns ``(channels, samples)`` while generated
+    native audio is normally ``(samples, channels)``. Looking only at axis 0
+    therefore mistakes stereo audio for a two-sample clip. The sample axis is
+    the larger non-channel dimension for every waveform used by Maestro.
+    """
+
+    if waveform is None:
+        return 0
+    shape = tuple(int(value) for value in getattr(waveform, "shape", ()))
+    if not shape or any(value == 0 for value in shape):
+        return 0
+    if len(shape) == 1:
+        return shape[0]
+    return max(shape[-2:])
+
+
 def get_audio_file_sample_rate(audio_path):
     import ffmpeg
 
@@ -6930,6 +6986,19 @@ def resolve_mux_audio_sampling_rate(default_rate, source_audio_metadata=None, au
         if audio_path:
             sample_rates.append(get_audio_file_sample_rate(audio_path))
     return max(sample_rates)
+
+
+def resolve_generated_audio_sampling_rate(result, default_rate):
+    """Honor a model's native output rate for every generated-audio path."""
+
+    fallback = max(1, int(default_rate))
+    if not isinstance(result, dict):
+        return fallback
+    try:
+        sample_rate = int(result.get("audio_sampling_rate", fallback) or fallback)
+    except (TypeError, ValueError):
+        return fallback
+    return sample_rate if sample_rate > 0 else fallback
 
 
 def resolve_model_preprocess_all(model_def, **kwargs):
@@ -7307,6 +7376,10 @@ def generate_video(
     minimax_h3_sequence_clip_frames=None,
     minimax_h3_sequence_memory_override=False,
     minimax_h3_text_encoder="nvfp4_awq",
+    # LTX-2.5 defaults to the conventional fast ConvVAE. The optional NAD
+    # diffusion decoder is model state and therefore triggers a model reload
+    # when changed in Advanced settings.
+    ltx25_video_vae="fast",
     # Exact per-pass prompts from Maestro's H3 planner or manual sequence UI.
     # Kept as a real list so semantic newlines inside an automatic Context-IR
     # prompt are never mistaken for prompt boundaries.
@@ -7409,6 +7482,32 @@ def generate_video(
                 "reloading the model profile."
             )
             reload_needed = True
+    if (
+        model_def.get("external_runtime") == "ltx25"
+        or model_def.get("ltx25_native_runtime", False)
+    ):
+        from models.ltx25.ltx25_handler import normalize_video_vae_variant
+
+        requested_ltx25_video_vae = normalize_video_vae_variant(
+            ltx25_video_vae
+            or model_def.get("ltx25_video_vae_default", "fast")
+        )
+        model_kwargs["ltx25_video_vae"] = requested_ltx25_video_vae
+        loaded_ltx25_video_vae = getattr(
+            wan_model,
+            "video_vae_variant",
+            None,
+        )
+        if (
+            wan_model is not None
+            and loaded_ltx25_video_vae != requested_ltx25_video_vae
+        ):
+            print(
+                "[LTX-2.5] Video decoder changed "
+                f"{loaded_ltx25_video_vae or 'unknown'} -> "
+                f"{requested_ltx25_video_vae}; reloading the model profile."
+            )
+            reload_needed = True
     if vae_upsampling is not None:
         new_vae_upsampling = None if image_mode not in vae_upsampling or "vae" not in spatial_upsampling else spatial_upsampling
         # Read back the currently-applied setting to decide whether a reload
@@ -7470,6 +7569,10 @@ def generate_video(
         send_cmd("status", "Model loaded")
         send_cmd("refresh_models", get_unique_id())
         reload_needed=  False
+    elif model_def.get("ltx25_native_runtime", False):
+        print(
+            "[LTX-2.5] Reusing the loaded MMGP model profile for this job."
+        )
     # Remember the VAE setting we just asked for so the next generation's
     # comparison has a real value to check against (instead of falling back
     # to None and spuriously "detecting a change" every gen on LTX-2).
@@ -7743,7 +7846,7 @@ def generate_video(
     else:     
         trans_lora, trans2_lora = trans, trans2
 
-    if len(loras_selected) > 0:
+    if len(loras_selected) > 0 and not model_def.get("external_runtime"):
         pinnedLora = loaded_profile !=5  # and transformer_loras_filenames == None False # # # 
         preprocess_target = trans_lora if trans_lora is not None else trans
         split_linear_modules_map = getattr(preprocess_target, "split_linear_modules_map", None)
@@ -8111,9 +8214,10 @@ def generate_video(
         """Release preparation/runtime state on success, failure, or abort."""
         clear_status(state)
         trans.cache = None
-        offload.unload_loras_from_model(trans_lora)
-        if trans2_lora is not None:
-            offload.unload_loras_from_model(trans2_lora)
+        if not model_def.get("external_runtime"):
+            offload.unload_loras_from_model(trans_lora)
+            if trans2_lora is not None:
+                offload.unload_loras_from_model(trans2_lora)
         if trans2 is not None:
             trans2.cache = None
         if control_audio_tracks or source_audio_tracks:
@@ -8431,7 +8535,7 @@ def generate_video(
                 # If the requested audio window fell past the source (empty slice),
                 # fall back to the previous window's trailing generated audio so we
                 # get a non-empty prefix — the model will continue the voice/tone.
-                if input_waveform is not None and input_waveform.shape[0] == 0 and pre_audio_guide is not None:
+                if _audio_waveform_sample_count(input_waveform) == 0 and pre_audio_guide is not None:
                     input_waveform, input_waveform_sample_rate = pre_audio_guide, pre_audio_guide_sample_rate
                 if audio_frame_offset > 0:
                     audio_energy = float(np.abs(input_waveform).mean()) if input_waveform is not None else 0
@@ -8441,7 +8545,7 @@ def generate_video(
                 # exact stereo tail they generated in the preceding window.
                 # If the first pass itself begins with source-video overlap,
                 # seed that history with the source soundtrack instead.
-                if pre_audio_guide is not None and pre_audio_guide.shape[0] > 0:
+                if _audio_waveform_sample_count(pre_audio_guide) > 0:
                     input_waveform, input_waveform_sample_rate = (
                         pre_audio_guide,
                         pre_audio_guide_sample_rate,
@@ -9020,9 +9124,10 @@ def generate_video(
                 trans.cache = None 
                 if trans2 is not None: 
                     trans2.cache = None 
-                offload.unload_loras_from_model(trans_lora)
-                if trans2_lora is not None: 
-                    offload.unload_loras_from_model(trans2_lora)
+                if not model_def.get("external_runtime"):
+                    offload.unload_loras_from_model(trans_lora)
+                    if trans2_lora is not None:
+                        offload.unload_loras_from_model(trans2_lora)
                 skip_steps_cache = None
                 # if compile:
                 #     cache_size = torch._dynamo.config.cache_size_limit                                      
@@ -9065,15 +9170,32 @@ def generate_video(
                     overlapped_latents = samples.get("latent_slice", None)
                     BGRA_frames = samples.get("BGRA_frames", None)
                     generated_audio = samples.get("audio", generated_audio)
+                    output_audio_sampling_rate = resolve_generated_audio_sampling_rate(
+                        samples,
+                        audio_sampling_rate,
+                    )
                     overridden_inputs = samples.get("overridden_inputs", None)
                     if generated_audio is not None:
-                        if model_def.get("output_audio_is_input_audio", False) and output_new_audio_filepath is not None:  
+                        input_fills_window = (
+                            input_waveform is not None
+                            and input_waveform_sample_rate > 0
+                            and _audio_waveform_sample_count(input_waveform)
+                            >= int(
+                                round(
+                                    current_video_length
+                                    * input_waveform_sample_rate
+                                    / fps
+                                )
+                            )
+                        )
+                        if (
+                            model_def.get("output_audio_is_input_audio", False)
+                            and output_new_audio_filepath is not None
+                            and input_fills_window
+                        ):
                             generated_audio = None
-                        else:
+                        elif input_fills_window:
                             output_new_audio_filepath = None
-                            output_audio_sampling_rate =  samples.get("audio_sampling_rate", audio_sampling_rate)
-                    else:
-                        output_audio_sampling_rate =  samples.get("audio_sampling_rate", audio_sampling_rate)
                     post_decode_pre_trim = samples.get("post_decode_pre_trim", 0)
                     _retake_stitch_info = samples.get("retake_stitch_info", None)
                     samples = samples.get("x", None)

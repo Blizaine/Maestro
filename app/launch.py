@@ -5367,6 +5367,9 @@ def get_model_options(model_type: str):
         "returns_audio": md.get("returns_audio", False),
         "any_audio_prompt": md.get("any_audio_prompt", False),
         "audio_scale_name": md.get("audio_scale_name", ""),
+        "infer_audio_prompt_from_guide": md.get(
+            "infer_audio_prompt_from_guide", False
+        ),
         "lock_inference_steps": md.get("lock_inference_steps", False),
         "lock_guidance_scale": md.get("lock_guidance_scale", False),
         "no_negative_prompt": md.get("no_negative_prompt", False),
@@ -5393,6 +5396,11 @@ def get_model_options(model_type: str):
             for key, value in _h3_encoder_variants.items()
         ] or None,
         "minimax_h3_text_encoder_default": _h3_encoder_default,
+        "ltx25_video_vae_choices": md.get("ltx25_video_vae_choices"),
+        "ltx25_video_vae_default": md.get(
+            "ltx25_video_vae_default",
+            "fast",
+        ),
         "minimax_h3_turbo": _minimax_h3_turbo_option(md),
         "minimax_h3_runtime_advisory": _minimax_h3_runtime_advisory(md),
         "minimax_h3_media_sources": md.get(
@@ -5439,6 +5447,9 @@ def get_model_options(model_type: str):
         "director_memory_policy": md.get("director_memory_policy"),
         "sliding_window_auto_prompt_pacing": md.get(
             "sliding_window_auto_prompt_pacing", False
+        ),
+        "multi_window_sequence_controls": md.get(
+            "multi_window_sequence_controls", False
         ),
         "sliding_window_end_image_at_final": md.get(
             "sliding_window_end_image_at_final", False
@@ -8700,6 +8711,7 @@ async def generate(request: Request):
     """Submit a generation job. Returns immediately with a job_id."""
     body = await request.json()
     h3_window_plan_response = None
+    ltx_window_plan_response = None
 
     is_sfx = body.get("sfx_mode")
     if not body.get("model_type"):
@@ -8715,6 +8727,25 @@ async def generate(request: Request):
     except Exception:
         _base_model_type = body.get("model_type")
     _generation_model_def = wgp.get_model_def(body["model_type"]) or {}
+    if (
+        _generation_model_def.get("infer_audio_prompt_from_guide", False)
+        and body.get("audio_guide")
+        and (
+            not body.get("video_guide")
+            or "V" not in str(body.get("video_prompt_type") or "")
+        )
+    ):
+        _audio_prompt_type = str(body.get("audio_prompt_type") or "")
+        if not any(letter in _audio_prompt_type for letter in "AK2"):
+            # Preserve passive processing flags such as N/V/L while restoring
+            # the missing source selector. A Control Video deliberately
+            # permits text-generated audio with a soundtrack still attached,
+            # so this repair is limited to standalone soundtrack input.
+            body["audio_prompt_type"] = f"A{_audio_prompt_type}"
+            print(
+                "[Audio Input] Repaired standalone soundtrack input to "
+                f"Audio-to-Video mode for {body['model_type']}."
+            )
     if _generation_model_def.get("omni_reference"):
         from models.minimax_h3.ref2va import validate_reference_manifest
 
@@ -9415,6 +9446,192 @@ async def generate(request: Request):
             body.pop("h3_window_plan_signature", None)
             body.pop("h3_window_plan", None)
 
+    # LTX 0.9 / 2.x / 2.5 all use WanGP's native rolling-window engine, but
+    # Maestro now makes that behavior explicit.  A disabled toggle means one
+    # native pass; Manual requires one exact line per computed window; Auto
+    # expands one overall idea through the configured prompt-enhancer LLM.
+    if _generation_model_def.get("multi_window_sequence_controls"):
+        from services.ltx_window_planner import (
+            compute_ltx_window_count,
+            parse_ltx_window_prompts,
+            plan_ltx_sliding_windows,
+        )
+
+        try:
+            ltx_total_frames = max(1, int(body.get("video_length") or 1))
+            ltx_window_frames = max(
+                1,
+                int(body.get("sliding_window_size") or ltx_total_frames),
+            )
+            ltx_overlap_frames = max(
+                0,
+                int(body.get("sliding_window_overlap") or 0),
+            )
+            ltx_discard_frames = max(
+                0,
+                int(body.get("sliding_window_discard_last_frames") or 0),
+            )
+        except (TypeError, ValueError) as error:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid LTX multi-window timing: {error}",
+            ) from error
+
+        ltx_sequence_enabled = body.get("ltx_multi_window") is True
+        ltx_prompt_mode = (
+            "manual"
+            if body.get("ltx_window_prompt_mode") == "manual"
+            else "auto"
+        )
+        if not ltx_sequence_enabled:
+            if ltx_total_frames > ltx_window_frames:
+                print(
+                    "[LTX Sequence] Multi-window is off; limiting the request "
+                    f"to one {ltx_window_frames}-frame native pass."
+                )
+                body["video_length"] = ltx_window_frames
+            # Newlines inside an ordinary cinematic prompt are semantic prose,
+            # not queue entries or continuation-window boundaries.
+            body["multi_prompts_gen_type"] = 2
+            body.pop("ltx_window_prompts", None)
+            body.pop("_ltx_original_prompt", None)
+        elif ltx_total_frames > ltx_window_frames:
+            try:
+                ltx_window_count = compute_ltx_window_count(
+                    ltx_total_frames,
+                    ltx_window_frames,
+                    overlap_frames=ltx_overlap_frames,
+                    discard_frames=ltx_discard_frames,
+                )
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
+
+            if ltx_prompt_mode == "manual":
+                try:
+                    ltx_prompts = parse_ltx_window_prompts(
+                        str(body.get("prompt") or ""),
+                        expected_count=ltx_window_count,
+                    )
+                except ValueError as error:
+                    raise HTTPException(status_code=400, detail=str(error)) from error
+                ltx_window_plan_response = {
+                    "source_prompt": str(body.get("prompt") or "").strip(),
+                    "window_count": ltx_window_count,
+                    "window_prompts": ltx_prompts,
+                    "planned_by": "manual",
+                    "planning_error": None,
+                }
+                body.pop("_ltx_original_prompt", None)
+                print(
+                    f"[LTX Sequence] Using {ltx_window_count} exact manual "
+                    "window prompts."
+                )
+            else:
+                ltx_source_prompt = str(
+                    body.get("_ltx_original_prompt")
+                    or body.get("prompt")
+                    or ""
+                ).strip()
+                cached_ltx_prompts = body.get("ltx_window_prompts")
+                try:
+                    ltx_prompts = parse_ltx_window_prompts(
+                        cached_ltx_prompts,
+                        expected_count=ltx_window_count,
+                    )
+                    cached_ltx_valid = bool(
+                        body.get("_ltx_original_prompt")
+                        and ltx_source_prompt
+                    )
+                except ValueError:
+                    ltx_prompts = []
+                    cached_ltx_valid = False
+
+                if cached_ltx_valid:
+                    ltx_window_plan_response = {
+                        "source_prompt": ltx_source_prompt,
+                        "window_count": ltx_window_count,
+                        "window_prompts": ltx_prompts,
+                        "planned_by": "reviewed",
+                        "planning_error": None,
+                    }
+                    print(
+                        f"[LTX Sequence] Reusing {ltx_window_count} reviewed "
+                        "window prompts."
+                    )
+                else:
+                    from services import llm_service
+
+                    llm_was_loaded = llm_service.is_loaded()
+                    try:
+                        _ensure_llm_loaded()
+                    except Exception as load_error:
+                        # The planner has a deterministic chronological
+                        # fallback, so a missing optional LLM must not block
+                        # the actual video generation.
+                        print(
+                            "[LTX Sequence] Planner LLM unavailable; using "
+                            f"fallback: {load_error}"
+                        )
+                    services = wgp.server_config.get("services", {})
+                    provider = services.get("llm_provider", "local")
+                    nsfw = (
+                        services.get("nsfw_mode", False)
+                        and provider not in _PUBLIC_LLM_PROVIDERS
+                    )
+                    ltx_image_value = body.get("image_start")
+                    if isinstance(ltx_image_value, (list, tuple)):
+                        ltx_image_value = (
+                            ltx_image_value[0] if ltx_image_value else None
+                        )
+                    ltx_images = (
+                        [ltx_image_value]
+                        if isinstance(ltx_image_value, str)
+                        and os.path.isfile(ltx_image_value)
+                        else None
+                    )
+                    ltx_fps = float(_generation_model_def.get("fps") or 24)
+                    print(
+                        f"[LTX Sequence] Planning {ltx_window_count} "
+                        "chronological window-local prompts."
+                    )
+                    ltx_window_plan_response = await asyncio.to_thread(
+                        plan_ltx_sliding_windows,
+                        ltx_source_prompt,
+                        model_type=str(body.get("model_type") or ""),
+                        duration_seconds=ltx_total_frames / ltx_fps,
+                        window_count=ltx_window_count,
+                        window_size_seconds=ltx_window_frames / ltx_fps,
+                        image_paths=ltx_images,
+                        nsfw=bool(nsfw),
+                    )
+                    ltx_prompts = list(
+                        ltx_window_plan_response["window_prompts"]
+                    )
+                    if not llm_was_loaded and llm_service.is_loaded():
+                        try:
+                            if llm_service.get_status().get("provider") == "local":
+                                llm_service.unload_model()
+                        except Exception as unload_error:
+                            print(
+                                "[LTX Sequence] Planner LLM unload skipped: "
+                                f"{unload_error}"
+                            )
+
+                body["_ltx_original_prompt"] = ltx_source_prompt
+
+            # WanGP's generic mode 1 selector consumes one non-empty line per
+            # rolling pass.  Collapse each planned paragraph to one line in
+            # the planner, then route the result through that native path.
+            body["ltx_window_prompts"] = list(ltx_prompts)
+            body["prompt"] = "\n".join(ltx_prompts)
+            body["multi_prompts_gen_type"] = 1
+        else:
+            # The toggle may be on before Duration crosses a second native
+            # pass. Keep the ordinary prompt intact until a split is real.
+            body["multi_prompts_gen_type"] = 2
+            body.pop("ltx_window_prompts", None)
+            body.pop("_ltx_original_prompt", None)
+
     # Defense: normalize video_prompt_type so flags whose required input
     # is missing get stripped before wgp.py's validation rejects the job.
     # This catches stale UI state (e.g. "I" persisting in a saved snapshot
@@ -9590,6 +9807,8 @@ async def generate(request: Request):
     response = {"job_id": job_id, "status": "queued"}
     if h3_window_plan_response is not None:
         response["h3_window_plan"] = h3_window_plan_response
+    if ltx_window_plan_response is not None:
+        response["ltx_window_plan"] = ltx_window_plan_response
     return response
 
 

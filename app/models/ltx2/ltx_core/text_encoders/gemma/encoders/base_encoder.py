@@ -51,7 +51,13 @@ class GemmaTextEncoderModelBase(torch.nn.Module):
         token_pairs = self.tokenizer.tokenize_with_weights(text)["gemma"]
         input_ids = torch.tensor([[t[0] for t in token_pairs]], device=self.model.device)
         attention_mask = torch.tensor([[w[1] for w in token_pairs]], device=self.model.device)
-        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
+        language_model = self.model.model if hasattr(self.model, "model") else self.model
+        outputs = language_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+            use_cache=False,
+        )
         return RawTextEmbeddings(outputs.hidden_states, attention_mask, padding_side)
 
     def _run_feature_extractor(
@@ -305,6 +311,20 @@ def _find_merged_gemma_file(gemma_root: str) -> str | None:
     return None
 
 
+def _force_gemma_tied_embeddings(tied_weights_map):
+    source = "model.embed_tokens.weight"
+    target = "lm_head.weight"
+    tied_weights_map = dict(tied_weights_map or {})
+    for name, tied_names in list(tied_weights_map.items()):
+        filtered = [tied_name for tied_name in tied_names if tied_name != target]
+        if filtered:
+            tied_weights_map[name] = filtered
+        else:
+            tied_weights_map.pop(name)
+    tied_weights_map.setdefault(source, []).append(target)
+    return tied_weights_map
+
+
 def _preprocess_gemma_state_dict(sd, qm, twm):
     if len(sd) == 0:
         return sd
@@ -313,41 +333,91 @@ def _preprocess_gemma_state_dict(sd, qm, twm):
     rules = {"model.language_model": "model",  "model.vision_tower": None, "model.multi_modal_projector": None, "multi_modal_projector": None }
     sd, qm, twm = map_state_dict([sd, qm, twm], rules=rules)
 
-    if twm is None or len(twm)==0:
-        twm = {"model.embed_tokens.weight": ["lm_head.weight"]}
+    if "model.embed_tokens.weight" in sd:
+        twm = _force_gemma_tied_embeddings(twm)
 
     return sd, qm, twm
 
 
-def build_gemma_text_encoder(
-    gemma_root: str, default_dtype: torch.dtype = torch.bfloat16
-) -> GemmaTextEncoderModelBase:
+def _preprocess_gemma4_state_dict(sd, qm, twm):
+    if len(sd) == 0:
+        return sd, qm, twm
+    sd.pop("tokenizer_json", None)
+    from mmgp.offload import map_state_dict
 
+    sd, qm, twm = map_state_dict(
+        [sd, qm, twm],
+        rules={
+            "text_embedding_projection": None,
+            "vision_model": None,
+            "multi_modal_projector": None,
+            "audio_projector": None,
+            "hf_asset__chat_template": None,
+            "hf_asset__generation_config": None,
+            "hf_asset__processor_config": None,
+            "hf_asset__tokenizer_config": None,
+        },
+    )
+    if "model.embed_tokens.weight" in sd:
+        twm = _force_gemma_tied_embeddings(twm)
+    return sd, qm, twm
+
+
+def build_gemma_text_encoder(
+    gemma_root: str,
+    default_dtype: torch.dtype = torch.bfloat16,
+    side_files_root: str | None = None,
+) -> GemmaTextEncoderModelBase:
     gemma_path = gemma_root
     if not gemma_path or not os.path.isfile(gemma_path):
         raise FileNotFoundError(f"Gemma checkpoint not found: {gemma_root}")
-    gemma_dir = os.path.dirname(gemma_path)
+    side_files_root = fl.locate_folder(side_files_root or _GEMMA_FOLDER)
     # required_files: the folder must actually CONTAIN the tokenizer —
     # a weight-only folder in the primary root would otherwise shadow the
     # complete linked one and AutoTokenizer dies with sentencepiece's
     # cryptic "not a string" (issue #17).
-    tokenizer_path = fl.locate_folder(os.path.join(_GEMMA_FOLDER),
-                                      required_files=["tokenizer_config.json", "tokenizer.model"])
-    config_path = fl.locate_file(os.path.join(_GEMMA_FOLDER, "config_light.json"))
+    tokenizer_path = side_files_root
+    gemma4_config_path = os.path.join(side_files_root, "config.json")
+    if os.path.isfile(gemma4_config_path):
+        import json
+
+        with open(gemma4_config_path, "r", encoding="utf-8") as reader:
+            gemma4 = json.load(reader).get("model_type") == "gemma4_unified_text"
+    else:
+        gemma4 = False
+    config_path = (
+        gemma4_config_path
+        if gemma4
+        else os.path.join(side_files_root, "config_light.json")
+    )
     from accelerate import init_empty_weights
     with init_empty_weights():
         text_encoder = GemmaTextEncoderModelBase(feature_extractor_linear=None, tokenizer=None, model=None, dtype=default_dtype)
+    if gemma4:
+        from ..gemma4_unified import Gemma4UnifiedForCausalLM, register_gemma4_config
+
+        register_gemma4_config()
+        model_class = Gemma4UnifiedForCausalLM
+        preprocess_sd = _preprocess_gemma4_state_dict
+    else:
+        model_class = Gemma3ForCausalLM
+        preprocess_sd = _preprocess_gemma_state_dict
     text_encoder.model = offload.fast_load_transformers_model(
         gemma_path,
-        modelClass=Gemma3ForCausalLM, #Gemma3ForConditionalGeneration,
+        modelClass=model_class,
         defaultConfigPath=config_path,
         writable_tensors=False,
-        preprocess_sd=_preprocess_gemma_state_dict,
+        preprocess_sd=preprocess_sd,
         forcedConfigPath= config_path,
         default_dtype=default_dtype,
+        ignore_unused_weights=gemma4,
     )
-    text_encoder.tokenizer = LTXVGemmaTokenizer(tokenizer_path, 1024)
-    text_encoder._gemma_root = gemma_dir
+    text_encoder.tokenizer = LTXVGemmaTokenizer(
+        tokenizer_path,
+        1024,
+        fix_mistral_regex=gemma4,
+    )
+    text_encoder._gemma_root = side_files_root
 
     return text_encoder
 

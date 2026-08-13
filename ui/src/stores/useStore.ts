@@ -612,6 +612,9 @@ const DEFAULT_ENABLED_MODELS = new Set([
   // Settings → System → Model Visibility but off by default so the
   // first-launch picker isn't overwhelming.
   'ltx2_22B_distilled_1_1',
+  // LTX-2.5's official split Distilled workflow. The large gated component
+  // pack downloads only when selected for the first time.
+  'ltx2_25',
   // SCAIL-2 character animation (Animate a character with a control
   // video). Fast = lightx2v distill bundled (6 steps, no CFG, ~13x).
   'scail2_14B',
@@ -650,7 +653,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
  * a user who then disables them stays disabled forever. (This is
  * deliberately narrower than auto-enabling every unknown model — only
  * the curated list's own additions are pushed.) */
-const DEFAULTS_VERSION = 8
+const DEFAULTS_VERSION = 9
 const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   // v1.2.0: the ACE-Step XL SFT pair; LM_4B becomes the music default.
   2: ['ace_step_v1_5_xl_sft', 'ace_step_v1_5_xl_sft_lm_4b'],
@@ -666,6 +669,8 @@ const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   7: ['minimax_h3_ref2va'],
   // Full 33B H3 variants alongside the recommended Pruned 20B entries.
   8: ['minimax_h3_full', 'minimax_h3_ref2va_full'],
+  // LTX-2.5 official Distilled T2V/I2V with synchronized native audio.
+  9: ['ltx2_25'],
 }
 const DEFAULTS_VERSION_KEY = 'maestro_defaults_version'
 
@@ -2448,7 +2453,33 @@ export const useStore = create<AppState>((set, get) => ({
     ].includes(String(key))
     set(s => {
       const nextParams = { ...s.params, [key]: value }
-      if (key === 'prompt') delete nextParams._h3_original_prompt
+      if (key === 'prompt') {
+        delete nextParams._h3_original_prompt
+        const editedLines = typeof value === 'string'
+          ? value.replace(/\r\n?/g, '\n').split('\n').map(line => line.trim()).filter(Boolean)
+          : []
+        const reviewedLtxPlan = (
+          s.modelOptions?.multi_window_sequence_controls === true
+          && s.params.ltx_multi_window === true
+          && s.params.ltx_window_prompt_mode !== 'manual'
+          && Array.isArray(s.params.ltx_window_prompts)
+          && editedLines.length === s.params.ltx_window_prompts.length
+        )
+        if (reviewedLtxPlan) {
+          nextParams.ltx_window_prompts = editedLines
+        } else {
+          delete nextParams._ltx_original_prompt
+          delete nextParams.ltx_window_prompts
+        }
+      }
+      if (
+        key === 'ltx_multi_window'
+        || key === 'ltx_window_prompt_mode'
+        || key === 'model_type'
+      ) {
+        delete nextParams._ltx_original_prompt
+        delete nextParams.ltx_window_prompts
+      }
       return {
         params: nextParams,
         ...(invalidatesH3Plan ? { h3WindowPlan: null } : {}),
@@ -3459,6 +3490,15 @@ export const useStore = create<AppState>((set, get) => ({
       && get().params.minimax_h3_reference_sequence === true
     )
     const isH3 = String(options?.architecture || '').startsWith('minimax_h3')
+    const isLtxSequence = options?.multi_window_sequence_controls === true
+    const ltxMultiWindow = (
+      isLtxSequence
+      && get().params.ltx_multi_window === true
+    )
+    const ltxWindowDefaults = options?.sliding_window_defaults
+    const ltxSinglePassMaximum = isLtxSequence
+      ? (ltxWindowDefaults?.window_max ?? Math.round(20 * fps)) / fps
+      : null
     const h3FirstLastMultiWindow = (
       isH3
       && options?.omni_reference !== true
@@ -3473,6 +3513,10 @@ export const useStore = create<AppState>((set, get) => ({
       ? (h3ReferenceSequence || h3FirstLastMultiWindow
           ? Number.POSITIVE_INFINITY
           : (nativeMaximum ?? Number.POSITIVE_INFINITY))
+      : isLtxSequence
+        ? (ltxMultiWindow
+            ? Number.POSITIVE_INFINITY
+            : (ltxSinglePassMaximum ?? Number.POSITIVE_INFINITY))
       : (options?.sliding_window || nativeMaximum == null
           ? Number.POSITIVE_INFINITY
           : nativeMaximum)
@@ -3510,6 +3554,7 @@ export const useStore = create<AppState>((set, get) => ({
             }
           : {}),
       }
+      delete nextParams.ltx_window_prompts
       return {
         durationSeconds: seconds,
         ...(expandNativeWindow
@@ -3550,9 +3595,8 @@ export const useStore = create<AppState>((set, get) => ({
       frames = Math.max(minimum, Math.min(maximum, frames))
     }
     const seconds = frames / fps
-    set(state => ({
-      slidingWindowSeconds: seconds,
-      params: {
+    set(state => {
+      const nextParams = {
         ...state.params,
         sliding_window_size: frames,
         ...(
@@ -3561,10 +3605,15 @@ export const useStore = create<AppState>((set, get) => ({
             ? { minimax_h3_sequence_clip_frames: frames }
             : {}
         ),
-      },
-      h3WindowPlan: null,
-      promptEnhanceError: null,
-    }))
+      }
+      delete nextParams.ltx_window_prompts
+      return {
+        slidingWindowSeconds: seconds,
+        params: nextParams,
+        h3WindowPlan: null,
+        promptEnhanceError: null,
+      }
+    })
     get().syncClipCount()
   },
 
@@ -3575,9 +3624,11 @@ export const useStore = create<AppState>((set, get) => ({
         frames,
         state.modelOptions?.sliding_window_defaults,
       )
+      const nextParams = { ...state.params, sliding_window_overlap: normalized }
+      delete nextParams.ltx_window_prompts
       return {
         slidingWindowOverlap: normalized,
-        params: { ...state.params, sliding_window_overlap: normalized },
+        params: nextParams,
         h3WindowPlan: null,
         promptEnhanceError: null,
       }
@@ -4041,6 +4092,7 @@ export const useStore = create<AppState>((set, get) => ({
     const isI2vOnly = state.modelOptions?.i2v_class && !state.modelOptions?.t2v_class
     const isOmniReference = state.modelOptions?.omni_reference === true
     const isH3Model = String(state.modelOptions?.architecture || '').startsWith('minimax_h3')
+    const isLtxSequenceModel = state.modelOptions?.multi_window_sequence_controls === true
     const hasStartImage = state.startImage || state.params.image_start
     const hasMultiClipImages = state.clips.some(c => c.startImage || c.startImagePath)
     if (state.generationMode === 'video' && isI2vOnly && !isOmniReference && !hasStartImage && !hasMultiClipImages) {
@@ -4660,6 +4712,20 @@ export const useStore = create<AppState>((set, get) => ({
     let h3ManualSequencePrompts: string[] | null = null
     let h3ManualFirstLastPrompts: string[] | null = null
 
+    if (
+      state.generationMode === 'video'
+      && state.modelOptions?.infer_audio_prompt_from_guide === true
+      && params.audio_guide
+      && (!params.video_guide || !String(params.video_prompt_type || '').includes('V'))
+    ) {
+      const audioPromptType = String(params.audio_prompt_type || '')
+      if (![...'AK2'].some(letter => audioPromptType.includes(letter))) {
+        // The visible soundtrack tile and its hidden mode must travel as one
+        // contract. This also heals Load Settings from an affected sidecar.
+        params.audio_prompt_type = `A${audioPromptType}`
+      }
+    }
+
     // H3 video-to-audio freezes the Control Video's pictures, so any
     // remembered V2V mask/edit controls are irrelevant. Normalize the request
     // copy here as a durable safety net for loaded sidecars and older saved UI
@@ -4687,6 +4753,10 @@ export const useStore = create<AppState>((set, get) => ({
         isH3Model
         && !isOmniReference
         && params.minimax_h3_multi_window === true
+      )
+      const ltxMultiWindowRequested = (
+        isLtxSequenceModel
+        && params.ltx_multi_window === true
       )
       const h3DirectOmniPass = (
         isOmniReference
@@ -4726,6 +4796,11 @@ export const useStore = create<AppState>((set, get) => ({
         && !isOmniReference
         && !h3FirstLastMultiWindowRequested
       ) {
+        requestedFrames = Math.min(
+          requestedFrames,
+          Math.max(minimumFrames, Math.round(state.slidingWindowSeconds * fps)),
+        )
+      } else if (isLtxSequenceModel && !ltxMultiWindowRequested) {
         requestedFrames = Math.min(
           requestedFrames,
           Math.max(minimumFrames, Math.round(state.slidingWindowSeconds * fps)),
@@ -4840,6 +4915,31 @@ export const useStore = create<AppState>((set, get) => ({
       }
 
       if (
+        ltxMultiWindowRequested
+        && params.ltx_window_prompt_mode === 'manual'
+        && requestedFrames > Number(params.sliding_window_size || 0)
+      ) {
+        const ltxManualPrompts = String(params.prompt || '')
+          .replace(/\r\n?/g, '\n')
+          .split('\n')
+          .map(line => line.trim())
+          .filter(Boolean)
+        const expectedPromptCount = h3SlidingWindowCount({
+          totalFrames: requestedFrames,
+          windowFrames: Number(params.sliding_window_size || requestedFrames),
+          overlapFrames: Number(params.sliding_window_overlap || 0),
+          discardFrames: Number(params.sliding_window_discard_last_frames || 0),
+        })
+        if (ltxManualPrompts.length !== expectedPromptCount) {
+          set({
+            promptEnhanceError: `Manual LTX sequence needs exactly ${expectedPromptCount} non-empty prompt ${expectedPromptCount === 1 ? 'line' : 'lines'} (window 1 through window ${expectedPromptCount}); found ${ltxManualPrompts.length}.`,
+          })
+          return
+        }
+        params.ltx_window_prompts = ltxManualPrompts
+      }
+
+      if (
         h3ReferenceSequenceRequested
         && params.minimax_h3_sequence_prompt_mode === 'manual'
         && effectiveH3SequenceClipFrames != null
@@ -4881,16 +4981,35 @@ export const useStore = create<AppState>((set, get) => ({
       delete params.minimax_h3_references
       delete params.minimax_h3_reference_detail
       delete params.minimax_h3_reference_sequence
-      delete params.minimax_h3_sequence_prompt_mode
       delete params.minimax_h3_sequence_continuity
       delete params.minimax_h3_sequence_clip_frames
       delete params.minimax_h3_sequence_memory_override
     }
     if (!isH3Model) {
       delete params.minimax_h3_multi_window
+      delete params.minimax_h3_sequence_prompt_mode
+    }
+    if (!isLtxSequenceModel) {
+      delete params.ltx_multi_window
+      delete params.ltx_window_prompt_mode
+      delete params.ltx_window_prompts
+      delete params._ltx_original_prompt
     }
     if (!state.modelOptions?.minimax_h3_text_encoder_choices?.length) {
       delete params.minimax_h3_text_encoder
+    }
+    if (state.modelOptions?.ltx25_video_vae_choices?.length) {
+      const validLtx25VideoVae = state.modelOptions.ltx25_video_vae_choices.some(
+        choice => choice.value === params.ltx25_video_vae
+      )
+      if (!validLtx25VideoVae) {
+        params.ltx25_video_vae = (
+          state.modelOptions.ltx25_video_vae_default
+          || state.modelOptions.ltx25_video_vae_choices[0].value
+        )
+      }
+    } else {
+      delete params.ltx25_video_vae
     }
     if (
       state.modelOptions?.sol_attention
@@ -5017,17 +5136,26 @@ export const useStore = create<AppState>((set, get) => ({
           ? params.minimax_h3_reference_sequence === true
           : params.minimax_h3_multi_window === true
       )
+      const ltxWindowPromptRoutingEnabled = (
+        !isLtxSequenceModel
+        || params.ltx_multi_window === true
+      )
       const hasSlidingWindow = state.modelOptions?.sliding_window === true
         && h3WindowPromptRoutingEnabled
+        && ltxWindowPromptRoutingEnabled
         && state.durationSeconds > state.slidingWindowSeconds
       if (
         hasSlidingWindow
-        && state.modelOptions?.sliding_window_auto_prompt_pacing === true
+        && (
+          state.modelOptions?.sliding_window_auto_prompt_pacing === true
+          || (
+            isLtxSequenceModel
+            && params.ltx_window_prompt_mode !== 'manual'
+          )
+        )
       ) {
-        // H3's structured Context-IR prompt contains semantic line breaks;
-        // they are not one prompt per continuation window. Keep the complete
-        // shot plan intact so the backend can assign its timeline and tagged
-        // dialogue across the automatically sized VRAM-safe passes.
+        // Auto planners receive one complete story idea. The backend then
+        // compiles exact H3 Context-IR or LTX prose for each native pass.
         params.multi_prompts_gen_type = 2
       } else if (hasSlidingWindow && prompt.includes('\n')) {
         // Sliding window: each line = one window prompt (rolling generation)
@@ -5461,6 +5589,16 @@ export const useStore = create<AppState>((set, get) => ({
       && params.minimax_h3_window_storyboard === false
       && Number(params.video_length || 0) > Number(params.sliding_window_size || 0)
     )
+    const ltxWindowSequenceActive = (
+      state.generationMode === 'video'
+      && isLtxSequenceModel
+      && params.ltx_multi_window === true
+      && Number(params.video_length || 0) > Number(params.sliding_window_size || 0)
+    )
+    const ltxAutoPlanActive = (
+      ltxWindowSequenceActive
+      && params.ltx_window_prompt_mode !== 'manual'
+    )
     const h3PlanActive = h3WindowStoryboardActive || (
       h3ReferenceSequenceActive && !h3ManualReferenceSequence
     )
@@ -5512,6 +5650,8 @@ export const useStore = create<AppState>((set, get) => ({
       phase: '',
       message: h3PlanActive
         ? `Planning H3 ${h3ReferenceSequenceActive ? 'reference sequence' : 'windows'}...`
+        : ltxAutoPlanActive
+          ? 'Planning LTX windows...'
         : h3ManualReferenceSequence
           ? 'Preparing H3 manual sequence...'
           : 'Submitting...',
@@ -5526,7 +5666,7 @@ export const useStore = create<AppState>((set, get) => ({
     }))
 
     try {
-      const { job_id, h3_window_plan } = await api.submitGeneration(params)
+      const { job_id, h3_window_plan, ltx_window_plan } = await api.submitGeneration(params)
 
       if (h3_window_plan) {
         const planFps = state.modelOptions?.fps ?? 24
@@ -5548,6 +5688,19 @@ export const useStore = create<AppState>((set, get) => ({
             params: { ...s.params, sliding_window_size: effectiveWindowFrames },
           }))
         }
+      }
+      if (ltx_window_plan) {
+        const isManualPlan = ltx_window_plan.planned_by === 'manual'
+        set(s => ({
+          params: {
+            ...s.params,
+            prompt: ltx_window_plan.window_prompts.join('\n'),
+            ltx_window_prompts: ltx_window_plan.window_prompts,
+            _ltx_original_prompt: isManualPlan
+              ? undefined
+              : ltx_window_plan.source_prompt,
+          },
+        }))
       }
 
       // Update the job with its server-assigned ID
@@ -6316,6 +6469,18 @@ export const useStore = create<AppState>((set, get) => ({
           )
         }
       }
+      if (options.ltx25_video_vae_choices?.length) {
+        const currentVideoVae = get().params.ltx25_video_vae
+        const valid = options.ltx25_video_vae_choices.some(
+          choice => choice.value === currentVideoVae
+        )
+        if (!valid) {
+          paramUpdates.ltx25_video_vae = (
+            options.ltx25_video_vae_default
+            || options.ltx25_video_vae_choices[0].value
+          )
+        }
+      }
       if (options.minimax_h3_turbo) {
         const turboPresets = options.minimax_h3_turbo.presets?.length
           ? options.minimax_h3_turbo.presets
@@ -6583,6 +6748,16 @@ export const useStore = create<AppState>((set, get) => ({
       })
       return
     }
+    if (
+      state.modelOptions?.multi_window_sequence_controls === true
+      && params.ltx_multi_window === true
+      && params.ltx_window_prompt_mode === 'manual'
+    ) {
+      set({
+        promptEnhanceError: 'Manual LTX multi-window mode uses each prompt line exactly as written. Switch Window prompts to Auto plan to use the LLM planner.',
+      })
+      return
+    }
     set({ isEnhancing: true, promptEnhanceError: null })
     try {
       // Collect images relevant to the CURRENT mode only
@@ -6593,6 +6768,7 @@ export const useStore = create<AppState>((set, get) => ({
         state.modelOptions?.architecture?.startsWith('minimax_h3') === true
         && !isOmniReference
       )
+      const isLtxSequence = state.modelOptions?.multi_window_sequence_controls === true
       const injectedPositions = String(params.frames_positions || '').split(/[\s,]+/).filter(Boolean)
       const injectedKeyframes = (
         isH3FirstLast
@@ -6697,7 +6873,6 @@ export const useStore = create<AppState>((set, get) => ({
           referenceContext = alignmentLines.join('\n') || undefined
         }
       }
-
       // Include duration/window info for video models
       const fps = state.modelOptions?.fps ?? 16
       const swDefaults = (state.modelOptions as Record<string, unknown> | null)?.sliding_window_defaults as Record<string, number> | undefined
@@ -6708,6 +6883,7 @@ export const useStore = create<AppState>((set, get) => ({
       const supportsSlidingWindows = state.modelOptions?.sliding_window === true
       const windowCount = supportsSlidingWindows
         && (!isH3FirstLast || params.minimax_h3_multi_window === true)
+        && (!isLtxSequence || params.ltx_multi_window === true)
         && stride > 0
         && state.durationSeconds > state.slidingWindowSeconds
         ? 1 + Math.ceil((state.durationSeconds - state.slidingWindowSeconds + discardSec) / stride)
@@ -6825,9 +7001,17 @@ export const useStore = create<AppState>((set, get) => ({
 
       // TTS dialogue needs more tokens for longer conversations
       const maxTokens = (generationMode === 'audio' && ttsMode) ? 2048 : undefined
+      const ltxEnhanceSource = (
+        generationMode === 'video'
+        && isLtxSequence
+        && params.ltx_multi_window === true
+        && params.ltx_window_prompt_mode !== 'manual'
+        && typeof params._ltx_original_prompt === 'string'
+        && params._ltx_original_prompt.trim()
+      ) ? params._ltx_original_prompt : params.prompt
 
       const result = await api.llmEnhancePrompt({
-        prompt: params.prompt,
+        prompt: ltxEnhanceSource,
         mode: generationMode,
         model_type: params.model_type,
         max_new_tokens: maxTokens,
@@ -6847,11 +7031,29 @@ export const useStore = create<AppState>((set, get) => ({
         ? ((typeof params._h3_original_prompt === 'string'
             && params._h3_original_prompt.trim()) || params.prompt)
         : undefined
+      const enhancedLtxLines = result.enhanced
+        .replace(/\r\n?/g, '\n')
+        .split('\n')
+        .map(line => line.trim())
+        .filter(Boolean)
+      const preserveLtxPlan = (
+        generationMode === 'video'
+        && isLtxSequence
+        && params.ltx_multi_window === true
+        && params.ltx_window_prompt_mode !== 'manual'
+        && windowCount > 1
+        && enhancedLtxLines.length === windowCount
+      )
+      const ltxSourcePrompt = ltxEnhanceSource
       set(s => ({
         params: {
           ...s.params,
-          prompt: result.enhanced,
+          prompt: preserveLtxPlan ? enhancedLtxLines.join('\n') : result.enhanced,
           ...(preserveH3Source ? { _h3_original_prompt: preserveH3Source } : {}),
+          ...(preserveLtxPlan ? {
+            _ltx_original_prompt: ltxSourcePrompt,
+            ltx_window_prompts: enhancedLtxLines,
+          } : {}),
         },
         isEnhancing: false,
       }))
@@ -8752,6 +8954,65 @@ export const useStore = create<AppState>((set, get) => ({
         && savedRuntimePrompt === restoredH3WindowPrompts[0])
     ) ? savedSourcePrompt : ''
 
+    // First / Last sidecars created before the explicit prompt-mode field
+    // used minimax_h3_window_storyboard as the UI's Auto/Manual switch.
+    // Prefer the explicit field, while keeping those existing clips durable.
+    const restoredH3SequencePromptMode: 'auto' | 'manual' | undefined = (
+      p.minimax_h3_sequence_prompt_mode === 'manual'
+        ? 'manual'
+        : p.minimax_h3_sequence_prompt_mode === 'auto'
+          ? 'auto'
+          : p.minimax_h3_multi_window === true
+            ? (p.minimax_h3_window_storyboard === false ? 'manual' : 'auto')
+            : undefined
+    )
+
+    const restoredTurboOption = restoredModelOptions?.minimax_h3_turbo
+    const restoredTurboPresets = restoredTurboOption?.presets?.length
+      ? restoredTurboOption.presets
+      : restoredTurboOption
+        ? [{
+            id: restoredTurboOption.preset_id,
+            filename: restoredTurboOption.filename,
+          }]
+        : []
+    const savedTurboPreset = restoredTurboPresets.find(
+      preset => preset.id === p.minimax_h3_turbo_preset,
+    )
+    const savedActivatedLoras = Array.isArray(p.activated_loras)
+      ? (p.activated_loras as unknown[]).map(item => String(item))
+      : []
+    const activeTurboPreset = restoredTurboPresets.find(
+      preset => savedActivatedLoras.some(
+        filename => filename.replace(/\\/g, '/').split('/').pop()?.toLowerCase()
+          === preset.filename.toLowerCase(),
+      ),
+    )
+    const restoredTurboPreset = (
+      savedTurboPreset
+      || activeTurboPreset
+      || restoredTurboPresets.find(
+        preset => preset.id === restoredTurboOption?.preset_id,
+      )
+      || restoredTurboPresets[0]
+    )
+    const legacyTurboEnabled = (
+      p.minimax_h3_turbo_mode == null
+      && activeTurboPreset != null
+    )
+    const savedTextEncoder = p.minimax_h3_text_encoder
+    const restoredTextEncoder = (
+      savedTextEncoder === 'nvfp4_awq'
+      || savedTextEncoder === 'gguf_q2_k'
+      || savedTextEncoder === 'gguf_q4_k_m'
+      || savedTextEncoder === 'int8'
+      || savedTextEncoder === 'bf16'
+    ) && restoredModelOptions?.minimax_h3_text_encoder_choices?.some(
+      choice => choice.value === savedTextEncoder,
+    ) ? savedTextEncoder : undefined
+    const restoredLtx25VideoVae = restoredModelOptions?.ltx25_video_vae_choices
+      ?.find(choice => choice.value === p.ltx25_video_vae)?.value
+
     // TTS restores names before Speaker 1/2 substitution. Edit workflows
     // restore the user's text rather than internal conditioning guidance.
     const originalPrompt = (p._tts_original_prompt as string) || (
@@ -8799,6 +9060,10 @@ export const useStore = create<AppState>((set, get) => ({
     // Copy optional fields — explicitly clear when absent to prevent stale values leaking
     newParams.sliding_window_size = (p.sliding_window_size as number) ?? undefined
     newParams.sliding_window_overlap = (p.sliding_window_overlap as number) ?? undefined
+    newParams.sliding_window_discard_last_frames = (
+      p.sliding_window_discard_last_frames as number
+    ) ?? undefined
+    newParams.sliding_window_memory_override = p.sliding_window_memory_override === true
     newParams.guidance_phases = (p.guidance_phases as number) ?? undefined
     newParams.video_prompt_type = (p.video_prompt_type as string) || ''
     newParams.audio_prompt_type = (p.audio_prompt_type as string) || ''
@@ -8807,6 +9072,7 @@ export const useStore = create<AppState>((set, get) => ({
     newParams.flow_shift = migratedLegacyRecast ? 1 : (p.flow_shift as number) ?? undefined
     newParams.self_refiner_setting = (p.self_refiner_setting as number) ?? undefined
     newParams.audio_guide = (p.audio_guide as string) || ''
+    newParams.audio_scale = (p.audio_scale as number) ?? undefined
     newParams.audio_guide2 = (p.audio_guide2 as string) || ''
     // Style / Music Caption (ACE-Step). Was never copied here, so the
     // pencil restored only the lyrics — clear when absent so a stale
@@ -8869,15 +9135,50 @@ export const useStore = create<AppState>((set, get) => ({
     (newParams as Record<string, unknown>).keyframe_inject_mode = (p.keyframe_inject_mode as string) ?? undefined;
     (newParams as Record<string, unknown>).temperature = (p.temperature as number) ?? undefined;
     (newParams as Record<string, unknown>).audio_guidance_scale = (p.audio_guidance_scale as number) ?? undefined
-    newParams.override_attention = p.override_attention === 'sol' ? 'sol' : undefined
+    // H3 optimization controls are a cohesive saved recipe. Explicit off
+    // values matter: undefined would retain the clip selected before this one.
+    newParams.override_attention = p.override_attention === 'sol' ? 'sol' : ''
+    newParams.skip_steps_cache_type = (
+      p.skip_steps_cache_type === 'first_block' ? 'first_block' : ''
+    )
+    newParams.skip_steps_multiplier = Number.isFinite(Number(p.skip_steps_multiplier))
+      ? Number(p.skip_steps_multiplier)
+      : restoredModelOptions?.default_skip_steps_multiplier
+    newParams.skip_steps_start_step_perc = Number.isFinite(
+      Number(p.skip_steps_start_step_perc),
+    )
+      ? Math.max(0, Math.min(100, Number(p.skip_steps_start_step_perc)))
+      : restoredModelOptions?.default_skip_steps_start_step_perc
+    newParams.minimax_h3_turbo_mode = (
+      p.minimax_h3_turbo_mode === true || legacyTurboEnabled
+    )
+    newParams.minimax_h3_turbo_preset = restoredTurboPreset?.id
+    newParams.minimax_h3_text_encoder = restoredTextEncoder
+    newParams.ltx25_video_vae = restoredLtx25VideoVae
     newParams.minimax_h3_window_storyboard = (p.minimax_h3_window_storyboard as boolean) ?? undefined
     newParams.minimax_h3_multi_window = (p.minimax_h3_multi_window as boolean) ?? undefined
-    newParams.minimax_h3_reference_sequence = (p.minimax_h3_reference_sequence as boolean) ?? undefined
-    newParams.minimax_h3_sequence_prompt_mode = (
-      p.minimax_h3_sequence_prompt_mode === 'manual'
-        ? 'manual'
-        : (p.minimax_h3_sequence_prompt_mode === 'auto' ? 'auto' : undefined)
+    const legacyLtxLongForm = (
+      /^ltx(?:v|2)/i.test(String(p.model_type || ''))
+      && Number(p.video_length || 0) > Number(p.sliding_window_size || 0)
     )
+    newParams.ltx_multi_window = (p.ltx_multi_window as boolean)
+      ?? (legacyLtxLongForm ? true : undefined)
+    newParams.ltx_window_prompt_mode = (
+      p.ltx_window_prompt_mode === 'manual'
+        ? 'manual'
+        : (p.ltx_window_prompt_mode === 'auto'
+            ? 'auto'
+            : (legacyLtxLongForm ? 'auto' : undefined))
+    )
+    newParams.ltx_window_prompts = Array.isArray(p.ltx_window_prompts)
+      ? (p.ltx_window_prompts as string[]).filter(item => typeof item === 'string' && item.trim())
+      : undefined
+    newParams._ltx_original_prompt = (
+      typeof p._ltx_original_prompt === 'string'
+      && p._ltx_original_prompt.trim()
+    ) ? p._ltx_original_prompt : undefined
+    newParams.minimax_h3_reference_sequence = (p.minimax_h3_reference_sequence as boolean) ?? undefined
+    newParams.minimax_h3_sequence_prompt_mode = restoredH3SequencePromptMode
     newParams.minimax_h3_sequence_continuity = (p.minimax_h3_sequence_continuity as boolean) ?? undefined
     newParams.minimax_h3_sequence_clip_frames = (
       p.minimax_h3_sequence_clip_frames as number

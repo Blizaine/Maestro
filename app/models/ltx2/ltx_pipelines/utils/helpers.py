@@ -726,8 +726,31 @@ def euler_denoising_loop(
                 video_state = replace(video_state, latent=latents_refined)
                 audio_state = replace(audio_state, latent=stepper.step(audio_state.latent, denoised_audio_final, sigmas, step_idx))
             else:
-                video_state = replace(video_state, latent=stepper.step(video_state.latent, denoised_video, sigmas, step_idx))
-                audio_state = replace(audio_state, latent=stepper.step(audio_state.latent, denoised_audio, sigmas, step_idx))
+                video_latent = stepper.step(
+                    video_state.latent,
+                    denoised_video,
+                    sigmas,
+                    step_idx,
+                )
+                audio_latent = stepper.step(
+                    audio_state.latent,
+                    denoised_audio,
+                    sigmas,
+                    step_idx,
+                )
+                if getattr(stepper, "postprocess_after_step", False):
+                    video_latent = post_process_latent(
+                        video_latent,
+                        video_state.denoise_mask,
+                        video_state.clean_latent,
+                    )
+                    audio_latent = post_process_latent(
+                        audio_latent,
+                        audio_state.denoise_mask,
+                        audio_state.clean_latent,
+                    )
+                video_state = replace(video_state, latent=video_latent)
+                audio_state = replace(audio_state, latent=audio_latent)
 
             if mask_context is not None:
                 _apply_mask_injection(video_state, sigmas, step_idx, mask_context)
@@ -1106,6 +1129,7 @@ def modality_from_latent_state(
         context_mask=None,
         attention_mask=state.attention_mask,
         frame_indices=frame_indices,
+        keyframes_mask=state.keyframes_mask,
         runtime_cache=runtime_cache,
         step_index=step_index,
         sigma_schedule=sigma_schedule,

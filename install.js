@@ -1,4 +1,8 @@
-const { runtimeProfile } = require("./launcher_profile")
+const {
+  isSolCapable,
+  needsCuda13DriverUpdate,
+  runtimeProfile,
+} = require("./launcher_profile")
 
 module.exports = async (kernel) => {
   const runtime = runtimeProfile(kernel)
@@ -12,6 +16,14 @@ module.exports = async (kernel) => {
       method: "notify",
       params: {
         html: "This app requires an NVIDIA GPU on Windows or Linux."
+      },
+      next: null
+    },
+    {
+      when: isSolCapable(kernel) && needsCuda13DriverUpdate(kernel),
+      method: "notify",
+      params: {
+        html: `Your NVIDIA driver (${kernel.gpu_driver}) is too old for Maestro's default CUDA 13 H3 runtime. Update to NVIDIA driver 580 or newer, then run Install again.`
       },
       next: null
     },

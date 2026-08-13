@@ -783,9 +783,9 @@ export function InputsPanel() {
             </p>
           ) : (
             <>
-              <Row label={modelOptions?.audio_scale_name || 'Audio strength'} value={(((params as unknown as Record<string, unknown>).modality_scale as number) ?? 1.0).toFixed(1)} />
-              <input type="range" min={0.1} max={3.0} step={0.1} value={((params as unknown as Record<string, unknown>).modality_scale as number) ?? 1.0}
-                onChange={e => setParam('modality_scale' as keyof typeof params, parseFloat(e.target.value) as never)} className="w-full h-1 accent-accent-blue" />
+              <Row label={modelOptions?.audio_scale_name || 'Audio strength'} value={(params.audio_scale ?? 1.0).toFixed(1)} />
+              <input type="range" min={0.1} max={modelOptions?.architecture === 'ltx2_25' ? 1.0 : 3.0} step={0.1} value={params.audio_scale ?? 1.0}
+                onChange={e => setParam('audio_scale', parseFloat(e.target.value))} className="w-full h-1 accent-accent-blue" />
               <label className="flex items-center gap-2 cursor-pointer pt-1">
                 <input type="checkbox" checked={audioPT.includes('N')} onChange={() => toggleAudioFlag('N')} className="accent-accent-blue" />
                 <span className="text-[10px] text-text-secondary">Normalize audio volume</span>

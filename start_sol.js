@@ -17,8 +17,8 @@ module.exports = async (kernel) => {
       when: `{{!exists('${runtime.marker}')}}`,
       method: "input",
       params: {
-        title: "Sol Engine runtime required",
-        description: "Run Install H3 Sol Engine Runtime from the Maestro Pinokio menu, then start this mode again.",
+        title: "H3 performance runtime required",
+        description: "Run Maestro's normal Update action to install or repair the H3 performance runtime, then use the normal Start button.",
       },
       next: null,
     }, {

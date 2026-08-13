@@ -1873,7 +1873,7 @@ class TestMaskPreservingOutpaint(unittest.TestCase):
             official_sampler_branch,
         )
         refinement_sampler_branch = distilled.split(
-            "# Standard stage 2 uses ancestral sampling",
+            "# Keep the native LTX-2.5 ancestral trajectory",
             1,
         )[1].split("self_refiner_handler", 1)[0]
         self.assertIn(

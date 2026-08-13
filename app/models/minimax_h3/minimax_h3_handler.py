@@ -1572,6 +1572,10 @@ class family_handler:
                         "show_label": True,
                         "default": "",
                     },
+                    # A visible standalone soundtrack is unambiguously the
+                    # FL2VA Audio-to-Video source. Repair older sidecars and
+                    # model-switch state if their hidden A selector was lost.
+                    "infer_audio_prompt_from_guide": True,
                     "video_length_not_limited_by_audio": True,
                     "output_audio_is_input_audio": True,
                     "minimax_h3_media_sources": True,
