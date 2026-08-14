@@ -26,6 +26,10 @@ ENVIRONMENT
 # Kept locally for the maintainer's reference; not shipped via git.
 docs/release_todo.md
 
+# Maintainer research, implementation plans, and deferred product notes.
+# These remain available in the local development checkout only.
+docs/development/
+
 # Uploaded files
 uploads/
 
