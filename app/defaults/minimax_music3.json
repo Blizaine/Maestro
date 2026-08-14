@@ -1,0 +1,29 @@
+{
+    "model": {
+        "name": "MiniMax-Music3",
+        "architecture": "minimax_music3",
+        "description": "MiniMax-Music3 creates complete stereo songs from lyrics and a detailed music caption, with expressive vocals, evolving arrangements, and long-form structure up to five minutes. The official converted components require about 28 GB of storage and are streamed through Maestro's single-GPU memory manager.",
+        "selector_help": "Best for full songs with detailed lyric sections and arrangement control. First use downloads about 28 GB. Model weights use the MiniMax-Music3 Community License.",
+        "URLs": [
+            "https://huggingface.co/MiniMaxAI/MiniMax-Music3/resolve/bd348f9c49ea3c1b39f33ace3436f8fad435f24e/modular_model_index.json"
+        ],
+        "source_repo": "https://huggingface.co/MiniMaxAI/MiniMax-Music3",
+        "license_name": "MiniMax-Music3 Community License",
+        "license_url": "https://huggingface.co/MiniMaxAI/MiniMax-Music3/blob/main/LICENSE",
+        "model_size_gb": 28,
+        "required_model_assets": [
+            "minimax_music3/LICENSE",
+            "minimax_music3/tokenizer/tokenizer.json",
+            "minimax_music3/language_model/model-00004-of-00004.safetensors",
+            "minimax_music3/rvq_depth_decoder/diffusion_pytorch_model.safetensors",
+            "minimax_music3/condition_encoder/diffusion_pytorch_model.safetensors",
+            "minimax_music3/transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+            "minimax_music3/vocoder/diffusion_pytorch_model.safetensors"
+        ]
+    },
+    "prompt": "[Verse]\nMorning light filters through the pines\nEvery quiet road is yours and mine\n[Chorus]\nSoftly the whole world starts to breathe\nStay for one more song with me\n[Outro]",
+    "alt_prompt": "### Global Metadata\nWarm acoustic pop at 96 BPM in C major; intimate and hopeful, growing into a wide final chorus; polished natural production.\n\n### Vocal Details\nSoft, close female lead with breathy verses, clear diction, and light stacked harmonies in the chorus.\n\n### Arrangement\nFingerpicked acoustic guitar and soft piano open the song. Brushed drums and upright bass enter in the chorus; strings bloom gently before a sparse outro.",
+    "duration_seconds": 120,
+    "num_inference_steps": 30,
+    "guidance_scale": 1.7
+}

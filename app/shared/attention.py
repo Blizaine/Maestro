@@ -172,7 +172,21 @@ def sdpa_wrapper(
     q = q.transpose(1,2)
     k = k.transpose(1,2)
     v = v.transpose(1,2)
-    if attention_mask != None:
+    if attention_mask is not None:
+        # PyTorch SDPA accepts a boolean mask, a float32 mask, or a floating
+        # mask matching the query dtype. Quantized/offloaded LTX layers can
+        # promote Q/K/V to FP32 while their reference-conditioning mask stays
+        # BF16, so normalize that otherwise-invalid combination at the final
+        # attention boundary. Keep float32 masks untouched because SDPA
+        # supports them natively and they may contain weighted attention bias.
+        if (
+            torch.is_floating_point(attention_mask)
+            and attention_mask.dtype not in (torch.float32, q.dtype)
+        ):
+            attention_mask = attention_mask.to(
+                device=q.device,
+                dtype=q.dtype,
+            )
         attention_mask = attention_mask.transpose(1,2)
     o = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_mask, is_causal=causal).transpose(1,2)
     del q, k ,v

@@ -2054,7 +2054,14 @@ def _generate_streaming_anthropic(messages: list, max_tokens: int, temperature: 
     return content.strip()
 
 
-def _build_enhance_user_prompt(prompt, mode, duration_seconds, window_count, window_size_seconds):
+def _build_enhance_user_prompt(
+    prompt,
+    mode,
+    duration_seconds,
+    window_count,
+    window_size_seconds,
+    model_type="",
+):
     """Prefix the user prompt with the app's structural context (duration +
     sliding-window / paragraph count) so the LLM writes one paragraph per
     window. Shared by the guide-based path and the raw per-model-enhancer
@@ -2071,7 +2078,28 @@ def _build_enhance_user_prompt(prompt, mode, duration_seconds, window_count, win
                 f"Write EXACTLY {window_count} paragraphs (one per window), "
                 "separated by newlines"
             )
-        return f"[{', '.join(parts)}]\n\n{prompt}"
+        context = f"[{', '.join(parts)}]"
+        if (
+            window_count
+            and window_count > 1
+            and str(model_type or "").lower().startswith("ltx")
+        ):
+            context += (
+                "\n[LTX STANDALONE-WINDOW CONTRACT: Each paragraph is sent "
+                "alone to one native video pass. A later pass receives only a "
+                "short audiovisual overlap, never any previous prompt text. "
+                "First identify the sequence-wide capture format, camera "
+                "behavior, speed/pacing, visual style or era, persistent "
+                "identity/world rules, continuous-shot rules, and audio rules. "
+                "Repeat every applicable sequence-wide rule explicitly and "
+                "with near-identical wording in EVERY paragraph. Keep only "
+                "the window-local action, environment, and physical handoff "
+                "unique. If the request is endless, looping, nonstop, or "
+                "never-stopping, the final paragraph must remain in motion "
+                "through its last frame and must not slow, settle, stop, or "
+                "resolve.]"
+            )
+        return f"{context}\n\n{prompt}"
     return prompt
 
 
@@ -2196,7 +2224,14 @@ def enhance_prompt(
             outs = []
             for i, ln in enumerate(lines):
                 # Image only informs window 1; later windows continue from it.
-                w_prompt = _build_enhance_user_prompt(ln, mode, window_size_seconds, 1, window_size_seconds)
+                w_prompt = _build_enhance_user_prompt(
+                    ln,
+                    mode,
+                    window_size_seconds,
+                    1,
+                    window_size_seconds,
+                    model_type,
+                )
                 r = generate(prompt=w_prompt, image_paths=(image_paths if i == 0 else None), **gen_kw)
                 r = _clean_enhancer_output(r)
                 r = " ".join(r.split()) if r else ln  # collapse to one paragraph
@@ -2204,7 +2239,14 @@ def enhance_prompt(
             return "\n".join(outs)
         # Single call: 1-line "expand into N windows", or a line/window
         # mismatch. Falls back to the explicit-count instruction.
-        raw_prompt = _build_enhance_user_prompt(prompt, mode, duration_seconds, window_count, window_size_seconds)
+        raw_prompt = _build_enhance_user_prompt(
+            prompt,
+            mode,
+            duration_seconds,
+            window_count,
+            window_size_seconds,
+            model_type,
+        )
         print(f"[Enhance] Raw enhancer ({model_type}, images={bool(image_paths)}, windows={window_count})")
         result = generate(prompt=raw_prompt, image_paths=image_paths, **gen_kw)
         return _clean_enhancer_output(result) or prompt
@@ -2347,7 +2389,14 @@ def enhance_prompt(
 
     # Build the user prompt with context (duration + sliding-window count).
     # Shared with the raw per-model-enhancer path via the helper above.
-    user_prompt = _build_enhance_user_prompt(prompt, mode, duration_seconds, window_count, window_size_seconds)
+    user_prompt = _build_enhance_user_prompt(
+        prompt,
+        mode,
+        duration_seconds,
+        window_count,
+        window_size_seconds,
+        model_type,
+    )
 
     # Add image context
     if image_paths:

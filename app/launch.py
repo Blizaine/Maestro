@@ -424,6 +424,13 @@ def _check_model_downloaded(model_type: str) -> bool:
         for url in wgp.get_model_recursive_prop(model_type, "loras", return_list=True):
             if not os.path.isfile(wgp.resolve_lora_path(model_type, url.split("/")[-1])):
                 return False
+        # Component-folder models may use a tiny root manifest as their
+        # primary URL while the actual weights are downloaded by the family
+        # handler. Do not call a partial/interrupted install ready merely
+        # because that manifest arrived first.
+        for relative_path in model_def.get("required_model_assets", []):
+            if wgp.fl.locate_file(relative_path, error_if_none=False) is None:
+                return False
         return True
     except Exception:
         return False
@@ -5482,6 +5489,14 @@ def get_model_options(model_type: str):
         "pause_between_sentences": md.get("pause_between_sentences", False),
         "temperature_enabled": md.get("temperature", False),
         "custom_settings_def": md.get("custom_settings"),
+        "music3_structured_caption": md.get(
+            "music3_structured_caption", False
+        ),
+        "music_caption_label": md.get(
+            "music_caption_label", "Style / Music Caption"
+        ),
+        "music_caption_help": md.get("music_caption_help", ""),
+        "music_lyrics_help": md.get("music_lyrics_help", ""),
         # Voice-count-driven audio mode (KugelAudio + Scenema): the UI hides
         # the manual Audio Mode ChoiceControl when this is True, since the
         # voice-slot buttons are the sole source of truth for audio_prompt_type.
@@ -7018,6 +7033,47 @@ _SONG_WRITER_FALLBACK_INSTRUMENTAL = (
 )
 
 
+_MUSIC3_SONG_WRITER_FALLBACK = (
+    "You are writing for MiniMax-Music3. Output exactly [STYLE] and [LYRICS]. "
+    "STYLE must contain the headings ### Global Metadata, ### Vocal Details, "
+    "and ### Arrangement, with a concrete section-by-section arrangement. "
+    "LYRICS must be original and use section tags such as [Verse], [Chorus], "
+    "[Bridge], and [Outro] on their own lines. Keep lyric text out of STYLE."
+)
+_MUSIC3_SONG_WRITER_FALLBACK_INSTRUMENTAL = (
+    "You are writing an instrumental track for MiniMax-Music3. Output exactly "
+    "[STYLE] and [LYRICS]. STYLE must contain ### Global Metadata, ### Vocal "
+    "Details, and ### Arrangement; Vocal Details must explicitly say the track "
+    "is instrumental and name the lead melodic texture. Return "
+    "[LYRICS]\n[Instrumental]."
+)
+
+
+def _music3_writer_duration_instruction(duration_seconds) -> str:
+    """Return the hard runtime contract supplied to the Music3 song writer."""
+    try:
+        duration = float(duration_seconds)
+    except (TypeError, ValueError):
+        duration = 120.0
+    if not math.isfinite(duration):
+        duration = 120.0
+    duration = min(300.0, max(5.0, duration))
+    duration_label = f"{duration:g}"
+    return (
+        "TARGET RUNTIME CONTRACT:\n"
+        f"- The generated track will be {duration_label} seconds long. Treat "
+        "this as a hard creative constraint.\n"
+        "- Scale the section count, lyric density, repetitions, instrumental "
+        "space, transitions, and arrangement detail to this exact runtime.\n"
+        "- For a short target, write a complete short cue rather than a full "
+        "song that would be rushed or cut off. For a long target, supply enough "
+        "evolving material to avoid empty or repetitive stretches.\n"
+        "- In ### Arrangement, use approximate time ranges beginning at 0:00 "
+        f"and ending near {duration_label} seconds. Never plan material beyond "
+        "the target runtime."
+    )
+
+
 def _parse_song_output(raw, instrumental):
     """Split the song-writer LLM output into (style, lyrics)."""
     import re as _re
@@ -7040,7 +7096,7 @@ def _parse_song_output(raw, instrumental):
 @api.post("/api/v1/llm/write-song")
 async def llm_write_song(request: Request):
     """Music-mode Simple writer: from a free-text description, produce a Music
-    Caption (style tags) + structured lyrics for ACE-Step. Returns
+    Caption (style tags) + structured lyrics for the selected model. Returns
     {style, lyrics, raw}."""
     from services import llm_service
     body = await request.json()
@@ -7048,6 +7104,15 @@ async def llm_write_song(request: Request):
     if not description:
         raise HTTPException(status_code=400, detail="description is required")
     instrumental = bool(body.get("instrumental"))
+    model_type = str(body.get("model_type") or "").strip()
+    try:
+        selected_model = wgp.get_model_def(model_type) if model_type else None
+    except Exception:
+        selected_model = None
+    selected_architecture = str(
+        (selected_model or {}).get("architecture") or model_type
+    )
+    is_minimax_music3 = selected_architecture == "minimax_music3"
 
     # Optional reference image → the vision LLM lets the visuals inform the
     # STYLE (e.g. neon cityscape → synthwave). Degrades gracefully: if the
@@ -7059,15 +7124,32 @@ async def llm_write_song(request: Request):
 
     _ensure_llm_loaded()
     from services.guide_loader import load_guide
-    if instrumental:
+    if is_minimax_music3 and instrumental:
+        system_prompt = (
+            load_guide("music", "song_writer_minimax_music3_instrumental")
+            or _MUSIC3_SONG_WRITER_FALLBACK_INSTRUMENTAL
+        )
+    elif is_minimax_music3:
+        system_prompt = (
+            load_guide("music", "song_writer_minimax_music3")
+            or _MUSIC3_SONG_WRITER_FALLBACK
+        )
+    elif instrumental:
         system_prompt = load_guide("music", "song_writer_instrumental") or _SONG_WRITER_FALLBACK_INSTRUMENTAL
     else:
         system_prompt = load_guide("music", "song_writer") or _SONG_WRITER_FALLBACK
+    if is_minimax_music3:
+        system_prompt = (
+            f"{system_prompt.rstrip()}\n\n"
+            f"{_music3_writer_duration_instruction(body.get('duration_seconds'))}"
+        )
     try:
         raw = llm_service.generate(
             prompt=description,
             system_prompt=system_prompt,
-            max_new_tokens=body.get("max_new_tokens", 1024),
+            max_new_tokens=body.get(
+                "max_new_tokens", 1536 if is_minimax_music3 else 1024
+            ),
             temperature=body.get("temperature", 0.85),
             top_p=body.get("top_p", 0.9),
             seed=body.get("seed"),
@@ -7080,7 +7162,7 @@ async def llm_write_song(request: Request):
 
 
 def _build_music_gen_params(model_type: str, lyrics: str, style: str, duration_seconds, seed) -> dict:
-    """Build an ACE-Step generation params dict by seeding from the model's
+    """Build music-generation params by seeding from the selected model's
     OWN default settings — the exact same source the Studio Music UI starts
     from (served via /api/v1/models/{model_type} → wgp.get_default_settings).
     This guarantees parity: every model-specific field the ACE-Step pipeline
@@ -7136,8 +7218,11 @@ async def director_generate_music(request: Request):
     seed = body.get("seed")
     workspace = body.get("workspace") or _get_active_workspace()
 
-    if wgp.get_model_def(model_type) is None:
+    selected_model = wgp.get_model_def(model_type)
+    if selected_model is None:
         raise HTTPException(status_code=400, detail=f"Unknown model: {model_type}")
+    selected_architecture = str(selected_model.get("architecture") or model_type)
+    is_minimax_music3 = selected_architecture == "minimax_music3"
 
     image_paths = body.get("image_paths") or []
     if not image_paths and body.get("reference_image_path"):
@@ -7152,16 +7237,33 @@ async def director_generate_music(request: Request):
         from services import llm_service
         from services.guide_loader import load_guide
         _ensure_llm_loaded()
-        if instrumental:
+        if is_minimax_music3 and instrumental:
+            system_prompt = (
+                load_guide("music", "song_writer_minimax_music3_instrumental")
+                or _MUSIC3_SONG_WRITER_FALLBACK_INSTRUMENTAL
+            )
+        elif is_minimax_music3:
+            system_prompt = (
+                load_guide("music", "song_writer_minimax_music3")
+                or _MUSIC3_SONG_WRITER_FALLBACK
+            )
+        elif instrumental:
             system_prompt = load_guide("music", "song_writer_instrumental") or _SONG_WRITER_FALLBACK_INSTRUMENTAL
         else:
             system_prompt = load_guide("music", "song_writer") or _SONG_WRITER_FALLBACK
+        if is_minimax_music3:
+            system_prompt = (
+                f"{system_prompt.rstrip()}\n\n"
+                f"{_music3_writer_duration_instruction(duration_seconds)}"
+            )
         try:
             raw = await asyncio.to_thread(
                 llm_service.generate,
                 prompt=description,
                 system_prompt=system_prompt,
-                max_new_tokens=body.get("max_new_tokens", 1024),
+                max_new_tokens=body.get(
+                    "max_new_tokens", 1536 if is_minimax_music3 else 1024
+                ),
                 temperature=body.get("temperature", 0.85),
                 top_p=body.get("top_p", 0.9),
                 seed=body.get("seed"),
@@ -7187,9 +7289,24 @@ async def director_generate_music(request: Request):
     # item assignment". Every other _submit_and_wait caller calls this first.
     _init_pipeline()
     from services.director_pipeline import _submit_and_wait
+    generation_timeout_s = 1800
+    if is_minimax_music3:
+        try:
+            # Long-form Music3 tracks can legitimately take much longer than
+            # the previous fixed 30-minute ACE-Step ceiling. Budget up to one
+            # wall-clock minute per requested audio second.
+            generation_timeout_s = max(
+                generation_timeout_s,
+                int(float(duration_seconds or 120) * 60),
+            )
+        except (TypeError, ValueError):
+            generation_timeout_s = 7200
     try:
         output_files = await asyncio.to_thread(
-            _submit_and_wait, gen_params, timeout_s=1800, out_dir=out_dir
+            _submit_and_wait,
+            gen_params,
+            timeout_s=generation_timeout_s,
+            out_dir=out_dir,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Music generation failed: {e}")
@@ -7444,13 +7561,26 @@ async def llm_enhance_prompt(request: Request):
         model_type.lower().startswith("minimax_h3")
         and generation_mode in ("video", "avatar")
     )
+    try:
+        requested_window_count = max(1, int(body.get("window_count") or 1))
+    except (TypeError, ValueError):
+        requested_window_count = 1
+    needs_ltx_window_plan = (
+        model_type.lower().startswith("ltx")
+        and generation_mode in ("video", "avatar")
+        and requested_window_count > 1
+    )
     enhancer_enabled = int(wgp.server_config.get("enhancer_enabled", 0) or 0)
 
     # The generic Wan2GP cinematic enhancer cannot produce MiniMax H3's
     # required Context-IR fields, speaker IDs, or <d> dialogue tags. Route H3
     # through Maestro's model-specific guide even when the legacy enhancer is
     # enabled; all other model families retain the configured behavior.
-    if enhancer_enabled > 0 and not needs_h3_context_ir:
+    if (
+        enhancer_enabled > 0
+        and not needs_h3_context_ir
+        and not needs_ltx_window_plan
+    ):
         try:
             # Support both single image_path and array image_paths
             image_paths = body.get("image_paths") or []
@@ -7460,8 +7590,14 @@ async def llm_enhance_prompt(request: Request):
         except Exception as e:
             print(f"[Enhance] Wan2GP enhancer failed, falling back to LLM: {e}")
             # Fall through to LLM
-    elif enhancer_enabled > 0 and needs_h3_context_ir:
-        print("[Enhance] MiniMax H3 requires structured Context-IR; using Maestro's model-specific LLM guide")
+    elif enhancer_enabled > 0:
+        if needs_h3_context_ir:
+            print("[Enhance] MiniMax H3 requires structured Context-IR; using Maestro's model-specific LLM guide")
+        elif needs_ltx_window_plan:
+            print(
+                "[Enhance] LTX multi-window planning requires standalone "
+                "window prompts; using Maestro's model-specific LLM guide"
+            )
 
     # Use our local LLM service
     from services import llm_service
@@ -7596,6 +7732,32 @@ async def llm_enhance_prompt(request: Request):
             raw_enhancer_mode=raw_enhancer_mode,
             reference_context=body.get("reference_context"),
         )
+        if needs_ltx_window_plan:
+            from services.ltx_window_planner import (
+                deterministic_ltx_window_prompts,
+                parse_ltx_window_prompts,
+                reinforce_ltx_window_invariants,
+            )
+
+            try:
+                ltx_prompts = parse_ltx_window_prompts(
+                    result,
+                    expected_count=requested_window_count,
+                )
+            except ValueError as planning_error:
+                print(
+                    "[Enhance] LTX planner returned malformed window output; "
+                    f"using deterministic fallback: {planning_error}"
+                )
+                ltx_prompts = deterministic_ltx_window_prompts(
+                    prompt,
+                    requested_window_count,
+                )
+            ltx_prompts = reinforce_ltx_window_invariants(
+                ltx_prompts,
+                prompt,
+            )
+            result = "\n".join(ltx_prompts)
         return {"original": prompt, "enhanced": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -9455,6 +9617,7 @@ async def generate(request: Request):
             compute_ltx_window_count,
             parse_ltx_window_prompts,
             plan_ltx_sliding_windows,
+            reinforce_ltx_window_invariants,
         )
 
         try:
@@ -9547,6 +9710,13 @@ async def generate(request: Request):
                     cached_ltx_valid = False
 
                 if cached_ltx_valid:
+                    # Older saved Auto plans predate the standalone-window
+                    # contract. Reinforcement is idempotent, so this upgrades
+                    # those plans while preserving every reviewed local beat.
+                    ltx_prompts = reinforce_ltx_window_invariants(
+                        ltx_prompts,
+                        ltx_source_prompt,
+                    )
                     ltx_window_plan_response = {
                         "source_prompt": ltx_source_prompt,
                         "window_count": ltx_window_count,

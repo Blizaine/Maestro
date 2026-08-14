@@ -1382,8 +1382,15 @@ class MiniMaxH3Model:
             )
         frozen_video_mode = not self.omni_reference and "2" in audio_prompt_type
         source_audio_mode = (
-            not self.omni_reference
-            and any(flag in audio_prompt_type for flag in "AK")
+            any(flag in audio_prompt_type for flag in "AK")
+            and (
+                not self.omni_reference
+                # ``D`` is an internal Maestro Director marker: ordinary
+                # Ref2VA audio remains a voice/style/reference input, while
+                # Director music/dialogue uses the supplied waveform as
+                # frozen target-audio conditioning.
+                or "D" in audio_prompt_type
+            )
         )
         control_video_mode = (
             not self.omni_reference

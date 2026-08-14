@@ -553,6 +553,10 @@ export interface ModelOptions {
   pause_between_sentences: boolean
   temperature_enabled: boolean
   custom_settings_def: { id: string; label: string; name: string; type: string }[] | null
+  music3_structured_caption?: boolean
+  music_caption_label?: string
+  music_caption_help?: string
+  music_lyrics_help?: string
 }
 
 export interface SystemConfig {

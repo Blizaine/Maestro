@@ -11,6 +11,7 @@ Controlled by feature flags in params or server config.
 """
 
 import os
+import copy
 import re
 import time
 import json
@@ -43,9 +44,11 @@ from services.director_video_strategy import (
     build_director_video_execution_profile,
     resolve_shot_image_policy,
     shot_images_required,
+    supports_director_seamless,
     validate_director_execution_frames,
     video_strategy,
 )
+from services.h3_window_planner import compute_h3_window_boundaries
 
 # These will be set by launch.py on startup
 _jobs: dict = None          # reference to launch._jobs
@@ -98,6 +101,42 @@ def _director_hardware_snapshot() -> dict:
             return {"gpu_vram_gb": 0.0}
 
 
+def _director_uses_fixed_media_strength(
+    video_model: str,
+    model_def: Optional[dict] = None,
+) -> bool:
+    """Return whether Director must keep image/audio conditioning at 1.0."""
+
+    identifiers = (
+        str(video_model or "").lower(),
+        str((model_def or {}).get("architecture") or "").lower(),
+    )
+    return any(
+        value.startswith(("minimax_h3", "ltx2_25"))
+        for value in identifiers
+    )
+
+
+def _normalize_director_media_strengths(
+    params: dict,
+    *,
+    model_def: Optional[dict] = None,
+) -> bool:
+    """Lock fixed-strength Director models, including older saved projects."""
+
+    video_model = params.get("video_model") or "ltx2_22B_distilled_1_1"
+    if model_def is None:
+        getter = getattr(_wgp, "get_model_def", None)
+        model_def = getter(video_model) if callable(getter) else {}
+    if not _director_uses_fixed_media_strength(video_model, model_def):
+        return False
+    video_params = dict(params.get("video_params") or {})
+    video_params["input_video_strength"] = 1.0
+    params["video_params"] = video_params
+    params["audio_scale"] = 1.0
+    return True
+
+
 def _create_director_video_execution_profile(
     params: dict,
     *,
@@ -111,6 +150,7 @@ def _create_director_video_execution_profile(
         getter = getattr(_wgp, "get_model_def", None)
         model_def = getter(video_model) if callable(getter) else {}
     model_def = dict(model_def or {})
+    _normalize_director_media_strengths(params, model_def=model_def)
     video_params = dict(params.get("video_params") or {})
     video_loras = dict(params.get("video_loras") or {})
     profile_inputs = {
@@ -466,8 +506,8 @@ def _validate_director_models(
 
     effective_policy = _director_effective_shot_image_policy(params)
     # A direct image rerun still needs a valid image model. During a complete
-    # pipeline, however, prompt-only/direct-reference H3 projects have no
-    # image stage and should not be blocked by an irrelevant image selector.
+    # pipeline, however, prompt-only/direct-reference projects have no image
+    # stage and should not be blocked by an irrelevant image selector.
     validate_image_stage = "image" in stages and (
         "video" not in stages or shot_images_required(effective_policy)
     )
@@ -2167,6 +2207,17 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
             fps = model_def["fps"]
     except Exception:
         pass
+    rerun_strengths = {
+        "video_model": video_model,
+        "video_params": video_params,
+        "audio_scale": snapshot.get("audio_scale"),
+    }
+    _normalize_director_media_strengths(
+        rerun_strengths,
+        model_def=model_def,
+    )
+    video_params = rerun_strengths["video_params"]
+    rerun_audio_scale = rerun_strengths.get("audio_scale")
     try:
         fps = float(fps)
         if not math.isfinite(fps) or fps <= 0:
@@ -2327,6 +2378,7 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
         ),
         "num_inference_steps": video_params.get("num_inference_steps", 8),
         "guidance_scale": video_params.get("guidance_scale", 1),
+        "input_video_strength": video_params.get("input_video_strength", 1.0),
         "resolution": (
             execution_profile.get("normalized_resolution")
             or video_params.get("resolution", "1280x720")
@@ -2412,11 +2464,12 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
             _slice_audio_segment(
                 audio_path, clip_start, clip_duration_sec, slice_path,
             )
-            if director_strategy != OMNI_REFERENCE:
-                gen_params["audio_prompt_type"] = "A"
-                gen_params["audio_guide"] = slice_path
-                if snapshot.get("audio_scale") is not None:
-                    gen_params["audio_scale"] = snapshot["audio_scale"]
+            gen_params["audio_prompt_type"] = (
+                "AD" if director_strategy == OMNI_REFERENCE else "A"
+            )
+            gen_params["audio_guide"] = slice_path
+            if rerun_audio_scale is not None:
+                gen_params["audio_scale"] = rerun_audio_scale
             print(f"[Pipeline {pid}] Clip {clip_index} rerun conditioned on song segment "
                   f"{float(clip_start):.3f}s-"
                   f"{float(clip_start) + float(clip_duration_sec):.3f}s")
@@ -2443,7 +2496,10 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
             manifest_params,
             start_path if uses_shot_images else None,
             out_dir=clip_out_dir,
-            drive_audio_path=slice_path,
+            # The soundtrack slice is exact target audio through
+            # audio_guide/AD above. Only identity, scene, composition, and
+            # optional voice references belong in the Omni manifest.
+            drive_audio_path=None,
         )
         if not any(
             reference.get("type") in {"image", "video"}
@@ -3533,6 +3589,17 @@ def get_pipeline_status(pid: str, out_dir: str) -> Optional[dict]:
 
     live = get_pipeline(pid)
     if live is not None:
+        # Publish the model-adapted timeline explicitly. Director may begin
+        # with broad music-analysis sections and then split them onto the
+        # selected model's native shot lattice. Keeping this only under the
+        # private ``_planned_clips`` key left the browser displaying stale
+        # pre-adaptation durations while shorter clips were actually queued.
+        planned_clips = (
+            live.get("_planned_clips")
+            or (live.get("params") or {}).get("planned_clips")
+            or []
+        )
+        live["planned_clips"] = copy.deepcopy(planned_clips)
         return live
     saved = load_pipeline_state(out_dir, pid)
     if not saved:
@@ -3571,6 +3638,11 @@ def get_pipeline_status(pid: str, out_dir: str) -> Optional[dict]:
             "window_prompts": clip.get("window_prompts", []) or [],
             "keyframe_prompts": clip.get("keyframe_prompts", []) or [],
         } for clip in clips],
+        "planned_clips": [
+            copy.deepcopy(clip.get("planned_clip"))
+            for clip in clips
+            if isinstance(clip.get("planned_clip"), dict)
+        ],
         "clip_images": [
             clip.get("start_image_filename") or "" for clip in clips
         ],
@@ -4852,6 +4924,11 @@ def _run_planning_legacy(pid: str, params: dict, pipeline_type: str):
     fps = params.get("fps", 16)
     frames_steps = params.get("frames_steps", 8)
     frames_minimum = params.get("frames_minimum", 41)
+    prompt_type = (
+        "both"
+        if shot_images_required(_director_effective_shot_image_policy(params))
+        else "video"
+    )
 
     if pipeline_type == "short_film_story":
         # Path C: Full story-based planning
@@ -4880,7 +4957,7 @@ def _run_planning_legacy(pid: str, params: dict, pipeline_type: str):
             reference_image_path=reference_image_path,
             speaker_mappings=speaker_mappings,
             characters=characters,
-            prompt_type="both",
+            prompt_type=prompt_type,
         )
         clip_plans = result if isinstance(result, list) else result.get("clip_plans", [])
 
@@ -4893,7 +4970,7 @@ def _run_planning_legacy(pid: str, params: dict, pipeline_type: str):
             bpm=params.get("bpm"),
             reference_image_path=reference_image_path,
             speaker_mappings=speaker_mappings,
-            prompt_type="both",
+            prompt_type=prompt_type,
         )
         clip_plans = result if isinstance(result, list) else result.get("clip_plans", [])
 
@@ -5435,11 +5512,22 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
             fps = model_def["fps"]
     except Exception:
         pass
+    _normalize_director_media_strengths(params, model_def=model_def)
+    video_params = dict(params.get("video_params") or {})
     director_strategy = video_strategy(model_def)
     execution_profile = _director_video_execution_profile(params)
     shot_image_policy = _director_effective_shot_image_policy(params)
     uses_shot_images = shot_images_required(shot_image_policy)
-    if director_strategy != ROLLING_WINDOW:
+    is_minimax_h3 = str(
+        model_def.get("architecture") or video_model
+    ).lower().startswith("minimax_h3")
+    h3_first_last_seamless = bool(
+        seamless
+        and is_minimax_h3
+        and director_strategy == BOUNDED_START_END
+        and supports_director_seamless(model_def)
+    )
+    if not supports_director_seamless(model_def):
         seamless = False
     print(
         f"[Pipeline] Video gen: fps={fps}, video_model={video_model}, "
@@ -5483,6 +5571,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
     # Studio mode: rolling windows with per-window prompts + keyframe injection.
     if seamless:
         window_prompts_all = []  # One prompt per rolling window
+        timeline_prompt_spans = []  # (start frame, end frame, prompt)
         keyframe_images = []     # All keyframe images in order
         keyframe_frame_positions = []  # Absolute frame numbers (1-indexed for wgp parser)
 
@@ -5498,16 +5587,21 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
 
             wp = plan.get("window_prompts") or []
             wp = [w.get("prompt", w.get("text", str(w))) if isinstance(w, dict) else str(w) for w in wp]
-            if len(wp) > 1:
+            vp = str(plan.get("video_prompt", "") or "").strip()
+            span_prompt = vp or " ".join(item.strip() for item in wp if item.strip())
+            if span_prompt:
+                timeline_prompt_spans.append(
+                    (cumulative_frames, cumulative_frames + scene_frames, span_prompt)
+                )
+            if len(wp) > 1 and not h3_first_last_seamless:
                 for w_prompt in wp:
                     window_prompts_all.append(w_prompt)
             else:
-                vp = plan.get("video_prompt", "")
-                if vp:
-                    window_prompts_all.append(vp)
+                if span_prompt:
+                    window_prompts_all.append(span_prompt)
 
             # Mid-scene keyframes from the LLM (injected at mid-point of this scene)
-            if clip_keyframes and i < len(clip_keyframes):
+            if uses_shot_images and clip_keyframes and i < len(clip_keyframes):
                 kf_list = clip_keyframes[i]
                 if kf_list:
                     # Distribute mid-scene keyframes evenly across the scene
@@ -5522,7 +5616,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                                 keyframe_frame_positions.append(kf_pos + 1)  # 1-indexed for wgp parser
 
             # Scene boundary keyframe: inject next scene's start image at the end of this scene
-            if i < len(clip_plans) - 1:
+            if uses_shot_images and i < len(clip_plans) - 1:
                 next_img = clip_images[i + 1] if i + 1 < len(clip_images) else ""
                 if next_img:
                     next_path = os.path.join(out_dir, next_img)
@@ -5533,19 +5627,81 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
 
             cumulative_frames += scene_frames
 
-        total_frames = _quantize_frames(cumulative_frames)
-        sliding_window_frames = (
-            native_window_frames
-            if native_window_frames is not None
-            else _quantize_frames(round(20 * fps))
-        )
+        if h3_first_last_seamless:
+            # H3 aligns each native pass independently and trims the joined
+            # tail to the exact requested duration. Quantizing the complete
+            # timeline to the generic latent*n+1 lattice would add or remove
+            # story time before H3 ever sees it.
+            total_frames = max(1, cumulative_frames)
+            sliding_window_frames = int(
+                execution_profile.get("effective_max_frames")
+                or model_def.get("frames_maximum")
+                or native_window_frames
+                or _min_f
+            )
+            overlap_default = (
+                model_def.get("sliding_window_defaults", {}) or {}
+            ).get("overlap_default", 18)
+            requested_overlap = video_params.get(
+                "sliding_window_overlap", overlap_default,
+            )
+            from models.minimax_h3.minimax_h3_handler import (
+                normalize_h3_overlap_frames,
+            )
 
-        # First scene's start image
+            seamless_overlap_frames = normalize_h3_overlap_frames(
+                requested_overlap,
+                window_frames=sliding_window_frames,
+            )
+            h3_boundaries = compute_h3_window_boundaries(
+                total_frames,
+                sliding_window_frames,
+                fps=fps,
+                overlap_frames=seamless_overlap_frames,
+            )
+            mapped_prompts = []
+            for boundary in h3_boundaries:
+                start = int(boundary["start_frame"])
+                end = int(boundary["end_frame"])
+                if timeline_prompt_spans:
+                    # Select the planned beat owning most of the output that
+                    # this pass commits. This keeps one explicit local prompt
+                    # per actual H3 pass and prevents the complete screenplay
+                    # from replaying in every continuation window.
+                    _, _, selected = max(
+                        timeline_prompt_spans,
+                        key=lambda span: max(
+                            0, min(end, span[1]) - max(start, span[0])
+                        ),
+                    )
+                else:
+                    selected = window_prompts_all[-1] if window_prompts_all else ""
+                mapped_prompts.append(selected)
+            window_prompts_all = mapped_prompts
+        else:
+            total_frames = _quantize_frames(cumulative_frames)
+            sliding_window_frames = (
+                native_window_frames
+                if native_window_frames is not None
+                else _quantize_frames(round(20 * fps))
+            )
+
+        # First scene's start image.  ``prompt_only`` disables Director's
+        # image-generation stage; it must not discard an opening image that
+        # the user explicitly uploaded for a Seamless run.
         first_start = ""
-        if clip_images and clip_images[0]:
+        if uses_shot_images and clip_images and clip_images[0]:
             first_path = os.path.join(out_dir, clip_images[0])
             if os.path.isfile(first_path):
                 first_start = first_path
+        elif not uses_shot_images:
+            uploaded_start = str(params.get("reference_image_path") or "").strip()
+            if uploaded_start and os.path.isfile(uploaded_start):
+                first_start = uploaded_start
+                print(
+                    f"[Pipeline {pid}] Seamless start anchored to uploaded "
+                    f"main image: {uploaded_start}"
+                )
 
         prompt_text = "\n".join(window_prompts_all)
 
@@ -5561,9 +5717,6 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
         per_clip_frames = []
         has_sliding_window = False
         h3_timing_repaired = False
-        is_minimax_h3 = str(
-            model_def.get("architecture") or video_model
-        ).lower().startswith("minimax_h3")
         bounded_director = director_strategy in {
             BOUNDED_START_END,
             OMNI_REFERENCE,
@@ -5788,7 +5941,6 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
     # Build audio params
     audio_params: dict = {}
     per_clip_h3_references: list[list[dict]] = []
-    temporary_h3_audio: list[str] = []
     audio_start_sec = (
         _audio_timeline_start(planned_clips)
         if pipeline_type != "short_film_story" and audio_path
@@ -5810,55 +5962,47 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                 "MiniMax H3 Omni Director needs the uploaded soundtrack or "
                 "dialogue audio for this workflow."
             )
-        pid_token = re.sub(r"[^A-Za-z0-9_-]", "_", pid)[:32]
-        cumulative_frames = 0
-        try:
-            for index, (clip_image, clip_frames) in enumerate(
-                zip(image_start_paths, per_clip_frames)
+        for clip_image in image_start_paths:
+            manifest = _director_h3_reference_manifest(
+                params,
+                clip_image if uses_shot_images else None,
+                out_dir=out_dir,
+                # The project soundtrack is target conditioning, not an
+                # Omni style/voice reference. WGP slices it for each native
+                # task below and H3 freezes those target audio latents. A
+                # second copy in the manifest only made H3 synthesize a
+                # related, rather than exact, performance.
+                drive_audio_path=None,
+            )
+            if not any(
+                reference.get("type") in {"image", "video"}
+                for reference in manifest
             ):
-                drive_slice = None
-                if pipeline_type != "short_film_story":
-                    drive_slice = os.path.join(
-                        out_dir,
-                        f"_director_h3_audio_{pid_token}_c{index}_{uuid.uuid4().hex[:8]}.wav",
-                    )
-                    clip_start = audio_start_sec + cumulative_frames / fps
-                    _slice_audio_segment(
-                        audio_path,
-                        clip_start,
-                        clip_frames / fps,
-                        drive_slice,
-                    )
-                    temporary_h3_audio.append(drive_slice)
-                manifest = _director_h3_reference_manifest(
-                    params,
-                    clip_image if uses_shot_images else None,
-                    out_dir=out_dir,
-                    drive_audio_path=drive_slice,
+                raise RuntimeError(
+                    "MiniMax H3 Omni Director has no valid visual reference. "
+                    "Restore a main, character, or location image, or enable "
+                    "generated shot images."
                 )
-                if not any(
-                    reference.get("type") in {"image", "video"}
-                    for reference in manifest
-                ):
-                    raise RuntimeError(
-                        "MiniMax H3 Omni Director has no valid visual "
-                        "reference. Restore a main, character, or location "
-                        "image, or enable generated shot images."
-                    )
-                per_clip_h3_references.append(manifest)
-                cumulative_frames += clip_frames
-        except Exception:
-            for temporary_path in temporary_h3_audio:
-                if os.path.isfile(temporary_path):
-                    try:
-                        os.remove(temporary_path)
-                    except OSError:
-                        pass
-            raise
+            per_clip_h3_references.append(manifest)
         print(
             f"[Pipeline {pid}] Built {len(per_clip_h3_references)} H3 Omni "
             "shot manifest(s) with explicitly mapped visual and audio roles."
         )
+        if pipeline_type != "short_film_story":
+            # ``D`` is Maestro's internal exact-drive marker. ``A`` keeps
+            # WGP's source-audio slicing active; ``D`` tells Ref2VA to place
+            # that slice on the target audio timeline (and mux the pristine
+            # source) instead of treating it as a creative audio reference.
+            audio_params["audio_prompt_type"] = "AD"
+            audio_params["audio_guide"] = audio_path
+            audio_params["audio_frame_offset"] = round(audio_start_sec * fps)
+            audio_scale = params.get("audio_scale")
+            if audio_scale is not None:
+                audio_params["audio_scale"] = audio_scale
+            print(
+                f"[Pipeline {pid}] H3 Omni soundtrack locked to the exact "
+                "source timeline for per-shot audio-driven generation."
+            )
     elif pipeline_type == "short_film_story":
         audio_params["audio_prompt_type"] = ""
     elif audio_path:
@@ -5885,7 +6029,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
             "model_type": video_model,
             "prompt": prompt_text,
             "image_mode": 0,
-            "multi_prompts_gen_type": 0,  # Rolling window mode (one prompt per window)
+            "multi_prompts_gen_type": 2 if h3_first_last_seamless else 0,
             "image_prompt_type": "S" if first_start else "",
             "video_prompt_type": "",
             "num_inference_steps": steps,
@@ -5905,6 +6049,12 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
         }
         if first_start:
             gen_params["image_start"] = first_start
+        if h3_first_last_seamless:
+            gen_params.update({
+                "minimax_h3_multi_window": True,
+                "h3_window_prompts": list(window_prompts_all),
+                "sliding_window_overlap": seamless_overlap_frames,
+            })
         # Keyframe injection via image_refs + frames_positions (numeric absolute positions)
         if keyframe_images:
             gen_params["image_refs"] = keyframe_images
@@ -6039,9 +6189,9 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
             gen_params["per_clip_minimax_h3_references"] = per_clip_h3_references
             gen_params["minimax_h3_reference_detail"] = "match"
             if pipeline_type != "short_film_story" and audio_path:
-                # Ref2VA receives per-shot slices through its manifest, but
-                # the final join still uses the pristine continuous source
-                # track to avoid audible boundaries between generated clips.
+                # Each Ref2VA task receives its exact target slice through
+                # audio_guide; the final join also uses the pristine
+                # continuous source to avoid audible clip boundaries.
                 gen_params["multi_clip_concat_audio"] = audio_path
         # Per-clip keyframe injection
         if supports_frame_injection and clip_keyframes:
@@ -6059,6 +6209,9 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                 print(f"[Pipeline {pid}] Keyframe injection: {[len(p) for p in per_clip_kf_paths]} keyframes per clip")
 
     # Common params
+    gen_params["input_video_strength"] = video_params.get(
+        "input_video_strength", 1.0,
+    )
     _apply_director_h3_optimizations(
         gen_params,
         video_params,
@@ -6076,18 +6229,10 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
         gen_params["film_grain_saturation"] = film_grain_saturation
 
     # Track progress by monitoring the generation job
-    try:
-        output_files = _submit_and_wait(
-            gen_params,
-            timeout_s=7200,
-            workspace=workspace,
-            out_dir=out_dir,
-        )  # 2hr timeout for long videos
-    finally:
-        for temporary_path in temporary_h3_audio:
-            if os.path.isfile(temporary_path):
-                try:
-                    os.remove(temporary_path)
-                except OSError:
-                    pass
+    output_files = _submit_and_wait(
+        gen_params,
+        timeout_s=7200,
+        workspace=workspace,
+        out_dir=out_dir,
+    )  # 2hr timeout for long videos
     return output_files

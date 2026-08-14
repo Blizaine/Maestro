@@ -21,6 +21,7 @@ from services.director_video_strategy import (
     ROLLING_WINDOW,
     SHOT_IMAGES_REQUIRED,
     shot_image_support,
+    supports_director_seamless,
     video_strategy,
 )
 
@@ -220,15 +221,10 @@ def _seamless_capability(
 ) -> dict[str, Any]:
     if not base.get("compatible"):
         return dict(base)
-    if video_strategy(model_def) != ROLLING_WINDOW:
+    if not supports_director_seamless(model_def):
         return _result(
             False,
-            "This model renders independent native-duration shots; use standard Director mode.",
-        )
-    if not model_def.get("custom_frames_injection"):
-        return _result(
-            False,
-            "Seamless Director needs planned frame/keyframe injection between scenes.",
+            "This model cannot carry a continuous Director timeline across native generation windows.",
         )
     return _result(True)
 

@@ -237,10 +237,11 @@ export function DurationSlider() {
       }
       return
     }
-    // In LTX long-form mode Window Length is an intentional native-pass
-    // choice. Extending the total Duration must add windows instead of
-    // silently growing the native pass until it reaches the engine ceiling.
-    if (isLtx && ltxMultiWindow) return
+    // LTX long-form Auto follows Duration up to the model's native window
+    // ceiling. This keeps a 58-second timeline at roughly three 20-second
+    // passes instead of preserving a short one-window value and creating a
+    // dozen tiny passes. Moving Window Length in Advanced locks it, so an
+    // intentionally shorter user-selected pass still remains untouched.
     if (omniReferenceSequence) {
       if (locked || safeWindowFrames == null) return
       const nextWindowSize = safeWindowFrames / fps

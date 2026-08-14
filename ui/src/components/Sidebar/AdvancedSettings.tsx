@@ -7,6 +7,7 @@ import { LoraSelector } from '../SettingsDrawer/LoraSelector'
 import { ResolutionPresets } from './ResolutionPresets'
 import { AspectRatioGrid } from './AspectRatioGrid'
 import { WindowSettings } from './DurationSlider'
+import { DirectorH3Optimizations } from './DirectorH3Optimizations'
 
 function PresetManager() {
   const presets = useStore(s => s.presets)
@@ -112,6 +113,11 @@ function PresetManager() {
 export function useAdvancedActiveItems(): string[] {
   const params = useStore(s => s.params)
   const modelOptions = useStore(s => s.modelOptions)
+  const sidebarMode = useStore(s => s.sidebarMode)
+  const directorVideoModel = useStore(s => s.selectedModelPerMode.video || '')
+  const directorTurboMode = useStore(s => s.directorH3TurboModeByModel)
+  const directorSolMode = useStore(s => s.directorH3SolModeByModel)
+  const directorFirstBlockCache = useStore(s => s.directorH3FirstBlockCacheByModel)
   const spatialUpsampling = useStore(s => s.spatialUpsampling)
   const filmGrainIntensity = useStore(s => s.filmGrainIntensity)
   const generationMode = useStore(s => s.generationMode)
@@ -124,6 +130,12 @@ export function useAdvancedActiveItems(): string[] {
   const isScailHq = isScailEdit && params.model_type === 'scail2_14B'
 
   const items: string[] = []
+  if (sidebarMode === 'director') {
+    if (directorTurboMode[directorVideoModel] === true) items.push('H3 Turbo')
+    if (directorSolMode[directorVideoModel] === true) items.push('H3 Sol Engine')
+    if (directorFirstBlockCache[directorVideoModel] === true) items.push('First Block Cache')
+    return items
+  }
   if (params.seed !== -1) items.push(`Seed ${params.seed}`)
   if (
     String(modelOptions?.architecture || '').startsWith('minimax_h3')
@@ -211,6 +223,7 @@ export function AdvancedSettings() {
   const params = useStore(s => s.params)
   const setParam = useStore(s => s.setParam)
   const modelOptions = useStore(s => s.modelOptions)
+  const isDirector = useStore(s => s.sidebarMode === 'director')
   const generationMode = useStore(s => s.generationMode)
   const editSubMode = useStore(s => s.editSubMode)
   const audioSubMode = useStore(s => s.audioSubMode)
@@ -314,6 +327,15 @@ export function AdvancedSettings() {
 
             {/* Scrollable content */}
             <div className="flex-1 overflow-y-auto px-4 py-4 space-y-5">
+              {isDirector ? (
+                <>
+                  <DirectorH3Optimizations />
+                  <p className="rounded-lg border border-border/60 bg-bg-tertiary/35 px-3 py-2 text-[9px] leading-relaxed text-text-muted">
+                    Director inference steps, maximum shot length, image guidance, and post-processing remain in the workflow&apos;s Advanced section. Settings here are saved with the Director project and reused by repair and regeneration.
+                  </p>
+                </>
+              ) : (
+                <>
               {/* Recast/Repaint own their output-quality profiles in the main
                   workflow. Their dedicated endpoints also choose adaptive
                   windows, so generic controls would be misleading here. */}
@@ -1076,6 +1098,8 @@ export function AdvancedSettings() {
                   className="w-full"
                 />
               </div>}
+                </>
+              )}
             </div>
           </div>
     </>

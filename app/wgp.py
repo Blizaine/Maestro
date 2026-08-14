@@ -2132,7 +2132,7 @@ def update_generation_status(html_content):
     if(html_content):
         return gr.update(value=html_content)
 
-family_handlers = ["models.wan.wan_handler", "models.wan.ovi_handler", "models.wan.df_handler", "models.hyvideo.hunyuan_handler", "models.ltx_video.ltxv_handler", "models.ltx2.ltx2_handler", "models.ltx25.ltx25_handler", "models.ltx2.scenema_audio_handler", "models.ltx2.ltx_audio_tts_handler", "models.minimax_h3.minimax_h3_handler", "models.longcat.longcat_handler", "models.flux.flux_handler", "models.qwen.qwen_handler", "models.kandinsky5.kandinsky_handler",  "models.z_image.z_image_handler", "models.krea2.krea2_handler", "models.hidream.hidream_handler", "models.TTS.ace_step_handler", "models.TTS.chatterbox_handler", "models.TTS.qwen3_handler", "models.TTS.yue_handler", "models.TTS.heartmula_handler", "models.TTS.kugelaudio_handler", "models.TTS.index_tts2_handler"]
+family_handlers = ["models.wan.wan_handler", "models.wan.ovi_handler", "models.wan.df_handler", "models.hyvideo.hunyuan_handler", "models.ltx_video.ltxv_handler", "models.ltx2.ltx2_handler", "models.ltx25.ltx25_handler", "models.ltx2.scenema_audio_handler", "models.ltx2.ltx_audio_tts_handler", "models.minimax_h3.minimax_h3_handler", "models.longcat.longcat_handler", "models.flux.flux_handler", "models.qwen.qwen_handler", "models.kandinsky5.kandinsky_handler",  "models.z_image.z_image_handler", "models.krea2.krea2_handler", "models.hidream.hidream_handler", "models.TTS.ace_step_handler", "models.TTS.chatterbox_handler", "models.TTS.qwen3_handler", "models.TTS.yue_handler", "models.TTS.heartmula_handler", "models.TTS.kugelaudio_handler", "models.TTS.minimax_music3_handler", "models.TTS.index_tts2_handler"]
 DEFAULT_LORA_ROOT = "loras"
 
 def register_family_lora_args(parser, lora_root):
@@ -9264,7 +9264,10 @@ def generate_video(
                             )
                         )
                         if (
-                            model_def.get("output_audio_is_input_audio", False)
+                            (
+                                model_def.get("output_audio_is_input_audio", False)
+                                or "D" in audio_prompt_type
+                            )
                             and output_new_audio_filepath is not None
                             and input_fills_window
                         ):

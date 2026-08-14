@@ -11,8 +11,12 @@ if str(APP) not in sys.path:
 from services.ltx_window_planner import (  # noqa: E402
     compute_ltx_window_count,
     deterministic_ltx_window_prompts,
+    extract_ltx_global_invariants,
     parse_ltx_window_prompts,
+    reinforce_ltx_window_invariants,
+    requests_open_ended_ltx_motion,
 )
+from services.llm_service import _build_enhance_user_prompt  # noqa: E402
 
 
 class LtxWindowPlannerTests(unittest.TestCase):
@@ -31,6 +35,17 @@ class LtxWindowPlannerTests(unittest.TestCase):
             compute_ltx_window_count(
                 241,
                 241,
+                overlap_frames=9,
+                discard_frames=8,
+            ),
+        )
+
+    def test_58_second_timeline_uses_three_max_length_ltx_windows(self):
+        self.assertEqual(
+            3,
+            compute_ltx_window_count(
+                58 * 25,
+                501,
                 overlap_frames=9,
                 discard_frames=8,
             ),
@@ -82,6 +97,95 @@ class LtxWindowPlannerTests(unittest.TestCase):
         self.assertIn("advance only this middle beat", prompts[1])
         self.assertIn("complete the requested final beat", prompts[2])
 
+    def test_global_sequence_rules_are_repeated_in_every_native_pass(self):
+        source = (
+            "an amateur handheld recording of a very fast movement falling "
+            "through never ending rooms, never stopping. different 90s style "
+            "rooms, all indoors. Seamless oner with no clear cuts, flowing "
+            "through an ever rising sweeping path inside a very large torus."
+        )
+        invariants = extract_ltx_global_invariants(source)
+        self.assertIn("an amateur handheld recording", invariants)
+        self.assertIn("very fast movement and pacing", invariants)
+        self.assertIn("continuous falling motion", invariants)
+        self.assertIn(
+            "nonstop motion that never slows, settles, stops, or resolves",
+            invariants,
+        )
+        self.assertIn("90s visual design", invariants)
+        self.assertIn("every environment remaining indoors", invariants)
+        self.assertIn(
+            "one seamless continuous take with no cuts or invisible resets",
+            invariants,
+        )
+        self.assertIn(
+            "an ever-rising sweeping path inside a vast torus",
+            invariants,
+        )
+
+        prompts = reinforce_ltx_window_invariants(
+            [
+                "Fall through a floral living room into a tiled passage.",
+                "Fall through an indoor pool toward a concrete opening.",
+                "Fall through a parking garage and onward beyond the frame.",
+            ],
+            source,
+        )
+        self.assertEqual(3, len(prompts))
+        for prompt in prompts:
+            for invariant in invariants:
+                self.assertIn(invariant, prompt)
+            self.assertTrue(
+                prompt.startswith("Throughout this complete window, preserve")
+            )
+        self.assertNotIn("indoor pool", prompts[0])
+        self.assertNotIn("floral living room", prompts[1])
+        self.assertEqual(
+            prompts,
+            reinforce_ltx_window_invariants(prompts, source),
+        )
+
+    def test_a_local_period_room_is_not_forced_across_the_whole_sequence(self):
+        invariants = extract_ltx_global_invariants(
+            "Start in a 1990s living room, then pass into a futuristic lab."
+        )
+        self.assertNotIn("1990s visual design", invariants)
+
+    def test_explicit_camera_and_speed_changes_are_not_forced_globally(self):
+        invariants = extract_ltx_global_invariants(
+            "Begin with handheld footage during a very fast fall, then stop "
+            "and switch to a locked-off static camera for a slow-motion walk."
+        )
+        self.assertNotIn("handheld camera movement", invariants)
+        self.assertNotIn("a locked-off static camera", invariants)
+        self.assertNotIn("very fast movement and pacing", invariants)
+        self.assertNotIn("continuous falling motion", invariants)
+
+    def test_endless_fallback_never_invents_a_resolved_finale(self):
+        source = (
+            "A handheld camera keeps falling through endless rooms, nonstop, "
+            "never stopping."
+        )
+        self.assertTrue(requests_open_ended_ltx_motion(source))
+        prompts = deterministic_ltx_window_prompts(source, 3)
+        self.assertNotIn("complete the requested final beat", prompts[-1])
+        self.assertIn("without slowing, settling, stopping, or resolving", prompts[-1])
+
+    def test_ltx_enhance_request_explains_the_isolated_window_runtime(self):
+        request = _build_enhance_user_prompt(
+            "A continuous journey through many rooms.",
+            "video",
+            120,
+            6,
+            20,
+            "ltx2_25",
+        )
+        self.assertIn("LTX STANDALONE-WINDOW CONTRACT", request)
+        self.assertIn("short audiovisual overlap", request)
+        self.assertIn("never any previous prompt text", request)
+        self.assertIn("EVERY paragraph", request)
+        self.assertIn("must not slow, settle, stop, or resolve", request)
+
 
 class LtxMultiWindowWiringTests(unittest.TestCase):
     def test_every_ltx_video_handler_declares_sequence_controls(self):
@@ -99,6 +203,8 @@ class LtxMultiWindowWiringTests(unittest.TestCase):
         self.assertIn('body.get("ltx_multi_window") is True', launch)
         self.assertIn('body["multi_prompts_gen_type"] = 1', launch)
         self.assertIn('response["ltx_window_plan"]', launch)
+        self.assertIn("needs_ltx_window_plan", launch)
+        self.assertIn("reinforce_ltx_window_invariants", launch)
 
     def test_studio_exposes_toggle_modes_counts_and_manual_validation(self):
         controls = (
@@ -116,6 +222,8 @@ class LtxMultiWindowWiringTests(unittest.TestCase):
         self.assertIn("ltx_multi_window", controls)
         self.assertIn("ltx_window_prompt_mode", controls)
         self.assertIn("AI-planned window prompts", duration)
+        self.assertIn("LTX long-form Auto follows Duration", duration)
+        self.assertNotIn("if (isLtx && ltxMultiWindow) return", duration)
         self.assertIn("usesLtxManualPrompts", prompt)
         self.assertIn("Manual LTX sequence needs exactly", store)
 
@@ -123,9 +231,15 @@ class LtxMultiWindowWiringTests(unittest.TestCase):
         guide = (
             APP / "services/llm_guides/enhance/ltx2_video.md"
         ).read_text(encoding="utf-8")
-        self.assertIn("Distribute the requested story chronologically", guide)
-        self.assertIn("never repeat", guide)
-        self.assertIn("native audio", guide)
+        normalized_guide = " ".join(guide.split())
+        self.assertIn("Distribute the requested story chronologically", normalized_guide)
+        self.assertIn("never repeat", normalized_guide)
+        self.assertIn("native audio", normalized_guide)
+        self.assertIn("COMPLETE STANDALONE generation prompt", normalized_guide)
+        self.assertIn("short audiovisual overlap", normalized_guide)
+        self.assertIn("Repeat EVERY applicable global invariant", normalized_guide)
+        self.assertIn("must not resolve", normalized_guide)
+        self.assertIn("one seamless continuous take", normalized_guide)
 
 
 if __name__ == "__main__":

@@ -21,6 +21,48 @@ from ..policies import build_character_rules_block, build_camera_style_block
 from .base import BasePlanner
 
 
+def _compact_lyrics_for_context(
+    value: Any,
+    *,
+    max_words: int = 48,
+    max_chars: int = 320,
+) -> str:
+    """Bound noisy transcription text before it reaches the planning LLM."""
+
+    words = re.findall(r"\S+", str(value or ""))
+    compact: list[str] = []
+    index = 0
+    truncated = False
+    while index < len(words) and len(compact) < max_words:
+        word = words[index]
+        key = re.sub(r"(^\W+|\W+$)", "", word).casefold()
+        run_end = index + 1
+        while run_end < len(words):
+            candidate = re.sub(
+                r"(^\W+|\W+$)", "", words[run_end],
+            ).casefold()
+            if not key or candidate != key:
+                break
+            run_end += 1
+        run_length = run_end - index
+        if run_length >= 4:
+            compact.extend(words[index:index + 3])
+            compact.append("[repeated refrain]")
+        else:
+            compact.extend(words[index:run_end])
+        index = run_end
+
+    if index < len(words) or len(compact) > max_words:
+        truncated = True
+    text = " ".join(compact[:max_words])
+    if len(text) > max_chars:
+        text = text[:max_chars].rsplit(" ", 1)[0].rstrip(" ,;:-")
+        truncated = True
+    if truncated:
+        text = f"{text} [transcript excerpt truncated]".strip()
+    return text
+
+
 # ── Section-based visual strategy ────────────────────────────────────
 
 _SECTION_VISUAL_STRATEGY = {
@@ -272,8 +314,18 @@ class MusicVideoPlanner(BasePlanner):
             ] if speaker_mappings else None,
         )
 
-        # Build clip context for LLM
-        clip_contexts = self._build_clip_contexts(clips, lyrics, performer_map, speaker_names, speaker_mappings)
+        # Build clip context for LLM. H3 receives the actual source-audio slice
+        # for every shot, so its transcript must never become prompt dialogue.
+        clip_contexts = self._build_clip_contexts(
+            clips,
+            lyrics,
+            performer_map,
+            speaker_names,
+            speaker_mappings,
+            source_audio_drives_vocals=video_model.lower().startswith(
+                "minimax_h3"
+            ),
+        )
 
         # Call LLM for creative planning
         nsfw = kwargs.get("nsfw", False)
@@ -490,6 +542,8 @@ class MusicVideoPlanner(BasePlanner):
         performer_map: dict[str, str],
         speaker_names: dict[str, str],
         speaker_mappings: Optional[dict],
+        *,
+        source_audio_drives_vocals: bool = False,
     ) -> list[str]:
         """Build text descriptions for each clip (context for LLM)."""
         contexts = []
@@ -508,7 +562,9 @@ class MusicVideoPlanner(BasePlanner):
                     if l.get("start", 0) < end_sec and l.get("end", 0) > start_sec
                 ]
                 if overlapping:
-                    lyrics_snippet = " ".join(overlapping)
+                    lyrics_snippet = _compact_lyrics_for_context(
+                        " ".join(overlapping)
+                    )
 
             # Identify dominant speaker
             performer_hint = ""
@@ -525,7 +581,18 @@ class MusicVideoPlanner(BasePlanner):
                 performer_hint += "."
 
             # Vocal info
-            vocal_info = f'lyrics: "{lyrics_snippet}"' if lyrics_snippet else "instrumental"
+            if source_audio_drives_vocals:
+                vocal_info = (
+                    "mapped source audio drives this interval; synchronize "
+                    "visible performance, movement, and any singing to that "
+                    "exact audio without quoting, transcribing, or inventing "
+                    "words"
+                )
+            else:
+                vocal_info = (
+                    f'lyrics excerpt: "{lyrics_snippet}"'
+                    if lyrics_snippet else "instrumental"
+                )
 
             ctx = f"Clip {i + 1}: {section}, {beat_count} beats, {vocal_info}.{performer_hint}"
             contexts.append(ctx)

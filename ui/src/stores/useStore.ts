@@ -575,7 +575,7 @@ const audioSubFamilies: ModelFamily[] = [
 // them. Keep the explicit set for one-off ids that don't share a
 // prefix with their line.
 const musicModelTypes = new Set<string>([])
-const musicModelPrefixes = ['ace_step', 'heartmula']
+const musicModelPrefixes = ['ace_step', 'heartmula', 'minimax_music3']
 
 function isMusicModelType(modelType: string): boolean {
   if (musicModelTypes.has(modelType)) return true
@@ -637,6 +637,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
   'ace_step_v1_5_xl_turbo_lm_4b',
   'ace_step_v1_5_xl_sft',
   'ace_step_v1_5_xl_sft_lm_4b',
+  'minimax_music3',
   // Audio — SFX
   'mmaudio_v2',
   'mmaudio_nsfw',
@@ -653,7 +654,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
  * a user who then disables them stays disabled forever. (This is
  * deliberately narrower than auto-enabling every unknown model — only
  * the curated list's own additions are pushed.) */
-const DEFAULTS_VERSION = 9
+const DEFAULTS_VERSION = 10
 const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   // v1.2.0: the ACE-Step XL SFT pair; LM_4B becomes the music default.
   2: ['ace_step_v1_5_xl_sft', 'ace_step_v1_5_xl_sft_lm_4b'],
@@ -671,6 +672,8 @@ const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   8: ['minimax_h3_full', 'minimax_h3_ref2va_full'],
   // LTX-2.5 official Distilled T2V/I2V with synchronized native audio.
   9: ['ltx2_25'],
+  // MiniMax-Music3 long-form stereo song generation.
+  10: ['minimax_music3'],
 }
 const DEFAULTS_VERSION_KEY = 'maestro_defaults_version'
 
@@ -768,6 +771,17 @@ export function getModelMode(modelType: string, familyId: string): GenerationMod
   if (avatarModelTypes.has(modelType)) return 'avatar'
   if (familyId === 'longcat') return 'avatar'
   return getFamilyMode(familyId)
+}
+
+/** Director models whose image/audio conditioning strengths are fixed at 1.0. */
+export function directorModelUsesFixedMediaStrength(
+  modelType: string | undefined,
+  architecture?: string | null,
+): boolean {
+  return [modelType, architecture].some(value => {
+    const normalized = String(value || '').toLowerCase()
+    return normalized.startsWith('minimax_h3') || normalized.startsWith('ltx2_25')
+  })
 }
 
 export function getFamiliesForMode(mode: GenerationMode, allFamilies: ModelFamily[], editSubMode?: string, audioSubMode?: string): ModelFamily[] {
@@ -1532,6 +1546,9 @@ interface AppState {
   setDirectorVoiceRef: (file: File | null) => void
   setDirectorIdentityGuidanceScale: (v: number) => void
   directorClipImages: DirectorClipImage[]
+  /** Set or clear an optional user-supplied start image for one manually
+   *  reviewed Director scene. */
+  directorSetClipImage: (clipIndex: number, file: File | null) => void
   directorImageGenProgress: DirectorImageGenProgress | null
   directorSpeakers: string[]
   directorSpeakerMappings: SpeakerMapping[]
@@ -1584,6 +1601,7 @@ interface AppState {
   directorUploadAndAnalyze: (file: File) => Promise<void>
   // Music Video: generate-the-track source + song setup
   directorMusicSource: 'upload' | 'generate' | null
+  directorMusicModel: string
   directorSongDescription: string
   directorSongInstrumental: boolean
   directorSongStyle: string
@@ -1591,6 +1609,7 @@ interface AppState {
   directorSongDuration: number
   directorTrackGenerating: boolean
   setDirectorMusicSource: (s: 'upload' | 'generate' | null) => void
+  setDirectorMusicModel: (modelType: string) => void
   setDirectorSongDescription: (v: string) => void
   setDirectorSongInstrumental: (v: boolean) => void
   setDirectorSongStyle: (v: string) => void
@@ -1863,6 +1882,29 @@ function computeFilteredOutputs(outputs: OutputFile[], mediaFilter: MediaFilter)
     _foCachedResult = outputs
   }
   return _foCachedResult
+}
+
+/** Resolve whether the current Director selection owns generated per-shot
+ *  images. This mirrors services/director_video_strategy.py so the manual
+ *  browser flow and the durable server pipeline take the same branch. */
+function _directorUsesGeneratedShotImages(state: AppState): boolean {
+  const videoModel = state.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+  const support = state.models.find(
+    model => model.model_type === videoModel,
+  )?.director?.shot_image_support
+  const guidance = state.directorShotImageGuidance
+  if (guidance === 'prompt_only') return false
+  if (guidance === 'generate') return true
+  if (!support || support === 'required') return true
+  if (support === 'direct_references') return false
+  return Boolean(
+    state.directorReferenceImage
+    || state.directorReferenceImagePath
+    || state.directorCharacterRefs.length
+    || state.directorCharacterRefPaths.length
+    || state.directorLocationRefs.length
+    || state.directorLocationRefPaths.length
+  )
 }
 
 export const useStore = create<AppState>((set, get) => ({
@@ -7109,6 +7151,23 @@ export const useStore = create<AppState>((set, get) => ({
   },
   setDirectorIdentityGuidanceScale: (v) => set({ directorIdentityGuidanceScale: v }),
   directorClipImages: [],
+  directorSetClipImage: (clipIndex, file) => set(s => {
+    const remaining = s.directorClipImages.filter(
+      image => image.clipIndex !== clipIndex,
+    )
+    if (!file) return { directorClipImages: remaining }
+    const image: DirectorClipImage = {
+      clipIndex,
+      prompt: s.directorClipPlans[clipIndex]?.image_prompt || '',
+      file,
+      filename: file.name,
+    }
+    return {
+      directorClipImages: [...remaining, image].sort(
+        (left, right) => left.clipIndex - right.clipIndex,
+      ),
+    }
+  }),
   directorImageGenProgress: null,
   directorSpeakers: [],
   directorSpeakerMappings: [],
@@ -7121,6 +7180,7 @@ export const useStore = create<AppState>((set, get) => ({
   directorLlmLog: [],
   directorSkill: null,
   directorMusicSource: null,
+  directorMusicModel: 'ace_step_v1_5_xl_sft_lm_4b',
   directorSongDescription: '',
   directorSongInstrumental: false,
   directorSongStyle: '',
@@ -7128,6 +7188,13 @@ export const useStore = create<AppState>((set, get) => ({
   directorSongDuration: 120,
   directorTrackGenerating: false,
   setDirectorMusicSource: (s) => set({ directorMusicSource: s }),
+  setDirectorMusicModel: (modelType) => set({
+    directorMusicModel: modelType,
+    // The two model families use different caption contracts. Never retain a
+    // hidden song plan written for the previously selected generator.
+    directorSongStyle: '',
+    directorSongLyrics: '',
+  }),
   setDirectorSongDescription: (v) => set({ directorSongDescription: v }),
   setDirectorSongInstrumental: (v) => set({ directorSongInstrumental: v }),
   setDirectorSongStyle: (v) => set({ directorSongStyle: v }),
@@ -7154,7 +7221,16 @@ export const useStore = create<AppState>((set, get) => ({
   pipelinePolling: false,
   setDirectorAutoMode: (v) => set({ directorAutoMode: v }),
   setDirectorSeamless: (v) => set({ directorSeamless: v }),
-  setDirectorShotImageGuidance: (v) => set({ directorShotImageGuidance: v }),
+  setDirectorShotImageGuidance: (v) => set({
+    directorShotImageGuidance: v,
+    // Selecting "None" must not leave generated images from an earlier
+    // choice silently attached to manual video jobs. Users can add fresh
+    // per-scene uploads from the review screen after making this choice.
+    ...(v === 'prompt_only' ? {
+      directorClipImages: [],
+      directorImageGenProgress: null,
+    } : {}),
+  }),
   directorAppendLlmLog: (stage, text) => set(s => {
     const t = (text || '').trim()
     if (!t) return {}
@@ -7166,6 +7242,20 @@ export const useStore = create<AppState>((set, get) => ({
   }),
   setDirectorSkill: (skill) => {
     set({ directorSkill: skill })
+    const state = get()
+    const selectedVideoModel = state.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+    const selectedVideoDefinition = state.models.find(
+      model => model.model_type === selectedVideoModel,
+    )
+    if (directorModelUsesFixedMediaStrength(
+      selectedVideoModel,
+      selectedVideoDefinition?.architecture,
+    )) {
+      if (state.params.input_video_strength !== 1.0) {
+        state.setParam('input_video_strength', 1.0)
+      }
+      return
+    }
     // Music director default for image-to-video reference strength is
     // 0.7 (loosens the lock to the start frame so motion can develop
     // naturally) rather than 1.0 (rigid frame). Only initialize when
@@ -7242,8 +7332,15 @@ export const useStore = create<AppState>((set, get) => ({
   })),
 
   selectDirectorImageModel: (modelType) => {
+    if (get().selectedModelPerMode.image === modelType) return
     set(s => ({
       selectedModelPerMode: { ...s.selectedModelPerMode, image: modelType },
+      // Model-specific prompts and rendered starts must never survive a
+      // pre-planning model change. Keep the uploaded/analyzed source intact.
+      directorClipPlans: [],
+      directorClipImages: [],
+      directorImageGenProgress: null,
+      directorError: null,
     }))
     const s = get()
     _saveSettings({
@@ -7256,10 +7353,37 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   selectDirectorVideoModel: (modelType) => {
+    const previousModel = get().selectedModelPerMode.video
+    if (previousModel === modelType) return
     set(s => ({
       selectedModelPerMode: { ...s.selectedModelPerMode, video: modelType },
+      // The video model determines both prompt rules and the legal frame
+      // lattice. Preserve source media and analysis, but invalidate anything
+      // derived downstream from those choices.
+      directorClipPlans: [],
+      directorClipImages: [],
+      directorImageGenProgress: null,
+      directorError: null,
     }))
+    const selectedVideoDefinition = get().models.find(
+      model => model.model_type === modelType,
+    )
+    if (directorModelUsesFixedMediaStrength(
+      modelType,
+      selectedVideoDefinition?.architecture,
+    ) && get().params.input_video_strength !== 1.0) {
+      get().setParam('input_video_strength', 1.0)
+    }
     get().loadModelOptions(modelType)
+    const current = get()
+    if (
+      current.directorAnalysis
+      && (current.directorStep === 'structure' || current.directorStep === 'style')
+    ) {
+      // Rebuild clip lengths against the newly selected model without
+      // re-uploading or re-transcribing the user's audio.
+      void current.directorSetEnergyBias(current.directorEnergyBias)
+    }
     const s = get()
     _saveSettings({
       generationMode: s.generationMode,
@@ -7462,7 +7586,9 @@ export const useStore = create<AppState>((set, get) => ({
     const r = await api.writeSong({
       description,
       instrumental: s.directorSongInstrumental,
+      duration_seconds: s.directorSongDuration,
       reference_image_path: refPath || undefined,
+      model_type: s.directorMusicModel,
     })
     set({
       directorSongStyle: r.style || '',
@@ -7512,6 +7638,7 @@ export const useStore = create<AppState>((set, get) => ({
         instrumental,
         duration_seconds: s.directorSongDuration,
         reference_image_path: refPath || undefined,
+        model_type: s.directorMusicModel,
         workspace: get().activeWorkspace || undefined,
       })
       setTimeout(() => { void get().reconnectJobs() }, 1200)
@@ -7677,6 +7804,8 @@ export const useStore = create<AppState>((set, get) => ({
         ...(charPaths.length > 0 ? { character_ref_paths: charPaths, character_ref_labels: charLabels } : {}),
         ...(locPaths.length > 0 ? { location_ref_paths: locPaths, location_ref_labels: locLabels } : {}),
       }
+      const generateShotImages = _directorUsesGeneratedShotImages(get())
+      const promptType = generateShotImages ? 'both' : 'video'
 
       // Build speaker_mappings from user-assigned names (only those with names filled in)
       const speakerMappings: Record<string, { name: string; role: string }> = {}
@@ -7704,7 +7833,7 @@ export const useStore = create<AppState>((set, get) => ({
           reference_image_path: refImagePath ?? undefined,
           ...extraRefs,
           speaker_mappings: Object.keys(speakerMappings).length > 0 ? speakerMappings : undefined,
-          prompt_type: 'both',
+          prompt_type: promptType,
         })
         plans = result.clip_plans.map(p => ({
           video_prompt: p.video_prompt || '',
@@ -7720,7 +7849,7 @@ export const useStore = create<AppState>((set, get) => ({
           reference_image_path: refImagePath,
           ...extraRefs,
           speaker_mappings: Object.keys(speakerMappings).length > 0 ? speakerMappings : undefined,
-          prompt_type: 'both',
+          prompt_type: promptType,
         })
         plans = result.clip_plans.map(p => ({
           video_prompt: p.video_prompt || '',
@@ -7729,16 +7858,19 @@ export const useStore = create<AppState>((set, get) => ({
       }
       set({
         directorClipPlans: plans,
-        directorStep: 'review',
+        directorStep: generateShotImages ? 'review' : 'review_video',
         directorLoading: false,
       })
 
-      // Auto-mode: skip review, proceed to image gen. directorGenerateStartImages
-      // now generates an establishing/anchor image first when no reference was
-      // provided, so every clip shares a consistent look (instead of skipping
-      // images entirely as it used to).
+      // Auto mode follows the image selector: generate consistent scene starts
+      // with a concrete image model, or go directly to prompt-only video when
+      // the selector is None.
       if (get().directorAutoMode) {
-        get().directorGenerateStartImages()
+        if (generateShotImages) {
+          get().directorGenerateStartImages()
+        } else {
+          get().directorGenerate()
+        }
       }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Planning failed'
@@ -8319,6 +8451,8 @@ export const useStore = create<AppState>((set, get) => ({
         ...(charPaths.length > 0 ? { character_ref_paths: charPaths, character_ref_labels: charLabels } : {}),
         ...(locPaths.length > 0 ? { location_ref_paths: locPaths, location_ref_labels: locLabels } : {}),
       }
+      const generateShotImages = _directorUsesGeneratedShotImages(get())
+      const promptType = generateShotImages ? 'both' : 'video'
 
       // Build speaker mappings
       const speakerMappings: Record<string, { name: string; role: string }> = {}
@@ -8345,7 +8479,7 @@ export const useStore = create<AppState>((set, get) => ({
           ...extraRefs,
           speaker_mappings: Object.keys(speakerMappings).length > 0 ? speakerMappings : undefined,
           characters: shortFilmCharacters.length > 0 ? shortFilmCharacters : undefined,
-          prompt_type: 'both',
+          prompt_type: promptType,
         })
         plans = result.clip_plans.map(p => ({
           video_prompt: p.video_prompt || '',
@@ -8360,7 +8494,7 @@ export const useStore = create<AppState>((set, get) => ({
           ...extraRefs,
           speaker_mappings: Object.keys(speakerMappings).length > 0 ? speakerMappings : undefined,
           characters: shortFilmCharacters.length > 0 ? shortFilmCharacters : undefined,
-          prompt_type: 'both',
+          prompt_type: promptType,
         })
         plans = result.clip_plans.map(p => ({
           video_prompt: p.video_prompt || '',
@@ -8369,16 +8503,15 @@ export const useStore = create<AppState>((set, get) => ({
       }
       set({
         directorClipPlans: plans,
-        directorStep: 'review',
+        directorStep: generateShotImages ? 'review' : 'review_video',
         directorLoading: false,
       })
 
       // Auto-mode: skip review
       if (get().directorAutoMode) {
-        if (get().directorReferenceImage) {
+        if (generateShotImages) {
           get().directorGenerateStartImages()
         } else {
-          set({ directorStep: 'review_video' })
           get().directorGenerate()
         }
       }
@@ -8449,6 +8582,8 @@ export const useStore = create<AppState>((set, get) => ({
         ...(charPaths.length > 0 ? { character_ref_paths: charPaths, character_ref_labels: charLabels } : {}),
         ...(locPaths.length > 0 ? { location_ref_paths: locPaths, location_ref_labels: locLabels } : {}),
       }
+      const generateShotImages = _directorUsesGeneratedShotImages(get())
+      const promptType = generateShotImages ? 'both' : 'video'
 
       // ?? not || — an explicit user-toggled `false` must be respected
       // (legacy v1 path); only fall back to true when servicesConfig
@@ -8470,7 +8605,7 @@ export const useStore = create<AppState>((set, get) => ({
           fps: get().modelOptions?.fps ?? 24,
           frames_steps: get().modelOptions?.frames_steps ?? 4,
           frames_minimum: get().modelOptions?.frames_minimum ?? 5,
-          prompt_type: 'both',
+          prompt_type: promptType,
         })
         plans = result.clip_plans.map(p => ({
           video_prompt: p.video_prompt || '',
@@ -8516,16 +8651,15 @@ export const useStore = create<AppState>((set, get) => ({
       set({
         directorPlannedClips: storyClips || get().directorPlannedClips,
         directorClipPlans: plans,
-        directorStep: 'review',
+        directorStep: generateShotImages ? 'review' : 'review_video',
         directorLoading: false,
       })
 
       // Auto-mode: skip review steps
       if (get().directorAutoMode) {
-        if (get().directorReferenceImage) {
+        if (generateShotImages) {
           get().directorGenerateStartImages()
         } else {
-          set({ directorStep: 'review_video' })
           get().directorGenerate()
         }
       }
@@ -9852,6 +9986,11 @@ export const useStore = create<AppState>((set, get) => ({
       ? state.modelOptions
       : null
     const directorVideoOptions = fetchedVideoOptions || cachedVideoOptions
+    const directorFixedMediaStrength = directorModelUsesFixedMediaStrength(
+      selectedVideoModel,
+      directorVideoOptions?.architecture
+        || state.models.find(model => model.model_type === selectedVideoModel)?.architecture,
+    )
     const directorImageOptions = fetchedImageOptions
     const directorImageResolution = resolveResolution(
       directorImageOptions,
@@ -10074,13 +10213,14 @@ export const useStore = create<AppState>((set, get) => ({
         skip_steps_cache_type: directorFirstBlockCacheEnabled ? 'first_block' : '',
         skip_steps_multiplier: directorCacheMultiplier,
         skip_steps_start_step_perc: directorCacheWarmup,
+        ...(directorFixedMediaStrength ? { input_video_strength: 1.0 } : {}),
       },
       video_loras: savedLoraPerMode.video || {},
       video_spatial_upsampling: directorVideoSpatialUpsampling,
       video_film_grain_intensity: directorVideoFilmGrainIntensity,
       video_film_grain_saturation: directorVideoFilmGrainSaturation,
       video_self_refiner: directorVideoSelfRefiner,
-      audio_scale: get().directorAudioScale,
+      audio_scale: directorFixedMediaStrength ? 1.0 : get().directorAudioScale,
 
       // Voice identity: LTX uses the CelebVHQ ID-LoRA; H3 Omni maps the
       // same upload into each shot's native Ref2VA manifest.
@@ -10142,11 +10282,33 @@ export const useStore = create<AppState>((set, get) => ({
         const status = await api.fetchPipelineStatus(pid)
         set({ pipelineStatus: status })
 
-        // Sync pipeline state to director UI state
-        if (status.clip_plans?.length && !get().directorClipPlans.length) {
+        // Sync the backend's model-adapted plan, not just an initially empty
+        // UI. H3 can split broad 20-30s music sections into additional native
+        // <=14.4s shots after the browser has already populated its draft
+        // timeline. The old empty-only guard left those stale durations and
+        // prompts visible even though the worker queued the shorter plan.
+        const currentPlans = get().directorClipPlans
+        const currentTimeline = get().directorPlannedClips
+        const plansChanged = Boolean(status.clip_plans?.length) && (
+          currentPlans.length !== status.clip_plans.length
+          || status.clip_plans.some((plan, index) => (
+            plan.video_prompt !== currentPlans[index]?.video_prompt
+            || plan.image_prompt !== currentPlans[index]?.image_prompt
+          ))
+        )
+        const timelineChanged = Boolean(status.planned_clips?.length) && (
+          currentTimeline.length !== status.planned_clips!.length
+          || status.planned_clips!.some((clip, index) => (
+            clip.start !== currentTimeline[index]?.start
+            || clip.end !== currentTimeline[index]?.end
+            || clip.duration_frames !== currentTimeline[index]?.duration_frames
+          ))
+        )
+        if (plansChanged || timelineChanged) {
           set({
-            directorClipPlans: status.clip_plans,
-            directorStep: 'review',
+            ...(plansChanged ? { directorClipPlans: status.clip_plans } : {}),
+            ...(timelineChanged ? { directorPlannedClips: status.planned_clips! } : {}),
+            ...(!currentPlans.length && plansChanged ? { directorStep: 'review' as const } : {}),
           })
         }
 

@@ -1418,8 +1418,9 @@ class family_handler:
             # scheduler supplies that tail through ``input_waveform``.
             "audio_guide_window_slicing": True,
             "sliding_window_audio_history": True,
-            # Director renders H3 as independent native-duration shots rather
-            # than pretending it supports the rolling-window contract.
+            # Standard Director renders independent native-duration shots;
+            # its Seamless option may opt FL2VA into the same native rolling
+            # continuation contract used by Studio.
             "director_video_strategy": (
                 "omni_reference" if omni_reference else "bounded_start_end"
             ),
@@ -1447,9 +1448,10 @@ class family_handler:
             "custom_frames_injection": not omni_reference,
             "returns_audio": True,
             "control_video_trim_disabled": True,
-            # Ref2VA accepts audio through its ordered Omni manifest, not
-            # through Wan's generic audio-guide input. Keep that capability
-            # explicit so the UI can distinguish Audio In from Audio Out.
+            # Studio Ref2VA audio is normally an ordered Omni reference.
+            # Director can additionally use a hidden exact-target soundtrack
+            # route for music/dialogue timing; keep the public capability
+            # explicit so the UI still distinguishes Audio In from Audio Out.
             "supports_reference_audio": omni_reference,
             "no_negative_prompt": True,
             "guidance_max_phases": 0,

@@ -33,6 +33,12 @@ class TestDirectorPipelineStatusReconnect(unittest.TestCase):
                     "status": "running",
                     "clips": [{
                         "video_prompt": "A saved shot.",
+                        "planned_clip": {
+                            "start": 0.0,
+                            "end": 5.5,
+                            "duration_sec": 5.5,
+                            "duration_frames": 132,
+                        },
                         "start_image_filename": "",
                         "video_filename": "clip.mp4",
                     }],
@@ -47,19 +53,26 @@ class TestDirectorPipelineStatusReconnect(unittest.TestCase):
         self.assertTrue(status["recovered_from_disk"])
         self.assertEqual(status["progress"]["current"], 1)
         self.assertEqual(status["progress"]["total"], 1)
+        self.assertEqual(status["planned_clips"][0]["duration_frames"], 132)
 
     def test_live_pipeline_wins_over_saved_fallback(self):
         live = {
             "id": "deadbeef",
             "status": "running",
             "phase": "generating_video",
+            "_planned_clips": [{
+                "start": 0.0,
+                "end": 10.125,
+                "duration_frames": 243,
+            }],
         }
         pipeline._pipelines["deadbeef"] = live
 
         with tempfile.TemporaryDirectory() as output_dir:
             status = pipeline.get_pipeline_status("deadbeef", output_dir)
 
-        self.assertEqual(status, live)
+        self.assertEqual(status["planned_clips"], live["_planned_clips"])
+        self.assertEqual(status["status"], live["status"])
         self.assertIsNot(status, live)
 
 

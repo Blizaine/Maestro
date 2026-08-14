@@ -5,6 +5,66 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [Unreleased]
 
+## [1.8.5] - 2026-08-14
+
+MiniMax-Music3: added native local long-form stereo music generation from a
+structured caption and section-tagged lyrics, with selectable 5-second to
+5-minute runtimes and a two-minute default. The model uses staged single-GPU
+offloading, pinned component downloads, complete-asset validation, and a
+model-aware Studio editor. Its AI song writer now treats the selected duration
+as a hard creative constraint, scaling lyric density, song structure,
+arrangement, transitions, and instrumental space accordingly. Director Music
+Video projects can generate their soundtrack with MiniMax-Music3 or ACE-Step.
+
+Director flexibility: the image-model selector now includes an explicit
+`None — no generated images` choice for every compatible video model. Auto
+projects skip image planning and generation when it is selected, while Manual
+projects can attach an optional image to any individual scene. A user-uploaded
+main image remains the first-frame anchor for Seamless generation even without
+an image generator, and H3 Omni continues to receive the supplied character,
+location, image, and voice references for its clips. Director's aspect ratio,
+resolution, workflow, and video/image model controls now appear before media
+inputs and remain visible after audio analysis. The music and image upload
+areas retain a consistent full-size presentation throughout setup instead of
+collapsing after soundtrack analysis. Setup controls lock when prompt planning
+begins; a pre-planning video-model change rebuilds clip timing while preserving
+uploaded media and analysis. MiniMax H3 First / Last can now run as one native Seamless
+Director timeline with motion and synchronized-audio overlap, exact H3 window
+geometry, and one local prompt assigned to each actual generation pass.
+MiniMax H3 Omni music videos now use the exact source-song timeline as target
+audio conditioning for each native shot and preserve the pristine continuous
+track in the joined result. Director status also replaces draft screenplay
+durations with the model-adapted H3 clip schedule, preventing stale 20-second
+estimates from appearing after the plan has been split below H3's native cap.
+The persistent Director Advanced drawer now exposes Director-owned H3 Turbo,
+Sol Engine, and First Block Cache controls, including managed Turbo checkpoint
+selection and cache threshold/warmup tuning; it no longer displays unrelated
+Studio-owned controls while Director mode is active. Director also hides the
+inapplicable image/audio strength controls for MiniMax H3 and LTX-2.5 and
+normalizes both conditioning strengths to their supported value of 1.0.
+
+LTX long-form generation: increasing total duration once again expands the
+native window toward the model ceiling before adding additional passes, unless
+the user deliberately locks a shorter window. AI-planned LTX sequences now
+treat every pass as an isolated generation request: Maestro repeats persistent
+camera, speed, style, identity, location, lighting, audio, and continuity rules
+while keeping each window's action local. Deterministic reinforcement protects
+seamless one-take and open-ended motion requests from resets, invented cuts,
+premature slowdown, or an unwanted ending.
+
+Generation reliability: corrected LTX-2.5 continuation audio when a generated
+tail is sample-major rather than channel-major, fixing failures after the first
+window and malformed carried audio. Shared attention now normalizes an
+otherwise-invalid BF16 mask / FP32 query combination, fixing LTX-2.5 jobs that
+combine multiple reference images with reference audio. Component-folder
+models verify every required asset before reporting that installation is
+complete. MiniMax H3 Music Video planning now treats source-song vocals as
+mapped driving audio instead of copying transcriptions into scripted dialogue;
+pathological repeated refrains are bounded before LLM planning, and a truncated
+generated dialogue tag can no longer prevent video jobs from being queued.
+Regression coverage now spans the new music, Director, H3, LTX, and mixed-dtype
+reference paths.
+
 ## [1.8.1] - 2026-08-13
 
 MiniMax H3 model sharing: linked WanGP installations can now supply their

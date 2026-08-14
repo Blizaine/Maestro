@@ -40,21 +40,34 @@ export function AutoGrowTextarea({
   )
 }
 
-function StyleField({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+function StyleField({
+  value,
+  onChange,
+  label,
+  placeholder,
+  help,
+}: {
+  value: string
+  onChange: (v: string) => void
+  label: string
+  placeholder: string
+  help?: string
+}) {
   return (
     <div>
-      <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">Style / Music Caption</label>
+      <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">{label}</label>
       <AutoGrowTextarea
         value={value}
         onChange={onChange}
-        placeholder="Describe it like you're briefing musicians — genre, instruments, mood, production, vocals. e.g. dreamy bedroom-pop with shimmering reverb guitars and warm analog synths, soft breathy female vocals, nostalgic and intimate, gently mid-tempo"
-        extraClass="min-h-[3.5rem]"
+        placeholder={placeholder}
+        extraClass="min-h-[5rem]"
       />
+      {help && <p className="text-[10px] text-text-muted leading-snug mt-1.5">{help}</p>}
     </div>
   )
 }
 
-function LyricsField({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+function LyricsField({ value, onChange, help }: { value: string; onChange: (v: string) => void; help?: string }) {
   return (
     <div>
       <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">Lyrics</label>
@@ -64,6 +77,7 @@ function LyricsField({ value, onChange }: { value: string; onChange: (v: string)
         placeholder={'[Verse]\nYour lyrics here…\n[Chorus]\n…'}
         extraClass="min-h-[8rem] font-mono"
       />
+      {help && <p className="text-[10px] text-text-muted leading-snug mt-1.5">{help}</p>}
     </div>
   )
 }
@@ -74,15 +88,22 @@ export function MusicControls() {
   const instrumental = useStore(s => s.musicInstrumental)
   const setInstrumental = useStore(s => s.setMusicInstrumental)
   const params = useStore(s => s.params)
+  const modelOptions = useStore(s => s.modelOptions)
+  const durationSeconds = useStore(s => s.durationSeconds)
   const setParam = useStore(s => s.setParam)
 
   const style = (params.alt_prompt as string) || ''
   const lyrics = (params.prompt as string) || ''
   const [writing, setWriting] = useState(false)
   const [writeError, setWriteError] = useState<string | null>(null)
+  const isMusic3 = !!modelOptions?.music3_structured_caption
+  const captionLabel = modelOptions?.music_caption_label || 'Style / Music Caption'
+  const captionPlaceholder = isMusic3
+    ? '### Global Metadata\nGenre, tempo, mood, and production...\n\n### Vocal Details\nVoice, delivery, harmonies, and effects...\n\n### Arrangement\nSection-by-section instruments and energy changes...'
+    : "Describe it like you're briefing musicians — genre, instruments, mood, production, vocals. e.g. dreamy bedroom-pop with shimmering reverb guitars and warm analog synths, soft breathy female vocals, nostalgic and intimate, gently mid-tempo"
 
   // alt_prompt = Music Caption (style); prompt = Lyrics. Both flow straight
-  // to ACE-Step's generate (input_prompt=lyrics, alt_prompt=caption).
+  // to the selected music model (input_prompt=lyrics, alt_prompt=caption).
   const setStyle = (v: string) => setParam('alt_prompt' as keyof GenerateParams, v)
   const setLyrics = (v: string) => setParam('prompt', v)
 
@@ -100,7 +121,12 @@ export function MusicControls() {
     setWriting(true)
     setWriteError(null)
     try {
-      const r = await api.writeSong({ description: description.trim(), instrumental })
+      const r = await api.writeSong({
+        description: description.trim(),
+        instrumental,
+        duration_seconds: durationSeconds,
+        model_type: params.model_type,
+      })
       if (r.style) setStyle(r.style)
       setLyrics(instrumental ? '[Instrumental]' : (r.lyrics || ''))
     } catch (e) {
@@ -153,13 +179,19 @@ export function MusicControls() {
         </button>
         {writeError && <p className="text-[10px] text-red-400 leading-snug">{writeError}</p>}
         <p className="text-[10px] text-text-muted leading-snug">
-          Let the LLM write the Style{instrumental ? '' : ' + Lyrics'} from your description — or just fill them in yourself below. Either way, edit and Generate.
+          Let the LLM write the {isMusic3 ? 'structured Music3 caption' : 'Style'}{instrumental ? '' : ' + Lyrics'} from your description — or fill them in yourself below. Either way, edit and Generate.
         </p>
       </div>
 
       {/* Style + Lyrics (editable, auto-sizing). Lyrics hidden when instrumental. */}
-      <StyleField value={style} onChange={setStyle} />
-      {!instrumental && <LyricsField value={lyrics} onChange={setLyrics} />}
+      <StyleField
+        value={style}
+        onChange={setStyle}
+        label={captionLabel}
+        placeholder={captionPlaceholder}
+        help={modelOptions?.music_caption_help}
+      />
+      {!instrumental && <LyricsField value={lyrics} onChange={setLyrics} help={modelOptions?.music_lyrics_help} />}
     </div>
   )
 }

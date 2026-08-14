@@ -20,6 +20,7 @@ DEFAULT_PATH = APP_ROOT / "defaults" / "ltx2_25.json"
 DEV_DEFAULT_PATH = APP_ROOT / "defaults" / "ltx2_25_dev.json"
 NVFP4_DEFAULT_PATH = APP_ROOT / "defaults" / "ltx2_25_nvfp4.json"
 LTX2_PATH = APP_ROOT / "models" / "ltx2" / "ltx2.py"
+ATTENTION_PATH = APP_ROOT / "shared" / "attention.py"
 DISTILLED_PATH = (
     APP_ROOT / "models" / "ltx2" / "ltx_pipelines" / "distilled.py"
 )
@@ -249,6 +250,36 @@ class LTX25HandlerTests(unittest.TestCase):
         self.assertEqual(count(np.zeros((48_000,), dtype=np.float32)), 48_000)
         self.assertEqual(count(np.zeros((2, 0), dtype=np.float32)), 0)
 
+    def test_ltx_continuation_audio_accepts_generated_sample_major_tail(self):
+        import numpy as np
+        import torch
+
+        tree = ast.parse(LTX2_PATH.read_text(encoding="utf-8"))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_prepare_ltx_audio_waveform"
+        )
+        namespace = {"torch": torch}
+        exec(
+            compile(
+                ast.Module(body=[function], type_ignores=[]),
+                str(LTX2_PATH),
+                "exec",
+            ),
+            namespace,
+        )
+        prepare = namespace["_prepare_ltx_audio_waveform"]
+
+        sample_major_mono = np.zeros((12_000, 1), dtype=np.float32)
+        sample_major_stereo = np.zeros((12_000, 2), dtype=np.float32)
+        channel_major_stereo = np.zeros((2, 12_000), dtype=np.float32)
+
+        self.assertEqual(tuple(prepare(sample_major_mono, 2).shape), (1, 1, 12_000))
+        self.assertEqual(tuple(prepare(sample_major_stereo, 2).shape), (1, 2, 12_000))
+        self.assertEqual(tuple(prepare(channel_major_stereo, 2).shape), (1, 2, 12_000))
+
     def test_standalone_soundtrack_is_durably_routed(self):
         launch = LAUNCH_PATH.read_text(encoding="utf-8")
         wgp = WGP_PATH.read_text(encoding="utf-8")
@@ -378,6 +409,18 @@ class LTX25HandlerTests(unittest.TestCase):
         )
         self.assertNotIn("frame_indices = list(range", prefix_block)
         self.assertNotIn("input_video[:, frame_idx]", prefix_block)
+
+    def test_masked_sdpa_normalizes_bf16_mask_for_fp32_query(self):
+        source = ATTENTION_PATH.read_text(encoding="utf-8")
+        sdpa_block = source.split("def sdpa_wrapper(", 1)[1].split(
+            "def get_attention_modes()", 1
+        )[0]
+        self.assertIn("torch.is_floating_point(attention_mask)", sdpa_block)
+        self.assertIn(
+            "attention_mask.dtype not in (torch.float32, q.dtype)",
+            sdpa_block,
+        )
+        self.assertIn("dtype=q.dtype", sdpa_block)
 
     def test_obsolete_sidecar_is_not_advertised_or_updated(self):
         launcher = PINOKIO_PATH.read_text(encoding="utf-8")

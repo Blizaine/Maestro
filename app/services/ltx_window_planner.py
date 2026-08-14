@@ -42,6 +42,183 @@ def _collapse_prompt(value: str) -> str:
     return " ".join(str(value or "").strip().split())
 
 
+_OPEN_ENDED_MOTION_RE = re.compile(
+    r"\b(?:non[-\s]?stop|never[-\s]?ending|endless|perpetual|infinite|"
+    r"forever|never\s+(?:slows?|stops?|stopping|ends?|ending)|"
+    r"keeps?\s+(?:moving|falling|travelling|traveling|going))\b",
+    re.IGNORECASE,
+)
+
+
+def requests_open_ended_ltx_motion(prompt: str) -> bool:
+    """Whether the requested sequence must remain active beyond its last pass."""
+
+    return bool(_OPEN_ENDED_MOTION_RE.search(_collapse_prompt(prompt)))
+
+
+def extract_ltx_global_invariants(prompt: str) -> list[str]:
+    """Extract explicit sequence-wide rules that every native pass must see.
+
+    The LLM guide remains responsible for arbitrary creative continuity.  This
+    small deterministic layer protects the high-impact rules users most often
+    express globally (capture language, pace, persistent motion, era, spatial
+    domain, one-take continuity, and unusual path geometry).  It deliberately
+    avoids copying the complete story, which would make every pass perform all
+    future beats again.
+    """
+
+    source = _collapse_prompt(prompt)
+    lowered = source.lower()
+    invariants: list[str] = []
+    open_ended_motion = requests_open_ended_ltx_motion(source)
+
+    def add(value: str) -> None:
+        if value and value not in invariants:
+            invariants.append(value)
+
+    has_handheld = bool(re.search(r"\bhandheld\b", lowered))
+    has_pov = bool(
+        re.search(r"\b(?:pov|point[-\s]of[-\s]view|first[-\s]person)\b", lowered)
+    )
+    has_static = bool(re.search(r"\b(?:locked[-\s]?off|static camera)\b", lowered))
+    has_aerial = bool(
+        re.search(r"\b(?:aerial|drone)\s+(?:camera|shot|view)\b", lowered)
+    )
+    camera_mode_count = sum((has_handheld, has_pov, has_static, has_aerial))
+    handheld_is_global = bool(
+        re.search(
+            r"\b(?:amateur\s+)?handheld\s+(?:recording|footage|video|camera|style)\b",
+            lowered,
+        )
+    )
+    if has_handheld and camera_mode_count == 1 and handheld_is_global:
+        add(
+            "an amateur handheld recording"
+            if "amateur" in lowered
+            else "handheld camera movement"
+        )
+    elif camera_mode_count <= 1 and re.search(r"\bfound[-\s]?footage\b", lowered):
+        add("found-footage camera language")
+    elif has_pov and camera_mode_count == 1:
+        add("a first-person point of view")
+    elif has_static and camera_mode_count == 1:
+        add("a locked-off static camera")
+
+    has_fast_pacing = bool(
+        re.search(
+            r"\b(?:very\s+fast|extremely\s+fast|high[-\s]?speed|rapid|frantic|"
+            r"breakneck|supersonic)\b",
+            lowered,
+        )
+    )
+    has_slow_pacing = bool(
+        re.search(
+            r"\b(?:slow[-\s]?moving|very\s+slow|gentle pace|slow motion)\b",
+            lowered,
+        )
+    )
+    if has_fast_pacing and not has_slow_pacing and open_ended_motion:
+        add("very fast movement and pacing")
+    elif has_slow_pacing and not has_fast_pacing and open_ended_motion:
+        add("deliberately slow movement and pacing")
+
+    has_falling_motion = bool(
+        re.search(r"\b(?:falling|plummeting|plunging|descending|descent)\b", lowered)
+    )
+    if has_falling_motion and (
+        open_ended_motion
+        or re.search(
+            r"\b(?:continuous(?:ly)?\s+(?:falling|plummeting|descending)|"
+            r"keeps?\s+falling)\b",
+            lowered,
+        )
+    ):
+        add("continuous falling motion")
+    elif re.search(r"\b(?:keeps? moving|continuous movement|moving forward)\b", lowered):
+        add("continuous forward motion")
+
+    if open_ended_motion:
+        add("nonstop motion that never slows, settles, stops, or resolves")
+
+    decade = re.search(
+        r"\b((?:19|20)\d{2}|\d{2})s[-\s]?(?:style|aesthetic|look)\b",
+        lowered,
+    )
+    if not decade:
+        decade = re.search(
+            r"\b(?:all|every|each|different|throughout)\b.{0,48}?"
+            r"\b((?:19|20)\d{2}|\d{2})s\b",
+            lowered,
+        )
+    if decade:
+        add(f"{decade.group(1)}s visual design")
+    for pattern, description in (
+        (r"\bphotoreal(?:istic|ism)?\b", "photorealistic live-action imagery"),
+        (r"\blive[-\s]?action\b", "live-action imagery"),
+        (r"\bstop[-\s]?motion\b", "stop-motion animation"),
+        (r"\banime\b", "anime visual styling"),
+        (r"\bfilm noir\b", "film-noir visual styling"),
+        (r"\bblack[-\s]and[-\s]white\b", "black-and-white imagery"),
+        (r"\bvhs\b", "VHS-era image texture"),
+    ):
+        if re.search(pattern, lowered):
+            add(description)
+
+    if re.search(
+        r"\b(?:all|entirely|completely)\s+(?:remain\s+)?indoors?\b",
+        lowered,
+    ):
+        add("every environment remaining indoors")
+    elif re.search(
+        r"\b(?:all|entirely|completely)\s+(?:remain\s+)?outdoors?\b",
+        lowered,
+    ):
+        add("every environment remaining outdoors")
+
+    if (
+        re.search(r"\b(?:seamless|unbroken|continuous)\b", lowered)
+        or re.search(r"\b(?:one[-\s]?take|oner|one[-\s]?er)\b", lowered)
+    ) and re.search(
+        r"\b(?:no\s+(?:clear\s+)?cuts?|without\s+cuts?|one[-\s]?take|oner|one[-\s]?er)\b",
+        lowered,
+    ):
+        add("one seamless continuous take with no cuts or invisible resets")
+
+    if "torus" in lowered or "toroid" in lowered:
+        if "rising" in lowered and ("sweep" in lowered or "sweeping" in lowered):
+            add("an ever-rising sweeping path inside a vast torus")
+        else:
+            add("a continuous path around the inside of a vast torus")
+
+    if re.search(r"\b(?:no dialogue|without dialogue|silent film)\b", lowered):
+        add("no spoken dialogue")
+    if re.search(r"\b(?:no music|without music)\b", lowered):
+        add("no non-diegetic music")
+
+    return invariants
+
+
+def reinforce_ltx_window_invariants(
+    prompts: Sequence[str],
+    source_prompt: str,
+) -> list[str]:
+    """Prepend the same compact global contract to every independent pass."""
+
+    cleaned = [_collapse_prompt(item) for item in prompts if _collapse_prompt(item)]
+    invariants = extract_ltx_global_invariants(source_prompt)
+    if not invariants:
+        return cleaned
+    if len(invariants) == 1:
+        joined = invariants[0]
+    else:
+        joined = ", ".join(invariants[:-1]) + f", and {invariants[-1]}"
+    prefix = f"Throughout this complete window, preserve {joined}."
+    return [
+        item if item.startswith(prefix) else _collapse_prompt(f"{prefix} {item}")
+        for item in cleaned
+    ]
+
+
 def parse_ltx_window_prompts(
     value: str | Sequence[str] | None,
     *,
@@ -109,6 +286,12 @@ def deterministic_ltx_window_prompts(prompt: str, count: int) -> list[str]:
             local = source
         if index == 0:
             phase = "Establish the requested characters, setting, and action, then begin this beat."
+        elif index == count - 1 and requests_open_ended_ltx_motion(source):
+            phase = (
+                "Continue directly from the preceding window without restarting; "
+                "keep the requested motion visibly active through the final frame "
+                "and beyond without slowing, settling, stopping, or resolving."
+            )
         elif index == count - 1:
             phase = "Continue directly from the preceding window without restarting, then complete the requested final beat."
         else:
@@ -119,7 +302,7 @@ def deterministic_ltx_window_prompts(prompt: str, count: int) -> list[str]:
                 "lighting, screen direction, and visible continuity."
             )
         )
-    return prompts
+    return reinforce_ltx_window_invariants(prompts, source)
 
 
 def plan_ltx_sliding_windows(
@@ -164,6 +347,8 @@ def plan_ltx_sliding_windows(
         error = str(exc)
         planned_by = "deterministic_fallback"
         prompts = deterministic_ltx_window_prompts(source, count)
+
+    prompts = reinforce_ltx_window_invariants(prompts, source)
 
     return {
         "source_prompt": source,

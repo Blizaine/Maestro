@@ -142,6 +142,64 @@ def _decord_frame_to_numpy(frame):
     return frame
 
 
+def _prepare_ltx_audio_waveform(input_waveform, target_channels):
+    """Return continuation audio as ``(batch, channels, samples)``.
+
+    File-backed audio slices enter LTX channel-first, while decoded native
+    audio leaves the model sample-first.  Sliding-window continuation feeds
+    that decoded tail back into the next pass, so treating every 2-D array as
+    channel-first turns ``(samples, 1)`` into ``(1, samples, 1)`` and leaves a
+    one-sample signal for the mel transform.  Accept both layouts explicitly
+    and keep the batch dimension unambiguous.
+    """
+
+    waveform = torch.as_tensor(input_waveform, dtype=torch.float32, device="cpu")
+    target_channels = max(1, int(target_channels or 1))
+
+    if waveform.ndim == 1:
+        waveform = waveform.unsqueeze(0)
+    elif waveform.ndim == 2:
+        first, second = (int(value) for value in waveform.shape)
+        if first <= 8 and second > 8:
+            pass  # channels, samples
+        elif second <= 8 and first > 8:
+            waveform = waveform.transpose(0, 1)  # samples, channels
+        elif first in (1, target_channels):
+            pass
+        elif second in (1, target_channels):
+            waveform = waveform.transpose(0, 1)
+        else:
+            raise ValueError(
+                "LTX continuation audio must be mono or channel-oriented; "
+                f"got {tuple(waveform.shape)}."
+            )
+    elif waveform.ndim == 3:
+        if int(waveform.shape[0]) != 1:
+            raise ValueError(
+                "LTX continuation audio supports one batch at a time; "
+                f"got {tuple(waveform.shape)}."
+            )
+        if int(waveform.shape[1]) <= 8 and int(waveform.shape[2]) > 8:
+            return waveform.contiguous()
+        if int(waveform.shape[2]) <= 8 and int(waveform.shape[1]) > 8:
+            return waveform.transpose(1, 2).contiguous()
+        if int(waveform.shape[1]) in (1, target_channels):
+            return waveform.contiguous()
+        if int(waveform.shape[2]) in (1, target_channels):
+            return waveform.transpose(1, 2).contiguous()
+        raise ValueError(
+            "LTX continuation audio must be batch/channel/sample oriented; "
+            f"got {tuple(waveform.shape)}."
+        )
+    else:
+        raise ValueError(
+            "LTX continuation audio must be one-, two-, or three-dimensional; "
+            f"got {tuple(waveform.shape)}."
+        )
+
+    return waveform.unsqueeze(0).contiguous()
+
+
 def _resolve_retake_pipeline_models(pipeline):
     """Return the model container used by the native Retake pipeline.
 
@@ -2282,14 +2340,14 @@ class LTX2:
             if audio_strength > 0.0:
                 if self._interrupt:
                     return None
-                waveform, waveform_sample_rate =  torch.from_numpy(input_waveform), input_waveform_sample_rate
+                target_channels = int(getattr(self.audio_encoder, "in_channels", 1))
+                waveform = _prepare_ltx_audio_waveform(
+                    input_waveform,
+                    target_channels,
+                )
+                waveform_sample_rate = input_waveform_sample_rate
                 if self._interrupt:
                     return None
-                if waveform.ndim == 1:
-                    waveform = waveform.unsqueeze(0).unsqueeze(0)
-                elif waveform.ndim == 2:
-                    waveform = waveform.unsqueeze(0)
-                target_channels = int(getattr(self.audio_encoder, "in_channels", waveform.shape[1]))
                 if target_channels <= 0:
                     target_channels = waveform.shape[1]
                 if waveform.shape[1] != target_channels:

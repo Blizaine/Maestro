@@ -1,6 +1,6 @@
 # Maestro
 
-A one-click AI **video, image, and audio studio** for creators. Maestro pairs a modern React UI with a powerful generation backend and adds a **Director mode** that uses an LLM to plan music videos and short films from a single prompt. Optimized for the latest LTX-2.3 models & LoRAs, with support for virtually all open weight models.  
+A one-click AI **video, image, and audio studio** for creators. Maestro pairs a modern React UI with a powerful generation backend and adds a **Director mode** that uses an LLM to plan music videos and short films from a single prompt. Optimized for LTX-2.5, MiniMax H3, and the latest local creative models and LoRAs.
 
 ![Maestro UI](Maestro_UI_02.jpg)
 
@@ -23,9 +23,9 @@ Detects your GPU, VRAM, and RAM on first launch and picks the right profile, qua
 
 ### 🎨 Studio Mode — full manual control
 Direct access to every model and every knob:
-- **Video** — MiniMax H3 with native synchronized audio, LTX-2.3, Wan1/2, Hunyuan, and many more.
+- **Video** — MiniMax H3 and LTX-2.5 with native synchronized audio, LTX-2.3, Wan1/2, Hunyuan, and many more.
 - **Image** — Flux 2 Klein 9B, Krea 2 RAW/Turbo and Identity Edit, Qwen Image Edit, and many more
-- **Audio** — TTS: Kugelaudio, Qwen3 TTS. Music: ACE-Step. SFX: MMAudio
+- **Audio** — TTS: Kugelaudio, Qwen3 TTS. Music: MiniMax-Music3 and ACE-Step. SFX: MMAudio
 - **Multi-clip generation** with per-clip prompts, seamless overlapping (sliding window) transitions, and shared LoRAs
 - **Blend video Mode** Remember Sora 1 blend mode, where you could overlap two videos, and use AI to blend them together? 
 - **Frames Injection (KFI)** for character continuity in long videos
@@ -76,6 +76,37 @@ View all past Director runs with their full state — clip plans, generated imag
 ## Updates
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
+
+### v1.8.5 (2026-08-14)
+
+**MiniMax-Music3**
+- Added native local MiniMax-Music3 generation for complete stereo songs from structured music direction and lyrics, with selectable 5-second to 5-minute runtimes and a two-minute default.
+- Added a duration-aware AI song writer that scales lyrics, sections, arrangement, transitions, and instrumental space to the selected track length instead of forcing every idea into a full-length song.
+- Added MiniMax-Music3 as a soundtrack generator in Director Music Video mode, alongside ACE-Step.
+- Added staged single-GPU memory management, verified component downloads, interrupted-install detection, and model-specific Studio controls and guidance.
+
+**Director workflow flexibility**
+- Reorganized Director setup so aspect ratio, resolution, workflow, and video/image models appear before media uploads and remain visible after audio analysis. Music and image upload areas now keep a consistent, easy-to-find size throughout setup. Setup choices lock once prompt planning begins, and changing the video model safely rebuilds clip timing without re-uploading the source.
+- Added **None — no generated images** to Director's image-model selector. Auto mode can now plan and render directly from video prompts without loading an image model.
+- Manual Director projects can optionally upload a different scene image for any shot while leaving other shots prompt-only.
+- Disabling generated shot images does not disable user references: an uploaded main start image still anchors Seamless LTX and H3 First / Last runs, while H3 Omni continues to receive the supplied character, location, image, and voice references for its clips.
+- Added native Seamless Director support for MiniMax H3 First / Last, carrying motion and synchronized audio between windows while assigning each native pass only its correct local prompt.
+- MiniMax H3 Omni music videos now condition against the exact source-song segment for each shot and retain the pristine continuous soundtrack, rather than merely treating the song as a style reference.
+- Director now displays the model-adapted H3 clip count and native durations after planning, so long screenplay sections no longer appear as unsupported 20-second H3 generations.
+- Added Director-owned Turbo, Sol Engine, and First Block Cache controls to the persistent Advanced menu for MiniMax H3 models, including Turbo checkpoint selection and cache tuning.
+- Simplified MiniMax H3 and LTX-2.5 Director setup by hiding inapplicable image/audio strength sliders and locking both conditioning strengths to their supported 1.0 values.
+
+**LTX long-form generation**
+- Restored automatic LTX window sizing: increasing total duration now grows each native pass to the model ceiling before adding more windows, unless the user explicitly locks a shorter window.
+- Reworked AI-planned LTX sequences so every native pass receives a complete standalone prompt with the persistent camera, speed, style, identity, location, lighting, audio, and continuity rules it needs.
+- Improved seamless one-take and open-ended prompts so later windows do not reset, invent cuts, slow down, or resolve action the user asked to continue indefinitely.
+- Fixed LTX-2.5 continuation failing after the first window or corrupting audio history when generated audio returned in sample-major layout.
+
+**Reference and generation reliability**
+- Fixed LTX-2.5 generation with multiple reference images plus reference audio failing when a BF16 attention mask met an FP32 query tensor.
+- Fixed MiniMax H3 Music Video planning failing on an unbalanced dialogue tag when a repetitive source-song transcription exhausted the LLM output limit. Source vocals now remain mapped driving audio instead of being copied into scripted dialogue.
+- Component-based models now verify all required assets before being marked installed, preventing partial MiniMax-Music3 downloads from appearing ready.
+- Expanded regression coverage for MiniMax-Music3, Director image policies, H3 Seamless generation, LTX sequence planning, continuation audio, and mixed-dtype reference attention.
 
 ### v1.8.1 (2026-08-13)
 

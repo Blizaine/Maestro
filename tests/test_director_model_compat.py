@@ -31,6 +31,7 @@ from services.director.planners.short_film import (  # noqa: E402
 )
 from services.director.planners.music_video import (  # noqa: E402
     MusicVideoPlanner,
+    _compact_lyrics_for_context,
     _music_shot_schema,
 )
 from services.director_video_strategy import (  # noqa: E402
@@ -73,6 +74,32 @@ def _ltx_video(**updates):
 
 
 class TestDirectorModelAssessment(unittest.TestCase):
+    def test_music_planner_compacts_pathological_repeated_transcription(self):
+        compact = _compact_lyrics_for_context("beep " * 2000)
+
+        self.assertEqual(compact.lower().count("beep"), 3)
+        self.assertIn("[repeated refrain]", compact)
+        self.assertLess(len(compact), 400)
+
+    def test_h3_music_context_maps_vocals_without_exposing_transcript(self):
+        planner = MusicVideoPlanner()
+        contexts = planner._build_clip_contexts(
+            [{"start": 0.0, "end": 5.2, "label": "chorus"}],
+            [{"start": 0.0, "end": 5.2, "text": "beep " * 2000}],
+            {},
+            {},
+            None,
+            source_audio_drives_vocals=True,
+        )
+
+        self.assertEqual(len(contexts), 1)
+        self.assertNotIn("beep", contexts[0].lower())
+        self.assertIn("mapped source audio drives this interval", contexts[0])
+        self.assertIn(
+            "without quoting, transcribing, or inventing words",
+            contexts[0],
+        )
+
     def test_video_only_planner_schemas_forbid_unused_image_fields(self):
         short_schema = _shot_list_schema(
             1,
@@ -802,6 +829,22 @@ class TestDirectorModelAssessment(unittest.TestCase):
             SHOT_IMAGE_GENERATE,
         )
 
+    def test_explicit_no_image_model_overrides_legacy_required_policy(self):
+        legacy = {"director_shot_image_support": "required"}
+
+        self.assertEqual(
+            resolve_shot_image_policy(
+                legacy, "prompt_only", has_visual_references=True,
+            ),
+            SHOT_IMAGE_PROMPT_ONLY,
+        )
+        self.assertEqual(
+            resolve_shot_image_policy(
+                legacy, "auto", has_visual_references=False,
+            ),
+            SHOT_IMAGE_GENERATE,
+        )
+
     def test_reference_editor_can_bootstrap_and_edit(self):
         result = assess_director_model("editor", _image_editor())
         self.assertTrue(result["image"]["compatible"])
@@ -961,6 +1004,24 @@ class TestDirectorModelAssessment(unittest.TestCase):
             "direct_references",
         )
 
+    def test_h3_first_last_native_continuation_enables_seamless(self):
+        result = assess_director_model(
+            "minimax_h3",
+            {
+                "name": "H3 First / Last",
+                "image_prompt_types_allowed": "TSE",
+                "sliding_window": True,
+                "video_continuation": True,
+                "custom_frames_injection": True,
+                "returns_audio": True,
+                "director_video_strategy": "bounded_start_end",
+                "director_audio_input_mode": "none",
+            },
+            architecture="minimax_h3",
+        )
+
+        self.assertTrue(result["video"]["seamless"]["compatible"])
+
     def test_h3_timeline_merges_short_cuts_and_splits_long_scenes(self):
         plans = [
             {"video_prompt": "A", "image_prompt": "image A"},
@@ -1053,6 +1114,41 @@ class TestDirectorVideoExecutionProfile(unittest.TestCase):
                 ("1088x1920 (9:16 1080p)", "1088x1920"),
             ],
         }
+
+    def test_h3_and_ltx25_lock_director_media_strengths(self):
+        for model_type, architecture in (
+            ("minimax_h3", "minimax_h3"),
+            ("minimax_h3_ref2va_full", "minimax_h3_ref2va"),
+            ("ltx2_25", "ltx2_25"),
+            ("ltx2_25_dev", "ltx2_25"),
+        ):
+            with self.subTest(model_type=model_type):
+                params = {
+                    "video_model": model_type,
+                    "video_params": {"input_video_strength": 0.25},
+                    "audio_scale": 3.0,
+                }
+                self.assertTrue(pipeline._normalize_director_media_strengths(
+                    params,
+                    model_def={"architecture": architecture},
+                ))
+                self.assertEqual(
+                    params["video_params"]["input_video_strength"],
+                    1.0,
+                )
+                self.assertEqual(params["audio_scale"], 1.0)
+
+        adjustable = {
+            "video_model": "ltx2_22B_distilled_1_1",
+            "video_params": {"input_video_strength": 0.7},
+            "audio_scale": 2.0,
+        }
+        self.assertFalse(pipeline._normalize_director_media_strengths(
+            adjustable,
+            model_def={"architecture": "ltx2"},
+        ))
+        self.assertEqual(adjustable["video_params"]["input_video_strength"], 0.7)
+        self.assertEqual(adjustable["audio_scale"], 2.0)
 
     def test_auto_profile_uses_exact_canvas_vram_policy(self):
         profile = build_director_video_execution_profile(
@@ -1307,6 +1403,17 @@ class TestDirectorBackendValidation(unittest.TestCase):
                 "sliding_window": True,
                 "returns_audio": True,
             },
+            "h3": {
+                "name": "H3 First / Last",
+                "architecture": "minimax_h3",
+                "image_prompt_types_allowed": "TSE",
+                "sliding_window": True,
+                "video_continuation": True,
+                "custom_frames_injection": True,
+                "returns_audio": True,
+                "director_video_strategy": "bounded_start_end",
+                "director_shot_image_support": "optional",
+            },
         }
         pipeline._wgp = SimpleNamespace(
             get_model_def=lambda model_type: definitions.get(model_type),
@@ -1347,6 +1454,15 @@ class TestDirectorBackendValidation(unittest.TestCase):
                 "video_model": "ovi",
                 "seamless": True,
             })
+
+    def test_h3_seamless_prompt_only_skips_irrelevant_image_validation(self):
+        pipeline._validate_director_models({
+            "pipeline_type": "short_film_story",
+            "image_model": "__none__",
+            "video_model": "h3",
+            "_director_shot_image_policy": SHOT_IMAGE_PROMPT_ONLY,
+            "seamless": True,
+        })
 
     def test_reference_limit_keeps_source_first(self):
         definitions = pipeline._wgp.get_model_def
@@ -1469,7 +1585,8 @@ class TestDirectorH3GenerationContract(unittest.TestCase):
                     "video_model": model_type,
                     "pipeline_type": "short_film_story",
                     "seamless": False,
-                    "video_params": {},
+                    "video_params": {"input_video_strength": 0.25},
+                    "audio_scale": 2.5,
                     "_director_shot_image_policy": "prompt_only",
                 },
                 plans,
@@ -1484,6 +1601,141 @@ class TestDirectorH3GenerationContract(unittest.TestCase):
         self.assertAlmostEqual(clips[1]["end"], (124 + 141) / 24)
         self.assertEqual(plans[0]["_director_generation_frames"], 124)
         self.assertEqual(plans[1]["_director_generation_frames"], 141)
+        self.assertEqual(captured["input_video_strength"], 1.0)
+
+    def test_fl2va_seamless_uses_one_explicit_prompt_per_native_window(self):
+        model_type = "minimax_h3"
+        model_def = {
+            "name": "H3 First / Last",
+            "architecture": "minimax_h3",
+            "fps": 24,
+            "frames_minimum": 124,
+            "frames_maximum": 345,
+            "frames_steps": 17,
+            "latent_size": 17,
+            "image_prompt_types_allowed": "TSE",
+            "sliding_window": True,
+            "video_continuation": True,
+            "custom_frames_injection": True,
+            "sliding_window_defaults": {"overlap_default": 18},
+            "returns_audio": True,
+            "director_video_strategy": "bounded_start_end",
+            "director_audio_input_mode": "none",
+        }
+        self._install_registry(model_type, model_def)
+        plans = [
+            {"video_prompt": "first continuous beat"},
+            {"video_prompt": "second continuous beat"},
+            {"video_prompt": "third continuous beat"},
+        ]
+        clips = [
+            {
+                "start": index * 10.125,
+                "end": (index + 1) * 10.125,
+                "duration_sec": 10.125,
+                "duration_frames": 243,
+            }
+            for index in range(3)
+        ]
+        captured = {}
+
+        def submit(params, **kwargs):
+            captured.update(params)
+            return ["continuous.mp4"]
+
+        with patch.object(pipeline, "_submit_and_wait", side_effect=submit):
+            pipeline._run_video_generation(
+                "h3-seamless",
+                {
+                    "video_model": model_type,
+                    "pipeline_type": "short_film_story",
+                    "seamless": True,
+                    "video_params": {},
+                    "_director_shot_image_policy": SHOT_IMAGE_PROMPT_ONLY,
+                    "_director_video_execution_profile": {
+                        "is_minimax_h3": True,
+                        "effective_max_frames": 243,
+                        "normalized_resolution": "1280x704",
+                    },
+                },
+                plans,
+                clips,
+                ["", "", ""],
+                out_dir=self.temp_dir.name,
+            )
+
+        self.assertTrue(captured["minimax_h3_multi_window"])
+        self.assertEqual(captured["video_length"], 729)
+        self.assertEqual(captured["sliding_window_size"], 243)
+        self.assertEqual(captured["sliding_window_overlap"], 18)
+        prompts = captured["h3_window_prompts"]
+        self.assertEqual(len(prompts), 4)
+        self.assertIn("first continuous beat", prompts[0])
+        self.assertIn("second continuous beat", prompts[1])
+        self.assertIn("third continuous beat", prompts[2])
+        self.assertIn("third continuous beat", prompts[3])
+        self.assertNotIn("image_start", captured)
+
+    def test_fl2va_seamless_prompt_only_uses_uploaded_main_start(self):
+        model_type = "minimax_h3"
+        model_def = {
+            "name": "H3 First / Last",
+            "architecture": "minimax_h3",
+            "fps": 24,
+            "frames_minimum": 124,
+            "frames_maximum": 345,
+            "frames_steps": 17,
+            "latent_size": 17,
+            "image_prompt_types_allowed": "TSE",
+            "sliding_window": True,
+            "video_continuation": True,
+            "custom_frames_injection": True,
+            "sliding_window_defaults": {"overlap_default": 18},
+            "returns_audio": True,
+            "director_video_strategy": "bounded_start_end",
+            "director_audio_input_mode": "none",
+        }
+        self._install_registry(model_type, model_def)
+        main_start = self._file("main-start.png")
+        stale_generated = self._file("stale-generated.png")
+        plans = [{"video_prompt": "continuous opening beat"}]
+        clips = [{
+            "start": 0,
+            "end": 10.125,
+            "duration_sec": 10.125,
+            "duration_frames": 243,
+        }]
+        captured = {}
+
+        def submit(params, **kwargs):
+            captured.update(params)
+            return ["continuous.mp4"]
+
+        with patch.object(pipeline, "_submit_and_wait", side_effect=submit):
+            pipeline._run_video_generation(
+                "h3-seamless-main-start",
+                {
+                    "video_model": model_type,
+                    "pipeline_type": "short_film_story",
+                    "seamless": True,
+                    "reference_image_path": main_start,
+                    "video_params": {},
+                    "_director_shot_image_policy": SHOT_IMAGE_PROMPT_ONLY,
+                    "_director_video_execution_profile": {
+                        "is_minimax_h3": True,
+                        "effective_max_frames": 243,
+                        "normalized_resolution": "1280x704",
+                    },
+                },
+                plans,
+                clips,
+                [os.path.basename(stale_generated)],
+                out_dir=self.temp_dir.name,
+            )
+
+        self.assertEqual(captured["image_start"], main_start)
+        self.assertEqual(captured["image_prompt_type"], "S")
+        self.assertNotEqual(captured["image_start"], stale_generated)
 
     def test_fl2va_uses_native_lengths_and_endpoints_only_within_one_scene(self):
         model_type = "minimax_h3"
@@ -1803,7 +2055,7 @@ class TestDirectorH3GenerationContract(unittest.TestCase):
         self.assertIn("Blaine", manifest[-1]["role"])
         self.assertNotIn("voice_reference", captured)
 
-    def test_ref2va_audio_workflow_maps_shot_slice_and_keeps_clean_join_track(self):
+    def test_ref2va_audio_workflow_locks_source_audio_and_keeps_clean_join_track(self):
         model_type = "minimax_h3_ref2va"
         model_def = {
             "name": "H3 Ref2VA",
@@ -1823,26 +2075,11 @@ class TestDirectorH3GenerationContract(unittest.TestCase):
         shot = self._file("shot.png")
         song = self._file("song.wav")
         captured = {}
-        generated_slice = []
-
-        def slice_audio(source, start, duration, destination):
-            self.assertEqual(source, song)
-            self.assertAlmostEqual(start, 2.0)
-            self.assertAlmostEqual(duration, 124 / 24)
-            with open(destination, "wb") as handle:
-                handle.write(b"slice")
-            generated_slice.append(destination)
-
         def submit(params, **kwargs):
             captured.update(params)
-            manifest_path = params["per_clip_minimax_h3_references"][0][-1]["path"]
-            self.assertTrue(os.path.isfile(manifest_path))
             return ["joined.mp4"]
 
-        with (
-            patch.object(pipeline, "_slice_audio_segment", side_effect=slice_audio),
-            patch.object(pipeline, "_submit_and_wait", side_effect=submit),
-        ):
+        with patch.object(pipeline, "_submit_and_wait", side_effect=submit):
             pipeline._run_video_generation(
                 "h3-audio",
                 {
@@ -1859,10 +2096,13 @@ class TestDirectorH3GenerationContract(unittest.TestCase):
             )
 
         self.assertEqual(captured["multi_clip_concat_audio"], song)
-        audio_reference = captured["per_clip_minimax_h3_references"][0][-1]
-        self.assertEqual(audio_reference["audio_intent"], "drive")
-        self.assertTrue(generated_slice)
-        self.assertFalse(os.path.exists(generated_slice[0]))
+        self.assertEqual(captured["audio_prompt_type"], "AD")
+        self.assertEqual(captured["audio_guide"], song)
+        self.assertEqual(captured["audio_frame_offset"], 48)
+        self.assertFalse(any(
+            item["type"] == "audio"
+            for item in captured["per_clip_minimax_h3_references"][0]
+        ))
 
 
 class TestDirectorUICatalogContract(unittest.TestCase):
@@ -1881,6 +2121,22 @@ class TestDirectorUICatalogContract(unittest.TestCase):
             "SettingsDrawer",
             "DirectorLoraSelector.tsx",
         )
+        director_h3_optimizations_path = os.path.join(
+            _ROOT_DIR,
+            "ui",
+            "src",
+            "components",
+            "Sidebar",
+            "DirectorH3Optimizations.tsx",
+        )
+        advanced_settings_path = os.path.join(
+            _ROOT_DIR,
+            "ui",
+            "src",
+            "components",
+            "Sidebar",
+            "AdvancedSettings.tsx",
+        )
         launch_path = os.path.join(_APP_DIR, "launch.py")
         pipeline_path = os.path.join(_APP_DIR, "services", "director_pipeline.py")
         with open(client_path, encoding="utf-8") as handle:
@@ -1893,12 +2149,17 @@ class TestDirectorUICatalogContract(unittest.TestCase):
             chat = handle.read()
         with open(lora_selector_path, encoding="utf-8") as handle:
             lora_selector = handle.read()
+        with open(director_h3_optimizations_path, encoding="utf-8") as handle:
+            director_h3_optimizations = handle.read()
+        with open(advanced_settings_path, encoding="utf-8") as handle:
+            advanced_settings = handle.read()
         with open(launch_path, encoding="utf-8") as handle:
             launch = handle.read()
         with open(pipeline_path, encoding="utf-8") as handle:
             pipeline_source = handle.read()
 
         self.assertIn("director?: DirectorModelCompatibility", client)
+        self.assertIn("planned_clips?: import('../types').PlannedClip[]", client)
         self.assertIn("const backendModels: ModelDef[]", store)
         self.assertIn("...m,", store)
         self.assertIn("shot_image_guidance: directorShotImageGuidance", store)
@@ -1908,12 +2169,52 @@ class TestDirectorUICatalogContract(unittest.TestCase):
         self.assertIn("minimax_h3_turbo_preset: directorTurboPreset?.id", store)
         self.assertIn("override_attention: directorSolEnabled ? 'sol' : ''", store)
         self.assertIn("skip_steps_cache_type: directorFirstBlockCacheEnabled", store)
+        self.assertIn("directorModelUsesFixedMediaStrength", store)
+        self.assertIn("input_video_strength: 1.0", store)
+        self.assertIn("directorFixedMediaStrength ? 1.0", store)
         self.assertIn("shot_image_support?", types)
         self.assertIn("Shot image guidance", chat)
+        self.assertIn("None — no generated images", chat)
+        self.assertIn("allowSceneImageUploads", chat)
+        self.assertIn("directorSetClipImage", store)
+        self.assertIn("const timelineChanged =", store)
+        self.assertIn("directorPlannedClips: status.planned_clips!", store)
         self.assertIn("Maximum planned shot", chat)
-        self.assertIn("H3 Turbo", chat)
-        self.assertIn("H3 Sol Engine", chat)
-        self.assertIn("First Block Cache", chat)
+        self.assertIn("H3 Optimizations", director_h3_optimizations)
+        self.assertIn("Director H3 Turbo", director_h3_optimizations)
+        self.assertIn("Director H3 Sol Engine", director_h3_optimizations)
+        self.assertIn("Director First Block Cache", director_h3_optimizations)
+        self.assertIn("setDirectorH3TurboMode", director_h3_optimizations)
+        self.assertIn("setDirectorH3SolMode", director_h3_optimizations)
+        self.assertIn("setDirectorH3FirstBlockCache", director_h3_optimizations)
+        self.assertIn("import { DirectorH3Optimizations }", chat)
+        self.assertIn("<DirectorH3Optimizations />", chat)
+        self.assertIn("<DirectorH3Optimizations />", advanced_settings)
+        self.assertIn("sidebarMode === 'director'", advanced_settings)
+        self.assertIn("!fixedMediaStrength", chat)
+        self.assertIn("function DirectorSetupPanel", chat)
+        self.assertIn("function DirectorModelSelection", chat)
+        self.assertIn("function DirectorGenerationOptions", chat)
+        self.assertIn("<DirectorSetupPanel locked={directorSetupLocked} />", chat)
+        self.assertIn("Project setup is locked after planning begins.", chat)
+        self.assertNotIn("compact?: boolean", chat)
+        self.assertLess(
+            chat.index("<DirectorSetupPanel locked={directorSetupLocked} />"),
+            chat.index("{skill && (!isShortFilm || shortFilmPath === 'audio')"),
+        )
+        model_selection_start = chat.index("function DirectorModelSelection")
+        model_selection_end = chat.index(
+            "function DirectorLoraAccordion",
+            model_selection_start,
+        )
+        model_selection = chat[model_selection_start:model_selection_end]
+        self.assertLess(
+            model_selection.index('mode="video"'),
+            model_selection.index('mode="image"'),
+        )
+        self.assertIn("directorClipPlans: []", store)
+        self.assertIn("void current.directorSetEnergyBias", store)
+        self.assertIn("_normalize_director_media_strengths", pipeline_source)
         self.assertIn("director_memory_policy", chat)
         self.assertIn("LoRA strength", lora_selector)
         self.assertIn('type="number"', lora_selector)
