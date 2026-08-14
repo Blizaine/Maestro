@@ -9220,7 +9220,28 @@ def generate_video(
                         break
                 state["prompt"] = ""
                 if crash_type == "VRAM":
-                    new_error = "The generation of the video has encountered an error: it is likely that you have unsufficient VRAM and you should therefore reduce the video resolution or its number of frames."
+                    if (
+                        str(model_def.get("architecture") or "")
+                        == "minimax_music3"
+                    ):
+                        new_error = (
+                            "MiniMax-Music3 ran out of VRAM while planning the song. "
+                            "Restart Maestro to clear the GPU, then try a shorter Song "
+                            "duration if the problem continues."
+                        )
+                    elif model_def.get("audio_only", False):
+                        new_error = (
+                            "The audio generation ran out of VRAM. Restart Maestro to "
+                            "clear the GPU, then reduce duration or model workload if "
+                            "the problem continues."
+                        )
+                    else:
+                        new_error = (
+                            "The generation of the video has encountered an error: "
+                            "it is likely that you have insufficient VRAM and you "
+                            "should therefore reduce the video resolution or its "
+                            "number of frames."
+                        )
                 elif crash_type == "RAM":
                     new_error = "The generation of the video has encountered an error: it is likely that you have unsufficient RAM and / or Reserved RAM allocation should be reduced using 'perc_reserved_mem_max' or using a different Profile."
                 else:

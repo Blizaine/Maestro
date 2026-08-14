@@ -27,6 +27,7 @@ if _APP_DIR not in sys.path:
 
 from services.perf_recommend import (  # noqa: E402
     compute_h3_weight_budget,
+    compute_music3_weight_budget,
     compute_per_job_coefficient,
 )
 
@@ -346,6 +347,35 @@ class TestMiniMaxH3ActivationBudget(unittest.TestCase):
         self.assertLess(budget["activation_reserve_gb"], 19.5)
         self.assertGreater(budget["weight_budget_gb"], 4.5)
         self.assertLess(budget["weight_budget_gb"], 5.0)
+
+
+class TestMiniMaxMusic3SemanticBudget(unittest.TestCase):
+    def test_120_second_job_streams_qwen_on_20gb_card(self):
+        budget = compute_music3_weight_budget(20.0, 120)
+        self.assertGreater(budget["kv_cache_gb"], 1.1)
+        self.assertGreater(budget["runtime_reserve_gb"], 7.8)
+        self.assertLess(budget["weight_budget_gb"], 12.2)
+        self.assertGreater(budget["weight_budget_gb"], 12.0)
+
+    def test_24gb_card_can_retain_the_complete_qwen_checkpoint(self):
+        budget = compute_music3_weight_budget(24.0, 120)
+        self.assertEqual(budget["weight_budget_gb"], 16.0)
+        self.assertGreaterEqual(budget["runtime_reserve_gb"], 7.8)
+
+    def test_longer_music_reserves_more_cache_and_streams_more_weights(self):
+        short = compute_music3_weight_budget(20.0, 30)
+        long = compute_music3_weight_budget(20.0, 300)
+        self.assertGreater(long["kv_cache_gb"], short["kv_cache_gb"])
+        self.assertGreater(
+            long["runtime_reserve_gb"],
+            short["runtime_reserve_gb"],
+        )
+        self.assertLess(long["weight_budget_gb"], short["weight_budget_gb"])
+
+    def test_16gb_card_keeps_a_viable_streaming_budget(self):
+        budget = compute_music3_weight_budget(16.0, 120)
+        self.assertGreater(budget["weight_budget_gb"], 8.0)
+        self.assertLess(budget["weight_budget_gb"], 8.2)
 
 
 if __name__ == "__main__":

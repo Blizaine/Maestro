@@ -20718,6 +20718,7 @@ def _apply_per_job_coefficient(job: dict) -> None:
     try:
         from services.perf_recommend import (
             compute_h3_weight_budget,
+            compute_music3_weight_budget,
             compute_per_job_coefficient,
         )
 
@@ -20818,13 +20819,17 @@ def _apply_per_job_coefficient(job: dict) -> None:
         _is_h3 = str(_job_model_def.get("architecture") or "").startswith(
             "minimax_h3"
         )
+        _is_music3 = (
+            str(_job_model_def.get("architecture") or "") == "minimax_music3"
+            or str(model_type or "") == "minimax_music3"
+        )
         _h3_omni_video = bool(
             _job_model_def.get("omni_reference")
             and _h3_video_reference_count
         )
         # H3 itself is a single denoising pipeline. Treating the ordinary
         # two-stage UI default as a second H3 stage double-counts model memory.
-        if _is_h3:
+        if _is_h3 or _is_music3:
             stage_count = 1
 
         if _base_mt in ("scail2_14B", "scail2_1.3B"):
@@ -20977,22 +20982,62 @@ def _apply_per_job_coefficient(job: dict) -> None:
                     f"- {h3_budget['additional_reserve_gb']:.2f} GB reserved "
                     "inside the H3 cap for active LoRA tensors"
                 )
+        if _is_music3:
+            music3_budget = compute_music3_weight_budget(
+                total_vram_gb,
+                params.get("duration_seconds", 120),
+            )
+            music3_weight_budget_gb = music3_budget["weight_budget_gb"]
+            music3_coefficient_cap = music3_weight_budget_gb / total_vram_gb
+            if adjustment["effective_coef"] > music3_coefficient_cap:
+                adjustment["effective_coef"] = music3_coefficient_cap
+                adjustment["floored"] = False
+                adjustment["reasons"].append(
+                    f"- MiniMax Music3 Qwen residency capped at "
+                    f"{music3_weight_budget_gb:.1f} GB to preserve "
+                    f"{music3_budget['runtime_reserve_gb']:.1f} GB of "
+                    "semantic-stage workspace"
+                )
+            adjustment["music3_weight_budget_gb"] = music3_weight_budget_gb
+            adjustment["music3_runtime_reserve_gb"] = music3_budget[
+                "runtime_reserve_gb"
+            ]
+            adjustment["music3_kv_cache_gb"] = music3_budget["kv_cache_gb"]
+            adjustment["music3_duration_seconds"] = music3_budget[
+                "duration_seconds"
+            ]
+            adjustment["reasons"].append(
+                f"- {music3_budget['kv_cache_gb']:.2f} GB reserved for the "
+                f"{music3_budget['duration_seconds']:g}s Qwen KV cache"
+            )
         job["vram_adjustment"] = adjustment
 
         effective = adjustment["effective_coef"]
-        if abs(effective - base_coef) > 1e-6 or _is_h3:
+        if abs(effective - base_coef) > 1e-6 or _is_h3 or _is_music3:
             wgp.args.vram_safety_coefficient = effective
-            if _is_h3 and getattr(wgp, "wan_model", None) is not None:
+            if (
+                (_is_h3 or _is_music3)
+                and getattr(wgp, "wan_model", None) is not None
+            ):
                 loaded_coefficient = getattr(
                     wgp.wan_model,
                     "_maestro_profile_vram_coefficient",
                     None,
                 )
-                if loaded_coefficient is None or float(loaded_coefficient) > effective + 1e-6:
+                if (
+                    loaded_coefficient is None
+                    or float(loaded_coefficient) > effective + 1e-6
+                ):
                     wgp.reload_needed = True
-                    adjustment["reasons"].append(
-                        "- resident H3 profile will reload with packed-sequence headroom"
-                    )
+                    if _is_music3:
+                        adjustment["reasons"].append(
+                            "- resident Music3 profile will reload with "
+                            "duration-aware semantic-cache headroom"
+                        )
+                    else:
+                        adjustment["reasons"].append(
+                            "- resident H3 profile will reload with packed-sequence headroom"
+                        )
             cap_gb = effective * total_vram_gb
             base_cap_gb = base_coef * total_vram_gb
             # Log the frame-clamp explicitly when it fired so a future

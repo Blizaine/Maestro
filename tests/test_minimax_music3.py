@@ -231,6 +231,7 @@ class MiniMaxMusic3Tests(unittest.TestCase):
     def test_runtime_registers_handler_and_single_gpu_stages(self):
         wgp = _read(_WGP)
         pipeline = _read(_PIPELINE)
+        launch = _read(_LAUNCH)
         self.assertIn('"models.TTS.minimax_music3_handler"', wgp)
         self.assertIn("Qwen2TokenizerFast.from_pretrained", pipeline)
         self.assertIn("Qwen3Config.from_pretrained", pipeline)
@@ -243,6 +244,10 @@ class MiniMaxMusic3Tests(unittest.TestCase):
         self.assertIn('return "flash_attention_2"', pipeline)
         self.assertIn("self._release_stage(offloadobj)", pipeline)
         self.assertIn('"audio_sampling_rate": self.sampling_rate', pipeline)
+        self.assertIn("compute_music3_weight_budget", launch)
+        self.assertIn("resident Music3 profile will reload", launch)
+        self.assertIn("music3_kv_cache_gb", launch)
+        self.assertIn("MiniMax-Music3 ran out of VRAM while planning the song", wgp)
 
     def test_music_ui_and_song_writer_are_model_aware(self):
         store = _read(_STORE)

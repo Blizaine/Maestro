@@ -404,6 +404,24 @@ _H3_NATIVE_RUNTIME_EXCESS_SCALE = 0.70
 _H3_NATIVE_RUNTIME_SAFETY_MARGIN_GB = 1.0
 _H3_LARGE_CANVAS_RUNTIME_SAFETY_MARGIN_GB = 1.0
 
+# MiniMax-Music3 first runs a 25 Hz autoregressive Qwen stage. Its bf16
+# language-model weights are about 16 GB, the RVQ depth decoder is another
+# 1.2 GB, and a conditional/unconditional KV cache remains resident for the
+# entire requested song. A generic video coefficient cannot see that cache,
+# so a 120-second job on a 20 GB card can try to retain too much Qwen and fail
+# while MMGP is loading the next block. Keep the geometry here model-free so
+# the job planner can reserve the cache before the checkpoint is loaded.
+_MUSIC3_QWEN_LAYERS = 36
+_MUSIC3_QWEN_KV_HEADS = 8
+_MUSIC3_QWEN_HEAD_DIM = 128
+_MUSIC3_CACHE_BYTES_PER_VALUE = 2  # bf16
+_MUSIC3_CFG_BATCH_SIZE = 2
+_MUSIC3_SEMANTIC_FRAMES_PER_SECOND = 25
+_MUSIC3_PROMPT_TOKEN_ALLOWANCE = 1200
+_MUSIC3_NON_CACHE_RUNTIME_RESERVE_GB = 6.75
+_MUSIC3_MAX_WEIGHT_BUDGET_GB = 16.0
+_MUSIC3_MIN_WEIGHT_BUDGET_GB = 3.5
+
 
 def _parse_resolution(resolution) -> Optional[tuple]:
     """Parse a resolution string like "1280x720" or "1920x1080" → (w, h).
@@ -583,6 +601,78 @@ def compute_h3_weight_budget(
         "runtime_scaling_active": runtime_scaling_active,
         "runtime_safety_margin_gb": runtime_safety_margin_gb,
         "additional_reserve_gb": additional_reserve_gb,
+    }
+
+
+def compute_music3_weight_budget(
+    total_vram_gb: float,
+    duration_seconds: float,
+    prompt_token_allowance: int = _MUSIC3_PROMPT_TOKEN_ALLOWANCE,
+) -> dict:
+    """Reserve Music3 semantic-cache and runtime VRAM before model loading.
+
+    Music3 uses classifier-free guidance during its autoregressive Qwen pass,
+    so every prompt and generated 25 Hz semantic token retains key/value
+    tensors for a batch of two across all 36 layers. The fixed reserve also
+    covers the co-resident RVQ depth decoder, Qwen workspaces, MMGP's async
+    shuttle, allocator fragmentation, and display/driver headroom.
+
+    The returned weight budget is an absolute MMGP residency cap. Weights
+    beyond it are streamed from reserved RAM; later Music3 stages are smaller
+    than Qwen and therefore remain unaffected by the cap.
+    """
+
+    try:
+        total_vram_gb = max(0.0, float(total_vram_gb or 0.0))
+    except (TypeError, ValueError):
+        total_vram_gb = 0.0
+    try:
+        duration_seconds = min(300.0, max(5.0, float(duration_seconds or 120.0)))
+    except (TypeError, ValueError):
+        duration_seconds = 120.0
+    try:
+        prompt_tokens = max(1, int(prompt_token_allowance or 0))
+    except (TypeError, ValueError):
+        prompt_tokens = _MUSIC3_PROMPT_TOKEN_ALLOWANCE
+
+    semantic_tokens = max(
+        1,
+        int(duration_seconds * _MUSIC3_SEMANTIC_FRAMES_PER_SECOND),
+    )
+    cache_bytes = (
+        2  # key and value
+        * _MUSIC3_QWEN_LAYERS
+        * _MUSIC3_QWEN_KV_HEADS
+        * _MUSIC3_QWEN_HEAD_DIM
+        * _MUSIC3_CACHE_BYTES_PER_VALUE
+        * _MUSIC3_CFG_BATCH_SIZE
+        * (prompt_tokens + semantic_tokens)
+    )
+    kv_cache_gb = cache_bytes / float(1024**3)
+    runtime_reserve_gb = _MUSIC3_NON_CACHE_RUNTIME_RESERVE_GB + kv_cache_gb
+
+    if total_vram_gb <= 0.0:
+        weight_budget_gb = 0.0
+    else:
+        max_reserve_gb = max(
+            0.0,
+            total_vram_gb - _MUSIC3_MIN_WEIGHT_BUDGET_GB,
+        )
+        runtime_reserve_gb = min(runtime_reserve_gb, max_reserve_gb)
+        weight_budget_gb = min(
+            _MUSIC3_MAX_WEIGHT_BUDGET_GB,
+            max(
+                _MUSIC3_MIN_WEIGHT_BUDGET_GB,
+                total_vram_gb - runtime_reserve_gb,
+            ),
+        )
+
+    return {
+        "weight_budget_gb": weight_budget_gb,
+        "runtime_reserve_gb": runtime_reserve_gb,
+        "kv_cache_gb": kv_cache_gb,
+        "duration_seconds": duration_seconds,
+        "prompt_token_allowance": prompt_tokens,
     }
 
 
