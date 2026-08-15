@@ -45,8 +45,10 @@ def evaluate_runtime(
         warnings.append("a CUDA 13 PyTorch build is required for native RTX 50 kernels")
     if not triton_available:
         warnings.append("Triton is unavailable")
-    if not sage_available:
-        warnings.append("the CUDA 13 SageAttention build is unavailable")
+    # SageAttention is a useful dense backend, but it is not part of the H3
+    # Sol readiness contract. Linux can safely run the bundled Sol Triton
+    # kernels (or SDPA) when an optional Sage wheel is unavailable.
+    _ = sage_available
     if not lightx2v_available:
         warnings.append("the Lightx2v NVFP4 kernel is unavailable; NVFP4 will use a very slow fallback")
     return warnings

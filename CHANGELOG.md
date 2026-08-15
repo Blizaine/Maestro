@@ -5,6 +5,17 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [Unreleased]
 
+## [1.8.5.1] - 2026-08-15
+
+Linux performance runtime: fixed the H3 high-performance upgrade repeatedly
+restarting on Linux Mint and Ubuntu when SageAttention was compiled with a
+CUDA 12.x host toolkit against Maestro's PyTorch CUDA 13 runtime. Linux now
+installs pinned, prebuilt CUDA 13 SageAttention and FlashAttention wheels
+without invoking the host CUDA compiler. These optional accelerators can fall
+back to Sol/SDPA without blocking installation, while Maestro verifies the
+required Python, PyTorch, CUDA, Triton, GPU-access, and compute-capability
+contract before publishing the runtime-complete marker.
+
 ## [1.8.5] - 2026-08-14
 
 MiniMax-Music3: added native local long-form stereo music generation from a

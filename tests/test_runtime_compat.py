@@ -68,6 +68,20 @@ class TestRuntimeCompatibility(unittest.TestCase):
             [],
         )
 
+    def test_optional_sage_is_not_a_required_sol_runtime_warning(self):
+        self.assertEqual(
+            evaluate_runtime(
+                python_version="3.11.14",
+                torch_version="2.10.0+cu130",
+                cuda_version="13.0",
+                capability=(12, 0),
+                triton_available=True,
+                sage_available=False,
+                lightx2v_available=True,
+            ),
+            [],
+        )
+
     def test_capability_and_version_parsing(self):
         self.assertTrue(is_rtx50_capability("sm_120"))
         self.assertFalse(is_rtx50_capability("sm_89"))

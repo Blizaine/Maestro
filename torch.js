@@ -22,7 +22,11 @@ module.exports = async (kernel) => {
 
   let message
   let flashMessage
+  let optionalMessage = null
   let env = undefined
+  const verifyMessage = solCapable
+    ? "python scripts/verify_sol_runtime.py"
+    : null
 
   const cudaArch = ({
     sm_89: "8.9",
@@ -48,12 +52,16 @@ module.exports = async (kernel) => {
       "uv pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu130 --force-reinstall --no-deps",
       "{{args && args.xformers ? 'uv pip install xformers==0.0.35 --index-url https://download.pytorch.org/whl/cu130 --force-reinstall --no-deps' : ''}}",
       "uv pip install 'triton>=3.6,<3.7' --force-reinstall",
-      "uv pip install 'setuptools<=75.8.2' ninja wheel --force-reinstall",
-      "uv pip install --no-build-isolation git+https://github.com/thu-ml/SageAttention.git",
       "uv pip install https://github.com/deepbeepmeep/kernels/releases/download/Light2xv/lightx2v_kernel-0.0.2+torch2.10.0-cp311-abi3-linux_x86_64.whl --force-reinstall --no-deps",
       "uv pip install https://github.com/nunchaku-ai/nunchaku/releases/download/v1.2.1/nunchaku-1.2.1+cu13.0torch2.10-cp311-cp311-linux_x86_64.whl --force-reinstall --no-deps",
     ]
-    flashMessage = "uv pip install flash-attn --no-build-isolation"
+    // PyTorch's cu130 wheel does not provide nvcc. Compiling either package
+    // against a distro CUDA 12.x toolkit fails before the runtime markers are
+    // written and leaves Pinokio offering the same upgrade forever. Install
+    // the tested Linux wheels through a guarded helper instead; both packages
+    // remain optional because H3 Sol uses Maestro's bundled Triton kernels.
+    optionalMessage = "python scripts/install_optional_cuda_acceleration.py"
+    flashMessage = "python scripts/install_optional_cuda_acceleration.py --flash-only"
     env = {
       TORCH_CUDA_ARCH_LIST: cudaArch,
       MAX_JOBS: "4",
@@ -93,9 +101,23 @@ module.exports = async (kernel) => {
           venv: "{{args && args.venv ? args.venv : null}}",
           path: "{{args && args.path ? args.path : '.'}}",
           ...(env ? { env } : {}),
-          message: [...message, flashMessage],
+          message: optionalMessage ? message : [...message, flashMessage],
         },
       },
+      ...(optionalMessage ? [{
+        // Optional attention packages must never invalidate an otherwise
+        // working CUDA 13 / Triton Sol runtime. The helper uses prebuilt
+        // wheels and converts download/ABI failures into a clear fallback
+        // notice so the required readiness markers can still be written.
+        method: "shell.run",
+        when: "{{!args || !args.flash_only}}",
+        params: {
+          venv: "{{args && args.venv ? args.venv : null}}",
+          path: "{{args && args.path ? args.path : '.'}}",
+          ...(env ? { env } : {}),
+          message: optionalMessage,
+        },
+      }] : []),
       {
         // Update can repair only the optional FlashAttention wheel without
         // redownloading Torch, Triton, SageAttention, or the model kernels.
@@ -108,6 +130,18 @@ module.exports = async (kernel) => {
           message: flashMessage,
         },
       },
+      ...(verifyMessage ? [{
+        // Do not publish the main runtime marker merely because package
+        // installation commands returned. Verify the exact Python/Torch/CUDA,
+        // Triton, GPU, and Sol capability contract first.
+        method: "shell.run",
+        when: "{{!args || !args.flash_only}}",
+        params: {
+          venv: "{{args && args.venv ? args.venv : null}}",
+          path: "{{args && args.path ? args.path : '.'}}",
+          message: verifyMessage,
+        },
+      }] : []),
       {
         // update.js uses this hardware-specific marker to avoid unnecessary
         // multi-gigabyte reinstalls while still making interrupted migrations
@@ -123,7 +157,9 @@ module.exports = async (kernel) => {
         method: "fs.write",
         params: {
           path: runtime.flashMarker,
-          text: `Maestro ${runtime.label} FlashAttention wheel installed. Delete this file and run Update to repair it.`,
+          text: optionalMessage
+            ? `Maestro ${runtime.label} optional attention packages checked. Delete this file and run Update to retry them.`
+            : `Maestro ${runtime.label} FlashAttention wheel installed. Delete this file and run Update to repair it.`,
         },
       },
     ],
