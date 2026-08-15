@@ -77,6 +77,13 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.8.6 (2026-08-15)
+
+**Director music-video reliability**
+- Long MiniMax H3 Omni Director projects no longer stop merely because the full batch has run for two hours. The timeout now measures stalled progress, allowing large shot counts and long soundtracks to keep generating while work is advancing.
+- Improved LTX-2.5 music-video lip sync by explicitly locking visible vocal performances to each exact source-soundtrack segment.
+- Applied the LTX-2.5 sync contract to standard, Seamless, and Dashboard-regenerated clips while leaving the proven LTX-2.3 workflow unchanged.
+
 ### v1.8.5.1 (2026-08-15)
 
 **Linux performance runtime**

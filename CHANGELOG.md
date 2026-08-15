@@ -5,6 +5,16 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [Unreleased]
 
+## [1.8.6] - 2026-08-15
+
+Director music-video reliability: MiniMax H3 Omni batches now use a
+no-progress timeout instead of a fixed total-runtime limit, allowing long
+soundtracks and large shot counts to continue as long as generation is still
+advancing. LTX-2.5 music-video prompts now explicitly bind visible vocal
+performance to the exact supplied soundtrack segment, including normal,
+Seamless, and Dashboard-regenerated clips, improving lyric and mouth timing
+without changing the proven LTX-2.3 path.
+
 ## [1.8.5.1] - 2026-08-15
 
 Linux performance runtime: fixed the H3 high-performance upgrade repeatedly

@@ -314,8 +314,10 @@ class MusicVideoPlanner(BasePlanner):
             ] if speaker_mappings else None,
         )
 
-        # Build clip context for LLM. H3 receives the actual source-audio slice
-        # for every shot, so its transcript must never become prompt dialogue.
+        # Build clip context for the LLM. H3 and LTX-2.5 receive the actual
+        # source-audio slice for every shot, so a transcript must not become
+        # newly authored prompt dialogue. LTX-2.5 also responds much more
+        # reliably when ``lip-syncs`` is stated explicitly.
         clip_contexts = self._build_clip_contexts(
             clips,
             lyrics,
@@ -323,7 +325,7 @@ class MusicVideoPlanner(BasePlanner):
             speaker_names,
             speaker_mappings,
             source_audio_drives_vocals=video_model.lower().startswith(
-                "minimax_h3"
+                ("minimax_h3", "ltx2_25")
             ),
         )
 
@@ -584,9 +586,9 @@ class MusicVideoPlanner(BasePlanner):
             if source_audio_drives_vocals:
                 vocal_info = (
                     "mapped source audio drives this interval; synchronize "
-                    "visible performance, movement, and any singing to that "
-                    "exact audio without quoting, transcribing, or inventing "
-                    "words"
+                    "visible performance and movement to that exact audio; "
+                    "any visible vocalist explicitly lip-syncs every syllable "
+                    "to it without quoting, transcribing, or inventing words"
                 )
             else:
                 vocal_info = (

@@ -68,6 +68,12 @@ _pipeline_deleting: set[str] = set()
 _pipeline_repairs: dict[str, dict] = {}
 _REPAIR_ACTIVE_STATUSES = {"queued", "running", "cancelling"}
 _GENERATION_SETTLE_GRACE_S = 10.0
+_LTX25_MUSIC_VIDEO_SYNC_CONTRACT = (
+    "SOURCE-AUDIO LIP SYNC: Any person visibly singing or rapping "
+    "lip-syncs every vocal syllable to the supplied source soundtrack with "
+    "exact timing, natural mouth shapes, and matching breaths. People who "
+    "are not performing vocals keep their mouths closed."
+)
 _CANCELLED_ARTIFACT_FIELDS = {
     "output_files",
     "clip_images",
@@ -115,6 +121,44 @@ def _director_uses_fixed_media_strength(
         value.startswith(("minimax_h3", "ltx2_25"))
         for value in identifiers
     )
+
+
+def _apply_ltx25_music_video_sync_contract(
+    prompts: list[str],
+    *,
+    video_model: str,
+    model_def: Optional[dict],
+    pipeline_type: str,
+    audio_path: Optional[str],
+) -> list[str]:
+    """Give LTX-2.5 the explicit trigger it needs for source-audio lip sync.
+
+    The soundtrack slice is already sample-accurate. LTX-2.5 nevertheless
+    tends to treat a generic ``sings`` or ``raps`` prompt as unconstrained
+    performance unless the visual prompt explicitly says ``lip-syncs``.
+    Append the contract after all creative prompt-polish passes so it cannot
+    be omitted or paraphrased away. The wording is conditional, so an
+    instrumental/atmospheric shot does not invent a vocalist.
+    """
+
+    identifiers = (
+        str(video_model or "").lower(),
+        str((model_def or {}).get("architecture") or "").lower(),
+    )
+    if (
+        pipeline_type != "music_video"
+        or not audio_path
+        or not any(value.startswith("ltx2_25") for value in identifiers)
+    ):
+        return list(prompts)
+
+    contracted: list[str] = []
+    for prompt in prompts:
+        text = str(prompt or "").strip()
+        if _LTX25_MUSIC_VIDEO_SYNC_CONTRACT not in text:
+            text = f"{text.rstrip()}\n\n{_LTX25_MUSIC_VIDEO_SYNC_CONTRACT}".strip()
+        contracted.append(text)
+    return contracted
 
 
 def _normalize_director_media_strengths(
@@ -2537,6 +2581,21 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
         prompt = prompt_plan["video_prompt"]
         gen_params["prompt"] = prompt
 
+    if gen_params.get("audio_guide"):
+        rerun_prompts = _apply_ltx25_music_video_sync_contract(
+            [gen_params.get("prompt", "")],
+            video_model=video_model,
+            model_def=model_def,
+            pipeline_type=pipeline_type,
+            audio_path=audio_path,
+        )
+        gen_params["prompt"] = rerun_prompts[0] if rerun_prompts else ""
+        if _LTX25_MUSIC_VIDEO_SYNC_CONTRACT in gen_params["prompt"]:
+            print(
+                f"[Pipeline {pid}] LTX-2.5 source-audio lip-sync contract "
+                f"applied to Dashboard clip {clip_index + 1}."
+            )
+
     try:
         output_files = _submit_and_wait(
             gen_params, timeout_s=3600, out_dir=clip_out_dir,
@@ -3295,7 +3354,10 @@ def _director_job_outputs(job: dict) -> _DirectorOutputs:
 def _submit_and_wait(params: dict, timeout_s: float = 600, workspace: str = None, out_dir: str = None) -> list[str]:
     """Submit a generation job and block until it completes.
 
-    Returns list of output filenames. Raises on failure/timeout.
+    ``timeout_s`` is a no-progress timeout, not a total batch-duration cap.
+    Long Director batches can legitimately take many hours while continuing
+    to finish clips. Raises only when the job fails, is cancelled, or makes no
+    observable progress for the complete timeout interval.
     """
     _prepare_director_generation_params(params)
     job_id = uuid.uuid4().hex[:8]
@@ -3384,12 +3446,29 @@ def _submit_and_wait(params: dict, timeout_s: float = 600, workspace: str = None
         raise
 
     # Wait for completion, mirroring job progress to pipeline status
-    deadline = time.time() + timeout_s
+    def _activity_signature(current_job: dict) -> tuple:
+        clip_outputs = current_job.get("clip_output_files") or {}
+        return (
+            current_job.get("status"),
+            current_job.get("step", 0),
+            current_job.get("total_steps", 0),
+            current_job.get("phase", ""),
+            current_job.get("message", ""),
+            len(current_job.get("output_files") or []),
+            len(clip_outputs) if isinstance(clip_outputs, dict) else 0,
+        )
+
+    deadline = time.monotonic() + timeout_s
+    last_activity = _activity_signature(job)
     _abort_signalled = False
-    while time.time() < deadline:
+    while True:
         j = _jobs.get(job_id)
         if not j:
             raise RuntimeError("Job disappeared")
+        activity = _activity_signature(j)
+        if activity != last_activity:
+            last_activity = activity
+            deadline = time.monotonic() + timeout_s
         if j["status"] == "completed":
             return _director_job_outputs(j)
         if j["status"] == "cancelled":
@@ -3433,7 +3512,10 @@ def _submit_and_wait(params: dict, timeout_s: float = 600, workspace: str = None
                     p["progress"]["step"] = j.get("step", 0)
                     p["progress"]["total_steps"] = j.get("total_steps", 0)
                     p["progress"]["message"] = j.get("phase") or j.get("message") or "Generating..."
-        time.sleep(min(1.0, max(0.01, deadline - time.time())))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(1.0, max(0.01, remaining)))
 
     request_cancel(
         job,
@@ -5703,6 +5785,21 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                     f"main image: {uploaded_start}"
                 )
 
+        window_prompts_all = _apply_ltx25_music_video_sync_contract(
+            window_prompts_all,
+            video_model=video_model,
+            model_def=model_def,
+            pipeline_type=pipeline_type,
+            audio_path=audio_path,
+        )
+        if any(
+            _LTX25_MUSIC_VIDEO_SYNC_CONTRACT in prompt
+            for prompt in window_prompts_all
+        ):
+            print(
+                f"[Pipeline {pid}] LTX-2.5 source-audio lip-sync contract "
+                "applied to seamless prompts."
+            )
         prompt_text = "\n".join(window_prompts_all)
 
         print(f"[Pipeline {pid}] Seamless mode: {len(window_prompts_all)} windows, "
@@ -6144,6 +6241,21 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
             )
             prompts = [str(plan.get("video_prompt") or "") for plan in clip_plans]
 
+        prompts = _apply_ltx25_music_video_sync_contract(
+            prompts,
+            video_model=video_model,
+            model_def=model_def,
+            pipeline_type=pipeline_type,
+            audio_path=audio_path,
+        )
+        if any(
+            _LTX25_MUSIC_VIDEO_SYNC_CONTRACT in prompt
+            for prompt in prompts
+        ):
+            print(
+                f"[Pipeline {pid}] LTX-2.5 source-audio lip-sync contract "
+                f"applied to {len(prompts)} shot prompt(s)."
+            )
         prompt_text = CLIP_SEPARATOR.join(prompts)
 
         ipt = (
@@ -6234,5 +6346,5 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
         timeout_s=7200,
         workspace=workspace,
         out_dir=out_dir,
-    )  # 2hr timeout for long videos
+    )  # Abort only after 2 hours with no observable generation progress.
     return output_files
