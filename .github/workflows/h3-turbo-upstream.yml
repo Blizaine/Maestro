@@ -1,0 +1,80 @@
+name: MiniMax H3 Turbo upstream monitor
+
+on:
+  schedule:
+    - cron: "17 13 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check-upstream:
+    name: Check Hugging Face revision
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Compare pinned observation with Hugging Face main
+        id: upstream
+        run: python scripts/check_h3_turbo_upstream.py
+      - name: Open or update the review issue
+        if: steps.upstream.outputs.changed == 'true'
+        uses: actions/github-script@v7
+        env:
+          REPO_ID: ${{ steps.upstream.outputs.repo_id }}
+          LATEST_REVISION: ${{ steps.upstream.outputs.latest_revision }}
+          OBSERVED_REVISION: ${{ steps.upstream.outputs.observed_revision }}
+          LAST_MODIFIED: ${{ steps.upstream.outputs.last_modified }}
+          MODEL_CARD_URL: ${{ steps.upstream.outputs.model_card_url }}
+          SAFETENSORS_JSON: ${{ steps.upstream.outputs.safetensors_json }}
+          SAFETENSOR_METADATA_JSON: ${{ steps.upstream.outputs.safetensor_metadata_json }}
+        with:
+          script: |
+            const title = 'Upstream review: MiniMax H3 Turbo LoRA changed';
+            const revision = process.env.LATEST_REVISION;
+            const marker = `<!-- h3-turbo-upstream:${revision} -->`;
+            const files = JSON.parse(process.env.SAFETENSORS_JSON || '[]');
+            const metadata = JSON.parse(process.env.SAFETENSOR_METADATA_JSON || '[]');
+            const body = `${marker}
+            The public **${process.env.REPO_ID}** repository changed after Maestro's last reviewed revision.
+
+            - Observed by Maestro: \`${process.env.OBSERVED_REVISION}\`
+            - Current upstream main: \`${revision}\`
+            - Upstream modified: ${process.env.LAST_MODIFIED || 'unknown'}
+            - [Model card](${process.env.MODEL_CARD_URL})
+
+            Safetensors currently published:
+            ${metadata.length
+              ? metadata.map(file => `- \`${file.filename}\` — ${file.size ?? 'unknown'} bytes — LFS SHA-256 \`${file.sha256 || 'unavailable'}\``).join('\n')
+              : files.map(name => `- \`${name}\``).join('\n') || '- None reported'}
+
+            Review rather than auto-promote: identify the publisher's recommended checkpoint, pin an immutable revision, byte size, and **LFS SHA-256** (not the Xet hash or response ETag), then run Maestro's Full/Pruned, First/Last/Omni, static/fast-motion, and audio validation matrix.`;
+
+            const { owner, repo } = context.repo;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'all', per_page: 100,
+            });
+            const existing = issues.find(issue => !issue.pull_request && issue.title === title);
+            if (!existing) {
+              await github.rest.issues.create({ owner, repo, title, body });
+              return;
+            }
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: existing.number, per_page: 100,
+            });
+            if ((existing.body || '').includes(marker) || comments.some(comment => (comment.body || '').includes(marker))) {
+              core.info(`Revision ${revision} is already recorded in issue #${existing.number}.`);
+              return;
+            }
+            if (existing.state === 'closed') {
+              await github.rest.issues.update({
+                owner, repo, issue_number: existing.number, state: 'open',
+              });
+            }
+            await github.rest.issues.createComment({
+              owner, repo, issue_number: existing.number, body,
+            });

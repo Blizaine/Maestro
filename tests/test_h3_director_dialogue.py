@@ -147,6 +147,41 @@ class TestH3DirectorDialogueCompiler(unittest.TestCase):
                 self.beats[:1],
             )
 
+    def test_music_driven_prompt_discards_unbalanced_generated_dialogue(self):
+        compiled, contract = compile_h3_official_prompt(
+            (
+                "A singer performs directly to camera while the band plays. "
+                "The singer begins <d>[English] beep beep beep beep beep"
+            ),
+            [],
+            [],
+            mode="t2va",
+            audio_plan={"mode": "music_driven", "timing_anchor": "audio"},
+        )
+
+        self.assertNotIn("<d>", compiled)
+        self.assertNotIn("beep", compiled.lower())
+        self.assertIn("mapped driving audio", compiled)
+        self.assertEqual(contract.count("mapped driving audio"), 1)
+        self.assertEqual(validate_h3_prompt_contract(compiled, mode="t2va"), [])
+
+    def test_music_driven_prompt_discards_balanced_generated_dialogue(self):
+        compiled, _ = compile_h3_official_prompt(
+            (
+                "A singer performs directly to camera and improvises "
+                "<d>[English] words invented by the planner</d>."
+            ),
+            [],
+            [],
+            mode="t2va",
+            audio_plan={"mode": "music_driven"},
+        )
+
+        self.assertNotIn("invented by the planner", compiled)
+        self.assertNotIn("<d>", compiled)
+        self.assertIn("mapped driving audio", compiled)
+        self.assertEqual(validate_h3_prompt_contract(compiled, mode="t2va"), [])
+
     def test_silent_shot_gets_an_explicit_silence_contract(self):
         compiled, _ = compile_h3_vocal_contract(
             "A silent reaction. overall_soundscape: Air conditioning hum.",

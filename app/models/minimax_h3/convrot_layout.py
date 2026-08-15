@@ -52,13 +52,19 @@ def _is_convrot_config(tensor) -> bool:
         return False
 
 
+def has_convrot_layout(state_dict: dict) -> bool:
+    """Return whether checkpoint metadata declares ConvRot quantization."""
+
+    return any(
+        key.endswith(".comfy_quant") and _is_convrot_config(value)
+        for key, value in state_dict.items()
+    )
+
+
 def restore_interleaved_h3_qkv(state_dict: dict) -> dict:
     """Restore official H3 QKV ordering from a grouped ConvRot export."""
 
-    if not any(
-        key.endswith(".comfy_quant") and _is_convrot_config(value)
-        for key, value in state_dict.items()
-    ):
+    if not has_convrot_layout(state_dict):
         return state_dict
     norm_key = next(
         key for key in state_dict if key.endswith("blocks.0.attn.q_norm.weight")
@@ -83,4 +89,9 @@ def restore_interleaved_h3_qkv(state_dict: dict) -> dict:
     return state_dict
 
 
-__all__ = ["group_qkv_rows", "interleave_qkv_rows", "restore_interleaved_h3_qkv"]
+__all__ = [
+    "group_qkv_rows",
+    "has_convrot_layout",
+    "interleave_qkv_rows",
+    "restore_interleaved_h3_qkv",
+]

@@ -43,6 +43,61 @@ def get_checkpoints_paths():
     return list(_checkpoints_paths)
 
 
+def describe_file_source(path):
+    """Describe which configured model root supplies ``path``.
+
+    The model loader normally needs only the resolved filename, but large
+    shared installations are much easier to troubleshoot when the terminal
+    also says whether a component came from Maestro or a linked app.  Keep
+    this helper read-only and path based: it never changes search order or
+    assumes that a linked folder is writable.
+    """
+    if not path:
+        return {
+            "path": None,
+            "kind": "missing",
+            "installation": None,
+            "root": None,
+            "root_index": None,
+        }
+
+    resolved = os.path.abspath(os.fspath(path))
+    resolved_norm = os.path.normcase(resolved)
+    for index, root in enumerate(_checkpoints_paths):
+        root_abs = os.path.abspath(root)
+        root_norm = os.path.normcase(root_abs)
+        try:
+            if os.path.commonpath([resolved_norm, root_norm]) != root_norm:
+                continue
+        except ValueError:
+            continue
+
+        # Linked model folders conventionally point at
+        # <pinokio>/api/<installation>/app/ckpts.  Preserve a useful label
+        # for custom roots as well instead of returning an empty source.
+        root_parent = os.path.dirname(root_abs)
+        if os.path.basename(root_parent).lower() == "app":
+            installation = os.path.basename(os.path.dirname(root_parent))
+        else:
+            installation = os.path.basename(root_parent) or os.path.basename(root_abs)
+        linked = index > 0 and is_external_root(root)
+        return {
+            "path": resolved,
+            "kind": "linked" if linked else "primary",
+            "installation": installation,
+            "root": root_abs,
+            "root_index": index,
+        }
+
+    return {
+        "path": resolved,
+        "kind": "unmanaged",
+        "installation": None,
+        "root": None,
+        "root_index": None,
+    }
+
+
 def is_protected_path(path):
     """True when path lives inside a LINKED install — under a non-primary
     external root's parent app folder (covering its ckpts AND its sibling

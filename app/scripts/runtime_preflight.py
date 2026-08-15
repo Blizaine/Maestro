@@ -7,6 +7,8 @@ existing fallback behavior for manually managed environments.
 from __future__ import annotations
 
 import importlib
+import importlib.metadata
+import re
 import sys
 
 from services.runtime_compat import evaluate_runtime, format_runtime_warnings
@@ -18,6 +20,22 @@ def _import_ok(module_name: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def _distribution_version(*names: str) -> str | None:
+    for name in names:
+        try:
+            return importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+    return None
+
+
+def _version_at_least(value: str | None, minimum: tuple[int, int]) -> bool:
+    numbers = [int(token) for token in re.findall(r"\d+", value or "")[:2]]
+    while len(numbers) < 2:
+        numbers.append(0)
+    return tuple(numbers[:2]) >= minimum
 
 
 def main() -> int:
@@ -42,6 +60,7 @@ def main() -> int:
     # can exist but still fail here when it was built for the wrong Torch/CUDA
     # ABI, which is exactly the public-v1.6.5 RTX 5090 failure mode.
     triton_ok = _import_ok("triton")
+    triton_version = _distribution_version("triton-windows", "triton")
     sage_ok = _import_ok("sageattention")
     flash_ok = _import_ok("flash_attn")
     lightx2v_import_ok = _import_ok("lightx2v_kernel")
@@ -50,6 +69,13 @@ def main() -> int:
         and hasattr(torch.ops.lightx2v_kernel, "cutlass_scaled_nvfp4_mm_sm120")
     )
     lightx2v_ok = lightx2v_import_ok and lightx2v_ops
+    sol_capability = capability in {(8, 9), (9, 0), (10, 0), (12, 0)}
+    sol_ready = bool(
+        cuda_available
+        and sol_capability
+        and triton_ok
+        and _version_at_least(triton_version, (3, 6))
+    )
 
     torch_version = str(getattr(torch, "__version__", "unknown"))
     cuda_version = str(getattr(torch.version, "cuda", None) or "none")
@@ -60,10 +86,12 @@ def main() -> int:
     )
     print(
         "[Runtime] Kernels: "
-        f"Triton={'ready' if triton_ok else 'missing'}, "
+        f"Triton={'ready' if triton_ok else 'missing'}"
+        f"{f' ({triton_version})' if triton_version else ''}, "
         f"SageAttention={'ready' if sage_ok else 'missing'}, "
         f"Lightx2v NVFP4={'ready' if lightx2v_ok else 'missing'}, "
-        f"FlashAttention={'ready' if flash_ok else 'missing'}"
+        f"FlashAttention={'ready' if flash_ok else 'missing'}, "
+        f"H3 Sol Engine={'ready' if sol_ready else 'unavailable in this runtime'}"
     )
 
     warnings = evaluate_runtime(

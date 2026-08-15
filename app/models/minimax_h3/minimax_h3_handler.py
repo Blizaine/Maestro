@@ -26,6 +26,13 @@ _TEXT_ENCODER_GGUF_Q2 = "qwen3vl-32B-MiniMax-H3-Q2_K.gguf"
 _TEXT_ENCODER_GGUF_Q4 = "qwen3vl-32B-MiniMax-H3-Q4_K_M.gguf"
 _VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
 _AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
+_WANGP_TEXT_ENCODER_FOLDER = "Qwen3-VL-32B-Instruct"
+_WANGP_FL2VA_PRUNED_TRANSFORMER = (
+    "MiniMax-H3-FL2VA-pruned_rank8_int8_convrot.safetensors"
+)
+_WANGP_REF2VA_PRUNED_TRANSFORMER = (
+    "MiniMax-H3-Ref2VA-pruned_rank8_int8_convrot.safetensors"
+)
 
 # H3 packs video, audio, and text into one unusually long transformer
 # sequence.  At 480p / 10 seconds the token-wise activations alone need
@@ -1411,8 +1418,9 @@ class family_handler:
             # scheduler supplies that tail through ``input_waveform``.
             "audio_guide_window_slicing": True,
             "sliding_window_audio_history": True,
-            # Director renders H3 as independent native-duration shots rather
-            # than pretending it supports the rolling-window contract.
+            # Standard Director renders independent native-duration shots;
+            # its Seamless option may opt FL2VA into the same native rolling
+            # continuation contract used by Studio.
             "director_video_strategy": (
                 "omni_reference" if omni_reference else "bounded_start_end"
             ),
@@ -1440,14 +1448,18 @@ class family_handler:
             "custom_frames_injection": not omni_reference,
             "returns_audio": True,
             "control_video_trim_disabled": True,
-            # Ref2VA accepts audio through its ordered Omni manifest, not
-            # through Wan's generic audio-guide input. Keep that capability
-            # explicit so the UI can distinguish Audio In from Audio Out.
+            # Studio Ref2VA audio is normally an ordered Omni reference.
+            # Director can additionally use a hidden exact-target soundtrack
+            # route for music/dialogue timing; keep the public capability
+            # explicit so the UI still distinguishes Audio In from Audio Out.
             "supports_reference_audio": omni_reference,
             "no_negative_prompt": True,
             "guidance_max_phases": 0,
             "visible_phases": 0,
             "compile": False,
+            # H3's packed BF16 head-dimension-128 attention can use the
+            # bundled Sol Engine from a compatible SM89+ / Triton 3.6 runtime.
+            "sol_attention": True,
             "first_block_cache": True,
             "first_block_cache_thresholds": _FIRST_BLOCK_CACHE_THRESHOLDS,
             "skip_steps_multiplier_choices": _FIRST_BLOCK_CACHE_STRENGTHS,
@@ -1465,6 +1477,54 @@ class family_handler:
             "text_encoder_URLs": text_encoder_variants["nvfp4_awq"]["URLs"],
             "minimax_h3_text_encoder_default": "nvfp4_awq",
             "minimax_h3_text_encoder_variants": text_encoder_variants,
+            # Maestro's original pruned checkpoints are Comfy scaled-FP8;
+            # current WanGP publishes the same rank-8 H3 architecture as an
+            # INT8 ConvRot export. They are not byte duplicates, but this
+            # runtime supports both tensor formats. Treat an existing WanGP
+            # file as a verified load-compatible alternative so linked
+            # installs do not download a second ~20B transformer.
+            "compatible_model_paths": (
+                {}
+                if full_checkpoint
+                else {
+                    (
+                        _REF2VA_TRANSFORMER
+                        if omni_reference
+                        else _TRANSFORMER
+                    ): [
+                        (
+                            _WANGP_REF2VA_PRUNED_TRANSFORMER
+                            if omni_reference
+                            else _WANGP_FL2VA_PRUNED_TRANSFORMER
+                        )
+                    ]
+                }
+            ),
+            "compatible_model_qkv_layouts": (
+                {}
+                if full_checkpoint
+                else {
+                    (
+                        _WANGP_REF2VA_PRUNED_TRANSFORMER
+                        if omni_reference
+                        else _WANGP_FL2VA_PRUNED_TRANSFORMER
+                    ): "interleaved"
+                }
+            ),
+            # WanGP stores every Qwen variant in its upstream folder while
+            # Maestro keeps the weight beside its other H3 assets. These are
+            # the same published files (the Comfy NVFP4 artifact is also
+            # byte-identical), so support both relative layouts.
+            "compatible_text_encoder_paths": {
+                filename: [os.path.join(_WANGP_TEXT_ENCODER_FOLDER, filename)]
+                for filename in (
+                    _TEXT_ENCODER,
+                    _TEXT_ENCODER_BF16,
+                    _TEXT_ENCODER_INT8,
+                    _TEXT_ENCODER_GGUF_Q2,
+                    _TEXT_ENCODER_GGUF_Q4,
+                )
+            },
             "minimax_h3_full_checkpoint": full_checkpoint,
             "minimax_h3_transformer_working_vram_gb": (
                 _TRANSFORMER_WORKING_VRAM_MB / 1024
@@ -1569,6 +1629,10 @@ class family_handler:
                         "show_label": True,
                         "default": "",
                     },
+                    # A visible standalone soundtrack is unambiguously the
+                    # FL2VA Audio-to-Video source. Repair older sidecars and
+                    # model-switch state if their hidden A selector was lost.
+                    "infer_audio_prompt_from_guide": True,
                     "video_length_not_limited_by_audio": True,
                     "output_audio_is_input_audio": True,
                     "minimax_h3_media_sources": True,

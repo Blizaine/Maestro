@@ -1,0 +1,19 @@
+{
+    "model": {
+        "name": "LTX-2.5 — Distilled NVFP4",
+        "architecture": "ltx2_25",
+        "description": "Native LTX-2.5 distilled NVFP4 workflow with synchronized audio, first/last and inserted frames, soundtrack or control-video conditioning, compatible LTX-2/2.3 LoRAs, and sliding-window continuation. This optional checkpoint keeps the fast 8-step plus 3-step refinement workflow while reducing transformer memory use on compatible NVIDIA hardware.",
+        "URLs": [
+            "https://huggingface.co/DeepBeepMeep/LTX-2/resolve/main/ltx-2.5-22b-distilled_diffusion_model_nvfp4.safetensors"
+        ],
+        "ltx2_pipeline": "distilled"
+    },
+    "prompt": "A cinematic medium shot follows a weathered astronaut walking through tall silver grass beneath two moons. Wind moves the grass and the fabric of the suit naturally. The astronaut stops, looks toward a distant glow, and says quietly, \"We finally found it.\" Soft wind, distant metallic creaks, and synchronized footsteps fill the soundtrack.",
+    "negative_prompt": "",
+    "num_inference_steps": 8,
+    "guidance_scale": 1.0,
+    "video_length": 241,
+    "resolution": "1024x576",
+    "input_video_strength": 0.7,
+    "image_prompt_type": ""
+}

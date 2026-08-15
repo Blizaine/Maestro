@@ -2,11 +2,12 @@ import { Info } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 
 /**
- * Shared long-form controls for both MiniMax H3 workflows.
+ * Shared long-form controls for MiniMax H3 and every LTX video family.
  *
  * First / Last uses H3's native sliding-window continuation. Omni keeps its
  * canonical reference manifest in every pass and can either carry native
- * motion/audio overlap or create independent hard-cut clips.
+ * motion/audio overlap or create independent hard-cut clips. LTX uses its
+ * existing native rolling-window path with the same explicit UX contract.
  */
 export function H3MultiWindowControls() {
   const params = useStore(s => s.params)
@@ -14,18 +15,29 @@ export function H3MultiWindowControls() {
   const setParam = useStore(s => s.setParam)
 
   const isH3 = String(modelOptions?.architecture || '').startsWith('minimax_h3')
-  if (!isH3) return null
+  const isLtx = modelOptions?.multi_window_sequence_controls === true
+  if (!isH3 && !isLtx) return null
 
-  const isOmni = modelOptions?.omni_reference === true
-  const enabled = isOmni
-    ? params.minimax_h3_reference_sequence === true
-    : params.minimax_h3_multi_window === true
-  const promptMode = isOmni
-    ? (params.minimax_h3_sequence_prompt_mode === 'manual' ? 'manual' : 'auto')
-    : (params.minimax_h3_window_storyboard === false ? 'manual' : 'auto')
+  const isOmni = isH3 && modelOptions?.omni_reference === true
+  const enabled = isLtx
+    ? params.ltx_multi_window === true
+    : isOmni
+      ? params.minimax_h3_reference_sequence === true
+      : params.minimax_h3_multi_window === true
+  const promptMode = isLtx
+    ? (params.ltx_window_prompt_mode === 'manual' ? 'manual' : 'auto')
+    : isOmni
+      ? (params.minimax_h3_sequence_prompt_mode === 'manual' ? 'manual' : 'auto')
+      : params.minimax_h3_sequence_prompt_mode === 'manual'
+        ? 'manual'
+        : params.minimax_h3_sequence_prompt_mode === 'auto'
+          ? 'auto'
+          : (params.minimax_h3_window_storyboard === false ? 'manual' : 'auto')
 
   const setEnabled = (checked: boolean) => {
-    if (isOmni) {
+    if (isLtx) {
+      setParam('ltx_multi_window', checked)
+    } else if (isOmni) {
       setParam('minimax_h3_reference_sequence', checked)
     } else {
       setParam('minimax_h3_multi_window', checked)
@@ -33,9 +45,14 @@ export function H3MultiWindowControls() {
   }
 
   const setPromptMode = (mode: 'auto' | 'manual') => {
-    if (isOmni) {
+    if (isLtx) {
+      setParam('ltx_window_prompt_mode', mode)
+    } else if (isOmni) {
       setParam('minimax_h3_sequence_prompt_mode', mode)
     } else {
+      // Retain the legacy storyboard switch for backend compatibility while
+      // also persisting the explicit UI choice in new sidecars.
+      setParam('minimax_h3_sequence_prompt_mode', mode)
       setParam('minimax_h3_window_storyboard', mode === 'auto')
     }
   }
@@ -58,7 +75,9 @@ export function H3MultiWindowControls() {
         <span
           title={isOmni
             ? 'Extends Duration beyond one native Omni pass. Canonical references remain available in every pass.'
-            : 'Extends Duration beyond one native First / Last pass while carrying recent motion and synchronized audio into the next window.'}
+            : isLtx
+              ? 'Extends Duration beyond one native LTX pass. Motion and, on audio-capable LTX models, synchronized audio continue into each new window.'
+              : 'Extends Duration beyond one native First / Last pass while carrying recent motion and synchronized audio into the next window.'}
           className="text-text-muted cursor-help"
         >
           <Info size={11} />

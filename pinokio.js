@@ -1,4 +1,8 @@
-const { isRtx50, runtimeProfile } = require("./launcher_profile")
+const {
+  isSolCapable,
+  needsCuda13DriverUpdate,
+  runtimeProfile,
+} = require("./launcher_profile")
 module.exports = {
   version: "8.0",
   title: "Maestro",
@@ -6,26 +10,34 @@ module.exports = {
   icon: "maestro_simplified_icon_alpha.png",
   menu: async (kernel, info) => {
     const runtime = runtimeProfile(kernel)
-    const rtx50 = isRtx50(kernel)
+    const solCapable = isSolCapable(kernel)
+    const cuda13DriverUpdateRequired = solCapable && needsCuda13DriverUpdate(kernel)
     // Do not gate this menu on kernel.gpu. Pinokio can render an app menu
     // before its hardware inventory has populated that property, which would
     // hide Start from supported systems. install.js retains the documented
     // execution-time NVIDIA check for fresh installations.
-    let installed = info.exists("app/env") || info.exists("app/env-rtx50")
-    let runtimeReady = info.exists(runtime.marker)
+    let installed = info.exists("app/env") || info.exists("app/env-rtx50") || info.exists("app/env-sol")
+    let runtimeReady = info.exists(runtime.marker) && info.exists(runtime.flashMarker)
     let running = {
       install: info.running("install.js"),
+      sol_install: info.running("sol_install.js"),
       start: info.running("start.js"),
+      start_sol: info.running("start_sol.js"),
       start_classic: info.running("start_classic.js"),
       update: info.running("update.js"),
+      huggingface_login: info.running("huggingface_login.js"),
       reset: info.running("reset.js")
     }
-    if (running.install) {
+    if (running.install || running.sol_install) {
       return [{
         default: true,
         icon: "fa-solid fa-plug",
-        text: "Installing",
-        href: "install.js",
+        text: running.sol_install
+          ? "Installing H3 Sol Engine Runtime"
+          : "Installing",
+        href: running.sol_install
+          ? "sol_install.js"
+          : "install.js",
       }]
     } else if (running.update) {
       return [{
@@ -34,12 +46,39 @@ module.exports = {
         text: "Updating",
         href: "update.js",
       }]
-    } else if (installed && rtx50 && !runtimeReady) {
+    } else if (running.huggingface_login) {
+      return [{
+        default: true,
+        icon: "fa-solid fa-key",
+        text: "Connecting Hugging Face",
+        href: "huggingface_login.js",
+      }]
+    } else if (installed && solCapable && !cuda13DriverUpdateRequired && !runtimeReady) {
       return [{
         default: true,
         icon: "fa-solid fa-bolt",
-        text: "Finish RTX 50 Runtime Upgrade",
+        text: "Finish H3 Performance Runtime Upgrade",
         href: "update.js",
+      }, ...(info.exists("app/env") ? [{
+        icon: "fa-solid fa-shield-halved",
+        text: "Start with Compatibility Runtime",
+        href: "start.js",
+      }] : []), {
+        icon: "fa-regular fa-circle-xmark",
+        text: "<div><strong>Reset</strong><div>Revert to pre-install state</div></div>",
+        href: "reset.js",
+        confirm: "Are you sure you wish to reset the app?"
+      }]
+    } else if (installed && solCapable && cuda13DriverUpdateRequired && !runtimeReady) {
+      return [...(info.exists("app/env") ? [{
+        default: true,
+        icon: "fa-solid fa-shield-halved",
+        text: "Start with Compatibility Runtime",
+        href: "start.js",
+      }] : []), {
+        icon: "fa-solid fa-triangle-exclamation",
+        text: `NVIDIA Driver 580+ Required (found ${kernel.gpu_driver})`,
+        href: "https://www.nvidia.com/Download/index.aspx",
       }, {
         icon: "fa-regular fa-circle-xmark",
         text: "<div><strong>Reset</strong><div>Revert to pre-install state</div></div>",
@@ -71,6 +110,25 @@ module.exports = {
             href: "start.js",
           }]
         }
+      } else if (running.start_sol) {
+        let local = info.local("start_sol.js")
+        if (local && local.url) {
+          return [{
+            default: true,
+            icon: "fa-solid fa-bolt",
+            text: "Open Web UI (Sol Runtime)",
+            href: local.url,
+          }, {
+            icon: 'fa-solid fa-terminal',
+            text: "Sol Runtime Terminal",
+            href: "start_sol.js",
+          }]
+        }
+        return [{
+          icon: 'fa-solid fa-terminal',
+          text: "Sol Runtime Terminal",
+          href: "start_sol.js",
+        }]
       } else if (running.start_classic) {
         let local = info.local("start_classic.js")
         if (local && local.url) {
@@ -124,9 +182,9 @@ module.exports = {
             params: {
               compile: true
             }
-          }, ...(rtx50 ? [{
+          }, ...(solCapable && !cuda13DriverUpdateRequired ? [{
             icon: "fa-solid fa-bolt",
-            text: "Repair RTX 50 Runtime",
+            text: "Repair H3 Performance Runtime",
             href: "torch.js",
             params: {
               venv: runtime.env,
@@ -153,6 +211,10 @@ module.exports = {
           text: "Install",
           href: "install.js",
         }, {
+          icon: "fa-solid fa-key",
+          text: "<div><strong>Connect Hugging Face (Optional)</strong><div>For custom gated models or higher download limits. Not required for Maestro.</div></div>",
+          href: "huggingface_login.js",
+        }, {
           // Install / re-install the SAM 3.1 segmentation service
           // (separate Python 3.12 conda env, takes ~5 min). Only
           // needed for the experimental Inpaint feature in Edit
@@ -178,6 +240,10 @@ module.exports = {
         icon: "fa-solid fa-plug",
         text: "Install",
         href: "install.js",
+      }, {
+        icon: "fa-solid fa-key",
+        text: "<div><strong>Connect Hugging Face (Optional)</strong><div>For custom gated models or higher download limits. Not required for Maestro.</div></div>",
+        href: "huggingface_login.js",
       }]
     }
   }

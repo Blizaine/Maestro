@@ -1,4 +1,6 @@
-const { runtimeProfile } = require("./launcher_profile")
+const {
+  runtimeProfile,
+} = require("./launcher_profile")
 
 module.exports = async (kernel) => {
   const runtime = runtimeProfile(kernel)

@@ -10,7 +10,12 @@ from ..inpainting import (
     _apply_ltx2_mask_blend,
     _edge_extend_ltx2_masked_control_video,
 )
-from ..ltx_core.components.diffusion_steps import EulerDiffusionStep, EulerAncestralDiffusionStep, DPMSolverPlusPlus2MDiffusionStep
+from ..ltx_core.components.diffusion_steps import (
+    DPMSolverPlusPlus2MDiffusionStep,
+    EulerAncestralDiffusionStep,
+    EulerDiffusionStep,
+    LTX25EulerAncestralDiffusionStep,
+)
 from ..ltx_core.components.noisers import GaussianNoiser
 from ..ltx_core.components.protocols import DiffusionStepProtocol
 from ..ltx_core.loader import LoraPathStrengthAndSDOps
@@ -541,6 +546,7 @@ class DistilledPipeline:
         full_resolution_refine: bool = False,
         keyframe_conditioning_mode: str = "replace",
         keyframe_inject_mode: str = "additive",
+        use_ancestral_sampler: bool = False,
     ) -> tuple[Iterator[torch.Tensor], torch.Tensor]:
         assert_resolution(height=height, width=width, is_two_stage=True)
         alt_guidance_scale = 1.0
@@ -562,7 +568,11 @@ class DistilledPipeline:
 
         generator = torch.Generator(device=self.device).manual_seed(seed)
         mask_generator = torch.Generator(device=self.device).manual_seed(int(seed) + 1)
-        ancestral_generator = torch.Generator(device=self.device).manual_seed(int(seed) + 2)
+        # Match WanGP's native LTX-2.5 noise stream so an identical prompt,
+        # seed, and LoRA produces the same ancestral base/refine trajectory.
+        ancestral_generator = torch.Generator(device=self.device).manual_seed(
+            int(seed) + 10000
+        )
         noiser = GaussianNoiser(generator=generator)
         # Single-stage runs all denoising at full target res with no upscale
         # refine pass, so we use DPM-Solver++ 2M — a 2nd-order multistep
@@ -587,10 +597,15 @@ class DistilledPipeline:
             )
         elif single_stage:
             stepper = DPMSolverPlusPlus2MDiffusionStep()
+        elif use_ancestral_sampler:
+            stepper = LTX25EulerAncestralDiffusionStep(
+                generator=ancestral_generator,
+            )
         else:
             stepper = EulerDiffusionStep()
-        # Standard stage 2 uses ancestral sampling with low eta. Official
-        # Outpaint is the exception and uses deterministic Euler here.
+        # Keep the native LTX-2.5 ancestral trajectory continuous across its
+        # 8-step base and 3-step full-resolution refinement. LTX-2/2.3 retain
+        # Maestro's established low-eta refinement behavior below.
         if full_resolution_refine:
             # Lightricks' published graph uses deterministic euler_cfg_pp for
             # its two-step full-resolution refinement pass.
@@ -600,6 +615,8 @@ class DistilledPipeline:
             # deterministic; unlike the pixel-handoff workflow it was tuned
             # around a three-step refinement schedule.
             stepper_stage2 = EulerDiffusionStep()
+        elif use_ancestral_sampler:
+            stepper_stage2 = stepper
         else:
             stepper_stage2 = EulerAncestralDiffusionStep(
                 generator=ancestral_generator,
@@ -923,14 +940,17 @@ class DistilledPipeline:
             latent_slice = None
             if return_latent_slice is not None:
                 latent_slice = video_state.latent[:, :, return_latent_slice].detach().to("cpu")
+            video_latent = [video_state.latent]
+            video_state = None
             decoded_video = vae_decode_video_to_tensor(
-                video_state.latent,
+                video_latent,
                 self._get_model("video_decoder"),
                 tiling_config,
                 expected_frames=int(stage_1_output_shape.frames),
                 expected_height=int(stage_1_output_shape.height),
                 expected_width=int(stage_1_output_shape.width),
                 interrupt_check=interrupt_check,
+                generator=generator,
             )
             decoded_audio = vae_decode_audio(
                 audio_state.latent, self._get_model("audio_decoder"), self._get_model("vocoder")
@@ -1213,14 +1233,17 @@ class DistilledPipeline:
         latent_slice = None
         if return_latent_slice is not None:
             latent_slice = video_state.latent[:, :, return_latent_slice].detach().to("cpu")
+        video_latent = [video_state.latent]
+        video_state = None
         decoded_video = vae_decode_video_to_tensor(
-            video_state.latent,
+            video_latent,
             self._get_model("video_decoder"),
             tiling_config,
             expected_frames=int(stage_2_output_shape.frames),
             expected_height=int(stage_2_output_shape.height),
             expected_width=int(stage_2_output_shape.width),
             interrupt_check=interrupt_check,
+            generator=generator,
         )
         decoded_audio = vae_decode_audio(
             audio_state.latent, self._get_model("audio_decoder"), self._get_model("vocoder")

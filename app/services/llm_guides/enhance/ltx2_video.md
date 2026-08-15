@@ -22,9 +22,57 @@ per window — no line breaks inside a window, no bullet points, no labels.
 WINDOWS:
 - SINGLE WINDOW (no sliding-window info, or 1 window): one paragraph total.
 - MULTIPLE WINDOWS (2+): one paragraph per window, separated by blank lines.
-  Each window is rendered independently with no memory of prior windows, so
-  re-state characters and setting in EVERY window. Each paragraph should be
-  a complete standalone scene description hitting all seven elements above.
+  Each paragraph is a COMPLETE STANDALONE generation prompt. Only that one
+  paragraph is sent to its native LTX pass. A later pass receives a short
+  audiovisual overlap from the preceding pass, but it NEVER receives any
+  earlier prompt text or instructions.
+
+  Before writing, separate the request into:
+  - GLOBAL INVARIANTS that govern the whole sequence: capture format, camera
+    behavior and direction, speed and pacing, visual medium / era / style,
+    persistent subject identity and wardrobe, world or location rules,
+    lighting or color rules that are meant to persist, continuous-shot / no-cut
+    requirements, and persistent audio requirements.
+  - WINDOW-LOCAL BEATS: only the action, environment, transition, and concrete
+    handoff that happen during that particular native pass.
+
+  Repeat EVERY applicable global invariant explicitly in EVERY paragraph,
+  even when that wording feels repetitive. Near-identical wording is desirable
+  because the video model sees each paragraph independently. Never rely on
+  "continues," "the same," "still," "next," or pronouns alone to carry a
+  camera rule, speed, style, identity, location rule, or motion rule from a
+  previous paragraph; state exactly what continues.
+
+  Distribute the requested story chronologically across the exact number of
+  windows. Every paragraph contains ONLY its own window-local actions: never
+  repeat the complete user story in every window and never reveal or perform a
+  later beat early. Window 1 establishes and begins; middle windows continue
+  and advance; the final window performs the requested ending ONLY when the
+  user requested an ending. If the user requests endless, looping, perpetual,
+  nonstop, or never-stopping action, the final window must keep that action
+  visibly active through its final frame and beyond; it must not resolve,
+  decelerate, settle, calm down, pause, or stop.
+
+  Open every later paragraph from a concrete physical continuation state that
+  can be inferred from the short overlap, and end every paragraph with a
+  concrete physical handoff for the next pass. Briefly re-state stable
+  identities, wardrobe, current environment, lighting, and screen direction.
+  Do not restart the action or describe a fresh establishing pose unless
+  requested.
+
+  When the user requests a seamless oner / one-take / no-cut sequence, every
+  window must preserve one seamless continuous take and one camera path. Move
+  physically between environments through a visible doorway, opening, tunnel,
+  breach, water
+  surface, or other connected passage. Do not use a cut, snap, reset, sudden
+  replacement, "the scene shears away," or "the environment transforms."
+
+  EXAMPLE OF THE REQUIRED REPETITION:
+  Window 1 may begin, "An amateur handheld camera falls at very high speed in
+  one seamless unbroken take through strange 1990s indoor rooms, following an
+  ever-rising path inside a vast torus..." Window 2 and every later window must
+  repeat that same filming, speed, era, indoor, no-cut, falling, and torus
+  contract before describing only its own new room and transition.
 
 START IMAGE AWARENESS:
 WHEN A START IMAGE IS ATTACHED (the user prompt will say so):
@@ -78,7 +126,14 @@ Applies to ALL video prompts, regardless of content type.
 NEVER USE:
 - Montage / quick cuts / cut to / series of shots — LTX-2 produces ONE
   continuous shot per generation. Multi-shot language confuses the model.
-- Ambient sound descriptions — LTX-2 doesn't generate audio.
+- A slower, calmer, resolved, or stopped final window when the user requested
+  endless, perpetual, looping, nonstop, or never-stopping motion.
+- An abrupt transformation, snap, reset, or invisible scene replacement when
+  the user requested a seamless oner / one-take / no-cut sequence. Describe a
+  visible physical passage that the continuously moving camera travels through.
+- Unrequested ambient sound inventories. When the active LTX generation has
+  native audio and the user requests dialogue, music, or synchronized sound,
+  preserve and time those requested audible events inside the correct window.
 - Abstract emotional adjectives without visible cues ("passionate", "intense",
   "ethereal").
 - Vague camera moves ("the camera moves") — always pick a specific verb.

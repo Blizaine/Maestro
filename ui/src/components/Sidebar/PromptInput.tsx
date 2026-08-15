@@ -134,6 +134,8 @@ export function PromptInput() {
   const h3ReferenceSequenceEnabled = useStore(s => s.params.minimax_h3_reference_sequence === true)
   const h3ManualSequencePrompts = useStore(s => s.params.minimax_h3_sequence_prompt_mode === 'manual')
   const h3NativeSequence = useStore(s => s.params.minimax_h3_sequence_continuity !== false)
+  const ltxMultiWindow = useStore(s => s.params.ltx_multi_window === true)
+  const ltxManualWindowPrompts = useStore(s => s.params.ltx_window_prompt_mode === 'manual')
   const h3WindowPlan = useStore(s => s.h3WindowPlan)
   const updateH3WindowPrompt = useStore(s => s.updateH3WindowPrompt)
   const activeH3JobPhase = useStore(s => {
@@ -178,8 +180,10 @@ export function PromptInput() {
     String(modelOptions?.architecture || '').startsWith('minimax_h3')
     && modelOptions?.omni_reference !== true
   )
+  const isLtxSequence = modelOptions?.multi_window_sequence_controls === true
   const windowCount = supportsSlidingWindows
     && (!isH3FirstLast || h3FirstLastMultiWindow)
+    && (!isLtxSequence || ltxMultiWindow)
     && stride > 0
     && durationSeconds > slidingWindowSeconds
     ? 1 + Math.ceil((durationSeconds - slidingWindowSeconds + discardSec) / stride)
@@ -227,6 +231,13 @@ export function PromptInput() {
     && !h3WindowPlanningEnabled
   )
   const usesH3ManualPrompts = usesH3ManualSequence || usesH3ManualFirstLast
+  const usesLtxManualPrompts = (
+    usesWindows
+    && isLtxSequence
+    && ltxMultiWindow
+    && ltxManualWindowPrompts
+  )
+  const usesManualWindowPrompts = usesH3ManualPrompts || usesLtxManualPrompts
   const usesH3SequencePlanner = h3SequenceNeedsMultiplePasses && !h3ManualSequencePrompts
   const sequenceClipCount = h3SequenceEnabled && sequenceClipFrames
     ? h3OmniSequenceWindowCount({
@@ -237,8 +248,10 @@ export function PromptInput() {
       })
     : 1
   const manualPromptLineCount = prompt.split('\n').filter(line => line.trim()).length
-  const manualPromptCount = usesH3ManualFirstLast ? windowCount : sequenceClipCount
-  const manualPromptUnit = usesH3ManualFirstLast
+  const manualPromptCount = (usesH3ManualFirstLast || usesLtxManualPrompts)
+    ? windowCount
+    : sequenceClipCount
+  const manualPromptUnit = (usesH3ManualFirstLast || usesLtxManualPrompts)
     ? 'window'
     : (h3NativeSequence ? 'window' : 'clip')
   const usesH3Plan = usesH3WindowPlanner || usesH3SequencePlanner
@@ -389,7 +402,7 @@ export function PromptInput() {
           )}
         </div>
       )}
-      {usesH3ManualPrompts && (
+      {usesManualWindowPrompts && (
         <div className="mb-1.5 flex items-center justify-between gap-2 text-[10px] text-text-muted">
           <span>One non-empty line per {manualPromptUnit}</span>
           <span className={manualPromptLineCount === manualPromptCount ? 'text-text-secondary' : 'text-amber-400'}>
@@ -400,17 +413,19 @@ export function PromptInput() {
       <textarea
         value={prompt}
         onChange={e => setParam('prompt', e.target.value)}
-        placeholder={usesH3ManualPrompts
+        placeholder={usesManualWindowPrompts
           ? `Line 1 = ${manualPromptUnit} 1, line 2 = ${manualPromptUnit} 2... (${manualPromptCount} total)`
           : usesH3Plan
           ? `Describe the complete video idea—Maestro will plan ${expectedPlanCount} H3 ${usesH3SequencePlanner ? 'reference clips' : 'windows'}.`
           : usesWindows
-            ? `Line 1 = window 1, line 2 = window 2... (${windowCount} windows)`
+            ? (isLtxSequence
+                ? `Describe the complete video idea - Maestro will plan ${windowCount} LTX windows.`
+                : `Line 1 = window 1, line 2 = window 2... (${windowCount} windows)`)
           : modePlaceholder}
         className="w-full flex-1 bg-bg-tertiary border border-border rounded-lg px-3 py-2 pr-10 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue transition-colors"
         style={{ resize: 'none', minHeight: 112 }}
       />
-      {prompt.trim() && !usesH3ManualPrompts && (
+      {prompt.trim() && !usesManualWindowPrompts && (
         isAudioOnly ? (
           /* TTS: mode-aware split button. Main button uses default mode based
              on voice-slot count; dropdown exposes both Speech and Dialogue

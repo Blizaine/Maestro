@@ -1,4 +1,8 @@
-const { runtimeProfile } = require("./launcher_profile")
+const {
+  isSolCapable,
+  needsCuda13DriverUpdate,
+  runtimeProfile,
+} = require("./launcher_profile")
 
 module.exports = async (kernel) => {
   const runtime = runtimeProfile(kernel)
@@ -15,15 +19,13 @@ module.exports = async (kernel) => {
       },
       next: null
     },
-    // Optional HuggingFace login. Maestro's default models are all on
-    // PUBLIC repos, so this is NOT required — but a token lifts HuggingFace's
-    // anonymous rate limits (helpful for the large model downloads) and
-    // unlocks any gated models you add later. Non-blocking (wait: false):
-    // Pinokio stores the token at HF_TOKEN_PATH; skip it and downloads fall
-    // back to anonymous (launch.py is tolerant of an absent/blocked token).
     {
-      method: "hf.login",
-      params: { wait: false }
+      when: isSolCapable(kernel) && needsCuda13DriverUpdate(kernel),
+      method: "notify",
+      params: {
+        html: `Your NVIDIA driver (${kernel.gpu_driver}) is too old for Maestro's default CUDA 13 H3 runtime. Update to NVIDIA driver 580 or newer, then run Install again.`
+      },
+      next: null
     },
     {
       method: "shell.run",

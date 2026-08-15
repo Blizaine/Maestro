@@ -2,6 +2,10 @@
 env/
 app/env/
 app/env-rtx50/
+app/env-sol/
+app/env-ltx25/
+app/env-ltx25-*/
+app/temp/
 
 # Node.js dependencies
 ui/node_modules/
@@ -21,6 +25,10 @@ ENVIRONMENT
 # Internal release-readiness checklist — not for public consumption.
 # Kept locally for the maintainer's reference; not shipped via git.
 docs/release_todo.md
+
+# Maintainer research, implementation plans, and deferred product notes.
+# These remain available in the local development checkout only.
+docs/development/
 
 # Uploaded files
 uploads/
@@ -90,6 +98,10 @@ app/postprocessing/seedvc/
 # Local build/archive outputs (formerly supplement-pack zips) — never tracked.
 dist/
 .codex-tmp/
+
+# Official LTX-2.5 source checkout. The pinned revision is installed lazily
+# into an isolated runtime by app/scripts/install_ltx25_runtime.py.
+app/third_party/ltx25-runtime/
 
 # Cloned upstream plugins (re-downloaded by WanGP plugin manager)
 app/plugins/wan2gp-gallery/

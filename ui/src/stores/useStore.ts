@@ -575,7 +575,7 @@ const audioSubFamilies: ModelFamily[] = [
 // them. Keep the explicit set for one-off ids that don't share a
 // prefix with their line.
 const musicModelTypes = new Set<string>([])
-const musicModelPrefixes = ['ace_step', 'heartmula']
+const musicModelPrefixes = ['ace_step', 'heartmula', 'minimax_music3']
 
 function isMusicModelType(modelType: string): boolean {
   if (musicModelTypes.has(modelType)) return true
@@ -612,6 +612,9 @@ const DEFAULT_ENABLED_MODELS = new Set([
   // Settings → System → Model Visibility but off by default so the
   // first-launch picker isn't overwhelming.
   'ltx2_22B_distilled_1_1',
+  // LTX-2.5's official split Distilled workflow. The large gated component
+  // pack downloads only when selected for the first time.
+  'ltx2_25',
   // SCAIL-2 character animation (Animate a character with a control
   // video). Fast = lightx2v distill bundled (6 steps, no CFG, ~13x).
   'scail2_14B',
@@ -634,6 +637,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
   'ace_step_v1_5_xl_turbo_lm_4b',
   'ace_step_v1_5_xl_sft',
   'ace_step_v1_5_xl_sft_lm_4b',
+  'minimax_music3',
   // Audio — SFX
   'mmaudio_v2',
   'mmaudio_nsfw',
@@ -650,7 +654,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
  * a user who then disables them stays disabled forever. (This is
  * deliberately narrower than auto-enabling every unknown model — only
  * the curated list's own additions are pushed.) */
-const DEFAULTS_VERSION = 8
+const DEFAULTS_VERSION = 10
 const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   // v1.2.0: the ACE-Step XL SFT pair; LM_4B becomes the music default.
   2: ['ace_step_v1_5_xl_sft', 'ace_step_v1_5_xl_sft_lm_4b'],
@@ -666,6 +670,10 @@ const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   7: ['minimax_h3_ref2va'],
   // Full 33B H3 variants alongside the recommended Pruned 20B entries.
   8: ['minimax_h3_full', 'minimax_h3_ref2va_full'],
+  // LTX-2.5 official Distilled T2V/I2V with synchronized native audio.
+  9: ['ltx2_25'],
+  // MiniMax-Music3 long-form stereo song generation.
+  10: ['minimax_music3'],
 }
 const DEFAULTS_VERSION_KEY = 'maestro_defaults_version'
 
@@ -763,6 +771,17 @@ export function getModelMode(modelType: string, familyId: string): GenerationMod
   if (avatarModelTypes.has(modelType)) return 'avatar'
   if (familyId === 'longcat') return 'avatar'
   return getFamilyMode(familyId)
+}
+
+/** Director models whose image/audio conditioning strengths are fixed at 1.0. */
+export function directorModelUsesFixedMediaStrength(
+  modelType: string | undefined,
+  architecture?: string | null,
+): boolean {
+  return [modelType, architecture].some(value => {
+    const normalized = String(value || '').toLowerCase()
+    return normalized.startsWith('minimax_h3') || normalized.startsWith('ltx2_25')
+  })
 }
 
 export function getFamiliesForMode(mode: GenerationMode, allFamilies: ModelFamily[], editSubMode?: string, audioSubMode?: string): ModelFamily[] {
@@ -1528,6 +1547,9 @@ interface AppState {
   setDirectorVoiceRef: (file: File | null) => void
   setDirectorIdentityGuidanceScale: (v: number) => void
   directorClipImages: DirectorClipImage[]
+  /** Set or clear an optional user-supplied start image for one manually
+   *  reviewed Director scene. */
+  directorSetClipImage: (clipIndex: number, file: File | null) => void
   directorImageGenProgress: DirectorImageGenProgress | null
   directorSpeakers: string[]
   directorSpeakerMappings: SpeakerMapping[]
@@ -1549,6 +1571,14 @@ interface AppState {
   directorVideoMaxShotFramesByModel: Record<string, number>
   /** Director-owned H3 Turbo choices, separate from Studio's active mode. */
   directorH3TurboModeByModel: Record<string, boolean>
+  /** Director-owned managed H3 Turbo checkpoint choice. */
+  directorH3TurboPresetByModel: Record<string, string>
+  /** Director-owned experimental H3 Sol Engine choices. */
+  directorH3SolModeByModel: Record<string, boolean>
+  /** Director-owned H3 First Block Cache choices and tuning. */
+  directorH3FirstBlockCacheByModel: Record<string, boolean>
+  directorH3FirstBlockCacheMultiplierByModel: Record<string, number>
+  directorH3FirstBlockCacheWarmupByModel: Record<string, number>
   setDirectorAutoMode: (v: boolean) => void
   setDirectorSeamless: (v: boolean) => void
   setDirectorShotImageGuidance: (v: DirectorShotImageGuidance) => void
@@ -1558,6 +1588,11 @@ interface AppState {
   setDirectorVideoInferenceSteps: (modelType: string, steps: number | null) => void
   setDirectorVideoMaxShotFrames: (modelType: string, frames: number | null) => void
   setDirectorH3TurboMode: (modelType: string, enabled: boolean) => void
+  setDirectorH3TurboPreset: (modelType: string, presetId: string) => void
+  setDirectorH3SolMode: (modelType: string, enabled: boolean) => void
+  setDirectorH3FirstBlockCache: (modelType: string, enabled: boolean) => void
+  setDirectorH3FirstBlockCacheMultiplier: (modelType: string, value: number) => void
+  setDirectorH3FirstBlockCacheWarmup: (modelType: string, value: number) => void
   selectDirectorImageModel: (modelType: string) => void
   selectDirectorVideoModel: (modelType: string) => void
   directorSetLora: (mode: 'image' | 'video', activated_loras: string[], loras_multipliers: string, loraWeights: Record<string, number[]>, availableLoras: string[]) => void
@@ -1567,6 +1602,7 @@ interface AppState {
   directorUploadAndAnalyze: (file: File) => Promise<void>
   // Music Video: generate-the-track source + song setup
   directorMusicSource: 'upload' | 'generate' | null
+  directorMusicModel: string
   directorSongDescription: string
   directorSongInstrumental: boolean
   directorSongStyle: string
@@ -1574,6 +1610,7 @@ interface AppState {
   directorSongDuration: number
   directorTrackGenerating: boolean
   setDirectorMusicSource: (s: 'upload' | 'generate' | null) => void
+  setDirectorMusicModel: (modelType: string) => void
   setDirectorSongDescription: (v: string) => void
   setDirectorSongInstrumental: (v: boolean) => void
   setDirectorSongStyle: (v: string) => void
@@ -1846,6 +1883,29 @@ function computeFilteredOutputs(outputs: OutputFile[], mediaFilter: MediaFilter)
     _foCachedResult = outputs
   }
   return _foCachedResult
+}
+
+/** Resolve whether the current Director selection owns generated per-shot
+ *  images. This mirrors services/director_video_strategy.py so the manual
+ *  browser flow and the durable server pipeline take the same branch. */
+function _directorUsesGeneratedShotImages(state: AppState): boolean {
+  const videoModel = state.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+  const support = state.models.find(
+    model => model.model_type === videoModel,
+  )?.director?.shot_image_support
+  const guidance = state.directorShotImageGuidance
+  if (guidance === 'prompt_only') return false
+  if (guidance === 'generate') return true
+  if (!support || support === 'required') return true
+  if (support === 'direct_references') return false
+  return Boolean(
+    state.directorReferenceImage
+    || state.directorReferenceImagePath
+    || state.directorCharacterRefs.length
+    || state.directorCharacterRefPaths.length
+    || state.directorLocationRefs.length
+    || state.directorLocationRefPaths.length
+  )
 }
 
 export const useStore = create<AppState>((set, get) => ({
@@ -2436,7 +2496,33 @@ export const useStore = create<AppState>((set, get) => ({
     ].includes(String(key))
     set(s => {
       const nextParams = { ...s.params, [key]: value }
-      if (key === 'prompt') delete nextParams._h3_original_prompt
+      if (key === 'prompt') {
+        delete nextParams._h3_original_prompt
+        const editedLines = typeof value === 'string'
+          ? value.replace(/\r\n?/g, '\n').split('\n').map(line => line.trim()).filter(Boolean)
+          : []
+        const reviewedLtxPlan = (
+          s.modelOptions?.multi_window_sequence_controls === true
+          && s.params.ltx_multi_window === true
+          && s.params.ltx_window_prompt_mode !== 'manual'
+          && Array.isArray(s.params.ltx_window_prompts)
+          && editedLines.length === s.params.ltx_window_prompts.length
+        )
+        if (reviewedLtxPlan) {
+          nextParams.ltx_window_prompts = editedLines
+        } else {
+          delete nextParams._ltx_original_prompt
+          delete nextParams.ltx_window_prompts
+        }
+      }
+      if (
+        key === 'ltx_multi_window'
+        || key === 'ltx_window_prompt_mode'
+        || key === 'model_type'
+      ) {
+        delete nextParams._ltx_original_prompt
+        delete nextParams.ltx_window_prompts
+      }
       return {
         params: nextParams,
         ...(invalidatesH3Plan ? { h3WindowPlan: null } : {}),
@@ -3472,6 +3558,15 @@ export const useStore = create<AppState>((set, get) => ({
       && get().params.minimax_h3_reference_sequence === true
     )
     const isH3 = String(options?.architecture || '').startsWith('minimax_h3')
+    const isLtxSequence = options?.multi_window_sequence_controls === true
+    const ltxMultiWindow = (
+      isLtxSequence
+      && get().params.ltx_multi_window === true
+    )
+    const ltxWindowDefaults = options?.sliding_window_defaults
+    const ltxSinglePassMaximum = isLtxSequence
+      ? (ltxWindowDefaults?.window_max ?? Math.round(20 * fps)) / fps
+      : null
     const h3FirstLastMultiWindow = (
       isH3
       && options?.omni_reference !== true
@@ -3486,6 +3581,10 @@ export const useStore = create<AppState>((set, get) => ({
       ? (h3ReferenceSequence || h3FirstLastMultiWindow
           ? Number.POSITIVE_INFINITY
           : (nativeMaximum ?? Number.POSITIVE_INFINITY))
+      : isLtxSequence
+        ? (ltxMultiWindow
+            ? Number.POSITIVE_INFINITY
+            : (ltxSinglePassMaximum ?? Number.POSITIVE_INFINITY))
       : (options?.sliding_window || nativeMaximum == null
           ? Number.POSITIVE_INFINITY
           : nativeMaximum)
@@ -3523,6 +3622,7 @@ export const useStore = create<AppState>((set, get) => ({
             }
           : {}),
       }
+      delete nextParams.ltx_window_prompts
       return {
         durationSeconds: seconds,
         ...(expandNativeWindow
@@ -3563,9 +3663,8 @@ export const useStore = create<AppState>((set, get) => ({
       frames = Math.max(minimum, Math.min(maximum, frames))
     }
     const seconds = frames / fps
-    set(state => ({
-      slidingWindowSeconds: seconds,
-      params: {
+    set(state => {
+      const nextParams = {
         ...state.params,
         sliding_window_size: frames,
         ...(
@@ -3574,10 +3673,15 @@ export const useStore = create<AppState>((set, get) => ({
             ? { minimax_h3_sequence_clip_frames: frames }
             : {}
         ),
-      },
-      h3WindowPlan: null,
-      promptEnhanceError: null,
-    }))
+      }
+      delete nextParams.ltx_window_prompts
+      return {
+        slidingWindowSeconds: seconds,
+        params: nextParams,
+        h3WindowPlan: null,
+        promptEnhanceError: null,
+      }
+    })
     get().syncClipCount()
   },
 
@@ -3588,9 +3692,11 @@ export const useStore = create<AppState>((set, get) => ({
         frames,
         state.modelOptions?.sliding_window_defaults,
       )
+      const nextParams = { ...state.params, sliding_window_overlap: normalized }
+      delete nextParams.ltx_window_prompts
       return {
         slidingWindowOverlap: normalized,
-        params: { ...state.params, sliding_window_overlap: normalized },
+        params: nextParams,
         h3WindowPlan: null,
         promptEnhanceError: null,
       }
@@ -4054,6 +4160,7 @@ export const useStore = create<AppState>((set, get) => ({
     const isI2vOnly = state.modelOptions?.i2v_class && !state.modelOptions?.t2v_class
     const isOmniReference = state.modelOptions?.omni_reference === true
     const isH3Model = String(state.modelOptions?.architecture || '').startsWith('minimax_h3')
+    const isLtxSequenceModel = state.modelOptions?.multi_window_sequence_controls === true
     const hasStartImage = state.startImage || state.params.image_start
     const hasMultiClipImages = state.clips.some(c => c.startImage || c.startImagePath)
     if (state.generationMode === 'video' && isI2vOnly && !isOmniReference && !hasStartImage && !hasMultiClipImages) {
@@ -4673,6 +4780,20 @@ export const useStore = create<AppState>((set, get) => ({
     let h3ManualSequencePrompts: string[] | null = null
     let h3ManualFirstLastPrompts: string[] | null = null
 
+    if (
+      state.generationMode === 'video'
+      && state.modelOptions?.infer_audio_prompt_from_guide === true
+      && params.audio_guide
+      && (!params.video_guide || !String(params.video_prompt_type || '').includes('V'))
+    ) {
+      const audioPromptType = String(params.audio_prompt_type || '')
+      if (![...'AK2'].some(letter => audioPromptType.includes(letter))) {
+        // The visible soundtrack tile and its hidden mode must travel as one
+        // contract. This also heals Load Settings from an affected sidecar.
+        params.audio_prompt_type = `A${audioPromptType}`
+      }
+    }
+
     // H3 video-to-audio freezes the Control Video's pictures, so any
     // remembered V2V mask/edit controls are irrelevant. Normalize the request
     // copy here as a durable safety net for loaded sidecars and older saved UI
@@ -4700,6 +4821,10 @@ export const useStore = create<AppState>((set, get) => ({
         isH3Model
         && !isOmniReference
         && params.minimax_h3_multi_window === true
+      )
+      const ltxMultiWindowRequested = (
+        isLtxSequenceModel
+        && params.ltx_multi_window === true
       )
       const h3DirectOmniPass = (
         isOmniReference
@@ -4739,6 +4864,11 @@ export const useStore = create<AppState>((set, get) => ({
         && !isOmniReference
         && !h3FirstLastMultiWindowRequested
       ) {
+        requestedFrames = Math.min(
+          requestedFrames,
+          Math.max(minimumFrames, Math.round(state.slidingWindowSeconds * fps)),
+        )
+      } else if (isLtxSequenceModel && !ltxMultiWindowRequested) {
         requestedFrames = Math.min(
           requestedFrames,
           Math.max(minimumFrames, Math.round(state.slidingWindowSeconds * fps)),
@@ -4853,6 +4983,31 @@ export const useStore = create<AppState>((set, get) => ({
       }
 
       if (
+        ltxMultiWindowRequested
+        && params.ltx_window_prompt_mode === 'manual'
+        && requestedFrames > Number(params.sliding_window_size || 0)
+      ) {
+        const ltxManualPrompts = String(params.prompt || '')
+          .replace(/\r\n?/g, '\n')
+          .split('\n')
+          .map(line => line.trim())
+          .filter(Boolean)
+        const expectedPromptCount = h3SlidingWindowCount({
+          totalFrames: requestedFrames,
+          windowFrames: Number(params.sliding_window_size || requestedFrames),
+          overlapFrames: Number(params.sliding_window_overlap || 0),
+          discardFrames: Number(params.sliding_window_discard_last_frames || 0),
+        })
+        if (ltxManualPrompts.length !== expectedPromptCount) {
+          set({
+            promptEnhanceError: `Manual LTX sequence needs exactly ${expectedPromptCount} non-empty prompt ${expectedPromptCount === 1 ? 'line' : 'lines'} (window 1 through window ${expectedPromptCount}); found ${ltxManualPrompts.length}.`,
+          })
+          return
+        }
+        params.ltx_window_prompts = ltxManualPrompts
+      }
+
+      if (
         h3ReferenceSequenceRequested
         && params.minimax_h3_sequence_prompt_mode === 'manual'
         && effectiveH3SequenceClipFrames != null
@@ -4894,16 +5049,45 @@ export const useStore = create<AppState>((set, get) => ({
       delete params.minimax_h3_references
       delete params.minimax_h3_reference_detail
       delete params.minimax_h3_reference_sequence
-      delete params.minimax_h3_sequence_prompt_mode
       delete params.minimax_h3_sequence_continuity
       delete params.minimax_h3_sequence_clip_frames
       delete params.minimax_h3_sequence_memory_override
     }
     if (!isH3Model) {
       delete params.minimax_h3_multi_window
+      delete params.minimax_h3_sequence_prompt_mode
+    }
+    if (!isLtxSequenceModel) {
+      delete params.ltx_multi_window
+      delete params.ltx_window_prompt_mode
+      delete params.ltx_window_prompts
+      delete params._ltx_original_prompt
     }
     if (!state.modelOptions?.minimax_h3_text_encoder_choices?.length) {
       delete params.minimax_h3_text_encoder
+    }
+    if (state.modelOptions?.ltx25_video_vae_choices?.length) {
+      const validLtx25VideoVae = state.modelOptions.ltx25_video_vae_choices.some(
+        choice => choice.value === params.ltx25_video_vae
+      )
+      if (!validLtx25VideoVae) {
+        params.ltx25_video_vae = (
+          state.modelOptions.ltx25_video_vae_default
+          || state.modelOptions.ltx25_video_vae_choices[0].value
+        )
+      }
+    } else {
+      delete params.ltx25_video_vae
+    }
+    if (
+      state.modelOptions?.sol_attention
+      && state.modelOptions.sol_attention_status?.supported
+    ) {
+      params.override_attention = (
+        params.override_attention === 'sol' ? 'sol' : ''
+      )
+    } else {
+      delete params.override_attention
     }
     if (state.modelOptions?.first_block_cache) {
       const allowedThresholds = (
@@ -5020,17 +5204,26 @@ export const useStore = create<AppState>((set, get) => ({
           ? params.minimax_h3_reference_sequence === true
           : params.minimax_h3_multi_window === true
       )
+      const ltxWindowPromptRoutingEnabled = (
+        !isLtxSequenceModel
+        || params.ltx_multi_window === true
+      )
       const hasSlidingWindow = state.modelOptions?.sliding_window === true
         && h3WindowPromptRoutingEnabled
+        && ltxWindowPromptRoutingEnabled
         && state.durationSeconds > state.slidingWindowSeconds
       if (
         hasSlidingWindow
-        && state.modelOptions?.sliding_window_auto_prompt_pacing === true
+        && (
+          state.modelOptions?.sliding_window_auto_prompt_pacing === true
+          || (
+            isLtxSequenceModel
+            && params.ltx_window_prompt_mode !== 'manual'
+          )
+        )
       ) {
-        // H3's structured Context-IR prompt contains semantic line breaks;
-        // they are not one prompt per continuation window. Keep the complete
-        // shot plan intact so the backend can assign its timeline and tagged
-        // dialogue across the automatically sized VRAM-safe passes.
+        // Auto planners receive one complete story idea. The backend then
+        // compiles exact H3 Context-IR or LTX prose for each native pass.
         params.multi_prompts_gen_type = 2
       } else if (hasSlidingWindow && prompt.includes('\n')) {
         // Sliding window: each line = one window prompt (rolling generation)
@@ -5464,6 +5657,16 @@ export const useStore = create<AppState>((set, get) => ({
       && params.minimax_h3_window_storyboard === false
       && Number(params.video_length || 0) > Number(params.sliding_window_size || 0)
     )
+    const ltxWindowSequenceActive = (
+      state.generationMode === 'video'
+      && isLtxSequenceModel
+      && params.ltx_multi_window === true
+      && Number(params.video_length || 0) > Number(params.sliding_window_size || 0)
+    )
+    const ltxAutoPlanActive = (
+      ltxWindowSequenceActive
+      && params.ltx_window_prompt_mode !== 'manual'
+    )
     const h3PlanActive = h3WindowStoryboardActive || (
       h3ReferenceSequenceActive && !h3ManualReferenceSequence
     )
@@ -5515,6 +5718,8 @@ export const useStore = create<AppState>((set, get) => ({
       phase: '',
       message: h3PlanActive
         ? `Planning H3 ${h3ReferenceSequenceActive ? 'reference sequence' : 'windows'}...`
+        : ltxAutoPlanActive
+          ? 'Planning LTX windows...'
         : h3ManualReferenceSequence
           ? 'Preparing H3 manual sequence...'
           : 'Submitting...',
@@ -5529,7 +5734,7 @@ export const useStore = create<AppState>((set, get) => ({
     }))
 
     try {
-      const { job_id, h3_window_plan } = await api.submitGeneration(params)
+      const { job_id, h3_window_plan, ltx_window_plan } = await api.submitGeneration(params)
 
       if (h3_window_plan) {
         const planFps = state.modelOptions?.fps ?? 24
@@ -5551,6 +5756,19 @@ export const useStore = create<AppState>((set, get) => ({
             params: { ...s.params, sliding_window_size: effectiveWindowFrames },
           }))
         }
+      }
+      if (ltx_window_plan) {
+        const isManualPlan = ltx_window_plan.planned_by === 'manual'
+        set(s => ({
+          params: {
+            ...s.params,
+            prompt: ltx_window_plan.window_prompts.join('\n'),
+            ltx_window_prompts: ltx_window_plan.window_prompts,
+            _ltx_original_prompt: isManualPlan
+              ? undefined
+              : ltx_window_plan.source_prompt,
+          },
+        }))
       }
 
       // Update the job with its server-assigned ID
@@ -5878,10 +6096,13 @@ export const useStore = create<AppState>((set, get) => ({
     // the shared Wan model family advertises support for up to three phases.
     const recastSinglePhase = generationMode === 'avatar' && editSubMode === 'recast'
     const phases = recastSinglePhase ? 1 : Math.max(1, modelOptions?.guidance_max_phases ?? 1)
-    const removedTurboPreset = (
-      idx >= 0
-      && filename === modelOptions?.minimax_h3_turbo?.filename
+    const managedTurboFilenames = new Set(
+      modelOptions?.minimax_h3_turbo?.presets?.map(preset => preset.filename)
+      || (modelOptions?.minimax_h3_turbo?.filename
+        ? [modelOptions.minimax_h3_turbo.filename]
+        : []),
     )
+    const removedTurboPreset = idx >= 0 && managedTurboFilenames.has(filename)
 
     if (idx >= 0) {
       current.splice(idx, 1)
@@ -6316,17 +6537,44 @@ export const useStore = create<AppState>((set, get) => ({
           )
         }
       }
+      if (options.ltx25_video_vae_choices?.length) {
+        const currentVideoVae = get().params.ltx25_video_vae
+        const valid = options.ltx25_video_vae_choices.some(
+          choice => choice.value === currentVideoVae
+        )
+        if (!valid) {
+          paramUpdates.ltx25_video_vae = (
+            options.ltx25_video_vae_default
+            || options.ltx25_video_vae_choices[0].value
+          )
+        }
+      }
       if (options.minimax_h3_turbo) {
+        const turboPresets = options.minimax_h3_turbo.presets?.length
+          ? options.minimax_h3_turbo.presets
+          : [{
+              id: options.minimax_h3_turbo.preset_id,
+              filename: options.minimax_h3_turbo.filename,
+              steps: options.minimax_h3_turbo.steps,
+            }]
+        const requestedPresetId = get().params.minimax_h3_turbo_preset
+        const selectedPreset = (
+          turboPresets.find(preset => preset.id === requestedPresetId)
+          || turboPresets.find(preset => preset.id === options.minimax_h3_turbo?.preset_id)
+          || turboPresets[0]
+        )
+        paramUpdates.minimax_h3_turbo_preset = selectedPreset.id
         // A restored Turbo preset always displays the same step count the
         // backend will enforce. This also closes a race where model defaults
         // (20 steps) arrive after the user checks Turbo (6 steps).
         if (get().params.minimax_h3_turbo_mode === true) {
-          paramUpdates.num_inference_steps = options.minimax_h3_turbo.steps
+          paramUpdates.num_inference_steps = selectedPreset.steps
         }
       } else {
         // Model switches preserve most Studio params. Never carry the Full-H3
         // Turbo flag invisibly into a Pruned H3 or unrelated model.
         paramUpdates.minimax_h3_turbo_mode = false
+        paramUpdates.minimax_h3_turbo_preset = undefined
       }
       // TTS default duration. Prefer the model's declared `default` (DramaBox
       // uses 0 = auto-derive from prompt); fall back to `max` (legacy behavior
@@ -6568,6 +6816,16 @@ export const useStore = create<AppState>((set, get) => ({
       })
       return
     }
+    if (
+      state.modelOptions?.multi_window_sequence_controls === true
+      && params.ltx_multi_window === true
+      && params.ltx_window_prompt_mode === 'manual'
+    ) {
+      set({
+        promptEnhanceError: 'Manual LTX multi-window mode uses each prompt line exactly as written. Switch Window prompts to Auto plan to use the LLM planner.',
+      })
+      return
+    }
     set({ isEnhancing: true, promptEnhanceError: null })
     try {
       // Collect images relevant to the CURRENT mode only
@@ -6578,6 +6836,7 @@ export const useStore = create<AppState>((set, get) => ({
         state.modelOptions?.architecture?.startsWith('minimax_h3') === true
         && !isOmniReference
       )
+      const isLtxSequence = state.modelOptions?.multi_window_sequence_controls === true
       const injectedPositions = String(params.frames_positions || '').split(/[\s,]+/).filter(Boolean)
       const injectedKeyframes = (
         isH3FirstLast
@@ -6682,7 +6941,6 @@ export const useStore = create<AppState>((set, get) => ({
           referenceContext = alignmentLines.join('\n') || undefined
         }
       }
-
       // Include duration/window info for video models
       const fps = state.modelOptions?.fps ?? 16
       const swDefaults = (state.modelOptions as Record<string, unknown> | null)?.sliding_window_defaults as Record<string, number> | undefined
@@ -6693,6 +6951,7 @@ export const useStore = create<AppState>((set, get) => ({
       const supportsSlidingWindows = state.modelOptions?.sliding_window === true
       const windowCount = supportsSlidingWindows
         && (!isH3FirstLast || params.minimax_h3_multi_window === true)
+        && (!isLtxSequence || params.ltx_multi_window === true)
         && stride > 0
         && state.durationSeconds > state.slidingWindowSeconds
         ? 1 + Math.ceil((state.durationSeconds - state.slidingWindowSeconds + discardSec) / stride)
@@ -6810,9 +7069,17 @@ export const useStore = create<AppState>((set, get) => ({
 
       // TTS dialogue needs more tokens for longer conversations
       const maxTokens = (generationMode === 'audio' && ttsMode) ? 2048 : undefined
+      const ltxEnhanceSource = (
+        generationMode === 'video'
+        && isLtxSequence
+        && params.ltx_multi_window === true
+        && params.ltx_window_prompt_mode !== 'manual'
+        && typeof params._ltx_original_prompt === 'string'
+        && params._ltx_original_prompt.trim()
+      ) ? params._ltx_original_prompt : params.prompt
 
       const result = await api.llmEnhancePrompt({
-        prompt: params.prompt,
+        prompt: ltxEnhanceSource,
         mode: generationMode,
         model_type: params.model_type,
         max_new_tokens: maxTokens,
@@ -6832,11 +7099,29 @@ export const useStore = create<AppState>((set, get) => ({
         ? ((typeof params._h3_original_prompt === 'string'
             && params._h3_original_prompt.trim()) || params.prompt)
         : undefined
+      const enhancedLtxLines = result.enhanced
+        .replace(/\r\n?/g, '\n')
+        .split('\n')
+        .map(line => line.trim())
+        .filter(Boolean)
+      const preserveLtxPlan = (
+        generationMode === 'video'
+        && isLtxSequence
+        && params.ltx_multi_window === true
+        && params.ltx_window_prompt_mode !== 'manual'
+        && windowCount > 1
+        && enhancedLtxLines.length === windowCount
+      )
+      const ltxSourcePrompt = ltxEnhanceSource
       set(s => ({
         params: {
           ...s.params,
-          prompt: result.enhanced,
+          prompt: preserveLtxPlan ? enhancedLtxLines.join('\n') : result.enhanced,
           ...(preserveH3Source ? { _h3_original_prompt: preserveH3Source } : {}),
+          ...(preserveLtxPlan ? {
+            _ltx_original_prompt: ltxSourcePrompt,
+            ltx_window_prompts: enhancedLtxLines,
+          } : {}),
         },
         isEnhancing: false,
       }))
@@ -6892,6 +7177,23 @@ export const useStore = create<AppState>((set, get) => ({
   },
   setDirectorIdentityGuidanceScale: (v) => set({ directorIdentityGuidanceScale: v }),
   directorClipImages: [],
+  directorSetClipImage: (clipIndex, file) => set(s => {
+    const remaining = s.directorClipImages.filter(
+      image => image.clipIndex !== clipIndex,
+    )
+    if (!file) return { directorClipImages: remaining }
+    const image: DirectorClipImage = {
+      clipIndex,
+      prompt: s.directorClipPlans[clipIndex]?.image_prompt || '',
+      file,
+      filename: file.name,
+    }
+    return {
+      directorClipImages: [...remaining, image].sort(
+        (left, right) => left.clipIndex - right.clipIndex,
+      ),
+    }
+  }),
   directorImageGenProgress: null,
   directorSpeakers: [],
   directorSpeakerMappings: [],
@@ -6904,6 +7206,7 @@ export const useStore = create<AppState>((set, get) => ({
   directorLlmLog: [],
   directorSkill: null,
   directorMusicSource: null,
+  directorMusicModel: 'ace_step_v1_5_xl_sft_lm_4b',
   directorSongDescription: '',
   directorSongInstrumental: false,
   directorSongStyle: '',
@@ -6911,6 +7214,13 @@ export const useStore = create<AppState>((set, get) => ({
   directorSongDuration: 120,
   directorTrackGenerating: false,
   setDirectorMusicSource: (s) => set({ directorMusicSource: s }),
+  setDirectorMusicModel: (modelType) => set({
+    directorMusicModel: modelType,
+    // The two model families use different caption contracts. Never retain a
+    // hidden song plan written for the previously selected generator.
+    directorSongStyle: '',
+    directorSongLyrics: '',
+  }),
   setDirectorSongDescription: (v) => set({ directorSongDescription: v }),
   setDirectorSongInstrumental: (v) => set({ directorSongInstrumental: v }),
   setDirectorSongStyle: (v) => set({ directorSongStyle: v }),
@@ -6921,6 +7231,11 @@ export const useStore = create<AppState>((set, get) => ({
   directorVideoInferenceStepsByModel: {},
   directorVideoMaxShotFramesByModel: {},
   directorH3TurboModeByModel: {},
+  directorH3TurboPresetByModel: {},
+  directorH3SolModeByModel: {},
+  directorH3FirstBlockCacheByModel: {},
+  directorH3FirstBlockCacheMultiplierByModel: {},
+  directorH3FirstBlockCacheWarmupByModel: {},
   shortFilmCharacters: [],
   shortFilmPath: null,
   shortFilmTargetDuration: 30,
@@ -6932,7 +7247,16 @@ export const useStore = create<AppState>((set, get) => ({
   pipelinePolling: false,
   setDirectorAutoMode: (v) => set({ directorAutoMode: v }),
   setDirectorSeamless: (v) => set({ directorSeamless: v }),
-  setDirectorShotImageGuidance: (v) => set({ directorShotImageGuidance: v }),
+  setDirectorShotImageGuidance: (v) => set({
+    directorShotImageGuidance: v,
+    // Selecting "None" must not leave generated images from an earlier
+    // choice silently attached to manual video jobs. Users can add fresh
+    // per-scene uploads from the review screen after making this choice.
+    ...(v === 'prompt_only' ? {
+      directorClipImages: [],
+      directorImageGenProgress: null,
+    } : {}),
+  }),
   directorAppendLlmLog: (stage, text) => set(s => {
     const t = (text || '').trim()
     if (!t) return {}
@@ -6944,6 +7268,20 @@ export const useStore = create<AppState>((set, get) => ({
   }),
   setDirectorSkill: (skill) => {
     set({ directorSkill: skill })
+    const state = get()
+    const selectedVideoModel = state.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+    const selectedVideoDefinition = state.models.find(
+      model => model.model_type === selectedVideoModel,
+    )
+    if (directorModelUsesFixedMediaStrength(
+      selectedVideoModel,
+      selectedVideoDefinition?.architecture,
+    )) {
+      if (state.params.input_video_strength !== 1.0) {
+        state.setParam('input_video_strength', 1.0)
+      }
+      return
+    }
     // Music director default for image-to-video reference strength is
     // 0.7 (loosens the lock to the start frame so motion can develop
     // naturally) rather than 1.0 (rigid frame). Only initialize when
@@ -6988,10 +7326,47 @@ export const useStore = create<AppState>((set, get) => ({
       [modelType]: enabled,
     },
   })),
+  setDirectorH3TurboPreset: (modelType, presetId) => set(s => ({
+    directorH3TurboPresetByModel: {
+      ...s.directorH3TurboPresetByModel,
+      [modelType]: presetId,
+    },
+  })),
+  setDirectorH3SolMode: (modelType, enabled) => set(s => ({
+    directorH3SolModeByModel: {
+      ...s.directorH3SolModeByModel,
+      [modelType]: enabled,
+    },
+  })),
+  setDirectorH3FirstBlockCache: (modelType, enabled) => set(s => ({
+    directorH3FirstBlockCacheByModel: {
+      ...s.directorH3FirstBlockCacheByModel,
+      [modelType]: enabled,
+    },
+  })),
+  setDirectorH3FirstBlockCacheMultiplier: (modelType, value) => set(s => ({
+    directorH3FirstBlockCacheMultiplierByModel: {
+      ...s.directorH3FirstBlockCacheMultiplierByModel,
+      [modelType]: value,
+    },
+  })),
+  setDirectorH3FirstBlockCacheWarmup: (modelType, value) => set(s => ({
+    directorH3FirstBlockCacheWarmupByModel: {
+      ...s.directorH3FirstBlockCacheWarmupByModel,
+      [modelType]: Math.max(0, Math.min(75, Math.round(value / 5) * 5)),
+    },
+  })),
 
   selectDirectorImageModel: (modelType) => {
+    if (get().selectedModelPerMode.image === modelType) return
     set(s => ({
       selectedModelPerMode: { ...s.selectedModelPerMode, image: modelType },
+      // Model-specific prompts and rendered starts must never survive a
+      // pre-planning model change. Keep the uploaded/analyzed source intact.
+      directorClipPlans: [],
+      directorClipImages: [],
+      directorImageGenProgress: null,
+      directorError: null,
     }))
     const s = get()
     _saveSettings({
@@ -7004,10 +7379,37 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   selectDirectorVideoModel: (modelType) => {
+    const previousModel = get().selectedModelPerMode.video
+    if (previousModel === modelType) return
     set(s => ({
       selectedModelPerMode: { ...s.selectedModelPerMode, video: modelType },
+      // The video model determines both prompt rules and the legal frame
+      // lattice. Preserve source media and analysis, but invalidate anything
+      // derived downstream from those choices.
+      directorClipPlans: [],
+      directorClipImages: [],
+      directorImageGenProgress: null,
+      directorError: null,
     }))
+    const selectedVideoDefinition = get().models.find(
+      model => model.model_type === modelType,
+    )
+    if (directorModelUsesFixedMediaStrength(
+      modelType,
+      selectedVideoDefinition?.architecture,
+    ) && get().params.input_video_strength !== 1.0) {
+      get().setParam('input_video_strength', 1.0)
+    }
     get().loadModelOptions(modelType)
+    const current = get()
+    if (
+      current.directorAnalysis
+      && (current.directorStep === 'structure' || current.directorStep === 'style')
+    ) {
+      // Rebuild clip lengths against the newly selected model without
+      // re-uploading or re-transcribing the user's audio.
+      void current.directorSetEnergyBias(current.directorEnergyBias)
+    }
     const s = get()
     _saveSettings({
       generationMode: s.generationMode,
@@ -7210,7 +7612,9 @@ export const useStore = create<AppState>((set, get) => ({
     const r = await api.writeSong({
       description,
       instrumental: s.directorSongInstrumental,
+      duration_seconds: s.directorSongDuration,
       reference_image_path: refPath || undefined,
+      model_type: s.directorMusicModel,
     })
     set({
       directorSongStyle: r.style || '',
@@ -7260,6 +7664,7 @@ export const useStore = create<AppState>((set, get) => ({
         instrumental,
         duration_seconds: s.directorSongDuration,
         reference_image_path: refPath || undefined,
+        model_type: s.directorMusicModel,
         workspace: get().activeWorkspace || undefined,
       })
       setTimeout(() => { void get().reconnectJobs() }, 1200)
@@ -7425,6 +7830,8 @@ export const useStore = create<AppState>((set, get) => ({
         ...(charPaths.length > 0 ? { character_ref_paths: charPaths, character_ref_labels: charLabels } : {}),
         ...(locPaths.length > 0 ? { location_ref_paths: locPaths, location_ref_labels: locLabels } : {}),
       }
+      const generateShotImages = _directorUsesGeneratedShotImages(get())
+      const promptType = generateShotImages ? 'both' : 'video'
 
       // Build speaker_mappings from user-assigned names (only those with names filled in)
       const speakerMappings: Record<string, { name: string; role: string }> = {}
@@ -7452,7 +7859,7 @@ export const useStore = create<AppState>((set, get) => ({
           reference_image_path: refImagePath ?? undefined,
           ...extraRefs,
           speaker_mappings: Object.keys(speakerMappings).length > 0 ? speakerMappings : undefined,
-          prompt_type: 'both',
+          prompt_type: promptType,
         })
         plans = result.clip_plans.map(p => ({
           video_prompt: p.video_prompt || '',
@@ -7468,7 +7875,7 @@ export const useStore = create<AppState>((set, get) => ({
           reference_image_path: refImagePath,
           ...extraRefs,
           speaker_mappings: Object.keys(speakerMappings).length > 0 ? speakerMappings : undefined,
-          prompt_type: 'both',
+          prompt_type: promptType,
         })
         plans = result.clip_plans.map(p => ({
           video_prompt: p.video_prompt || '',
@@ -7477,16 +7884,19 @@ export const useStore = create<AppState>((set, get) => ({
       }
       set({
         directorClipPlans: plans,
-        directorStep: 'review',
+        directorStep: generateShotImages ? 'review' : 'review_video',
         directorLoading: false,
       })
 
-      // Auto-mode: skip review, proceed to image gen. directorGenerateStartImages
-      // now generates an establishing/anchor image first when no reference was
-      // provided, so every clip shares a consistent look (instead of skipping
-      // images entirely as it used to).
+      // Auto mode follows the image selector: generate consistent scene starts
+      // with a concrete image model, or go directly to prompt-only video when
+      // the selector is None.
       if (get().directorAutoMode) {
-        get().directorGenerateStartImages()
+        if (generateShotImages) {
+          get().directorGenerateStartImages()
+        } else {
+          get().directorGenerate()
+        }
       }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Planning failed'
@@ -8067,6 +8477,8 @@ export const useStore = create<AppState>((set, get) => ({
         ...(charPaths.length > 0 ? { character_ref_paths: charPaths, character_ref_labels: charLabels } : {}),
         ...(locPaths.length > 0 ? { location_ref_paths: locPaths, location_ref_labels: locLabels } : {}),
       }
+      const generateShotImages = _directorUsesGeneratedShotImages(get())
+      const promptType = generateShotImages ? 'both' : 'video'
 
       // Build speaker mappings
       const speakerMappings: Record<string, { name: string; role: string }> = {}
@@ -8093,7 +8505,7 @@ export const useStore = create<AppState>((set, get) => ({
           ...extraRefs,
           speaker_mappings: Object.keys(speakerMappings).length > 0 ? speakerMappings : undefined,
           characters: shortFilmCharacters.length > 0 ? shortFilmCharacters : undefined,
-          prompt_type: 'both',
+          prompt_type: promptType,
         })
         plans = result.clip_plans.map(p => ({
           video_prompt: p.video_prompt || '',
@@ -8108,7 +8520,7 @@ export const useStore = create<AppState>((set, get) => ({
           ...extraRefs,
           speaker_mappings: Object.keys(speakerMappings).length > 0 ? speakerMappings : undefined,
           characters: shortFilmCharacters.length > 0 ? shortFilmCharacters : undefined,
-          prompt_type: 'both',
+          prompt_type: promptType,
         })
         plans = result.clip_plans.map(p => ({
           video_prompt: p.video_prompt || '',
@@ -8117,16 +8529,15 @@ export const useStore = create<AppState>((set, get) => ({
       }
       set({
         directorClipPlans: plans,
-        directorStep: 'review',
+        directorStep: generateShotImages ? 'review' : 'review_video',
         directorLoading: false,
       })
 
       // Auto-mode: skip review
       if (get().directorAutoMode) {
-        if (get().directorReferenceImage) {
+        if (generateShotImages) {
           get().directorGenerateStartImages()
         } else {
-          set({ directorStep: 'review_video' })
           get().directorGenerate()
         }
       }
@@ -8197,6 +8608,8 @@ export const useStore = create<AppState>((set, get) => ({
         ...(charPaths.length > 0 ? { character_ref_paths: charPaths, character_ref_labels: charLabels } : {}),
         ...(locPaths.length > 0 ? { location_ref_paths: locPaths, location_ref_labels: locLabels } : {}),
       }
+      const generateShotImages = _directorUsesGeneratedShotImages(get())
+      const promptType = generateShotImages ? 'both' : 'video'
 
       // ?? not || — an explicit user-toggled `false` must be respected
       // (legacy v1 path); only fall back to true when servicesConfig
@@ -8218,7 +8631,7 @@ export const useStore = create<AppState>((set, get) => ({
           fps: get().modelOptions?.fps ?? 24,
           frames_steps: get().modelOptions?.frames_steps ?? 4,
           frames_minimum: get().modelOptions?.frames_minimum ?? 5,
-          prompt_type: 'both',
+          prompt_type: promptType,
         })
         plans = result.clip_plans.map(p => ({
           video_prompt: p.video_prompt || '',
@@ -8264,16 +8677,15 @@ export const useStore = create<AppState>((set, get) => ({
       set({
         directorPlannedClips: storyClips || get().directorPlannedClips,
         directorClipPlans: plans,
-        directorStep: 'review',
+        directorStep: generateShotImages ? 'review' : 'review_video',
         directorLoading: false,
       })
 
       // Auto-mode: skip review steps
       if (get().directorAutoMode) {
-        if (get().directorReferenceImage) {
+        if (generateShotImages) {
           get().directorGenerateStartImages()
         } else {
-          set({ directorStep: 'review_video' })
           get().directorGenerate()
         }
       }
@@ -8294,6 +8706,7 @@ export const useStore = create<AppState>((set, get) => ({
         activated_loras: [],
         loras_multipliers: '',
         minimax_h3_turbo_mode: false,
+        minimax_h3_turbo_preset: undefined,
       },
       selectedModelPerMode: { ...s.selectedModelPerMode, [currentMode]: modelType },
       h3WindowPlan: null,
@@ -8701,6 +9114,65 @@ export const useStore = create<AppState>((set, get) => ({
         && savedRuntimePrompt === restoredH3WindowPrompts[0])
     ) ? savedSourcePrompt : ''
 
+    // First / Last sidecars created before the explicit prompt-mode field
+    // used minimax_h3_window_storyboard as the UI's Auto/Manual switch.
+    // Prefer the explicit field, while keeping those existing clips durable.
+    const restoredH3SequencePromptMode: 'auto' | 'manual' | undefined = (
+      p.minimax_h3_sequence_prompt_mode === 'manual'
+        ? 'manual'
+        : p.minimax_h3_sequence_prompt_mode === 'auto'
+          ? 'auto'
+          : p.minimax_h3_multi_window === true
+            ? (p.minimax_h3_window_storyboard === false ? 'manual' : 'auto')
+            : undefined
+    )
+
+    const restoredTurboOption = restoredModelOptions?.minimax_h3_turbo
+    const restoredTurboPresets = restoredTurboOption?.presets?.length
+      ? restoredTurboOption.presets
+      : restoredTurboOption
+        ? [{
+            id: restoredTurboOption.preset_id,
+            filename: restoredTurboOption.filename,
+          }]
+        : []
+    const savedTurboPreset = restoredTurboPresets.find(
+      preset => preset.id === p.minimax_h3_turbo_preset,
+    )
+    const savedActivatedLoras = Array.isArray(p.activated_loras)
+      ? (p.activated_loras as unknown[]).map(item => String(item))
+      : []
+    const activeTurboPreset = restoredTurboPresets.find(
+      preset => savedActivatedLoras.some(
+        filename => filename.replace(/\\/g, '/').split('/').pop()?.toLowerCase()
+          === preset.filename.toLowerCase(),
+      ),
+    )
+    const restoredTurboPreset = (
+      savedTurboPreset
+      || activeTurboPreset
+      || restoredTurboPresets.find(
+        preset => preset.id === restoredTurboOption?.preset_id,
+      )
+      || restoredTurboPresets[0]
+    )
+    const legacyTurboEnabled = (
+      p.minimax_h3_turbo_mode == null
+      && activeTurboPreset != null
+    )
+    const savedTextEncoder = p.minimax_h3_text_encoder
+    const restoredTextEncoder = (
+      savedTextEncoder === 'nvfp4_awq'
+      || savedTextEncoder === 'gguf_q2_k'
+      || savedTextEncoder === 'gguf_q4_k_m'
+      || savedTextEncoder === 'int8'
+      || savedTextEncoder === 'bf16'
+    ) && restoredModelOptions?.minimax_h3_text_encoder_choices?.some(
+      choice => choice.value === savedTextEncoder,
+    ) ? savedTextEncoder : undefined
+    const restoredLtx25VideoVae = restoredModelOptions?.ltx25_video_vae_choices
+      ?.find(choice => choice.value === p.ltx25_video_vae)?.value
+
     // TTS restores names before Speaker 1/2 substitution. Edit workflows
     // restore the user's text rather than internal conditioning guidance.
     const originalPrompt = (p._tts_original_prompt as string) || (
@@ -8748,6 +9220,10 @@ export const useStore = create<AppState>((set, get) => ({
     // Copy optional fields — explicitly clear when absent to prevent stale values leaking
     newParams.sliding_window_size = (p.sliding_window_size as number) ?? undefined
     newParams.sliding_window_overlap = (p.sliding_window_overlap as number) ?? undefined
+    newParams.sliding_window_discard_last_frames = (
+      p.sliding_window_discard_last_frames as number
+    ) ?? undefined
+    newParams.sliding_window_memory_override = p.sliding_window_memory_override === true
     newParams.guidance_phases = (p.guidance_phases as number) ?? undefined
     newParams.video_prompt_type = (p.video_prompt_type as string) || ''
     newParams.audio_prompt_type = (p.audio_prompt_type as string) || ''
@@ -8756,6 +9232,7 @@ export const useStore = create<AppState>((set, get) => ({
     newParams.flow_shift = migratedLegacyRecast ? 1 : (p.flow_shift as number) ?? undefined
     newParams.self_refiner_setting = (p.self_refiner_setting as number) ?? undefined
     newParams.audio_guide = (p.audio_guide as string) || ''
+    newParams.audio_scale = (p.audio_scale as number) ?? undefined
     newParams.audio_guide2 = (p.audio_guide2 as string) || ''
     // Style / Music Caption (ACE-Step). Was never copied here, so the
     // pencil restored only the lyrics — clear when absent so a stale
@@ -8818,14 +9295,50 @@ export const useStore = create<AppState>((set, get) => ({
     (newParams as Record<string, unknown>).keyframe_inject_mode = (p.keyframe_inject_mode as string) ?? undefined;
     (newParams as Record<string, unknown>).temperature = (p.temperature as number) ?? undefined;
     (newParams as Record<string, unknown>).audio_guidance_scale = (p.audio_guidance_scale as number) ?? undefined
+    // H3 optimization controls are a cohesive saved recipe. Explicit off
+    // values matter: undefined would retain the clip selected before this one.
+    newParams.override_attention = p.override_attention === 'sol' ? 'sol' : ''
+    newParams.skip_steps_cache_type = (
+      p.skip_steps_cache_type === 'first_block' ? 'first_block' : ''
+    )
+    newParams.skip_steps_multiplier = Number.isFinite(Number(p.skip_steps_multiplier))
+      ? Number(p.skip_steps_multiplier)
+      : restoredModelOptions?.default_skip_steps_multiplier
+    newParams.skip_steps_start_step_perc = Number.isFinite(
+      Number(p.skip_steps_start_step_perc),
+    )
+      ? Math.max(0, Math.min(100, Number(p.skip_steps_start_step_perc)))
+      : restoredModelOptions?.default_skip_steps_start_step_perc
+    newParams.minimax_h3_turbo_mode = (
+      p.minimax_h3_turbo_mode === true || legacyTurboEnabled
+    )
+    newParams.minimax_h3_turbo_preset = restoredTurboPreset?.id
+    newParams.minimax_h3_text_encoder = restoredTextEncoder
+    newParams.ltx25_video_vae = restoredLtx25VideoVae
     newParams.minimax_h3_window_storyboard = (p.minimax_h3_window_storyboard as boolean) ?? undefined
     newParams.minimax_h3_multi_window = (p.minimax_h3_multi_window as boolean) ?? undefined
-    newParams.minimax_h3_reference_sequence = (p.minimax_h3_reference_sequence as boolean) ?? undefined
-    newParams.minimax_h3_sequence_prompt_mode = (
-      p.minimax_h3_sequence_prompt_mode === 'manual'
-        ? 'manual'
-        : (p.minimax_h3_sequence_prompt_mode === 'auto' ? 'auto' : undefined)
+    const legacyLtxLongForm = (
+      /^ltx(?:v|2)/i.test(String(p.model_type || ''))
+      && Number(p.video_length || 0) > Number(p.sliding_window_size || 0)
     )
+    newParams.ltx_multi_window = (p.ltx_multi_window as boolean)
+      ?? (legacyLtxLongForm ? true : undefined)
+    newParams.ltx_window_prompt_mode = (
+      p.ltx_window_prompt_mode === 'manual'
+        ? 'manual'
+        : (p.ltx_window_prompt_mode === 'auto'
+            ? 'auto'
+            : (legacyLtxLongForm ? 'auto' : undefined))
+    )
+    newParams.ltx_window_prompts = Array.isArray(p.ltx_window_prompts)
+      ? (p.ltx_window_prompts as string[]).filter(item => typeof item === 'string' && item.trim())
+      : undefined
+    newParams._ltx_original_prompt = (
+      typeof p._ltx_original_prompt === 'string'
+      && p._ltx_original_prompt.trim()
+    ) ? p._ltx_original_prompt : undefined
+    newParams.minimax_h3_reference_sequence = (p.minimax_h3_reference_sequence as boolean) ?? undefined
+    newParams.minimax_h3_sequence_prompt_mode = restoredH3SequencePromptMode
     newParams.minimax_h3_sequence_continuity = (p.minimax_h3_sequence_continuity as boolean) ?? undefined
     newParams.minimax_h3_sequence_clip_frames = (
       p.minimax_h3_sequence_clip_frames as number
@@ -9469,6 +9982,10 @@ export const useStore = create<AppState>((set, get) => ({
             directorAutoMode, directorSeamless, directorShotImageGuidance,
             directorResolution, directorAspectRatio,
             directorVideoMaxShotFramesByModel, directorH3TurboModeByModel,
+            directorH3TurboPresetByModel, directorH3SolModeByModel,
+            directorH3FirstBlockCacheByModel,
+            directorH3FirstBlockCacheMultiplierByModel,
+            directorH3FirstBlockCacheWarmupByModel,
             selectedModelPerMode, savedParamsPerMode, savedLoraPerMode,
             directorSpeakerMappings, directorImageSpatialUpsampling,
             directorImageFilmGrainIntensity, directorImageFilmGrainSaturation,
@@ -9495,6 +10012,11 @@ export const useStore = create<AppState>((set, get) => ({
       ? state.modelOptions
       : null
     const directorVideoOptions = fetchedVideoOptions || cachedVideoOptions
+    const directorFixedMediaStrength = directorModelUsesFixedMediaStrength(
+      selectedVideoModel,
+      directorVideoOptions?.architecture
+        || state.models.find(model => model.model_type === selectedVideoModel)?.architecture,
+    )
     const directorImageOptions = fetchedImageOptions
     const directorImageResolution = resolveResolution(
       directorImageOptions,
@@ -9531,13 +10053,66 @@ export const useStore = create<AppState>((set, get) => ({
       ? defaultVideoSteps
       : (configuredVideoSteps ?? defaultVideoSteps)
     const directorTurboOption = directorVideoOptions?.minimax_h3_turbo
+    const directorTurboPresets = directorTurboOption?.presets?.length
+      ? directorTurboOption.presets
+      : directorTurboOption
+        ? [{
+            id: directorTurboOption.preset_id,
+            label: directorTurboOption.version_label,
+            status: 'validated',
+            filename: directorTurboOption.filename,
+            steps: directorTurboOption.steps,
+            weight: directorTurboOption.weight,
+            weight_min: 0.5,
+            weight_max: 1.0,
+            description: directorTurboOption.guide,
+            revision: '',
+          }]
+        : []
+    const directorTurboPreset = (
+      directorTurboPresets.find(
+        preset => preset.id === directorH3TurboPresetByModel[selectedVideoModel],
+      )
+      || directorTurboPresets.find(
+        preset => preset.id === directorTurboOption?.preset_id,
+      )
+      || directorTurboPresets[0]
+    )
     const savedDirectorVideoLoras = savedLoraPerMode.video
     const directorTurboEnabled = Boolean(
-      directorTurboOption
+      directorTurboOption && directorTurboPreset
       && directorH3TurboModeByModel[selectedVideoModel] === true
-      && savedDirectorVideoLoras?.activated_loras?.includes(directorTurboOption.filename)
+      && savedDirectorVideoLoras?.activated_loras?.includes(directorTurboPreset.filename)
     )
-    if (directorTurboEnabled) directorVideoSteps = directorTurboOption!.steps
+    if (directorTurboEnabled) directorVideoSteps = directorTurboPreset!.steps
+    const directorSolEnabled = Boolean(
+      directorVideoOptions?.sol_attention
+      && directorVideoOptions.sol_attention_status?.supported
+      && directorH3SolModeByModel[selectedVideoModel] === true
+    )
+    const directorFirstBlockCacheEnabled = Boolean(
+      directorVideoOptions?.first_block_cache
+      && directorH3FirstBlockCacheByModel[selectedVideoModel] === true
+    )
+    const cacheChoices = directorVideoOptions?.skip_steps_multiplier_choices || []
+    const requestedCacheMultiplier = (
+      directorH3FirstBlockCacheMultiplierByModel[selectedVideoModel]
+      ?? directorVideoOptions?.default_skip_steps_multiplier
+      ?? 0.08
+    )
+    const directorCacheMultiplier = cacheChoices.length
+      ? cacheChoices.reduce((closest, choice) => (
+          Math.abs(choice[1] - requestedCacheMultiplier)
+            < Math.abs(closest - requestedCacheMultiplier)
+            ? choice[1]
+            : closest
+        ), cacheChoices[0][1])
+      : requestedCacheMultiplier
+    const directorCacheWarmup = Math.max(0, Math.min(75, Math.round((
+      directorH3FirstBlockCacheWarmupByModel[selectedVideoModel]
+      ?? directorVideoOptions?.default_skip_steps_start_step_perc
+      ?? 25
+    ) / 5) * 5))
     const directorMaxShotFrames = directorVideoMaxShotFramesByModel[selectedVideoModel]
 
     // Upload all reference images (main + character + location) if not already uploaded
@@ -9659,13 +10234,19 @@ export const useStore = create<AppState>((set, get) => ({
         num_inference_steps: directorVideoSteps,
         resolution: directorVideoResolution,
         minimax_h3_turbo_mode: directorTurboEnabled,
+        minimax_h3_turbo_preset: directorTurboPreset?.id,
+        override_attention: directorSolEnabled ? 'sol' : '',
+        skip_steps_cache_type: directorFirstBlockCacheEnabled ? 'first_block' : '',
+        skip_steps_multiplier: directorCacheMultiplier,
+        skip_steps_start_step_perc: directorCacheWarmup,
+        ...(directorFixedMediaStrength ? { input_video_strength: 1.0 } : {}),
       },
       video_loras: savedLoraPerMode.video || {},
       video_spatial_upsampling: directorVideoSpatialUpsampling,
       video_film_grain_intensity: directorVideoFilmGrainIntensity,
       video_film_grain_saturation: directorVideoFilmGrainSaturation,
       video_self_refiner: directorVideoSelfRefiner,
-      audio_scale: get().directorAudioScale,
+      audio_scale: directorFixedMediaStrength ? 1.0 : get().directorAudioScale,
 
       // Voice identity: LTX uses the CelebVHQ ID-LoRA; H3 Omni maps the
       // same upload into each shot's native Ref2VA manifest.
@@ -9727,11 +10308,33 @@ export const useStore = create<AppState>((set, get) => ({
         const status = await api.fetchPipelineStatus(pid)
         set({ pipelineStatus: status })
 
-        // Sync pipeline state to director UI state
-        if (status.clip_plans?.length && !get().directorClipPlans.length) {
+        // Sync the backend's model-adapted plan, not just an initially empty
+        // UI. H3 can split broad 20-30s music sections into additional native
+        // <=14.4s shots after the browser has already populated its draft
+        // timeline. The old empty-only guard left those stale durations and
+        // prompts visible even though the worker queued the shorter plan.
+        const currentPlans = get().directorClipPlans
+        const currentTimeline = get().directorPlannedClips
+        const plansChanged = Boolean(status.clip_plans?.length) && (
+          currentPlans.length !== status.clip_plans.length
+          || status.clip_plans.some((plan, index) => (
+            plan.video_prompt !== currentPlans[index]?.video_prompt
+            || plan.image_prompt !== currentPlans[index]?.image_prompt
+          ))
+        )
+        const timelineChanged = Boolean(status.planned_clips?.length) && (
+          currentTimeline.length !== status.planned_clips!.length
+          || status.planned_clips!.some((clip, index) => (
+            clip.start !== currentTimeline[index]?.start
+            || clip.end !== currentTimeline[index]?.end
+            || clip.duration_frames !== currentTimeline[index]?.duration_frames
+          ))
+        )
+        if (plansChanged || timelineChanged) {
           set({
-            directorClipPlans: status.clip_plans,
-            directorStep: 'review',
+            ...(plansChanged ? { directorClipPlans: status.clip_plans } : {}),
+            ...(timelineChanged ? { directorPlannedClips: status.planned_clips! } : {}),
+            ...(!currentPlans.length && plansChanged ? { directorStep: 'review' as const } : {}),
           })
         }
 

@@ -27,6 +27,7 @@ _TRANSFORMER_PATH = _APP / "models" / "minimax_h3" / "transformer.py"
 _CONDITIONER_PATH = _APP / "models" / "minimax_h3" / "conditioner.py"
 _CHECKPOINT_PATH = _APP / "models" / "minimax_h3" / "checkpoint.py"
 _TURBO_PATH = _APP / "models" / "minimax_h3" / "turbo.py"
+_TURBO_MANIFEST_PATH = _APP / "models" / "minimax_h3" / "turbo_presets.json"
 _NVFP4_PATH = _APP / "shared" / "qtypes" / "nvfp4.py"
 _INT8_CONVROT_PATH = _APP / "shared" / "qtypes" / "int8_convrot.py"
 _WGP_PATH = _APP / "wgp.py"
@@ -41,8 +42,8 @@ _PROMPT_INPUT_PATH = _ROOT / "ui" / "src" / "components" / "Sidebar" / "PromptIn
 _DURATION_SLIDER_PATH = _ROOT / "ui" / "src" / "components" / "Sidebar" / "DurationSlider.tsx"
 _ADVANCED_SETTINGS_PATH = _ROOT / "ui" / "src" / "components" / "Sidebar" / "AdvancedSettings.tsx"
 _INPUTS_PANEL_PATH = _ROOT / "ui" / "src" / "components" / "Sidebar" / "InputsPanel.tsx"
-_TURBO_TOGGLE_PATH = (
-    _ROOT / "ui" / "src" / "components" / "Sidebar" / "MiniMaxH3TurboToggle.tsx"
+_H3_OPTIMIZATIONS_PATH = (
+    _ROOT / "ui" / "src" / "components" / "Sidebar" / "MiniMaxH3Optimizations.tsx"
 )
 _SIDEBAR_PATH = _ROOT / "ui" / "src" / "components" / "Sidebar" / "Sidebar.tsx"
 _TYPES_PATH = _ROOT / "ui" / "src" / "types" / "index.ts"
@@ -329,6 +330,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertTrue(model_def["any_audio_prompt"])
         self.assertTrue(model_def["audio_prompt_choices"])
         self.assertTrue(model_def["output_audio_is_input_audio"])
+        self.assertTrue(model_def["infer_audio_prompt_from_guide"])
         self.assertTrue(model_def["minimax_h3_media_sources"])
         self.assertTrue(model_def["video_to_video_inpaint"])
         self.assertEqual(
@@ -357,6 +359,29 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertEqual(
             set(model_def["minimax_h3_text_encoder_variants"]),
             {"nvfp4_awq", "gguf_q2_k", "gguf_q4_k_m", "int8", "bf16"},
+        )
+        self.assertEqual(
+            model_def["compatible_model_paths"][
+                "minimax_h3_fl2va_pruned_fp8_scaled.safetensors"
+            ],
+            ["MiniMax-H3-FL2VA-pruned_rank8_int8_convrot.safetensors"],
+        )
+        self.assertEqual(
+            model_def["compatible_model_qkv_layouts"][
+                "MiniMax-H3-FL2VA-pruned_rank8_int8_convrot.safetensors"
+            ],
+            "interleaved",
+        )
+        self.assertEqual(
+            model_def["compatible_text_encoder_paths"][
+                "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+            ],
+            [
+                os.path.join(
+                    "Qwen3-VL-32B-Instruct",
+                    "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+                )
+            ],
         )
 
     def test_fl2va_media_source_validation_fails_before_generation(self):
@@ -1034,10 +1059,23 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertTrue(model_def["t2v_class"])
         self.assertFalse(model_def["i2v_class"])
         self.assertFalse(model_def["end_frames_always_enabled"])
+        self.assertEqual(
+            model_def["compatible_model_paths"][
+                "minimax_h3_ref2va_pruned_fp8_scaled.safetensors"
+            ],
+            ["MiniMax-H3-Ref2VA-pruned_rank8_int8_convrot.safetensors"],
+        )
+        self.assertEqual(
+            model_def["compatible_model_qkv_layouts"][
+                "MiniMax-H3-Ref2VA-pruned_rank8_int8_convrot.safetensors"
+            ],
+            "interleaved",
+        )
         self.assertTrue(model_def["sliding_window"])
         self.assertTrue(model_def["video_continuation"])
         self.assertTrue(model_def["sliding_window_exact_total_frames"])
         self.assertTrue(model_def["sliding_window_audio_history"])
+        self.assertNotIn("infer_audio_prompt_from_guide", model_def)
         self.assertEqual(model_def["image_prompt_types_allowed"], "")
         self.assertEqual(
             model_def["omni_reference_limits"],
@@ -1204,6 +1242,41 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("usesH3ManualFirstLast", prompt_input)
         self.assertIn("usesH3ManualPrompts", prompt_input)
 
+    def test_studio_load_settings_round_trips_h3_window_mode_and_optimizations(self):
+        store = _read(_STORE_PATH)
+        controls = _read(_H3_MULTI_WINDOW_CONTROLS_PATH)
+
+        # New First / Last clips persist an explicit mode; existing clips infer
+        # the same choice from their saved storyboard switch.
+        self.assertIn("setParam('minimax_h3_sequence_prompt_mode', mode)", controls)
+        self.assertIn("const restoredH3SequencePromptMode", store)
+        self.assertIn("p.minimax_h3_window_storyboard === false ? 'manual' : 'auto'", store)
+        self.assertIn(
+            "newParams.minimax_h3_sequence_prompt_mode = restoredH3SequencePromptMode",
+            store,
+        )
+        non_omni_cleanup = store.split("if (isOmniReference) {", 1)[1].split(
+            "if (!isH3Model) {", 1
+        )[0]
+        self.assertNotIn("delete params.minimax_h3_sequence_prompt_mode", non_omni_cleanup)
+
+        # Disabled values are as important as enabled values: they clear a
+        # different clip's optimization state instead of leaking it forward.
+        for field in (
+            "override_attention",
+            "skip_steps_cache_type",
+            "skip_steps_multiplier",
+            "skip_steps_start_step_perc",
+            "minimax_h3_turbo_mode",
+            "minimax_h3_turbo_preset",
+            "minimax_h3_text_encoder",
+            "sliding_window_memory_override",
+            "sliding_window_discard_last_frames",
+        ):
+            self.assertIn(f"newParams.{field}", store, field)
+        self.assertIn("const activeTurboPreset", store)
+        self.assertIn("const legacyTurboEnabled", store)
+
     def test_shared_h3_window_ui_and_durable_overrides_are_wired(self):
         controls = _read(_H3_MULTI_WINDOW_CONTROLS_PATH)
         sidebar = _read(_SIDEBAR_PATH)
@@ -1368,7 +1441,10 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("'minimax_h3_full'", default_block)
         self.assertIn("'minimax_h3_ref2va'", default_block)
         self.assertIn("'minimax_h3_ref2va_full'", default_block)
-        self.assertIn("const DEFAULTS_VERSION = 8", store)
+        defaults_version = int(
+            store.split("const DEFAULTS_VERSION = ", 1)[1].splitlines()[0]
+        )
+        self.assertGreaterEqual(defaults_version, 8)
         self.assertIn("6: ['minimax_h3']", store)
         self.assertIn("7: ['minimax_h3_ref2va']", store)
         self.assertIn("8: ['minimax_h3_full', 'minimax_h3_ref2va_full']", store)
@@ -1409,7 +1485,8 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         launch = _read(_LAUNCH_PATH)
         llm_service = _read(_LLM_SERVICE_PATH)
         self.assertIn("needs_h3_context_ir", launch)
-        self.assertIn("enhancer_enabled > 0 and not needs_h3_context_ir", launch)
+        self.assertIn("and not needs_h3_context_ir", launch)
+        self.assertIn("and not needs_ltx_window_plan", launch)
         self.assertIn("is_h3_context_ir", llm_service)
         self.assertIn("is_h3_ref2va", llm_service)
         self.assertIn("is_h3_structured = is_h3_context_ir or is_h3_ref2va", llm_service)
@@ -1697,6 +1774,8 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
         self.assertIn("target_condition_audio_latents=", main)
         self.assertIn("target_condition_video_frames=", main)
         self.assertIn("generated_audio_local_indices", main)
+        self.assertIn('or "D" in audio_prompt_type', main)
+        self.assertIn('or "D" in audio_prompt_type', _read(_WGP_PATH))
         self.assertIn('"audio_prompt_type_sources"', handler)
         self.assertIn('"output_audio_is_input_audio": True', handler)
         self.assertIn('"minimax_h3_media_sources"', launch)
@@ -1851,11 +1930,34 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
                 turbo.MINIMAX_H3_TURBO_LORA_FILENAME,
             ],
         )
-        self.assertEqual(body["loras_multipliers"], "1.15 0.65")
+        self.assertEqual(body["loras_multipliers"], "1.15 1.00")
         self.assertEqual(
             turbo.MINIMAX_H3_TURBO_LORA_SHA256,
-            "82d0acff583b04ad9a4238a7440b584b56094bfb7c4fdb2981f67c7a4784b62d",
+            "5f3a626cd72c93a8b9318d6760c510bc5092d2ab13aaba1f932c5bab07a416d3",
         )
+
+        candidate = {
+            "minimax_h3_turbo_mode": True,
+            "minimax_h3_turbo_preset": "v4-step600-ema",
+            "activated_loras": [
+                turbo.MINIMAX_H3_TURBO_LORA_FILENAME,
+                "minimax_h3_turbo_v4_step600_ema.safetensors",
+            ],
+            "loras_multipliers": "0.50 0.70",
+        }
+        self.assertTrue(
+            turbo.normalize_minimax_h3_turbo_request(
+                candidate,
+                full_checkpoint=True,
+            )
+        )
+        self.assertEqual(candidate["minimax_h3_turbo_preset"], "v4-step600-ema")
+        self.assertEqual(
+            candidate["activated_loras"],
+            ["minimax_h3_turbo_v4_step600_ema.safetensors"],
+        )
+        self.assertEqual(candidate["loras_multipliers"], "0.70")
+        self.assertEqual(candidate["num_inference_steps"], 6)
 
         disabled = {"minimax_h3_turbo_mode": False, "num_inference_steps": 20}
         self.assertFalse(
@@ -1877,7 +1979,7 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
                 full_checkpoint=True,
             )
         )
-        self.assertEqual(missing_selection["loras_multipliers"], "0.50")
+        self.assertEqual(missing_selection["loras_multipliers"], "1.00")
 
         pruned = {"minimax_h3_turbo_mode": True}
         self.assertTrue(
@@ -1887,31 +1989,41 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
             )
         )
         self.assertEqual(pruned["num_inference_steps"], 6)
-        self.assertEqual(pruned["loras_multipliers"], "0.50")
+        self.assertEqual(pruned["loras_multipliers"], "1.00")
 
     def test_managed_turbo_choice_is_discoverable_for_full_and_pruned(self):
         launch = _read(_LAUNCH_PATH)
-        toggle = _read(_TURBO_TOGGLE_PATH)
+        optimizations = _read(_H3_OPTIMIZATIONS_PATH)
         sidebar = _read(_SIDEBAR_PATH)
         advanced = _read(_ADVANCED_SETTINGS_PATH)
         types_source = _read(_TYPES_PATH)
 
         self.assertIn("def _minimax_h3_turbo_option", launch)
-        self.assertIn('names.add(turbo_option["filename"])', launch)
-        self.assertIn("MINIMAX_H3_TURBO_LORA_FILENAME: {", launch)
+        self.assertIn('preset["filename"] for preset in turbo_option.get("presets", [])', launch)
+        self.assertIn("for _turbo_preset in MINIMAX_H3_TURBO_PRESETS", launch)
         self.assertIn('"minimax_h3_turbo": _minimax_h3_turbo_option(md)', launch)
         self.assertIn('"minimax_h3_runtime_advisory":', launch)
         self.assertIn("_minimax_h3_runtime_advisory", launch)
         self.assertIn("normalize_minimax_h3_turbo_request", launch)
-        self.assertIn("<MiniMaxH3TurboToggle />", sidebar)
-        self.assertIn("Experimental", toggle)
-        self.assertIn("setParam('num_inference_steps', option.steps)", toggle)
-        self.assertIn("toggleLora(option.filename)", toggle)
-        self.assertIn("setLoraWeight(option.filename, 0, option.weight)", toggle)
-        self.assertIn("Use Pruned Turbo", toggle)
-        self.assertIn("recommended_model_type", toggle)
+        self.assertIn("<MiniMaxH3Optimizations />", sidebar)
+        self.assertIn("H3 Optimizations", optimizations)
+        self.assertIn("aria-expanded={expanded}", optimizations)
+        self.assertIn("setExpanded(value => !value)", optimizations)
+        self.assertIn("Experimental", optimizations)
+        self.assertIn("setParam('num_inference_steps', selectedTurboPreset.steps)", optimizations)
+        self.assertIn("handleTurboPresetChange", optimizations)
+        self.assertIn("Turbo checkpoint", optimizations)
+        self.assertIn("selectedTurboPreset.filename", optimizations)
+        self.assertIn("selectedTurboPreset.weight", optimizations)
+        self.assertIn("Use Pruned Turbo", optimizations)
+        self.assertIn("recommended_model_type", optimizations)
+        self.assertIn("Sol Engine", optimizations)
+        self.assertIn("First Block Cache", optimizations)
+        self.assertIn("'skip_steps_cache_type', checked ? 'first_block' : ''", optimizations)
+        self.assertIn("First Block Cache Tuning", advanced)
         self.assertIn("disabled={h3TurboMode}", advanced)
         self.assertIn("minimax_h3_turbo_mode?: boolean", types_source)
+        self.assertIn("minimax_h3_turbo_preset?: string", types_source)
         self.assertIn("minimax_h3_runtime_advisory?:", types_source)
 
         option = _load_source_function(_LAUNCH_PATH, "_minimax_h3_turbo_option")
@@ -1929,10 +2041,24 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
             if sys.path and sys.path[0] == str(_APP):
                 sys.path.pop(0)
         self.assertEqual(pruned["steps"], 6)
-        self.assertEqual(pruned["weight"], 0.50)
+        self.assertEqual(pruned["weight"], 1.0)
         self.assertEqual(full["steps"], 6)
-        self.assertEqual(full["weight"], 0.50)
+        self.assertEqual(full["weight"], 1.0)
         self.assertTrue(full["experimental"])
+        self.assertEqual(full["preset_id"], "v4-step600-ema")
+        self.assertEqual(len(full["presets"]), 2)
+        current_option = next(
+            preset for preset in full["presets"]
+            if preset["id"] == "v4-step600-ema"
+        )
+        self.assertEqual(current_option["status"], "validated")
+        self.assertEqual(current_option["weight"], 1.0)
+        manifest = json.loads(_read(_TURBO_MANIFEST_PATH))
+        self.assertEqual(manifest["default_preset_id"], "v4-step600-ema")
+        self.assertEqual(
+            current_option["revision"],
+            "afc0346516372a17162c14df3c5264de1d9aa1c0",
+        )
 
     def test_consumer_checkpoint_shapes_are_kept_native(self):
         transformer = _read(_TRANSFORMER_PATH)

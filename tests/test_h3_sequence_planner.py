@@ -557,7 +557,10 @@ class H3ReferenceSequencePlannerTests(unittest.TestCase):
         self.assertIn('apply_h3_omni_sequence_memory_policy', launch)
         self.assertIn('body["sliding_window_size"] = min(', launch)
         self.assertIn('omniReferenceSequence', duration)
-        self.assertIn("{isH3 ? 'Window Length' : 'Window Size'}", duration)
+        self.assertIn(
+            "{isH3 || isLtx ? 'Window Length' : 'Window Size'}",
+            duration,
+        )
         self.assertIn('Recommended {formatSeconds(safeWindowSeconds)}', duration)
         self.assertIn('native Omni windows', duration)
         self.assertIn('body["multi_prompts_gen_type"] = 0', launch)

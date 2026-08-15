@@ -1,4 +1,4 @@
-import type { DirectorModelCompatibility, H3WindowPlan, MiniMaxH3Reference, ScailResolutionProfile } from '../types'
+import type { DirectorModelCompatibility, H3WindowPlan, LTXWindowPlan, MiniMaxH3Reference, ScailResolutionProfile } from '../types'
 
 const BASE = ''  // same origin in production; Vite proxy handles /api in dev
 
@@ -153,7 +153,7 @@ export async function fetchDefaults(modelType: string): Promise<Record<string, u
 
 // --- Generation ---
 
-export async function submitGeneration(params: Record<string, unknown>): Promise<{ job_id: string; h3_window_plan?: H3WindowPlan }> {
+export async function submitGeneration(params: Record<string, unknown>): Promise<{ job_id: string; h3_window_plan?: H3WindowPlan; ltx_window_plan?: LTXWindowPlan }> {
   const res = await fetch(`${BASE}/api/v1/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -250,8 +250,10 @@ export async function fetchJobStatus(jobId: string): Promise<ApiJobStatus> {
 export async function writeSong(params: {
   description: string
   instrumental?: boolean
+  duration_seconds?: number
   seed?: number
   reference_image_path?: string
+  model_type?: string
 }): Promise<{ style: string; lyrics: string; raw: string }> {
   const res = await fetch(`${BASE}/api/v1/llm/write-song`, {
     method: 'POST',
@@ -503,6 +505,9 @@ export interface PipelineStatus {
   auto_mode: boolean
   progress: { current: number; total: number; message: string; step: number; total_steps: number }
   clip_plans: Array<{ video_prompt: string; image_prompt: string }>
+  /** Model-adapted native timeline. This can contain more, shorter clips than
+   *  the initial music-analysis timeline (for example MiniMax H3's 14.4s cap). */
+  planned_clips?: import('../types').PlannedClip[]
   clip_images: string[]
   output_files: string[]
   error: string | null

@@ -73,6 +73,68 @@ class EulerAncestralDiffusionStep(DiffusionStepProtocol):
         return result
 
 
+class LTX25EulerAncestralDiffusionStep(DiffusionStepProtocol):
+    """LTX-2.5's rectified-flow ancestral Euler update.
+
+    Kept separate from Maestro's legacy ancestral sampler so enabling native
+    LTX-2.5 does not change established LTX-2/2.3 generation behavior.
+    """
+
+    def __init__(
+        self,
+        generator: torch.Generator,
+        eta: float = 1.0,
+        s_noise: float = 1.0,
+    ) -> None:
+        self.generator = generator
+        self.eta = eta
+        self.s_noise = s_noise
+        # WanGP restores conditioned pixels after every stochastic step.
+        # The shared denoising helper checks this marker without changing
+        # Maestro's established LTX-2/2.3 sampler behavior.
+        self.postprocess_after_step = True
+
+    def step(
+        self,
+        sample: torch.Tensor,
+        denoised_sample: torch.Tensor,
+        sigmas: torch.Tensor,
+        step_index: int,
+    ) -> torch.Tensor:
+        sigma = sigmas[step_index].to(torch.float32)
+        sigma_next = sigmas[step_index + 1].to(torch.float32)
+        if float(sigma_next.item()) == 0.0:
+            return denoised_sample.to(sample.dtype)
+
+        downstep_ratio = 1.0 + (sigma_next / sigma - 1.0) * self.eta
+        sigma_down = sigma_next * downstep_ratio
+        sigma_down_ratio = sigma_down / sigma
+        x_next = (
+            sigma_down_ratio * sample.float()
+            + (1.0 - sigma_down_ratio) * denoised_sample.float()
+        )
+        if self.eta > 0:
+            alpha_next = 1.0 - sigma_next
+            alpha_down = 1.0 - sigma_down
+            renoise_coeff = (
+                sigma_next.square()
+                - sigma_down.square()
+                * alpha_next.square()
+                / alpha_down.square()
+            ).clamp(min=0).sqrt()
+            noise = torch.randn(
+                sample.shape,
+                generator=self.generator,
+                device=sample.device,
+                dtype=sample.dtype,
+            )
+            x_next = (
+                alpha_next / alpha_down * x_next
+                + noise.float() * self.s_noise * renoise_coeff
+            )
+        return x_next.to(sample.dtype)
+
+
 class DPMSolverPlusPlus2MDiffusionStep(DiffusionStepProtocol):
     """
     DPM-Solver++ 2M — 2nd-order multistep deterministic sampler.

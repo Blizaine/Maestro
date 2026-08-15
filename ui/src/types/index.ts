@@ -84,6 +84,8 @@ export interface GenerateParams {
   multi_prompts_gen_type?: number
   sliding_window_size?: number
   sliding_window_overlap?: number
+  /** Frames trimmed from the tail of each rolling window before stitching. */
+  sliding_window_discard_last_frames?: number
   /** Explicitly honor a manually locked window above the model's VRAM-aware recommendation. */
   sliding_window_memory_override?: boolean
   /** Optional model-specific transformer step cache. */
@@ -92,6 +94,8 @@ export interface GenerateParams {
   skip_steps_multiplier?: number
   /** Percentage of denoising steps to run before caching may begin. */
   skip_steps_start_step_perc?: number
+  /** Per-generation attention override. Sol is H3-only and experimental. */
+  override_attention?: '' | 'sol'
   guidance_phases?: number
   video_prompt_type?: string
   audio_prompt_type?: string
@@ -178,8 +182,12 @@ export interface GenerateParams {
   /** Add bounded generated look/blocking references between sequence clips. */
   minimax_h3_sequence_continuity?: boolean
   minimax_h3_text_encoder?: 'nvfp4_awq' | 'gguf_q2_k' | 'gguf_q4_k_m' | 'int8' | 'bf16'
+  /** LTX-2.5 video decoder. Fast ConvVAE is recommended; NAD is experimental. */
+  ltx25_video_vae?: 'fast' | 'nad'
   /** One-click managed H3 Turbo recipe for Full or Pruned H3. */
   minimax_h3_turbo_mode?: boolean
+  /** Immutable validated/candidate Turbo checkpoint selected by its manifest id. */
+  minimax_h3_turbo_preset?: string
   /** Automatically expand one long H3 concept into window-local prompts. */
   minimax_h3_window_storyboard?: boolean
   /** H3 First/Last edit grammar used by the automatic window planner. */
@@ -190,6 +198,22 @@ export interface GenerateParams {
   h3_window_plan?: H3WindowPlan
   /** Plain user concept retained when a one-clip H3 prompt is enhanced. */
   _h3_original_prompt?: string
+  /** Explicitly enable rolling long-form generation for the LTX family. */
+  ltx_multi_window?: boolean
+  /** Expand one overall idea with AI, or consume one exact line per window. */
+  ltx_window_prompt_mode?: 'auto' | 'manual'
+  /** Compiled, single-line prompts consumed by WanGP's native window router. */
+  ltx_window_prompts?: string[]
+  /** Original overall idea retained while the compiled prompts are visible. */
+  _ltx_original_prompt?: string
+}
+
+export interface LTXWindowPlan {
+  source_prompt: string
+  window_count: number
+  window_prompts: string[]
+  planned_by: 'llm' | 'manual' | 'reviewed' | 'deterministic_fallback' | string
+  planning_error?: string | null
 }
 
 export type MiniMaxH3ReferenceType = 'image' | 'video' | 'audio'
@@ -383,6 +407,16 @@ export interface ModelOptions {
   flow_shift: boolean
   tea_cache: boolean
   first_block_cache?: boolean
+  sol_attention?: boolean
+  sol_attention_status?: {
+    installed: boolean
+    supported: boolean
+    reason?: string | null
+    capability?: string
+    triton_version?: string | null
+    minimum_triton?: string
+    first_run_compiles_kernels?: boolean
+  } | null
   skip_steps_multiplier_choices?: [string, number][] | null
   skip_steps_multiplier_label?: string
   default_skip_steps_multiplier?: number
@@ -390,6 +424,8 @@ export interface ModelOptions {
   returns_audio: boolean
   any_audio_prompt: boolean
   audio_scale_name: string
+  /** Repair a standalone uploaded soundtrack whose hidden source mode was lost. */
+  infer_audio_prompt_from_guide?: boolean
   lock_inference_steps: boolean
   lock_guidance_scale: boolean
   no_negative_prompt: boolean
@@ -415,12 +451,34 @@ export interface ModelOptions {
     recommended?: boolean
   }[] | null
   minimax_h3_text_encoder_default?: string
+  ltx25_video_vae_choices?: {
+    value: 'fast' | 'nad'
+    label: string
+    description: string
+    experimental?: boolean
+  }[] | null
+  ltx25_video_vae_default?: 'fast' | 'nad'
   minimax_h3_turbo?: {
     filename: string
     label: string
     experimental: boolean
+    preset_id: string
+    version_label: string
     steps: number
     weight: number
+    presets: Array<{
+      id: string
+      label: string
+      status: 'validated' | 'candidate' | 'legacy' | string
+      filename: string
+      steps: number
+      weight: number
+      weight_min: number
+      weight_max: number
+      description: string
+      revision: string
+    }>
+    upstream_url: string
     guide: string
   } | null
   minimax_h3_runtime_advisory?: {
@@ -462,6 +520,8 @@ export interface ModelOptions {
   self_refiner_max_plans: number
   sliding_window_defaults: Record<string, number> | null
   sliding_window_auto_prompt_pacing?: boolean
+  /** Shows Maestro's explicit single-pass / long-form sequence controls. */
+  multi_window_sequence_controls?: boolean
   /** Native end image belongs to the last continuation window. */
   sliding_window_end_image_at_final?: boolean
   /** Carries generated video and stereo-audio history between native passes. */
@@ -493,6 +553,10 @@ export interface ModelOptions {
   pause_between_sentences: boolean
   temperature_enabled: boolean
   custom_settings_def: { id: string; label: string; name: string; type: string }[] | null
+  music3_structured_caption?: boolean
+  music_caption_label?: string
+  music_caption_help?: string
+  music_lyrics_help?: string
 }
 
 export interface SystemConfig {

@@ -342,6 +342,19 @@ def build_director_video_execution_profile(
             (recommendation or {}).get("fallback_resolution")
         ),
         "turbo_mode": bool(video_params.get("minimax_h3_turbo_mode")),
+        "turbo_preset": str(
+            video_params.get("minimax_h3_turbo_preset") or ""
+        ),
+        "sol_attention": video_params.get("override_attention") == "sol",
+        "first_block_cache": (
+            video_params.get("skip_steps_cache_type") == "first_block"
+        ),
+        "first_block_cache_multiplier": video_params.get(
+            "skip_steps_multiplier"
+        ),
+        "first_block_cache_warmup": video_params.get(
+            "skip_steps_start_step_perc"
+        ),
         "activated_lora_count": len(
             video_params.get("activated_loras") or []
         ),
@@ -582,6 +595,31 @@ def video_strategy(model_def: Mapping[str, Any] | None) -> str:
     return ROLLING_WINDOW
 
 
+def supports_director_seamless(model_def: Mapping[str, Any] | None) -> bool:
+    """Whether Director may submit one native rolling-window generation.
+
+    Most Director models advertise the rolling strategy directly. MiniMax H3
+    First / Last keeps its bounded-shot strategy for ordinary Director runs,
+    but its newer runtime can also continue a single generation with motion
+    and audio overlap. Keep that opt-in narrow: Ref2VA/Omni owns a different
+    reference-sequence contract and must not enter this path.
+    """
+
+    model_def = model_def or {}
+    strategy = video_strategy(model_def)
+    if strategy == OMNI_REFERENCE:
+        return False
+    if not (
+        model_def.get("sliding_window")
+        and model_def.get("custom_frames_injection")
+    ):
+        return False
+    return strategy == ROLLING_WINDOW or (
+        strategy == BOUNDED_START_END
+        and bool(model_def.get("video_continuation"))
+    )
+
+
 def shot_image_support(model_def: Mapping[str, Any] | None) -> str:
     """Return the visual-guidance contract declared by a video model."""
 
@@ -607,10 +645,10 @@ def resolve_shot_image_policy(
 ) -> str:
     """Resolve Director's saved shot-image behavior for one project.
 
-    Existing Director models keep their required start-image workflow.
-    MiniMax H3 FL2VA can render from prompts alone, while Ref2VA normally
-    consumes the user's references directly.  Explicit generated guidance is
-    still available for either H3 flavor.
+    Auto preserves each model's historical behavior. An explicit
+    ``prompt_only`` request comes from the image selector's None option and
+    skips generated starts for any video model. MiniMax H3 Ref2VA still maps
+    that choice to its native direct-reference workflow.
     """
 
     support = shot_image_support(model_def)
@@ -622,14 +660,24 @@ def resolve_shot_image_policy(
     }:
         requested = SHOT_IMAGE_AUTO
 
-    if support == SHOT_IMAGES_REQUIRED:
-        return SHOT_IMAGE_GENERATE
     if requested == SHOT_IMAGE_GENERATE:
+        return SHOT_IMAGE_GENERATE
+    # ``prompt_only`` is an explicit user choice from Director's image-model
+    # selector ("None — no generated images").  It must win even for models
+    # that historically declared start images as required; otherwise the UI
+    # says None while the backend silently launches Flux anyway.  A user may
+    # still supply per-scene images in manual Director mode, while compatible
+    # text-to-video models can render without any image input in Auto mode.
+    if requested == SHOT_IMAGE_PROMPT_ONLY:
+        return (
+            SHOT_IMAGES_DIRECT_REFERENCES
+            if support == SHOT_IMAGES_DIRECT_REFERENCES
+            else SHOT_IMAGE_PROMPT_ONLY
+        )
+    if support == SHOT_IMAGES_REQUIRED:
         return SHOT_IMAGE_GENERATE
     if support == SHOT_IMAGES_DIRECT_REFERENCES:
         return SHOT_IMAGES_DIRECT_REFERENCES
-    if requested == SHOT_IMAGE_PROMPT_ONLY:
-        return SHOT_IMAGE_PROMPT_ONLY
     return (
         SHOT_IMAGE_GENERATE
         if has_visual_references

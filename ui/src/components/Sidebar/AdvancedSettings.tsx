@@ -7,6 +7,7 @@ import { LoraSelector } from '../SettingsDrawer/LoraSelector'
 import { ResolutionPresets } from './ResolutionPresets'
 import { AspectRatioGrid } from './AspectRatioGrid'
 import { WindowSettings } from './DurationSlider'
+import { DirectorH3Optimizations } from './DirectorH3Optimizations'
 
 function PresetManager() {
   const presets = useStore(s => s.presets)
@@ -112,6 +113,11 @@ function PresetManager() {
 export function useAdvancedActiveItems(): string[] {
   const params = useStore(s => s.params)
   const modelOptions = useStore(s => s.modelOptions)
+  const sidebarMode = useStore(s => s.sidebarMode)
+  const directorVideoModel = useStore(s => s.selectedModelPerMode.video || '')
+  const directorTurboMode = useStore(s => s.directorH3TurboModeByModel)
+  const directorSolMode = useStore(s => s.directorH3SolModeByModel)
+  const directorFirstBlockCache = useStore(s => s.directorH3FirstBlockCacheByModel)
   const spatialUpsampling = useStore(s => s.spatialUpsampling)
   const filmGrainIntensity = useStore(s => s.filmGrainIntensity)
   const generationMode = useStore(s => s.generationMode)
@@ -124,15 +130,17 @@ export function useAdvancedActiveItems(): string[] {
   const isScailHq = isScailEdit && params.model_type === 'scail2_14B'
 
   const items: string[] = []
+  if (sidebarMode === 'director') {
+    if (directorTurboMode[directorVideoModel] === true) items.push('H3 Turbo')
+    if (directorSolMode[directorVideoModel] === true) items.push('H3 Sol Engine')
+    if (directorFirstBlockCache[directorVideoModel] === true) items.push('First Block Cache')
+    return items
+  }
   if (params.seed !== -1) items.push(`Seed ${params.seed}`)
-  if (params.minimax_h3_turbo_mode) items.push('H3 Turbo')
   if (
     String(modelOptions?.architecture || '').startsWith('minimax_h3')
     && slidingWindowLocked
   ) items.push('H3 window override')
-  if (params.skip_steps_cache_type === 'first_block') {
-    items.push(`H3 cache ${params.skip_steps_multiplier ?? 0.08}`)
-  }
   if (
     (
       modelOptions?.sliding_window_auto_prompt_pacing === true
@@ -167,6 +175,12 @@ export function useAdvancedActiveItems(): string[] {
       choice => choice.value === params.minimax_h3_text_encoder
     )
     items.push(`H3 encoder: ${selected?.label || params.minimax_h3_text_encoder}`)
+  }
+  if (
+    modelOptions?.ltx25_video_vae_choices?.length
+    && params.ltx25_video_vae === 'nad'
+  ) {
+    items.push('LTX-2.5 NAD VAE')
   }
   // injection_strength only matters when injected frames actually exist.
   // The persisted snapshot strips image_refs (file paths are ephemeral)
@@ -209,6 +223,7 @@ export function AdvancedSettings() {
   const params = useStore(s => s.params)
   const setParam = useStore(s => s.setParam)
   const modelOptions = useStore(s => s.modelOptions)
+  const isDirector = useStore(s => s.sidebarMode === 'director')
   const generationMode = useStore(s => s.generationMode)
   const editSubMode = useStore(s => s.editSubMode)
   const audioSubMode = useStore(s => s.audioSubMode)
@@ -312,6 +327,15 @@ export function AdvancedSettings() {
 
             {/* Scrollable content */}
             <div className="flex-1 overflow-y-auto px-4 py-4 space-y-5">
+              {isDirector ? (
+                <>
+                  <DirectorH3Optimizations />
+                  <p className="rounded-lg border border-border/60 bg-bg-tertiary/35 px-3 py-2 text-[9px] leading-relaxed text-text-muted">
+                    Director inference steps, maximum shot length, image guidance, and post-processing remain in the workflow&apos;s Advanced section. Settings here are saved with the Director project and reused by repair and regeneration.
+                  </p>
+                </>
+              ) : (
+                <>
               {/* Recast/Repaint own their output-quality profiles in the main
                   workflow. Their dedicated endpoints also choose adaptive
                   windows, so generic controls would be misleading here. */}
@@ -348,70 +372,73 @@ export function AdvancedSettings() {
                 </div>
               ) : null}
 
-              {modelOptions?.first_block_cache && (
-                <div className="space-y-2 p-2.5 bg-bg-tertiary/40 rounded-lg border border-border/60">
-                  <label className="flex items-center gap-2 cursor-pointer group">
-                    <input
-                      type="checkbox"
-                      checked={params.skip_steps_cache_type === 'first_block'}
-                      onChange={e => {
-                        setParam(
-                          'skip_steps_cache_type',
-                          e.target.checked ? 'first_block' : '',
-                        )
-                        if (e.target.checked && params.skip_steps_multiplier == null) {
-                          setParam(
-                            'skip_steps_multiplier',
-                            modelOptions.default_skip_steps_multiplier ?? 0.08,
-                          )
-                        }
-                      }}
-                      className="accent-accent-blue"
-                    />
-                    <span className="text-[11px] text-text-muted uppercase tracking-wider group-hover:text-text-secondary transition-colors">
-                      First Block Cache
-                    </span>
-                    <span className="text-[9px] text-amber-300/90 border border-amber-400/30 rounded px-1 py-0.5">
-                      Experimental
-                    </span>
+              {modelOptions?.ltx25_video_vae_choices?.length ? (
+                <div>
+                  <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">
+                    LTX-2.5 Video Decoder
                   </label>
-                  {params.skip_steps_cache_type === 'first_block' && (
-                    <div className="space-y-2 pl-1 border-l border-border ml-1">
-                      <div>
-                        <label className="text-[10px] text-text-muted block mb-1">
-                          {modelOptions.skip_steps_multiplier_label || 'Cache Threshold'}
-                        </label>
-                        <select
-                          value={params.skip_steps_multiplier ?? modelOptions.default_skip_steps_multiplier ?? 0.08}
-                          onChange={e => setParam('skip_steps_multiplier', Number(e.target.value))}
-                          className="w-full bg-bg-tertiary border border-border rounded px-2 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent-blue"
-                        >
-                          {(modelOptions.skip_steps_multiplier_choices || []).map(([label, value]) => (
-                            <option key={value} value={value}>{label}</option>
-                          ))}
-                        </select>
-                      </div>
-                      <div>
-                        <div className="flex items-center justify-between mb-1">
-                          <label className="text-[10px] text-text-muted">Warmup</label>
-                          <span className="text-[10px] text-text-secondary">
-                            {params.skip_steps_start_step_perc ?? modelOptions.default_skip_steps_start_step_perc ?? 25}%
-                          </span>
-                        </div>
-                        <input
-                          type="range"
-                          min={0}
-                          max={75}
-                          step={5}
-                          value={params.skip_steps_start_step_perc ?? modelOptions.default_skip_steps_start_step_perc ?? 25}
-                          onChange={e => setParam('skip_steps_start_step_perc', Number(e.target.value))}
-                          className="w-full"
-                        />
-                      </div>
+                  <select
+                    value={params.ltx25_video_vae || modelOptions.ltx25_video_vae_default || modelOptions.ltx25_video_vae_choices[0]?.value}
+                    onChange={e => setParam('ltx25_video_vae', e.target.value as 'fast' | 'nad')}
+                    className="w-full bg-bg-tertiary border border-border rounded px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent-blue"
+                  >
+                    {modelOptions.ltx25_video_vae_choices.map(choice => (
+                      <option key={choice.value} value={choice.value}>
+                        {choice.label}{choice.experimental ? ' (Experimental)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[9px] text-text-muted mt-1">
+                    {modelOptions.ltx25_video_vae_choices.find(
+                      choice => choice.value === (params.ltx25_video_vae || modelOptions.ltx25_video_vae_default)
+                    )?.description || 'Changing this reloads the LTX-2.5 model.'}
+                  </p>
+                </div>
+              ) : null}
+
+              {modelOptions?.first_block_cache && params.skip_steps_cache_type === 'first_block' && (
+                <div className="space-y-2 p-2.5 bg-bg-tertiary/40 rounded-lg border border-border/60">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] text-text-muted uppercase tracking-wider">
+                      First Block Cache Tuning
+                    </span>
+                    <span className="text-[9px] text-accent-blue">Enabled in Studio</span>
+                  </div>
+                  <div className="space-y-2 pl-1 border-l border-border ml-1">
+                    <div>
+                      <label className="text-[10px] text-text-muted block mb-1">
+                        {modelOptions.skip_steps_multiplier_label || 'Cache Threshold'}
+                      </label>
+                      <select
+                        value={params.skip_steps_multiplier ?? modelOptions.default_skip_steps_multiplier ?? 0.08}
+                        onChange={e => setParam('skip_steps_multiplier', Number(e.target.value))}
+                        className="w-full bg-bg-tertiary border border-border rounded px-2 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent-blue"
+                      >
+                        {(modelOptions.skip_steps_multiplier_choices || []).map(([label, value]) => (
+                          <option key={value} value={value}>{label}</option>
+                        ))}
+                      </select>
                     </div>
-                  )}
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-[10px] text-text-muted">Warmup</label>
+                        <span className="text-[10px] text-text-secondary">
+                          {params.skip_steps_start_step_perc ?? modelOptions.default_skip_steps_start_step_perc ?? 25}%
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={75}
+                        step={5}
+                        value={params.skip_steps_start_step_perc ?? modelOptions.default_skip_steps_start_step_perc ?? 25}
+                        onChange={e => setParam('skip_steps_start_step_perc', Number(e.target.value))}
+                        className="w-full"
+                      />
+                    </div>
+                  </div>
                   <p className="text-[9px] text-text-muted">
-                    Reuses stable transformer work after warmup. Best suited to 15-20 step H3 runs; higher thresholds can change motion or fine detail.
+                    Higher thresholds reuse more work but can change motion or fine detail.
                   </p>
                 </div>
               )}
@@ -1071,6 +1098,8 @@ export function AdvancedSettings() {
                   className="w-full"
                 />
               </div>}
+                </>
+              )}
             </div>
           </div>
     </>

@@ -9,6 +9,7 @@ from typing import Callable, Iterator
 import torch
 import torchaudio
 from accelerate import init_empty_weights
+from shared.qtypes.int8_convrot import install_native_lora_forwards
 from shared.utils import files_locator as fl
 
 from .ltx_core.conditioning import AudioConditionByLatent, AudioConditionByLatentPrefix, AudioConditionByReferenceLatent
@@ -26,11 +27,19 @@ from .ltx_core.model.transformer import (
 )
 from .ltx_core.model.upsampler import LatentUpsamplerConfigurator
 from .ltx_core.model.video_vae import VideoDecoderConfigurator, VideoEncoderConfigurator
+from .ltx_core.model.video_vae.diffusion_video_decoder import DiffusionVideoDecoder
 from .ltx_core.text_encoders.gemma import (
+    AUDIO_EMBEDDINGS_CONNECTOR_KEY_OPS,
     GemmaTextEmbeddingsConnectorModelConfigurator,
+    GemmaTextEmbeddingsConnectorModel,
     TEXT_EMBEDDING_PROJECTION_KEY_OPS,
     TEXT_EMBEDDINGS_CONNECTOR_KEY_OPS,
+    VIDEO_EMBEDDINGS_CONNECTOR_KEY_OPS,
     build_gemma_text_encoder,
+)
+from .ltx_core.text_encoders.gemma.embeddings_connector import (
+    AudioEmbeddings1DConnectorConfigurator,
+    Embeddings1DConnectorConfigurator,
 )
 from .ltx_core.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorProjLinear
 from .ltx_core.model.video_vae import SpatialTilingConfig, TemporalTilingConfig, TilingConfig
@@ -62,6 +71,46 @@ _SPATIAL_UPSCALER_FILENAME = "ltx-2-spatial-upscaler-x2-1.0.safetensors"
 LTX2_USE_FP32_ROPE_FREQS = True
 LTX2_OUTPAINT_GAMMA = 2.0
 LTX2_DISABLE_STAGE2_WITH_CONTROL_VIDEO = True
+LTX2_ENABLE_EMBEDDING_LORAS = False
+LTX2_EMBEDDING_LORA_PREFIXES = (
+    "text_embedding_projection.",
+    "feature_extractor_linear.",
+    "text_embeddings_connector.",
+    "embeddings_connector.",
+    "video_embeddings_connector.",
+    "audio_embeddings_connector.",
+)
+# Comfy's lora_unet convention flattens module paths with underscores, but
+# several real LTX module names also contain underscores. Restore those
+# names before translating the remaining separators to dots. This mirrors
+# current WanGP and keeps older LTX-2/2.3 adapters usable with LTX-2.5.
+LTX2_COMFY_LORA_UNDERSCORED_NAMES = (
+    "av_ca_audio_scale_shift_adaln_single",
+    "av_ca_video_scale_shift_adaln_single",
+    "av_ca_a2v_gate_adaln_single",
+    "av_ca_v2a_gate_adaln_single",
+    "audio_prompt_adaln_single",
+    "audio_patchify_proj",
+    "audio_to_video_attn",
+    "prompt_adaln_single",
+    "video_to_audio_attn",
+    "audio_adaln_single",
+    "transformer_blocks",
+    "timestep_embedder",
+    "audio_proj_out",
+    "to_gate_logits",
+    "patchify_proj",
+    "adaln_single",
+    "audio_attn1",
+    "audio_attn2",
+    "audio_ff",
+    "linear_1",
+    "linear_2",
+    "proj_out",
+    "k_norm",
+    "q_norm",
+    "to_out",
+)
 
 
 def _decord_frame_to_numpy(frame):
@@ -91,6 +140,64 @@ def _decord_frame_to_numpy(frame):
     # Already a numpy array (paranoid fallback — shouldn't happen with
     # decord but cheap to support).
     return frame
+
+
+def _prepare_ltx_audio_waveform(input_waveform, target_channels):
+    """Return continuation audio as ``(batch, channels, samples)``.
+
+    File-backed audio slices enter LTX channel-first, while decoded native
+    audio leaves the model sample-first.  Sliding-window continuation feeds
+    that decoded tail back into the next pass, so treating every 2-D array as
+    channel-first turns ``(samples, 1)`` into ``(1, samples, 1)`` and leaves a
+    one-sample signal for the mel transform.  Accept both layouts explicitly
+    and keep the batch dimension unambiguous.
+    """
+
+    waveform = torch.as_tensor(input_waveform, dtype=torch.float32, device="cpu")
+    target_channels = max(1, int(target_channels or 1))
+
+    if waveform.ndim == 1:
+        waveform = waveform.unsqueeze(0)
+    elif waveform.ndim == 2:
+        first, second = (int(value) for value in waveform.shape)
+        if first <= 8 and second > 8:
+            pass  # channels, samples
+        elif second <= 8 and first > 8:
+            waveform = waveform.transpose(0, 1)  # samples, channels
+        elif first in (1, target_channels):
+            pass
+        elif second in (1, target_channels):
+            waveform = waveform.transpose(0, 1)
+        else:
+            raise ValueError(
+                "LTX continuation audio must be mono or channel-oriented; "
+                f"got {tuple(waveform.shape)}."
+            )
+    elif waveform.ndim == 3:
+        if int(waveform.shape[0]) != 1:
+            raise ValueError(
+                "LTX continuation audio supports one batch at a time; "
+                f"got {tuple(waveform.shape)}."
+            )
+        if int(waveform.shape[1]) <= 8 and int(waveform.shape[2]) > 8:
+            return waveform.contiguous()
+        if int(waveform.shape[2]) <= 8 and int(waveform.shape[1]) > 8:
+            return waveform.transpose(1, 2).contiguous()
+        if int(waveform.shape[1]) in (1, target_channels):
+            return waveform.contiguous()
+        if int(waveform.shape[2]) in (1, target_channels):
+            return waveform.transpose(1, 2).contiguous()
+        raise ValueError(
+            "LTX continuation audio must be batch/channel/sample oriented; "
+            f"got {tuple(waveform.shape)}."
+        )
+    else:
+        raise ValueError(
+            "LTX continuation audio must be one-, two-, or three-dimensional; "
+            f"got {tuple(waveform.shape)}."
+        )
+
+    return waveform.unsqueeze(0).contiguous()
 
 
 def _resolve_retake_pipeline_models(pipeline):
@@ -280,6 +387,64 @@ def _make_vae_postprocess(prefix: str):
     return postprocess
 
 
+def _split_diffusion_vae_state_dict(state_dict: dict, prefix: str):
+    new_sd = {}
+    for key, value in state_dict.items():
+        key = _strip_model_prefix(key)
+        if key.startswith(prefix):
+            key = key[len(prefix):]
+        elif not key.startswith(("encoder.", "decoder.", "per_channel_statistics.")):
+            continue
+        if key == "decoder.type_emb":
+            continue
+        if key.startswith("per_channel_statistics."):
+            suffix = key[len("per_channel_statistics."):]
+            new_sd[f"encoder.per_channel_statistics.{suffix}"] = value.clone()
+            new_sd[f"decoder.per_channel_statistics.{suffix}"] = value.clone()
+        elif key.startswith("decoder.t_embedder.mlp.0."):
+            new_sd[key.replace(
+                "decoder.t_embedder.mlp.0.",
+                "decoder.t_embedder.timestep_embedder.linear_1.",
+            )] = value
+        elif key.startswith("decoder.t_embedder.mlp.2."):
+            new_sd[key.replace(
+                "decoder.t_embedder.mlp.2.",
+                "decoder.t_embedder.timestep_embedder.linear_2.",
+            )] = value
+        elif ".attn.qkv." in key:
+            prefix_key, suffix = key.split(".attn.qkv.", 1)
+            q, k, v = value.chunk(3, dim=0)
+            new_sd[f"{prefix_key}.attn.qkv.to_q.{suffix}"] = q
+            new_sd[f"{prefix_key}.attn.qkv.to_k.{suffix}"] = k
+            new_sd[f"{prefix_key}.attn.qkv.to_v.{suffix}"] = v
+        else:
+            new_sd[key] = value
+    return new_sd, {}
+
+
+def _make_diffusion_vae_postprocess(prefix: str):
+    def postprocess(state_dict, quantization_map):
+        return _split_diffusion_vae_state_dict(state_dict, prefix)
+
+    return postprocess
+
+
+def _diffusion_vae_encoder_config(config: dict) -> dict:
+    encoder = config["vae"]["encoder"]
+    return {
+        "vae": {
+            "dims": encoder["dims"],
+            "in_channels": encoder["in_channels"],
+            "latent_channels": encoder["out_channels"],
+            "encoder_blocks": encoder["blocks"],
+            "patch_size": encoder["patch_size"],
+            "norm_layer": encoder["norm_layer"],
+            "latent_log_var": encoder["latent_log_var"],
+            "encoder_spatial_padding_mode": encoder["spatial_padding_mode"],
+        }
+    }
+
+
 class _AudioVAEWrapper(torch.nn.Module):
     def __init__(self, decoder: torch.nn.Module) -> None:
         super().__init__()
@@ -419,22 +584,54 @@ def _attach_lora_preprocessor(transformer: torch.nn.Module) -> None:
                 key = key[len("diffusion_model.") :]
             if key.startswith("transformer."):
                 key = key[len("transformer.") :]
-            if key.startswith("embeddings_connector."):
-                key = f"video_embeddings_connector.{key[len('embeddings_connector.'):]}"
-            if key.startswith("feature_extractor_linear."):
-                key = f"text_embedding_projection.{key[len('feature_extractor_linear.'):]}"
 
             module_name, suffix = split_lora_key(key)
             if not module_name:
                 dropped_keys.append(original_key)
                 continue
+            if module_name.startswith("lora_unet_"):
+                module_name = module_name[len("lora_unet_") :]
+                for name in LTX2_COMFY_LORA_UNDERSCORED_NAMES:
+                    module_name = module_name.replace(
+                        name,
+                        name.replace("_", "\0"),
+                    )
+                module_name = module_name.replace("_", ".").replace(
+                    "\0",
+                    "_",
+                )
+            if (
+                not LTX2_ENABLE_EMBEDDING_LORAS
+                and module_name.startswith(LTX2_EMBEDDING_LORA_PREFIXES)
+            ):
+                continue
+            if module_name.startswith("embeddings_connector."):
+                module_name = (
+                    "video_embeddings_connector."
+                    f"{module_name[len('embeddings_connector.'):]}"
+                )
+            if module_name.startswith("feature_extractor_linear."):
+                module_name = (
+                    "text_embedding_projection."
+                    f"{module_name[len('feature_extractor_linear.'):]}"
+                )
             if module_name not in module_names:
                 prefixed_name = f"velocity_model.{module_name}"
-                if prefixed_name in module_names:
+                if (
+                    module_name.endswith(".to_out")
+                    and f"{prefixed_name}.0" in module_names
+                ):
+                    module_name = f"{prefixed_name}.0"
+                elif prefixed_name in module_names:
                     module_name = prefixed_name
                 else:
                     dropped_keys.append(original_key)
                     continue
+            elif (
+                module_name.endswith(".to_out")
+                and f"{module_name}.0" in module_names
+            ):
+                module_name = f"{module_name}.0"
             new_sd[f"{module_name}{suffix}"] = value
         if dropped_keys:
             sample = ", ".join(dropped_keys[:8])
@@ -679,6 +876,7 @@ class LTX2:
             transformer_path=transformer_path,
             component_paths=component_paths,
             gemma_root=gemma_root,
+            gemma_side_files_root=text_encoder_filepath,
             spatial_upsampler_path=spatial_upsampler_path,
         )
 
@@ -695,11 +893,23 @@ class LTX2:
             )
         self._build_diffuser_model()
 
+    def finalize_loras(self) -> None:
+        """Keep INT8 ConvRot base math intact after MMGP attaches LoRAs."""
+
+        lora_target = getattr(self, "diffuser_model", self.model)
+        installed = install_native_lora_forwards(lora_target)
+        if installed:
+            print(
+                "[LTX LoRA] Preserved native INT8 ConvRot activation math for "
+                f"{installed} adapter-targeted layer(s)."
+            )
+
     def _init_models(
         self,
         transformer_path,
         component_paths: dict,
         gemma_root: str,
+        gemma_side_files_root: str | None,
         spatial_upsampler_path: str,
     ):
         from mmgp import offload as mmgp_offload
@@ -745,16 +955,40 @@ class LTX2:
         VAE_URLs = self.model_def.get("VAE_URLs", None)
         video_vae_path =  fl.locate_file(VAE_URLs[0]) if VAE_URLs is not None and len(VAE_URLs) else _component_path("video_vae")
         video_config = copy.deepcopy(_component_config(video_vae_path))
+        diffusion_vae = (
+            video_config.get("vae", {}).get("_class_name")
+            == "CausalDiffusionVAE"
+        )
+        if diffusion_vae:
+            print("[Maestro][LTX2] Loading NAD Diffusion Decoder.")
         video_config_vae = video_config.setdefault("vae", {})
         video_config_vae["spatial_padding_mode"] = "reflect"
         video_config_vae["encoder_spatial_padding_mode"] = "reflect"
         video_config_vae["decoder_spatial_padding_mode"] = "reflect"
         # print("[LTX2 VAE Config] forcing encoder/decoder spatial_padding_mode=reflect")
         with init_empty_weights():
-            video_encoder = VideoEncoderConfigurator.from_config(video_config)
-            video_decoder = VideoDecoderConfigurator.from_config(video_config)
+            video_encoder = VideoEncoderConfigurator.from_config(
+                _diffusion_vae_encoder_config(video_config)
+                if diffusion_vae
+                else video_config
+            )
+            video_decoder = (
+                DiffusionVideoDecoder.from_config(video_config)
+                if diffusion_vae
+                else VideoDecoderConfigurator.from_config(video_config)
+            )
             video_vae = _VAEContainer(video_encoder, video_decoder)
-        video_vae = _load_component(video_vae, video_vae_path, postprocess=_make_vae_postprocess("vae."), ignore_unused_weights=True)
+        vae_postprocess = (
+            _make_diffusion_vae_postprocess("vae.")
+            if diffusion_vae
+            else _make_vae_postprocess("vae.")
+        )
+        video_vae = _load_component(
+            video_vae,
+            video_vae_path,
+            postprocess=vae_postprocess,
+            ignore_unused_weights=True,
+        )
         video_encoder = video_vae.encoder
         video_decoder = video_vae.decoder
 
@@ -780,13 +1014,51 @@ class LTX2:
             text_embedding_projection = GemmaFeaturesExtractorProjLinear.from_config(text_projection_config)
         text_embedding_projection = _load_component( text_embedding_projection, text_projection_path, TEXT_EMBEDDING_PROJECTION_KEY_OPS )
 
-        text_connector_path = _component_path("text_embeddings_connector")
-        text_connector_config = _component_config(text_connector_path)
-        with init_empty_weights():
-            text_embeddings_connector = GemmaTextEmbeddingsConnectorModelConfigurator.from_config(text_connector_config)
-        text_embeddings_connector = _load_component( text_embeddings_connector, text_connector_path, TEXT_EMBEDDINGS_CONNECTOR_KEY_OPS )
+        self.split_text_connectors = "video_embeddings_connector" in component_paths
+        if self.split_text_connectors:
+            video_connector_path = _component_path("video_embeddings_connector")
+            video_connector_config = _component_config(video_connector_path)
+            with init_empty_weights():
+                video_embeddings_connector = (
+                    Embeddings1DConnectorConfigurator.from_config(
+                        video_connector_config
+                    )
+                )
+            video_embeddings_connector = _load_component(
+                video_embeddings_connector,
+                video_connector_path,
+                VIDEO_EMBEDDINGS_CONNECTOR_KEY_OPS,
+            )
 
-        text_encoder = build_gemma_text_encoder(gemma_root, default_dtype=self.dtype)
+            audio_connector_path = _component_path("audio_embeddings_connector")
+            audio_connector_config = _component_config(audio_connector_path)
+            with init_empty_weights():
+                audio_embeddings_connector = (
+                    AudioEmbeddings1DConnectorConfigurator.from_config(
+                        audio_connector_config
+                    )
+                )
+            audio_embeddings_connector = _load_component(
+                audio_embeddings_connector,
+                audio_connector_path,
+                AUDIO_EMBEDDINGS_CONNECTOR_KEY_OPS,
+            )
+            text_embeddings_connector = GemmaTextEmbeddingsConnectorModel(
+                video_embeddings_connector,
+                audio_embeddings_connector,
+            )
+        else:
+            text_connector_path = _component_path("text_embeddings_connector")
+            text_connector_config = _component_config(text_connector_path)
+            with init_empty_weights():
+                text_embeddings_connector = GemmaTextEmbeddingsConnectorModelConfigurator.from_config(text_connector_config)
+            text_embeddings_connector = _load_component( text_embeddings_connector, text_connector_path, TEXT_EMBEDDINGS_CONNECTOR_KEY_OPS )
+
+        text_encoder = build_gemma_text_encoder(
+            gemma_root,
+            default_dtype=self.dtype,
+            side_files_root=gemma_side_files_root,
+        )
         text_encoder.eval().requires_grad_(False)
 
         upsampler_config = _load_config_from_checkpoint(spatial_upsampler_path)
@@ -1927,16 +2199,24 @@ class LTX2:
             frame_count = min(prefix_frames_count, input_video.shape[1])
             if frame_count <= 0:
                 return
-            frame_indices = list(range(0, frame_count, latent_stride))
-            last_idx = frame_count - 1
-            if frame_indices[-1] != last_idx:
-                # Ensure the latest prefix frame dominates its latent slot.
-                frame_indices.append(last_idx)
-            for frame_idx in frame_indices:
-                entry = (input_video[:, frame_idx], _to_latent_index(frame_idx, latent_stride), input_video_strength)
-                target_list.append(entry)
-                if extra_list is not None:
-                    extra_list.append(entry)
+            # Preserve the overlap as one temporal conditioning sequence.
+            # Sampling isolated stills here keeps appearance but discards the
+            # direction and speed of motion at a sliding-window boundary.  The
+            # native LTX pipeline accepts an F,H,W,C tensor and VAE-encodes the
+            # complete prefix, allowing the next window to continue its motion.
+            entry = (
+                input_video[:, :frame_count].permute(1, 2, 3, 0),
+                0,
+                input_video_strength,
+            )
+            if frame_count > 1:
+                print(
+                    f"[LTX2] Continuing with {frame_count} motion-history "
+                    "frames as one temporal prefix."
+                )
+            target_list.append(entry)
+            if extra_list is not None:
+                extra_list.append(entry)
 
         def _append_suffix_entries(target_list, extra_list=None):
             """Mirror of _append_prefix_entries but at the END of the output.
@@ -2060,14 +2340,14 @@ class LTX2:
             if audio_strength > 0.0:
                 if self._interrupt:
                     return None
-                waveform, waveform_sample_rate =  torch.from_numpy(input_waveform), input_waveform_sample_rate
+                target_channels = int(getattr(self.audio_encoder, "in_channels", 1))
+                waveform = _prepare_ltx_audio_waveform(
+                    input_waveform,
+                    target_channels,
+                )
+                waveform_sample_rate = input_waveform_sample_rate
                 if self._interrupt:
                     return None
-                if waveform.ndim == 1:
-                    waveform = waveform.unsqueeze(0).unsqueeze(0)
-                elif waveform.ndim == 2:
-                    waveform = waveform.unsqueeze(0)
-                target_channels = int(getattr(self.audio_encoder, "in_channels", waveform.shape[1]))
                 if target_channels <= 0:
                     target_channels = waveform.shape[1]
                 if waveform.shape[1] != target_channels:
@@ -2456,6 +2736,9 @@ class LTX2:
                     single_stage=bool(kwargs.get("single_stage_pipeline", False)),
                     full_resolution_refine=(
                         full_resolution_outpaint_refine
+                    ),
+                    use_ancestral_sampler=(
+                        self.base_model_type == "ltx2_25_22B"
                     ),
                     video_conditioning_generation_mask=(
                         video_conditioning_generation_mask

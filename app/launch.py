@@ -89,11 +89,8 @@ if _hf_token_path:
 print("[Maestro] Importing WanGP engine...")
 import wgp
 from models.minimax_h3.turbo import (
-    MINIMAX_H3_TURBO_LORA_FILENAME,
-    MINIMAX_H3_TURBO_LORA_REPO_ID,
-    MINIMAX_H3_TURBO_LORA_REVISION,
-    MINIMAX_H3_TURBO_LORA_SHA256,
-    MINIMAX_H3_TURBO_LORA_SIZE,
+    MINIMAX_H3_TURBO_MANIFEST,
+    MINIMAX_H3_TURBO_PRESETS,
 )
 print(f"[Maestro] WanGP loaded: {len(wgp.displayed_model_types)} models available")
 # Base save path always comes from server_config["save_path"] (never from wgp.save_path which gets workspace-modified)
@@ -426,6 +423,13 @@ def _check_model_downloaded(model_type: str) -> bool:
         # read-only roots like the generation path does.
         for url in wgp.get_model_recursive_prop(model_type, "loras", return_list=True):
             if not os.path.isfile(wgp.resolve_lora_path(model_type, url.split("/")[-1])):
+                return False
+        # Component-folder models may use a tiny root manifest as their
+        # primary URL while the actual weights are downloaded by the family
+        # handler. Do not call a partial/interrupted install ready merely
+        # because that manifest arrived first.
+        for relative_path in model_def.get("required_model_assets", []):
+            if wgp.fl.locate_file(relative_path, error_if_none=False) is None:
                 return False
         return True
     except Exception:
@@ -1587,7 +1591,11 @@ def delete_lora_file(directory: str, filename: str):
         raise HTTPException(status_code=423, detail="The file is locked by another process. Try again in a moment.")
     base = os.path.splitext(target)[0]
     extras_removed = []
-    extras = [base + ".civitai.json", base + ".guide.md"]
+    extras = [
+        base + ".civitai.json",
+        base + ".guide.md",
+        target + ".maestro-managed.json",
+    ]
     extras += [base + f"_preview1{ext}" for ext in (".mp4", ".png", ".jpg", ".webp")]
     for extra in extras:
         try:
@@ -1617,23 +1625,44 @@ def _minimax_h3_turbo_option(model_def: dict) -> dict | None:
         return None
 
     from models.minimax_h3.turbo import (
-        MINIMAX_H3_TURBO_LORA_FILENAME,
-        MINIMAX_H3_TURBO_PRESET_STEPS,
-        MINIMAX_H3_TURBO_PRESET_WEIGHT,
+        MINIMAX_H3_TURBO_DEFAULT_PRESET_ID,
+        MINIMAX_H3_TURBO_MANIFEST,
+        MINIMAX_H3_TURBO_PRESETS,
+        minimax_h3_turbo_preset,
     )
 
+    default_preset = minimax_h3_turbo_preset()
+    presets = [
+        {
+            "id": str(preset["id"]),
+            "label": str(preset["label"]),
+            "status": str(preset["status"]),
+            "filename": str(preset["filename"]),
+            "steps": int(preset["steps"]),
+            "weight": float(preset["weight"]),
+            "weight_min": float(preset.get("weight_min", 0.0)),
+            "weight_max": float(preset.get("weight_max", 2.0)),
+            "description": str(preset.get("description") or ""),
+            "revision": str(preset["revision"]),
+        }
+        for preset in MINIMAX_H3_TURBO_PRESETS
+    ]
+    upstream = MINIMAX_H3_TURBO_MANIFEST.get("upstream_watch") or {}
     return {
-        "filename": MINIMAX_H3_TURBO_LORA_FILENAME,
+        "filename": str(default_preset["filename"]),
         "label": "Turbo mode",
         "experimental": True,
-        "steps": MINIMAX_H3_TURBO_PRESET_STEPS,
-        "weight": MINIMAX_H3_TURBO_PRESET_WEIGHT,
+        "preset_id": MINIMAX_H3_TURBO_DEFAULT_PRESET_ID,
+        "version_label": str(default_preset["label"]),
+        "steps": int(default_preset["steps"]),
+        "weight": float(default_preset["weight"]),
+        "presets": presets,
+        "upstream_url": str(upstream.get("model_card_url") or ""),
         "guide": (
             "Experimental MiniMax H3 accelerator for Full and Pruned "
-            "checkpoints. Maestro's one-click preset uses 6 steps and starts "
-            "at strength 0.50. Adjust its active LoRA strength in Advanced; "
-            "the managed adapter and small compatibility data download "
-            "automatically on first use. Pruned is recommended on 16 GB GPUs."
+            "checkpoints. Choose a pinned Maestro-validated version or an "
+            "explicit candidate; mutable Hugging Face main is never loaded "
+            "silently. Adjust the selected adapter strength in Advanced."
         ),
     }
 
@@ -1669,7 +1698,9 @@ def list_loras(model_type: str):
     # filename in the catalog makes it discoverable on a fresh install; the
     # generation preflight below performs the verified one-time download.
     if turbo_option:
-        names.add(turbo_option["filename"])
+        names.update(
+            preset["filename"] for preset in turbo_option.get("presets", [])
+        )
     loras = sorted(names)
 
     return {
@@ -1829,34 +1860,36 @@ def list_loras_details(model_type: str):
         loras.append(info)
 
     if turbo_option:
-        filename = turbo_option["filename"]
-        info = next((item for item in loras if item["filename"] == filename), None)
-        if info is None:
-            info = {
-                "filename": filename,
-                "trained_words": [],
-                "preview_url": None,
-                "civitai_model_id": None,
-                "recommended_weights": None,
-                "has_guide": False,
-                "nsfw": False,
-                "downloaded_at": None,
-                "released_at": None,
-                "lora_id": f"managed:{filename}",
-            }
-            loras.append(info)
-        info.update({
-            "managed": True,
-            "recommended_weights": {
-                "source": "default",
-                "default": turbo_option["weight"],
-                "min": 0.50,
-                "max": 1.00,
-            },
-            "has_guide": True,
-            "guide": turbo_option["guide"],
-            "update_status": "current",
-        })
+        for preset in turbo_option.get("presets", []):
+            filename = preset["filename"]
+            info = next((item for item in loras if item["filename"] == filename), None)
+            if info is None:
+                info = {
+                    "filename": filename,
+                    "trained_words": [],
+                    "preview_url": None,
+                    "civitai_model_id": None,
+                    "recommended_weights": None,
+                    "has_guide": False,
+                    "nsfw": False,
+                    "downloaded_at": None,
+                    "released_at": None,
+                    "lora_id": f"managed:{filename}",
+                }
+                loras.append(info)
+            info.update({
+                "managed": True,
+                "managed_channel": preset["status"],
+                "recommended_weights": {
+                    "source": "default",
+                    "default": preset["weight"],
+                    "min": preset["weight_min"],
+                    "max": preset["weight_max"],
+                },
+                "has_guide": True,
+                "guide": preset["description"],
+                "update_status": "current",
+            })
         loras.sort(key=lambda item: item["filename"])
     return {
         "loras": loras,
@@ -5293,6 +5326,18 @@ def get_model_options(model_type: str):
         if _h3_encoder_variants
         else None
     )
+    _sol_attention_status = None
+    if md.get("sol_attention", False):
+        try:
+            from shared.attention import get_sol_attention_status
+
+            _sol_attention_status = get_sol_attention_status()
+        except Exception as error:
+            _sol_attention_status = {
+                "installed": False,
+                "supported": False,
+                "reason": f"Sol Engine runtime detection failed: {error}",
+            }
 
     return {
         "model_type": model_type,
@@ -5307,6 +5352,8 @@ def get_model_options(model_type: str):
         "flow_shift": bool(md.get("flow_shift", False)),
         "tea_cache": md.get("tea_cache", False),
         "first_block_cache": md.get("first_block_cache", False),
+        "sol_attention": md.get("sol_attention", False),
+        "sol_attention_status": _sol_attention_status,
         "skip_steps_multiplier_choices": [
             [str(choice[0]), float(choice[1])]
             for choice in md.get("skip_steps_multiplier_choices", [])
@@ -5327,6 +5374,9 @@ def get_model_options(model_type: str):
         "returns_audio": md.get("returns_audio", False),
         "any_audio_prompt": md.get("any_audio_prompt", False),
         "audio_scale_name": md.get("audio_scale_name", ""),
+        "infer_audio_prompt_from_guide": md.get(
+            "infer_audio_prompt_from_guide", False
+        ),
         "lock_inference_steps": md.get("lock_inference_steps", False),
         "lock_guidance_scale": md.get("lock_guidance_scale", False),
         "no_negative_prompt": md.get("no_negative_prompt", False),
@@ -5353,6 +5403,11 @@ def get_model_options(model_type: str):
             for key, value in _h3_encoder_variants.items()
         ] or None,
         "minimax_h3_text_encoder_default": _h3_encoder_default,
+        "ltx25_video_vae_choices": md.get("ltx25_video_vae_choices"),
+        "ltx25_video_vae_default": md.get(
+            "ltx25_video_vae_default",
+            "fast",
+        ),
         "minimax_h3_turbo": _minimax_h3_turbo_option(md),
         "minimax_h3_runtime_advisory": _minimax_h3_runtime_advisory(md),
         "minimax_h3_media_sources": md.get(
@@ -5400,6 +5455,9 @@ def get_model_options(model_type: str):
         "sliding_window_auto_prompt_pacing": md.get(
             "sliding_window_auto_prompt_pacing", False
         ),
+        "multi_window_sequence_controls": md.get(
+            "multi_window_sequence_controls", False
+        ),
         "sliding_window_end_image_at_final": md.get(
             "sliding_window_end_image_at_final", False
         ),
@@ -5431,6 +5489,14 @@ def get_model_options(model_type: str):
         "pause_between_sentences": md.get("pause_between_sentences", False),
         "temperature_enabled": md.get("temperature", False),
         "custom_settings_def": md.get("custom_settings"),
+        "music3_structured_caption": md.get(
+            "music3_structured_caption", False
+        ),
+        "music_caption_label": md.get(
+            "music_caption_label", "Style / Music Caption"
+        ),
+        "music_caption_help": md.get("music_caption_help", ""),
+        "music_lyrics_help": md.get("music_lyrics_help", ""),
         # Voice-count-driven audio mode (KugelAudio + Scenema): the UI hides
         # the manual Audio Mode ChoiceControl when this is True, since the
         # voice-slot buttons are the sole source of truth for audio_prompt_type.
@@ -6967,6 +7033,47 @@ _SONG_WRITER_FALLBACK_INSTRUMENTAL = (
 )
 
 
+_MUSIC3_SONG_WRITER_FALLBACK = (
+    "You are writing for MiniMax-Music3. Output exactly [STYLE] and [LYRICS]. "
+    "STYLE must contain the headings ### Global Metadata, ### Vocal Details, "
+    "and ### Arrangement, with a concrete section-by-section arrangement. "
+    "LYRICS must be original and use section tags such as [Verse], [Chorus], "
+    "[Bridge], and [Outro] on their own lines. Keep lyric text out of STYLE."
+)
+_MUSIC3_SONG_WRITER_FALLBACK_INSTRUMENTAL = (
+    "You are writing an instrumental track for MiniMax-Music3. Output exactly "
+    "[STYLE] and [LYRICS]. STYLE must contain ### Global Metadata, ### Vocal "
+    "Details, and ### Arrangement; Vocal Details must explicitly say the track "
+    "is instrumental and name the lead melodic texture. Return "
+    "[LYRICS]\n[Instrumental]."
+)
+
+
+def _music3_writer_duration_instruction(duration_seconds) -> str:
+    """Return the hard runtime contract supplied to the Music3 song writer."""
+    try:
+        duration = float(duration_seconds)
+    except (TypeError, ValueError):
+        duration = 120.0
+    if not math.isfinite(duration):
+        duration = 120.0
+    duration = min(300.0, max(5.0, duration))
+    duration_label = f"{duration:g}"
+    return (
+        "TARGET RUNTIME CONTRACT:\n"
+        f"- The generated track will be {duration_label} seconds long. Treat "
+        "this as a hard creative constraint.\n"
+        "- Scale the section count, lyric density, repetitions, instrumental "
+        "space, transitions, and arrangement detail to this exact runtime.\n"
+        "- For a short target, write a complete short cue rather than a full "
+        "song that would be rushed or cut off. For a long target, supply enough "
+        "evolving material to avoid empty or repetitive stretches.\n"
+        "- In ### Arrangement, use approximate time ranges beginning at 0:00 "
+        f"and ending near {duration_label} seconds. Never plan material beyond "
+        "the target runtime."
+    )
+
+
 def _parse_song_output(raw, instrumental):
     """Split the song-writer LLM output into (style, lyrics)."""
     import re as _re
@@ -6989,7 +7096,7 @@ def _parse_song_output(raw, instrumental):
 @api.post("/api/v1/llm/write-song")
 async def llm_write_song(request: Request):
     """Music-mode Simple writer: from a free-text description, produce a Music
-    Caption (style tags) + structured lyrics for ACE-Step. Returns
+    Caption (style tags) + structured lyrics for the selected model. Returns
     {style, lyrics, raw}."""
     from services import llm_service
     body = await request.json()
@@ -6997,6 +7104,15 @@ async def llm_write_song(request: Request):
     if not description:
         raise HTTPException(status_code=400, detail="description is required")
     instrumental = bool(body.get("instrumental"))
+    model_type = str(body.get("model_type") or "").strip()
+    try:
+        selected_model = wgp.get_model_def(model_type) if model_type else None
+    except Exception:
+        selected_model = None
+    selected_architecture = str(
+        (selected_model or {}).get("architecture") or model_type
+    )
+    is_minimax_music3 = selected_architecture == "minimax_music3"
 
     # Optional reference image → the vision LLM lets the visuals inform the
     # STYLE (e.g. neon cityscape → synthwave). Degrades gracefully: if the
@@ -7008,15 +7124,32 @@ async def llm_write_song(request: Request):
 
     _ensure_llm_loaded()
     from services.guide_loader import load_guide
-    if instrumental:
+    if is_minimax_music3 and instrumental:
+        system_prompt = (
+            load_guide("music", "song_writer_minimax_music3_instrumental")
+            or _MUSIC3_SONG_WRITER_FALLBACK_INSTRUMENTAL
+        )
+    elif is_minimax_music3:
+        system_prompt = (
+            load_guide("music", "song_writer_minimax_music3")
+            or _MUSIC3_SONG_WRITER_FALLBACK
+        )
+    elif instrumental:
         system_prompt = load_guide("music", "song_writer_instrumental") or _SONG_WRITER_FALLBACK_INSTRUMENTAL
     else:
         system_prompt = load_guide("music", "song_writer") or _SONG_WRITER_FALLBACK
+    if is_minimax_music3:
+        system_prompt = (
+            f"{system_prompt.rstrip()}\n\n"
+            f"{_music3_writer_duration_instruction(body.get('duration_seconds'))}"
+        )
     try:
         raw = llm_service.generate(
             prompt=description,
             system_prompt=system_prompt,
-            max_new_tokens=body.get("max_new_tokens", 1024),
+            max_new_tokens=body.get(
+                "max_new_tokens", 1536 if is_minimax_music3 else 1024
+            ),
             temperature=body.get("temperature", 0.85),
             top_p=body.get("top_p", 0.9),
             seed=body.get("seed"),
@@ -7029,7 +7162,7 @@ async def llm_write_song(request: Request):
 
 
 def _build_music_gen_params(model_type: str, lyrics: str, style: str, duration_seconds, seed) -> dict:
-    """Build an ACE-Step generation params dict by seeding from the model's
+    """Build music-generation params by seeding from the selected model's
     OWN default settings — the exact same source the Studio Music UI starts
     from (served via /api/v1/models/{model_type} → wgp.get_default_settings).
     This guarantees parity: every model-specific field the ACE-Step pipeline
@@ -7085,8 +7218,11 @@ async def director_generate_music(request: Request):
     seed = body.get("seed")
     workspace = body.get("workspace") or _get_active_workspace()
 
-    if wgp.get_model_def(model_type) is None:
+    selected_model = wgp.get_model_def(model_type)
+    if selected_model is None:
         raise HTTPException(status_code=400, detail=f"Unknown model: {model_type}")
+    selected_architecture = str(selected_model.get("architecture") or model_type)
+    is_minimax_music3 = selected_architecture == "minimax_music3"
 
     image_paths = body.get("image_paths") or []
     if not image_paths and body.get("reference_image_path"):
@@ -7101,16 +7237,33 @@ async def director_generate_music(request: Request):
         from services import llm_service
         from services.guide_loader import load_guide
         _ensure_llm_loaded()
-        if instrumental:
+        if is_minimax_music3 and instrumental:
+            system_prompt = (
+                load_guide("music", "song_writer_minimax_music3_instrumental")
+                or _MUSIC3_SONG_WRITER_FALLBACK_INSTRUMENTAL
+            )
+        elif is_minimax_music3:
+            system_prompt = (
+                load_guide("music", "song_writer_minimax_music3")
+                or _MUSIC3_SONG_WRITER_FALLBACK
+            )
+        elif instrumental:
             system_prompt = load_guide("music", "song_writer_instrumental") or _SONG_WRITER_FALLBACK_INSTRUMENTAL
         else:
             system_prompt = load_guide("music", "song_writer") or _SONG_WRITER_FALLBACK
+        if is_minimax_music3:
+            system_prompt = (
+                f"{system_prompt.rstrip()}\n\n"
+                f"{_music3_writer_duration_instruction(duration_seconds)}"
+            )
         try:
             raw = await asyncio.to_thread(
                 llm_service.generate,
                 prompt=description,
                 system_prompt=system_prompt,
-                max_new_tokens=body.get("max_new_tokens", 1024),
+                max_new_tokens=body.get(
+                    "max_new_tokens", 1536 if is_minimax_music3 else 1024
+                ),
                 temperature=body.get("temperature", 0.85),
                 top_p=body.get("top_p", 0.9),
                 seed=body.get("seed"),
@@ -7136,9 +7289,24 @@ async def director_generate_music(request: Request):
     # item assignment". Every other _submit_and_wait caller calls this first.
     _init_pipeline()
     from services.director_pipeline import _submit_and_wait
+    generation_timeout_s = 1800
+    if is_minimax_music3:
+        try:
+            # Long-form Music3 tracks can legitimately take much longer than
+            # the previous fixed 30-minute ACE-Step ceiling. Budget up to one
+            # wall-clock minute per requested audio second.
+            generation_timeout_s = max(
+                generation_timeout_s,
+                int(float(duration_seconds or 120) * 60),
+            )
+        except (TypeError, ValueError):
+            generation_timeout_s = 7200
     try:
         output_files = await asyncio.to_thread(
-            _submit_and_wait, gen_params, timeout_s=1800, out_dir=out_dir
+            _submit_and_wait,
+            gen_params,
+            timeout_s=generation_timeout_s,
+            out_dir=out_dir,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Music generation failed: {e}")
@@ -7393,13 +7561,26 @@ async def llm_enhance_prompt(request: Request):
         model_type.lower().startswith("minimax_h3")
         and generation_mode in ("video", "avatar")
     )
+    try:
+        requested_window_count = max(1, int(body.get("window_count") or 1))
+    except (TypeError, ValueError):
+        requested_window_count = 1
+    needs_ltx_window_plan = (
+        model_type.lower().startswith("ltx")
+        and generation_mode in ("video", "avatar")
+        and requested_window_count > 1
+    )
     enhancer_enabled = int(wgp.server_config.get("enhancer_enabled", 0) or 0)
 
     # The generic Wan2GP cinematic enhancer cannot produce MiniMax H3's
     # required Context-IR fields, speaker IDs, or <d> dialogue tags. Route H3
     # through Maestro's model-specific guide even when the legacy enhancer is
     # enabled; all other model families retain the configured behavior.
-    if enhancer_enabled > 0 and not needs_h3_context_ir:
+    if (
+        enhancer_enabled > 0
+        and not needs_h3_context_ir
+        and not needs_ltx_window_plan
+    ):
         try:
             # Support both single image_path and array image_paths
             image_paths = body.get("image_paths") or []
@@ -7409,8 +7590,14 @@ async def llm_enhance_prompt(request: Request):
         except Exception as e:
             print(f"[Enhance] Wan2GP enhancer failed, falling back to LLM: {e}")
             # Fall through to LLM
-    elif enhancer_enabled > 0 and needs_h3_context_ir:
-        print("[Enhance] MiniMax H3 requires structured Context-IR; using Maestro's model-specific LLM guide")
+    elif enhancer_enabled > 0:
+        if needs_h3_context_ir:
+            print("[Enhance] MiniMax H3 requires structured Context-IR; using Maestro's model-specific LLM guide")
+        elif needs_ltx_window_plan:
+            print(
+                "[Enhance] LTX multi-window planning requires standalone "
+                "window prompts; using Maestro's model-specific LLM guide"
+            )
 
     # Use our local LLM service
     from services import llm_service
@@ -7545,6 +7732,32 @@ async def llm_enhance_prompt(request: Request):
             raw_enhancer_mode=raw_enhancer_mode,
             reference_context=body.get("reference_context"),
         )
+        if needs_ltx_window_plan:
+            from services.ltx_window_planner import (
+                deterministic_ltx_window_prompts,
+                parse_ltx_window_prompts,
+                reinforce_ltx_window_invariants,
+            )
+
+            try:
+                ltx_prompts = parse_ltx_window_prompts(
+                    result,
+                    expected_count=requested_window_count,
+                )
+            except ValueError as planning_error:
+                print(
+                    "[Enhance] LTX planner returned malformed window output; "
+                    f"using deterministic fallback: {planning_error}"
+                )
+                ltx_prompts = deterministic_ltx_window_prompts(
+                    prompt,
+                    requested_window_count,
+                )
+            ltx_prompts = reinforce_ltx_window_invariants(
+                ltx_prompts,
+                prompt,
+            )
+            result = "\n".join(ltx_prompts)
         return {"original": prompt, "enhanced": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -8677,6 +8890,7 @@ async def generate(request: Request):
     """Submit a generation job. Returns immediately with a job_id."""
     body = await request.json()
     h3_window_plan_response = None
+    ltx_window_plan_response = None
 
     is_sfx = body.get("sfx_mode")
     if not body.get("model_type"):
@@ -8692,6 +8906,25 @@ async def generate(request: Request):
     except Exception:
         _base_model_type = body.get("model_type")
     _generation_model_def = wgp.get_model_def(body["model_type"]) or {}
+    if (
+        _generation_model_def.get("infer_audio_prompt_from_guide", False)
+        and body.get("audio_guide")
+        and (
+            not body.get("video_guide")
+            or "V" not in str(body.get("video_prompt_type") or "")
+        )
+    ):
+        _audio_prompt_type = str(body.get("audio_prompt_type") or "")
+        if not any(letter in _audio_prompt_type for letter in "AK2"):
+            # Preserve passive processing flags such as N/V/L while restoring
+            # the missing source selector. A Control Video deliberately
+            # permits text-generated audio with a soundtrack still attached,
+            # so this repair is limited to standalone soundtrack input.
+            body["audio_prompt_type"] = f"A{_audio_prompt_type}"
+            print(
+                "[Audio Input] Repaired standalone soundtrack input to "
+                f"Audio-to-Video mode for {body['model_type']}."
+            )
     if _generation_model_def.get("omni_reference"):
         from models.minimax_h3.ref2va import validate_reference_manifest
 
@@ -8747,6 +8980,7 @@ async def generate(request: Request):
             ):
                 print(
                     "[MiniMax H3 Turbo] Experimental preset enabled: "
+                    f"{body.get('minimax_h3_turbo_preset', 'default')}, "
                     f"{body['num_inference_steps']} steps, "
                     f"LoRA strength {body['loras_multipliers'].split()[-1]}."
                 )
@@ -9391,6 +9625,200 @@ async def generate(request: Request):
             body.pop("h3_window_plan_signature", None)
             body.pop("h3_window_plan", None)
 
+    # LTX 0.9 / 2.x / 2.5 all use WanGP's native rolling-window engine, but
+    # Maestro now makes that behavior explicit.  A disabled toggle means one
+    # native pass; Manual requires one exact line per computed window; Auto
+    # expands one overall idea through the configured prompt-enhancer LLM.
+    if _generation_model_def.get("multi_window_sequence_controls"):
+        from services.ltx_window_planner import (
+            compute_ltx_window_count,
+            parse_ltx_window_prompts,
+            plan_ltx_sliding_windows,
+            reinforce_ltx_window_invariants,
+        )
+
+        try:
+            ltx_total_frames = max(1, int(body.get("video_length") or 1))
+            ltx_window_frames = max(
+                1,
+                int(body.get("sliding_window_size") or ltx_total_frames),
+            )
+            ltx_overlap_frames = max(
+                0,
+                int(body.get("sliding_window_overlap") or 0),
+            )
+            ltx_discard_frames = max(
+                0,
+                int(body.get("sliding_window_discard_last_frames") or 0),
+            )
+        except (TypeError, ValueError) as error:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid LTX multi-window timing: {error}",
+            ) from error
+
+        ltx_sequence_enabled = body.get("ltx_multi_window") is True
+        ltx_prompt_mode = (
+            "manual"
+            if body.get("ltx_window_prompt_mode") == "manual"
+            else "auto"
+        )
+        if not ltx_sequence_enabled:
+            if ltx_total_frames > ltx_window_frames:
+                print(
+                    "[LTX Sequence] Multi-window is off; limiting the request "
+                    f"to one {ltx_window_frames}-frame native pass."
+                )
+                body["video_length"] = ltx_window_frames
+            # Newlines inside an ordinary cinematic prompt are semantic prose,
+            # not queue entries or continuation-window boundaries.
+            body["multi_prompts_gen_type"] = 2
+            body.pop("ltx_window_prompts", None)
+            body.pop("_ltx_original_prompt", None)
+        elif ltx_total_frames > ltx_window_frames:
+            try:
+                ltx_window_count = compute_ltx_window_count(
+                    ltx_total_frames,
+                    ltx_window_frames,
+                    overlap_frames=ltx_overlap_frames,
+                    discard_frames=ltx_discard_frames,
+                )
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
+
+            if ltx_prompt_mode == "manual":
+                try:
+                    ltx_prompts = parse_ltx_window_prompts(
+                        str(body.get("prompt") or ""),
+                        expected_count=ltx_window_count,
+                    )
+                except ValueError as error:
+                    raise HTTPException(status_code=400, detail=str(error)) from error
+                ltx_window_plan_response = {
+                    "source_prompt": str(body.get("prompt") or "").strip(),
+                    "window_count": ltx_window_count,
+                    "window_prompts": ltx_prompts,
+                    "planned_by": "manual",
+                    "planning_error": None,
+                }
+                body.pop("_ltx_original_prompt", None)
+                print(
+                    f"[LTX Sequence] Using {ltx_window_count} exact manual "
+                    "window prompts."
+                )
+            else:
+                ltx_source_prompt = str(
+                    body.get("_ltx_original_prompt")
+                    or body.get("prompt")
+                    or ""
+                ).strip()
+                cached_ltx_prompts = body.get("ltx_window_prompts")
+                try:
+                    ltx_prompts = parse_ltx_window_prompts(
+                        cached_ltx_prompts,
+                        expected_count=ltx_window_count,
+                    )
+                    cached_ltx_valid = bool(
+                        body.get("_ltx_original_prompt")
+                        and ltx_source_prompt
+                    )
+                except ValueError:
+                    ltx_prompts = []
+                    cached_ltx_valid = False
+
+                if cached_ltx_valid:
+                    # Older saved Auto plans predate the standalone-window
+                    # contract. Reinforcement is idempotent, so this upgrades
+                    # those plans while preserving every reviewed local beat.
+                    ltx_prompts = reinforce_ltx_window_invariants(
+                        ltx_prompts,
+                        ltx_source_prompt,
+                    )
+                    ltx_window_plan_response = {
+                        "source_prompt": ltx_source_prompt,
+                        "window_count": ltx_window_count,
+                        "window_prompts": ltx_prompts,
+                        "planned_by": "reviewed",
+                        "planning_error": None,
+                    }
+                    print(
+                        f"[LTX Sequence] Reusing {ltx_window_count} reviewed "
+                        "window prompts."
+                    )
+                else:
+                    from services import llm_service
+
+                    llm_was_loaded = llm_service.is_loaded()
+                    try:
+                        _ensure_llm_loaded()
+                    except Exception as load_error:
+                        # The planner has a deterministic chronological
+                        # fallback, so a missing optional LLM must not block
+                        # the actual video generation.
+                        print(
+                            "[LTX Sequence] Planner LLM unavailable; using "
+                            f"fallback: {load_error}"
+                        )
+                    services = wgp.server_config.get("services", {})
+                    provider = services.get("llm_provider", "local")
+                    nsfw = (
+                        services.get("nsfw_mode", False)
+                        and provider not in _PUBLIC_LLM_PROVIDERS
+                    )
+                    ltx_image_value = body.get("image_start")
+                    if isinstance(ltx_image_value, (list, tuple)):
+                        ltx_image_value = (
+                            ltx_image_value[0] if ltx_image_value else None
+                        )
+                    ltx_images = (
+                        [ltx_image_value]
+                        if isinstance(ltx_image_value, str)
+                        and os.path.isfile(ltx_image_value)
+                        else None
+                    )
+                    ltx_fps = float(_generation_model_def.get("fps") or 24)
+                    print(
+                        f"[LTX Sequence] Planning {ltx_window_count} "
+                        "chronological window-local prompts."
+                    )
+                    ltx_window_plan_response = await asyncio.to_thread(
+                        plan_ltx_sliding_windows,
+                        ltx_source_prompt,
+                        model_type=str(body.get("model_type") or ""),
+                        duration_seconds=ltx_total_frames / ltx_fps,
+                        window_count=ltx_window_count,
+                        window_size_seconds=ltx_window_frames / ltx_fps,
+                        image_paths=ltx_images,
+                        nsfw=bool(nsfw),
+                    )
+                    ltx_prompts = list(
+                        ltx_window_plan_response["window_prompts"]
+                    )
+                    if not llm_was_loaded and llm_service.is_loaded():
+                        try:
+                            if llm_service.get_status().get("provider") == "local":
+                                llm_service.unload_model()
+                        except Exception as unload_error:
+                            print(
+                                "[LTX Sequence] Planner LLM unload skipped: "
+                                f"{unload_error}"
+                            )
+
+                body["_ltx_original_prompt"] = ltx_source_prompt
+
+            # WanGP's generic mode 1 selector consumes one non-empty line per
+            # rolling pass.  Collapse each planned paragraph to one line in
+            # the planner, then route the result through that native path.
+            body["ltx_window_prompts"] = list(ltx_prompts)
+            body["prompt"] = "\n".join(ltx_prompts)
+            body["multi_prompts_gen_type"] = 1
+        else:
+            # The toggle may be on before Duration crosses a second native
+            # pass. Keep the ordinary prompt intact until a split is real.
+            body["multi_prompts_gen_type"] = 2
+            body.pop("ltx_window_prompts", None)
+            body.pop("_ltx_original_prompt", None)
+
     # Defense: normalize video_prompt_type so flags whose required input
     # is missing get stripped before wgp.py's validation rejects the job.
     # This catches stale UI state (e.g. "I" persisting in a saved snapshot
@@ -9566,6 +9994,8 @@ async def generate(request: Request):
     response = {"job_id": job_id, "status": "queued"}
     if h3_window_plan_response is not None:
         response["h3_window_plan"] = h3_window_plan_response
+    if ltx_window_plan_response is not None:
+        response["ltx_window_plan"] = ltx_window_plan_response
     return response
 
 
@@ -9856,19 +10286,23 @@ _MANAGED_LORAS = {
         "label": "SCAIL-2 Relighting",
         "support_url": "https://huggingface.co/zai-org/SCAIL-2/blob/main/model/relighting-lora.pt",
     },
-    MINIMAX_H3_TURBO_LORA_FILENAME: {
-        "repo_id": MINIMAX_H3_TURBO_LORA_REPO_ID,
-        "revision": MINIMAX_H3_TURBO_LORA_REVISION,
-        "remote_path": MINIMAX_H3_TURBO_LORA_FILENAME,
-        "sha256": MINIMAX_H3_TURBO_LORA_SHA256,
-        "size": MINIMAX_H3_TURBO_LORA_SIZE,
-        "label": "MiniMax H3 Turbo (Experimental)",
-        "support_url": (
-            "https://huggingface.co/"
-            f"{MINIMAX_H3_TURBO_LORA_REPO_ID}"
-        ),
-    },
 }
+
+for _turbo_preset in MINIMAX_H3_TURBO_PRESETS:
+    _MANAGED_LORAS[str(_turbo_preset["filename"])] = {
+        "repo_id": str(MINIMAX_H3_TURBO_MANIFEST["repo_id"]),
+        "revision": str(_turbo_preset["revision"]),
+        "remote_path": str(_turbo_preset["remote_path"]),
+        "sha256": str(_turbo_preset["sha256"]),
+        "size": int(_turbo_preset["size"]),
+        "label": f"MiniMax H3 Turbo — {_turbo_preset['label']}",
+        "support_url": str(
+            (MINIMAX_H3_TURBO_MANIFEST.get("upstream_watch") or {}).get(
+                "model_card_url"
+            )
+            or f"https://huggingface.co/{MINIMAX_H3_TURBO_MANIFEST['repo_id']}"
+        ),
+    }
 
 
 def _ensure_managed_loras_present(activated_loras, model_type, progress=None):
@@ -9913,6 +10347,19 @@ def _ensure_managed_loras_present(activated_loras, model_type, progress=None):
                     match = dict(rec)
             return match
 
+    from services.managed_assets import (
+        managed_asset_matches,
+        write_managed_asset_receipt,
+    )
+
+    def _managed_file_matches(path, spec):
+        # Converted assets (currently SCAIL-2's SAT .pt -> safetensors) carry
+        # source-file integrity metadata, not a hash/size for the converted
+        # destination. Their converter performs its own pinned-source check.
+        if spec.get("converter"):
+            return os.path.isfile(path)
+        return managed_asset_matches(path, spec)
+
     downloaded = []
     for fname in activated_loras:
         base = os.path.basename(str(fname))
@@ -9929,7 +10376,12 @@ def _ensure_managed_loras_present(activated_loras, model_type, progress=None):
         except Exception:
             resolved_path = save_path
         if os.path.isfile(resolved_path):
-            continue
+            if _managed_file_matches(resolved_path, spec):
+                continue
+            print(
+                f"[ManagedLoRA] {label} local copy does not match its pinned "
+                "manifest; downloading a verified replacement."
+            )
 
         # If another part of the app is already fetching this exact file (the
         # frontend pre-downloads it when the panel mounts), wait for that to
@@ -9959,7 +10411,7 @@ def _ensure_managed_loras_present(activated_loras, model_type, progress=None):
                 except Exception:
                     pass
 
-        if os.path.isfile(save_path):
+        if os.path.isfile(save_path) and _managed_file_matches(save_path, spec):
             continue
 
         os.makedirs(target_dir, exist_ok=True)
@@ -10023,6 +10475,18 @@ def _ensure_managed_loras_present(activated_loras, model_type, progress=None):
             elif source_tmp_path != tmp_path:
                 os.replace(source_tmp_path, tmp_path)
             os.replace(tmp_path, save_path)
+            if not spec.get("converter"):
+                try:
+                    write_managed_asset_receipt(
+                        save_path,
+                        spec,
+                        actual_sha256=actual_sha256,
+                    )
+                except OSError as receipt_error:
+                    print(
+                        f"[ManagedLoRA] Could not cache verification receipt for "
+                        f"{label}: {receipt_error}"
+                    )
             downloaded.append(base)
             print(f"[ManagedLoRA] {label} downloaded -> {save_path}")
         except Exception as e:
@@ -10033,6 +10497,19 @@ def _ensure_managed_loras_present(activated_loras, model_type, progress=None):
                 except Exception:
                     pass
             support_url = spec.get("support_url", f"https://huggingface.co/{spec['repo_id']}")
+            error_text = str(e)
+            integrity_failure = (
+                "sha-256 mismatch" in error_text.casefold()
+                or "download size mismatch" in error_text.casefold()
+            )
+            if integrity_failure:
+                raise RuntimeError(
+                    f"Could not verify the {label} model automatically: {e}. "
+                    "Maestro rejected the download before installation because "
+                    "its bytes did not match the pinned release metadata. Update "
+                    "Maestro and retry; if the error remains, report it so the "
+                    f"manifest can be reviewed. Source: {support_url}."
+                ) from e
             if spec.get("converter"):
                 recovery_hint = (
                     f"Retry the automatic setup, or download the official source from "
@@ -20258,6 +20735,7 @@ def _apply_per_job_coefficient(job: dict) -> None:
     try:
         from services.perf_recommend import (
             compute_h3_weight_budget,
+            compute_music3_weight_budget,
             compute_per_job_coefficient,
         )
 
@@ -20358,13 +20836,17 @@ def _apply_per_job_coefficient(job: dict) -> None:
         _is_h3 = str(_job_model_def.get("architecture") or "").startswith(
             "minimax_h3"
         )
+        _is_music3 = (
+            str(_job_model_def.get("architecture") or "") == "minimax_music3"
+            or str(model_type or "") == "minimax_music3"
+        )
         _h3_omni_video = bool(
             _job_model_def.get("omni_reference")
             and _h3_video_reference_count
         )
         # H3 itself is a single denoising pipeline. Treating the ordinary
         # two-stage UI default as a second H3 stage double-counts model memory.
-        if _is_h3:
+        if _is_h3 or _is_music3:
             stage_count = 1
 
         if _base_mt in ("scail2_14B", "scail2_1.3B"):
@@ -20517,22 +20999,62 @@ def _apply_per_job_coefficient(job: dict) -> None:
                     f"- {h3_budget['additional_reserve_gb']:.2f} GB reserved "
                     "inside the H3 cap for active LoRA tensors"
                 )
+        if _is_music3:
+            music3_budget = compute_music3_weight_budget(
+                total_vram_gb,
+                params.get("duration_seconds", 120),
+            )
+            music3_weight_budget_gb = music3_budget["weight_budget_gb"]
+            music3_coefficient_cap = music3_weight_budget_gb / total_vram_gb
+            if adjustment["effective_coef"] > music3_coefficient_cap:
+                adjustment["effective_coef"] = music3_coefficient_cap
+                adjustment["floored"] = False
+                adjustment["reasons"].append(
+                    f"- MiniMax Music3 Qwen residency capped at "
+                    f"{music3_weight_budget_gb:.1f} GB to preserve "
+                    f"{music3_budget['runtime_reserve_gb']:.1f} GB of "
+                    "semantic-stage workspace"
+                )
+            adjustment["music3_weight_budget_gb"] = music3_weight_budget_gb
+            adjustment["music3_runtime_reserve_gb"] = music3_budget[
+                "runtime_reserve_gb"
+            ]
+            adjustment["music3_kv_cache_gb"] = music3_budget["kv_cache_gb"]
+            adjustment["music3_duration_seconds"] = music3_budget[
+                "duration_seconds"
+            ]
+            adjustment["reasons"].append(
+                f"- {music3_budget['kv_cache_gb']:.2f} GB reserved for the "
+                f"{music3_budget['duration_seconds']:g}s Qwen KV cache"
+            )
         job["vram_adjustment"] = adjustment
 
         effective = adjustment["effective_coef"]
-        if abs(effective - base_coef) > 1e-6 or _is_h3:
+        if abs(effective - base_coef) > 1e-6 or _is_h3 or _is_music3:
             wgp.args.vram_safety_coefficient = effective
-            if _is_h3 and getattr(wgp, "wan_model", None) is not None:
+            if (
+                (_is_h3 or _is_music3)
+                and getattr(wgp, "wan_model", None) is not None
+            ):
                 loaded_coefficient = getattr(
                     wgp.wan_model,
                     "_maestro_profile_vram_coefficient",
                     None,
                 )
-                if loaded_coefficient is None or float(loaded_coefficient) > effective + 1e-6:
+                if (
+                    loaded_coefficient is None
+                    or float(loaded_coefficient) > effective + 1e-6
+                ):
                     wgp.reload_needed = True
-                    adjustment["reasons"].append(
-                        "- resident H3 profile will reload with packed-sequence headroom"
-                    )
+                    if _is_music3:
+                        adjustment["reasons"].append(
+                            "- resident Music3 profile will reload with "
+                            "duration-aware semantic-cache headroom"
+                        )
+                    else:
+                        adjustment["reasons"].append(
+                            "- resident H3 profile will reload with packed-sequence headroom"
+                        )
             cap_gb = effective * total_vram_gb
             base_cap_gb = base_coef * total_vram_gb
             # Log the frame-clamp explicitly when it fired so a future

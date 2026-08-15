@@ -172,7 +172,21 @@ def sdpa_wrapper(
     q = q.transpose(1,2)
     k = k.transpose(1,2)
     v = v.transpose(1,2)
-    if attention_mask != None:
+    if attention_mask is not None:
+        # PyTorch SDPA accepts a boolean mask, a float32 mask, or a floating
+        # mask matching the query dtype. Quantized/offloaded LTX layers can
+        # promote Q/K/V to FP32 while their reference-conditioning mask stays
+        # BF16, so normalize that otherwise-invalid combination at the final
+        # attention boundary. Keep float32 masks untouched because SDPA
+        # supports them natively and they may contain weighted attention bias.
+        if (
+            torch.is_floating_point(attention_mask)
+            and attention_mask.dtype not in (torch.float32, q.dtype)
+        ):
+            attention_mask = attention_mask.to(
+                device=q.device,
+                dtype=q.dtype,
+            )
         attention_mask = attention_mask.transpose(1,2)
     o = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_mask, is_causal=causal).transpose(1,2)
     del q, k ,v
@@ -218,9 +232,90 @@ def get_supported_attention_modes():
 
     return ret
 
+
+SOL_ATTENTION_CAPABILITIES = ((8, 9), (9, 0), (10, 0), (12, 0))
+SOL_ATTENTION_MIN_TRITON = (3, 6)
+
+
+def _triton_version_tuple():
+    if not triton_installed:
+        return ()
+    raw = str(getattr(triton, "__version__", "0"))
+    parts = []
+    for value in raw.split(".")[:2]:
+        digits = "".join(character for character in value if character.isdigit())
+        parts.append(int(digits or 0))
+    return tuple(parts)
+
+
+def get_sol_attention_status():
+    """Describe whether the bundled H3-only Sol backend can run here."""
+
+    capability = tuple(torch.cuda.get_device_capability())
+    triton_version = str(getattr(triton, "__version__", "")) if triton_installed else None
+    if not triton_installed:
+        reason = "Sol Engine requires Triton 3.6 or newer."
+        installed = supported = False
+    elif _triton_version_tuple() < SOL_ATTENTION_MIN_TRITON:
+        reason = (
+            "Sol Engine requires Triton 3.6 or newer "
+            f"(this runtime has {triton_version})."
+        )
+        installed = supported = False
+    elif capability not in SOL_ATTENTION_CAPABILITIES:
+        supported_names = ", ".join(
+            f"SM{item[0]}{item[1]}" for item in SOL_ATTENTION_CAPABILITIES
+        )
+        reason = (
+            f"Sol Engine supports {supported_names}; this GPU is "
+            f"SM{capability[0]}{capability[1]}."
+        )
+        installed, supported = True, False
+    else:
+        reason = None
+        installed = supported = True
+    return {
+        "installed": installed,
+        "supported": supported,
+        "reason": reason,
+        "capability": f"SM{capability[0]}{capability[1]}",
+        "triton_version": triton_version,
+        "minimum_triton": "3.6",
+        "first_run_compiles_kernels": True,
+    }
+
+
+def get_override_attention_modes():
+    """Generation overrides include model-specific backends such as Sol."""
+
+    modes = get_attention_modes()
+    if get_sol_attention_status()["installed"]:
+        modes.append("sol")
+    return modes
+
+
+def get_supported_override_attention_modes():
+    modes = get_supported_attention_modes()
+    if get_sol_attention_status()["supported"]:
+        modes.append("sol")
+    return modes
+
+
+def get_default_attention_mode():
+    for mode in ("sage2", "sage", "sdpa"):
+        if mode in get_supported_attention_modes():
+            return mode
+    return "sdpa"
+
 __all__ = [
     'pay_attention',
     'attention',
+    'get_attention_modes',
+    'get_supported_attention_modes',
+    'get_override_attention_modes',
+    'get_supported_override_attention_modes',
+    'get_sol_attention_status',
+    'get_default_attention_mode',
 ]
 
 def get_cu_seqlens(batch_size, lens, max_len):
@@ -258,6 +353,12 @@ def pay_attention(
         if  attention_mask.dtype == torch.bfloat16 and not bfloat16_supported:
             attention_mask = attention_mask.to(torch.float16)
     attn = offload.shared_state["_attention"] if force_attention== None else force_attention
+
+    # Sol is a MiniMax-H3 main-DiT override, not a general attention mode.
+    # H3's short token-refiner calls and any fail-safe recovery come through
+    # this shared function and should use the fastest supported dense backend.
+    if attn == "sol":
+        attn = get_default_attention_mode()
 
     q,k,v = qkv_list
     qkv_list.clear()

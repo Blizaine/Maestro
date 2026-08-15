@@ -168,6 +168,7 @@ class family_handler:
             "frames_minimum": 17,
             "frames_steps": 8,
             "sliding_window": True,
+            "multi_window_sequence_controls": True,
             "image_prompt_types_allowed": "TSEV",
             "end_frames_always_enabled": True,
             "returns_audio": True,

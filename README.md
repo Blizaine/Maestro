@@ -1,6 +1,6 @@
 # Maestro
 
-A one-click AI **video, image, and audio studio** for creators. Maestro pairs a modern React UI with a powerful generation backend and adds a **Director mode** that uses an LLM to plan music videos and short films from a single prompt. Optimized for the latest LTX-2.3 models & LoRAs, with support for virtually all open weight models.  
+A one-click AI **video, image, and audio studio** for creators. Maestro pairs a modern React UI with a powerful generation backend and adds a **Director mode** that uses an LLM to plan music videos and short films from a single prompt. Optimized for LTX-2.5, MiniMax H3, and the latest local creative models and LoRAs.
 
 ![Maestro UI](Maestro_UI_02.jpg)
 
@@ -23,9 +23,9 @@ Detects your GPU, VRAM, and RAM on first launch and picks the right profile, qua
 
 ### 🎨 Studio Mode — full manual control
 Direct access to every model and every knob:
-- **Video** — MiniMax H3 with native synchronized audio, LTX-2.3, Wan1/2, Hunyuan, and many more.
+- **Video** — MiniMax H3 and LTX-2.5 with native synchronized audio, LTX-2.3, Wan1/2, Hunyuan, and many more.
 - **Image** — Flux 2 Klein 9B, Krea 2 RAW/Turbo and Identity Edit, Qwen Image Edit, and many more
-- **Audio** — TTS: Kugelaudio, Qwen3 TTS. Music: ACE-Step. SFX: MMAudio
+- **Audio** — TTS: Kugelaudio, Qwen3 TTS. Music: MiniMax-Music3 and ACE-Step. SFX: MMAudio
 - **Multi-clip generation** with per-clip prompts, seamless overlapping (sliding window) transitions, and shared LoRAs
 - **Blend video Mode** Remember Sora 1 blend mode, where you could overlap two videos, and use AI to blend them together? 
 - **Frames Injection (KFI)** for character continuity in long videos
@@ -76,6 +76,86 @@ View all past Director runs with their full state — clip plans, generated imag
 ## Updates
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
+
+### v1.8.5.1 (2026-08-15)
+
+**Linux performance runtime**
+- Fixed the H3 high-performance runtime upgrade repeatedly restarting on Linux Mint and Ubuntu when the system CUDA toolkit did not match Maestro's PyTorch CUDA 13 runtime.
+- Linux now uses pinned, prebuilt CUDA 13 SageAttention and FlashAttention wheels instead of compiling them against the host CUDA toolkit.
+- Optional attention-wheel failures no longer block installation: Maestro can continue with Sol/SDPA fallback while required runtime validation prevents incomplete environments from being marked ready.
+
+### v1.8.5 (2026-08-14)
+
+**MiniMax-Music3**
+- Added native local MiniMax-Music3 generation for complete stereo songs from structured music direction and lyrics, with selectable 5-second to 5-minute runtimes and a two-minute default.
+- Added a duration-aware AI song writer that scales lyrics, sections, arrangement, transitions, and instrumental space to the selected track length instead of forcing every idea into a full-length song.
+- Added MiniMax-Music3 as a soundtrack generator in Director Music Video mode, alongside ACE-Step.
+- Added staged single-GPU memory management, verified component downloads, interrupted-install detection, and model-specific Studio controls and guidance.
+
+**Director workflow flexibility**
+- Reorganized Director setup so aspect ratio, resolution, workflow, and video/image models appear before media uploads and remain visible after audio analysis. Music and image upload areas now keep a consistent, easy-to-find size throughout setup. Setup choices lock once prompt planning begins, and changing the video model safely rebuilds clip timing without re-uploading the source.
+- Added **None — no generated images** to Director's image-model selector. Auto mode can now plan and render directly from video prompts without loading an image model.
+- Manual Director projects can optionally upload a different scene image for any shot while leaving other shots prompt-only.
+- Disabling generated shot images does not disable user references: an uploaded main start image still anchors Seamless LTX and H3 First / Last runs, while H3 Omni continues to receive the supplied character, location, image, and voice references for its clips.
+- Added native Seamless Director support for MiniMax H3 First / Last, carrying motion and synchronized audio between windows while assigning each native pass only its correct local prompt.
+- MiniMax H3 Omni music videos now condition against the exact source-song segment for each shot and retain the pristine continuous soundtrack, rather than merely treating the song as a style reference.
+- Director now displays the model-adapted H3 clip count and native durations after planning, so long screenplay sections no longer appear as unsupported 20-second H3 generations.
+- Added Director-owned Turbo, Sol Engine, and First Block Cache controls to the persistent Advanced menu for MiniMax H3 models, including Turbo checkpoint selection and cache tuning.
+- Simplified MiniMax H3 and LTX-2.5 Director setup by hiding inapplicable image/audio strength sliders and locking both conditioning strengths to their supported 1.0 values.
+
+**LTX long-form generation**
+- Restored automatic LTX window sizing: increasing total duration now grows each native pass to the model ceiling before adding more windows, unless the user explicitly locks a shorter window.
+- Reworked AI-planned LTX sequences so every native pass receives a complete standalone prompt with the persistent camera, speed, style, identity, location, lighting, audio, and continuity rules it needs.
+- Improved seamless one-take and open-ended prompts so later windows do not reset, invent cuts, slow down, or resolve action the user asked to continue indefinitely.
+- Fixed LTX-2.5 continuation failing after the first window or corrupting audio history when generated audio returned in sample-major layout.
+
+**Reference and generation reliability**
+- Fixed LTX-2.5 generation with multiple reference images plus reference audio failing when a BF16 attention mask met an FP32 query tensor.
+- Fixed MiniMax H3 Music Video planning failing on an unbalanced dialogue tag when a repetitive source-song transcription exhausted the LLM output limit. Source vocals now remain mapped driving audio instead of being copied into scripted dialogue.
+- Component-based models now verify all required assets before being marked installed, preventing partial MiniMax-Music3 downloads from appearing ready.
+- Expanded regression coverage for MiniMax-Music3, Director image policies, H3 Seamless generation, LTX sequence planning, continuation audio, and mixed-dtype reference attention.
+
+### v1.8.1 (2026-08-13)
+
+**MiniMax H3 model sharing**
+- Maestro can now reuse WanGP's compatible pruned FL2VA and Ref2VA INT8 ConvRot checkpoints instead of downloading separate scaled-FP8 copies.
+- Shared Qwen3-VL text/vision encoders are detected across both folder layouts, while non-identical VAE files remain separate for safety.
+- Added checkpoint-layout detection and component-source diagnostics so shared H3 installations load the correct tensor format and clearly report which app supplied each asset.
+
+**Account-free installation**
+- Maestro no longer opens a Hugging Face sign-in flow during Install. Installation and default managed-model downloads require no Maestro or Hugging Face account.
+- Added an explicit **Connect Hugging Face (Optional)** launcher action for custom gated models or higher download limits.
+- Fixed the missing LTX-2.5 component message incorrectly claiming that its managed repository was gated.
+
+### v1.8.0 (2026-08-13)
+
+**LTX-2.5 and next-generation LTX workflows**
+- Added native local LTX-2.5 with synchronized audio. Distilled is enabled by default, while Dev and NVFP4 variants can be enabled in Settings.
+- Added the official Distilled 8-step base pass, learned latent upscaling, and 3-step full-resolution refinement, with persistent model reuse for faster follow-up generations.
+- Added first and last frames, timed frame injection, audio-driven video, control-video audio, native audio, and compatible LTX-2/2.3 LoRAs from the existing shared library.
+- Added LTX-2.5 to compatible Director Music Video, Short Film, and seamless-generation workflows.
+- Fixed LTX-2.5 LoRAs producing noise on INT8 ConvRot checkpoints and added a choice between the fast video decoder and optional NAD diffusion decoder.
+
+**LTX multi-window sequences**
+- Added one consistent Multi-window Sequence workflow to all LTX video models, with AI-planned or exact one-prompt-per-window manual modes.
+- Added duration and window counts, early prompt validation, editable generated window prompts, and chronological prompt planning that advances the story instead of repeating it.
+- Improved LTX-2.5 continuation so full motion and matching audio history cross each window boundary cleanly without distorted seams or a slowdown in camera movement.
+
+**Audio, saved settings, and performance runtime**
+- Fixed slowed-down generated audio across MiniMax H3 and LTX and repaired standalone soundtrack routing when loading older settings.
+- Load Settings now restores LTX window choices and geometry plus H3 Turbo, Sol Engine, First Block Cache, text encoder, and their associated values.
+- Made the tested Sol-capable Python 3.11 / PyTorch 2.10 / CUDA 13 environment the normal Install, Update, and Start runtime on compatible RTX 40- and 50-series systems, while retaining safe fallbacks.
+- Reordered the Studio sidecar to Duration, inputs or Omni references, H3 Optimizations, then Multi-window Sequence.
+
+### v1.7.5 (2026-08-11)
+
+**MiniMax H3 Performance Update**
+- Added the experimental H3 Sol Engine sparse-attention backend for supported RTX 40- and 50-series GPUs, with cached kernel compilation and an automatic safe fallback.
+- Added one collapsible H3 Optimizations panel for Turbo, Sol Engine, and First Block Cache; each can be enabled independently or combined.
+- Updated the managed Turbo default to the newer v4-600 EMA LoRA at six steps and strength 1.0, while retaining the previous preset for rollback and comparison.
+- Added pinned checksums, atomic downloads, local receipts, and a scheduled upstream-change monitor for managed H3 Turbo releases.
+- Added the same Turbo preset, Sol Engine, and First Block Cache controls to Director. Settings now survive project saves, Dashboard regeneration, repair, and resume.
+- Hardened RTX 50's CUDA 13/Triton runtime and made interrupted optional RTX 40 Sol installations repairable through Update without replacing the normal runtime.
 
 ### v1.7.2 (2026-08-11)
 
@@ -528,22 +608,30 @@ The first video is always the slow one: install is ~10–20 min, then the first 
 1. Install [Pinokio](https://pinokio.computer).
 2. In Pinokio, open the **Discover** tab and search for *Maestro* — or click the **Download** button on the [Maestro repo page](https://github.com/Blizaine/Maestro) and paste the URL.
 3. Click **Install**. The launcher will:
-   - Create a Python virtual environment in `app/env/` (`app/env-rtx50/` on RTX 50-series GPUs)
+   - Create the hardware-matched Python environment: `app/env-sol/` on supported RTX 40-class GPUs, `app/env-rtx50/` on RTX 50-series GPUs, or `app/env/` on other supported NVIDIA GPUs
    - Install all Python dependencies (torch, xformers, transformers, fastapi, …)
    - Build the React UI in `ui/`
 4. When install finishes, click **Start**. The first generation in each model triggers a one-time weight download.
 
 The install (without model downloads) typically takes **10–20 minutes** depending on internet speed. SAM 3.1 (used only for the experimental Inpaint feature) is **not installed by default** — install it on demand via Pinokio menu → "Install Inpaint Support (SAM 3.1)" if you want to use Inpaint.
 
-RTX 50-series cards use a dedicated Python 3.11, PyTorch 2.10, CUDA 13 environment with native SageAttention and Lightx2v NVFP4 kernels. Existing RTX 50 installs migrate automatically the next time **Update** is run; the older environment is retained as a recovery point. Maestro prints a short runtime audit at startup. If that audit reports a missing RTX 50 kernel after Update completed, use **Advanced → Repair RTX 50 Runtime** in the Pinokio menu.
+Maestro does **not** require a Maestro account or a Hugging Face account. Its default managed models download anonymously from public sources. If you intentionally use custom gated assets or want higher Hugging Face download limits, choose **Connect Hugging Face (Optional)** in the Pinokio launcher menu.
+
+Supported RTX 40- and 50-series cards use Maestro's standard Python 3.11, PyTorch 2.10, CUDA 13 H3 performance runtime. NVIDIA driver 580 or newer is required for that runtime. Existing installations migrate automatically through the normal **Update** action; RTX 40 migrations are created alongside the prior `app/env/` environment so a failed or interrupted upgrade can still launch the compatibility runtime. On Linux, Maestro installs tested prebuilt SageAttention and FlashAttention wheels rather than compiling them against the host CUDA toolkit; if either optional wheel is temporarily unavailable, the required Sol runtime still completes and uses Sol/SDPA fallback. Maestro prints a short runtime audit at startup. If it reports a missing H3 kernel after Update completes, use **Advanced → Repair H3 Performance Runtime** in the Pinokio menu.
+
+MiniMax H3 offers an optional **Sol Engine (Experimental)** sparse-attention backend inside the H3 Optimizations panel. Its runtime support is installed and launched by default on compatible hardware; there is no separate Sol installer or Start mode. The optimization toggle remains per-generation so existing projects do not silently change their rendering recipe. The first Sol generation compiles Triton kernels and can start more slowly. RTX 20/30-series GPUs remain on SageAttention because the optimized Sol kernels do not support their compute architecture. If Sol cannot handle a call, Maestro reports it once and falls back to the normal dense H3 attention path.
+
+On one RTX 4090 test system, a 14.4-second 720p H3 generation at 30 steps measured 23m43s with neither optimization, 19m30s with Sol, 17m54s with First Block Cache, and 12m59s with both. Treat these as a directional example only: model choice, prompt/reference load, resolution, drivers, cache threshold, and hardware all affect speed and quality.
 
 ### Updating
 
-Click **Update** in the launcher menu. This pulls the latest launcher scripts and app code, reinstalls any new Python dependencies, and rebuilds the React UI.
+Click **Update** in the launcher menu. This pulls the latest launcher scripts and app code, migrates or repairs the active hardware runtime when needed, reinstalls new Python dependencies, and rebuilds the React UI. When an older RTX 40 installation first receives the unified H3 runtime, Pinokio automatically continues into the one-time migration after the code pull.
 
 ### Resetting
 
-Click **Reset** to wipe the install and start over. Removes `app/env/`, `app/env-rtx50/`, `ui/node_modules/`, `ui/dist/`, and the SAM venv if installed. Model checkpoints in `app/ckpts/` are NOT removed by default — delete them manually if you want a true fresh start.
+The `app/env-sol/` H3 performance environment is removed along with the other Maestro environments.
+
+Click **Reset** to wipe the install and start over. Removes `app/env/`, `app/env-sol/`, `app/env-rtx50/`, `ui/node_modules/`, `ui/dist/`, and the SAM venv if installed. Model checkpoints in `app/ckpts/` are NOT removed by default — delete them manually if you want a true fresh start.
 
 ## Usage
 
