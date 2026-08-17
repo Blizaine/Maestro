@@ -935,11 +935,14 @@ class TestDirectorCancellation(unittest.TestCase):
         pid = "pipe-ltx25-rerun-sync"
         record = self._add_pipeline(pid, "completed")
         audio_path = self._write_media("song.wav", b"audio")
+        vocals_path = self._write_media("song-vocals.wav", b"vocals")
         record["params"].update({
             "seamless": False,
             "video_model": "ltx2_25",
             "video_params": {"resolution": "1280x704"},
             "audio_path": audio_path,
+            "audio_vocals_path": vocals_path,
+            "lyrics": [{"text": "Sing the next line"}],
             "fps": 24,
         })
         record["_planned_clips"] = [
@@ -981,6 +984,7 @@ class TestDirectorCancellation(unittest.TestCase):
             submitted[0]["prompt"],
         )
         self.assertEqual(submitted[0]["audio_prompt_type"], "A")
+        self.assertIn("audio_conditioning_guide", submitted[0])
 
     def test_standard_video_uses_each_generated_start_image(self):
         pid = "pipe-video-starts"
@@ -1100,6 +1104,7 @@ class TestDirectorCancellation(unittest.TestCase):
         pid = "pipe-ltx25-lip-sync"
         self._add_pipeline(pid, "running")
         audio_path = self._write_media("song.wav", b"audio")
+        vocals_path = self._write_media("song-vocals.wav", b"vocals")
         for filename in ("shot-1.jpg", "shot-2.jpg"):
             self._write_media(filename, b"image")
         params = {
@@ -1108,6 +1113,8 @@ class TestDirectorCancellation(unittest.TestCase):
             "video_model": "ltx2_25",
             "video_params": {"resolution": "1280x704"},
             "audio_path": audio_path,
+            "audio_vocals_path": vocals_path,
+            "lyrics": [{"text": "Sing the next line"}],
             "fps": 24,
         }
         plans = [
@@ -1152,8 +1159,114 @@ class TestDirectorCancellation(unittest.TestCase):
         for prompt in prompts:
             self.assertIn("SOURCE-AUDIO LIP SYNC", prompt)
             self.assertIn("lip-syncs every vocal syllable", prompt)
+            self.assertNotIn("\n", prompt)
         self.assertEqual(submitted[0]["audio_prompt_type"], "A")
+        self.assertEqual(
+            submitted[0]["audio_conditioning_guide"],
+            vocals_path,
+        )
         self.assertEqual(submitted[0]["audio_frame_offset"], 48)
+        self.assertEqual(submitted[0]["per_clip_prompt_modes"], [0, 0])
+
+    def test_ltx25_music_video_uses_one_native_window_per_planned_shot(self):
+        params = {
+            "pipeline_type": "music_video",
+            "video_model": "ltx2_25",
+            "audio_path": "song.wav",
+            "lyrics": [{"text": "A vocal line"}],
+        }
+        model_def = {
+            "architecture": "ltx2_25",
+            "frames_minimum": 17,
+            "frames_steps": 8,
+            "sliding_window_defaults": {
+                "window_default": 241,
+                "window_max": 501,
+            },
+        }
+        self.assertEqual(
+            pipeline._ltx25_music_video_max_shot_frames(
+                params,
+                model_def,
+                pipeline_type="music_video",
+            ),
+            241,
+        )
+        self.assertIsNone(
+            pipeline._ltx25_music_video_max_shot_frames(
+                params,
+                model_def,
+                pipeline_type="short_film_story",
+            )
+        )
+        instrumental = {
+            **params,
+            "lyrics": [],
+            "scene_description": "Abstract landscapes follow the beat.",
+        }
+        self.assertIsNone(
+            pipeline._ltx25_music_video_max_shot_frames(
+                instrumental,
+                model_def,
+                pipeline_type="music_video",
+            )
+        )
+
+    def test_ltx25_music_video_sync_contract_reaches_every_planned_window(self):
+        pid = "pipe-ltx25-window-lip-sync"
+        self._add_pipeline(pid, "running")
+        audio_path = self._write_media("song.wav", b"audio")
+        params = {
+            "pipeline_type": "music_video",
+            "seamless": False,
+            "video_model": "ltx2_25",
+            "video_params": {"resolution": "1280x704"},
+            "audio_path": audio_path,
+            "fps": 24,
+        }
+        plans = [{
+            "video_prompt": "unused combined prompt",
+            "window_count": 2,
+            "window_prompts": [
+                {"prompt": "The singer begins the verse."},
+                {"prompt": "The singer finishes the verse."},
+            ],
+        }]
+        planned = [{"start": 0, "end": 40, "duration_sec": 40}]
+        submitted: list[dict] = []
+        pipeline._wgp = SimpleNamespace(
+            save_path=self.temp_dir.name,
+            server_config={"services": {}},
+            get_model_def=lambda _model: {
+                "architecture": "ltx2_25",
+                "fps": 24,
+            },
+            get_model_min_frames_and_step=lambda _model: (17, 8, 8),
+        )
+
+        with patch.object(
+            pipeline,
+            "_submit_and_wait",
+            side_effect=lambda gen_params, **_kwargs: (
+                submitted.append(gen_params) or ["one.mp4"]
+            ),
+        ):
+            pipeline._run_video_generation(
+                pid,
+                params,
+                plans,
+                planned,
+                [],
+                out_dir=self.temp_dir.name,
+            )
+
+        window_prompts = submitted[0]["prompt"].splitlines()
+        self.assertEqual(len(window_prompts), 2)
+        self.assertTrue(all(
+            "SOURCE-AUDIO LIP SYNC" in prompt
+            for prompt in window_prompts
+        ))
+        self.assertEqual(submitted[0]["per_clip_prompt_modes"], [1])
 
     def test_video_phase_rejects_a_recorded_start_image_missing_on_disk(self):
         with open(

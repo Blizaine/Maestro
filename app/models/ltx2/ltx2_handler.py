@@ -183,6 +183,12 @@ class family_handler:
                 "show_label": False,
             },
             "audio_guide_window_slicing": True,
+            # A soundtrack that remains present after a model switch or a
+            # settings restore is still an explicit Audio-to-Video request.
+            # Keep the hidden ``A`` mode in sync with the visible upload, just
+            # as LTX-2.5 does, so the file cannot be used only to set Duration
+            # while LTX-2.3 silently generates an unrelated soundtrack.
+            "infer_audio_prompt_from_guide": True,
             "auto_null_audio": True,  # Silent Movie Mode: allow generation
                                        # without explicit audio source by
                                        # auto-creating a silent WAV. Set on

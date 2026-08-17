@@ -33,6 +33,12 @@ _WANGP_FL2VA_PRUNED_TRANSFORMER = (
 _WANGP_REF2VA_PRUNED_TRANSFORMER = (
     "MiniMax-H3-Ref2VA-pruned_rank8_int8_convrot.safetensors"
 )
+_WANGP_FL2VA_PRUNED_BF16_TRANSFORMER = (
+    "MiniMax-H3-FL2VA-pruned_rank8_bf16.safetensors"
+)
+_WANGP_REF2VA_PRUNED_BF16_TRANSFORMER = (
+    "MiniMax-H3-Ref2VA-pruned_rank8_bf16.safetensors"
+)
 
 # H3 packs video, audio, and text into one unusually long transformer
 # sequence.  At 480p / 10 seconds the token-wise activations alone need
@@ -1298,6 +1304,37 @@ def pace_h3_sliding_window_prompt(
     )
 
 
+def enforce_h3_source_continuation_prompt(prompt):
+    """Keep Studio Extend from treating the source tail as a new-shot ref.
+
+    H3 receives native motion history plus the final boundary frame, but the
+    model may still interpret a normal action prompt as permission to begin a
+    fresh camera setup at the first generated frame.  Extend promises a
+    temporal continuation, so make the boundary behavior explicit while
+    leaving the user free to request cuts later in the generated portion.
+    """
+
+    prompt = str(prompt or "").strip()
+    if not prompt:
+        return prompt
+    marker = "SOURCE-VIDEO CONTINUATION CONTRACT"
+    if marker in prompt:
+        return prompt
+    return (
+        f"{marker} (highest priority): At 0.00 seconds, continue directly "
+        "from the supplied source video's final moment as the same "
+        "uninterrupted take. The opening generated frames preserve the exact "
+        "camera position, lens, framing, environment, lighting, subject "
+        "identities, poses, screen positions, and current motion trajectories. "
+        "Do not cut, reset the action, change angle, or begin a new establishing "
+        "shot at the extension boundary. Continue the existing motion naturally "
+        "before introducing the requested action. If a later camera cut is "
+        "requested, perform it only after the continuation is visibly "
+        "established.\n\nEXTENSION PLAN:\n"
+        f"{prompt}"
+    )
+
+
 class family_handler:
     @staticmethod
     def query_supported_types():
@@ -1440,7 +1477,12 @@ class family_handler:
             "director_trim_end_frames": False,
             "t2v_class": True,
             "i2v_class": not omni_reference,
-            "image_prompt_types_allowed": "" if omni_reference else "TSE",
+            # FL2VA supports native continuation from a source video's
+            # audiovisual tail.  ``V`` is not merely a Classic-UI label: the
+            # shared task normalizer uses this capability string as an
+            # allowlist.  Omitting it caused Studio Extend to retain the path
+            # in metadata while silently stripping the source before H3 ran.
+            "image_prompt_types_allowed": "" if omni_reference else "TSEV",
             "end_frames_always_enabled": not omni_reference,
             # FL2VA can pin additional pictures to exact target positions.
             # Maestro exposes this through the unified Frame strip instead of
@@ -1477,12 +1519,12 @@ class family_handler:
             "text_encoder_URLs": text_encoder_variants["nvfp4_awq"]["URLs"],
             "minimax_h3_text_encoder_default": "nvfp4_awq",
             "minimax_h3_text_encoder_variants": text_encoder_variants,
-            # Maestro's original pruned checkpoints are Comfy scaled-FP8;
-            # current WanGP publishes the same rank-8 H3 architecture as an
-            # INT8 ConvRot export. They are not byte duplicates, but this
-            # runtime supports both tensor formats. Treat an existing WanGP
-            # file as a verified load-compatible alternative so linked
-            # installs do not download a second ~20B transformer.
+            # New installs follow WanGP's BF16/INT8 pruned exports while
+            # existing Maestro installs may still hold Comfy's scaled-FP8
+            # checkpoint. They are not byte duplicates, but this runtime
+            # supports both tensor formats. Keep the INT8 and legacy FP8
+            # names as bidirectional migration aliases so the default switch
+            # to INT8 does not download a second ~20B transformer.
             "compatible_model_paths": (
                 {}
                 if full_checkpoint
@@ -1497,7 +1539,18 @@ class family_handler:
                             if omni_reference
                             else _WANGP_FL2VA_PRUNED_TRANSFORMER
                         )
-                    ]
+                    ],
+                    (
+                        _WANGP_REF2VA_PRUNED_TRANSFORMER
+                        if omni_reference
+                        else _WANGP_FL2VA_PRUNED_TRANSFORMER
+                    ): [
+                        (
+                            _REF2VA_TRANSFORMER
+                            if omni_reference
+                            else _TRANSFORMER
+                        )
+                    ],
                 }
             ),
             "compatible_model_qkv_layouts": (
@@ -1508,7 +1561,12 @@ class family_handler:
                         _WANGP_REF2VA_PRUNED_TRANSFORMER
                         if omni_reference
                         else _WANGP_FL2VA_PRUNED_TRANSFORMER
-                    ): "interleaved"
+                    ): "interleaved",
+                    (
+                        _WANGP_REF2VA_PRUNED_BF16_TRANSFORMER
+                        if omni_reference
+                        else _WANGP_FL2VA_PRUNED_BF16_TRANSFORMER
+                    ): "interleaved",
                 }
             ),
             # WanGP stores every Qwen variant in its upstream folder while
@@ -1851,6 +1909,18 @@ class family_handler:
         **kwargs,
     ):
         """Pace one full H3 shot prompt across automatic continuations."""
+
+        is_source_extension = (
+            int(window_no or 1) == 1
+            and kwargs.get("video_source") is not None
+            and "V" in str(kwargs.get("image_prompt_type") or "")
+        )
+        if is_source_extension:
+            prompt = enforce_h3_source_continuation_prompt(prompt)
+            print(
+                "[MiniMax H3 Extend] Enforcing uninterrupted same-shot "
+                "continuity at the source boundary."
+            )
 
         if (model_def or {}).get("omni_reference", False):
             return prompt

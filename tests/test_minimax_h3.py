@@ -89,6 +89,7 @@ def _load_handler_class():
             "align_h3_num_frames",
             "normalize_h3_overlap_frames",
             "pace_h3_sliding_window_prompt",
+            "enforce_h3_source_continuation_prompt",
         }:
             selected.append(node)
         elif isinstance(node, ast.ClassDef) and node.name == "family_handler":
@@ -261,8 +262,21 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertEqual(defaults["num_inference_steps"], 20)
         self.assertEqual(defaults["video_length"], 124)
         self.assertEqual(defaults["resolution"], "864x480")
-        self.assertIn("minimax_h3_fl2va_pruned_fp8_scaled.safetensors", model["URLs"][0])
-        self.assertIn("0543966fbdce5ba05709a8f2031c94bdba629b4a", model["URLs"][0])
+        self.assertEqual(
+            [os.path.basename(url) for url in model["URLs"]],
+            [
+                "MiniMax-H3-FL2VA-pruned_rank8_bf16.safetensors",
+                "MiniMax-H3-FL2VA-pruned_rank8_int8_convrot.safetensors",
+                "minimax_h3_fl2va_pruned_fp8_scaled.safetensors",
+            ],
+        )
+        self.assertTrue(
+            all(
+                "fec7846aef352e58a1cfb699455e3d104281e68b" in url
+                for url in model["URLs"][:2]
+            )
+        )
+        self.assertIn("0543966fbdce5ba05709a8f2031c94bdba629b4a", model["URLs"][2])
         self.assertNotIn("minimax_h3_text_encoder", defaults)
 
     def test_handler_exposes_base_fl2va_contract(self):
@@ -282,7 +296,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             (model_def["frame_alignment_modulus"], model_def["frame_alignment_remainder"]),
             (17, 5),
         )
-        self.assertEqual(model_def["image_prompt_types_allowed"], "TSE")
+        self.assertEqual(model_def["image_prompt_types_allowed"], "TSEV")
         self.assertTrue(model_def["end_frames_always_enabled"])
         self.assertTrue(model_def["t2v_class"])
         self.assertTrue(model_def["i2v_class"])
@@ -369,6 +383,18 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertEqual(
             model_def["compatible_model_qkv_layouts"][
                 "MiniMax-H3-FL2VA-pruned_rank8_int8_convrot.safetensors"
+            ],
+            "interleaved",
+        )
+        self.assertEqual(
+            model_def["compatible_model_paths"][
+                "MiniMax-H3-FL2VA-pruned_rank8_int8_convrot.safetensors"
+            ],
+            ["minimax_h3_fl2va_pruned_fp8_scaled.safetensors"],
+        )
+        self.assertEqual(
+            model_def["compatible_model_qkv_layouts"][
+                "MiniMax-H3-FL2VA-pruned_rank8_bf16.safetensors"
             ],
             "interleaved",
         )
@@ -973,6 +999,44 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             prompt,
         )
 
+    def test_h3_video_extend_enforces_same_shot_boundary_continuity(self):
+        original = "The Hulk transforms into Bruce Banner."
+        extended = self.handler.custom_prompt_preprocess(
+            original,
+            window_no=1,
+            total_windows=1,
+            prompts=[original],
+            model_def={"omni_reference": False},
+            video_source="source.mp4",
+            image_prompt_type="V",
+        )
+        self.assertIn("SOURCE-VIDEO CONTINUATION CONTRACT", extended)
+        self.assertIn("same uninterrupted take", extended)
+        self.assertIn("Do not cut", extended)
+        self.assertIn(original, extended)
+
+        later_window = self.handler.custom_prompt_preprocess(
+            original,
+            window_no=2,
+            total_windows=2,
+            prompts=["first", "second"],
+            model_def={"omni_reference": False},
+            video_source="source.mp4",
+            image_prompt_type="V",
+        )
+        self.assertEqual(later_window, original)
+
+        ordinary_i2v = self.handler.custom_prompt_preprocess(
+            original,
+            window_no=1,
+            total_windows=1,
+            prompts=[original],
+            model_def={"omni_reference": False},
+            video_source=None,
+            image_prompt_type="S",
+        )
+        self.assertEqual(ordinary_i2v, original)
+
     def test_conditioner_namespaces_cover_wangp_int8_bf16_and_gguf(self):
         normalize = _load_source_function(
             _MAIN_PATH,
@@ -1048,8 +1112,21 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         defaults = json.loads(_REF2VA_DEFAULT_PATH.read_text(encoding="utf-8"))
         model = defaults["model"]
         self.assertEqual(model["architecture"], "minimax_h3_ref2va")
-        self.assertIn("minimax_h3_ref2va_pruned_fp8_scaled.safetensors", model["URLs"][0])
-        self.assertIn("0543966fbdce5ba05709a8f2031c94bdba629b4a", model["URLs"][0])
+        self.assertEqual(
+            [os.path.basename(url) for url in model["URLs"]],
+            [
+                "MiniMax-H3-Ref2VA-pruned_rank8_bf16.safetensors",
+                "MiniMax-H3-Ref2VA-pruned_rank8_int8_convrot.safetensors",
+                "minimax_h3_ref2va_pruned_fp8_scaled.safetensors",
+            ],
+        )
+        self.assertTrue(
+            all(
+                "fec7846aef352e58a1cfb699455e3d104281e68b" in url
+                for url in model["URLs"][:2]
+            )
+        )
+        self.assertIn("0543966fbdce5ba05709a8f2031c94bdba629b4a", model["URLs"][2])
         self.assertEqual(defaults["minimax_h3_references"], [])
         self.assertEqual(defaults["minimax_h3_reference_detail"], "match")
 
@@ -1068,6 +1145,18 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertEqual(
             model_def["compatible_model_qkv_layouts"][
                 "MiniMax-H3-Ref2VA-pruned_rank8_int8_convrot.safetensors"
+            ],
+            "interleaved",
+        )
+        self.assertEqual(
+            model_def["compatible_model_paths"][
+                "MiniMax-H3-Ref2VA-pruned_rank8_int8_convrot.safetensors"
+            ],
+            ["minimax_h3_ref2va_pruned_fp8_scaled.safetensors"],
+        )
+        self.assertEqual(
+            model_def["compatible_model_qkv_layouts"][
+                "MiniMax-H3-Ref2VA-pruned_rank8_bf16.safetensors"
             ],
             "interleaved",
         )
@@ -1527,7 +1616,8 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("validate_reference_manifest", launch)
         self.assertIn("per_clip_minimax_h3_references", launch)
         self.assertIn("director_trim_end_frames", launch)
-        self.assertIn('"minimax_h3_references": minimax_h3_references', wgp)
+        self.assertIn('"minimax_h3_references": (', wgp)
+        self.assertIn("minimax_h3_runtime_references", wgp)
         self.assertIn('multi_clip_info.get("concat_audio_path")', wgp)
         self.assertIn("build_ref2va_packed_sequence", main)
         self.assertIn("duration_seconds=target_frame_num / fps", main)
@@ -1545,7 +1635,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("Voice reference", section)
         self.assertIn("Music / performance timeline", section)
         self.assertIn("Music / sound style only", section)
-        self.assertIn("advances through the recording across sequence clips", section)
+        self.assertIn("preserves the exact soundtrack and advances through it", section)
         self.assertIn("timeline_start_frame=window_start_frame_no", main)
         self.assertNotIn('accept="image/*,video/*,audio/*', section)
         self.assertNotIn('accept="audio/*', section)
@@ -1567,6 +1657,29 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("supportsSlidingWindows = modelOptions?.sliding_window === true", prompt_input)
         self.assertIn("(!isH3FirstLast || h3FirstLastMultiWindow)", prompt_input)
         self.assertIn("&& stride > 0", prompt_input)
+
+    def test_omni_drive_audio_adopts_timeline_without_mutating_voice_or_style(self):
+        section = _read(_OMNI_REFERENCE_SECTION_PATH)
+        duration_slider = _read(_DURATION_SLIDER_PATH)
+        handler_start = section.index("const setAudioIntent =")
+        handler_end = section.index("const attachAudio =", handler_start)
+        handler = section[handler_start:handler_end]
+
+        self.assertIn("if (intent !== 'drive') return", handler)
+        self.assertIn("Number(reference?.duration_seconds)", handler)
+        self.assertIn("audioDuration > slidingWindowSeconds + (1 / fps)", handler)
+        self.assertIn("setParam('minimax_h3_reference_sequence', true)", handler)
+        self.assertIn("setDurationSeconds(audioDuration)", handler)
+        self.assertLess(
+            handler.index("setParam('minimax_h3_reference_sequence', true)"),
+            handler.index("setDurationSeconds(audioDuration)"),
+        )
+        self.assertIn("onChange={event => setAudioIntent(", section)
+        self.assertIn("automatically enables a multi-window sequence", section)
+        self.assertIn(
+            "const shouldInitializeTotalDuration = selectionChanged || !h3MultiWindowEnabled",
+            duration_slider,
+        )
 
     def test_single_pass_omni_multiline_prompt_stays_one_prompt(self):
         store = _read(_STORE_PATH)
@@ -1761,6 +1874,28 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
         self.assertIn('"sliding_window_trim_to_requested"', wgp)
         self.assertIn('"sliding_window_end_image_at_final"', wgp)
 
+    def test_studio_extend_keeps_source_and_requested_new_duration(self):
+        handler = _read(_HANDLER_PATH)
+        wgp = _read(_WGP_PATH)
+        store = _read(_STORE_PATH)
+        joined_target = _load_source_function(
+            _WGP_PATH,
+            "_joined_output_frame_target",
+        )
+
+        # A 209-frame source, 18-frame continuation context, and 260-frame
+        # continuation timeline publish as 209 source + 242 new frames.
+        self.assertEqual(joined_target(260, 209, 18), 451)
+        self.assertEqual(joined_target(260, 0, 0), 260)
+        self.assertIn('"image_prompt_types_allowed": "" if omni_reference else "TSEV"', handler)
+        self.assertIn("[MiniMax H3 Extend] Preserving", wgp)
+        self.assertIn("joined_output_frame_target", wgp)
+        self.assertIn("params.video_source = state.continueVideoPath", store)
+        self.assertNotIn(
+            "params.video_length = currentFrames - overlapFrames",
+            store,
+        )
+
     def test_h3_runtime_exposes_native_media_source_conditioning(self):
         main = _read(_MAIN_PATH)
         handler = _read(_HANDLER_PATH)
@@ -1776,6 +1911,12 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
         self.assertIn("generated_audio_local_indices", main)
         self.assertIn('or "D" in audio_prompt_type', main)
         self.assertIn('or "D" in audio_prompt_type', _read(_WGP_PATH))
+        self.assertIn("minimax_h3_runtime_references", _read(_WGP_PATH))
+        self.assertIn("split_exact_drive_audio_reference", launch)
+        self.assertIn("Music / Performance timeline locked", launch)
+        self.assertIn("apply_exact_drive_audio_prompt_contract", main)
+        self.assertIn("transformer quantization:", main)
+        self.assertIn("Exact target audio window", _read(_WGP_PATH))
         self.assertIn('"audio_prompt_type_sources"', handler)
         self.assertIn('"output_audio_is_input_audio": True', handler)
         self.assertIn('"minimax_h3_media_sources"', launch)
@@ -2457,6 +2598,10 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
 
     def test_ref2va_manifest_limits_and_visual_reference_requirement(self):
         from models.minimax_h3.ref2va import validate_reference_manifest
+        from models.minimax_h3.reference_manifest import (
+            apply_exact_drive_audio_prompt_contract,
+            split_exact_drive_audio_reference,
+        )
 
         manifest = validate_reference_manifest(
             [
@@ -2508,6 +2653,45 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
                 ],
                 require_files=False,
             )
+
+        with self.assertRaisesRegex(ValueError, "one Music / performance timeline"):
+            validate_reference_manifest(
+                [
+                    {"type": "image", "path": "portrait.png"},
+                    {"type": "audio", "path": "song-a.wav", "audio_intent": "drive"},
+                    {"type": "audio", "path": "song-b.wav", "audio_intent": "drive"},
+                ],
+                require_files=False,
+            )
+
+        runtime, drive_path, drive_ordinal = split_exact_drive_audio_reference(
+            [
+                {
+                    "type": "video",
+                    "path": "motion.mp4",
+                    "audio_path": "motion.wav",
+                    "include_audio": True,
+                },
+                {"type": "image", "path": "portrait.png"},
+                {"type": "audio", "path": "song.wav", "audio_intent": "drive"},
+                {"type": "audio", "path": "voice.wav", "audio_intent": "voice"},
+            ]
+        )
+        self.assertEqual(drive_path, "song.wav")
+        self.assertEqual(drive_ordinal, 2)
+        self.assertEqual(
+            [item.get("path") for item in runtime],
+            ["motion.mp4", "portrait.png", "voice.wav"],
+        )
+        repaired = apply_exact_drive_audio_prompt_contract(
+            "<Audio 2> drives the song; <Audio 3> defines the voice. "
+            "non_diegetic_music: Audio 2",
+            drive_ordinal,
+        )
+        self.assertIn("EXACT TARGET SOUNDTRACK", repaired)
+        self.assertNotIn("<Audio 2> drives", repaired)
+        self.assertIn("<Audio 2> defines the voice", repaired)
+        self.assertIn("non_diegetic_music: the exact target soundtrack", repaired)
 
     def test_ref2va_music_references_advance_while_voice_reuses_its_start(self):
         from PIL import Image

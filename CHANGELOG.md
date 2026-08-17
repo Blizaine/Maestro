@@ -5,6 +5,34 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [Unreleased]
 
+## [1.8.7] - 2026-08-16
+
+MiniMax H3 soundtrack workflows: Studio Omni now treats Music / Performance
+timeline audio as an exact target soundtrack instead of a generative reference,
+preserving its waveform while advancing the correct segment through every
+sequence window. Selecting that intent adopts the source duration and enables
+multi-window generation when needed without changing Voice or Style references.
+Prompt-reference numbering is repaired after the target soundtrack is routed
+out of the Omni manifest, and runtime logs show the exact audio window in use.
+
+H3 continuation and model sharing: Studio Video Extend now preserves the
+original clip, uses its audiovisual tail as native continuation context, and
+generates the requested amount of new material instead of starting an unrelated
+shot. All four Pruned and Full First / Last and Omni variants now select WanGP's
+INT8 ConvRot or BF16 checkpoints consistently. Linked checkpoint aliases and
+Qwen encoder layouts participate in readiness, download, storage, and deletion
+accounting, while startup diagnostics report each component's source and the
+transformer's actual quantization format.
+
+Music-video synchronization: vocal-performance LTX-2.5 Director plans are
+divided into native independent shots before prompt generation, and every
+window receives its exact soundtrack segment and lip-sync contract. When Audio
+Analysis provides a separated vocal stem, Maestro uses it only to condition
+mouth motion while retaining the untouched song in the published video; the
+same behavior applies to Dashboard regeneration. LTX-2.3 also restores its
+audio-driven mode when a soundtrack survives a model switch or saved-settings
+load, preventing it from silently generating unrelated audio.
+
 ## [1.8.6] - 2026-08-15
 
 Director music-video reliability: MiniMax H3 Omni batches now use a

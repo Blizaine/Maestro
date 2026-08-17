@@ -251,6 +251,36 @@ class H3ReferenceSequencePlannerTests(unittest.TestCase):
         )
 
     @patch("services.llm_service.generate", side_effect=RuntimeError("offline"))
+    def test_drive_soundtrack_is_target_conditioning_not_an_omni_audio_reference(
+        self,
+        _generate,
+    ):
+        result = plan_h3_reference_sequence(
+            "A singer performs the supplied song.",
+            model_type="minimax_h3_ref2va",
+            resolution="864x480",
+            total_frames=720,
+            references=[
+                {
+                    "type": "audio",
+                    "path": "song.wav",
+                    "role": "the performance",
+                    "audio_intent": "drive",
+                },
+                {
+                    "type": "image",
+                    "path": "singer.png",
+                    "role": "the singer",
+                    "image_intent": "identity",
+                },
+            ],
+        )
+        for prompt in result["window_prompts"]:
+            self.assertIn("exact target soundtrack", prompt.lower())
+            self.assertNotIn("<Audio 1>", prompt)
+            self.assertIn("<Picture 1>", prompt)
+
+    @patch("services.llm_service.generate", side_effect=RuntimeError("offline"))
     def test_fallback_keeps_retention_out_of_subject_definitions(self, _generate):
         result = plan_h3_reference_sequence(
             "Alex enters the city. Alex reaches the station. Alex boards the train.",

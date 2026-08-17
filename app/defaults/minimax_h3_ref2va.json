@@ -4,6 +4,8 @@
         "architecture": "minimax_h3_ref2va",
         "description": "Recommended lighter MiniMax H3 Omni model. Ordered image, video, and audio references can guide identity, appearance, motion, scenes, voices, or sound. Multi-window sequence supports AI-planned or manual per-window prompts while carrying recent motion and synchronized stereo audio with the same canonical references. H3 LoRAs, including Turbo, are converted automatically when needed.",
         "URLs": [
+            "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/fec7846aef352e58a1cfb699455e3d104281e68b/MiniMax-H3-Ref2VA-pruned_rank8_bf16.safetensors",
+            "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/fec7846aef352e58a1cfb699455e3d104281e68b/MiniMax-H3-Ref2VA-pruned_rank8_int8_convrot.safetensors",
             "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/0543966fbdce5ba05709a8f2031c94bdba629b4a/diffusion_models/minimax_h3_ref2va_pruned_fp8_scaled.safetensors"
         ]
     },

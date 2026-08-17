@@ -118,7 +118,7 @@ lm_decoder_engine = ""
 enable_int8_kernels = 0
 # All media attachment keys for queue save/load
 ATTACHMENT_KEYS = ["image_start", "image_end", "image_refs", "image_guide", "image_mask",
-                   "video_guide",  "video_mask", "video_source", "video_end", "audio_guide", "audio_guide2", "audio_guide3", "audio_guide4", "audio_guide5", "audio_guide6", "audio_source", "custom_guide"]
+                   "video_guide",  "video_mask", "video_source", "video_end", "audio_guide", "audio_guide2", "audio_guide3", "audio_guide4", "audio_guide5", "audio_guide6", "audio_conditioning_guide", "audio_source", "custom_guide"]
 
 from importlib.metadata import version
 mmgp_version = version("mmgp")
@@ -7249,6 +7249,30 @@ def _video_tensor_to_uint8_chunk_inplace(sample, value_range=(-1, 1)):
     sample = sample.sub_(min_val).mul_(255.0 / (max_val - min_val)).to(torch.uint8)
     return sample
 
+
+def _joined_output_frame_target(
+    requested_frames_to_generate,
+    source_video_frames_count=0,
+    source_video_overlap_frames_count=0,
+):
+    """Return the final joined-frame target for a continuation request.
+
+    ``requested_frames_to_generate`` uses WanGP's continuation timeline: it
+    includes the source-tail overlap that conditions the first generated
+    window, but not the earlier source frames that are copied verbatim into
+    the published movie.  Exact-duration models therefore need those
+    committed source frames added back before trimming the joined tensor.
+    """
+
+    requested = max(0, int(requested_frames_to_generate or 0))
+    source_frames = max(0, int(source_video_frames_count or 0))
+    source_overlap = min(
+        source_frames,
+        max(0, int(source_video_overlap_frames_count or 0)),
+    )
+    return requested + source_frames - source_overlap
+
+
 def _resolve_image_ref_fit(model_def, auto_aspect):
     """Choose shared reference fitting without pre-empting model postprocessing.
 
@@ -7443,7 +7467,9 @@ def generate_video(
     # MiniMax H3 Ref2VA's ordered image/video/audio manifest and reference
     # preparation policy. Other model runtimes ignore these kwargs.
     minimax_h3_references=None,
+    minimax_h3_runtime_references=None,
     minimax_h3_reference_detail="match",
+    minimax_h3_exact_drive_audio_ordinal=None,
     minimax_h3_multi_window=False,
     minimax_h3_reference_sequence=False,
     minimax_h3_sequence_prompt_mode="auto",
@@ -7461,6 +7487,11 @@ def generate_video(
     h3_window_prompts=None,
     h3_window_plan_signature=None,
     h3_window_plan=None,
+    # Optional pre-separated vocal stem used only for model conditioning.
+    # ``audio_guide`` remains the pristine soundtrack that is muxed into the
+    # published video. Director uses this to give LTX-2.5 a clearer lip-sync
+    # target without replacing the user's music with a vocals-only output.
+    audio_conditioning_guide=None,
 ):
 
 
@@ -8175,6 +8206,18 @@ def generate_video(
     output_new_audio_filepath = None
     original_audio_guide = audio_guide
     original_audio_guide2 = audio_guide2
+    if audio_conditioning_guide:
+        if os.path.isfile(str(audio_conditioning_guide)):
+            audio_guide = str(audio_conditioning_guide)
+            print(
+                "[Audio] Using a pre-separated vocal stem for visual "
+                "conditioning; preserving the original soundtrack for output."
+            )
+        else:
+            print(
+                "[Audio] Vocal conditioning stem is missing; falling back "
+                "to the original soundtrack."
+            )
     audio_proj_split = None
     audio_proj_full = None
     audio_scale = audio_scale if model_def.get("audio_scale_name") else None
@@ -8525,10 +8568,38 @@ def generate_video(
                     if fit_crop or "L" in image_prompt_type: refresh_preview["video_source"] = convert_tensor_to_image(prefix_video, 0)
 
                     new_height, new_width = prefix_video.shape[-2:]
-                    pre_video_guide =  prefix_video[:, -reuse_frames:].float().div_(127.5).sub_(1.) # c, f, h, w
+                    # A source movie contributes only its trailing native
+                    # continuation overlap to inference; the complete source
+                    # is copied verbatim into the final output below.  ``-0``
+                    # means the entire tensor in Python, so explicitly fall
+                    # back to one boundary frame for models with no rolling
+                    # overlap instead of accidentally conditioning on (and
+                    # regenerating against) the whole source clip.
+                    source_overlap = min(
+                        int(prefix_video.shape[1]),
+                        int(reuse_frames) if int(reuse_frames or 0) > 0 else 1,
+                    )
+                    pre_video_guide = (
+                        prefix_video[:, -source_overlap:]
+                        .float()
+                        .div_(127.5)
+                        .sub_(1.0)
+                    )  # c, f, h, w
                 pre_video_frame = convert_tensor_to_image(prefix_video[:, -1])
                 source_video_overlap_frames_count = pre_video_guide.shape[1]
                 source_video_frames_count = prefix_video.shape[1]
+                if (
+                    video_source is not None
+                    and str(model_def.get("architecture") or "").startswith(
+                        "minimax_h3"
+                    )
+                ):
+                    print(
+                        "[MiniMax H3 Extend] Preserving "
+                        f"{source_video_frames_count} source frames and using "
+                        f"the final {source_video_overlap_frames_count} frames "
+                        "as native motion/audio continuation context."
+                    )
                 # SCAIL-2's fake start image is an identity reference, not
                 # an output-frame anchor.  Keep fit_canvas available so the
                 # control video establishes the generated canvas/aspect.
@@ -8607,6 +8678,12 @@ def generate_video(
                 # detect that case and substitute the previous window's
                 # trailing generated audio as a continuation prefix.
                 input_waveform, input_waveform_sample_rate = slice_audio_window(audio_guide, audio_start_frame, current_video_length, fps, save_path, suffix=f"_win{window_no}", pad_tail=not video_length_not_limited_by_audio)
+                if "D" in audio_prompt_type:
+                    print(
+                        "[MiniMax H3 Omni] Exact target audio window "
+                        f"{audio_start_frame / float(fps):.2f}-"
+                        f"{(audio_start_frame + current_video_length) / float(fps):.2f}s."
+                    )
                 # If the requested audio window fell past the source (empty slice),
                 # fall back to the previous window's trailing generated audio so we
                 # get a non-empty prefix — the model will continue the voice/tone.
@@ -9175,8 +9252,15 @@ def generate_video(
                     progressive_stage1_image_weight=progressive_stage1_image_weight,
                     progressive_stage3_image_weight=progressive_stage3_image_weight,
                     **({} if not model_def.get("omni_reference", False) else {
-                        "minimax_h3_references": minimax_h3_references,
+                        "minimax_h3_references": (
+                            minimax_h3_runtime_references
+                            if minimax_h3_runtime_references is not None
+                            else minimax_h3_references
+                        ),
                         "minimax_h3_reference_detail": minimax_h3_reference_detail,
+                        "minimax_h3_exact_drive_audio_ordinal": (
+                            minimax_h3_exact_drive_audio_ordinal
+                        ),
                     }),
                     # Motion suffix: only passed when the loaded suffix video
                     # is available. Other model handlers (Wan / Flux / Qwen /
@@ -9390,9 +9474,14 @@ def generate_video(
                     # Trim that tail only after removing the shared boundary
                     # frame so video and native audio keep the exact requested
                     # joined duration.
+                    joined_output_frame_target = _joined_output_frame_target(
+                        requested_frames_to_generate,
+                        source_video_frames_count,
+                        source_video_overlap_frames_count,
+                    )
                     remaining_output_frames = max(
                         0,
-                        requested_frames_to_generate
+                        joined_output_frame_target
                         - frames_already_processed_count,
                     )
                     excess_output_frames = max(

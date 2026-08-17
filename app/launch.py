@@ -329,8 +329,15 @@ def _init_pipeline():
 # API Routes: /api/v1/*
 # ============================================================================
 
-def _variant_group_filenames(urls) -> list:
-    """Flatten one weight group (list of variant URLs / dict entries) to file names."""
+def _variant_group_filenames(urls, model_type: str | None = None) -> list:
+    """Flatten one weight group to canonical and load-compatible filenames.
+
+    Some linked WanGP installs contain a different supported serialization of
+    the same architecture (for example H3 Pruned INT8 ConvRot versus
+    Maestro's legacy scaled-FP8 file). Generation already resolves those
+    aliases; model readiness, deletion, and storage accounting must use the
+    same view or the UI can claim a usable linked model is missing.
+    """
     names = []
     for url_entry in urls:
         url_str = url_entry
@@ -340,15 +347,41 @@ def _variant_group_filenames(urls) -> list:
         if not isinstance(url_str, str) or not url_str:
             continue
         names.append(url_str.rstrip("/").split("/")[-1])
-    return names
+
+    compatibility = {}
+    if model_type:
+        model_def = wgp.get_model_def(model_type) or {}
+        compatibility = model_def.get("compatible_model_paths", {}) or {}
+
+    # Walk aliases transitively. Bidirectional migration mappings are
+    # deliberate, so dedupe while traversing rather than only at the end.
+    pending = list(names)
+    unique = []
+    seen = set()
+    while pending:
+        filename = pending.pop(0)
+        key = os.path.normcase(filename)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(filename)
+        aliases = compatibility.get(os.path.basename(str(filename)), [])
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        pending.extend(
+            os.path.basename(str(alias))
+            for alias in aliases
+            if str(alias)
+        )
+    return unique
 
 
-def _variant_group_downloaded(urls) -> bool:
+def _variant_group_downloaded(urls, model_type: str | None = None) -> bool:
     """True when ANY variant (full bf16 vs quantized int8...) of one weight
     group exists locally. Resolves through the files locator so checkpoints
     in linked model folders (Settings -> System -> Linked Model Folders)
     light up too — a hardcoded ckpts_dir check misses every secondary root."""
-    for filename in _variant_group_filenames(urls):
+    for filename in _variant_group_filenames(urls, model_type=model_type):
         if wgp.fl.locate_file(filename, error_if_none=False) is not None:
             return True
     return False
@@ -404,7 +437,7 @@ def _check_model_downloaded(model_type: str) -> bool:
         groups = _model_weight_groups(model_type)
         if not groups:
             return False
-        if not all(_variant_group_downloaded(g) for g in groups):
+        if not all(_variant_group_downloaded(g, model_type=model_type) for g in groups):
             return False
         # Some edit pipelines split required conditioning weights out of the
         # main transformer/text-encoder groups. Krea 2 Edit cannot run without
@@ -721,7 +754,7 @@ def delete_model(model_type: str):
     # shared base transformer for the base model's own delete button.
     filenames = []
     for group in _model_weight_groups(model_type, owned_only=True):
-        filenames.extend(_variant_group_filenames(group))
+        filenames.extend(_variant_group_filenames(group, model_type=model_type))
     deleted = []
     skipped_linked = []
     errors = []
@@ -802,7 +835,12 @@ def _download_model_files(model_type: str):
         if text_encoder_filename is not None and len(text_encoder_filename):
             text_encoder_folder = model_def.get("text_encoder_folder", None)
             wgp.download_models(text_encoder_filename, model_type, 2, -1, force_path=text_encoder_folder)
-            if wgp.get_local_model_filename(text_encoder_filename, extra_paths=text_encoder_folder) is None:
+            if wgp.get_compatible_local_model_filename(
+                text_encoder_filename,
+                model_type,
+                file_type=2,
+                extra_paths=text_encoder_folder,
+            ) is None:
                 raise Exception(f"Text encoder '{os.path.basename(text_encoder_filename)}' could not be located after download.")
 
     if not _check_model_downloaded(model_type):
@@ -6797,7 +6835,7 @@ def storage_usage():
         seen_paths = set()
         try:
             for group in _model_weight_groups(mt):
-                for fname in _variant_group_filenames(group):
+                for fname in _variant_group_filenames(group, model_type=mt):
                     p = wgp.fl.locate_file(fname, error_if_none=False)
                     if not p:
                         continue
@@ -6817,7 +6855,7 @@ def storage_usage():
             # removes owned files only (a finetune's alias never deletes
             # the shared base) — mirror that here or the button lies.
             for group in _model_weight_groups(mt, owned_only=True):
-                for fname in _variant_group_filenames(group):
+                for fname in _variant_group_filenames(group, model_type=mt):
                     p = wgp.fl.locate_file(fname, error_if_none=False)
                     if p and not wgp.fl.is_protected_path(p):
                         try:
@@ -9413,6 +9451,34 @@ async def generate(request: Request):
                 print(
                     "[MiniMax H3 Omni] Sequence planner release skipped: "
                     f"{unload_error}"
+                )
+
+        if _generation_model_def.get("omni_reference"):
+            from models.minimax_h3.reference_manifest import (
+                split_exact_drive_audio_reference,
+            )
+
+            runtime_references, drive_audio_path, drive_audio_ordinal = (
+                split_exact_drive_audio_reference(
+                    body.get("minimax_h3_references") or []
+                )
+            )
+            if drive_audio_path:
+                # ``drive`` is not a creative Ref2VA audio reference. Route it
+                # through the same frozen target-audio path as Director while
+                # retaining the original manifest for Load Settings and UI.
+                body["minimax_h3_runtime_references"] = runtime_references
+                body["minimax_h3_exact_drive_audio_ordinal"] = (
+                    drive_audio_ordinal
+                )
+                body["audio_prompt_type"] = "AD"
+                body["audio_guide"] = drive_audio_path
+                if int(body.get("multi_prompts_gen_type") or 0) == 3:
+                    body["multi_clip_concat_audio"] = drive_audio_path
+                print(
+                    "[MiniMax H3 Omni] Music / Performance timeline locked "
+                    "as exact target audio; voice/style references remain "
+                    "in the Omni manifest."
                 )
 
         # H3 First/Last continuation passes need genuinely different prompts.
@@ -22211,6 +22277,9 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     image_ends = [image_ends] if image_ends else []
                 sw_size = raw_params.get("sliding_window_size", raw_params.get("video_length", 121))
                 per_clip_frames = raw_params.pop("per_clip_frames", None)  # optional per-clip durations
+                per_clip_prompt_modes = raw_params.pop(
+                    "per_clip_prompt_modes", None,
+                )
                 per_clip_keyframes = raw_params.pop("per_clip_keyframes", None)  # optional keyframe injection per clip
                 per_clip_h3_references = raw_params.pop(
                     "per_clip_minimax_h3_references", None,
@@ -22395,11 +22464,29 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                         "omni_sequence_continuity": omni_sequence_continuity,
                         "target_total_frames": omni_sequence_target_frames,
                     }
-                    # If the clip prompt has newlines (window_prompts), use mode 1 (per-window)
-                    # Otherwise mode 0 (single task)
+                    # Director supplies the prompt mode explicitly so normal
+                    # paragraph breaks cannot be mistaken for window prompts.
+                    # Retain newline inference only for legacy/Studio callers.
                     clip_prompt = clip_params.get("prompt", "")
+                    explicit_prompt_mode = None
+                    if (
+                        isinstance(per_clip_prompt_modes, list)
+                        and i < len(per_clip_prompt_modes)
+                    ):
+                        try:
+                            explicit_prompt_mode = int(
+                                per_clip_prompt_modes[i]
+                            )
+                        except (TypeError, ValueError):
+                            explicit_prompt_mode = 0
                     clip_params["multi_prompts_gen_type"] = (
-                        0 if _mc_is_h3 else (1 if "\n" in clip_prompt else 0)
+                        0
+                        if _mc_is_h3
+                        else (
+                            explicit_prompt_mode
+                            if explicit_prompt_mode is not None
+                            else (1 if "\n" in clip_prompt else 0)
+                        )
                     )
                     # Keyframe injection: add image_refs and frames_positions for this clip
                     if per_clip_keyframes and i < len(per_clip_keyframes) and per_clip_keyframes[i]:

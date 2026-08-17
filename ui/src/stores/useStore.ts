@@ -5504,16 +5504,11 @@ export const useStore = create<AppState>((set, get) => ({
       if (!vptExtend.endsWith('T')) {
         params.video_prompt_type = vptExtend + 'T'
       }
-      // Compensate for the overlap frames the backend adds (video_length +
-      // overlap - 1). Without this, a 20s request with a 20s window produces
-      // 2 windows because the overlap pushes total frames past one window.
-      const swDefaults = state.modelOptions?.sliding_window_defaults as Record<string, number> | undefined
-      const overlap = swDefaults?.overlap_default ?? 9
-      const overlapFrames = Math.max(0, overlap - 1)
-      const currentFrames = (params.video_length as number) || 0
-      if (currentFrames > overlapFrames) {
-        params.video_length = currentFrames - overlapFrames
-      }
+      // Duration is the amount of NEW content requested by the user. The
+      // backend adds the source-tail overlap only to the model's first pass;
+      // it is conditioning context and must not be subtracted here. If that
+      // context pushes the request beyond one safe H3 pass, native sliding
+      // windows are the correct behavior and preserve the requested length.
     }
 
     // Safety net: Studio Video mode ALWAYS produces video. The sub-mode
@@ -6831,7 +6826,7 @@ export const useStore = create<AppState>((set, get) => ({
           if (reference.type === 'audio') {
             const intent = reference.audio_intent ?? 'voice'
             if (intent === 'drive') {
-              labelLines.push(`<Audio ${++audioIndex}>: ${note}; intent=AUDIO REUSE / PERFORMANCE DRIVER; retention=partially_copy; preserve its audible timeline and synchronize action to it`)
+              labelLines.push(`Exact target soundtrack: ${note}; intent=AUDIO REUSE / PERFORMANCE DRIVER; retention=fully_preserved; preserve its waveform and audible timeline exactly and synchronize visible action and lip movement to it; this is target conditioning rather than a numbered Omni audio reference`)
             } else if (intent === 'style') {
               labelLines.push(`<Audio ${++audioIndex}>: ${note}; intent=AUDIO REFERENCE; retention=weak_reference; borrow only rhythm/style/texture and do not copy the source signal or words`)
             } else {
@@ -10155,6 +10150,10 @@ export const useStore = create<AppState>((set, get) => ({
       workspace: get().activeWorkspace,
       scene_description: directorSceneDescription,
       audio_path: directorAudioPath,
+      // Audio analysis already produced this reusable stem for transcription.
+      // LTX-2.5 can condition mouth motion on it while Director keeps the
+      // untouched song as the final joined soundtrack.
+      audio_vocals_path: directorAnalysis?.vocals_path || undefined,
       reference_image_path: refImagePath,
       character_ref_paths: charPaths.length > 0 ? charPaths : undefined,
       character_ref_labels: state.directorCharacterRefLabels.length > 0 ? state.directorCharacterRefLabels : undefined,

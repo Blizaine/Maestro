@@ -77,6 +77,21 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.8.7 (2026-08-16)
+
+**MiniMax H3 audio, continuation, and shared models**
+- Music / Performance timeline audio in H3 Omni is now preserved as the exact target soundtrack and advances through long multi-window sequences instead of behaving like a reusable style reference.
+- Selecting a performance timeline automatically adopts the audio duration and enables multi-window generation when necessary, while Voice and Style references keep their existing behavior.
+- H3 Video Extend now keeps the complete source clip and uses its audiovisual tail for native same-shot continuation instead of creating an unrelated replacement clip.
+- Added consistent WanGP INT8 ConvRot and BF16 selection for all Pruned and Full First / Last and Omni variants, including linked-model readiness and storage accounting.
+- H3 startup diagnostics now identify where every component was loaded from and report whether the transformer is INT8 ConvRot, BF16, or legacy scaled FP8.
+
+**LTX music-video timing**
+- LTX-2.5 Director vocal performances are planned as native independent shots, with the correct source-song segment and lip-sync instructions applied to every generated window.
+- When available, Audio Analysis' separated vocal stem improves mouth-motion conditioning while the untouched original song remains in the final video.
+- Dashboard regeneration follows the same LTX-2.5 soundtrack and vocal-conditioning path as the initial Director run.
+- Fixed LTX-2.3 losing its audio-driven mode after model changes or restored settings even though the soundtrack remained selected.
+
 ### v1.8.6 (2026-08-15)
 
 **Director music-video reliability**

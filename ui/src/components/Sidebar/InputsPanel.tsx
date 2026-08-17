@@ -792,8 +792,17 @@ export function InputsPanel() {
               </label>
               <label className="flex items-center gap-2 cursor-pointer">
                 <input type="checkbox" checked={audioPT.includes('V')} onChange={() => toggleAudioFlag('V')} className="accent-accent-blue" />
-                <span className="text-[10px] text-text-secondary">Remove background music</span>
+                <span className="text-[10px] text-text-secondary">
+                  {modelOptions?.architecture === 'ltx2_25'
+                    ? 'Isolate vocals for better lip sync'
+                    : 'Remove background music'}
+                </span>
               </label>
+              {modelOptions?.architecture === 'ltx2_25' && (
+                <p className="text-[9px] text-text-muted">
+                  Conditions mouth motion on the vocal stem while keeping the original song in the finished video.
+                </p>
+              )}
             </>
           )}
         </Strip>

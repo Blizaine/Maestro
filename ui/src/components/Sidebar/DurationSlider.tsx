@@ -189,7 +189,15 @@ export function DurationSlider() {
       if (Math.abs(preferredSeconds - windowSize) > 0.0001) {
         setWindowSize(preferredSeconds)
       }
-      if (Math.abs(preferredSeconds - duration) > 0.0001) {
+      // Enabling a long-form H3 sequence changes the memory recommendation,
+      // but that recommendation is the per-window size—not a replacement for
+      // an established total timeline (for example, a drive-audio track).
+      // Model/resolution changes still initialize both values as before.
+      const shouldInitializeTotalDuration = selectionChanged || !h3MultiWindowEnabled
+      if (
+        shouldInitializeTotalDuration
+        && Math.abs(preferredSeconds - duration) > 0.0001
+      ) {
         setDuration(preferredSeconds)
       }
     }
@@ -206,6 +214,7 @@ export function DurationSlider() {
     setDuration,
     setWindowSize,
     setLocked,
+    h3MultiWindowEnabled,
   ])
 
   // Auto-track: window size follows duration with a small model-native

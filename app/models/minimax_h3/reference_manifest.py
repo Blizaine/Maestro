@@ -9,6 +9,7 @@ lightweight tools and CI.
 from __future__ import annotations
 
 import os
+import re
 
 
 MINIMAX_H3_MAX_REFERENCE_IMAGES = 9
@@ -21,6 +22,11 @@ _VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"}
 _AUDIO_EXTENSIONS = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav"}
 _AUDIO_INTENTS = {"voice", "drive", "style"}
 _IMAGE_INTENTS = {"identity", "scene", "style", "composition"}
+_AUDIO_REFERENCE_TAG_RE = re.compile(
+    r"(?P<tag><Audio\s+(?P<tag_index>\d+)>)|(?P<plain>\bAudio\s+(?P<plain_index>\d+)\b)",
+    re.IGNORECASE,
+)
+_EXACT_DRIVE_PROMPT_MARKER = "EXACT TARGET SOUNDTRACK"
 
 
 def validate_reference_manifest(
@@ -49,6 +55,7 @@ def validate_reference_manifest(
 
     normalized: list[dict] = []
     counts = {"image": 0, "video": 0, "audio": 0}
+    drive_audio_count = 0
     allowed = {"image": _IMAGE_EXTENSIONS, "video": _VIDEO_EXTENSIONS, "audio": _AUDIO_EXTENSIONS}
     for index, raw in enumerate(references):
         if not isinstance(raw, dict):
@@ -90,6 +97,8 @@ def validate_reference_manifest(
                     f"expected one of: {choices}."
                 )
             item["audio_intent"] = audio_intent
+            if audio_intent == "drive":
+                drive_audio_count += 1
         if kind == "video":
             item["include_audio"] = bool(raw.get("include_audio", True))
             audio_path = str(raw.get("audio_path") or "").strip()
@@ -111,4 +120,95 @@ def validate_reference_manifest(
             raise ValueError(f"MiniMax H3 accepts at most {limit} {kind} references, got {counts[kind]}.")
     if require_visual and counts["image"] + counts["video"] == 0:
         raise ValueError("Audio references cannot be used alone; add at least one image or video reference.")
+    if drive_audio_count > 1:
+        raise ValueError(
+            "MiniMax H3 accepts one Music / performance timeline. "
+            "Use Voice reference or Music / sound style only for additional audio references."
+        )
     return normalized
+
+
+def split_exact_drive_audio_reference(references) -> tuple[list[dict], str | None, int | None]:
+    """Separate Studio Omni's exact soundtrack from creative references.
+
+    Ref2VA reference audio is intentionally generative: it can borrow a voice,
+    rhythm, or performance, but it does not freeze the supplied waveform on the
+    target timeline. Maestro's ``drive`` intent promises the latter. The
+    generation request therefore sends that one file through H3's target-audio
+    conditioning path and keeps only visual/voice/style media in the packed
+    Omni reference sequence.
+
+    The returned ordinal is the drive file's original ``<Audio N>`` number so
+    old enhanced prompts can be repaired just before text encoding.
+    """
+
+    items = [dict(item) for item in (references or []) if isinstance(item, dict)]
+    runtime_references: list[dict] = []
+    drive_path: str | None = None
+    drive_ordinal: int | None = None
+    audio_ordinal = 0
+
+    for item in items:
+        kind = str(item.get("type") or item.get("kind") or "").strip().lower()
+        if kind == "video":
+            if (
+                (item.get("has_audio") or item.get("audio_path"))
+                and item.get("include_audio", True)
+            ):
+                audio_ordinal += 1
+            runtime_references.append(item)
+            continue
+        if kind != "audio":
+            runtime_references.append(item)
+            continue
+
+        audio_ordinal += 1
+        if str(item.get("audio_intent") or "voice").strip().lower() != "drive":
+            runtime_references.append(item)
+            continue
+        if drive_path is not None:
+            raise ValueError(
+                "MiniMax H3 accepts one Music / performance timeline. "
+                "Use Voice reference or Music / sound style only for additional audio references."
+            )
+        drive_path = str(item.get("path") or "").strip() or None
+        drive_ordinal = audio_ordinal
+
+    return runtime_references, drive_path, drive_ordinal
+
+
+def apply_exact_drive_audio_prompt_contract(prompt, removed_audio_ordinal: int | None) -> str:
+    """Remove a routed drive-audio tag and preserve later audio numbering."""
+
+    text = str(prompt or "").strip()
+    try:
+        removed = int(removed_audio_ordinal or 0)
+    except (TypeError, ValueError):
+        removed = 0
+
+    if removed > 0 and text:
+        def replace_tag(match: re.Match) -> str:
+            raw_index = match.group("tag_index") or match.group("plain_index")
+            index = int(raw_index)
+            if index == removed:
+                return "the exact target soundtrack"
+            if index < removed:
+                return match.group(0)
+            shifted = index - 1
+            return (
+                f"<Audio {shifted}>"
+                if match.group("tag") is not None
+                else f"Audio {shifted}"
+            )
+
+        text = _AUDIO_REFERENCE_TAG_RE.sub(replace_tag, text)
+
+    if not text or _EXACT_DRIVE_PROMPT_MARKER in text:
+        return text
+    return (
+        f"{_EXACT_DRIVE_PROMPT_MARKER} (highest priority): Preserve the supplied "
+        "soundtrack waveform and timing exactly on the target timeline. Synchronize "
+        "visible performance, body movement, cuts, and lip movement to that audio. "
+        "Do not reinterpret, replace, restart, or regenerate the music or spoken words.\n\n"
+        f"{text}"
+    )

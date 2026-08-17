@@ -32,7 +32,7 @@ from services.h3_window_planner import (
 )
 
 
-_H3_SEQUENCE_PLANNER_VERSION = 3 + H3_STORY_LEDGER_VERSION
+_H3_SEQUENCE_PLANNER_VERSION = 4 + H3_STORY_LEDGER_VERSION
 _H3_CLIP_BOUNDARY = "\n---CLIP_BOUNDARY---\n"
 
 
@@ -384,16 +384,17 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
                 if "audio reuse" not in task_types:
                     task_types.append("audio reuse")
         else:
-            audio += 1
             intent = item.get("audio_intent", "voice")
             if intent == "drive":
                 relationships.append(
-                    f"<Audio {audio}> is performance-driving audio for {role}; preserve its audible timeline."
+                    f"The exact target soundtrack supplies the performance and timing for {role}; "
+                    "preserve its waveform and audible timeline exactly and synchronize visible action to it."
                 )
-                retention.append(f"<Audio {audio}>: partially_copy")
+                retention.append("Exact target soundtrack: fully_preserved")
                 if "audio reuse" not in task_types:
                     task_types.append("audio reuse")
             elif intent == "style":
+                audio += 1
                 relationships.append(
                     f"<Audio {audio}> supplies sound, music, rhythm, or texture style for {role}, without copying its signal."
                 )
@@ -401,6 +402,7 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
                 if "audio reference" not in task_types:
                     task_types.append("audio reference")
             else:
+                audio += 1
                 relationships.append(
                     f"<Audio {audio}> supplies voice timbre, emotion, and delivery for {role}, without copying its words or timing."
                 )

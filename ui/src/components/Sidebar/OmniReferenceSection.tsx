@@ -45,6 +45,8 @@ export function OmniReferenceSection() {
   const params = useStore(s => s.params)
   const modelOptions = useStore(s => s.modelOptions)
   const setParam = useStore(s => s.setParam)
+  const setDurationSeconds = useStore(s => s.setDurationSeconds)
+  const slidingWindowSeconds = useStore(s => s.slidingWindowSeconds)
   const inputRef = useRef<HTMLInputElement>(null)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState('')
@@ -107,6 +109,26 @@ export function OmniReferenceSection() {
 
   const patchReference = (index: number, patch: Partial<MiniMaxH3Reference>) => {
     update(references.map((reference, itemIndex) => itemIndex === index ? { ...reference, ...patch } : reference))
+  }
+
+  const setAudioIntent = (index: number, intent: MiniMaxH3AudioIntent) => {
+    const reference = references[index]
+    patchReference(index, { audio_intent: intent })
+
+    // Voice and style references are reusable conditioning, not timelines.
+    // An exact music/performance driver, however, defines the output length.
+    if (intent !== 'drive') return
+    const audioDuration = Number(reference?.duration_seconds)
+    if (!Number.isFinite(audioDuration) || audioDuration <= 0) return
+
+    const fps = Math.max(1, Number(modelOptions?.fps) || 24)
+    const exceedsNativeWindow = audioDuration > slidingWindowSeconds + (1 / fps)
+    if (exceedsNativeWindow) {
+      // Enable sequence mode before setting Duration so the store does not
+      // clamp a long soundtrack back to Omni's single-pass frame lattice.
+      setParam('minimax_h3_reference_sequence', true)
+    }
+    setDurationSeconds(audioDuration)
   }
 
   const attachAudio = async (referenceId: string, file: File | undefined) => {
@@ -229,10 +251,11 @@ export function OmniReferenceSection() {
                 {reference.type === 'audio' && (
                   <select
                     value={reference.audio_intent ?? 'voice'}
-                    onChange={event => patchReference(index, {
-                      audio_intent: event.target.value as MiniMaxH3AudioIntent,
-                    })}
-                    title="Voice reference is reused for identity in every clip. Music/performance timeline advances through the recording across sequence clips. Style-only advances through long references but borrows character rather than exact audio or timing."
+                    onChange={event => setAudioIntent(
+                      index,
+                      event.target.value as MiniMaxH3AudioIntent,
+                    )}
+                    title="Voice reference is reused for identity in every clip. Music / performance timeline adopts the track duration, preserves the exact soundtrack and advances through it across sequence clips. It automatically enables a multi-window sequence when needed. Style-only borrows musical character rather than exact audio or timing."
                     className="w-full bg-bg-primary border border-border rounded px-2 py-1 text-[10px] text-text-secondary focus:outline-none focus:border-accent-blue"
                   >
                     <option value="voice">Voice reference</option>

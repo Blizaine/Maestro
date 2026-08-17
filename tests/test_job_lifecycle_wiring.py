@@ -412,6 +412,19 @@ class TestJobLifecycleWiring(unittest.TestCase):
             '"audio_start_sec": multi_clip_audio_start_sec'
         ), 2)
 
+    def test_director_multiclip_dispatch_uses_explicit_prompt_modes(self):
+        generation = _function(self.launch, "_run_generation")
+        with open(
+            os.path.join(_ROOT, "app", "launch.py"), "r", encoding="utf-8",
+        ) as handle:
+            source = ast.get_source_segment(handle.read(), generation)
+        self.assertIn('raw_params.pop(\n                    "per_clip_prompt_modes"', source)
+        self.assertIn("explicit_prompt_mode", source)
+        self.assertIn(
+            'else (1 if "\\n" in clip_prompt else 0)',
+            source,
+        )
+
     def test_failed_audio_mux_removes_partial_output(self):
         combine = _load_isolated_function(
             "app/shared/utils/audio_video.py",

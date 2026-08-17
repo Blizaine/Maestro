@@ -74,6 +74,11 @@ _LTX25_MUSIC_VIDEO_SYNC_CONTRACT = (
     "exact timing, natural mouth shapes, and matching breaths. People who "
     "are not performing vocals keep their mouths closed."
 )
+_DIRECTOR_VOCAL_PERFORMANCE_RE = re.compile(
+    r"\b(?:lip[-\s]?sync(?:s|ing|ed)?|sing(?:s|ing|er|ers)?|"
+    r"rap(?:s|ping|per|pers)?|vocalist(?:s)?|lyrics?|chorus|verse)\b",
+    re.IGNORECASE,
+)
 _CANCELLED_ARTIFACT_FIELDS = {
     "output_files",
     "clip_images",
@@ -156,9 +161,117 @@ def _apply_ltx25_music_video_sync_contract(
     for prompt in prompts:
         text = str(prompt or "").strip()
         if _LTX25_MUSIC_VIDEO_SYNC_CONTRACT not in text:
-            text = f"{text.rstrip()}\n\n{_LTX25_MUSIC_VIDEO_SYNC_CONTRACT}".strip()
+            # Keep this on the same logical prompt line. Multi-clip dispatch
+            # historically treated any newline as a sliding-window boundary,
+            # which meant the sync contract became an unused second window
+            # instead of conditioning the clip that was actually rendered.
+            text = f"{text.rstrip()} {_LTX25_MUSIC_VIDEO_SYNC_CONTRACT}".strip()
         contracted.append(text)
     return contracted
+
+
+def _is_ltx25_model(video_model: str, model_def: Optional[dict]) -> bool:
+    """Return whether a selected Director model uses LTX-2.5."""
+
+    identifiers = (
+        str(video_model or "").lower(),
+        str((model_def or {}).get("architecture") or "").lower(),
+    )
+    return any(value.startswith("ltx2_25") for value in identifiers)
+
+
+def _director_requests_vocal_performance(params: dict) -> bool:
+    """Return whether the supplied song/project contains visible vocals."""
+
+    lyrics = params.get("lyrics")
+    if isinstance(lyrics, (list, tuple)):
+        for entry in lyrics:
+            if isinstance(entry, dict):
+                value = entry.get("text") or entry.get("lyrics") or ""
+            else:
+                value = entry
+            if str(value or "").strip():
+                return True
+    elif str(lyrics or "").strip():
+        return True
+    return bool(
+        _DIRECTOR_VOCAL_PERFORMANCE_RE.search(
+            str(params.get("scene_description") or "")
+        )
+    )
+
+
+def _ltx25_music_video_max_shot_frames(
+    params: dict,
+    model_def: Optional[dict],
+    *,
+    pipeline_type: str,
+) -> Optional[int]:
+    """Use one native LTX-2.5 pass per vocal-performance Director shot.
+
+    LTX-2.5 can technically continue a much longer clip with rolling windows,
+    but a mouth trajectory that misses the soundtrack in an early pass tends
+    to deteriorate for the remainder of a 20-30 second shot. Music videos are
+    editorial by nature, so plan independent shots at the model's native
+    window length (currently about ten seconds) and give every shot its exact
+    soundtrack slice instead of accumulating that visual error.
+    """
+
+    video_model = str(params.get("video_model") or "")
+    audio_path = str(params.get("audio_path") or "").strip()
+    if (
+        pipeline_type != "music_video"
+        or not audio_path
+        or not _is_ltx25_model(video_model, model_def)
+        or not _director_requests_vocal_performance(params)
+    ):
+        return None
+
+    defaults = (model_def or {}).get("sliding_window_defaults") or {}
+    minimum = max(1, int((model_def or {}).get("frames_minimum") or 17))
+    step = max(1, int((model_def or {}).get("frames_steps") or 8))
+    requested = int(defaults.get("window_default") or round(10 * 24))
+    maximum = int(defaults.get("window_max") or requested)
+    requested = min(maximum, max(minimum, requested))
+    # Snap to the same minimum+n*step lattice used by the model runtime while
+    # never rounding above a model-published maximum.
+    valid = list(range(minimum, maximum + 1, step)) or [minimum]
+    return min(valid, key=lambda value: (abs(value - requested), value))
+
+
+def _ltx25_vocal_conditioning_path(
+    params: dict,
+    model_def: Optional[dict],
+    *,
+    pipeline_type: str,
+) -> Optional[str]:
+    """Find Audio Analysis' reusable vocal stem for LTX-2.5 Director."""
+
+    video_model = str(params.get("video_model") or "")
+    audio_path = str(params.get("audio_path") or "").strip()
+    if (
+        pipeline_type != "music_video"
+        or not audio_path
+        or not _is_ltx25_model(video_model, model_def)
+        or not _director_requests_vocal_performance(params)
+    ):
+        return None
+
+    candidates: list[str] = []
+    stem, _ = os.path.splitext(os.path.basename(audio_path))
+    if stem:
+        candidates.append(
+            os.path.join(
+                os.path.dirname(audio_path),
+                "vocals",
+                f"{stem}_vocals.wav",
+            )
+        )
+    candidates.append(str(params.get("audio_vocals_path") or "").strip())
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    return None
 
 
 def _normalize_director_media_strengths(
@@ -2489,6 +2602,7 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
     ) / fps
     clip_duration_sec = video_length / fps
     slice_path = None
+    vocal_slice_path = None
     if (
         director_strategy == OMNI_REFERENCE
         and pipeline_type != "short_film_story"
@@ -2512,6 +2626,39 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
                 "AD" if director_strategy == OMNI_REFERENCE else "A"
             )
             gen_params["audio_guide"] = slice_path
+            vocal_source = _ltx25_vocal_conditioning_path(
+                snapshot,
+                model_def,
+                pipeline_type=pipeline_type,
+            )
+            if vocal_source:
+                vocal_slice_path = os.path.join(
+                    clip_out_dir,
+                    f"_rerun_vocals_{pid_token}_c{clip_index}_"
+                    f"{uuid.uuid4().hex[:8]}.wav",
+                )
+                try:
+                    _slice_audio_segment(
+                        vocal_source,
+                        clip_start,
+                        clip_duration_sec,
+                        vocal_slice_path,
+                    )
+                    gen_params["audio_conditioning_guide"] = (
+                        vocal_slice_path
+                    )
+                except Exception as vocal_error:
+                    if os.path.isfile(vocal_slice_path):
+                        try:
+                            os.remove(vocal_slice_path)
+                        except OSError:
+                            pass
+                    vocal_slice_path = None
+                    print(
+                        f"[Pipeline {pid}] Clip {clip_index} vocal-stem "
+                        "slice failed; falling back to the original song "
+                        f"for visual conditioning: {vocal_error}"
+                    )
             if rerun_audio_scale is not None:
                 gen_params["audio_scale"] = rerun_audio_scale
             print(f"[Pipeline {pid}] Clip {clip_index} rerun conditioned on song segment "
@@ -2604,6 +2751,11 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
         if slice_path and os.path.isfile(slice_path):
             try:
                 os.remove(slice_path)
+            except OSError:
+                pass
+        if vocal_slice_path and os.path.isfile(vocal_slice_path):
+            try:
+                os.remove(vocal_slice_path)
             except OSError:
                 pass
         if continuation_path and os.path.isfile(continuation_path):
@@ -4059,10 +4211,10 @@ def _run_pipeline(pid: str, resume: bool = False):
         if not clip_plans:
             raise RuntimeError("Planning produced no clip plans")
 
-        # H3 does not expose Director's rolling-window contract. Convert the
-        # plan before prompt polish and image generation so every downstream
-        # artifact (start images, source-audio slices, repair metadata, and
-        # generated clips) shares the same native 17n+5 timing lattice.
+        # Bounded H3 and lip-sync-critical LTX-2.5 music videos need native
+        # independent shots. Convert the plan before prompt polish and image
+        # generation so every downstream artifact (start images, exact audio
+        # slices, repair metadata, and generated clips) shares one timeline.
         if not resume_plans:
             video_model = params.get("video_model") or "ltx2_22B_distilled_1_1"
             try:
@@ -4070,11 +4222,23 @@ def _run_pipeline(pid: str, resume: bool = False):
             except Exception:
                 selected_video_def = {}
             selected_strategy = video_strategy(selected_video_def)
-            if selected_strategy in {BOUNDED_START_END, OMNI_REFERENCE}:
+            ltx25_max_frames = _ltx25_music_video_max_shot_frames(
+                params,
+                selected_video_def,
+                pipeline_type=pipeline_type,
+            )
+            if (
+                selected_strategy in {BOUNDED_START_END, OMNI_REFERENCE}
+                or ltx25_max_frames is not None
+            ):
                 model_fps = float(selected_video_def.get("fps") or 24)
                 minimum_frames = int(selected_video_def.get("frames_minimum") or 124)
-                maximum_frames = _director_effective_max_frames(
-                    params, selected_video_def,
+                maximum_frames = (
+                    ltx25_max_frames
+                    if ltx25_max_frames is not None
+                    else _director_effective_max_frames(
+                        params, selected_video_def,
+                    )
                 )
                 frame_step = int(selected_video_def.get("frames_steps") or 17)
                 original_count = len(clip_plans)
@@ -4702,15 +4866,24 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
     effective_max_frames = _director_effective_max_frames(
         params, selected_video_def,
     )
+    ltx25_max_frames = _ltx25_music_video_max_shot_frames(
+        params,
+        selected_video_def,
+        pipeline_type=pipeline_type,
+    )
 
     # Audio-analysis workflows arrive with a coarse clip timeline before the
-    # LLM writes prompts. For bounded H3, divide that timeline now so the LLM
-    # receives the exact number and duration of native shots. Splitting after
-    # prompt generation forced one long action/dialogue description across
-    # multiple hardware windows and made later windows repeat or improvise.
+    # LLM writes prompts. For bounded H3 and LTX-2.5 music-video lip sync,
+    # divide that timeline now so the LLM receives the exact number and
+    # duration of native shots. Splitting after prompt generation forced one
+    # long action/dialogue description across multiple runtime windows and
+    # made later windows repeat, improvise, or drift away from the vocal.
     if (
         pipeline_type != "short_film_story"
-        and selected_video_strategy in {BOUNDED_START_END, OMNI_REFERENCE}
+        and (
+            selected_video_strategy in {BOUNDED_START_END, OMNI_REFERENCE}
+            or ltx25_max_frames is not None
+        )
         and planned_clips
     ):
         placeholder_plans = [
@@ -4718,6 +4891,11 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
             for _ in planned_clips
         ]
         original_planning_count = len(planned_clips)
+        planning_max_frames = (
+            ltx25_max_frames
+            if ltx25_max_frames is not None
+            else effective_max_frames
+        )
         _, planned_clips = adapt_bounded_timeline(
             placeholder_plans,
             planned_clips,
@@ -4725,7 +4903,7 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
             minimum_frames=int(
                 selected_video_def.get("frames_minimum") or 124
             ),
-            maximum_frames=effective_max_frames,
+            maximum_frames=planning_max_frames,
             frame_step=int(selected_video_def.get("frames_steps") or 17),
         )
         params["planned_clips"] = planned_clips
@@ -4733,7 +4911,7 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
             f"[Pipeline {pid}] Pre-segmented {original_planning_count} "
             f"audio timeline item(s) into {len(planned_clips)} "
             f"hardware-safe native shot(s) before prompt planning "
-            f"(max {effective_max_frames} frames)."
+            f"(max {planning_max_frames} frames)."
         )
     # Pass video_model and image_model to every planner so Pass 2 can
     # route its prompt guides correctly. Previously these only flowed
@@ -5812,6 +5990,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
         image_start_paths = []
         image_end_paths = []
         per_clip_frames = []
+        per_clip_prompt_modes = []
         has_sliding_window = False
         h3_timing_repaired = False
         bounded_director = director_strategy in {
@@ -5831,6 +6010,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
             wp = [w.get("prompt", w.get("text", str(w))) if isinstance(w, dict) else str(w) for w in wp]
             if len(wp) > 1:
                 prompts.append("\n".join(wp))
+                per_clip_prompt_modes.append(1)
             else:
                 vp = plan.get("video_prompt", "")
                 pc = planned_clips[i] if i < len(planned_clips) else {}
@@ -5838,6 +6018,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                 if dur > 32 and vp:
                     print(f"[Pipeline] WARNING: Clip {i+1} is {dur:.0f}s but has no window_prompts")
                 prompts.append(vp)
+                per_clip_prompt_modes.append(0)
 
             img_file = (
                 clip_images[i]
@@ -6043,6 +6224,11 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
         if pipeline_type != "short_film_story" and audio_path
         else 0.0
     )
+    audio_conditioning_path = _ltx25_vocal_conditioning_path(
+        params,
+        model_def,
+        pipeline_type=pipeline_type,
+    )
     if director_strategy == OMNI_REFERENCE:
         if uses_shot_images and (
             not image_start_paths or not all(image_start_paths)
@@ -6105,6 +6291,15 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
     elif audio_path:
         audio_params["audio_prompt_type"] = "A"
         audio_params["audio_guide"] = audio_path
+        if audio_conditioning_path:
+            audio_params["audio_conditioning_guide"] = (
+                audio_conditioning_path
+            )
+            print(
+                f"[Pipeline {pid}] LTX-2.5 visual conditioning uses the "
+                "pre-separated vocal stem; final output keeps the original "
+                "song."
+            )
         # Music analysis may intentionally omit a silent intro. Align model
         # conditioning to the source-audio time represented by video frame 0.
         audio_params["audio_frame_offset"] = round(audio_start_sec * fps)
@@ -6241,13 +6436,30 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
             )
             prompts = [str(plan.get("video_prompt") or "") for plan in clip_plans]
 
-        prompts = _apply_ltx25_music_video_sync_contract(
-            prompts,
-            video_model=video_model,
-            model_def=model_def,
-            pipeline_type=pipeline_type,
-            audio_path=audio_path,
-        )
+        # A planned multi-window clip stores one prompt per line. Apply the
+        # LTX-2.5 sync contract to every window independently; ordinary clips
+        # keep their full prompt (including harmless paragraph breaks) as one
+        # logical prompt.
+        contracted_prompts: list[str] = []
+        for prompt_index, prompt in enumerate(prompts):
+            is_windowed = (
+                prompt_index < len(per_clip_prompt_modes)
+                and per_clip_prompt_modes[prompt_index] == 1
+            )
+            prompt_parts = (
+                [line for line in str(prompt).splitlines() if line.strip()]
+                if is_windowed
+                else [prompt]
+            )
+            contracted_parts = _apply_ltx25_music_video_sync_contract(
+                prompt_parts,
+                video_model=video_model,
+                model_def=model_def,
+                pipeline_type=pipeline_type,
+                audio_path=audio_path,
+            )
+            contracted_prompts.append("\n".join(contracted_parts))
+        prompts = contracted_prompts
         if any(
             _LTX25_MUSIC_VIDEO_SYNC_CONTRACT in prompt
             for prompt in prompts
@@ -6278,6 +6490,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
             "video_length": total_frames,
             "sliding_window_size": sliding_window_frames,
             "per_clip_frames": per_clip_frames,
+            "per_clip_prompt_modes": per_clip_prompt_modes,
             "multi_clip_audio_start_sec": audio_start_sec,
             "seed": -1,
             "settings_version": 2.52,

@@ -62,6 +62,7 @@ from .ref2va import (
     prepare_references,
     trim_reference_num_frames,
 )
+from .reference_manifest import apply_exact_drive_audio_prompt_contract
 from .scheduler import MiniMaxH3Scheduler
 from .first_block_cache import MiniMaxH3FirstBlockCache
 from .transformer import (
@@ -879,6 +880,20 @@ def _log_h3_asset_sources(components: dict[str, str]) -> None:
         else:
             origin = kind
         print(f"[MiniMax H3 Assets]   {component}: {origin} -> {source['path']}")
+        if component == "transformer":
+            filename = os.path.basename(str(source["path"])).lower()
+            if "int8_convrot" in filename:
+                checkpoint_format = "INT8 ConvRot"
+            elif "fp8_scaled" in filename:
+                checkpoint_format = "scaled FP8 (legacy compatible)"
+            elif "bf16" in filename:
+                checkpoint_format = "BF16"
+            else:
+                checkpoint_format = "unrecognized filename format"
+            print(
+                "[MiniMax H3 Assets]   transformer quantization: "
+                f"{checkpoint_format}"
+            )
 
 
 class MiniMaxH3Model:
@@ -1334,6 +1349,7 @@ class MiniMaxH3Model:
         set_progress_status=None,
         minimax_h3_references=None,
         minimax_h3_reference_detail: str = "match",
+        minimax_h3_exact_drive_audio_ordinal: int | None = None,
         frames_to_inject=None,
         frames_relative_positions_list=None,
         audio_prompt_type: str = "",
@@ -1385,10 +1401,10 @@ class MiniMaxH3Model:
             any(flag in audio_prompt_type for flag in "AK")
             and (
                 not self.omni_reference
-                # ``D`` is an internal Maestro Director marker: ordinary
-                # Ref2VA audio remains a voice/style/reference input, while
-                # Director music/dialogue uses the supplied waveform as
-                # frozen target-audio conditioning.
+                # ``D`` is Maestro's internal exact-drive marker. Ordinary
+                # Ref2VA voice/style audio remains a creative reference;
+                # Director soundtracks and Studio's Music / Performance
+                # timeline use frozen target-audio conditioning.
                 or "D" in audio_prompt_type
             )
         )
@@ -1737,6 +1753,11 @@ class MiniMaxH3Model:
 
         audio_condition_rows = None
         if self.omni_reference:
+            if source_audio_mode:
+                input_prompt = apply_exact_drive_audio_prompt_contract(
+                    input_prompt,
+                    minimax_h3_exact_drive_audio_ordinal,
+                )
             conditioned_prompt = ensure_ref2va_prompt_relationships(
                 input_prompt,
                 minimax_h3_references,
