@@ -23,6 +23,84 @@ __all__ = [
     'attention',
 ]
 
+# Upstream SCAIL-2 calls Flash Attention directly.  That ignores the attention
+# backend the user selected and hard fails on GPUs the installed flash-attn
+# wheel carries no kernels for ("no kernel image is available for execution on
+# the device", e.g. SM 8.6 with a wheel built for sm80/sm90 only).  Route
+# through Maestro's shared dispatcher instead, so the dedicated transformer
+# path gets the same backend selection and capability gating as the
+# generalized Wan path.  The vendored implementation below stays as the
+# fallback for standalone / CPU contract-test use.
+_dispatcher = None
+
+
+def _get_dispatcher():
+    global _dispatcher
+    if _dispatcher is None:
+        try:
+            from mmgp import offload
+            from shared.attention import (
+                get_default_attention_mode,
+                pay_attention,
+            )
+        except Exception:
+            _dispatcher = False
+        else:
+            _dispatcher = (pay_attention, get_default_attention_mode, offload)
+    return None if _dispatcher is False else _dispatcher
+
+
+def _shared_attention(
+    dispatcher,
+    q,
+    k,
+    v,
+    q_lens,
+    k_lens,
+    dropout_p,
+    softmax_scale,
+    q_scale,
+    causal,
+    window_size,
+    deterministic,
+    dtype,
+    fa_version,
+):
+    pay_attention, get_default_attention_mode, offload = dispatcher
+    half_dtypes = (torch.float16, torch.bfloat16)
+    assert dtype in half_dtypes
+    out_dtype = q.dtype
+
+    def half(x):
+        return x if x.dtype in half_dtypes else x.to(dtype)
+
+    q, k, v = half(q), half(k), half(v)
+    if q_scale is not None:
+        q = q * q_scale
+
+    # 'pay_attention' reads the selected backend from the offload shared state,
+    # which only the generation loop populates.
+    force_attention = (
+        None if offload.shared_state.get("_attention")
+        else get_default_attention_mode()
+    )
+
+    qkv_list = [q, k, v]
+    del q, k, v
+    x = pay_attention(
+        qkv_list,
+        dropout_p=dropout_p,
+        softmax_scale=softmax_scale,
+        causal=causal,
+        window_size=window_size,
+        deterministic=deterministic,
+        version=fa_version,
+        q_lens=q_lens,
+        k_lens=k_lens,
+        force_attention=force_attention,
+    )
+    return x.type(out_dtype)
+
 
 def flash_attention(
     q,
@@ -148,6 +226,26 @@ def attention(
     dtype=torch.bfloat16,
     fa_version=None,
 ):
+    if q.device.type == 'cuda':
+        dispatcher = _get_dispatcher()
+        if dispatcher is not None:
+            return _shared_attention(
+                dispatcher,
+                q=q,
+                k=k,
+                v=v,
+                q_lens=q_lens,
+                k_lens=k_lens,
+                dropout_p=dropout_p,
+                softmax_scale=softmax_scale,
+                q_scale=q_scale,
+                causal=causal,
+                window_size=window_size,
+                deterministic=deterministic,
+                dtype=dtype,
+                fa_version=fa_version,
+            )
+
     if (
         q.device.type == 'cuda'
         and (FLASH_ATTN_2_AVAILABLE or FLASH_ATTN_3_AVAILABLE)
