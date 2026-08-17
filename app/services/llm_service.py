@@ -613,6 +613,42 @@ def provider_api_key(provider: str, services: dict) -> str:
     return services.get(setting, "") if setting else ""
 
 
+#: Body fields the OpenAI chat-completions API defines. Everything else in
+#: our payloads is a llama.cpp sampling extension.
+_OPENAI_CHAT_FIELDS = frozenset({
+    "messages", "model", "max_tokens", "max_completion_tokens", "temperature",
+    "top_p", "n", "stream", "stream_options", "stop", "presence_penalty",
+    "frequency_penalty", "logit_bias", "logprobs", "top_logprobs", "seed",
+    "response_format", "tools", "tool_choice", "user",
+})
+
+
+def _finalize_payload(payload: dict) -> dict:
+    """Adapt a llama-server payload to whichever provider is active.
+
+    Payloads are built in llama-server's dialect: it serves exactly one
+    model, so no "model" field is needed, and it accepts llama.cpp sampling
+    extensions such as top_k, min_p, repeat_penalty and cache_prompt.
+
+    Remote OpenAI-compatible endpoints need the opposite treatment. "model"
+    is required by the spec -- a gateway fronting several models cannot
+    route without it -- and strict gateways reject unknown body fields
+    outright, so a request carrying cache_prompt comes back 400 Bad Request
+    with no indication of which field was at fault.
+    """
+    if _provider == "local":
+        return payload
+    prepared = {k: v for k, v in payload.items() if k in _OPENAI_CHAT_FIELDS}
+    dropped = sorted(set(payload) - set(prepared))
+    if dropped:
+        print(
+            f"[LLM] Dropped {len(dropped)} llama.cpp-only field(s) not accepted by "
+            f"provider={_provider}: {', '.join(dropped)}"
+        )
+    prepared["model"] = _model_id
+    return prepared
+
+
 def _server_url() -> str:
     if _provider in ("remote", "openai") and _remote_url:
         return _remote_url.rstrip("/")
@@ -1462,8 +1498,23 @@ def _diagnose_llm_request_failure(exc: Exception) -> "RuntimeError":
         return RuntimeError(
             f"LLM request failed: {exc}\nRecent llama-server output:\n{tail}"
         )
-    # Remote provider — a real network/timeout issue.
-    return RuntimeError(f"LLM request failed: {exc}")
+    # Remote provider — a network/timeout issue, or the endpoint rejecting
+    # the request. requests' HTTPError stringifies to the status line alone,
+    # so a 4xx arrives with no hint of what the gateway objected to. Quote
+    # its body: that is where "unknown parameter" / "model not found" /
+    # "insufficient quota" actually live.
+    detail = ""
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            body = (response.text or "").strip()
+        except Exception:
+            body = ""
+        if body:
+            if len(body) > 800:
+                body = body[:800] + "... (truncated)"
+            detail = f"\nEndpoint response: {body}"
+    return RuntimeError(f"LLM request failed: {exc}{detail}")
 
 
 def _unload_inner():
@@ -1659,7 +1710,7 @@ def generate(
     try:
         resp = requests.post(
             f"{_server_url()}/v1/chat/completions",
-            json=payload,
+            json=_finalize_payload(payload),
             headers=_api_headers(),
             # (connect, read): fail fast if the server socket is gone;
             # allow a long read for actual generation.
@@ -1868,7 +1919,7 @@ def generate_streaming(
     try:
         resp = requests.post(
             f"{_server_url()}/v1/chat/completions",
-            json=payload,
+            json=_finalize_payload(payload),
             headers=_api_headers(),
             timeout=(10, 600),
             stream=True,
