@@ -619,6 +619,8 @@ export interface ServicesConfig {
   llm_device: string
   llm_provider: string
   llm_remote_url: string
+  llm_remote_api_key: string
+  llm_remote_api_key_set: boolean
   enhance_llm_model_id: string
   enhance_llm_device: string
   google_api_key: string

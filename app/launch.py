@@ -6281,6 +6281,11 @@ def get_services_config():
         "llm_device": services.get("llm_device", _llm_default_device()),
         "llm_provider": provider,
         "llm_remote_url": services.get("llm_remote_url", ""),
+        # Hosted OpenAI-compatible endpoints (as opposed to a LAN LM Studio /
+        # Ollama box) require a bearer token. Kept separate from the OpenAI
+        # key so switching providers doesn't send the wrong credential.
+        "llm_remote_api_key": _mask_key(services.get("llm_remote_api_key", "")),
+        "llm_remote_api_key_set": bool(services.get("llm_remote_api_key", "")),
         "enhance_llm_model_id": services.get("enhance_llm_model_id", ""),
         "enhance_llm_device": services.get("enhance_llm_device", "cuda"),
         "google_api_key": _mask_key(services.get("google_api_key", "")),
@@ -6367,6 +6372,7 @@ async def update_services_config(request: Request):
 
     ALLOWED_KEYS = {
         "llm_model_id", "llm_device", "llm_provider", "llm_remote_url",
+        "llm_remote_api_key",
         "enhance_llm_model_id", "enhance_llm_device",
         "google_api_key", "openai_api_key", "anthropic_api_key",
         "use_director_v2", "nsfw_mode", "nsfw_accepted_at", "director_prompt_polish",
@@ -6955,11 +6961,7 @@ async def llm_load(request: Request):
     device = body.get("device", services.get("llm_device", _llm_default_device()))
     provider = body.get("provider", services.get("llm_provider", "local"))
     remote_url = body.get("remote_url", services.get("llm_remote_url", ""))
-    api_key = ""
-    if provider == "openai":
-        api_key = services.get("openai_api_key", "")
-    elif provider == "anthropic":
-        api_key = services.get("anthropic_api_key", "")
+    api_key = llm_service.provider_api_key(provider, services)
 
     try:
         llm_service.load_model(model_id=model_id, device=device, provider=provider, remote_url=remote_url, api_key=api_key)
@@ -6984,11 +6986,7 @@ def list_llm_models(provider: str = ""):
     services = wgp.server_config.get("services", {})
     p = provider or services.get("llm_provider", "local")
     remote_url = services.get("llm_remote_url", "")
-    api_key = ""
-    if p == "openai":
-        api_key = services.get("openai_api_key", "")
-    elif p == "anthropic":
-        api_key = services.get("anthropic_api_key", "")
+    api_key = llm_service.provider_api_key(p, services)
     return {"models": llm_service.get_available_models(provider=p, remote_url=remote_url, api_key=api_key)}
 
 
@@ -7007,11 +7005,7 @@ def _ensure_llm_loaded():
     desired_device = services.get("llm_device", _llm_default_device())
     desired_provider = services.get("llm_provider", "local")
     desired_remote_url = services.get("llm_remote_url", "")
-    desired_api_key = ""
-    if desired_provider == "openai":
-        desired_api_key = services.get("openai_api_key", "")
-    elif desired_provider == "anthropic":
-        desired_api_key = services.get("anthropic_api_key", "")
+    desired_api_key = llm_service.provider_api_key(desired_provider, services)
 
     if llm_service.is_loaded():
         status = llm_service.get_status()

@@ -592,6 +592,27 @@ def get_model_dir() -> str:
     return d
 
 
+#: Which services-config entry holds the credential for each provider.
+#: "local" is absent on purpose — llama-server needs no key.
+PROVIDER_API_KEY_SETTING = {
+    "remote": "llm_remote_api_key",
+    "openai": "openai_api_key",
+    "anthropic": "anthropic_api_key",
+}
+
+
+def provider_api_key(provider: str, services: dict) -> str:
+    """Resolve the API key a provider should authenticate with.
+
+    Callers used to inline this mapping, and every copy omitted "remote" --
+    so hosted OpenAI-compatible endpoints were called with no Authorization
+    header and answered 401. Keep the mapping here, next to the code that
+    builds the headers, so a new provider only has to be added once.
+    """
+    setting = PROVIDER_API_KEY_SETTING.get(provider)
+    return services.get(setting, "") if setting else ""
+
+
 def _server_url() -> str:
     if _provider in ("remote", "openai") and _remote_url:
         return _remote_url.rstrip("/")

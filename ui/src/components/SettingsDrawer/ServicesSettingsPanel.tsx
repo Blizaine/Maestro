@@ -703,6 +703,25 @@ export function ServicesSettingsPanel() {
       <div className="space-y-4">
         <h3 className="text-[11px] text-text-secondary uppercase tracking-wider font-medium">API Keys</h3>
 
+        {/* Shown only while the remote provider is selected, and deliberately
+            not gated behind show_experimental: without this key a hosted
+            OpenAI-compatible endpoint answers 401, so it isn't optional for
+            the users who need it. */}
+        {isRemote && (
+          <>
+            <ApiKeyField
+              label="Remote OpenAI-Compatible API Key"
+              maskedValue={servicesConfig.llm_remote_api_key}
+              isSet={servicesConfig.llm_remote_api_key_set}
+              onSave={val => updateConfig({ llm_remote_api_key: val })}
+            />
+            <p className="text-[10px] text-text-muted -mt-2">
+              Sent as an Authorization: Bearer header to the Server URL set above. Leave unset
+              for local servers such as LM Studio or Ollama, which usually need no key.
+            </p>
+          </>
+        )}
+
         {servicesConfig.show_experimental && (
           <>
             <p className="text-[10px] text-text-muted">
