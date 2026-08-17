@@ -22,6 +22,7 @@ module.exports = async (kernel) => {
 
   let message
   let flashMessage
+  let flashInstalled = true
   let optionalMessage = null
   let env = undefined
   const verifyMessage = solCapable
@@ -73,10 +74,16 @@ module.exports = async (kernel) => {
       "uv pip install triton-windows==3.3.1.post19",
       "uv pip install https://github.com/woct0rdho/SageAttention/releases/download/v2.2.0-windows/sageattention-2.2.0+cu128torch2.7.1-cp310-cp310-win_amd64.whl",
     ]
-    // Match WanGP's documented Python 3.10 / Torch 2.7.1 / CUDA 12.8 ABI.
-    // The former 2.8.2 wheel can install successfully yet fail to load
-    // flash_attn_2_cuda on otherwise-supported RTX 30 systems.
-    flashMessage = "uv pip install https://github.com/Redtash1/Flash_Attention_2_Windows/releases/download/v2.7.0-v2.7.4/flash_attn-2.7.4.post1+cu128torch2.7.0cxx11abiFALSE-cp310-cp310-win_amd64.whl --force-reinstall --no-deps"
+    if (runtime.flashSupported) {
+      // Match WanGP's documented Python 3.10 / Torch 2.7.1 / CUDA 12.8 ABI.
+      flashMessage = "uv pip install https://github.com/Redtash1/Flash_Attention_2_Windows/releases/download/v2.7.0-v2.7.4/flash_attn-2.7.4.post1+cu128torch2.7.0cxx11abiFALSE-cp310-cp310-win_amd64.whl --force-reinstall --no-deps"
+    } else {
+      // This wheel contains only sm_89 cubins. On RTX 30/Ampere and older
+      // GPUs it imports but fails at its first CUDA launch, so remove it and
+      // let Maestro use SageAttention/SDPA instead.
+      flashMessage = "uv pip uninstall flash-attn"
+      flashInstalled = false
+    }
   } else {
     message = [
       "uv pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 {{args && args.xformers ? 'xformers==0.0.30' : ''}} --index-url https://download.pytorch.org/whl/cu128 --force-reinstall",
@@ -159,7 +166,9 @@ module.exports = async (kernel) => {
           path: runtime.flashMarker,
           text: optionalMessage
             ? `Maestro ${runtime.label} optional attention packages checked. Delete this file and run Update to retry them.`
-            : `Maestro ${runtime.label} FlashAttention wheel installed. Delete this file and run Update to repair it.`,
+            : flashInstalled
+              ? `Maestro ${runtime.label} FlashAttention wheel installed. Delete this file and run Update to repair it.`
+              : `Maestro ${runtime.label} uses SageAttention/SDPA because the bundled FlashAttention wheel does not support this GPU.`,
         },
       },
     ],

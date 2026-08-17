@@ -77,6 +77,13 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.8.7.1 (2026-08-17)
+
+**MiniMax Music3 GPU compatibility**
+- Fixed MiniMax Music3 crashing on Windows GPUs when FlashAttention imported successfully but its wheel did not contain a CUDA kernel for that GPU architecture.
+- Music3 now validates the bundled FlashAttention wheel against the active GPU before selecting it and automatically falls back to SDPA when necessary.
+- Update removes the incompatible architecture-specific FlashAttention package from affected legacy Windows runtimes while preserving acceleration on supported GPUs.
+
 ### v1.8.7 (2026-08-16)
 
 **MiniMax H3 audio, continuation, and shared models**

@@ -80,11 +80,16 @@ class TestPinokioGpuCompatibility(unittest.TestCase):
         self.assertIn("Repair H3 Performance Runtime", menu)
 
     def test_legacy_windows_flash_wheel_matches_wangp_documented_abi(self):
+        profile = (_ROOT / "launcher_profile.js").read_text(encoding="utf-8")
         torch_script = (_ROOT / "torch.js").read_text(encoding="utf-8")
 
         self.assertIn("flash_attn-2.7.4.post1+cu128torch2.7.0", torch_script)
         self.assertNotIn("flash_attn-2.8.2%2Bcu128torch2.7", torch_script)
         self.assertIn("--force-reinstall --no-deps", torch_script)
+        self.assertIn("legacyWindowsFlashSupported", profile)
+        self.assertIn("maestro_flash_disabled_v2", profile)
+        self.assertIn("uv pip uninstall flash-attn", torch_script)
+        self.assertIn("uses SageAttention/SDPA", torch_script)
 
     def test_update_can_resume_a_missing_hardware_runtime(self):
         profile = (_ROOT / "launcher_profile.js").read_text(encoding="utf-8")
