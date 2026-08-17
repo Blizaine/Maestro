@@ -195,6 +195,36 @@ def sdpa_wrapper(
     return o
 
 
+_flash_attn_kernels = None
+
+
+def flash_attn_kernels_available():
+    """Whether the installed flash-attn wheel carries kernels for this GPU.
+
+    flash-attn imports successfully on any device, but a wheel only ships
+    cubins for the architectures it was built against.  Launching on any other
+    architecture fails with "no kernel image is available for execution on the
+    device" -- for instance the common sm80/sm90 Windows wheels on an SM 8.6
+    card.  A wheel's architecture list cannot be read back, so probe once with
+    a minimal varlen call and cache the verdict.
+    """
+    global _flash_attn_kernels
+    if _flash_attn_kernels is None:
+        if flash_attn is None or not torch.cuda.is_available():
+            _flash_attn_kernels = False
+        else:
+            try:
+                probe = torch.zeros(1, 1, 32, dtype=torch.float16, device="cuda")
+                cu_seqlens = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
+                flash_attn.flash_attn_varlen_func(
+                    probe, probe, probe, cu_seqlens, cu_seqlens, 1, 1)
+                torch.cuda.synchronize()
+                _flash_attn_kernels = True
+            except Exception:
+                _flash_attn_kernels = False
+    return _flash_attn_kernels
+
+
 def get_attention_modes():
     ret = ["sdpa", "auto"]
     if flash_attn != None:
@@ -229,6 +259,9 @@ def get_supported_attention_modes():
     if major < 7 or not triton_installed:
         if "sage" in ret:
             ret.remove("sage")
+
+    if "flash" in ret and not flash_attn_kernels_available():
+        ret.remove("flash")
 
     return ret
 
