@@ -7,13 +7,13 @@ import torch
 try:
     import flash_attn_interface
     FLASH_ATTN_3_AVAILABLE = True
-except ModuleNotFoundError:
+except (ImportError, OSError):
     FLASH_ATTN_3_AVAILABLE = False
 
 try:
     import flash_attn
     FLASH_ATTN_2_AVAILABLE = True
-except ModuleNotFoundError:
+except (ImportError, OSError):
     FLASH_ATTN_2_AVAILABLE = False
 
 import warnings
@@ -22,6 +22,79 @@ __all__ = [
     'flash_attention',
     'attention',
 ]
+
+
+# The upstream SCAIL-2 module calls FlashAttention directly. In Maestro that
+# bypasses both the user's selected backend and the runtime capability checks
+# used by every other Wan path. Resolve the shared dispatcher lazily so this
+# vendored module remains importable for standalone CPU contract tests.
+_dispatcher = None
+
+
+def _get_dispatcher():
+    global _dispatcher
+    if _dispatcher is not None:
+        return _dispatcher
+    try:
+        from mmgp import offload
+        from shared.attention import get_default_attention_mode, pay_attention
+    except (ImportError, OSError, RuntimeError):
+        return None
+    _dispatcher = (pay_attention, get_default_attention_mode, offload)
+    return _dispatcher
+
+
+@torch.compiler.disable()
+def _shared_attention(
+    dispatcher,
+    q,
+    k,
+    v,
+    q_lens,
+    k_lens,
+    dropout_p,
+    softmax_scale,
+    q_scale,
+    causal,
+    window_size,
+    deterministic,
+    dtype,
+    fa_version,
+):
+    pay_attention, get_default_attention_mode, offload = dispatcher
+    half_dtypes = (torch.float16, torch.bfloat16)
+    assert dtype in half_dtypes
+    out_dtype = q.dtype
+
+    def half(tensor):
+        return tensor if tensor.dtype in half_dtypes else tensor.to(dtype)
+
+    q, k, v = half(q), half(k), half(v)
+    if q_scale is not None:
+        q = q * q_scale
+
+    # The generation loop normally sets the resolved backend in mmgp's shared
+    # state. Standalone calls and lightweight tests do not, so choose Maestro's
+    # best supported dense backend instead of indexing a missing key.
+    shared_state = getattr(offload, "shared_state", {})
+    force_attention = (
+        None if shared_state.get("_attention") else get_default_attention_mode()
+    )
+    qkv_list = [q, k, v]
+    del q, k, v
+    result = pay_attention(
+        qkv_list,
+        dropout_p=dropout_p,
+        softmax_scale=softmax_scale,
+        causal=causal,
+        window_size=window_size,
+        deterministic=deterministic,
+        version=fa_version,
+        q_lens=q_lens,
+        k_lens=k_lens,
+        force_attention=force_attention,
+    )
+    return result.to(out_dtype)
 
 
 def flash_attention(
@@ -148,6 +221,26 @@ def attention(
     dtype=torch.bfloat16,
     fa_version=None,
 ):
+    if q.device.type == 'cuda':
+        dispatcher = _get_dispatcher()
+        if dispatcher is not None:
+            return _shared_attention(
+                dispatcher,
+                q=q,
+                k=k,
+                v=v,
+                q_lens=q_lens,
+                k_lens=k_lens,
+                dropout_p=dropout_p,
+                softmax_scale=softmax_scale,
+                q_scale=q_scale,
+                causal=causal,
+                window_size=window_size,
+                deterministic=deterministic,
+                dtype=dtype,
+                fa_version=fa_version,
+            )
+
     if (
         q.device.type == 'cuda'
         and (FLASH_ATTN_2_AVAILABLE or FLASH_ATTN_3_AVAILABLE)

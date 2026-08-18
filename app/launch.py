@@ -6371,10 +6371,9 @@ _PUBLIC_LLM_PROVIDERS = {"openai", "anthropic"}
 def _llm_api_key_for_provider(services: dict, provider: str) -> str:
     """Return the credential owned by the selected LLM provider.
 
-    Self-hosted OpenAI-compatible servers can require authentication too.
-    Keeping that credential separate from the public OpenAI key prevents a
-    provider switch from accidentally sending the wrong secret to a LAN or
-    third-party endpoint.
+    This remains as a compatibility boundary for callers that import the
+    launch helper directly. Runtime request paths use the shared service
+    implementation so Director and Studio follow the same mapping.
     """
 
     key_name = {
@@ -7099,7 +7098,7 @@ async def llm_load(request: Request):
     device = body.get("device", services.get("llm_device", _llm_default_device()))
     provider = body.get("provider", services.get("llm_provider", "local"))
     remote_url = body.get("remote_url", services.get("llm_remote_url", ""))
-    api_key = _llm_api_key_for_provider(services, provider)
+    api_key = llm_service.provider_api_key(provider, services)
 
     try:
         llm_service.load_model(model_id=model_id, device=device, provider=provider, remote_url=remote_url, api_key=api_key)
@@ -7124,7 +7123,7 @@ def list_llm_models(provider: str = ""):
     services = wgp.server_config.get("services", {})
     p = provider or services.get("llm_provider", "local")
     remote_url = services.get("llm_remote_url", "")
-    api_key = _llm_api_key_for_provider(services, p)
+    api_key = llm_service.provider_api_key(p, services)
     return {"models": llm_service.get_available_models(provider=p, remote_url=remote_url, api_key=api_key)}
 
 
@@ -7143,7 +7142,10 @@ def _ensure_llm_loaded():
     desired_device = services.get("llm_device", _llm_default_device())
     desired_provider = services.get("llm_provider", "local")
     desired_remote_url = services.get("llm_remote_url", "")
-    desired_api_key = _llm_api_key_for_provider(services, desired_provider)
+    desired_api_key = llm_service.provider_api_key(
+        desired_provider,
+        services,
+    )
 
     if llm_service.is_loaded():
         status = llm_service.get_status()

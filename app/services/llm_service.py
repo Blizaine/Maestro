@@ -602,6 +602,72 @@ def get_model_dir() -> str:
     return d
 
 
+PROVIDER_API_KEY_SETTING = {
+    "remote": "llm_remote_api_key",
+    "openai": "openai_api_key",
+    "anthropic": "anthropic_api_key",
+}
+
+
+def provider_api_key(provider: str, services: dict) -> str:
+    """Return only the credential owned by the selected LLM provider."""
+
+    setting = PROVIDER_API_KEY_SETTING.get(str(provider or "").lower())
+    if not setting or not isinstance(services, dict):
+        return ""
+    return str(services.get(setting, "") or "")
+
+
+_OPENAI_CHAT_FIELDS = frozenset({
+    "messages",
+    "model",
+    "max_tokens",
+    "max_completion_tokens",
+    "temperature",
+    "top_p",
+    "n",
+    "stream",
+    "stream_options",
+    "stop",
+    "presence_penalty",
+    "frequency_penalty",
+    "logit_bias",
+    "logprobs",
+    "top_logprobs",
+    "seed",
+    "response_format",
+    "tools",
+    "tool_choice",
+    "user",
+})
+
+
+def _finalize_payload(payload: dict) -> dict:
+    """Translate Maestro's llama.cpp request into OpenAI-compatible form.
+
+    Local llama-server accepts additional sampler controls and serves only one
+    model, so its native payload remains untouched. Hosted and third-party
+    OpenAI-compatible gateways usually require ``model`` and often reject
+    llama.cpp-only fields such as ``cache_prompt`` and ``min_p``.
+    """
+
+    if _provider not in ("remote", "openai"):
+        return payload
+    prepared = {
+        key: value
+        for key, value in payload.items()
+        if key in _OPENAI_CHAT_FIELDS
+    }
+    dropped = sorted(set(payload) - set(prepared))
+    if dropped:
+        print(
+            f"[LLM] Dropped {len(dropped)} llama.cpp-only field(s) not "
+            f"accepted by provider={_provider}: {', '.join(dropped)}"
+        )
+    prepared["model"] = _model_id
+    return prepared
+
+
 def _server_url() -> str:
     if _provider in ("remote", "openai") and _remote_url:
         return _remote_url.rstrip("/")
@@ -868,22 +934,96 @@ def _download_gguf(repo_id: str, filename: str, cache_dir: str) -> str:
 # this (and FALLBACK_TAG below) when a newer model needs a newer runtime.
 MIN_LLAMA_BUILD = 9632
 
+_LLAMA_RUNTIME_RECEIPT = ".maestro_llama_runtime.json"
+_WINDOWS_LLAMA_CUDA_FILES = (
+    "cudart64_12.dll",
+    "cublas64_12.dll",
+    "cublasLt64_12.dll",
+)
+
+
+def _positive_llama_build(value: str):
+    """Extract a meaningful llama.cpp build number from text.
+
+    Some official release binaries report ``version: 0 (unknown)`` even
+    though the archive itself is tagged with a current ``bNNNN`` release.
+    Build zero is missing metadata, not evidence that the binary predates
+    every real llama.cpp release.
+    """
+
+    import re
+
+    match = re.search(r"version:\s*b?(\d+)\b", str(value or ""), re.IGNORECASE)
+    if not match:
+        return None
+    build = int(match.group(1))
+    return build if build > 0 else None
+
+
+def _llama_release_build(tag: str):
+    """Return the numeric build encoded by a llama.cpp release tag."""
+
+    import re
+
+    match = re.fullmatch(r"b?(\d+)", str(tag or "").strip(), re.IGNORECASE)
+    if not match:
+        return None
+    build = int(match.group(1))
+    return build if build > 0 else None
+
+
+def _llama_runtime_receipt_path(bin_dir: str) -> str:
+    return os.path.join(bin_dir, _LLAMA_RUNTIME_RECEIPT)
+
+
+def _read_llama_runtime_receipt(bin_dir: str) -> dict:
+    import json
+
+    try:
+        with open(_llama_runtime_receipt_path(bin_dir), "r", encoding="utf-8") as handle:
+            receipt = json.load(handle)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+    return receipt if isinstance(receipt, dict) else {}
+
+
+def _write_llama_runtime_receipt(bin_dir: str, *, tag: str, build) -> None:
+    """Atomically record which release supplied the installed executable."""
+
+    import json
+
+    path = _llama_runtime_receipt_path(bin_dir)
+    temporary = f"{path}.{os.getpid()}.tmp"
+    receipt = {
+        "schema_version": 1,
+        "release_tag": str(tag or ""),
+        "build": int(build) if build else None,
+        "installed_at": int(time.time()),
+    }
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(receipt, handle, indent=2)
+        os.replace(temporary, path)
+    finally:
+        if os.path.isfile(temporary):
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+
 
 def _llama_server_build(exe_path: str):
     """Return the installed llama-server's llama.cpp build number, or None if
     it can't be determined (e.g. unexpected --version format)."""
     try:
         import subprocess
-        import re
         kwargs = {}
         if os.name == "nt":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         out = subprocess.run(
             [exe_path, "--version"], capture_output=True, text=True, timeout=20, **kwargs
         )
-        m = re.search(r"version:\s*(\d+)", (out.stdout or "") + (out.stderr or ""))
-        if m:
-            return int(m.group(1))
+        return _positive_llama_build((out.stdout or "") + (out.stderr or ""))
     except Exception:
         pass
     return None
@@ -920,16 +1060,40 @@ def _ensure_llama_server(bin_dir: str) -> None:
     is_linux = sys.platform.startswith("linux")
     exe_name = "llama-server.exe" if is_windows else "llama-server"
     exe_path = os.path.join(bin_dir, exe_name)
-    if os.path.isfile(exe_path):
-        build = _llama_server_build(exe_path)
-        # Keep the existing binary if it's new enough — or if its version is
-        # unparseable (don't risk a re-download loop on an unknown build).
-        # Only a KNOWN-too-old build triggers an upgrade.
-        if build is None or build >= MIN_LLAMA_BUILD:
-            return
-        print(f"[LLM] llama-server build {build} < required {MIN_LLAMA_BUILD}; "
-              "upgrading to the latest llama.cpp release.")
-        # fall through to re-download (extractall below overwrites in place)
+    exe_exists = os.path.isfile(exe_path)
+    reported_build = _llama_server_build(exe_path) if exe_exists else None
+    receipt = _read_llama_runtime_receipt(bin_dir)
+    receipt_build = _llama_release_build(receipt.get("release_tag", ""))
+    if receipt_build is None:
+        try:
+            stored_build = int(receipt.get("build") or 0)
+        except (TypeError, ValueError):
+            stored_build = 0
+        receipt_build = stored_build if stored_build > 0 else None
+
+    known_build = reported_build or receipt_build
+    needs_executable = not exe_exists
+    if exe_exists and known_build is not None and known_build < MIN_LLAMA_BUILD:
+        needs_executable = True
+        print(
+            f"[LLM] llama-server build {known_build} < required {MIN_LLAMA_BUILD}; "
+            "upgrading to the latest llama.cpp release."
+        )
+
+    missing_cuda_files = []
+    if is_windows:
+        missing_cuda_files = [
+            filename
+            for filename in _WINDOWS_LLAMA_CUDA_FILES
+            if not os.path.isfile(os.path.join(bin_dir, filename))
+        ]
+    needs_cudart = bool(missing_cuda_files)
+
+    # Unknown/zero version metadata is deliberately accepted. Official
+    # llama.cpp archives have occasionally shipped that way; repeatedly
+    # replacing the same binary cannot make its embedded metadata improve.
+    if not needs_executable and not needs_cudart:
+        return
 
     if not (is_windows or is_linux):
         raise RuntimeError(
@@ -962,15 +1126,14 @@ def _ensure_llama_server(bin_dir: str) -> None:
     # (both contain "bin-win-cuda-12.4-x64.zip" and we must download
     # the right one — and on Windows, both).
     if is_windows:
-        asset_specs = [
-            ("llama-",  "bin-win-cuda-12.4-x64.zip"),
-            ("cudart-", "bin-win-cuda-12.4-x64.zip"),
-        ]
+        asset_specs = []
+        if needs_executable:
+            asset_specs.append(("llama-", "bin-win-cuda-12.4-x64.zip"))
+        if needs_cudart:
+            asset_specs.append(("cudart-", "bin-win-cuda-12.4-x64.zip"))
         archive_ext = ".zip"
     else:  # linux
-        asset_specs = [
-            ("llama-", "bin-ubuntu-x64.tar.gz"),
-        ]
+        asset_specs = [("llama-", "bin-ubuntu-x64.tar.gz")]
         archive_ext = ".tar.gz"
 
     # Query GitHub for the latest release. If the API call fails (rate
@@ -978,7 +1141,15 @@ def _ensure_llama_server(bin_dir: str) -> None:
     # have a chance of downloading. Update the fallback tag occasionally
     # if a critical fix lands in newer builds.
     FALLBACK_TAG = "b9632"
-    print("[LLM] llama-server not found, fetching llama.cpp latest release info...")
+    if needs_executable and not exe_exists:
+        print("[LLM] llama-server not found; resolving a llama.cpp release...")
+    elif needs_cudart and not needs_executable:
+        print(
+            "[LLM] llama.cpp CUDA runtime is incomplete "
+            f"(missing {', '.join(missing_cuda_files)}); repairing it..."
+        )
+    else:
+        print("[LLM] Resolving the latest compatible llama.cpp release...")
     release_info = None
     tag = None
     try:
@@ -1085,6 +1256,13 @@ def _ensure_llama_server(bin_dir: str) -> None:
         raise FileNotFoundError(
             f"Downloaded llama.cpp release but {exe_name} not found in {bin_dir} "
             f"after extraction. Tried: {asset_urls}"
+        )
+    if needs_executable:
+        installed_build = _llama_server_build(exe_path) or _llama_release_build(tag)
+        _write_llama_runtime_receipt(
+            bin_dir,
+            tag=tag,
+            build=installed_build,
         )
     print(f"[LLM] llama-server installed to {exe_path}")
 
@@ -1475,8 +1653,22 @@ def _diagnose_llm_request_failure(exc: Exception) -> "RuntimeError":
         return RuntimeError(
             f"LLM request failed: {exc}\nRecent llama-server output:\n{tail}"
         )
-    # Remote provider — a real network/timeout issue.
-    return RuntimeError(f"LLM request failed: {exc}")
+    # Remote provider — include the endpoint's explanation. requests'
+    # HTTPError string normally contains only the status line, while strict
+    # gateways put the actionable "unknown field" / "model not found" detail
+    # in their response body.
+    detail = ""
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            body = (response.text or "").strip()
+        except Exception:
+            body = ""
+        if body:
+            if len(body) > 800:
+                body = body[:800] + "... (truncated)"
+            detail = f"\nEndpoint response: {body}"
+    return RuntimeError(f"LLM request failed: {exc}{detail}")
 
 
 def _unload_inner():
@@ -1672,7 +1864,7 @@ def generate(
     try:
         resp = requests.post(
             f"{_server_url()}/v1/chat/completions",
-            json=payload,
+            json=_finalize_payload(payload),
             headers=_api_headers(),
             # (connect, read): fail fast if the server socket is gone;
             # allow a long read for actual generation.
@@ -1881,7 +2073,7 @@ def generate_streaming(
     try:
         resp = requests.post(
             f"{_server_url()}/v1/chat/completions",
-            json=payload,
+            json=_finalize_payload(payload),
             headers=_api_headers(),
             timeout=(10, 600),
             stream=True,

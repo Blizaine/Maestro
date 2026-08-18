@@ -5339,11 +5339,10 @@ def _ensure_llm_loaded(params: dict):
     desired_device = params.get("llm_device") or services_cfg.get("llm_device", "cpu")
     desired_provider = params.get("llm_provider") or services_cfg.get("llm_provider", "local")
     desired_remote_url = services_cfg.get("llm_remote_url", "")
-    desired_api_key = ""
-    if desired_provider == "openai":
-        desired_api_key = services_cfg.get("openai_api_key", "")
-    elif desired_provider == "anthropic":
-        desired_api_key = services_cfg.get("anthropic_api_key", "")
+    desired_api_key = llm_service.provider_api_key(
+        desired_provider,
+        services_cfg,
+    )
 
     # Free GPU memory before running a local CUDA LLM. Director planning
     # fires right after image edits / audio analysis: memory profiles keep
