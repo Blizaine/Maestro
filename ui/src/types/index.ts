@@ -597,6 +597,11 @@ export interface OutputMetadata {
   params: Record<string, unknown> | null
   upload_filenames?: Record<string, string>
   job_id?: string
+  /** Director revision that produced this artifact. Gallery "Load settings"
+   *  uses it to reopen the complete Director project instead of flattening
+   *  the clip into an unrelated Studio job. */
+  director_pipeline_id?: string
+  director_clip_index?: number
   generation_time?: number
   generation_time_basis?: 'active' | 'elapsed'
   job_elapsed_time?: number
@@ -619,6 +624,8 @@ export interface ServicesConfig {
   llm_device: string
   llm_provider: string
   llm_remote_url: string
+  llm_remote_api_key: string
+  llm_remote_api_key_set: boolean
   enhance_llm_model_id: string
   enhance_llm_device: string
   google_api_key: string
@@ -962,6 +969,13 @@ export interface SpeakerMapping {
 export interface ClipPlan {
   video_prompt: string
   image_prompt: string
+  window_prompts?: string[]
+  keyframe_prompts?: string[]
+  window_count?: number
+  visual_changes?: unknown[]
+  image_source?: string
+  /** Model-aware Director contracts are persisted with the reviewed prompt. */
+  [key: `_director_${string}`]: unknown
 }
 
 /** Partial plan returned from single-phase LLM calls */
@@ -1169,16 +1183,33 @@ export interface PipelineRepairState {
 export interface SavedPipelineState {
   version: number
   pipeline_id: string
+  /** Stable project lineage. Every rerun is a new immutable pipeline revision. */
+  project_id?: string
+  parent_pipeline_id?: string | null
+  queue_entry_id?: string | null
   created_at: number
   completed_at: number | null
   status: string
   pipeline_type: string
+  workspace?: string
   scene_description: string
   reference_image_path: string | null
+  generated_reference_image_filename?: string | null
+  character_ref_paths?: string[]
+  location_ref_paths?: string[]
   auto_mode: boolean
   seamless: boolean
   image_model: string
   video_model: string
+  image_loras?: Record<string, unknown>
+  video_loras?: Record<string, unknown>
+  image_params?: Record<string, unknown>
+  video_params?: Record<string, unknown>
+  director_resolution_preset?: ResolutionPreset
+  director_aspect_ratio?: AspectRatio
+  director_ui_snapshot?: Record<string, unknown>
+  asset_manifest?: Record<string, unknown>
+  _params_snapshot?: Record<string, unknown>
   /** Effective saved behavior. Missing on legacy projects, which require images. */
   shot_image_policy?: DirectorShotImagePolicy
   shot_image_guidance?: DirectorShotImageGuidance
@@ -1187,6 +1218,40 @@ export interface SavedPipelineState {
   output_files: string[]
   total_time_sec: number | null
   repair?: PipelineRepairState | null
+}
+
+export type DirectorQueueEntryStatus =
+  | 'held'
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+
+export interface DirectorQueueEntry {
+  id: string
+  status: DirectorQueueEntryStatus
+  message: string
+  created_at: number
+  started_at?: number | null
+  completed_at?: number | null
+  pipeline_id?: string | null
+  error?: string | null
+  scene_description: string
+  pipeline_type: string
+  image_model: string
+  video_model: string
+}
+
+export interface DirectorQueueEntryDetail extends DirectorQueueEntry {
+  params: Record<string, unknown>
+}
+
+export interface DirectorQueueState {
+  version: number
+  paused: boolean
+  running: boolean
+  entries: DirectorQueueEntry[]
 }
 
 export interface PipelineListItem {

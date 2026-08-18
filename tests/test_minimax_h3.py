@@ -215,9 +215,12 @@ def _load_turbo_helpers():
 def _load_llm_enhance_helpers():
     tree = ast.parse(_read(_LLM_SERVICE_PATH), filename=str(_LLM_SERVICE_PATH))
     helper_names = {
+        "_canonical_h3_language_tag",
+        "_detect_h3_dialogue_language",
         "_extract_h3_quoted_dialogue",
         "_h3_requests_speech",
         "_extract_h3_dialogue_blocks",
+        "_extract_h3_dialogue_entries",
         "_h3_dialogue_schedule",
         "_build_h3_timed_silence_clause",
         "_build_h3_dialogue_requirement",
@@ -240,11 +243,18 @@ def _load_llm_enhance_helpers():
     for node in tree.body:
         if isinstance(node, ast.Assign):
             names = [target.id for target in node.targets if isinstance(target, ast.Name)]
-            if "_H3_REF2VA_FIELDS" in names or "_H3_CONTEXT_FIELDS" in names:
+            if any(name in names for name in (
+                "_H3_REF2VA_FIELDS",
+                "_H3_CONTEXT_FIELDS",
+                "_H3_LANGUAGE_ALIASES",
+            )):
                 selected.append(node)
         elif isinstance(node, ast.FunctionDef) and node.name in helper_names:
             selected.append(node)
-    namespace = {"Optional": typing.Optional}
+    namespace = {
+        "Optional": typing.Optional,
+        "repair_text": lambda value: str(value or ""),
+    }
     module = ast.Module(body=selected, type_ignores=[])
     exec(compile(ast.fix_missing_locations(module), str(_LLM_SERVICE_PATH), "exec"), namespace)
     return namespace

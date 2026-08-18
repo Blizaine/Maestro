@@ -94,8 +94,11 @@ SPEAKERS AND DIALOGUE
   surprise, or emotionally react to one another, add a brief in-character
   exchange or vocal reaction unless the user explicitly requests silent or
   nonverbal action. Do not leave a long interactive story entirely mute.
-- Default to [English] when the request is in English and names no other
-  language. Use the requested language when one is specified.
+- Default to [English] only when the request names no other spoken language.
+  When the user requests French, Spanish, German, or any other language, every
+  dialogue tag must name that language (for example [French]); never label
+  non-English words as [English], translate them, or infer the tag from the UI
+  language instead of the user's request.
 - Budget all spoken words across all speakers at no more than about two words
   per second. A roughly 5-second clip normally fits one short line; a roughly
   10-second clip fits one brief exchange; a roughly 15-second clip fits a few

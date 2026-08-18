@@ -519,6 +519,7 @@ function DirectorDashboardInner() {
   const rejoinClips = useStore(s => s.rejoinPipelineClips)
   const resumePipeline = useStore(s => s.resumePipeline)
   const deletePipeline = useStore(s => s.deletePipeline)
+  const loadDirectorFromPipeline = useStore(s => s.loadDirectorFromPipeline)
   const [resuming, setResuming] = useState(false)
   // Keyed by pipeline id — a bare boolean would let "arm on pipeline A,
   // switch to B, click once" delete B without a confirm.
@@ -737,6 +738,19 @@ function DirectorDashboardInner() {
                 </span>
               )
             )}
+            <button
+              onClick={() => {
+                if (selectedPipeline) {
+                  void loadDirectorFromPipeline(selectedPipeline.pipeline_id)
+                }
+              }}
+              disabled={loading || repairBusy}
+              className="flex items-center gap-1 px-2 py-1 text-[10px] bg-accent-blue/10 border border-accent-blue/30 rounded text-accent-blue hover:bg-accent-blue/20 disabled:opacity-40 transition-colors"
+              title="Restore this project’s script, prompts, references, models, LoRAs, and Director controls as an editable new revision"
+            >
+              <Pencil size={10} />
+              Open &amp; Edit
+            </button>
             <button
               onClick={() => {
                 if (!selectedPipeline) return

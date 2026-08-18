@@ -14,6 +14,8 @@ import logging
 import requests
 from typing import Optional
 
+from services.text_integrity import repair_text
+
 logger = logging.getLogger(__name__)
 
 # Singleton state
@@ -33,6 +35,14 @@ _vision_available: bool = False
 import collections as _collections
 _server_log: "_collections.deque[str]" = _collections.deque(maxlen=200)
 _log_reader: Optional[threading.Thread] = None
+
+_GEMMA_TEMPLATE_COMPAT_MARKER = "detected an outdated gemma4 chat template"
+
+
+def _is_benign_gemma_template_warning(line: str) -> bool:
+    """Identify llama.cpp's non-fatal Gemma 4 compatibility notice."""
+
+    return _GEMMA_TEMPLATE_COMPAT_MARKER in str(line or "").lower()
 
 # Provider state: "local" | "remote" | "openai" | "anthropic"
 _provider: str = "local"
@@ -1119,7 +1129,14 @@ def load_model(
     # Handle remote/API providers — no subprocess needed
     if provider in ("remote", "openai", "anthropic"):
         with _lock:
-            if is_loaded() and _model_id == model_id and _provider == provider and not force_reload:
+            if (
+                is_loaded()
+                and _model_id == model_id
+                and _provider == provider
+                and _remote_url == remote_url
+                and _api_key == api_key
+                and not force_reload
+            ):
                 return
             if _process is not None:
                 _unload_inner()
@@ -1358,6 +1375,7 @@ def _start_log_reader(proc: subprocess.Popen) -> None:
 
     def _drain():
         log_file = None
+        gemma_compat_noted = False
         if log_path:
             try:
                 log_file = open(log_path, "w", encoding="utf-8", errors="replace")
@@ -1366,6 +1384,17 @@ def _start_log_reader(proc: subprocess.Popen) -> None:
         try:
             for raw in iter(proc.stdout.readline, b""):
                 line = raw.decode(errors="replace").rstrip("\n")
+                if _is_benign_gemma_template_warning(line):
+                    # llama.cpp applies its compatibility workaround and keeps
+                    # serving. Recording the raw line as a WARNING made users
+                    # and crash-tail diagnostics mistake it for the failure.
+                    if gemma_compat_noted:
+                        continue
+                    line = (
+                        "[LLM] Gemma 4 embedded chat template is older; "
+                        "llama.cpp compatibility mode is active (non-fatal)."
+                    )
+                    gemma_compat_noted = True
                 _server_log.append(line)
                 if log_file:
                     try:
@@ -1387,7 +1416,12 @@ def _start_log_reader(proc: subprocess.Popen) -> None:
 
 
 def _server_log_tail(n: int = 20) -> str:
-    lines = list(_server_log)[-n:]
+    # Be defensive with logs captured before the reader learned to normalize
+    # this warning. It is not evidence of the subsequent request failure.
+    lines = [
+        line for line in list(_server_log)
+        if not _is_benign_gemma_template_warning(line)
+    ][-n:]
     return "\n".join(lines) if lines else "(no server output captured)"
 
 
@@ -2146,6 +2180,12 @@ def enhance_prompt(
     raw_enhancer_mode: bool = False,
     reference_context: Optional[str] = None,
 ) -> str:
+    # Repair legacy Windows/code-page damage before model-specific parsers
+    # copy user-authored international text into an immutable prompt contract.
+    prompt = repair_text(prompt)
+    system_override = repair_text(system_override) if system_override else system_override
+    reference_context = repair_text(reference_context) if reference_context else reference_context
+    lora_system_hint = repair_text(lora_system_hint)
     is_h3_ref2va = (
         mode in ("video", "avatar")
         and (model_type or "").lower().startswith("minimax_h3_ref2va")
@@ -2202,7 +2242,7 @@ def enhance_prompt(
             enable_thinking=False,
             stop=["<think>", "<thinking>"],
         )
-        return result.strip() if result else prompt
+        return repair_text(result).strip() if result else prompt
 
     # Dedicated per-model enhancer (e.g. Sulphur's uncensored enhancer): the
     # model is trained to enhance directly. Send the user's prompt (+ optional
@@ -2236,7 +2276,7 @@ def enhance_prompt(
                 r = _clean_enhancer_output(r)
                 r = " ".join(r.split()) if r else ln  # collapse to one paragraph
                 outs.append(r or ln)
-            return "\n".join(outs)
+            return repair_text("\n".join(outs))
         # Single call: 1-line "expand into N windows", or a line/window
         # mismatch. Falls back to the explicit-count instruction.
         raw_prompt = _build_enhance_user_prompt(
@@ -2249,7 +2289,7 @@ def enhance_prompt(
         )
         print(f"[Enhance] Raw enhancer ({model_type}, images={bool(image_paths)}, windows={window_count})")
         result = generate(prompt=raw_prompt, image_paths=image_paths, **gen_kw)
-        return _clean_enhancer_output(result) or prompt
+        return repair_text(_clean_enhancer_output(result) or prompt)
 
     # Try to load a model-specific guide
     system = None
@@ -2506,6 +2546,7 @@ def enhance_prompt(
         frequency_penalty=0.3,  # prevent repetition loops
         presence_penalty=0.1,   # encourage variety
     )
+    result = repair_text(result)
 
     # Post-process ordinary prose aggressively, but preserve H3's required field
     # labels and media tags. The old substring-loop cleaner could truncate a
@@ -2570,6 +2611,7 @@ def enhance_prompt(
             frequency_penalty=0.6,
             presence_penalty=0.15,
         )
+        retry = repair_text(retry)
         retry = _clean_enhance_output(retry, preserve_structure=True) if retry else ""
         retry_structure_is_valid = (
             _has_complete_h3_ref2va_structure(retry)
@@ -2624,6 +2666,7 @@ def enhance_prompt(
         and not _h3_dialogue_contract_satisfied(prompt, result)
     ):
         word_budget = max(4, int(duration_seconds or 8))
+        dialogue_language = _detect_h3_dialogue_language(prompt)
         print("[Enhance] H3 discussion still has no dialogue; generating a focused exchange.")
         dialogue_fragment = generate(
             prompt=(
@@ -2632,7 +2675,7 @@ def enhance_prompt(
             ),
             system_prompt=(
                 "Write only the concise dialogue requested by the user. Output one to three lines in "
-                "the exact form 'Speaker description (S1): <d>[English] Literal words.</d>', using "
+                f"the exact form 'Speaker description (S1): <d>[{dialogue_language}] Literal words.</d>', using "
                 "stable sequential speaker IDs. Communicate the requested topic. No narration, "
                 "markdown, quotation marks, headings, or dialogue beyond the word budget."
             ),
@@ -2644,6 +2687,7 @@ def enhance_prompt(
             frequency_penalty=0.4,
             presence_penalty=0.1,
         )
+        dialogue_fragment = repair_text(dialogue_fragment)
         dialogue_fragment = (
             _clean_enhance_output(dialogue_fragment, preserve_structure=True)
             if dialogue_fragment
@@ -2666,7 +2710,14 @@ def enhance_prompt(
         result = _strip_h3_untagged_dialogue_duplicates(result, prompt)
         result = _enforce_h3_soundscape_silence(result, prompt)
         result = _enforce_h3_music_request(result, prompt, reference_context)
-    return result
+    if is_h3_context_ir and image_paths:
+        result = _ensure_h3_visual_grounding(
+            result,
+            prompt,
+            image_paths,
+            generate_fn=generate,
+        )
+    return repair_text(result)
 
 
 _H3_REF2VA_FIELDS = (
@@ -2682,6 +2733,85 @@ _H3_CONTEXT_FIELDS = (
     "overall_soundscape",
     "non_diegetic_music",
 )
+
+_H3_LANGUAGE_ALIASES = (
+    ("mandarin chinese", "Mandarin Chinese"),
+    ("mandarin", "Mandarin Chinese"),
+    ("cantonese", "Cantonese"),
+    ("brazilian portuguese", "Brazilian Portuguese"),
+    ("portuguese", "Portuguese"),
+    ("french", "French"),
+    ("spanish", "Spanish"),
+    ("german", "German"),
+    ("italian", "Italian"),
+    ("japanese", "Japanese"),
+    ("korean", "Korean"),
+    ("chinese", "Chinese"),
+    ("hindi", "Hindi"),
+    ("arabic", "Arabic"),
+    ("russian", "Russian"),
+    ("dutch", "Dutch"),
+    ("polish", "Polish"),
+    ("turkish", "Turkish"),
+    ("swedish", "Swedish"),
+    ("norwegian", "Norwegian"),
+    ("danish", "Danish"),
+    ("finnish", "Finnish"),
+    ("greek", "Greek"),
+    ("hebrew", "Hebrew"),
+    ("ukrainian", "Ukrainian"),
+    ("czech", "Czech"),
+    ("romanian", "Romanian"),
+    ("hungarian", "Hungarian"),
+    ("thai", "Thai"),
+    ("vietnamese", "Vietnamese"),
+    ("indonesian", "Indonesian"),
+    ("filipino", "Filipino"),
+    ("tagalog", "Tagalog"),
+    ("english", "English"),
+)
+
+
+def _canonical_h3_language_tag(value: str) -> str:
+    normalized = " ".join(str(value or "").strip().casefold().split())
+    for alias, canonical in _H3_LANGUAGE_ALIASES:
+        if normalized == alias or normalized == canonical.casefold():
+            return canonical
+    return str(value or "").strip()
+
+
+def _detect_h3_dialogue_language(prompt: str) -> str:
+    """Return the explicitly requested H3 speech language, else English.
+
+    A language word only counts near speech/language wording, so a setting
+    such as "a French restaurant" does not accidentally change the dialogue.
+    Existing ``<d>[Language]`` syntax is authoritative.
+    """
+
+    import re
+
+    text = repair_text(prompt)
+    explicit = re.search(r"<d>\s*\[([^\]\r\n]+)\]", text, flags=re.IGNORECASE)
+    if explicit:
+        return _canonical_h3_language_tag(explicit.group(1)) or "English"
+
+    context_word = re.compile(
+        r"\b(?:in|speak|speaks|speaking|spoken|say|says|saying|talk|talks|"
+        r"talking|dialogue|sentence|line|words?|language|speech|voice|voiced)\b",
+        flags=re.IGNORECASE,
+    )
+    suffix_word = re.compile(
+        r"\b(?:dialogue|language|sentence|line|words?|speech|voice|speaking|spoken)\b",
+        flags=re.IGNORECASE,
+    )
+    lowered = text.casefold()
+    for alias, canonical in _H3_LANGUAGE_ALIASES:
+        for match in re.finditer(rf"\b{re.escape(alias)}\b", lowered):
+            before = lowered[max(0, match.start() - 60):match.start()]
+            after = lowered[match.end():match.end() + 40]
+            if context_word.search(before) or suffix_word.search(after):
+                return canonical
+    return "English"
 
 
 def _extract_h3_quoted_dialogue(text: str) -> list[str]:
@@ -2719,6 +2849,19 @@ def _extract_h3_dialogue_blocks(text: str) -> list[str]:
             flags=re.DOTALL,
         )
         if match.strip()
+    ]
+
+
+def _extract_h3_dialogue_entries(text: str) -> list[tuple[str, str]]:
+    import re
+    return [
+        (_canonical_h3_language_tag(language), words.strip())
+        for language, words in re.findall(
+            r"<d>\s*\[([^\]]+)\]\s*(.*?)\s*</d>",
+            str(text or ""),
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        if words.strip()
     ]
 
 
@@ -2760,10 +2903,11 @@ def _build_h3_dialogue_requirement(
     duration_seconds: Optional[float] = None,
 ) -> str:
     quotes = _extract_h3_quoted_dialogue(prompt)
+    language = _detect_h3_dialogue_language(prompt)
     timed_clause = _build_h3_timed_silence_clause(prompt, duration_seconds)
     if quotes:
         required = "\n".join(
-            f"- REQUIRED VERBATIM: <d>[English] {line}</d>" for line in quotes
+            f"- REQUIRED VERBATIM: <d>[{language}] {line}</d>" for line in quotes
         )
         return (
             "IMMUTABLE H3 DIALOGUE CONTRACT: The user supplied the spoken lines below. "
@@ -2776,7 +2920,7 @@ def _build_h3_dialogue_requirement(
         return (
             "MANDATORY H3 DIALOGUE CONTRACT: The user explicitly requests speech but supplied no "
             "script. Write concise, meaningful dialogue that communicates the requested subject, "
-            "using stable speaker IDs and one or more <d>[English] literal words</d> blocks. "
+            f"using stable speaker IDs and one or more <d>[{language}] literal words</d> blocks. "
             "Writing only 'speaks', 'talks', or 'they discuss' makes the output invalid. "
             f"{timed_clause}"
         )
@@ -2787,12 +2931,141 @@ def _h3_dialogue_contract_satisfied(prompt: str, result: str) -> bool:
     import re
     quotes = _extract_h3_quoted_dialogue(prompt)
     blocks = _extract_h3_dialogue_blocks(result)
+    entries = _extract_h3_dialogue_entries(result)
+    language = _detect_h3_dialogue_language(prompt)
     has_speaker_id = bool(re.search(r"\(S\d+\)", str(result or "")))
     if quotes:
-        return has_speaker_id and all(line in blocks for line in quotes)
+        return has_speaker_id and all(
+            any(entry_language == language and words == line for entry_language, words in entries)
+            for line in quotes
+        )
     if _h3_requests_speech(prompt):
-        return has_speaker_id and bool(blocks)
+        return has_speaker_id and bool(blocks) and all(
+            entry_language == language for entry_language, _words in entries
+        )
     return True
+
+
+_H3_VISUAL_CATEGORY_PATTERNS = (
+    r"\b(?:camera|shot|frame|framing|foreground|midground|background|screen[- ](?:left|right)|"
+    r"close[- ]?up|medium[- ]?shot|wide[- ]?shot|angle|lens|composition)\b",
+    r"\b(?:woman|man|person|people|child|face|hair|eyes?|build|silhouette|subject|character)\b",
+    r"\b(?:wearing|dressed|wardrobe|shirt|jacket|coat|dress|suit|trousers|pants|skirt|shoes?|hat)\b",
+    r"\b(?:interior|exterior|room|street|kitchen|office|building|wall|window|door|furniture|"
+    r"table|desk|landscape|environment|setting)\b",
+    r"\b(?:light|lighting|lit|shadow|sunlight|neon|warm|cool|bright|dim|color|palette|contrast)\b",
+)
+
+
+def _h3_visual_category_count(text: str) -> int:
+    import re
+    return sum(
+        1 for pattern in _H3_VISUAL_CATEGORY_PATTERNS
+        if re.search(pattern, str(text or ""), flags=re.IGNORECASE)
+    )
+
+
+def _h3_visual_grounding_contract_satisfied(prompt: str, result: str) -> bool:
+    """Reject H3 start-frame rewrites that merely repackage user prose."""
+
+    import re
+    match = re.search(
+        r"(?ms)^\s*integrated_multimodal_description\s*:(.*?)"
+        r"(?=^\s*overall_soundscape\s*:)",
+        str(result or ""),
+    )
+    if not match:
+        return False
+    description = match.group(1)
+    category_count = _h3_visual_category_count(description)
+    if category_count < 3:
+        return False
+
+    source_words = {
+        word for word in re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ]{4,}", str(prompt or "").casefold())
+    }
+    description_words = {
+        word for word in re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ]{4,}", description.casefold())
+    }
+    novel_words = description_words - source_words - {
+        "shot", "video", "seconds", "target", "picture", "requested",
+        "scene", "shows", "visible", "camera", "final", "frame",
+    }
+    # A user's already-rich prompt needs less invention; otherwise require
+    # enough genuinely new visual vocabulary to show that the image was used.
+    return len(novel_words) >= 8 or _h3_visual_category_count(prompt) >= 3
+
+
+def _inject_h3_visual_anchor(result: str, anchor: str) -> str:
+    """Insert a compact observed-frame description into the H3 visual field."""
+
+    import re
+    anchor = repair_text(anchor)
+    # A vision-only repair is never allowed to introduce extra speech.
+    anchor = re.sub(r"(?is)<\s*d\s*>.*?<\s*/\s*d\s*>", "", anchor)
+    anchor = re.sub(r"(?is)<\s*/?\s*d\s*>", "", anchor)
+    anchor = re.sub(r"(?m)^\s*(?:#{1,4}\s*)?(?:visual anchor|description)\s*:\s*", "", anchor)
+    anchor = " ".join(anchor.replace("**", "").split()).strip()
+    if not anchor or _h3_visual_category_count(anchor) < 3:
+        return result
+    anchor = anchor[:1800].rstrip()
+
+    match = re.search(
+        r"(?mi)^\s*integrated_multimodal_description\s*:\s*",
+        str(result or ""),
+    )
+    if not match:
+        return result
+    insert_at = match.end()
+    remainder = result[insert_at:]
+    shot = re.match(r"\[Shot\s+1\]\s*", remainder, flags=re.IGNORECASE)
+    if shot:
+        insert_at += shot.end()
+    prefix = "Attached-frame visual evidence in supplied timeline order: "
+    return result[:insert_at] + prefix + anchor + ". " + result[insert_at:]
+
+
+def _ensure_h3_visual_grounding(
+    result: str,
+    prompt: str,
+    image_paths: Optional[list],
+    *,
+    generate_fn,
+) -> str:
+    """Run one focused vision pass when the main H3 rewrite ignored images."""
+
+    if not image_paths or _h3_visual_grounding_contract_satisfied(prompt, result):
+        return result
+    print("[Enhance] H3 rewrite lacked concrete frame evidence; grounding from attached image(s).")
+    try:
+        anchor = generate_fn(
+            prompt=(
+                f"There are {len(image_paths)} attached target-frame image(s), in order. "
+                "Describe only concrete visible facts needed to preserve them in a generated video. "
+                f"The separate action request is: {prompt}"
+            ),
+            system_prompt=(
+                "Act as a visual continuity observer. Return one compact factual paragraph. "
+                "For every attached image, describe visible subject count and appearance, wardrobe, "
+                "screen position and composition, setting and important objects, lighting and color, "
+                "and camera framing. Do not invent identity, dialogue, action, emotion, or unseen facts. "
+                "Do not output markdown, field labels, quotation marks, or model instructions."
+            ),
+            max_new_tokens=max(240, min(700, len(image_paths) * 220)),
+            temperature=0.15,
+            image_paths=image_paths,
+            enable_thinking=False,
+            thinking_budget=2048,
+            frequency_penalty=0.2,
+            presence_penalty=0.0,
+        )
+    except Exception as exc:
+        print(f"[Enhance] Focused H3 visual grounding was unavailable: {exc}")
+        return result
+    grounded = _inject_h3_visual_anchor(result, repair_text(anchor))
+    if grounded == result:
+        print("[Enhance] Focused H3 visual pass returned no usable grounding details.")
+    return grounded
 
 
 def _h3_timed_silence_contract_satisfied(
@@ -2872,12 +3145,13 @@ def _compile_h3_explicit_dialogue(prompt: str) -> str:
     """Replace user quotation marks with literal H3 dialogue blocks."""
     import re
     counter = 0
+    language = _detect_h3_dialogue_language(prompt)
 
     def replace(match):
         nonlocal counter
         counter += 1
         value = (match.group(1) or match.group(2) or "").strip()
-        return f"(S{counter}) <d>[English] {value}</d>"
+        return f"(S{counter}) <d>[{language}] {value}</d>"
 
     return re.sub(
         r'"([^"\r\n]{1,500})"|“([^”\r\n]{1,500})”',
@@ -2895,8 +3169,9 @@ def _inject_missing_h3_dialogue(result: str, prompt: str, *, ref2va: bool) -> st
     missing = [line for line in quotes if line not in existing]
     if not missing:
         return result
+    language = _detect_h3_dialogue_language(prompt)
     additions = " ".join(
-        f"The intended speaker (S{index}) says exactly once: <d>[English] {line}</d>."
+        f"The intended speaker (S{index}) says exactly once: <d>[{language}] {line}</d>."
         for index, line in enumerate(missing, start=1)
     )
     additions += (

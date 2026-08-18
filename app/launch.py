@@ -50,6 +50,43 @@ sys.argv = _wgp_argv
 # download progress for the UI's downloads-in-progress banner.
 print("[Maestro] Installing download stall protection...")
 from services import safe_download  # noqa: F401 (side-effect import)
+from services.checkpoint_compatibility import (
+    CheckpointCompatibilityError,
+    checkpoint_targets_for_base,
+    checkpoint_template_model_type,
+    ensure_allowed_checkpoint_target,
+    quarantine_incompatible_checkpoint_definitions,
+    suggested_checkpoint_architecture,
+    unsupported_checkpoint_reason,
+    validate_checkpoint_file,
+)
+
+# Protect upgraded installations before WanGP builds its model registry.  Old
+# CivitAI imports could pair any checkpoint with any Maestro architecture; hide
+# those invalid definitions without deleting the user's downloaded weights.
+try:
+    _checkpoint_quarantine_changes = (
+        quarantine_incompatible_checkpoint_definitions(_app_dir)
+    )
+except Exception as _checkpoint_quarantine_error:
+    _checkpoint_quarantine_changes = []
+    print(
+        "[CivitAI] Could not audit legacy checkpoint registrations: "
+        f"{_checkpoint_quarantine_error}"
+    )
+for _checkpoint_change in _checkpoint_quarantine_changes:
+    if not _checkpoint_change["compatible"] and _checkpoint_change["applied"]:
+        print(
+            "[CivitAI] Disabled incompatible checkpoint "
+            f"'{_checkpoint_change['model_type']}': "
+            f"{_checkpoint_change['reason']}"
+        )
+    elif not _checkpoint_change["compatible"]:
+        print(
+            "[CivitAI] WARNING: Could not disable incompatible checkpoint "
+            f"'{_checkpoint_change['model_type']}': "
+            f"{_checkpoint_change.get('error', 'unknown filesystem error')}"
+        )
 
 # HuggingFace token-path robustness (fixes the "Permission denied:
 # .../HF_AUTH/token" crash on machines that never logged into HF).
@@ -2458,52 +2495,6 @@ _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 _DEFAULTS_DIR = os.path.join(_APP_DIR, "defaults")
 _FINETUNES_DIR = os.path.join(_APP_DIR, "finetunes")
 
-# Best-guess default for the architecture picker, keyed by CivitAI baseModel.
-# Only needed where CIVIT_TO_LOCAL_ARCH's lora-DIR value isn't itself a real
-# model architecture (e.g. "LTXV 2.3" → lora dir "ltx2", but the model arch
-# is "ltx2_22B"). The UI picker lets the user override this guess.
-_CIVIT_BASE_TO_ARCH_HINT = {
-    "LTXV 2.3": "ltx2_22B",
-    "LTXV2": "ltx2_22B",
-    "Flux.2 Klein 9B": "flux2_klein_9b",
-    "Flux.2 Klein 9B-base": "flux2_klein_9b",
-    "Flux.2 Klein 4B": "flux2_klein_4b",
-    "Flux.2 Klein 4B-base": "flux2_klein_4b",
-    "Flux.2 D": "flux2_dev",
-    "Flux.1 D": "flux",
-    "Flux.1 Krea": "flux",
-    "Qwen": "qwen_image_20B",
-}
-
-# Architecture families we never offer for checkpoint import (the picker is
-# for video/image generators; audio/LLM checkpoints aren't Civitai "Checkpoint"
-# uploads and their pipelines don't take a swapped transformer this way).
-_CKPT_EXCLUDED_FAMILY_HINTS = ("audio", "llm", "language", "speech", "music")
-
-
-def _scan_defaults_by_arch() -> dict:
-    """Build {architecture: defaults_json_path} from the shipped defaults.
-
-    The path is the *settings template* we clone when registering a checkpoint
-    for that architecture (so inference defaults, handler-critical companion
-    weights, etc. come along). Prefer the def whose filename == architecture
-    (the canonical base) when several defaults share one arch."""
-    index: dict = {}
-    for path in glob.glob(os.path.join(_DEFAULTS_DIR, "*.json")):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                jd = json.load(f)
-        except Exception:
-            continue
-        arch = (jd.get("model") or {}).get("architecture")
-        if not arch:
-            continue
-        model_type = os.path.basename(path)[:-5]
-        if arch not in index or model_type == arch:
-            index[arch] = path
-    return index
-
-
 def _ckpt_family_for_arch(arch: str, model_type: str) -> str:
     """Best-effort UI family label for an architecture (for grouping/filtering
     in the picker). Falls back to empty string when WGP can't resolve it."""
@@ -2517,44 +2508,39 @@ def _ckpt_family_for_arch(arch: str, model_type: str) -> str:
     return ""
 
 
-def _list_checkpoint_architectures() -> list:
-    """Supported architectures for checkpoint import, with display name +
-    family, excluding audio/LLM families. Powers the UI architecture picker."""
+def _list_checkpoint_architectures(base_model: str) -> list:
+    """Return only verified targets for this exact CivitAI base model.
+
+    The old picker exposed every Maestro architecture and defaulted unknown
+    checkpoints to the first one.  That let Flux 1 and SDXL weights be
+    registered as Flux 2 models.  Keep this list as an explicit allowlist and
+    verify that every mapped template still describes the expected pipeline.
+    """
     out = []
-    for arch, path in _scan_defaults_by_arch().items():
-        model_type = os.path.basename(path)[:-5]
+    for target in checkpoint_targets_for_base(base_model):
+        path = os.path.join(_DEFAULTS_DIR, f"{target.template_model_type}.json")
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                jd = json.load(f)
-            name = (jd.get("model") or {}).get("name", arch)
-        except Exception:
-            name = arch
-        family = _ckpt_family_for_arch(arch, model_type)
-        fam_l = family.lower()
-        if any(h in fam_l for h in _CKPT_EXCLUDED_FAMILY_HINTS):
+            with open(path, "r", encoding="utf-8") as handle:
+                definition = json.load(handle)
+        except (OSError, ValueError):
             continue
-        out.append({
-            "architecture": arch,
-            "name": name,
-            "family": family,
-            "template_model_type": model_type,
-        })
-    out.sort(key=lambda e: (e["family"], e["name"]))
+        template_architecture = (definition.get("model") or {}).get("architecture")
+        if template_architecture != target.architecture:
+            print(
+                "[CivitAI] Ignoring invalid checkpoint mapping "
+                f"{base_model!r} -> {target.template_model_type!r}: template "
+                f"uses architecture {template_architecture!r}."
+            )
+            continue
+        out.append(
+            target.as_dict(
+                _ckpt_family_for_arch(
+                    target.architecture, target.template_model_type
+                )
+            )
+        )
+    out.sort(key=lambda entry: (entry["family"], entry["name"]))
     return out
-
-
-def _guess_arch_for_base(base_model: str, arch_index: dict) -> str | None:
-    """Best-guess local architecture for a CivitAI baseModel string."""
-    if not base_model:
-        return None
-    hint = _CIVIT_BASE_TO_ARCH_HINT.get(base_model)
-    if hint and hint in arch_index:
-        return hint
-    # Fall back to the lora-dir mapping when it happens to equal a real arch.
-    d = CIVIT_TO_LOCAL_ARCH.get(base_model)
-    if d and d in arch_index:
-        return d
-    return None
 
 
 def _ckpt_slugify(text: str) -> str:
@@ -2586,17 +2572,38 @@ def _register_checkpoint_finetune(save_path: str, sidecar_data: dict,
     main transformer `URLs` at the LOCAL downloaded file. Because the URL is a
     bare filename (not http), WGP's get_local_model_filename() resolves it from
     ckpts/ and never tries to download it — the Civitai updater owns the file."""
-    arch_index = _scan_defaults_by_arch()
-    template_path = arch_index.get(target_architecture)
-    if template_path is None:
-        raise RuntimeError(f"Unsupported target architecture '{target_architecture}'")
+    base_model = str(sidecar_data.get("baseModel") or "")
+    filename = os.path.basename(save_path)
+    compatibility = validate_checkpoint_file(
+        save_path,
+        base_model,
+        target_architecture,
+        filename=filename,
+    )
+    template_model_type = checkpoint_template_model_type(
+        base_model, target_architecture
+    )
+    if not template_model_type:
+        raise CheckpointCompatibilityError(
+            f"No verified Maestro template exists for CivitAI base "
+            f"'{base_model}' and architecture '{target_architecture}'."
+        )
+    template_path = os.path.join(_DEFAULTS_DIR, f"{template_model_type}.json")
+    if not os.path.isfile(template_path):
+        raise RuntimeError(
+            f"Required checkpoint template '{template_model_type}' is missing"
+        )
     with open(template_path, "r", encoding="utf-8") as f:
         template = json.load(f)
+    if (template.get("model") or {}).get("architecture") != target_architecture:
+        raise RuntimeError(
+            f"Checkpoint template '{template_model_type}' does not use "
+            f"architecture '{target_architecture}'"
+        )
 
     tmpl_model = dict(template.get("model") or {})
     settings = {k: v for k, v in template.items() if k != "model"}
 
-    filename = os.path.basename(save_path)
     name = sidecar_data.get("name") or os.path.splitext(filename)[0]
     model_id = sidecar_data.get("modelId")
     version_id = sidecar_data.get("versionId")
@@ -2618,8 +2625,9 @@ def _register_checkpoint_finetune(save_path: str, sidecar_data: dict,
         "modelId": model_id,
         "versionId": version_id,
         "modelType": "Checkpoint",
-        "baseModel": sidecar_data.get("baseModel", ""),
+        "baseModel": base_model,
         "filename": filename,
+        "compatibility": compatibility,
     }
     if auto_quantize:
         # Load-time int8 quantization via mmgp. Lets one large bf16/fp16
@@ -2637,8 +2645,17 @@ def _register_checkpoint_finetune(save_path: str, sidecar_data: dict,
     base_slug = _ckpt_slugify(f"civitai_{model_id}_{name}") if model_id else _ckpt_slugify(name)
     slug = base_slug[:80].strip("_") or "checkpoint"
     out_path = os.path.join(_FINETUNES_DIR, f"{slug}.json")
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(finetune_def, f, indent=4)
+    temporary_path = f"{out_path}.maestro-{os.getpid()}.tmp"
+    try:
+        with open(temporary_path, "w", encoding="utf-8") as f:
+            json.dump(finetune_def, f, indent=4)
+        os.replace(temporary_path, out_path)
+    finally:
+        if os.path.isfile(temporary_path):
+            try:
+                os.remove(temporary_path)
+            except OSError:
+                pass
     print(f"[CivitAI] Registered checkpoint finetune '{slug}' "
           f"(arch={target_architecture}) -> {out_path}")
     return slug, out_path
@@ -2917,7 +2934,7 @@ def _validate_safetensors_payload(path: str):
     file_size = os.path.getsize(path)
     if file_size < 100 * 1024:
         raise ValueError(
-            f"file is only {file_size} bytes — too small to be a real LoRA"
+            f"file is only {file_size} bytes — too small to be a real model asset"
         )
     with open(path, "rb") as handle:
         raw_len = handle.read(8)
@@ -3087,7 +3104,10 @@ def _civitai_headers() -> dict:
 #       }
 #     }
 #   }
-LORA_MANIFEST_VERSION = 1
+# v2 invalidates cached v1 comparisons, which always followed the first
+# CivitAI version even when the installed file belonged to another base-model
+# branch (for example Z-Image Turbo instead of Z-Image Base).
+LORA_MANIFEST_VERSION = 2
 LORA_MANIFEST_FILENAME = ".lora_update_manifest.json"
 LORA_MANIFEST_STALE_HOURS = 24
 LORA_CHANGELOG_MAX_LEN = 800
@@ -3166,6 +3186,57 @@ def _civitai_fetch_model(model_id: int, timeout: float = 15.0) -> tuple[dict | N
         return None, None
 
 
+def _select_latest_compatible_civitai_version(
+    versions: list,
+    current_version_id: int | None,
+) -> dict | None:
+    """Choose the newest release for the installed model variant.
+
+    A single CivitAI model page can contain versions trained for different
+    bases (for example Z-Image Base and Z-Image Turbo).  The API returns the
+    newest version first, but that may belong to a different base and cannot
+    update the file the user installed.  Follow the current version's
+    ``baseModel`` and, when supplied, ``baseModelType`` branch instead.
+    CivitAI already orders each compatible subset newest-first.
+    """
+
+    valid = [version for version in versions if isinstance(version, dict)]
+    if not valid:
+        return None
+    if current_version_id is None:
+        return valid[0]
+
+    try:
+        current_id = int(current_version_id)
+    except (TypeError, ValueError):
+        return valid[0]
+
+    current = None
+    for version in valid:
+        try:
+            if int(version.get("id")) == current_id:
+                current = version
+                break
+        except (TypeError, ValueError):
+            continue
+    if current is None:
+        return valid[0]
+
+    compatible = valid
+    for field in ("baseModel", "baseModelType"):
+        current_value = str(current.get(field) or "").strip().casefold()
+        if not current_value:
+            continue
+        matches = [
+            version
+            for version in compatible
+            if str(version.get(field) or "").strip().casefold() == current_value
+        ]
+        if matches:
+            compatible = matches
+    return compatible[0] if compatible else current
+
+
 def _build_manifest_entry(
     model_id: int,
     current_version_id: int | None,
@@ -3203,7 +3274,7 @@ def _build_manifest_entry(
     if not isinstance(versions, list) or not versions:
         entry["status"] = "unknown"
         return entry
-    latest = versions[0] if isinstance(versions[0], dict) else None
+    latest = _select_latest_compatible_civitai_version(versions, current_version_id)
     if not latest:
         entry["status"] = "unknown"
         return entry
@@ -3236,12 +3307,29 @@ def civitai_base_models():
 
 @api.get("/api/v1/civitai/checkpoint-architectures")
 def civitai_checkpoint_architectures(base_model: str = ""):
-    """List architectures a checkpoint can be imported as (video/image models
-    we already support), plus a best-guess default for the given CivitAI
-    baseModel so the UI picker can pre-select it."""
-    architectures = _list_checkpoint_architectures()
-    guess = _guess_arch_for_base(base_model, {a["architecture"]: True for a in architectures})
-    return {"architectures": architectures, "suggested_architecture": guess}
+    """List only checkpoint pipelines verified for this CivitAI base label."""
+    architectures = _list_checkpoint_architectures(base_model)
+    guess = suggested_checkpoint_architecture(base_model)
+    available = {entry["architecture"] for entry in architectures}
+    if guess not in available:
+        guess = None
+    supported = bool(architectures)
+    if supported:
+        reason = None
+    elif checkpoint_targets_for_base(base_model):
+        reason = (
+            "Maestro recognizes this checkpoint family, but its required "
+            "pipeline definition is unavailable in this installation. Update "
+            "Maestro and try again."
+        )
+    else:
+        reason = unsupported_checkpoint_reason(base_model)
+    return {
+        "architectures": architectures,
+        "suggested_architecture": guess,
+        "supported": supported,
+        "unsupported_reason": reason,
+    }
 
 
 @api.post("/api/v1/models/reload")
@@ -3546,14 +3634,34 @@ async def civitai_download(request: Request):
 
     # Resolve target directory.
     if kind == "checkpoint":
-        # Checkpoints are full transformer weights — validate the requested
-        # architecture against the supported set and route into ckpts/ (where
-        # WGP loads model weights from), NOT the loras tree.
-        arch_index = _scan_defaults_by_arch()
-        if not target_architecture or target_architecture not in arch_index:
+        # Checkpoints are full transformer weights.  CivitAI's generic
+        # Checkpoint category includes unrelated families (notably SDXL), so
+        # require an exact verified base-model mapping instead of accepting
+        # any architecture that happens to exist in defaults/.
+        try:
+            ensure_allowed_checkpoint_target(base_model, target_architecture)
+        except CheckpointCompatibilityError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        available_targets = {
+            entry["architecture"]
+            for entry in _list_checkpoint_architectures(base_model)
+        }
+        if target_architecture not in available_targets:
             raise HTTPException(
                 status_code=400,
-                detail="A supported target_architecture is required for checkpoint imports",
+                detail=(
+                    "The verified pipeline definition for this checkpoint is "
+                    "not available. Update Maestro and try again."
+                ),
+            )
+        if os.path.splitext(filename)[1].casefold() not in {".safetensors", ".sft"}:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Checkpoint import currently supports individual "
+                    ".safetensors files only; archives and Diffusers folders "
+                    "cannot be registered as a single model."
+                ),
             )
         target_dir = _checkpoint_download_dir()
     else:
@@ -3727,16 +3835,36 @@ def _run_civitai_download(download_id: str):
         # `.safetensors` file and later crashes mmgp's loader with
         # `OverflowError: cannot fit 'int' into an index-sized integer`
         # — much harder to diagnose than failing here at download time.
-        if filename.lower().endswith((".safetensors", ".sft")):
+        is_checkpoint = dl.get("_kind") == "checkpoint"
+        file_extension = os.path.splitext(filename)[1].casefold()
+        if is_checkpoint and file_extension not in {".safetensors", ".sft"}:
+            raise RuntimeError(
+                "CivitAI returned an archive or non-SafeTensor checkpoint. "
+                "Maestro can import only an individual .safetensors file."
+            )
+        if file_extension in {".safetensors", ".sft"}:
             try:
                 _validate_safetensors_payload(partial_path)
             except Exception as _validate_exc:
+                asset_name = "checkpoint" if is_checkpoint else "LoRA"
                 raise RuntimeError(
-                    f"CivitAI returned an invalid LoRA payload: {_validate_exc}. "
+                    f"CivitAI returned an invalid {asset_name} payload: "
+                    f"{_validate_exc}. "
                     f"This is usually a missing/expired CivitAI API key, a rate-limit, "
                     f"or a model that requires special access. Check Settings → Services → "
                     f"CivitAI API Key."
                 )
+
+        checkpoint_compatibility = None
+        if is_checkpoint:
+            dl["message"] = "Verifying checkpoint architecture..."
+            checkpoint_compatibility = validate_checkpoint_file(
+                partial_path,
+                dl.get("_base_model", ""),
+                dl.get("_target_architecture", ""),
+                filename=filename,
+            )
+            dl["_checkpoint_compatibility"] = checkpoint_compatibility
 
         # Publish only a fully-received (and, for safetensors, validated)
         # payload. A failed stream leaves no truncated model at save_path.
@@ -3763,14 +3891,10 @@ def _run_civitai_download(download_id: str):
             _update_download_record(download_id, filename=filename)
             print(f"[CivitAI] Extracted {len(extracted_files)} file(s)")
 
-        # NOTE: A previous version did dim-based architecture verification
-        # here (peeking the safetensors header and warning if the file's
-        # attention tensors didn't match the target directory's expected
-        # hidden dim). It was removed because the dim assumptions were
-        # wrong — Klein 9B uses the same 4096 hidden / 12288 QKV dims as
-        # Flux 2 Pro/Dev, so the check false-positived on legitimate
-        # Klein-trained LoRAs. The file-integrity gate above (size > 100KB
-        # AND parseable safetensors header) is the actual safety net.
+        # LoRAs intentionally remain metadata-routed because adapter formats
+        # vary. Full checkpoints are stricter: the header-only verification
+        # above matches several architecture-specific tensor shapes before the
+        # multi-GB file is published or added to Maestro's model registry.
 
         sidecar_data = {
             "modelId": dl["_model_id"],
@@ -3790,6 +3914,7 @@ def _run_civitai_download(download_id: str):
             sidecar_data["publishedAt"] = dl["_published_at"]
         if dl.get("_kind") == "checkpoint":
             sidecar_data["modelType"] = "Checkpoint"
+            sidecar_data["compatibility"] = checkpoint_compatibility
 
         # Write sidecar and generate guide for each extracted file (or the single download)
         files_to_process = extracted_files if extracted_files else [save_path]
@@ -6243,6 +6368,23 @@ def _mask_key(key: str) -> str:
 _PUBLIC_LLM_PROVIDERS = {"openai", "anthropic"}
 
 
+def _llm_api_key_for_provider(services: dict, provider: str) -> str:
+    """Return the credential owned by the selected LLM provider.
+
+    Self-hosted OpenAI-compatible servers can require authentication too.
+    Keeping that credential separate from the public OpenAI key prevents a
+    provider switch from accidentally sending the wrong secret to a LAN or
+    third-party endpoint.
+    """
+
+    key_name = {
+        "remote": "llm_remote_api_key",
+        "openai": "openai_api_key",
+        "anthropic": "anthropic_api_key",
+    }.get(str(provider or "").lower())
+    return str(services.get(key_name, "") or "") if key_name else ""
+
+
 def _llm_default_device() -> str:
     """Default LLM device — CUDA when the system has it, else CPU.
 
@@ -6281,6 +6423,8 @@ def get_services_config():
         "llm_device": services.get("llm_device", _llm_default_device()),
         "llm_provider": provider,
         "llm_remote_url": services.get("llm_remote_url", ""),
+        "llm_remote_api_key": _mask_key(services.get("llm_remote_api_key", "")),
+        "llm_remote_api_key_set": bool(services.get("llm_remote_api_key", "")),
         "enhance_llm_model_id": services.get("enhance_llm_model_id", ""),
         "enhance_llm_device": services.get("enhance_llm_device", "cuda"),
         "google_api_key": _mask_key(services.get("google_api_key", "")),
@@ -6368,7 +6512,7 @@ async def update_services_config(request: Request):
     ALLOWED_KEYS = {
         "llm_model_id", "llm_device", "llm_provider", "llm_remote_url",
         "enhance_llm_model_id", "enhance_llm_device",
-        "google_api_key", "openai_api_key", "anthropic_api_key",
+        "google_api_key", "llm_remote_api_key", "openai_api_key", "anthropic_api_key",
         "use_director_v2", "nsfw_mode", "nsfw_accepted_at", "director_prompt_polish",
         "civitai_api_key", "voice_reference_enabled", "ltx_progressive_pipeline",
         "show_experimental", "auto_performance", "storage_allow_linked_removal",
@@ -6955,11 +7099,7 @@ async def llm_load(request: Request):
     device = body.get("device", services.get("llm_device", _llm_default_device()))
     provider = body.get("provider", services.get("llm_provider", "local"))
     remote_url = body.get("remote_url", services.get("llm_remote_url", ""))
-    api_key = ""
-    if provider == "openai":
-        api_key = services.get("openai_api_key", "")
-    elif provider == "anthropic":
-        api_key = services.get("anthropic_api_key", "")
+    api_key = _llm_api_key_for_provider(services, provider)
 
     try:
         llm_service.load_model(model_id=model_id, device=device, provider=provider, remote_url=remote_url, api_key=api_key)
@@ -6984,11 +7124,7 @@ def list_llm_models(provider: str = ""):
     services = wgp.server_config.get("services", {})
     p = provider or services.get("llm_provider", "local")
     remote_url = services.get("llm_remote_url", "")
-    api_key = ""
-    if p == "openai":
-        api_key = services.get("openai_api_key", "")
-    elif p == "anthropic":
-        api_key = services.get("anthropic_api_key", "")
+    api_key = _llm_api_key_for_provider(services, p)
     return {"models": llm_service.get_available_models(provider=p, remote_url=remote_url, api_key=api_key)}
 
 
@@ -7007,11 +7143,7 @@ def _ensure_llm_loaded():
     desired_device = services.get("llm_device", _llm_default_device())
     desired_provider = services.get("llm_provider", "local")
     desired_remote_url = services.get("llm_remote_url", "")
-    desired_api_key = ""
-    if desired_provider == "openai":
-        desired_api_key = services.get("openai_api_key", "")
-    elif desired_provider == "anthropic":
-        desired_api_key = services.get("anthropic_api_key", "")
+    desired_api_key = _llm_api_key_for_provider(services, desired_provider)
 
     if llm_service.is_loaded():
         status = llm_service.get_status()
@@ -7074,14 +7206,17 @@ _SONG_WRITER_FALLBACK_INSTRUMENTAL = (
 _MUSIC3_SONG_WRITER_FALLBACK = (
     "You are writing for MiniMax-Music3. Output exactly [STYLE] and [LYRICS]. "
     "STYLE must contain the headings ### Global Metadata, ### Vocal Details, "
-    "and ### Arrangement, with a concrete section-by-section arrangement. "
-    "LYRICS must be original and use section tags such as [Verse], [Chorus], "
-    "[Bridge], and [Outro] on their own lines. Keep lyric text out of STYLE."
+    "and ### Arrangement. Begin STYLE with genre, BPM, key, then one coherent "
+    "instrument palette, followed by a concrete section-by-section arrangement. "
+    "LYRICS must be original and use bare canonical tags such as [Verse], "
+    "[Chorus], [Bridge], [Guitar Solo], and [Outro] alone on their lines. Put "
+    "all production and stage directions in STYLE, never inside lyric tags."
 )
 _MUSIC3_SONG_WRITER_FALLBACK_INSTRUMENTAL = (
     "You are writing an instrumental track for MiniMax-Music3. Output exactly "
     "[STYLE] and [LYRICS]. STYLE must contain ### Global Metadata, ### Vocal "
-    "Details, and ### Arrangement; Vocal Details must explicitly say the track "
+    "Details, and ### Arrangement, beginning with genre, BPM, key, then a "
+    "coherent instrument palette. Vocal Details must explicitly say the track "
     "is instrumental and name the lead melodic texture. Return "
     "[LYRICS]\n[Instrumental]."
 )
@@ -7112,7 +7247,7 @@ def _music3_writer_duration_instruction(duration_seconds) -> str:
     )
 
 
-def _parse_song_output(raw, instrumental):
+def _parse_song_output(raw, instrumental, *, music3=False):
     """Split the song-writer LLM output into (style, lyrics)."""
     import re as _re
     text = str(raw or "").strip()
@@ -7128,6 +7263,12 @@ def _parse_song_output(raw, instrumental):
         lyrics = text
     if instrumental:
         lyrics = "[Instrumental]"
+    if music3:
+        from models.TTS.minimax_music3.prompting import (
+            normalize_generated_music3_song,
+        )
+
+        style, lyrics = normalize_generated_music3_song(style, lyrics)
     return style, lyrics
 
 
@@ -7195,7 +7336,11 @@ async def llm_write_song(request: Request):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    style, lyrics = _parse_song_output(raw, instrumental)
+    style, lyrics = _parse_song_output(
+        raw,
+        instrumental,
+        music3=is_minimax_music3,
+    )
     return {"style": style, "lyrics": lyrics, "raw": raw}
 
 
@@ -7309,7 +7454,11 @@ async def director_generate_music(request: Request):
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Song writing failed: {e}")
-        w_style, w_lyrics = _parse_song_output(raw, instrumental)
+        w_style, w_lyrics = _parse_song_output(
+            raw,
+            instrumental,
+            music3=is_minimax_music3,
+        )
         style = style or w_style
         lyrics = lyrics or w_lyrics
 
@@ -8531,6 +8680,112 @@ async def director_plan_short_film_script(request: Request):
 
 # ── Director Pipeline Endpoints ─────────────────────────────────────────
 
+@api.get("/api/v1/director/queue")
+def director_queue_list():
+    """Return the persistent, project-level Director render queue."""
+    _init_pipeline()
+    from services.director_pipeline import list_director_queue
+    base = wgp.server_config.get("save_path", "outputs")
+    return list_director_queue(base)
+
+
+@api.post("/api/v1/director/queue")
+async def director_queue_add(request: Request):
+    """Freeze a Director project revision in the held queue."""
+    _init_pipeline()
+    from services.director_pipeline import enqueue_director_pipeline
+    body = await request.json()
+    params = body.get("params") if isinstance(body, dict) else None
+    if not isinstance(params, dict):
+        raise HTTPException(status_code=400, detail="Director queue params are required")
+    base = wgp.server_config.get("save_path", "outputs")
+    try:
+        # Freezing a project can copy a full music track and many references.
+        # Keep that durable snapshot work off FastAPI's event loop so status,
+        # cancel, and system-stat requests remain responsive.
+        return await asyncio.to_thread(enqueue_director_pipeline, base, params)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@api.post("/api/v1/director/queue/start")
+def director_queue_start():
+    _init_pipeline()
+    from services.director_pipeline import start_director_queue
+    base = wgp.server_config.get("save_path", "outputs")
+    return start_director_queue(base)
+
+
+@api.post("/api/v1/director/queue/pause")
+def director_queue_pause():
+    _init_pipeline()
+    from services.director_pipeline import pause_director_queue
+    base = wgp.server_config.get("save_path", "outputs")
+    return pause_director_queue(base)
+
+
+@api.post("/api/v1/director/queue/reorder")
+async def director_queue_reorder(request: Request):
+    _init_pipeline()
+    from services.director_pipeline import reorder_director_queue
+    body = await request.json()
+    entry_ids = body.get("entry_ids") if isinstance(body, dict) else None
+    if not isinstance(entry_ids, list) or not all(isinstance(item, str) for item in entry_ids):
+        raise HTTPException(status_code=400, detail="entry_ids must be a list of queue IDs")
+    base = wgp.server_config.get("save_path", "outputs")
+    return reorder_director_queue(base, entry_ids)
+
+
+@api.get("/api/v1/director/queue/{entry_id}")
+def director_queue_get(entry_id: str):
+    _init_pipeline()
+    from services.director_pipeline import get_director_queue_entry
+    base = wgp.server_config.get("save_path", "outputs")
+    entry = get_director_queue_entry(base, entry_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Director queue entry not found")
+    return entry
+
+
+@api.put("/api/v1/director/queue/{entry_id}")
+async def director_queue_update(entry_id: str, request: Request):
+    """Replace a held queue entry with the edited Director snapshot."""
+    _init_pipeline()
+    from services.director_pipeline import (
+        PipelineBusyError,
+        update_director_queue_entry,
+    )
+    body = await request.json()
+    params = body.get("params") if isinstance(body, dict) else None
+    if not isinstance(params, dict):
+        raise HTTPException(status_code=400, detail="Director queue params are required")
+    base = wgp.server_config.get("save_path", "outputs")
+    try:
+        return await asyncio.to_thread(
+            update_director_queue_entry, base, entry_id, params,
+        )
+    except PipelineBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.delete("/api/v1/director/queue/{entry_id}")
+def director_queue_delete(entry_id: str):
+    _init_pipeline()
+    from services.director_pipeline import (
+        PipelineBusyError,
+        remove_director_queue_entry,
+    )
+    base = wgp.server_config.get("save_path", "outputs")
+    try:
+        removed = remove_director_queue_entry(base, entry_id)
+    except PipelineBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not removed:
+        raise HTTPException(status_code=404, detail="Director queue entry not found")
+    return {"deleted": entry_id}
+
 @api.post("/api/v1/director/pipeline/start")
 async def director_pipeline_start(request: Request):
     """Start a Director pipeline (LLM planning → image gen → video gen).
@@ -8541,7 +8796,7 @@ async def director_pipeline_start(request: Request):
     from services.director_pipeline import start_pipeline
     body = await request.json()
     try:
-        pid = start_pipeline(body)
+        pid = await asyncio.to_thread(start_pipeline, body)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"pipeline_id": pid}

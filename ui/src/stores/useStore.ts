@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, DirectorShotImageGuidance, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineRepairState, SavedPipelineState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping, H3WindowPlan } from '../types'
+import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, DirectorShotImageGuidance, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineClipState, PipelineRepairState, SavedPipelineState, DirectorQueueState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping, H3WindowPlan } from '../types'
 import * as api from '../api/client'
 import { applyThemePrefs, getStoredPrefs, type FamilyId, type ThemeMode, type ThemePrefs } from '../lib/theme'
 import {
@@ -87,6 +87,76 @@ function _inferOutpaintAspect(width: number, height: number): OutpaintAspect | n
 
 function _repairNeedsPolling(repair: PipelineRepairState | null | undefined): boolean {
   return !!repair && DIRECTOR_REPAIR_ACTIVE.has(repair.status)
+}
+
+function _record(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+}
+
+function _stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.length > 0)
+    : []
+}
+
+function _directorLoraState(value: unknown) {
+  const source = _record(value)
+  return {
+    activated_loras: _stringArray(source.activated_loras),
+    loras_multipliers: typeof source.loras_multipliers === 'string'
+      ? source.loras_multipliers : '',
+    loraWeights: _record(source.loraWeights) as Record<string, number[]>,
+    availableLoras: _stringArray(source.availableLoras),
+  }
+}
+
+function _assetName(path: string | null | undefined, fallback: string): string {
+  const normalized = String(path || '').replace(/\\/g, '/')
+  return normalized.split('/').filter(Boolean).pop() || fallback
+}
+
+function _directorAssetItem(
+  manifest: Record<string, unknown>,
+  key: string,
+  index?: number,
+): Record<string, unknown> {
+  const raw = manifest[key]
+  const value = index == null
+    ? raw
+    : Array.isArray(raw) ? raw[index] : undefined
+  return _record(value)
+}
+
+function _directorServePath(
+  manifest: Record<string, unknown>,
+  key: string,
+  fallbackPath?: string | null,
+  index?: number,
+): string | null {
+  const item = _directorAssetItem(manifest, key, index)
+  const served = typeof item.serve_path === 'string' ? item.serve_path : ''
+  if (served) return served
+  // Legacy projects usually stored a plain workspace filename. Absolute
+  // filesystem paths are deliberately reduced to their basename because the
+  // file endpoint never accepts arbitrary host paths.
+  return fallbackPath ? _assetName(fallbackPath, '') || null : null
+}
+
+async function _loadDirectorImageFile(
+  servePath: string | null,
+  displayName: string,
+): Promise<File | null> {
+  if (!servePath) return null
+  try {
+    const response = await fetch(api.getFileUrl(servePath), { cache: 'no-store' })
+    if (!response.ok) return null
+    const blob = await response.blob()
+    return new File([blob], displayName, { type: blob.type || 'image/png' })
+  } catch {
+    return null
+  }
 }
 
 function _stopDirectorRepairPoll(pid: string): void {
@@ -1174,6 +1244,17 @@ interface AppState {
   resumePipeline: (pid: string) => Promise<void>
   deletePipeline: (pid: string) => Promise<void>
   loadDirectorFromPipeline: (pid: string) => Promise<void>
+  directorQueue: DirectorQueueState | null
+  directorQueueLoading: boolean
+  /** Held entry currently open in the Director editor, if any. */
+  directorQueueEditingEntryId: string | null
+  loadDirectorQueue: () => Promise<void>
+  loadDirectorQueueEntry: (entryId: string) => Promise<void>
+  startDirectorQueue: () => Promise<void>
+  pauseDirectorQueue: () => Promise<void>
+  removeDirectorQueueEntry: (entryId: string) => Promise<void>
+  moveDirectorQueueEntry: (entryId: string, direction: -1 | 1) => Promise<void>
+  queueCurrentDirectorPipeline: () => Promise<void>
 
   // Recipes (one-click Studio presets)
   recipesOpen: boolean
@@ -1662,7 +1743,10 @@ interface AppState {
   pipelineId: string | null
   pipelineStatus: import('../api/client').PipelineStatus | null
   pipelinePolling: boolean
-  startDirectorPipeline: () => Promise<void>
+  /** Source revision and stable project lineage for Open & Edit reruns. */
+  directorSourcePipelineId: string | null
+  directorProjectId: string | null
+  startDirectorPipeline: (mode?: 'now' | 'queue') => Promise<void>
   continuePipeline: (updates?: { clip_plans?: Array<{ video_prompt: string; image_prompt: string }> }) => Promise<void>
   stopPipeline: () => Promise<void>
   pollPipelineStatus: () => void
@@ -1685,6 +1769,207 @@ const defaultParams: GenerateParams = {
   skip_steps_multiplier: 0.08,
   skip_steps_start_step_perc: 25,
   settings_version: 2.52,
+}
+
+async function _buildDirectorRestorePatch(
+  pipeline: SavedPipelineState,
+  paramsOverride?: Record<string, unknown>,
+): Promise<Partial<AppState>> {
+  const params = paramsOverride || _record(pipeline._params_snapshot)
+  const ui = _record(pipeline.director_ui_snapshot || params.director_ui_snapshot)
+  const manifest = _record(pipeline.asset_manifest || params._director_asset_manifest)
+
+  const plannedClips = (
+    Array.isArray(ui.directorPlannedClips) ? ui.directorPlannedClips
+      : pipeline.clips.map(clip => clip.planned_clip).filter(Boolean)
+  ) as PlannedClip[]
+  const clipPlans = pipeline.clips.length
+    ? pipeline.clips.map(clip => {
+        const raw = clip as PipelineClipState & Record<string, unknown>
+        const modelContracts = Object.fromEntries(
+          Object.entries(raw).filter(([key]) => key.startsWith('_director_')),
+        )
+        return {
+          ...modelContracts,
+          video_prompt: clip.video_prompt || '',
+          image_prompt: clip.image_prompt || '',
+          ...(clip.window_prompts?.length ? { window_prompts: clip.window_prompts } : {}),
+          ...(clip.keyframe_prompts?.length ? { keyframe_prompts: clip.keyframe_prompts } : {}),
+          ...(clip.window_count > 1 ? { window_count: clip.window_count } : {}),
+          ...(Array.isArray(raw.visual_changes) ? { visual_changes: raw.visual_changes } : {}),
+          ...(typeof raw.image_source === 'string' ? { image_source: raw.image_source } : {}),
+        }
+      }) as ClipPlan[]
+    : (Array.isArray(ui.directorClipPlans) ? ui.directorClipPlans as ClipPlan[] : [])
+
+  let analysis = _record(ui.directorAnalysis) as unknown as AudioAnalysisResult | null
+  if (!Object.keys(_record(analysis)).length) {
+    const duration = plannedClips.length
+      ? Number(plannedClips[plannedClips.length - 1].end || 0)
+      : Number(params.target_duration || 0)
+    analysis = duration > 0 ? {
+      duration,
+      sample_rate: 0,
+      bpm: Number(params.bpm || 0),
+      beats: [],
+      downbeats: [],
+      sections: plannedClips.map(clip => ({
+        start: clip.start,
+        end: clip.end,
+        label: clip.section_label || 'scene',
+        energy: clip.energy || 0.5,
+      })),
+      onset_envelope: [],
+      lyrics: Array.isArray(params.lyrics) ? params.lyrics as AudioAnalysisResult['lyrics'] : null,
+      vocals_path: typeof params.audio_vocals_path === 'string' ? params.audio_vocals_path : null,
+    } : null
+  }
+
+  const referencePath = typeof params.reference_image_path === 'string'
+    ? params.reference_image_path
+    : pipeline.reference_image_path
+  const referenceServePath = _directorServePath(
+    manifest, 'reference_image_path', referencePath,
+  )
+  const referenceName = _assetName(referencePath, 'reference.png')
+  const referenceFile = await _loadDirectorImageFile(referenceServePath, referenceName)
+
+  const characterPaths = _stringArray(
+    params.character_ref_paths || pipeline.character_ref_paths,
+  )
+  const locationPaths = _stringArray(
+    params.location_ref_paths || pipeline.location_ref_paths,
+  )
+  const characterFiles = await Promise.all(characterPaths.map(async (path, index) => {
+    const name = _assetName(path, `character-${index + 1}.png`)
+    return await _loadDirectorImageFile(
+      _directorServePath(manifest, 'character_ref_paths', path, index), name,
+    ) || new File([], name, { type: 'image/png' })
+  }))
+  const locationFiles = await Promise.all(locationPaths.map(async (path, index) => {
+    const name = _assetName(path, `location-${index + 1}.png`)
+    return await _loadDirectorImageFile(
+      _directorServePath(manifest, 'location_ref_paths', path, index), name,
+    ) || new File([], name, { type: 'image/png' })
+  }))
+
+  const clipImages = (
+    await Promise.all(pipeline.clips.map(async (clip, index) => {
+      if (!clip.start_image_filename) return null
+      const file = await _loadDirectorImageFile(
+        _directorServePath(
+          manifest,
+          'prepared_clip_image_paths',
+          clip.start_image_filename,
+          index,
+        ),
+        _assetName(clip.start_image_filename, `scene-${index + 1}.png`),
+      )
+      return {
+        clipIndex: index,
+        prompt: clip.image_prompt || '',
+        file: file || new File([], _assetName(clip.start_image_filename, `scene-${index + 1}.png`), { type: 'image/png' }),
+        filename: clip.start_image_filename,
+      } satisfies DirectorClipImage
+    }))
+  ).filter((image): image is DirectorClipImage => image !== null)
+
+  const audioPath = typeof params.audio_path === 'string' ? params.audio_path : null
+  const audioName = typeof ui.directorAudioName === 'string'
+    ? ui.directorAudioName
+    : _assetName(audioPath, 'Director audio')
+  const voicePath = typeof params.voice_reference === 'string' ? params.voice_reference : null
+  const voiceName = typeof ui.directorVoiceRefName === 'string'
+    ? ui.directorVoiceRefName
+    : _assetName(voicePath, 'Voice reference')
+  const pipelineType = String(params.pipeline_type || pipeline.pipeline_type || 'music_video')
+  const skill: DirectorSkill = pipelineType.startsWith('short_film')
+    ? 'short_film'
+    : (ui.directorSkill as DirectorSkill) || 'music_video'
+  const shortFilmPath: ShortFilmPath | null = pipelineType === 'short_film_story'
+    ? 'story'
+    : pipelineType === 'short_film_audio' ? 'audio' : null
+  const savedStep = typeof ui.directorStep === 'string'
+    ? ui.directorStep as AppState['directorStep'] : 'style'
+  const restoreStep: AppState['directorStep'] = clipPlans.length > 0
+    ? 'review_video'
+    : savedStep === 'plan' || savedStep === 'generate_images' || savedStep === 'plan_video'
+      ? 'style'
+      : savedStep
+
+  return {
+    sidebarMode: 'director',
+    sidebarOpen: true,
+    dashboardOpen: false,
+    dashboardSelectedPipeline: pipeline,
+    directorStep: restoreStep,
+    directorSourcePipelineId: pipeline.pipeline_id,
+    directorProjectId: pipeline.project_id || pipeline.pipeline_id,
+    directorSkill: skill,
+    shortFilmPath,
+    directorSceneDescription: String(ui.directorSceneDescription || pipeline.scene_description || ''),
+    directorAudioPath: audioPath,
+    directorAudioFile: audioPath ? new File([], audioName, { type: 'audio/wav' }) : null,
+    directorAnalysis: analysis,
+    directorPlannedClips: plannedClips,
+    directorEnergyBias: Number(ui.directorEnergyBias || 0),
+    directorClipPlans: clipPlans,
+    directorClipImages: clipImages,
+    directorReferenceImage: referenceFile,
+    directorReferenceImagePath: referencePath,
+    directorCharacterRefs: characterFiles,
+    directorCharacterRefPaths: characterPaths,
+    directorCharacterRefLabels: _stringArray(ui.directorCharacterRefLabels || params.character_ref_labels),
+    directorLocationRefs: locationFiles,
+    directorLocationRefPaths: locationPaths,
+    directorLocationRefLabels: _stringArray(ui.directorLocationRefLabels || params.location_ref_labels),
+    directorVoiceRef: voicePath ? new File([], voiceName, { type: 'audio/wav' }) : null,
+    directorVoiceRefPath: voicePath,
+    directorIdentityGuidanceScale: Number(ui.directorIdentityGuidanceScale || params.identity_guidance_scale || 3),
+    directorSpeakers: _stringArray(ui.directorSpeakers),
+    directorSpeakerMappings: Array.isArray(ui.directorSpeakerMappings)
+      ? ui.directorSpeakerMappings as SpeakerMapping[] : [],
+    directorAutoMode: ui.directorAutoMode == null ? pipeline.auto_mode : Boolean(ui.directorAutoMode),
+    directorSeamless: ui.directorSeamless == null ? pipeline.seamless : Boolean(ui.directorSeamless),
+    directorShotImageGuidance: (ui.directorShotImageGuidance || pipeline.shot_image_guidance || 'auto') as DirectorShotImageGuidance,
+    directorLlmLog: Array.isArray(ui.directorLlmLog)
+      ? ui.directorLlmLog as { stage: string; text: string }[]
+      : (pipeline.llm_log?.passes || []).map(pass => ({ stage: pass.pass, text: pass.response_text })),
+    directorResolution: (ui.directorResolution || pipeline.director_resolution_preset || '720p') as ResolutionPreset,
+    directorAspectRatio: (ui.directorAspectRatio || pipeline.director_aspect_ratio || '16:9') as AspectRatio,
+    directorVideoInferenceStepsByModel: _record(ui.directorVideoInferenceStepsByModel) as Record<string, number>,
+    directorVideoMaxShotFramesByModel: _record(ui.directorVideoMaxShotFramesByModel) as Record<string, number>,
+    directorH3TurboModeByModel: _record(ui.directorH3TurboModeByModel) as Record<string, boolean>,
+    directorH3TurboPresetByModel: _record(ui.directorH3TurboPresetByModel) as Record<string, string>,
+    directorH3SolModeByModel: _record(ui.directorH3SolModeByModel) as Record<string, boolean>,
+    directorH3FirstBlockCacheByModel: _record(ui.directorH3FirstBlockCacheByModel) as Record<string, boolean>,
+    directorH3FirstBlockCacheMultiplierByModel: _record(ui.directorH3FirstBlockCacheMultiplierByModel) as Record<string, number>,
+    directorH3FirstBlockCacheWarmupByModel: _record(ui.directorH3FirstBlockCacheWarmupByModel) as Record<string, number>,
+    directorImageSpatialUpsampling: String(ui.directorImageSpatialUpsampling ?? params.image_spatial_upsampling ?? ''),
+    directorImageFilmGrainIntensity: Number(ui.directorImageFilmGrainIntensity ?? params.image_film_grain_intensity ?? 0),
+    directorImageFilmGrainSaturation: Number(ui.directorImageFilmGrainSaturation ?? params.image_film_grain_saturation ?? 0.5),
+    directorVideoSpatialUpsampling: String(ui.directorVideoSpatialUpsampling ?? params.video_spatial_upsampling ?? ''),
+    directorVideoFilmGrainIntensity: Number(ui.directorVideoFilmGrainIntensity ?? params.video_film_grain_intensity ?? 0),
+    directorVideoFilmGrainSaturation: Number(ui.directorVideoFilmGrainSaturation ?? params.video_film_grain_saturation ?? 0.5),
+    directorVideoSelfRefiner: Number(ui.directorVideoSelfRefiner ?? params.video_self_refiner ?? 0),
+    directorAudioScale: Number(ui.directorAudioScale ?? params.audio_scale ?? 1),
+    directorMusicSource: (ui.directorMusicSource as 'upload' | 'generate' | null) || (audioPath ? 'upload' : null),
+    directorMusicModel: String(ui.directorMusicModel || 'ace_step_v1_5_xl_sft_lm_4b'),
+    directorSongDescription: String(ui.directorSongDescription || ''),
+    directorSongInstrumental: Boolean(ui.directorSongInstrumental),
+    directorSongStyle: String(ui.directorSongStyle || ''),
+    directorSongLyrics: String(ui.directorSongLyrics || ''),
+    directorSongDuration: Number(ui.directorSongDuration || analysis?.duration || 120),
+    shortFilmCharacters: Array.isArray(ui.shortFilmCharacters)
+      ? ui.shortFilmCharacters as ShortFilmCharacter[]
+      : Array.isArray(params.characters) ? params.characters as ShortFilmCharacter[] : [],
+    shortFilmTargetDuration: Number(ui.shortFilmTargetDuration || params.target_duration || 30),
+    shortFilmNarrative: ui.shortFilmNarrative == null
+      ? Boolean(params.narrative_mode) : Boolean(ui.shortFilmNarrative),
+    directorLoading: false,
+    directorLoadingMessage: null,
+    directorError: null,
+  }
 }
 
 // ── Per-sub-mode working sets (Studio Video) ─────────────────────────
@@ -2672,6 +2957,9 @@ export const useStore = create<AppState>((set, get) => ({
   dashboardPipelineList: [],
   dashboardSelectedPipeline: null,
   dashboardLoading: false,
+  directorQueue: null,
+  directorQueueLoading: false,
+  directorQueueEditingEntryId: null,
   setDashboardOpen: (open) => {
     set({ dashboardOpen: open })
     if (open) {
@@ -2932,6 +3220,184 @@ export const useStore = create<AppState>((set, get) => ({
     })
     get().pollPipelineStatus()
   },
+  loadDirectorQueue: async () => {
+    try {
+      const queue = await api.fetchDirectorQueue()
+      set({ directorQueue: queue, directorQueueLoading: false })
+    } catch (e) {
+      console.warn('Failed to load Director queue:', e)
+      set({ directorQueueLoading: false })
+    }
+  },
+  loadDirectorQueueEntry: async (entryId: string) => {
+    set({ directorQueueLoading: true })
+    try {
+      const entry = await api.fetchDirectorQueueEntry(entryId)
+      if (entry.pipeline_id && ['completed', 'failed', 'cancelled'].includes(entry.status)) {
+        await get().loadDirectorFromPipeline(entry.pipeline_id)
+        set({ directorQueueLoading: false })
+        return
+      }
+      const params = entry.params
+      const plans = Array.isArray(params.prepared_clip_plans)
+        ? params.prepared_clip_plans as ClipPlan[] : []
+      const timeline = Array.isArray(params.prepared_planned_clips)
+        ? params.prepared_planned_clips as PlannedClip[] : []
+      const draftPipeline: SavedPipelineState = {
+        version: 2,
+        pipeline_id: String(params._director_parent_pipeline_id || `queue-${entry.id}`),
+        project_id: String(params._director_project_id || `queue-${entry.id}`),
+        parent_pipeline_id: typeof params._director_parent_pipeline_id === 'string'
+          ? params._director_parent_pipeline_id : null,
+        queue_entry_id: entry.id,
+        created_at: entry.created_at,
+        completed_at: null,
+        status: entry.status,
+        pipeline_type: String(params.pipeline_type || entry.pipeline_type || 'music_video'),
+        scene_description: String(params.scene_description || entry.scene_description || ''),
+        reference_image_path: typeof params.reference_image_path === 'string'
+          ? params.reference_image_path : null,
+        character_ref_paths: _stringArray(params.character_ref_paths),
+        location_ref_paths: _stringArray(params.location_ref_paths),
+        auto_mode: Boolean(_record(params.director_ui_snapshot).directorAutoMode ?? true),
+        seamless: Boolean(params.seamless),
+        image_model: String(params.image_model || entry.image_model || ''),
+        video_model: String(params.video_model || entry.video_model || ''),
+        shot_image_guidance: (params.shot_image_guidance || 'auto') as DirectorShotImageGuidance,
+        image_loras: _record(params.image_loras),
+        video_loras: _record(params.video_loras),
+        image_params: _record(params.image_params),
+        video_params: _record(params.video_params),
+        director_resolution_preset: params.director_resolution_preset as ResolutionPreset,
+        director_aspect_ratio: params.director_aspect_ratio as AspectRatio,
+        director_ui_snapshot: _record(params.director_ui_snapshot),
+        asset_manifest: _record(params._director_asset_manifest),
+        llm_log: null,
+        clips: plans.map((plan, index) => ({
+          index,
+          planned_clip: timeline[index] || null,
+          image_prompt: plan.image_prompt || '',
+          video_prompt: plan.video_prompt || '',
+          keyframe_prompts: [],
+          window_prompts: [],
+          window_count: 1,
+          image_prompt_pre_polish: null,
+          video_prompt_pre_polish: null,
+          window_prompts_pre_polish: null,
+          keyframe_prompts_pre_polish: null,
+          start_image_filename: _stringArray(params.prepared_clip_image_paths)[index] || null,
+          keyframe_filenames: [],
+          video_filename: null,
+          tag: null,
+          image_gen_time_sec: null,
+          video_gen_time_sec: null,
+        })),
+        output_files: [],
+        total_time_sec: null,
+        _params_snapshot: params,
+      }
+      const restore = await _buildDirectorRestorePatch(draftPipeline, params)
+      const imageModel = draftPipeline.image_model
+      const videoModel = draftPipeline.video_model
+      set(s => ({
+        ...restore,
+        directorSourcePipelineId: typeof params._director_parent_pipeline_id === 'string'
+          ? params._director_parent_pipeline_id : null,
+        directorProjectId: typeof params._director_project_id === 'string'
+          ? params._director_project_id : null,
+        directorQueueEditingEntryId: entry.id,
+        directorQueueLoading: false,
+        selectedModelPerMode: {
+          ...s.selectedModelPerMode,
+          ...(imageModel ? { image: imageModel } : {}),
+          ...(videoModel ? { video: videoModel } : {}),
+        },
+        savedParamsPerMode: {
+          ...s.savedParamsPerMode,
+          ...(imageModel ? { image: { ..._record(params.image_params), model_type: imageModel } } : {}),
+          ...(videoModel ? { video: { ..._record(params.video_params), model_type: videoModel } } : {}),
+        },
+        savedLoraPerMode: {
+          ...s.savedLoraPerMode,
+          ...(imageModel ? { image: _directorLoraState(params.image_loras) } : {}),
+          ...(videoModel ? { video: _directorLoraState(params.video_loras) } : {}),
+        },
+      }))
+      if (videoModel) await get().loadModelOptions(videoModel)
+    } catch (e) {
+      set({
+        directorQueueLoading: false,
+        directorError: e instanceof Error ? e.message : 'Failed to open queued project',
+      })
+    }
+  },
+  startDirectorQueue: async () => {
+    set({ directorQueueLoading: true })
+    try {
+      const queue = await api.startDirectorQueue()
+      set({
+        directorQueue: queue,
+        directorQueueLoading: false,
+        // Starting freezes every queued snapshot. Further edits become a new
+        // revision unless the user explicitly reopens a still-held entry.
+        directorQueueEditingEntryId: null,
+      })
+    } catch (e) {
+      set({
+        directorQueueLoading: false,
+        directorError: e instanceof Error ? e.message : 'Failed to start queue',
+      })
+    }
+  },
+  pauseDirectorQueue: async () => {
+    set({ directorQueueLoading: true })
+    try {
+      const queue = await api.pauseDirectorQueue()
+      set({ directorQueue: queue, directorQueueLoading: false })
+    } catch (e) {
+      set({
+        directorQueueLoading: false,
+        directorError: e instanceof Error ? e.message : 'Failed to pause queue',
+      })
+    }
+  },
+  removeDirectorQueueEntry: async (entryId: string) => {
+    set({ directorQueueLoading: true })
+    try {
+      await api.deleteDirectorQueueEntry(entryId)
+      if (get().directorQueueEditingEntryId === entryId) {
+        set({ directorQueueEditingEntryId: null })
+      }
+      await get().loadDirectorQueue()
+    } catch (e) {
+      set({
+        directorQueueLoading: false,
+        directorError: e instanceof Error ? e.message : 'Failed to remove queued project',
+      })
+    }
+  },
+  moveDirectorQueueEntry: async (entryId: string, direction: -1 | 1) => {
+    const queue = get().directorQueue
+    if (!queue) return
+    const ids = queue.entries.map(entry => entry.id)
+    const from = ids.indexOf(entryId)
+    const to = from + direction
+    if (from < 0 || to < 0 || to >= ids.length) return
+    ;[ids[from], ids[to]] = [ids[to], ids[from]]
+    set({ directorQueueLoading: true })
+    try {
+      const updated = await api.reorderDirectorQueue(ids)
+      set({ directorQueue: updated, directorQueueLoading: false })
+    } catch (e) {
+      set({
+        directorQueueLoading: false,
+        directorError: e instanceof Error ? e.message : 'Failed to reorder Director queue',
+      })
+    }
+  },
+  queueCurrentDirectorPipeline: async () => {
+    await get().startDirectorPipeline('queue')
+  },
 
   // ── Recipes (one-click Studio presets) ────────────────────────────
   recipesOpen: false,
@@ -3039,30 +3505,43 @@ export const useStore = create<AppState>((set, get) => ({
   loadDirectorFromPipeline: async (pid) => {
     try {
       const pipeline = await api.fetchSavedPipeline(pid)
-      set({
-        sidebarMode: 'director' as const,
-        directorSceneDescription: pipeline.scene_description || '',
-        directorClipPlans: pipeline.clips.map(c => ({
-          video_prompt: c.video_prompt || '',
-          image_prompt: c.image_prompt || '',
-        })),
-        directorClipImages: pipeline.clips
-          .filter(c => c.start_image_filename)
-          .map((c, i) => ({
-            clipIndex: i,
-            prompt: c.image_prompt || '',
-            file: null as unknown as File,
-            filename: c.start_image_filename!,
-          })),
-        directorStep: 'review_video',
-        directorAutoMode: pipeline.auto_mode,
-        directorSeamless: pipeline.seamless,
-        directorShotImageGuidance: pipeline.shot_image_guidance || 'auto',
-        dashboardOpen: true,
-        dashboardSelectedPipeline: pipeline,
-      })
+      const restore = await _buildDirectorRestorePatch(pipeline)
+      const params = _record(pipeline._params_snapshot)
+      const imageParams = _record(pipeline.image_params || params.image_params)
+      const videoParams = _record(pipeline.video_params || params.video_params)
+      const imageLoras = _record(pipeline.image_loras || params.image_loras)
+      const videoLoras = _record(pipeline.video_loras || params.video_loras)
+      const imageModel = pipeline.image_model || String(params.image_model || '')
+      const videoModel = pipeline.video_model || String(params.video_model || '')
+      set(s => ({
+        ...restore,
+        pipelineId: null,
+        pipelineStatus: null,
+        pipelinePolling: false,
+        directorQueueEditingEntryId: null,
+        selectedModelPerMode: {
+          ...s.selectedModelPerMode,
+          ...(imageModel ? { image: imageModel } : {}),
+          ...(videoModel ? { video: videoModel } : {}),
+        },
+        savedParamsPerMode: {
+          ...s.savedParamsPerMode,
+          ...(imageModel ? { image: { ...imageParams, model_type: imageModel } } : {}),
+          ...(videoModel ? { video: { ...videoParams, model_type: videoModel } } : {}),
+        },
+        savedLoraPerMode: {
+          ...s.savedLoraPerMode,
+          ...(imageModel ? { image: _directorLoraState(imageLoras) } : {}),
+          ...(videoModel ? { video: _directorLoraState(videoLoras) } : {}),
+        },
+      }))
+      if (videoModel) {
+        await get().loadModelOptions(videoModel)
+        void get().loadLoras(videoModel)
+      }
     } catch (e) {
       console.error('Failed to load Director pipeline:', e)
+      set({ directorError: e instanceof Error ? e.message : 'Failed to open Director project' })
     }
   },
 
@@ -7214,6 +7693,8 @@ export const useStore = create<AppState>((set, get) => ({
   pipelineId: null,
   pipelineStatus: null,
   pipelinePolling: false,
+  directorSourcePipelineId: null,
+  directorProjectId: null,
   setDirectorAutoMode: (v) => set({ directorAutoMode: v }),
   setDirectorSeamless: (v) => set({ directorSeamless: v }),
   setDirectorShotImageGuidance: (v) => set({
@@ -7429,6 +7910,7 @@ export const useStore = create<AppState>((set, get) => ({
           set({ sidebarMode: 'director' })
         }
       }
+      void get().loadDirectorQueue()
     } else {
       set({ sidebarMode: 'studio' })
     }
@@ -7706,7 +8188,12 @@ export const useStore = create<AppState>((set, get) => ({
     set({ directorStep: 'style', directorLoading: false })
   },
 
-  directorSetReferenceImage: (file) => set({ directorReferenceImage: file }),
+  directorSetReferenceImage: (file) => set({
+    directorReferenceImage: file,
+    // A replacement/removal must not silently retain the durable path from a
+    // previously reopened project.
+    directorReferenceImagePath: null,
+  }),
   directorAddCharacterRef: (file) => set(s => ({
     directorCharacterRefs: [...s.directorCharacterRefs, file],
     directorCharacterRefLabels: [...s.directorCharacterRefLabels, ''],
@@ -8176,107 +8663,13 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   directorGenerate: () => {
-    const { directorClipPlans, directorPlannedClips, directorAnalysis,
-            directorClipImages, directorAudioPath, directorAudioFile,
-            directorSeamless, directorResolution, directorAspectRatio,
-            selectedModelPerMode, savedParamsPerMode, savedLoraPerMode } = get()
-    if (!directorClipPlans.length) return
-
-    // Use saved video-mode settings if available, override resolution with director's choice
-    const videoModel = selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
-    const cachedDirectorVideoOptions = get().modelOptions?.model_type === videoModel
-      ? get().modelOptions
-      : null
-    const directorRes = resolveResolution(
-      cachedDirectorVideoOptions,
-      directorResolution,
-      directorAspectRatio,
+    void get().startDirectorPipeline(
+      get().directorQueueEditingEntryId
+        || get().pipelinePolling
+        || get().isGenerating
+        || get().directorQueue?.running
+        ? 'queue' : 'now',
     )
-    const videoParams = savedParamsPerMode.video ? { ...savedParamsPerMode.video, resolution: directorRes } : { num_inference_steps: 8, guidance_scale: 1, resolution: directorRes }
-    const directorSteps = get().directorVideoInferenceStepsByModel[videoModel]
-    if (directorSteps != null) videoParams.num_inference_steps = directorSteps
-    const videoLora = savedLoraPerMode.video
-
-    const directorVideoOptions = get().modelOptions?.model_type === videoModel
-      ? get().modelOptions
-      : null
-    const isH3Video = videoModel.startsWith('minimax_h3')
-    const fps = isH3Video ? (directorVideoOptions?.fps ?? 24) : (directorVideoOptions?.fps ?? 16)
-    const totalDuration = directorAnalysis?.duration ?? 180
-    const totalDurationCapped = Math.min(totalDuration, 300)
-
-    const clips: MultiClip[] = directorClipPlans.map((plan, i) => {
-      const plannedClip = directorPlannedClips[i]
-      const clipImage = directorClipImages.find(img => img.clipIndex === i)
-
-      // Seamless mode: use next clip's start image as this clip's end image
-      let endImage: File | null = null
-      if (directorSeamless && i < directorClipPlans.length - 1) {
-        const nextClipImage = directorClipImages.find(img => img.clipIndex === i + 1)
-        endImage = nextClipImage?.file ?? null
-      }
-
-      return {
-        prompt: plan.video_prompt,
-        startImage: clipImage?.file ?? null,
-        startImagePath: null,
-        endImage,
-        endImagePath: null,
-        durationFrames: plannedClip?.duration_frames,
-      }
-    })
-
-    const requestedClipFrames = clips.map(
-      c => c.durationFrames ?? Math.round(5 * fps),
-    )
-    const perClipFrames = isH3Video
-      ? normalizeH3ClipFrameSchedule(
-          requestedClipFrames,
-          directorVideoOptions?.frames_minimum ?? 124,
-          directorVideoOptions?.frames_maximum ?? 345,
-          directorVideoOptions?.frames_steps ?? 17,
-        )
-      : requestedClipFrames
-    const totalFrames = perClipFrames.reduce((sum, f) => sum + f, 0)
-    const maxClipFrames = Math.max(...perClipFrames)
-
-    const audioParams: Record<string, unknown> = {}
-    if (get().shortFilmPath === 'story') {
-      // Path C: LTX generates video + audio from text (dialogue in quotes)
-      audioParams.audio_prompt_type = ''
-    } else if (directorAudioPath) {
-      audioParams.audio_prompt_type = 'A'
-      audioParams.audio_guide = directorAudioPath
-    }
-
-    // Apply director video post-processing to shared state (read by startGeneration)
-    const vidSelfRefiner = get().directorVideoSelfRefiner
-
-    set(s => ({
-      params: {
-        ...s.params,
-        ...(videoModel ? { model_type: videoModel } : {}),
-        ...(videoParams || {}),
-        ...(videoLora ? { activated_loras: videoLora.activated_loras, loras_multipliers: (videoLora.loras_multipliers || '').split(' ').map(m => m.split(';')[0]).join(' ') } : {}),
-        image_mode: 2,
-        video_length: totalFrames,
-        sliding_window_size: maxClipFrames,
-        per_clip_frames: perClipFrames,
-        self_refiner_setting: vidSelfRefiner,
-        ...audioParams,
-      },
-      clips,
-      singlePromptMode: false,
-      durationSeconds: totalDurationCapped,
-      slidingWindowSeconds: maxClipFrames / fps,
-      audioGuideFilename: directorAudioFile?.name ?? null,
-      // Apply director video post-processing to shared state
-      spatialUpsampling: get().directorVideoSpatialUpsampling,
-      filmGrainIntensity: get().directorVideoFilmGrainIntensity,
-      filmGrainSaturation: get().directorVideoFilmGrainSaturation,
-    }))
-
-    setTimeout(() => get().startGeneration(), 200)
   },
 
   directorReset: () => {
@@ -8322,6 +8715,9 @@ export const useStore = create<AppState>((set, get) => ({
       shortFilmPath: null,
       shortFilmTargetDuration: 30,
       shortFilmNarrative: false,
+      directorSourcePipelineId: null,
+      directorProjectId: null,
+      directorQueueEditingEntryId: null,
     })
   },
 
@@ -8954,6 +9350,10 @@ export const useStore = create<AppState>((set, get) => ({
         console.log('[LoadSettings] after on-demand fetch — params present:', !!selectedOutputMeta?.params,
                     '| source:', selectedOutputMeta?.source)
       }
+    }
+    if (selectedOutputMeta?.director_pipeline_id) {
+      await get().loadDirectorFromPipeline(selectedOutputMeta.director_pipeline_id)
+      return
     }
     if (!selectedOutputMeta?.params) {
       console.warn('[LoadSettings] ABORT — no params available after fetch attempt; button is a no-op')
@@ -9944,8 +10344,13 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   // ── Director Pipeline (server-side) ──────────────────────────────
-  startDirectorPipeline: async () => {
+  startDirectorPipeline: async (mode = 'now') => {
     const state = get()
+    if (mode === 'queue') {
+      set({ directorQueueLoading: true, directorError: null })
+    } else {
+      set({ directorLoading: true, directorError: null })
+    }
     const { directorPlannedClips, directorSceneDescription,
             directorAudioPath, directorAnalysis, directorReferenceImagePath,
             directorAutoMode, directorSeamless, directorShotImageGuidance,
@@ -10139,6 +10544,38 @@ export const useStore = create<AppState>((set, get) => ({
       } catch { /* skip */ }
     }
 
+    // A reviewed project is a frozen edit decision, not a request to ask the
+    // LLM to invent a new plan. Upload any user-edited scene images and pass
+    // the exact prompts/timeline to the new immutable revision.
+    let preparedClipImagePaths: string[] | undefined
+    if (state.directorClipPlans.length > 0) {
+      const paths: string[] = []
+      for (let index = 0; index < state.directorClipPlans.length; index++) {
+        const image = state.directorClipImages.find(item => item.clipIndex === index)
+        if (!image) {
+          paths.length = 0
+          break
+        }
+        if (image.file && image.file.size > 0) {
+          try {
+            const uploaded = await api.uploadImage(image.file)
+            paths.push(uploaded.path)
+          } catch {
+            paths.length = 0
+            break
+          }
+        } else if (image.filename) {
+          paths.push(image.filename)
+        } else {
+          paths.length = 0
+          break
+        }
+      }
+      if (paths.length === state.directorClipPlans.length) {
+        preparedClipImagePaths = paths
+      }
+    }
+
     // Determine pipeline type
     let pipelineType = 'music_video'
     if (shortFilmPath === 'story') pipelineType = 'short_film_story'
@@ -10146,8 +10583,12 @@ export const useStore = create<AppState>((set, get) => ({
 
     const pipelineParams: Record<string, unknown> = {
       pipeline_type: pipelineType,
-      auto_mode: directorAutoMode,
+      // Held work and reviewed revisions cannot pause for browser review.
+      auto_mode: mode === 'queue' || state.directorClipPlans.length > 0
+        ? true : directorAutoMode,
       workspace: get().activeWorkspace,
+      _director_project_id: state.directorProjectId || undefined,
+      _director_parent_pipeline_id: state.directorSourcePipelineId || undefined,
       scene_description: directorSceneDescription,
       audio_path: directorAudioPath,
       // Audio analysis already produced this reusable stem for transcription.
@@ -10160,6 +10601,11 @@ export const useStore = create<AppState>((set, get) => ({
       location_ref_paths: locPaths.length > 0 ? locPaths : undefined,
       location_ref_labels: state.directorLocationRefLabels.length > 0 ? state.directorLocationRefLabels : undefined,
       planned_clips: directorPlannedClips,
+      prepared_clip_plans: state.directorClipPlans.length > 0
+        ? state.directorClipPlans : undefined,
+      prepared_planned_clips: state.directorClipPlans.length > 0
+        ? directorPlannedClips : undefined,
+      prepared_clip_image_paths: preparedClipImagePaths,
       seamless: directorSeamless,
       shot_image_guidance: directorShotImageGuidance,
       director_resolution_preset: directorResolution,
@@ -10229,12 +10675,82 @@ export const useStore = create<AppState>((set, get) => ({
           identity_guidance_scale: state.directorIdentityGuidanceScale,
         } : {}),
       } : {}),
+
+      // Presentation/editor state is saved beside the immutable renderer
+      // request so Open & Edit can restore everything the user sees without
+      // rerunning analysis or planning.
+      director_ui_snapshot: {
+        snapshot_version: 1,
+        directorSkill: state.directorSkill,
+        directorStep: state.directorStep,
+        directorSceneDescription: state.directorSceneDescription,
+        directorAudioName: state.directorAudioFile?.name || null,
+        directorAnalysis: state.directorAnalysis,
+        directorPlannedClips: state.directorPlannedClips,
+        directorEnergyBias: state.directorEnergyBias,
+        directorClipPlans: state.directorClipPlans,
+        directorSpeakers: state.directorSpeakers,
+        directorSpeakerMappings: state.directorSpeakerMappings,
+        directorAutoMode: state.directorAutoMode,
+        directorSeamless: state.directorSeamless,
+        directorShotImageGuidance: state.directorShotImageGuidance,
+        directorLlmLog: state.directorLlmLog,
+        directorResolution: state.directorResolution,
+        directorAspectRatio: state.directorAspectRatio,
+        directorCharacterRefLabels: state.directorCharacterRefLabels,
+        directorLocationRefLabels: state.directorLocationRefLabels,
+        directorVoiceRefName: state.directorVoiceRef?.name || null,
+        directorIdentityGuidanceScale: state.directorIdentityGuidanceScale,
+        directorMusicSource: state.directorMusicSource,
+        directorMusicModel: state.directorMusicModel,
+        directorSongDescription: state.directorSongDescription,
+        directorSongInstrumental: state.directorSongInstrumental,
+        directorSongStyle: state.directorSongStyle,
+        directorSongLyrics: state.directorSongLyrics,
+        directorSongDuration: state.directorSongDuration,
+        directorVideoInferenceStepsByModel: state.directorVideoInferenceStepsByModel,
+        directorVideoMaxShotFramesByModel: state.directorVideoMaxShotFramesByModel,
+        directorH3TurboModeByModel: state.directorH3TurboModeByModel,
+        directorH3TurboPresetByModel: state.directorH3TurboPresetByModel,
+        directorH3SolModeByModel: state.directorH3SolModeByModel,
+        directorH3FirstBlockCacheByModel: state.directorH3FirstBlockCacheByModel,
+        directorH3FirstBlockCacheMultiplierByModel: state.directorH3FirstBlockCacheMultiplierByModel,
+        directorH3FirstBlockCacheWarmupByModel: state.directorH3FirstBlockCacheWarmupByModel,
+        directorImageSpatialUpsampling: state.directorImageSpatialUpsampling,
+        directorImageFilmGrainIntensity: state.directorImageFilmGrainIntensity,
+        directorImageFilmGrainSaturation: state.directorImageFilmGrainSaturation,
+        directorVideoSpatialUpsampling: state.directorVideoSpatialUpsampling,
+        directorVideoFilmGrainIntensity: state.directorVideoFilmGrainIntensity,
+        directorVideoFilmGrainSaturation: state.directorVideoFilmGrainSaturation,
+        directorVideoSelfRefiner: state.directorVideoSelfRefiner,
+        directorAudioScale: state.directorAudioScale,
+        shortFilmCharacters: state.shortFilmCharacters,
+        shortFilmTargetDuration: state.shortFilmTargetDuration,
+        shortFilmNarrative: state.shortFilmNarrative,
+      },
     }
 
     try {
+      if (mode === 'queue') {
+        const queue = state.directorQueueEditingEntryId
+          ? await api.updateDirectorQueueEntry(
+              state.directorQueueEditingEntryId,
+              pipelineParams,
+            )
+          : await api.enqueueDirectorPipeline(pipelineParams)
+        set({
+          directorQueue: queue,
+          directorQueueLoading: false,
+          directorQueueEditingEntryId: null,
+          directorError: null,
+        })
+        return
+      }
       const { pipeline_id } = await api.startPipeline(pipelineParams)
       set({
         pipelineId: pipeline_id,
+        directorProjectId: state.directorProjectId || pipeline_id,
+        directorSourcePipelineId: pipeline_id,
         pipelineStatus: null,
         pipelinePolling: true,
         directorStep: 'plan',
@@ -10244,7 +10760,7 @@ export const useStore = create<AppState>((set, get) => ({
       get().pollPipelineStatus()
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Pipeline failed to start'
-      set({ directorError: msg })
+      set({ directorError: msg, directorQueueLoading: false })
     }
   },
 
@@ -10286,6 +10802,11 @@ export const useStore = create<AppState>((set, get) => ({
         // <=14.4s shots after the browser has already populated its draft
         // timeline. The old empty-only guard left those stale durations and
         // prompts visible even though the worker queued the shorter plan.
+        // Once the editor reaches review_video, however, its controls are a
+        // draft for the *next* immutable revision. Polling the active revision
+        // must not overwrite prompt or scene-image edits the user is making
+        // while that render continues in the background.
+        const preserveNextRevisionDraft = get().directorStep === 'review_video'
         const currentPlans = get().directorClipPlans
         const currentTimeline = get().directorPlannedClips
         const plansChanged = Boolean(status.clip_plans?.length) && (
@@ -10303,7 +10824,7 @@ export const useStore = create<AppState>((set, get) => ({
             || clip.duration_frames !== currentTimeline[index]?.duration_frames
           ))
         )
-        if (plansChanged || timelineChanged) {
+        if (!preserveNextRevisionDraft && (plansChanged || timelineChanged)) {
           set({
             ...(plansChanged ? { directorClipPlans: status.clip_plans } : {}),
             ...(timelineChanged ? { directorPlannedClips: status.planned_clips! } : {}),
@@ -10311,7 +10832,7 @@ export const useStore = create<AppState>((set, get) => ({
           })
         }
 
-        if (status.clip_images?.length) {
+        if (!preserveNextRevisionDraft && status.clip_images?.length) {
           // Strip empty filenames — those are failed-shot sentinels from the
           // pipeline (clip_images.append("") on exception). If we keep them,
           // downstream <img src={getFileUrl("")} /> hits /api/v1/file/ which

@@ -29,6 +29,7 @@ from ..h3_dialogue import (
     normalize_h3_text as _normalize_h3_text,
 )
 from .base import BasePlanner
+from services.text_integrity import repair_text
 
 
 # Video-model architecture → Pass 2 shot-breakdown guide file.
@@ -3262,7 +3263,10 @@ H3 CHARACTER-AUTHENTICITY RULES:
             pass1_system = f"{pass1_system}\n\n{polish_block}"
         pass1_system = inject_nsfw_if_enabled(pass1_system, nsfw, "screenplay")
 
-        pass1_user = f"Write a short film screenplay based on this concept:\n\n{story_description}"
+        pass1_user = repair_text(
+            f"Write a short film screenplay based on this concept:\n\n{story_description}"
+        )
+        pass1_system = repair_text(pass1_system)
 
         # Repetition penalties are critical at Pass 1's scale (~18k token
         # output budget for a 180s film). Without them, models — especially
@@ -3289,15 +3293,17 @@ H3 CHARACTER-AUTHENTICITY RULES:
         # reasoning gets its own pool and doesn't count against this
         # cap.
         _output_token_cap = max(2000, max_total_words * 3)
-        screenplay = self._generate_streaming(
-            prompt=pass1_user,
-            system_prompt=pass1_system,
-            max_new_tokens=_output_token_cap,
-            temperature=0.8,
-            thinking_budget=16384,
-            image_paths=image_paths or [],
-            frequency_penalty=0.15,
-            presence_penalty=0.05,
+        screenplay = repair_text(
+            self._generate_streaming(
+                prompt=pass1_user,
+                system_prompt=pass1_system,
+                max_new_tokens=_output_token_cap,
+                temperature=0.8,
+                thinking_budget=16384,
+                image_paths=image_paths or [],
+                frequency_penalty=0.15,
+                presence_penalty=0.05,
+            )
         )
 
         print(f"[ShortFilmPlanner] Screenplay: {len(screenplay)} chars")

@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
-import { ArrowLeft, Download, Tag, Loader2, Check, ExternalLink, KeyRound, Boxes } from 'lucide-react'
+import { ArrowLeft, Download, Tag, Loader2, Check, ExternalLink, KeyRound, Boxes, AlertTriangle } from 'lucide-react'
 import DOMPurify from 'dompurify'
 import { useStore } from '../../stores/useStore'
 import { fetchLoraDirectories, fetchCheckpointArchitectures } from '../../api/client'
@@ -76,16 +76,38 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
   const baseModel = version?.baseModel || ''
   const [architectures, setArchitectures] = useState<CheckpointArchitecture[]>([])
   const [targetArchitecture, setTargetArchitecture] = useState('')
+  const [checkpointSupportReason, setCheckpointSupportReason] = useState<string | null>(null)
+  const [checkpointArchitectureLoading, setCheckpointArchitectureLoading] = useState(false)
   useEffect(() => {
-    if (!isCheckpoint) return
+    if (!isCheckpoint) {
+      setArchitectures([])
+      setTargetArchitecture('')
+      setCheckpointSupportReason(null)
+      setCheckpointArchitectureLoading(false)
+      return
+    }
     let cancelled = false
+    // Clear the previous version's selection immediately. Retaining a stale
+    // architecture here could register a newly-selected Flux 1 or SDXL file
+    // against the prior Flux 2 pipeline before this request finishes.
+    setArchitectures([])
+    setTargetArchitecture('')
+    setCheckpointSupportReason(null)
+    setCheckpointArchitectureLoading(true)
     fetchCheckpointArchitectures(baseModel)
       .then(r => {
         if (cancelled) return
         setArchitectures(r.architectures)
-        setTargetArchitecture(prev => r.suggested_architecture || prev || r.architectures[0]?.architecture || '')
+        setTargetArchitecture(r.suggested_architecture || '')
+        setCheckpointSupportReason(r.supported ? null : r.unsupported_reason)
       })
-      .catch(() => {})
+      .catch(() => {
+        if (cancelled) return
+        setCheckpointSupportReason('Could not verify checkpoint compatibility. Try again after updating or restarting Maestro.')
+      })
+      .finally(() => {
+        if (!cancelled) setCheckpointArchitectureLoading(false)
+      })
     return () => { cancelled = true }
   }, [isCheckpoint, baseModel])
 
@@ -108,6 +130,7 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
 
   const handleDownload = () => {
     if (!file || !version) return
+    if (isCheckpoint && (checkpointArchitectureLoading || checkpointSupportReason || !targetArchitecture)) return
 
     // Extract example prompts from image metadata
     const examplePrompts: string[] = []
@@ -292,9 +315,12 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
               <select
                 value={targetArchitecture}
                 onChange={e => setTargetArchitecture(e.target.value)}
+                disabled={checkpointArchitectureLoading || !!checkpointSupportReason}
                 className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
               >
-                <option value="">Select base architecture…</option>
+                <option value="">
+                  {checkpointArchitectureLoading ? 'Checking compatibility…' : 'Select base architecture…'}
+                </option>
                 {Object.entries(groupedArchs).map(([family, list]) => (
                   <optgroup key={family} label={family}>
                     {list.map(a => (
@@ -305,8 +331,14 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
               </select>
               <p className="text-[10px] text-text-muted mt-1 leading-snug">
                 The base model this checkpoint was trained for{baseModel ? ` (CivitAI base: ${baseModel})` : ''}.
-                It'll be registered as a new selectable model.
+                Compatible SafeTensor shapes are verified before the file is installed.
               </p>
+              {checkpointSupportReason && (
+                <div className="flex items-start gap-2 mt-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-text-primary leading-snug">
+                  <AlertTriangle size={13} className="text-indicator-warning shrink-0 mt-0.5" />
+                  <span>{checkpointSupportReason}</span>
+                </div>
+              )}
             </div>
           ) : (
             loraDirs.length > 0 && (
@@ -327,7 +359,7 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
           )}
 
           {/* Ask-per-download int8 (checkpoint only) */}
-          {isCheckpoint && (
+          {isCheckpoint && architectures.length > 0 && (
             <label className="flex items-start gap-2 cursor-pointer">
               <input
                 type="checkbox"
@@ -424,7 +456,7 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
                 )}
                 <button
                   onClick={handleDownload}
-                  disabled={!file || (isCheckpoint && !targetArchitecture)}
+                  disabled={!file || (isCheckpoint && (checkpointArchitectureLoading || !!checkpointSupportReason || !targetArchitecture))}
                   className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-accent-blue text-white text-sm rounded-lg hover:bg-accent-blue-hover transition-colors disabled:opacity-50"
                 >
                   <Download size={14} />

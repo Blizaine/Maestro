@@ -350,7 +350,7 @@ class TestMiniMaxH3ActivationBudget(unittest.TestCase):
 
 
 class TestMiniMaxMusic3SemanticBudget(unittest.TestCase):
-    def test_120_second_job_streams_qwen_on_20gb_card(self):
+    def test_120_second_job_keeps_the_optimized_planner_viable_on_20gb_card(self):
         budget = compute_music3_weight_budget(20.0, 120)
         self.assertGreater(budget["kv_cache_gb"], 1.1)
         self.assertGreater(budget["runtime_reserve_gb"], 7.8)

@@ -346,6 +346,11 @@ export function AdvancedSettings() {
                 </>
               )}
 
+              {/* Keep creative adapters near the top so users can choose them
+                  before working through the lower-level tuning controls.
+                  Official Outpaint owns its stage-one-only IC-LoRA schedule. */}
+              {!isOutpaint && <LoraSelector />}
+
               {/* The Qwen conditioner is shared by every H3 transformer.
                   Expose it once here instead of multiplying model entries. */}
               {modelOptions?.minimax_h3_text_encoder_choices?.length ? (
@@ -1074,9 +1079,6 @@ export function AdvancedSettings() {
 
               {/* Presets */}
               <PresetManager />
-
-              {/* Official Outpaint owns its stage-one-only IC-LoRA schedule. */}
-              {!isOutpaint && <LoraSelector />}
 
               {/* Dedicated SCAIL edit endpoints own their source video,
                   edited/reference frames, masks, and process selection. */}

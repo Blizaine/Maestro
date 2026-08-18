@@ -12,6 +12,8 @@ import math
 import re
 from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 
+from services.text_integrity import repair_text
+
 
 class H3DialogueContractError(ValueError):
     """Raised when an H3 prompt cannot be made safe for native speech."""
@@ -573,14 +575,7 @@ def normalize_h3_text(value: Any) -> str:
     known sequences and remove any orphaned controls deterministically.
     """
 
-    text = str(value or "")
-    for broken, repaired in _H3_MOJIBAKE_REPLACEMENTS.items():
-        text = text.replace(broken, repaired)
-    return "".join(
-        character
-        for character in text
-        if not 0x80 <= ord(character) <= 0x9F
-    )
+    return repair_text(value)
 
 
 def _extract_h3_fields(text: str) -> dict[str, str]:

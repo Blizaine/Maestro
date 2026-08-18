@@ -26,6 +26,7 @@ except ImportError:
     _HAVE_JSON_REPAIR = False
 
 from ..schema import ProductionPlan, ShotPlan
+from services.text_integrity import repair_payload, repair_text
 
 # Grammar fallback for the JSON-fix retry when the caller didn't provide a
 # shot schema: any JSON array of objects. llama-server compiles this to a
@@ -119,6 +120,12 @@ class BasePlanner(ABC):
         gen_fn = self._generate_streaming if (streaming and self._generate_streaming) else self._generate
         if gen_fn is None:
             raise RuntimeError("No LLM generate function provided to planner")
+
+        # Repair legacy Windows/code-page damage before it can be copied into
+        # another LLM pass. This is intentionally shared by every Director
+        # planner rather than being limited to H3 prompt compilation.
+        user_prompt = repair_text(user_prompt)
+        system_prompt = repair_text(system_prompt)
 
         # Model-aware thinking budget when caller didn't specify
         if thinking_budget is None:
@@ -217,6 +224,20 @@ class BasePlanner(ABC):
         if not text:
             return None
 
+        # A valid JSON string can still contain mojibake (for example the LLM
+        # returning ``WÃ¶rter``). Repair before parsing, then repair the parsed
+        # payload recursively so escaped/nested values receive the same guard.
+        text = repair_text(text)
+
+        def normalized_items(value: Any) -> list[dict]:
+            repaired = repair_payload(value)
+            if isinstance(repaired, list):
+                return repaired
+            if isinstance(repaired, dict) and "shots" in repaired:
+                shots = repaired["shots"]
+                return shots if isinstance(shots, list) else [shots]
+            return [repaired]
+
         # Strip thinking tags (Qwen <think>...</think> and Gemma <|channel>thought\n...<channel|>)
         text = re.sub(r'<(think|thinking|seed:think|reasoning|reflection)>.*?</\1>', '', text, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r'<(think|thinking|seed:think|reasoning|reflection)>.*$', '', text, flags=re.DOTALL | re.IGNORECASE)
@@ -233,11 +254,11 @@ class BasePlanner(ABC):
             result = json.loads(text)
             if isinstance(result, list):
                 print(f"[Planner] JSON parse OK: {len(result)} items (direct)")
-                return result
+                return normalized_items(result)
             if isinstance(result, dict) and "shots" in result:
                 print(f"[Planner] JSON parse OK: {len(result['shots'])} items (shots key)")
-                return result["shots"]
-            return [result]
+                return normalized_items(result)
+            return normalized_items(result)
         except json.JSONDecodeError as e:
             print(f"[Planner] Direct JSON parse failed: {e}")
             print(f"[Planner] Text starts with: {text[:200]!r}")
@@ -249,7 +270,7 @@ class BasePlanner(ABC):
                 result = json.loads(match.group())
                 if isinstance(result, list):
                     print(f"[Planner] JSON parse OK: {len(result)} items (regex array)")
-                    return result
+                    return normalized_items(result)
             except json.JSONDecodeError as e:
                 print(f"[Planner] Regex array parse failed: {e}")
                 print(f"[Planner] Matched array starts with: {match.group()[:200]!r}")
@@ -262,8 +283,8 @@ class BasePlanner(ABC):
             try:
                 result = json.loads(match.group())
                 if isinstance(result, dict) and "shots" in result:
-                    return result["shots"]
-                return [result]
+                    return normalized_items(result)
+                return normalized_items(result)
             except json.JSONDecodeError:
                 pass
 
@@ -279,13 +300,13 @@ class BasePlanner(ABC):
                 result = json_repair.loads(text)
                 if isinstance(result, list):
                     print(f"[Planner] JSON parse OK via json_repair: {len(result)} items")
-                    return result
+                    return normalized_items(result)
                 if isinstance(result, dict) and "shots" in result:
                     print(f"[Planner] JSON parse OK via json_repair (shots key): {len(result['shots'])} items")
-                    return result["shots"]
+                    return normalized_items(result)
                 if isinstance(result, dict):
                     print("[Planner] JSON parse OK via json_repair: 1 item (single object)")
-                    return [result]
+                    return normalized_items(result)
             except Exception as e:
                 print(f"[Planner] json_repair fallback failed: {e}")
         else:
