@@ -77,6 +77,39 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.9.0 (2026-08-19)
+
+**Universal queue and Director recovery**
+- Added one global Studio + Director queue with a compact top-bar popover, live count badge, ordering controls, removal, pause, and start controls.
+- Studio's split Generate button can now hold complete jobs without starting them, so several prompts can be prepared before the GPU begins working.
+- Director projects are checkpointed before rendering and can be restored through Load Settings with their models, references, prompts, plans, and generation options intact.
+- Added a persistent Director render queue that survives restarts, owns copies of its input assets, and runs complete projects sequentially without colliding with Studio work.
+- Improved cancellation and GPU coordination across held, queued, running, and resumed jobs.
+- Removed queued jobs from the main gallery so unfinished work no longer appears as large blank generation cards.
+
+**Director, dialogue, and Music3 reliability**
+- Added live progress while Director generates a MiniMax-Music3 soundtrack instead of leaving the interface apparently idle.
+- Improved MiniMax-Music3 speed and memory use with an optimized Qwen semantic engine, reusable KV caches, accelerated RVQ decoding, and safe GPU fallbacks.
+- Reworked Music3 prompting around its official bare section tags and duration-aware song structure, preventing stage directions from being sung and reducing truncated songs.
+- Added automatic UTF-8 repair throughout Director planning and saved projects while preserving valid international text.
+- Improved MiniMax H3 prompt enhancement so requested dialogue languages and attached-frame visual details are retained.
+- Fixed duplicate or malformed nested H3 dialogue fields causing valid Director projects to fail canonical prompt validation.
+
+**Model, LLM, and GPU compatibility**
+- CivitAI checkpoint imports now map only to verified compatible Maestro architectures, validate tensor layouts before publishing, and hide unsafe legacy registrations without deleting their weights.
+- Remote OpenAI-compatible LLM providers now support their own API key, standards-compliant request payloads, multimodal prompts, model selection, and useful endpoint error details.
+- Fixed llama.cpp binaries and CUDA support archives being downloaded repeatedly; valid local runtimes are now detected and reused.
+- Prevented harmless Gemma 4 template compatibility notices from being presented as the cause of a Director crash, and continuously drain local LLM logs to avoid long-run pipe stalls.
+- SCAIL-2 now honors Maestro's shared attention backend and safely falls back when an installed FlashAttention wheel lacks kernels for the active GPU.
+
+**Studio and interface improvements**
+- Moved LoRA selection near the top of Advanced settings and fixed LoRA update tracking when several variants exist on the same CivitAI release.
+- The main prompt editor now grows with its content, browser spellcheck is enabled, and prompt enhancement remains attached to the editor.
+- Made the gallery filter bar responsive with compact labels, horizontal navigation, and an accessible search overlay on narrow screens.
+- Simplified the Studio footer with an icon-only Advanced control and separate Generate / Add to Queue actions.
+- Cleaned up fresh-install model defaults so unavailable and mature-only models are not selected or exposed incorrectly.
+- Stopped disconnected media requests promptly, eliminating repeated `socket.send()` console noise after a browser closes or changes pages.
+
 ### v1.8.7.1 (2026-08-17)
 
 **MiniMax Music3 GPU compatibility**

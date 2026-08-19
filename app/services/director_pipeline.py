@@ -3177,6 +3177,7 @@ def _run_director_queue(base_out_dir: str) -> None:
                     pipeline_id=pid,
                     message="Director project running",
                 )
+                last_queue_message = "Director project running"
                 terminal = None
                 while terminal is None:
                     current = get_pipeline(pid)
@@ -3187,6 +3188,20 @@ def _run_director_queue(base_out_dir: str) -> None:
                     if status in _DIRECTOR_QUEUE_TERMINAL:
                         terminal = current
                         break
+                    progress = current.get("progress") or {}
+                    progress_message = str(
+                        progress.get("message") or ""
+                    ).strip()
+                    if (
+                        progress_message
+                        and progress_message != last_queue_message
+                    ):
+                        _set_director_queue_entry(
+                            base_out_dir,
+                            entry_id,
+                            message=progress_message,
+                        )
+                        last_queue_message = progress_message
                     time.sleep(1.0)
                 status = str(terminal.get("status") or "failed").lower()
                 _set_director_queue_entry(
@@ -4074,7 +4089,13 @@ def _director_job_outputs(job: dict) -> _DirectorOutputs:
     )
 
 
-def _submit_and_wait(params: dict, timeout_s: float = 600, workspace: str = None, out_dir: str = None) -> list[str]:
+def _submit_and_wait(
+    params: dict,
+    timeout_s: float = 600,
+    workspace: str = None,
+    out_dir: str = None,
+    job_id: str = None,
+) -> list[str]:
     """Submit a generation job and block until it completes.
 
     ``timeout_s`` is a no-progress timeout, not a total batch-duration cap.
@@ -4083,7 +4104,15 @@ def _submit_and_wait(params: dict, timeout_s: float = 600, workspace: str = None
     observable progress for the complete timeout interval.
     """
     _prepare_director_generation_params(params)
-    job_id = uuid.uuid4().hex[:8]
+    # Most Director child jobs can use an internal random id. A caller that
+    # has to follow a blocking request from the browser (Director's generated
+    # soundtrack flow) may reserve the id up front so the UI can poll the
+    # ordinary /status endpoint while this waiter is still running.
+    job_id = str(job_id or uuid.uuid4().hex[:8]).strip()
+    if not job_id:
+        raise ValueError("Generation job id cannot be empty")
+    if job_id in _jobs:
+        raise RuntimeError(f"Generation job id already exists: {job_id}")
     job = {
         "id": job_id,
         "status": "queued",
@@ -4913,8 +4942,10 @@ def _run_pipeline(pid: str, resume: bool = False):
         # selected image model.
         polish_mode = services.get("director_prompt_polish", "third_pass")
 
-        # Snapshot pre-polish prompts for comparison
-        import copy
+        # Snapshot pre-polish prompts for comparison. ``copy`` is imported at
+        # module scope because prepared queue revisions use it much earlier in
+        # this function, before the GPU wait. A function-local import makes
+        # Python treat the name as an uninitialized local on that path.
         _update_pipeline(pid, _clip_plans_pre_polish=copy.deepcopy(clip_plans))
 
         # On resume the saved clip_plans are ALREADY polished — re-polishing

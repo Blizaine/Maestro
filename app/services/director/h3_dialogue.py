@@ -87,6 +87,11 @@ _H3_MUSIC_PROSE_RE = re.compile(
     r"opening\s+continuity|final\s+blocking)\b|$)",
     re.IGNORECASE | re.DOTALL,
 )
+_H3_AUXILIARY_SECTION_BOUNDARY_RE = re.compile(
+    r"\b(?:integrated_multimodal_description|detailed_description|"
+    r"overall_soundscape|non_diegetic_music|dialogue\s+beats?)\s*:",
+    re.IGNORECASE,
+)
 _H3_META_SENTENCE_RE = re.compile(
     r"\bMiniMax H3 generates synchronized picture and stereo sound\.\s*",
     re.IGNORECASE,
@@ -716,10 +721,24 @@ def _source_prompt_parts(
             if _trim_sentence(effect)
         )
         soundscape = ", ".join(sound_bits) or "Natural scene-appropriate stereo ambience"
+    # Small local planners occasionally emit the requested Context-IR labels
+    # inline after first writing a prose prompt. The prose music extractor can
+    # then capture the repeated visual/sound fields (and even a non-canonical
+    # ``<d>`` block) as part of non_diegetic_music. Auxiliary fields never own
+    # dialogue, so trim at the first nested field and remove any dialogue block
+    # before final validation. The visual compiler retains/canonicalizes the
+    # authoritative copy when scripted dialogue is actually present.
+    def clean_auxiliary(value: Any) -> str:
+        cleaned = normalize_h3_text(value)
+        boundary = _H3_AUXILIARY_SECTION_BOUNDARY_RE.search(cleaned)
+        if boundary:
+            cleaned = cleaned[:boundary.start()]
+        return _strip_dialogue_for_driving_audio(cleaned)
+
     soundscape = _trim_sentence(
-        _sanitize_scripted_ambience(normalize_h3_text(soundscape))
+        _sanitize_scripted_ambience(clean_auxiliary(soundscape))
     )
-    music = _trim_sentence(normalize_h3_text(music)) or "N/A"
+    music = _trim_sentence(clean_auxiliary(music)) or "N/A"
     if music.casefold() in {"n/a", "none", "no music"}:
         music = "N/A"
     return body, soundscape, music, existing_blocks

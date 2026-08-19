@@ -12,6 +12,7 @@ import { DownloadStatusBanner } from './components/DownloadStatusBanner'
 import { PreflightBanner } from './components/PreflightBanner'
 import { WelcomeModal } from './components/WelcomeModal'
 import { RecipesOverlay } from './components/Recipes/RecipesOverlay'
+import { GlobalQueuePopover } from './components/GlobalQueuePopover'
 import { useStore } from './stores/useStore'
 import { useIsMobile } from './lib/useIsMobile'
 
@@ -67,12 +68,16 @@ function App() {
             <span className="font-semibold text-sm">Maestro</span>
             {appVersion && <span className="text-[10px] text-text-muted font-normal mt-0.5">v{appVersion}</span>}
           </div>
-          <button
-            onClick={() => { setSidebarOpen(false); toggleSettings() }}
-            className="p-2 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors"
-          >
-            <Settings size={20} />
-          </button>
+          <div className="flex items-center gap-1">
+            <GlobalQueuePopover iconSize={20} panelAlign="header-edge" />
+            <button
+              onClick={() => { setSidebarOpen(false); toggleSettings() }}
+              className="p-2 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors"
+              title="Settings"
+            >
+              <Settings size={20} />
+            </button>
+          </div>
         </header>
       )}
 

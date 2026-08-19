@@ -661,7 +661,7 @@ const sfxModelTypes = new Set([
 // Virtual MMAudio model entries (injected into model list alongside backend models)
 const SFX_VIRTUAL_MODELS: ModelDef[] = [
   { model_type: 'mmaudio_v2', name: 'MMAudio v2', family: 'tts', architecture: 'mmaudio', is_i2v: false, is_t2v: false, guidance_max_phases: 1, fps: 0, is_downloaded: true },
-  { model_type: 'mmaudio_nsfw', name: 'MMAudio NSFW', family: 'tts', architecture: 'mmaudio', is_i2v: false, is_t2v: false, guidance_max_phases: 1, fps: 0, is_downloaded: false },
+  { model_type: 'mmaudio_nsfw', name: 'MMAudio NSFW', family: 'tts', architecture: 'mmaudio', is_i2v: false, is_t2v: false, guidance_max_phases: 1, fps: 0, is_downloaded: false, nsfw_only: true },
 ]
 
 // Default enabled models (shown by default in selectors)
@@ -710,9 +710,6 @@ const DEFAULT_ENABLED_MODELS = new Set([
   'minimax_music3',
   // Audio — SFX
   'mmaudio_v2',
-  'mmaudio_nsfw',
-  // Avatar
-  'animate',
 ])
 
 /* Version of the curated defaults list above. enabledModels is a stored
@@ -828,7 +825,10 @@ const modeDefaultModel: Record<GenerationMode, string> = {
   image: 'flux2_klein_9b',
   video: 'ltx2_22B_distilled_1_1',
   audio: 'kugelaudio_0_open',
-  avatar: '',  // will fallback to first available
+  // Edit initially opens in Retake, whose curated compatible model is LTX-2.3.
+  // An empty preference fell back to the first legacy LTX family entry even
+  // though that checkpoint was not enabled in the selector.
+  avatar: 'ltx2_22B_distilled_1_1',
   tools: '',   // Tools is non-generative post-processing — owns no model
 }
 
@@ -937,16 +937,25 @@ const DEFAULT_RECAST_MAPPING: RecastCharacterMapping = {
   referenceAlignedToSource: false,
 }
 
-function getDefaultModelForMode(mode: GenerationMode, families: ModelFamily[], models: ModelDef[]): string {
+function getDefaultModelForMode(
+  mode: GenerationMode,
+  families: ModelFamily[],
+  models: ModelDef[],
+  enabledModels?: ReadonlySet<string>,
+): string {
+  const isEnabled = (modelType: string) => !enabledModels || enabledModels.has(modelType)
   // Try the preferred default first
   const preferred = modeDefaultModel[mode]
-  if (preferred && models.some(m => m.model_type === preferred)) {
+  if (preferred && isEnabled(preferred) && models.some(m => m.model_type === preferred)) {
     return preferred
   }
-  // Fallback: first model in first family of this mode
+  // Fallback: first enabled model in the first family of this mode. Selecting
+  // a disabled fallback leaves the trigger showing a model that is absent
+  // from its own dropdown.
   const modeFamilies = getFamiliesForMode(mode, families)
-  if (modeFamilies.length > 0) {
-    const firstModel = getModelsForFamily(modeFamilies[0].id, models, mode)[0]
+  for (const family of modeFamilies) {
+    const firstModel = getModelsForFamily(family.id, models, mode)
+      .find(model => isEnabled(model.model_type))
     if (firstModel) return firstModel.model_type
   }
   return ''
@@ -1445,7 +1454,8 @@ interface AppState {
   // Generation state (queue)
   jobs: GenerationJob[]
   isGenerating: boolean
-  startGeneration: () => Promise<void>
+  startGeneration: (mode?: 'now' | 'queue') => Promise<void>
+  startStudioQueue: () => Promise<void>
   stopGeneration: (jobId?: string) => void
   dismissJob: (jobId: string) => void
   reconnectJobs: () => Promise<void>
@@ -2229,7 +2239,7 @@ export const useStore = create<AppState>((set, get) => ({
     } else if (leavingScail2Edit && isScail2(current)) {
       const restore = _preScail2AvatarModel && s.models.some(m => m.model_type === _preScail2AvatarModel)
         ? _preScail2AvatarModel
-        : getDefaultModelForMode('avatar', s.families, s.models)
+        : getDefaultModelForMode('avatar', s.families, s.models, s.enabledModels)
       if (restore) get().selectModel(restore)
     }
   },
@@ -2643,7 +2653,7 @@ export const useStore = create<AppState>((set, get) => ({
       _saveSettings({ generationMode: prev, selectedModelPerMode: savedModels, savedParamsPerMode: savedParams, savedLoraPerMode: savedLoras, savedPromptPerMode: savedPrompts }, s.loraIdByFilename)
       return
     }
-    const { families, models, generationMode: prevMode, params, selectedModelPerMode, savedLoraPerMode, savedParamsPerMode, loraWeights, availableLoras, savedPromptPerMode } = get()
+    const { families, models, enabledModels, generationMode: prevMode, params, selectedModelPerMode, savedLoraPerMode, savedParamsPerMode, loraWeights, availableLoras, savedPromptPerMode } = get()
     // Save prompt for the mode we're leaving
     const savedPrompts = { ...savedPromptPerMode, [prevMode]: params.prompt }
     // Save current model + LoRA + params state for the mode we're leaving
@@ -2682,9 +2692,11 @@ export const useStore = create<AppState>((set, get) => ({
     }
     // Restore saved model for target mode, or fall back to default
     const savedModel = savedModels[mode]
-    const restoredModel = savedModel && models.some(m => m.model_type === savedModel)
+    const restoredModel = savedModel
+      && enabledModels.has(savedModel)
+      && models.some(m => m.model_type === savedModel)
       ? savedModel
-      : getDefaultModelForMode(mode, families, models)
+      : getDefaultModelForMode(mode, families, models, enabledModels)
     const newModelType = restoredModel || params.model_type
     // Restore saved LoRA state for target mode (if same model)
     const restoredLora = savedLoras[mode]
@@ -3891,9 +3903,11 @@ export const useStore = create<AppState>((set, get) => ({
         mode = saved.generationMode || mode
         // Validate saved model for this mode still exists
         let savedModel = saved.selectedModelPerMode?.[mode]
-        initialModelType = savedModel && models.some(m => m.model_type === savedModel)
+        initialModelType = savedModel
+          && get().enabledModels.has(savedModel)
+          && models.some(m => m.model_type === savedModel)
           ? savedModel
-          : getDefaultModelForMode(mode, families, models)
+          : getDefaultModelForMode(mode, families, models, get().enabledModels)
         const bootedIntoRecast = mode === 'avatar'
           && (initialModelType === 'scail2_14B_recast_fast' || initialModelType === 'scail2_14B')
         const bootedIntoRepaint = mode === 'avatar'
@@ -3924,7 +3938,12 @@ export const useStore = create<AppState>((set, get) => ({
           },
         }))
       } else {
-        initialModelType = getDefaultModelForMode(mode, families, models)
+        initialModelType = getDefaultModelForMode(
+          mode,
+          families,
+          models,
+          get().enabledModels,
+        )
         set(s => ({
           families,
           models,
@@ -4595,16 +4614,32 @@ export const useStore = create<AppState>((set, get) => ({
   jobs: [],
   isGenerating: false,
 
-  startGeneration: async () => {
-    // Auto-unload LLM before GPU-heavy generation to free VRAM
-    if (get().llmStatus?.loaded) {
+  startGeneration: async (submissionMode = 'now') => {
+    // Freeze the Studio configuration at click time. This matters for the
+    // split Add to Queue action: later UI edits must belong to a new job.
+    const state = get()
+    const holdForQueue = submissionMode === 'queue'
+    const queueSupported = (
+      state.generationMode !== 'avatar'
+      && !(
+        state.generationMode === 'video'
+        && Number(state.params.image_mode) === 4
+      )
+    )
+    if (holdForQueue && !queueSupported) {
+      console.warn('Add to Queue is not available for this specialized edit workflow yet.')
+      return
+    }
+
+    // A held job does not touch the GPU, so keep the prompt LLM resident for
+    // enhancing the next queued prompt. It will be unloaded when the queue is
+    // explicitly started, just like Generate Now.
+    if (!holdForQueue && state.llmStatus?.loaded) {
       try {
         await api.unloadLlm()
         set({ llmStatus: { loaded: false, model_id: null, device: null, provider: '' } })
       } catch { /* best-effort */ }
     }
-
-    const state = get()
 
     // Validate: i2v-only models require a start image — Video mode only.
     // Edit sub-modes supply their own source media and validate in their
@@ -6159,12 +6194,14 @@ export const useStore = create<AppState>((set, get) => ({
 
     const newJob: GenerationJob = {
       id: '',
-      status: 'queued',
+      status: holdForQueue ? 'held' : 'queued',
       progress: 0,
       step: 0,
       totalSteps: 0,
       phase: '',
-      message: h3PlanActive
+      message: holdForQueue
+        ? 'Preparing queue entry...'
+        : h3PlanActive
         ? `Planning H3 ${h3ReferenceSequenceActive ? 'reference sequence' : 'windows'}...`
         : ltxAutoPlanActive
           ? 'Planning LTX windows...'
@@ -6177,12 +6214,17 @@ export const useStore = create<AppState>((set, get) => ({
     }
 
     set(s => ({
-      isGenerating: true,
+      isGenerating: holdForQueue ? s.isGenerating : true,
       jobs: [newJob, ...s.jobs],
     }))
 
     try {
-      const { job_id, h3_window_plan, ltx_window_plan } = await api.submitGeneration(params)
+      const {
+        job_id,
+        status: submittedStatus,
+        h3_window_plan,
+        ltx_window_plan,
+      } = await api.submitGeneration(params, holdForQueue)
 
       if (h3_window_plan) {
         const planFps = state.modelOptions?.fps ?? 24
@@ -6224,8 +6266,10 @@ export const useStore = create<AppState>((set, get) => ({
         jobs: s.jobs.map(j => j === newJob ? {
           ...j,
           id: job_id,
-          status: 'running',
-          message: 'Queued...',
+          status: submittedStatus,
+          message: submittedStatus === 'held'
+            ? 'Ready - waiting for Start Queue'
+            : 'Queued...',
           h3WindowPlan: h3_window_plan ?? null,
         } : j),
       }))
@@ -6298,13 +6342,34 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
+  startStudioQueue: async () => {
+    if (get().llmStatus?.loaded) {
+      try {
+        await api.unloadLlm()
+        set({ llmStatus: { loaded: false, model_id: null, device: null, provider: '' } })
+      } catch { /* best-effort; generation has its own memory safeguards */ }
+    }
+    const result = await api.startStudioQueue()
+    if (result.job_ids.length === 0) return
+    const released = new Set(result.job_ids)
+    set(s => ({
+      jobs: s.jobs.map(job => released.has(job.id)
+        ? { ...job, status: 'queued', message: 'Queued' }
+        : job),
+      isGenerating: true,
+    }))
+  },
+
   stopGeneration: (jobId) => {
     if (jobId) {
       // Cancel specific job on backend, then remove from UI
       api.cancelJob(jobId).catch(e => console.error('Cancel failed:', e))
       set(s => {
         const remaining = s.jobs.filter(j => j.id !== jobId)
-        return { jobs: remaining, isGenerating: remaining.length > 0 }
+        return {
+          jobs: remaining,
+          isGenerating: remaining.some(j => j.status === 'queued' || j.status === 'running'),
+        }
       })
     } else {
       // Cancel all jobs
@@ -6352,7 +6417,9 @@ export const useStore = create<AppState>((set, get) => ({
         if (newJobs.length > 0) {
           set(s => ({
             jobs: [...s.jobs, ...newJobs],
-            isGenerating: true,
+            isGenerating: [...s.jobs, ...newJobs].some(
+              j => j.status === 'queued' || j.status === 'running',
+            ),
           }))
           // Start polling for each reconnected job
           newJobs.forEach(job => {
@@ -6377,7 +6444,12 @@ export const useStore = create<AppState>((set, get) => ({
                   clearInterval(pollInterval)
                   set(s => {
                     const remaining = s.jobs.filter(j => j.id !== job.id)
-                    return { jobs: remaining, isGenerating: remaining.length > 0 }
+                    return {
+                      jobs: remaining,
+                      isGenerating: remaining.some(
+                        j => j.status === 'queued' || j.status === 'running',
+                      ),
+                    }
                   })
                   get().loadOutputs()
                 }
@@ -6386,7 +6458,12 @@ export const useStore = create<AppState>((set, get) => ({
                 clearInterval(pollInterval)
                 set(s => {
                   const remaining = s.jobs.filter(j => j.id !== job.id)
-                  return { jobs: remaining, isGenerating: remaining.length > 0 }
+                  return {
+                    jobs: remaining,
+                    isGenerating: remaining.some(
+                      j => j.status === 'queued' || j.status === 'running',
+                    ),
+                  }
                 })
               }
             }, 2000)
@@ -8099,15 +8176,43 @@ export const useStore = create<AppState>((set, get) => ({
       directorTrackGenerating: true,
       directorError: null,
       directorLoading: true,
-      directorLoadingMessage: 'Generating music track…',
+      directorLoadingMessage: (!style || !lyrics) && description
+        ? 'Writing song…'
+        : 'Preparing music generation…',
       directorStep: 'analyze',
     })
+    const randomPart = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID().replace(/-/g, '')
+      : `${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`
+    const musicProgressId = `music_${randomPart.slice(0, 32)}`
+    let musicProgressPoll: ReturnType<typeof setInterval> | null = null
+    const pollMusicProgress = async () => {
+      try {
+        const status = await api.fetchJobStatus(musicProgressId)
+        const phase = (status.phase || status.message || '').trim()
+        if (status.status === 'queued') {
+          set({ directorLoadingMessage: 'Music generation queued…' })
+          return
+        }
+        if (status.status === 'running') {
+          const percent = status.total_steps > 0
+            ? Math.min(100, Math.max(0, Math.round((status.step / status.total_steps) * 100)))
+            : Math.min(100, Math.max(0, Math.round(status.progress || 0)))
+          const counter = status.total_steps > 0
+            ? ` · ${status.step}/${status.total_steps} (${percent}%)`
+            : status.progress > 0 ? ` · ${percent}%` : ''
+          set({ directorLoadingMessage: `${phase || 'Generating music…'}${counter}` })
+        }
+      } catch {
+        // The render job is registered after optional LLM song writing. A
+        // temporary 404 here simply means the writing/preparation phase is
+        // still active; keep the current status and try again.
+      }
+    }
     try {
-      // generateMusic is a BLOCKING POST — the browser only learns the job id
-      // when it finishes — but the backend registers the job immediately. Run
-      // the same discovery a fresh browser uses at page load (reconnectJobs:
-      // deduped, self-polling) so the gallery shows a live placeholder card
-      // during the render instead of nothing until LLM planning.
+      // The POST remains blocking so the existing analyze → plan handoff is
+      // unchanged, but the browser reserves its render id and polls the normal
+      // job endpoint for live model-loading, denoising, and decoding progress.
       const trackPromise = api.generateMusic({
         description: description || undefined,
         style: style || undefined,
@@ -8117,7 +8222,12 @@ export const useStore = create<AppState>((set, get) => ({
         reference_image_path: refPath || undefined,
         model_type: s.directorMusicModel,
         workspace: get().activeWorkspace || undefined,
+        progress_id: musicProgressId,
       })
+      void pollMusicProgress()
+      musicProgressPoll = setInterval(() => { void pollMusicProgress() }, 1000)
+      // Also reconnect the normal output card so generated music remains
+      // visible in the main gallery while Director is waiting for it.
       setTimeout(() => { void get().reconnectJobs() }, 1200)
       setTimeout(() => { void get().reconnectJobs() }, 5000)
       const r = await trackPromise
@@ -8161,6 +8271,8 @@ export const useStore = create<AppState>((set, get) => ({
         directorError: msg,
         directorStep: 'upload',
       })
+    } finally {
+      if (musicProgressPoll !== null) clearInterval(musicProgressPoll)
     }
   },
 

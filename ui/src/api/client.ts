@@ -58,7 +58,7 @@ export interface ApiOutput {
 
 export interface ApiJobStatus {
   job_id: string
-  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+  status: 'held' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
   progress: number
   step: number
   total_steps: number
@@ -153,11 +153,22 @@ export async function fetchDefaults(modelType: string): Promise<Record<string, u
 
 // --- Generation ---
 
-export async function submitGeneration(params: Record<string, unknown>): Promise<{ job_id: string; h3_window_plan?: H3WindowPlan; ltx_window_plan?: LTXWindowPlan }> {
+export async function submitGeneration(
+  params: Record<string, unknown>,
+  holdForQueue = false,
+): Promise<{
+  job_id: string
+  status: ApiJobStatus['status']
+  h3_window_plan?: H3WindowPlan
+  ltx_window_plan?: LTXWindowPlan
+}> {
   const res = await fetch(`${BASE}/api/v1/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
+    body: JSON.stringify({
+      ...params,
+      _queue_mode: holdForQueue ? 'held' : 'now',
+    }),
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Generation failed' }))
@@ -280,7 +291,8 @@ export async function generateMusic(params: {
   model_type?: string
   seed?: number
   workspace?: string
-}): Promise<{ audio_path: string; filename: string; style: string; lyrics: string }> {
+  progress_id?: string
+}): Promise<{ audio_path: string; filename: string; style: string; lyrics: string; job_id?: string | null }> {
   const res = await fetch(`${BASE}/api/v1/director/generate-music`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -384,8 +396,18 @@ export async function cancelJob(jobId: string): Promise<void> {
   if (!res.ok) throw new Error('Failed to cancel job')
 }
 
+export async function startStudioQueue(): Promise<{
+  status: 'started' | 'idle'
+  job_ids: string[]
+  released: number
+}> {
+  const res = await fetch(`${BASE}/api/v1/jobs/queue/start`, { method: 'POST' })
+  if (!res.ok) throw new Error('Failed to start Studio queue')
+  return res.json()
+}
+
 export async function fetchActiveJobs(): Promise<{ jobs: Array<{
-  job_id: string; status: string; progress: number; step: number;
+  job_id: string; status: ApiJobStatus['status']; progress: number; step: number;
   total_steps: number; phase: string; message: string; output_files: string[];
   error: string | null; created_at: number; h3_window_plan?: H3WindowPlan | null;
 }> }> {

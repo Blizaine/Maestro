@@ -20,6 +20,7 @@ import os
 import glob
 import json
 import math
+import re
 import time
 import uuid
 import asyncio
@@ -271,6 +272,7 @@ from services.job_lifecycle import (
     is_cancel_requested,
     record_job_outputs,
     register_abort_state,
+    release_held,
     request_cancel,
     snapshot_job,
     try_requeue,
@@ -6633,9 +6635,12 @@ def delete_workspace(name: str):
     if not os.path.isdir(ws_dir):
         raise HTTPException(status_code=404, detail=f"Workspace not found: {name}")
 
-    busy = any(j.get("status") in ("queued", "running") for j in _jobs.values())
+    busy = any(
+        j.get("status") in ("held", "queued", "running")
+        for j in _jobs.values()
+    )
     if busy or _active_gen_states:
-        raise HTTPException(status_code=409, detail="A generation is queued or running. Wait for it to finish before deleting a workspace.")
+        raise HTTPException(status_code=409, detail="A generation is held, queued, or running. Remove it or wait for it to finish before deleting a workspace.")
     # Director pipelines are alive between their generation jobs (LLM
     # planning, review pauses) with no _jobs entry — but their next step
     # would resurrect the folder via _workspace_dir().
@@ -7402,6 +7407,9 @@ async def director_generate_music(request: Request):
     duration_seconds = body.get("duration_seconds")
     seed = body.get("seed")
     workspace = body.get("workspace") or _get_active_workspace()
+    progress_id = str(body.get("progress_id") or "").strip()
+    if progress_id and not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", progress_id):
+        raise HTTPException(status_code=400, detail="Invalid music progress id")
 
     selected_model = wgp.get_model_def(model_type)
     if selected_model is None:
@@ -7496,6 +7504,7 @@ async def director_generate_music(request: Request):
             gen_params,
             timeout_s=generation_timeout_s,
             out_dir=out_dir,
+            job_id=progress_id or None,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Music generation failed: {e}")
@@ -7504,7 +7513,13 @@ async def director_generate_music(request: Request):
 
     filename = output_files[0]
     audio_path = os.path.join(out_dir, filename)
-    return {"audio_path": audio_path, "filename": filename, "style": style, "lyrics": lyrics}
+    return {
+        "audio_path": audio_path,
+        "filename": filename,
+        "style": style,
+        "lyrics": lyrics,
+        "job_id": progress_id or None,
+    }
 
 
 @api.post("/api/v1/llm/plan-h3-windows")
@@ -9167,6 +9182,13 @@ async def director_v2_plan(request: Request):
 async def generate(request: Request):
     """Submit a generation job. Returns immediately with a job_id."""
     body = await request.json()
+    queue_mode = str(body.pop("_queue_mode", "now") or "now").strip().lower()
+    if queue_mode not in {"now", "held"}:
+        raise HTTPException(
+            status_code=400,
+            detail="_queue_mode must be either 'now' or 'held'",
+        )
+    hold_for_queue = queue_mode == "held"
     h3_window_plan_response = None
     ltx_window_plan_response = None
 
@@ -10276,14 +10298,19 @@ async def generate(request: Request):
     job_out_dir = _workspace_dir(workspace)
 
     job_id = uuid.uuid4().hex[:8]
+    initial_status = "held" if hold_for_queue else "queued"
     job = {
         "id": job_id,
-        "status": "queued",
+        "status": initial_status,
         "progress": 0,
         "step": 0,
         "total_steps": 0,
         "phase": "",
-        "message": "Queued",
+        "message": (
+            "Ready - waiting for Start Queue"
+            if hold_for_queue
+            else "Queued"
+        ),
         "created_at": time.time(),
         "params": body,
         "output_files": [],
@@ -10293,11 +10320,18 @@ async def generate(request: Request):
     }
     _jobs[job_id] = job
 
-    # Non-daemon so generation survives browser disconnect during overnight runs
-    thread = threading.Thread(target=_run_generation, args=(job_id,), daemon=False)
-    thread.start()
+    if not hold_for_queue:
+        # Non-daemon so generation survives browser disconnect during
+        # overnight runs. Held Studio jobs deliberately have no worker until
+        # the user presses Start Queue.
+        thread = threading.Thread(
+            target=_run_generation,
+            args=(job_id,),
+            daemon=False,
+        )
+        thread.start()
 
-    response = {"job_id": job_id, "status": "queued"}
+    response = {"job_id": job_id, "status": initial_status}
     if h3_window_plan_response is not None:
         response["h3_window_plan"] = h3_window_plan_response
     if ltx_window_plan_response is not None:
@@ -24860,7 +24894,7 @@ def get_status(job_id: str):
 
 @api.post("/api/v1/cancel/{job_id}")
 def cancel_job(job_id: str):
-    """Cancel a queued or running generation job."""
+    """Cancel a held, queued, or running generation job."""
     if job_id not in _jobs:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -24875,13 +24909,67 @@ def cancel_job(job_id: str):
     return {"status": job["status"], "was_running": result.was_running}
 
 
+def _run_held_studio_jobs(job_ids: list[str]) -> None:
+    """Dispatch released Studio jobs serially in their captured order."""
+    for job_id in job_ids:
+        job = _jobs.get(job_id)
+        if job is None or snapshot_job(job).get("status") != "queued":
+            continue
+        try:
+            _run_generation(job_id)
+        except Exception as error:
+            # `_run_generation` normally owns all failure publication. Keep
+            # the batch moving if an unexpected exception escapes its guard.
+            current = snapshot_job(job).get("status")
+            if current == "queued" and try_start(job, message="Starting"):
+                current = "running"
+            if current == "running":
+                finish_job(job, "failed", message="Failed", error=str(error))
+            print(f"[Studio Queue] Job {job_id} failed: {error}")
+
+
+def _start_held_studio_queue() -> list[str]:
+    """Release all currently held Studio jobs and start one dispatcher."""
+    candidates = sorted(
+        (
+            (snapshot_job(job).get("created_at", 0), job_id, job)
+            for job_id, job in list(_jobs.items())
+            if snapshot_job(job).get("status") == "held"
+        ),
+        key=lambda item: (item[0], item[1]),
+    )
+    released: list[str] = []
+    for _created_at, job_id, job in candidates:
+        if release_held(job, message="Queued"):
+            released.append(job_id)
+    if released:
+        threading.Thread(
+            target=_run_held_studio_jobs,
+            args=(released,),
+            daemon=False,
+            name="maestro_studio_queue",
+        ).start()
+    return released
+
+
+@api.post("/api/v1/jobs/queue/start")
+def start_studio_queue():
+    """Release held Studio jobs without disturbing an active generation."""
+    released = _start_held_studio_queue()
+    return {
+        "status": "started" if released else "idle",
+        "job_ids": released,
+        "released": len(released),
+    }
+
+
 @api.get("/api/v1/jobs")
 def list_jobs():
     """List all active/recent jobs for reconnection after browser refresh."""
     active = []
     for job in list(_jobs.values()):
         j = snapshot_job(job)
-        if j["status"] in ("queued", "running"):
+        if j["status"] in ("held", "queued", "running"):
             active.append({
                 "job_id": j["id"],
                 "status": j["status"],

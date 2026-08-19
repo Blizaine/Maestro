@@ -252,6 +252,107 @@ class TestDirectorProjectRevisionsAndQueue(unittest.TestCase):
         detail = pipeline.get_director_queue_entry(self.temp_dir.name, entry_id)
         self.assertEqual(detail["status"], "completed")
 
+    def test_queue_surfaces_pipeline_gpu_wait_message(self):
+        queued = pipeline.enqueue_director_pipeline(self.temp_dir.name, {
+            "scene_description": "Director after Studio",
+        })
+        entry_id = queued["entries"][0]["id"]
+        with pipeline._director_queue_lock:
+            state = pipeline._load_director_queue_locked(self.temp_dir.name)
+            state["paused"] = False
+            state["entries"][0]["status"] = "queued"
+
+        statuses = iter([
+            {
+                "status": "running",
+                "progress": {
+                    "message": "Waiting for GPU (generation queue)...",
+                },
+            },
+            {"status": "completed", "error": None},
+        ])
+
+        def observe_wait(_seconds):
+            detail = pipeline.get_director_queue_entry(
+                self.temp_dir.name, entry_id,
+            )
+            self.assertEqual(
+                detail["message"],
+                "Waiting for GPU (generation queue)...",
+            )
+
+        with (
+            patch.object(pipeline, "start_pipeline", return_value="queued-run"),
+            patch.object(pipeline, "get_pipeline", side_effect=lambda _pid: next(statuses)),
+            patch.object(pipeline.time, "sleep", side_effect=observe_wait),
+        ):
+            pipeline._run_director_queue(self.temp_dir.name)
+
+        detail = pipeline.get_director_queue_entry(self.temp_dir.name, entry_id)
+        self.assertEqual(detail["status"], "completed")
+
+    def test_prepared_queue_revision_reaches_gpu_wait(self):
+        """A frozen Director revision can enter the normal GPU waiter."""
+
+        pid = "prepared-queue-run"
+        pipeline._pipelines[pid] = {
+            "id": pid,
+            "status": "running",
+            "phase": "planning",
+            "params": {
+                "pipeline_type": "music_video",
+                "prepared_clip_plans": [{
+                    "image_prompt": "reviewed opening frame",
+                    "video_prompt": "reviewed Tom Cruise shot",
+                }],
+                "prepared_planned_clips": [{
+                    "start": 0.0,
+                    "end": 5.0,
+                    "duration_frames": 81,
+                }],
+            },
+            "out_dir": self.temp_dir.name,
+            "workspace": "default",
+            "clip_plans": [],
+            "clip_images": [],
+            "output_files": [],
+            "progress": {},
+        }
+
+        # Returning False models cancellation after entering the normal GPU
+        # waiter and deliberately stops before LLM or model work. The frozen
+        # prepared plans must be copied successfully before that point.
+        with patch.object(pipeline, "_wait_for_gpu", return_value=False) as wait:
+            pipeline._run_pipeline(pid)
+
+        wait.assert_called_once_with(pid)
+        self.assertNotEqual(pipeline._pipelines[pid]["status"], "failed")
+        self.assertIsNone(pipeline._pipelines[pid].get("error"))
+
+    def test_gpu_wait_blocks_until_studio_generation_finishes(self):
+        pid = "director-behind-studio"
+        pipeline._pipelines[pid] = {
+            "status": "running",
+            "progress": {},
+        }
+        studio_job = {"status": "running"}
+
+        def finish_studio(_seconds):
+            studio_job["status"] = "completed"
+
+        with (
+            patch.object(pipeline, "_jobs", {"studio-job": studio_job}),
+            patch.object(pipeline.time, "sleep", side_effect=finish_studio) as sleep,
+        ):
+            ready = pipeline._wait_for_gpu(pid, poll_interval=0.01)
+
+        self.assertTrue(ready)
+        sleep.assert_called_once_with(0.01)
+        self.assertEqual(
+            pipeline._pipelines[pid]["progress"]["message"],
+            "Waiting for GPU (generation queue)...",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

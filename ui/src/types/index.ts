@@ -306,7 +306,7 @@ export interface OomInfo {
 
 export interface GenerationJob {
   id: string
-  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+  status: 'held' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
   progress: number
   step: number
   totalSteps: number

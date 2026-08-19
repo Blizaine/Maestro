@@ -266,6 +266,39 @@ class TestDirectorCancellation(unittest.TestCase):
         )
         self.assertEqual(outputs, ["rerun.png"])
 
+    def test_submit_and_wait_uses_reserved_job_id_for_live_progress(self):
+        observed_ids = []
+
+        def fake_generation(job_id: str):
+            observed_ids.append(job_id)
+            job = pipeline._jobs[job_id]
+            if not try_start(job):
+                return
+            job.update({
+                "step": 3,
+                "total_steps": 6,
+                "progress": 50,
+                "phase": "Flow matching",
+                "message": "Flow matching",
+            })
+            record_job_outputs(job, ["song.wav"])
+            finish_job(job, "completed", message="Done")
+
+        pipeline._run_generation = fake_generation
+        outputs = pipeline._submit_and_wait(
+            {},
+            timeout_s=1,
+            out_dir=self.temp_dir.name,
+            job_id="music_progress_1234",
+        )
+
+        self.assertEqual(observed_ids, ["music_progress_1234"])
+        self.assertEqual(outputs, ["song.wav"])
+        self.assertEqual(
+            pipeline._jobs["music_progress_1234"]["total_steps"],
+            6,
+        )
+
     def test_cancelled_detached_rerun_raises_with_settled_output(self):
         pid = "pipe-cancelled-detached"
         self._add_pipeline(pid, "completed")

@@ -182,6 +182,31 @@ class TestH3DirectorDialogueCompiler(unittest.TestCase):
         self.assertIn("mapped driving audio", compiled)
         self.assertEqual(validate_h3_prompt_contract(compiled, mode="t2va"), [])
 
+    def test_music_driven_prompt_repairs_inline_duplicate_context_fields(self):
+        compiled, _ = compile_h3_official_prompt(
+            (
+                "A singer runs across a moving train while lip-syncing to the "
+                "supplied track. Overall soundscape features train wheels and "
+                "wind; non-diegetic music is driving rock. "
+                "Integrated multimodal description: [Shot 1] The singer runs "
+                "toward camera. Overall soundscape: Train wheels and wind. "
+                "Non-diegetic music: Driving rock. Dialogue beats: "
+                "<d>Planner-invented words</d>."
+            ),
+            [],
+            [],
+            mode="t2va",
+            audio_plan={"mode": "music_driven", "timing_anchor": "audio"},
+        )
+
+        self.assertNotIn("Planner-invented words", compiled)
+        self.assertNotIn("<d>", compiled)
+        self.assertEqual(compiled.count("integrated_multimodal_description:"), 1)
+        self.assertEqual(compiled.count("overall_soundscape:"), 1)
+        self.assertEqual(compiled.count("non_diegetic_music:"), 1)
+        self.assertIn("mapped driving audio", compiled)
+        self.assertEqual(validate_h3_prompt_contract(compiled, mode="t2va"), [])
+
     def test_silent_shot_gets_an_explicit_silence_contract(self):
         compiled, _ = compile_h3_vocal_contract(
             "A silent reaction. overall_soundscape: Air conditioning hum.",

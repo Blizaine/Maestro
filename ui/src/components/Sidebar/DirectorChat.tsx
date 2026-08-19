@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from 'react'
-import { Upload, Loader2, Music, RotateCcw, Check, X, ChevronRight, ChevronDown, ImageIcon, Play, Film, Mic, Sparkles, Send, Users, FileText, Clock, Pause, ListVideo, ArrowUp, ArrowDown, Pencil, Trash2 } from 'lucide-react'
+import { Upload, Loader2, Music, RotateCcw, Check, X, ChevronRight, ChevronDown, ImageIcon, Play, Film, Mic, Sparkles, Send, Users, FileText, Clock, ListVideo } from 'lucide-react'
 import { useStore, directorModelUsesFixedMediaStrength, getFamiliesForMode, getModelsForFamily, resolveResolution } from '../../stores/useStore'
 import { fetchModelOptions, getFileUrl } from '../../api/client'
 import { DirectorLoraSelector } from '../SettingsDrawer/DirectorLoraSelector'
@@ -7,7 +7,7 @@ import { DirectorSongSetup } from './DirectorSongSetup'
 import { DirectorH3Optimizations } from './DirectorH3Optimizations'
 import { InfoTooltip } from './InfoTooltip'
 import { formatSeconds, recommendedWindowProfile } from './DurationSlider'
-import type { DirectorPipelineType, DirectorQueueState, DirectorShotImageGuidance, DirectorSkill, ModelOptions, ShortFilmCharacter, ShortFilmPath } from '../../types'
+import type { DirectorPipelineType, DirectorShotImageGuidance, DirectorSkill, ModelOptions, ShortFilmCharacter, ShortFilmPath } from '../../types'
 
 // AUDIO_ACCEPT lists both audio formats AND video formats. When a video
 // file is uploaded, the backend's /api/v1/upload-audio endpoint extracts
@@ -444,12 +444,6 @@ export function DirectorChat() {
   )
   const directorQueue = useStore(s => s.directorQueue)
   const directorQueueEditingEntryId = useStore(s => s.directorQueueEditingEntryId)
-  const loadDirectorQueue = useStore(s => s.loadDirectorQueue)
-  const startDirectorQueue = useStore(s => s.startDirectorQueue)
-  const pauseDirectorQueue = useStore(s => s.pauseDirectorQueue)
-  const removeDirectorQueueEntry = useStore(s => s.removeDirectorQueueEntry)
-  const moveDirectorQueueEntry = useStore(s => s.moveDirectorQueueEntry)
-  const loadDirectorQueueEntry = useStore(s => s.loadDirectorQueueEntry)
   const queueCurrentDirectorPipeline = useStore(s => s.queueCurrentDirectorPipeline)
   const usesShotImages = directorWillGenerateShotImages(
     selectedDirectorShotImageSupport,
@@ -508,13 +502,6 @@ export function DirectorChat() {
   // LoRA/model while it runs can never mutate work already in flight.
   const directorSetupLocked = currentIndex >= STEP_ORDER.indexOf('plan')
     && step !== 'review_video'
-
-  useEffect(() => {
-    void loadDirectorQueue()
-    if (!directorQueue?.running) return
-    const timer = window.setInterval(() => void loadDirectorQueue(), 2500)
-    return () => window.clearInterval(timer)
-  }, [directorQueue?.running, loadDirectorQueue])
 
   const handleFile = useCallback((file: File) => {
     // Accept audio/* MIME OR video/* MIME (backend extracts the audio
@@ -707,17 +694,6 @@ export function DirectorChat() {
           <div className="rounded-lg border border-accent-blue/25 bg-accent-blue/10 px-3 py-2 text-[10px] leading-relaxed text-text-secondary">
             The current render is frozen. Changes here apply to a new revision; Generate will add it to the held queue.
           </div>
-        )}
-
-        {directorQueue && directorQueue.entries.length > 0 && (
-          <DirectorQueuePanel
-            queue={directorQueue}
-            onStart={() => void startDirectorQueue()}
-            onPause={() => void pauseDirectorQueue()}
-            onOpen={entryId => void loadDirectorQueueEntry(entryId)}
-            onRemove={entryId => void removeDirectorQueueEntry(entryId)}
-            onMove={(entryId, direction) => void moveDirectorQueueEntry(entryId, direction)}
-          />
         )}
 
         {skill && (!isShortFilm || shortFilmPath === 'audio') && (atStep('upload') || atStep('analyze') || pastStep('analyze')) && (
@@ -1134,106 +1110,6 @@ export function DirectorChat() {
 }
 
 // --- Sub-components ---
-
-function DirectorQueuePanel({
-  queue, onStart, onPause, onOpen, onRemove, onMove,
-}: {
-  queue: DirectorQueueState
-  onStart: () => void
-  onPause: () => void
-  onOpen: (entryId: string) => void
-  onRemove: (entryId: string) => void
-  onMove: (entryId: string, direction: -1 | 1) => void
-}) {
-  const [expanded, setExpanded] = useState(true)
-  const busy = useStore(s => s.directorQueueLoading)
-  const pendingCount = queue.entries.filter(entry => ['held', 'queued', 'running'].includes(entry.status)).length
-  return (
-    <div className="rounded-lg border border-border bg-bg-tertiary/50">
-      <div className="flex items-center gap-2 px-3 py-2">
-        <button
-          type="button"
-          onClick={() => setExpanded(value => !value)}
-          className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
-        >
-          {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-          <ListVideo size={12} className="text-accent-blue" />
-          <span className="text-[11px] font-medium text-text-secondary">Director Queue</span>
-          <span className="rounded-full bg-accent-blue/15 px-1.5 text-[9px] text-accent-blue">
-            {pendingCount} pending
-          </span>
-        </button>
-        {queue.running && !queue.paused ? (
-          <button
-            type="button"
-            onClick={onPause}
-            disabled={busy}
-            className="flex items-center gap-1 rounded border border-orange-500/30 bg-orange-500/10 px-2 py-1 text-[9px] text-chip-orange disabled:opacity-40"
-            title="Finish the active Director project, then stop dispatching"
-          >
-            <Pause size={9} /> Pause after current
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={onStart}
-            disabled={pendingCount === 0 || busy}
-            className="flex items-center gap-1 rounded border border-green-500/30 bg-green-500/10 px-2 py-1 text-[9px] text-indicator-success disabled:opacity-40"
-          >
-            <Play size={9} /> Start queue
-          </button>
-        )}
-      </div>
-      {expanded && (
-        <div className="space-y-1 border-t border-border/60 p-2">
-          {queue.entries.map((entry, index) => (
-            <div key={entry.id} className="flex items-center gap-1.5 rounded bg-bg-secondary px-2 py-1.5">
-              {entry.status === 'running'
-                ? <Loader2 size={10} className="shrink-0 animate-spin text-accent-blue" />
-                : entry.status === 'completed'
-                  ? <Check size={10} className="shrink-0 text-indicator-success" />
-                  : <Clock size={10} className="shrink-0 text-text-muted" />}
-              <button
-                type="button"
-                onClick={() => onOpen(entry.id)}
-                disabled={busy}
-                className="min-w-0 flex-1 text-left"
-                title={entry.scene_description || entry.message}
-              >
-                <div className="truncate text-[10px] text-text-secondary">
-                  {entry.scene_description || `${entry.pipeline_type} project`}
-                </div>
-                <div className="truncate text-[8px] text-text-muted">
-                  {entry.status} · {entry.message || entry.video_model}
-                </div>
-              </button>
-              <button type="button" onClick={() => onOpen(entry.id)} disabled={busy} title="Open and edit queued project"
-                className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-accent-blue disabled:opacity-40">
-                <Pencil size={9} />
-              </button>
-              {entry.status !== 'running' && (
-                <>
-                  <button type="button" onClick={() => onMove(entry.id, -1)} disabled={index === 0 || busy}
-                    className="rounded p-1 text-text-muted hover:bg-bg-hover disabled:opacity-20" title="Move up">
-                    <ArrowUp size={9} />
-                  </button>
-                  <button type="button" onClick={() => onMove(entry.id, 1)} disabled={index === queue.entries.length - 1 || busy}
-                    className="rounded p-1 text-text-muted hover:bg-bg-hover disabled:opacity-20" title="Move down">
-                    <ArrowDown size={9} />
-                  </button>
-                  <button type="button" onClick={() => onRemove(entry.id)} disabled={busy}
-                    className="rounded p-1 text-text-muted hover:bg-red-500/10 hover:text-red-400 disabled:opacity-40" title="Remove from queue">
-                    <Trash2 size={9} />
-                  </button>
-                </>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
 
 function CharacterNaming({
   characters, setCharacters,
@@ -3092,6 +2968,32 @@ function VideoPromptsReview({
   editingQueueEntryId?: string | null
 }) {
   const queueBusy = useStore(s => s.directorQueueLoading)
+  const [queueConfirmation, setQueueConfirmation] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!queueConfirmation) return
+    const timer = window.setTimeout(() => setQueueConfirmation(null), 5000)
+    return () => window.clearTimeout(timer)
+  }, [queueConfirmation])
+
+  const handleAddToQueue = async () => {
+    setQueueConfirmation(null)
+    const beforeIds = new Set(
+      (useStore.getState().directorQueue?.entries || []).map(entry => entry.id),
+    )
+    await queueCurrent()
+    const state = useStore.getState()
+    const queue = state.directorQueue
+    const added = queue?.entries.find(entry => !beforeIds.has(entry.id))
+    if (!queue || !added || state.directorError) return
+    const heldCount = queue.entries.filter(
+      entry => ['held', 'queued', 'running'].includes(entry.status),
+    ).length
+    setQueueConfirmation(
+      `Added to Queue · ${heldCount} Director ${heldCount === 1 ? 'project' : 'projects'} waiting. Open the queue in the top bar when ready.`,
+    )
+  }
+
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
@@ -3224,14 +3126,34 @@ function VideoPromptsReview({
             : 'Generate'}
         </button>
         {!isGenerating && !editingQueueEntryId && (
-          <button
-            onClick={() => void queueCurrent()}
-            disabled={loading || queueBusy}
-            className="w-full py-2 rounded-lg border border-accent-blue/30 bg-accent-blue/5 text-accent-blue text-xs font-medium hover:bg-accent-blue/10 transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50"
-            title="Hold this complete project in the persistent queue without starting it"
-          >
-            <ListVideo size={12} /> Add to Queue
-          </button>
+          <>
+            <button
+              onClick={() => void handleAddToQueue()}
+              disabled={loading || queueBusy || Boolean(queueConfirmation)}
+              className={`w-full py-2 rounded-lg border text-xs font-medium transition-colors flex items-center justify-center gap-1.5 disabled:opacity-70 ${
+                queueConfirmation
+                  ? 'border-green-500/30 bg-green-500/10 text-indicator-success'
+                  : 'border-accent-blue/30 bg-accent-blue/5 text-accent-blue hover:bg-accent-blue/10'
+              }`}
+              title="Hold this complete project in the persistent queue without starting it"
+            >
+              {queueBusy
+                ? <Loader2 size={12} className="animate-spin" />
+                : queueConfirmation
+                  ? <Check size={12} />
+                  : <ListVideo size={12} />}
+              {queueBusy ? 'Adding…' : queueConfirmation ? 'Added to Queue' : 'Add to Queue'}
+            </button>
+            {queueConfirmation && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="rounded-md border border-green-500/20 bg-green-500/5 px-2.5 py-2 text-[10px] leading-relaxed text-indicator-success"
+              >
+                {queueConfirmation}
+              </div>
+            )}
+          </>
         )}
         <button
           onClick={applyToClips}
