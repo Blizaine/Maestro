@@ -3,8 +3,13 @@
 # Note: torch/torchvision installed separately from cu128 index
 
 # SAM 3 core deps
+# NOTE: sam3's pyproject.toml pins numpy<2. Every pin below that caps a version
+# (numpy, opencv-python-headless, scipy) exists to stay on the numpy 1.x ABI --
+# newer releases of those packages require numpy>=2 and will silently upgrade it,
+# breaking sam3 at import time. This env is isolated from Maestro's app/env
+# (which uses numpy 2.x), so these caps do not affect the main app.
 timm>=1.0.17
-numpy>=2
+numpy>=1.26,<2
 tqdm
 ftfy==6.1.1
 regex
@@ -17,7 +22,7 @@ psutil
 einops
 pycocotools
 decord
-opencv-python-headless
+opencv-python-headless<4.10
 
 # Triton (platform-specific)
 triton-windows; sys_platform == 'win32'
@@ -28,5 +33,5 @@ xformers
 fastapi>=0.115.0
 uvicorn>=0.34.0
 Pillow>=10.0
-scipy
+scipy<1.16
 ninja
