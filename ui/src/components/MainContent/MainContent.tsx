@@ -6,6 +6,7 @@ import { MediaFeedItem } from './MediaFeedItem'
 import { GlobalQueuePopover } from '../GlobalQueuePopover'
 import { useStore } from '../../stores/useStore'
 import { useIsMobile } from '../../lib/useIsMobile'
+import { formatEstimatedClock, formatEtaDuration } from '../../lib/format'
 import type { GenerationJob } from '../../types'
 
 function WorkspaceSelector() {
@@ -192,7 +193,14 @@ function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop
   const errorText = job.error || job.message || (job.status === 'cancelled' ? 'Cancelled' : 'Generation failed')
   const [showH3Prompts, setShowH3Prompts] = useState(false)
   const h3WindowMatch = (job.phase || job.message || '').match(/Sliding Window\s+(\d+)\/(\d+)/i)
-  const activeH3Window = h3WindowMatch ? Number(h3WindowMatch[1]) : 1
+  const activeH3Window = job.currentWindow ?? (h3WindowMatch ? Number(h3WindowMatch[1]) : 1)
+  const totalStudioWindows = job.totalWindows ?? (h3WindowMatch ? Number(h3WindowMatch[2]) : 1)
+  const isMultiWindow = totalStudioWindows > 1
+  const isMultiClip = (job.totalClips ?? 1) > 1
+  const windowEta = formatEtaDuration(job.windowEtaSeconds)
+  const windowClock = formatEstimatedClock(job.windowCompletionAt)
+  const generationEta = formatEtaDuration(job.generationEtaSeconds)
+  const generationClock = formatEstimatedClock(job.generationCompletionAt)
   const activeH3PlanWindow = job.h3WindowPlan?.windows.find(
     window => window.index === activeH3Window,
   ) || job.h3WindowPlan?.windows[0]
@@ -230,6 +238,30 @@ function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop
               <p className="text-[10px] text-text-muted mt-0.5">
                 Step {job.step}/{job.totalSteps}
               </p>
+            )}
+            {!isFailed && job.status === 'running' && (
+              <div className="mt-1 space-y-0.5 text-[10px] text-text-muted">
+                {isMultiClip && (
+                  <p>
+                    Clip {job.currentClip ?? 1}/{job.totalClips}
+                    {isMultiWindow ? ` · Window ${activeH3Window}/${totalStudioWindows}` : ''}
+                  </p>
+                )}
+                {isMultiWindow && windowEta && (
+                  <p>
+                    Window {activeH3Window}/{totalStudioWindows} · {windowEta} remaining
+                    {windowClock ? ` · around ${windowClock}` : ''}
+                  </p>
+                )}
+                {generationEta ? (
+                  <p>
+                    {isMultiWindow || isMultiClip ? 'Full Studio render' : 'Estimated'} {generationEta}
+                    {generationClock ? ` · around ${generationClock}` : ''}
+                  </p>
+                ) : job.etaConfidence === 'calibrating' ? (
+                  <p>Calibrating ETA…</p>
+                ) : null}
+              </div>
             )}
             {isFailed && (
               <p className="text-[11px] text-text-secondary mt-2 max-h-24 overflow-y-auto px-2 leading-relaxed whitespace-pre-wrap break-words">
@@ -338,6 +370,12 @@ function PipelinePlaceholder() {
       ? (progress.current / progress.total) * 100
       : 0
   const phaseLabel = stripTimeSuffix(message)
+  const currentClip = progress?.current_clip
+  const totalClips = progress?.total_clips
+  const clipEta = formatEtaDuration(progress?.clip_eta_seconds)
+  const clipClock = formatEstimatedClock(progress?.clip_completion_at)
+  const projectEta = formatEtaDuration(progress?.project_eta_seconds)
+  const projectClock = formatEstimatedClock(progress?.project_completion_at)
 
   return (
     <div className="rounded-xl overflow-hidden border border-accent-blue/30 bg-bg-tertiary">
@@ -355,6 +393,22 @@ function PipelinePlaceholder() {
                 Step {progress!.step}/{progress!.total_steps}
               </p>
             )}
+            {currentClip ? (
+              <div className="mt-1 space-y-0.5 text-[10px] text-text-muted">
+                <p>
+                  Clip {currentClip}/{totalClips || '?'}
+                  {clipEta
+                    ? ` · ${clipEta} remaining${clipClock ? ` · around ${clipClock}` : ''}`
+                    : ' · Calibrating ETA…'}
+                </p>
+                {projectEta && (
+                  <p>
+                    Full Director render {projectEta}
+                    {projectClock ? ` · around ${projectClock}` : ''}
+                  </p>
+                )}
+              </div>
+            ) : null}
           </div>
 
           {/* Progress bar */}

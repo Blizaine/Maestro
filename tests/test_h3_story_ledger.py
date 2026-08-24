@@ -114,6 +114,17 @@ class H3StoryLedgerTests(unittest.TestCase):
         rendered = " ".join(item["text"] for item in extract_source_events(prompt))
         self.assertIn("The One With the Broken Robot", rendered)
 
+    def test_pov_identity_and_opening_pose_are_one_source_event(self):
+        events = extract_source_events(
+            "POV: The viewer is Harry Potter as he stands on top of a scenic mountain. "
+            "Hermione waits beside him."
+        )
+        self.assertEqual(
+            events[0]["text"],
+            "POV: The viewer is Harry Potter as he stands on top of a scenic mountain",
+        )
+        self.assertFalse(any(item["text"] == "he stands on top of a scenic mountain" for item in events))
+
     def test_ledger_rejects_repeated_events_and_dialogue(self):
         ledger = _ledger()
         ledger["beats"][1]["description"] = ledger["beats"][0]["description"]
@@ -173,7 +184,7 @@ class H3StoryLedgerTests(unittest.TestCase):
         self.assertIn("assigned beat IDs are missing, foreign, or repeated", joined)
         self.assertIn("unusably short tail shot", joined)
 
-    def test_staged_planner_keeps_dialogue_exact_and_repairs_only_bad_segment(self):
+    def test_staged_planner_keeps_dialogue_exact_and_canonicalizes_bad_timing(self):
         invalid_second = _segment(2)
         invalid_second["shots"][0]["start_seconds"] = 9.9
         invalid_second["shots"][0]["end_seconds"] = 10.0
@@ -198,9 +209,11 @@ class H3StoryLedgerTests(unittest.TestCase):
             llm_generate=generate,
         )
         self.assertEqual(result["planned_by"], "llm")
-        self.assertEqual(len(calls), 4)
+        # Maestro owns the local shot clock now, so malformed model-authored
+        # timing is snapped locally instead of spending another LLM pass.
+        self.assertEqual(len(calls), 3)
         self.assertNotIn("REPAIR ONLY THIS SEGMENT", calls[1]["prompt"])
-        self.assertIn("REPAIR ONLY THIS SEGMENT", calls[3]["prompt"])
+        self.assertNotIn("REPAIR ONLY THIS SEGMENT", calls[2]["prompt"])
         rendered = json.dumps(result["segments"], ensure_ascii=False)
         self.assertEqual(rendered.count("Enough. Give me the glove, Thanos."), 1)
         self.assertEqual(rendered.count("I am inevitable."), 1)
@@ -210,6 +223,130 @@ class H3StoryLedgerTests(unittest.TestCase):
             result["segments"][1]["closing_state"],
             "Thanos holds the raised gauntlet toward Superman",
         )
+
+    def test_llm_cannot_corrupt_maestros_canonical_story_schedule(self):
+        candidate = _ledger()
+        candidate["beats"] = [{
+            "beat_id": "B99",
+            "segment": 1,
+            "description": "A reordered replacement event",
+            "source_event_ids": ["E999", "E1", "E1"],
+            "dialogue_ids": ["D2", "D1"],
+            "state_after": "The wrong ending",
+            "sound_effects": "N/A",
+        }]
+        responses = iter([
+            json.dumps(candidate),
+            json.dumps(_segment(1)),
+            json.dumps(_segment(2)),
+        ])
+        calls: list[dict] = []
+
+        def generate(**kwargs):
+            calls.append(kwargs)
+            return next(responses)
+
+        result = plan_h3_story_segments(
+            self.prompt,
+            segment_durations=[10.0, 10.0],
+            mode="reference_sequence",
+            camera_coverage="multi_shot",
+            expect_dialogue=True,
+            llm_generate=generate,
+        )
+
+        self.assertEqual(result["planned_by"], "llm")
+        self.assertEqual(result["planning_warnings"], [])
+        self.assertEqual(len(calls), 3)
+        referenced = [
+            event_id
+            for beat in result["ledger"]["beats"]
+            for event_id in beat["source_event_ids"]
+        ]
+        self.assertEqual(referenced, [item["event_id"] for item in extract_source_events(self.prompt)])
+        self.assertNotIn("beats", calls[0]["json_schema"]["properties"])
+
+    def test_generated_dialogue_selects_a_segment_without_owning_story_ids(self):
+        prompt = "Clark saves Lana from danger, and Lana reacts in disbelief."
+        context = {
+            "subject_continuity": "Clark and Lana remain visually unchanged",
+            "setting_continuity": "The same Smallville street",
+            "visual_continuity": "Live-action television drama",
+            "editing_style": "Motivated cinematic coverage",
+            "initial_state": "Clark sees Lana in danger",
+            "ambient_audio": "Quiet nonverbal small-town ambience",
+            "music": "N/A",
+            "required_final_outcome": "Lana reacts after Clark saves her",
+            "generated_dialogue": [{
+                "speaker": "Lana",
+                "language": "English",
+                "delivery": "stunned and breathless",
+                "text": "Clark, how did you do that?",
+                "segment": 2,
+            }],
+        }
+        responses = iter([
+            json.dumps(context),
+            json.dumps(_segment(1)),
+            json.dumps(_segment(2)),
+        ])
+
+        result = plan_h3_story_segments(
+            prompt,
+            segment_durations=[10.0, 10.0],
+            mode="sliding_window",
+            camera_coverage="multi_shot",
+            expect_dialogue=True,
+            llm_generate=lambda **_kwargs: next(responses),
+        )
+
+        self.assertEqual(result["planned_by"], "llm")
+        self.assertEqual(result["ledger"]["generated_dialogue"][0]["dialogue_id"], "D1")
+        rendered = json.dumps(result["segments"], ensure_ascii=False)
+        self.assertEqual(rendered.count("Clark, how did you do that?"), 1)
+        self.assertNotIn("Clark, how did you do that?", json.dumps(result["segments"][0]))
+
+    def test_one_camera_shot_is_canonicalized_to_cover_every_assigned_beat(self):
+        prompt = (
+            "Alex opens the wooden door. Alex crosses the dark room. "
+            "Alex picks up the red book."
+        )
+        context = {
+            "subject_continuity": "Alex remains visually unchanged",
+            "setting_continuity": "The same dark room",
+            "visual_continuity": "Natural cinematic realism",
+            "editing_style": "One continuous motivated shot",
+            "initial_state": "Alex stands outside the closed wooden door",
+            "ambient_audio": "Quiet nonverbal room tone",
+            "music": "N/A",
+            "required_final_outcome": "Alex holds the red book",
+            "generated_dialogue": [],
+        }
+        camera_plan = _segment(1, duration=12.0)
+        camera_plan["shots"][0]["action"] = "Alex opens the wooden door and steps inside"
+        calls: list[dict] = []
+        responses = iter([json.dumps(context), json.dumps(camera_plan)])
+
+        def generate(**kwargs):
+            calls.append(kwargs)
+            return next(responses)
+
+        result = plan_h3_story_segments(
+            prompt,
+            segment_durations=[12.0],
+            mode="sliding_window",
+            camera_coverage="continuous",
+            expect_dialogue=False,
+            llm_generate=generate,
+        )
+
+        self.assertEqual(result["planned_by"], "llm")
+        self.assertEqual(result["planning_warnings"], [])
+        self.assertEqual(len(calls), 2)
+        action = result["segments"][0]["shots"][0]["action"]
+        self.assertIn("opens the wooden door", action)
+        self.assertIn("crosses the dark room", action)
+        self.assertIn("picks up the red book", action)
 
     def test_compiler_neutralizes_braces_and_nested_context_labels(self):
         spans = compute_h3_window_boundaries(480, 240, fps=24, overlap_frames=0)

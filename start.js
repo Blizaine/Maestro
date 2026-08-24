@@ -71,7 +71,8 @@ module.exports = async (kernel) => {
       {
         method: "local.set",
         params: {
-          url: "{{input.event[1]}}"
+          url: "{{input.event[1]}}",
+          port: "{{input.event[1].split(':').pop()}}"
         }
       }
     ]

@@ -69,6 +69,21 @@ export interface ApiJobStatus {
   /** Present only on failed jobs that look like CUDA OOMs.
    *  See `OomInfo` in types/index.ts. */
   oom_info?: import('../types').OomInfo | null
+  /** Adaptive video-generation ETA. Values are absent for non-video jobs. */
+  current_clip?: number
+  total_clips?: number
+  current_window?: number
+  total_windows?: number
+  window_eta_seconds?: number | null
+  clip_eta_seconds?: number | null
+  generation_eta_seconds?: number | null
+  project_eta_seconds?: number | null
+  window_completion_at?: number | null
+  clip_completion_at?: number | null
+  generation_completion_at?: number | null
+  project_completion_at?: number | null
+  eta_confidence?: 'calibrating' | 'low' | 'medium' | 'high'
+  eta_basis?: 'waiting-for-first-clip' | 'live-adaptive' | 'live-cache-aware'
 }
 
 // --- Models & Families ---
@@ -406,10 +421,9 @@ export async function startStudioQueue(): Promise<{
   return res.json()
 }
 
-export async function fetchActiveJobs(): Promise<{ jobs: Array<{
-  job_id: string; status: ApiJobStatus['status']; progress: number; step: number;
-  total_steps: number; phase: string; message: string; output_files: string[];
-  error: string | null; created_at: number; h3_window_plan?: H3WindowPlan | null;
+export async function fetchActiveJobs(): Promise<{ jobs: Array<ApiJobStatus & {
+  created_at: number
+  h3_window_plan?: H3WindowPlan | null
 }> }> {
   const res = await fetch(`${BASE}/api/v1/jobs`)
   if (!res.ok) throw new Error('Failed to fetch jobs')
@@ -535,7 +549,28 @@ export interface PipelineStatus {
   status: 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'
   phase: 'planning' | 'polishing_prompts' | 'generating_images' | 'preparing_video' | 'generating_video' | 'post_processing' | 'completed' | 'failed' | 'cancelled'
   auto_mode: boolean
-  progress: { current: number; total: number; message: string; step: number; total_steps: number }
+  progress: {
+    current: number
+    total: number
+    message: string
+    step: number
+    total_steps: number
+    /** One-based active video clip and total native clips/windows. */
+    current_clip?: number
+    total_clips?: number
+    /** Adaptive remaining-time estimates, recalibrated from live sampler steps. */
+    clip_eta_seconds?: number | null
+    project_eta_seconds?: number | null
+    clip_completion_at?: number | null
+    project_completion_at?: number | null
+    eta_confidence?: 'calibrating' | 'low' | 'medium' | 'high'
+    eta_basis?: 'waiting-for-first-clip' | 'live-adaptive' | 'live-cache-aware'
+    clip_estimates?: Array<{
+      clip: number
+      status: 'completed' | 'current' | 'pending'
+      seconds: number | null
+    }>
+  }
   clip_plans: Array<{ video_prompt: string; image_prompt: string }>
   /** Model-adapted native timeline. This can contain more, shorter clips than
    *  the initial music-analysis timeline (for example MiniMax H3's 14.4s cap). */
@@ -1469,6 +1504,102 @@ export async function updateSystemConfig(
   return res.json()
 }
 
+export async function testHostNotificationSound(
+  volume?: number,
+): Promise<{ status: string; volume: number }> {
+  const res = await fetch(`${BASE}/api/v1/notification-sound/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(volume == null ? {} : { volume }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Sound test failed' }))
+    throw new Error(err.detail || 'Sound test failed')
+  }
+  return res.json()
+}
+
+export async function fetchWebPushStatus(): Promise<import('../types').WebPushStatus> {
+  const res = await fetch(`${BASE}/api/v1/notifications/push/status`)
+  if (!res.ok) throw new Error('Failed to read background notification status')
+  return res.json()
+}
+
+export async function subscribeWebPush(
+  subscription: PushSubscriptionJSON,
+  preferences: Record<string, boolean>,
+  origin: string,
+  label: string,
+): Promise<import('../types').WebPushMutationResult> {
+  const res = await fetch(`${BASE}/api/v1/notifications/push/subscribe`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ subscription, preferences, origin, label }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Background notification setup failed' }))
+    throw new Error(err.detail || 'Background notification setup failed')
+  }
+  return res.json()
+}
+
+export async function unsubscribeWebPush(
+  endpoint: string,
+): Promise<import('../types').WebPushMutationResult> {
+  const res = await fetch(`${BASE}/api/v1/notifications/push/subscribe`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ endpoint }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Background notification removal failed' }))
+    throw new Error(err.detail || 'Background notification removal failed')
+  }
+  return res.json()
+}
+
+export async function testWebPush(endpoint: string): Promise<{
+  status: string
+  attempted: number
+  delivered: number
+  removed: number
+}> {
+  const res = await fetch(`${BASE}/api/v1/notifications/push/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ endpoint }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Background notification test failed' }))
+    throw new Error(err.detail || 'Background notification test failed')
+  }
+  return res.json()
+}
+
+export async function fetchTailscaleRemoteAccessStatus(): Promise<import('../types').TailscaleRemoteAccessStatus> {
+  const res = await fetch(`${BASE}/api/v1/remote-access/tailscale/status`)
+  if (!res.ok) throw new Error('Failed to read Tailscale status')
+  return res.json()
+}
+
+export async function enableTailscaleRemoteAccess(): Promise<import('../types').TailscaleRemoteAccessStatus> {
+  const res = await fetch(`${BASE}/api/v1/remote-access/tailscale/enable`, { method: 'POST' })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Tailscale setup failed' }))
+    throw new Error(err.detail || 'Tailscale setup failed')
+  }
+  return res.json()
+}
+
+export async function disableTailscaleRemoteAccess(): Promise<import('../types').TailscaleRemoteAccessStatus> {
+  const res = await fetch(`${BASE}/api/v1/remote-access/tailscale/disable`, { method: 'POST' })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Could not disable Tailscale access' }))
+    throw new Error(err.detail || 'Could not disable Tailscale access')
+  }
+  return res.json()
+}
+
 // --- Performance Auto-Tune ---
 
 /** Read the user's current hardware + the auto-tune recommendation
@@ -1590,7 +1721,11 @@ export async function llmEnhancePrompt(params: {
   tts_voice_count?: number
   max_new_tokens?: number
   reference_context?: string
-}): Promise<{ original: string; enhanced: string }> {
+}): Promise<{
+  original: string
+  enhanced: string
+  prompt_budget?: { token_count: number; token_limit: number }
+}> {
   const res = await fetch(`${BASE}/api/v1/llm/enhance-prompt`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

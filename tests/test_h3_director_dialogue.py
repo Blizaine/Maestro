@@ -19,6 +19,7 @@ from services.director.h3_dialogue import (  # noqa: E402
     compile_h3_official_prompt,
     compile_h3_vocal_contract,
     h3_dialogue_budget_violations,
+    h3_prompt_token_count,
     validate_h3_prompt_contract,
     validate_h3_vocal_contract,
 )
@@ -31,11 +32,21 @@ from services.director.planners.short_film import (  # noqa: E402
     _extract_h3_screenplay_dialogue,
     _fit_bounded_frame_schedule,
     _h3_native_structure_issues,
+    _h3_dialogue_density_issue,
+    _h3_dialogue_density_targets,
+    _h3_dialogue_quality_issues,
+    _h3_dialogue_quality_metrics,
+    _h3_explicit_story_dialogue_fingerprints,
     _h3_planner_token_budget,
     _h3_preferred_native_durations,
+    _h3_screenplay_recovery_reasons,
+    _h3_screenplay_thinking_budget,
     _normalize_h3_voice_bible,
+    _normalize_story_continuity_blueprint,
+    _prepare_h3_story_continuity,
     _reconcile_h3_dialogue_manifest,
     _restore_h3_dialogue_after_pacing_repair,
+    _story_continuity_blueprint_schema,
 )
 
 
@@ -62,6 +73,13 @@ class TestH3DirectorDialogueCompiler(unittest.TestCase):
             {"character_id": "joey", "speaker_name": "Joey"},
             {"character_id": "monica", "speaker_name": "Monica"},
         ]
+
+    def test_screenplay_thinking_headroom_scales_with_film_duration(self):
+        self.assertEqual(_h3_screenplay_thinking_budget(120), 16384)
+        self.assertEqual(_h3_screenplay_thinking_budget(121), 24576)
+        self.assertEqual(_h3_screenplay_thinking_budget(180), 24576)
+        self.assertEqual(_h3_screenplay_thinking_budget(181), 32768)
+        self.assertEqual(_h3_screenplay_thinking_budget(300), 32768)
 
     def test_repairs_the_nested_mid_sentence_failure_from_director(self):
         broken = (
@@ -231,6 +249,256 @@ class TestH3DirectorDialogueCompiler(unittest.TestCase):
         self.assertEqual(plans[0]["video_prompt"].count("<d>"), 1)
         self.assertNotIn("cafe chatter", plans[0]["video_prompt"].lower())
 
+    def test_long_visual_plan_keeps_dialogue_inside_h3_text_limit(self):
+        spoken = "You float all day. Save the cape for church."
+        source = (
+            "Establish the hostile standoff and first insult. Nighttime city "
+            "street in a modern metropolis, wet asphalt, neon reflections. "
+            "Visible cast: WOLVERINE, Hugh Jackman as Wolverine, rugged male "
+            "with dark hair, scarred face, and intense eyes, wearing a tan "
+            "leather jacket, dark jeans, and brown boots, positioned screen-left; "
+            "SUPERMAN, Henry Cavill as Superman, tall male with a strong jaw, "
+            "wearing a blue bodysuit, red cape, red trunks, and yellow emblem, "
+            "positioned screen-right and hovering. Action: Wolverine tightens "
+            "his jaw and extends three metal claws Then Superman hovers with "
+            "arms crossed Then Wolverine speaks with aggressive sarcasm Then "
+            "Superman maintains eye contact. Camera: Wide two-shot, slow dolly "
+            "in, then an unobstructed speaker close-up, followed by a reaction "
+            "shot only after the complete line. Lighting: Moody night lighting, "
+            "neon accents, wet surface reflections. Mood: Tense and hostile. "
+            "Final beat: Wolverine stands with claws out while Superman hovers "
+            "with his arms crossed. SPEAKER VISIBILITY: Repeat the complete "
+            "speaker framing instructions and every character description here. "
+            "overall_soundscape: Rain, traffic, and metal claws. "
+            "non_diegetic_music: Low tense synth drone."
+        )
+        subjects = [{
+            "character_id": "wolverine",
+            "speaker_name": "WOLVERINE",
+            "visual_description": "Hugh Jackman as Wolverine, rugged male with dark hair and a scarred face",
+            "wardrobe": "tan leather jacket, dark blue jeans, brown leather boots",
+            "position_or_relation": "screen-left on wet asphalt facing screen-right",
+        }, {
+            "character_id": "superman",
+            "speaker_name": "SUPERMAN",
+            "visual_description": "Henry Cavill as Superman, tall male with a strong jaw and blue eyes",
+            "wardrobe": "blue bodysuit, red cape, red trunks, yellow S-shield emblem",
+            "position_or_relation": "screen-right hovering and facing screen-left",
+        }]
+        registry = {
+            "wolverine": {"stable_id": "(S1)", "speaker_name": "WOLVERINE"},
+            "superman": {"stable_id": "(S2)", "speaker_name": "SUPERMAN"},
+        }
+
+        prompt, _ = compile_h3_official_prompt(
+            source,
+            subjects,
+            [{
+                "speaker_id": "wolverine",
+                "spoken_text": spoken,
+                "delivery": (
+                    "Gritty, low-to-mid register with a raspy texture. Energy "
+                    "is high-tension and snappy; Raspy and dismissive; dragging "
+                    "the last word"
+                ),
+                "physical_cue": "Claws flash as he speaks",
+            }],
+            duration_seconds=13.67,
+            speaker_registry=registry,
+        )
+
+        dialogue_end = prompt.index("</d>") + len("</d>")
+        self.assertLessEqual(h3_prompt_token_count(prompt), 512)
+        self.assertLessEqual(h3_prompt_token_count(prompt[:dialogue_end]), 512)
+        self.assertIn(f"<d>[English] {spoken}</d>", prompt)
+        self.assertIn("Dialogue timing:", prompt)
+        self.assertNotIn("SPEAKER VISIBILITY:", prompt)
+        self.assertEqual(
+            validate_h3_prompt_contract(
+                prompt,
+                [{"speaker_id": "wolverine", "spoken_text": spoken}],
+            ),
+            [],
+        )
+
+    def test_dialogue_dense_final_shot_still_fits_h3_text_limit(self):
+        lines = [
+            ("wolverine", "Takes a little getting used to."),
+            ("superman", "Indeed."),
+            ("wolverine", "Same time tomorrow?"),
+            ("superman", "Do not push your luck."),
+            ("wolverine", "Yeah, that's what I like to hear."),
+            ("superman", "From me?"),
+            ("wolverine", "From you."),
+        ]
+        plans = [{
+            "video_prompt": (
+                "Wolverine and Superman exchange final witty lines and part "
+                "ways. Nighttime rooftop alley with brick walls, dumpsters, "
+                "wet ground, and neon reflections. Visible cast: Wolverine and "
+                "Superman in their complete costumes. Action: They finish a "
+                "handshake Then trade a rapid deadpan exchange Then turn toward "
+                "the skyline Then Superman rises into the night. Camera: Medium "
+                "two-shot followed by a wide tilt up. Lighting: Dim neon alley "
+                "lighting. Mood: Warm and humorous. Final beat: Superman rises "
+                "while Wolverine remains below. overall_soundscape: Rain and "
+                "city ambience. non_diegetic_music: Warm humorous underscore."
+            ),
+            "_director_subjects_on_screen": [
+                {
+                    "character_id": "wolverine",
+                    "speaker_name": "WOLVERINE",
+                    "visual_description": "Hugh Jackman as Wolverine, rugged and scarred",
+                    "wardrobe": "tan leather jacket, dark jeans, brown boots",
+                    "position_or_relation": "screen-left facing screen-right",
+                },
+                {
+                    "character_id": "superman",
+                    "speaker_name": "SUPERMAN",
+                    "visual_description": "Henry Cavill as Superman, tall with dark hair",
+                    "wardrobe": "blue bodysuit, red cape, red trunks, yellow emblem",
+                    "position_or_relation": "screen-right facing screen-left",
+                },
+            ],
+            "_director_dialogue_beats": [
+                {
+                    "speaker_id": speaker,
+                    "spoken_text": words,
+                    "delivery": "Stable voice profile; concise line-specific delivery",
+                }
+                for speaker, words in lines
+            ],
+            "_director_duration_sec": 13.67,
+        }]
+
+        compile_h3_clip_plans(plans)
+        prompt = plans[0]["video_prompt"]
+
+        self.assertLessEqual(h3_prompt_token_count(prompt), 512)
+        self.assertEqual(prompt.count("<d>"), len(lines))
+        for _, words in lines:
+            self.assertIn(f"<d>[English] {words}</d>", prompt)
+        self.assertEqual(
+            validate_h3_prompt_contract(
+                prompt,
+                plans[0]["_director_dialogue_beats"],
+            ),
+            [],
+        )
+
+    def test_qwen_dense_three_character_shot_gets_final_safe_compaction(self):
+        """A rich Qwen plan must not fail after otherwise valid planning."""
+
+        subjects = [{
+            "character_id": "wolverine",
+            "speaker_name": "WOLVERINE",
+            "visual_description": (
+                "Hugh Jackman as Wolverine, rugged face, stubble, intense eyes"
+            ),
+            "wardrobe": (
+                "tattered brown leather jacket, dark grey t-shirt, black cargo "
+                "pants, worn brown combat boots"
+            ),
+            "position_or_relation": (
+                "screen-left foreground, leaping after Superman and catching "
+                "his cape mid-air"
+            ),
+        }, {
+            "character_id": "superman",
+            "speaker_name": "SUPERMAN",
+            "visual_description": (
+                "Henry Cavill as Superman, tall with a chiseled jaw and short "
+                "brown hair"
+            ),
+            "wardrobe": (
+                "classic blue suit with red cape and yellow emblem, red briefs, "
+                "black boots"
+            ),
+            "position_or_relation": (
+                "screen-center midground, tumbling over the rooftop edge"
+            ),
+        }, {
+            "character_id": "crime_boss",
+            "speaker_name": "CRIME_BOSS",
+            "visual_description": "massive armored figure with an imposing silhouette",
+            "wardrobe": (
+                "heavy dark metallic armor, large shoulder pads, glowing energy "
+                "core"
+            ),
+            "position_or_relation": (
+                "screen-right background, standing on the rooftop and roaring"
+            ),
+        }]
+        lines = [
+            ("wolverine", "Easy for you to say. You're made of kryptonite-proof plastic."),
+            ("superman", "Just don't miss."),
+            ("wolverine", "And you don't die. Deal?"),
+            ("superman", "Deal."),
+            ("wolverine", "Clark! The cannon!"),
+            ("superman", "On it!"),
+        ]
+        beats = [{
+            "speaker_id": speaker,
+            "spoken_text": words,
+            "delivery": (
+                "Project-wide voice profile with detailed vocal texture and "
+                "cadence; concise line-specific delivery"
+            ),
+            "physical_cue": "The current speaker reacts visibly while speaking",
+        } for speaker, words in lines]
+        source = (
+            "Story handoff: Superman is battered by the armored Crime Boss's "
+            "energy blasts, creating an opening for Wolverine. Continuity state: "
+            "Wolverine and Superman must cooperate while an energy cannon falls "
+            "toward civilians below. Nighttime city rooftop with wet concrete, "
+            "ventilation units, antennas, and distant city lights. Visible cast: "
+            "Wolverine, Superman, and the armored Crime Boss in their complete "
+            "wardrobe and established positions. Camera: dynamic tracking into "
+            "a close-up, followed by six speaker-motivated alternating medium "
+            "close-ups and reaction shots, holding every mouth unobstructed for "
+            "the complete line. Action: Superman tumbles over the roof edge Then "
+            "Wolverine catches his cape mid-air Then Wolverine uses the momentum "
+            "to swing toward the Crime Boss Then Wolverine slashes through the "
+            "energy shield Then the wounded Crime Boss drops the cannon toward "
+            "the street. Lighting: moody wet neon night lighting with city "
+            "reflections. Mood: urgent, precise tandem combat. Final beat: The "
+            "Crime Boss roars in pain as the cannon falls toward civilians."
+        )
+        registry = {
+            "wolverine": {"stable_id": "(S1)", "speaker_name": "WOLVERINE"},
+            "superman": {"stable_id": "(S2)", "speaker_name": "SUPERMAN"},
+        }
+
+        prompt, _ = compile_h3_official_prompt(
+            source,
+            subjects,
+            beats,
+            duration_seconds=14.375,
+            speaker_registry=registry,
+            opening_blocking=(
+                "Wolverine catches Superman's cape as both hang over the rooftop."
+            ),
+            closing_blocking=(
+                "The Crime Boss drops the cannon while Wolverine and Superman "
+                "turn toward the endangered street below."
+            ),
+            audio_plan={
+                "mode": "dialogue_driven",
+                "ambience": "Rooftop wind and distant city traffic",
+                "effects": [
+                    "energy blasts",
+                    "metal claws striking the shield",
+                    "the cannon falling",
+                ],
+            },
+        )
+
+        self.assertLessEqual(h3_prompt_token_count(prompt), 512)
+        self.assertEqual(prompt.count("<d>"), len(lines))
+        for _, words in lines:
+            self.assertIn(f"<d>[English] {words}</d>", prompt)
+        self.assertEqual(validate_h3_prompt_contract(prompt, beats), [])
+
     def test_base_compiler_uses_exact_official_fields_and_repairs_mojibake(self):
         plans = [{
             "video_prompt": (
@@ -365,6 +633,11 @@ class TestH3DirectorDialogueCompiler(unittest.TestCase):
         )
         self.assertIn("<Audio 1>: reference -", prompt)
         self.assertNotIn("(retention reference)", prompt)
+        detailed = prompt.split("detailed_description: ", 1)[1].split(
+            "\n\noverall_soundscape:", 1,
+        )[0]
+        self.assertTrue(detailed.startswith("The target video maintains"))
+        self.assertGreater(detailed.index("[Shot 1]"), 0)
         self.assertEqual(
             validate_h3_prompt_contract(
                 prompt,
@@ -465,6 +738,205 @@ class TestH3DirectorDialogueCompiler(unittest.TestCase):
 
 
 class TestH3CharacterAuthenticity(unittest.TestCase):
+    def test_screenplay_recovery_detects_missing_explicit_dialogue(self):
+        story = (
+            'Superman looks at Wolverine and says, "Logan. Enough!" '
+            "Then they stop fighting."
+        )
+
+        self.assertEqual(
+            list(_h3_explicit_story_dialogue_fingerprints(story).values()),
+            ["Logan. Enough!"],
+        )
+        reasons = _h3_screenplay_recovery_reasons(
+            "",
+            story_description=story,
+        )
+        self.assertTrue(any("empty or truncated" in reason for reason in reasons))
+        self.assertTrue(any("Logan. Enough!" in reason for reason in reasons))
+
+    def test_quoted_project_title_is_not_required_as_dialogue(self):
+        story = (
+            'A silent short film titled "Night Shift" follows two officers.'
+        )
+        screenplay = (
+            "EXT. CITY STREET - NIGHT\n\n"
+            "Two officers cross the rain-dark street without speaking."
+        )
+
+        self.assertFalse(_h3_explicit_story_dialogue_fingerprints(story))
+        self.assertEqual(
+            _h3_screenplay_recovery_reasons(
+                screenplay,
+                story_description=story,
+            ),
+            [],
+        )
+
+    def test_dialogue_forward_concept_gets_duration_scaled_pacing_floor(self):
+        targets = _h3_dialogue_density_targets(
+            "A cinematic action comedy with witty dialogue and banter.",
+            target_duration=180,
+        )
+
+        self.assertEqual(targets, {
+            "minimum_turns": 23,
+            "minimum_words": 126,
+        })
+        self.assertIsNone(_h3_dialogue_density_targets(
+            "A wordless silent film with no dialogue.",
+            target_duration=180,
+        ))
+
+    def test_dialogue_forward_density_detects_sparse_screenplay(self):
+        screenplay = """EXT. ROOFTOP - NIGHT
+
+WOLVERINE
+You done?
+
+SUPERMAN
+Not yet.
+"""
+
+        issue = _h3_dialogue_density_issue(
+            screenplay,
+            story_description="A buddy action comedy with witty dialogue.",
+            target_duration=120,
+        )
+
+        self.assertIn("2 spoken turns", issue)
+        self.assertIn("target at least 15 responsive turns / 84 words", issue)
+
+    def test_reasoning_only_screenplay_retries_without_thinking(self):
+        captured = {}
+        screenplay_calls = []
+
+        class RecoveryPlanner(ShortFilmPlanner):
+            def _build_h3_character_voice_bible(self, **kwargs):
+                return []
+
+            def _run_h3_character_table_read(self, **kwargs):
+                return kwargs["manifest"]
+
+            def _plan_story_h3_native(self, **kwargs):
+                captured.update(kwargs)
+                return [], None
+
+        def generate(**kwargs):
+            screenplay_calls.append(kwargs)
+            if len(screenplay_calls) == 1:
+                # Mirrors Qwen exhausting its combined allowance in
+                # reasoning_content and returning zero final-answer chars.
+                return ""
+            return """EXT. CITY STREET - NIGHT
+
+Wolverine holds his claws against Superman's chest. Superman does not move.
+
+SUPERMAN
+Logan. Enough!
+
+Superman lowers Wolverine's arm and the confrontation ends.
+"""
+
+        planner = RecoveryPlanner(
+            llm_generate=generate,
+            llm_generate_streaming=generate,
+        )
+        planner.plan(
+            story_description=(
+                'Superman looks at Wolverine and says, "Logan. Enough!" '
+                "Then they stop fighting."
+            ),
+            target_duration=20,
+            target_scenes=2,
+            video_model="minimax_h3",
+            shot_image_policy="prompt_only",
+            fps=24,
+            frames_steps=17,
+            frames_minimum=124,
+            frames_maximum=345,
+        )
+
+        self.assertEqual(len(screenplay_calls), 2)
+        self.assertEqual(screenplay_calls[0]["thinking_budget"], 16384)
+        self.assertEqual(screenplay_calls[1]["thinking_budget"], 0)
+        self.assertFalse(screenplay_calls[1]["enable_thinking"])
+        self.assertIn("prior attempt", screenplay_calls[1]["prompt"].lower())
+        self.assertIn("Logan. Enough!", captured["screenplay"])
+        self.assertEqual(
+            captured["screenplay_dialogue_manifest"][0]["spoken_text"],
+            "Logan. Enough!",
+        )
+
+    def test_dialogue_light_screenplay_gets_one_non_thinking_recovery(self):
+        captured = {}
+        screenplay_calls = []
+
+        class RecoveryPlanner(ShortFilmPlanner):
+            def _build_h3_character_voice_bible(self, **kwargs):
+                return []
+
+            def _run_h3_character_table_read(self, **kwargs):
+                return kwargs["manifest"]
+
+            def _plan_story_h3_native(self, **kwargs):
+                captured.update(kwargs)
+                return [], None
+
+        sparse = """EXT. ROOFTOP - NIGHT
+
+WOLVERINE
+You done?
+
+SUPERMAN
+Not yet.
+
+Rain falls while both men hold their ground in tense silence.
+"""
+        recovered = """EXT. ROOFTOP - NIGHT
+
+WOLVERINE
+You really think that cape helps you intimidate people?
+
+SUPERMAN
+Only the ones holding knives.
+
+WOLVERINE
+Claws.
+
+They exchange a reluctant grin as the rain eases.
+"""
+
+        def generate(**kwargs):
+            screenplay_calls.append(kwargs)
+            return sparse if len(screenplay_calls) == 1 else recovered
+
+        planner = RecoveryPlanner(
+            llm_generate=generate,
+            llm_generate_streaming=generate,
+        )
+        planner.plan(
+            story_description=(
+                "Wolverine and Superman resolve a rooftop fight through "
+                "witty dialogue and banter."
+            ),
+            target_duration=20,
+            target_scenes=2,
+            video_model="minimax_h3_ref2va",
+            shot_image_policy="prompt_only",
+            fps=24,
+            frames_steps=17,
+            frames_minimum=124,
+            frames_maximum=345,
+        )
+
+        self.assertEqual(len(screenplay_calls), 2)
+        self.assertIn("at least 3 responsive spoken turns", screenplay_calls[1]["system_prompt"])
+        self.assertEqual(
+            len(captured["screenplay_dialogue_manifest"]),
+            3,
+        )
+
     def test_voice_bible_keeps_only_supplied_cast(self):
         rows = [{
             "character_name": "Ross",
@@ -490,6 +962,74 @@ class TestH3CharacterAuthenticity(unittest.TestCase):
         )
 
         self.assertEqual([entry["character_name"] for entry in bible], ["Ross"])
+
+    def test_voice_bible_removes_fixed_micro_line_prescriptions(self):
+        rows = [{
+            "character_name": "Wolverine",
+            "personality_engine": "Masks concern with aggression",
+            "speech_pattern": (
+                "Short, hard sentences, often one to three words. "
+                "Uses blunt verbs and controlled profanity."
+            ),
+            "relationship_behavior": "Challenges Superman's patience",
+            "performance_direction": "Low, rough, and tightly controlled",
+            "avoid": "Formal speeches",
+        }, {
+            "character_name": "Superman",
+            "personality_engine": "Patient until restraint stops working",
+            "speech_pattern": (
+                "Short declarative sentences, usually two to five words."
+            ),
+            "relationship_behavior": "Answers Wolverine with dry restraint",
+            "performance_direction": "Warm, steady, quietly forceful",
+            "avoid": "Smug heroic proclamations",
+        }]
+
+        bible = _normalize_h3_voice_bible(
+            rows,
+            supported_character_text="Wolverine argues with Superman.",
+        )
+
+        self.assertEqual(len(bible), 2)
+        combined = " ".join(row["speech_pattern"] for row in bible).casefold()
+        self.assertNotIn("one to three words", combined)
+        self.assertNotIn("two to five words", combined)
+        self.assertIn("line length varies with the dramatic beat", combined)
+        self.assertTrue(all(
+            "interchangeable fragments" in row["avoid"]
+            for row in bible
+        ))
+
+    def test_dialogue_quality_flags_generated_fragments_but_not_user_quote(self):
+        manifest = [{
+            "speaker_name": "Superman",
+            "spoken_text": "Logan. Enough!",
+        }]
+        fragments = [
+            ("Wolverine", "Five."),
+            ("Superman", "Duty."),
+            ("Wolverine", "Again."),
+            ("Superman", "Mostly."),
+            ("Wolverine", "Mostly."),
+            ("Superman", "Tomorrow."),
+            ("Wolverine", "I'm tired."),
+            ("Superman", "Pockets."),
+        ]
+        manifest.extend(
+            {"speaker_name": speaker, "spoken_text": text}
+            for speaker, text in fragments
+        )
+
+        metrics = _h3_dialogue_quality_metrics(
+            manifest,
+            story_description='Superman says, "Logan. Enough!"',
+        )
+
+        self.assertTrue(metrics["issues"])
+        self.assertEqual(metrics["editable_turns"], len(fragments))
+        self.assertNotIn(1, metrics["problem_turns"])
+        self.assertIn(4, metrics["problem_turns"])
+        self.assertGreater(metrics["cross_speaker_duplicates"], 0)
 
     def test_table_read_revises_generated_line_but_locks_user_quote(self):
         manifest = [{
@@ -530,6 +1070,43 @@ class TestH3CharacterAuthenticity(unittest.TestCase):
         )
         self.assertEqual(changed, 1)
 
+    def test_table_read_rejects_new_thesaurus_formality(self):
+        manifest = [{
+            "speaker_name": "Superman",
+            "spoken_text": "What's the problem, Logan?",
+        }, {
+            "speaker_name": "Wolverine",
+            "spoken_text": "You got the strength. You ain't got the grit.",
+        }]
+        rows = [{
+            "turn": 1,
+            "speaker_name": "Superman",
+            "original_text": "What's the problem, Logan?",
+            "revised_text": "What, precisely, is the core issue, Logan?",
+            "delivery": "measured and concerned",
+        }, {
+            "turn": 2,
+            "speaker_name": "Wolverine",
+            "original_text": "You got the strength. You ain't got the grit.",
+            "revised_text": (
+                "You possess adequate power, but lack the necessary tenacity."
+            ),
+            "delivery": "rough and confrontational",
+        }]
+
+        revised, changed = _apply_h3_character_table_read(
+            manifest,
+            rows,
+            story_description="Superman and Wolverine argue on a rooftop.",
+            max_spoken_words=40,
+        )
+
+        self.assertEqual(
+            [entry["spoken_text"] for entry in revised],
+            [entry["spoken_text"] for entry in manifest],
+        )
+        self.assertEqual(changed, 0)
+
     def test_table_read_rejects_speaker_reassignment(self):
         with self.assertRaisesRegex(ValueError, "reassigned"):
             _apply_h3_character_table_read(
@@ -544,6 +1121,149 @@ class TestH3CharacterAuthenticity(unittest.TestCase):
                 story_description="Ross insists he is fine.",
                 max_spoken_words=20,
             )
+
+    @staticmethod
+    def _table_read_rows_from_prompt(prompt: str) -> list[dict]:
+        payload_text = prompt.split(
+            "DIALOGUE TURN MANIFEST BATCH:\n",
+            1,
+        )[1].split(
+            "\n\nFULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:",
+            1,
+        )[0]
+        return json.loads(payload_text)
+
+    def test_table_read_is_non_thinking_and_chunked(self):
+        calls = []
+
+        def generate(**kwargs):
+            calls.append(kwargs)
+            payload = self._table_read_rows_from_prompt(kwargs["prompt"])
+            self.assertIn("actor's table read, not a thesaurus rewrite", kwargs["system_prompt"])
+            self.assertIn("silently inhabit the speaker", kwargs["system_prompt"])
+            self.assertIn("name-hidden", kwargs["system_prompt"])
+            self.assertIn("previous_turn", payload[0])
+            self.assertEqual(kwargs["thinking_budget"], 0)
+            self.assertFalse(kwargs["enable_thinking"])
+            self.assertEqual(
+                kwargs["json_schema"]["minItems"],
+                len(payload),
+            )
+            return json.dumps([{
+                "turn": row["turn"],
+                "speaker_name": row["speaker_name"],
+                "original_text": row["original_text"],
+                "revised_text": (
+                    f"Character-specific response for turn {row['turn']}."
+                ),
+                "delivery": "specific, responsive, and conversational",
+            } for row in payload])
+
+        manifest = [{
+            "speaker_name": "Ross" if turn % 2 else "Monica",
+            "spoken_text": f"Original dialogue turn {turn} has context.",
+        } for turn in range(1, 44)]
+        planner = ShortFilmPlanner(
+            llm_generate=generate,
+            llm_generate_streaming=generate,
+        )
+
+        revised = planner._run_h3_character_table_read(
+            story_description="Ross and Monica argue in the apartment.",
+            screenplay="INT. APARTMENT - DAY\n\nThey argue naturally.",
+            manifest=manifest,
+            voice_bible=[],
+            max_spoken_words=500,
+            maximum_line_words=30,
+        )
+
+        self.assertEqual(len(calls), 4)
+        self.assertTrue(all(
+            entry["spoken_text"].startswith("Character-specific response")
+            for entry in revised
+        ))
+
+    def test_failed_table_read_batch_preserves_only_that_batch(self):
+        def generate(**kwargs):
+            payload = self._table_read_rows_from_prompt(kwargs["prompt"])
+            broken_batch = payload[0]["turn"] == 13
+            return json.dumps([{
+                "turn": row["turn"],
+                "speaker_name": (
+                    "Wrong Speaker" if broken_batch else row["speaker_name"]
+                ),
+                "original_text": row["original_text"],
+                "revised_text": f"Revised dialogue for turn {row['turn']} stays natural.",
+                "delivery": "grounded and specific",
+            } for row in payload])
+
+        manifest = [{
+            "speaker_name": "Ross" if turn % 2 else "Monica",
+            "spoken_text": f"Original dialogue turn {turn} has context.",
+        } for turn in range(1, 26)]
+        planner = ShortFilmPlanner(
+            llm_generate=generate,
+            llm_generate_streaming=generate,
+        )
+
+        revised = planner._run_h3_character_table_read(
+            story_description="Ross and Monica argue in the apartment.",
+            screenplay="INT. APARTMENT - DAY\n\nThey argue naturally.",
+            manifest=manifest,
+            voice_bible=[],
+            max_spoken_words=500,
+            maximum_line_words=30,
+        )
+
+        self.assertTrue(revised[0]["spoken_text"].startswith("Revised dialogue"))
+        self.assertEqual(revised[12]["spoken_text"], manifest[12]["spoken_text"])
+        self.assertTrue(revised[24]["spoken_text"].startswith("Revised dialogue"))
+
+    def test_fragmented_table_read_gets_one_targeted_quality_retry(self):
+        calls = []
+
+        def generate(**kwargs):
+            calls.append(kwargs["prompt"])
+            payload = self._table_read_rows_from_prompt(kwargs["prompt"])
+            targeted = "targeted dialogue-quality retry" in kwargs["prompt"]
+            return json.dumps([{
+                "turn": row["turn"],
+                "speaker_name": row["speaker_name"],
+                "original_text": row["original_text"],
+                "revised_text": (
+                    f"I answer turn {row['turn']} with specific character intent."
+                    if targeted else row["original_text"]
+                ),
+                "delivery": "responsive and grounded",
+            } for row in payload])
+
+        manifest = [{
+            "speaker_name": "Wolverine" if turn % 2 else "Superman",
+            "spoken_text": f"Word {turn}.",
+        } for turn in range(1, 9)]
+        planner = ShortFilmPlanner(
+            llm_generate=generate,
+            llm_generate_streaming=generate,
+        )
+
+        revised = planner._run_h3_character_table_read(
+            story_description="Wolverine and Superman argue in the rain.",
+            screenplay="EXT. CITY STREET - NIGHT\n\nThe argument escalates.",
+            manifest=manifest,
+            voice_bible=[],
+            max_spoken_words=100,
+            maximum_line_words=30,
+        )
+
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(_h3_dialogue_quality_issues(
+            revised,
+            story_description="Wolverine and Superman argue in the rain.",
+        ))
+        self.assertTrue(all(
+            entry["spoken_text"].startswith("I answer turn")
+            for entry in revised
+        ))
 
     def test_speaker_visual_contract_adds_framing_and_voice_direction(self):
         shots = [{
@@ -596,7 +1316,8 @@ class TestH3CharacterAuthenticity(unittest.TestCase):
             shots[0]["dialogue_beats"][0]["delivery"],
         )
         self.assertIn("mouth remain unobstructed", shots[0]["camera_plan"]["reframing_notes"])
-        self.assertIn("SPEAKER VISIBILITY:", shots[0]["video_prompt"])
+        self.assertIn("Camera:", shots[0]["video_prompt"])
+        self.assertNotIn("SPEAKER VISIBILITY:", shots[0]["video_prompt"])
         self.assertEqual(
             [subject["speaker_name"] for subject in shots[0]["subjects_on_screen"]],
             ["Ross", "Joey"],
@@ -604,6 +1325,86 @@ class TestH3CharacterAuthenticity(unittest.TestCase):
         self.assertEqual(
             shots[0]["subjects_on_screen"][1]["position_or_relation"],
             "in the exact position and pose stated in spatial_setup",
+        )
+        self.assertIn(
+            "medium close-up of Ross",
+            shots[0]["camera_plan"]["framing"],
+        )
+
+    def test_speaker_visual_contract_builds_ordered_dialogue_coverage(self):
+        shots = [{
+            "scene_goal": "The argument turns into reluctant trust",
+            "environment": "A rain-dark rooftop at night",
+            "spatial_setup": "Wolverine stands left; Superman stands right.",
+            "subjects_on_screen": [{
+                "character_id": "wolverine",
+                "speaker_name": "Wolverine",
+                "visual_description": "Hugh Jackman as Wolverine",
+            }, {
+                "character_id": "superman",
+                "speaker_name": "Superman",
+                "visual_description": "Henry Cavill as Superman",
+            }],
+            "action_beats": ["They lower their guard while rain falls"],
+            "dialogue_beats": [{
+                "speaker_id": "wolverine",
+                "spoken_text": "You always this cheerful?",
+            }, {
+                "speaker_id": "superman",
+                "spoken_text": "Only when someone points claws at me.",
+            }, {
+                "speaker_id": "wolverine",
+                "spoken_text": "Fair enough.",
+            }],
+            "camera_plan": {
+                "framing": "wide rooftop two-shot",
+                "movement": "slow push in",
+            },
+            "audio_plan": {"mode": "dialogue_driven"},
+        }]
+
+        _enforce_h3_speaker_visual_contract(shots)
+
+        camera = shots[0]["camera_plan"]
+        self.assertIn("alternating medium close-ups", camera["framing"])
+        self.assertIn(
+            "Wolverine then Superman then Wolverine",
+            camera["reframing_notes"],
+        )
+        self.assertIn("over-the-shoulder reactions", camera["reframing_notes"])
+        prompt = shots[0]["video_prompt"]
+        self.assertLess(prompt.index("Camera:"), prompt.index("Action:"))
+
+    def test_speaker_visual_contract_preserves_existing_cinematic_coverage(self):
+        original_framing = "medium two-shot cutting to closeups"
+        shots = [{
+            "subjects_on_screen": [{
+                "character_id": "wolverine",
+                "speaker_name": "Wolverine",
+            }, {
+                "character_id": "superman",
+                "speaker_name": "Superman",
+            }],
+            "dialogue_beats": [{
+                "speaker_id": "wolverine",
+                "spoken_text": "Your turn.",
+            }, {
+                "speaker_id": "superman",
+                "spoken_text": "I was hoping you would say that.",
+            }],
+            "camera_plan": {
+                "framing": original_framing,
+                "movement": "speaker-motivated internal cuts",
+            },
+            "audio_plan": {"mode": "dialogue_driven"},
+        }]
+
+        _enforce_h3_speaker_visual_contract(shots)
+
+        self.assertEqual(shots[0]["camera_plan"]["framing"], original_framing)
+        self.assertNotIn(
+            "Begin on",
+            shots[0]["camera_plan"]["reframing_notes"],
         )
 
     def test_planner_locks_validated_table_read_before_h3_shot_planning(self):
@@ -701,13 +1502,26 @@ I have classified this as a Level Three problem.
         def generate(**kwargs):
             system = kwargs["system_prompt"]
             if "character and dialogue editor" in system:
+                self.assertIn("Silently inhabit each character", system)
+                self.assertIn("Character traits are ACTING INSTRUCTIONS", system)
+                self.assertIn("name-hidden test", system)
+                self.assertIn("CASTING IS NOT CHARACTERIZATION", system)
+                self.assertIn("Never transfer an actor's real nationality", system)
                 return json.dumps(bible)
             if "acclaimed screenwriter" in system:
                 self.assertIn("Defensive precision", system)
                 self.assertIn("Control and competence", system)
+                self.assertIn("Silently embody the speaker", system)
+                self.assertIn("performance engines, not dialogue subjects", system)
+                self.assertIn("name-hidden test", system)
+                self.assertIn("visual casting, not a personality transplant", system)
+                self.assertEqual(kwargs["thinking_budget"], 16384)
                 return screenplay
             if "H3 CHARACTER TABLE-READ" in system:
                 self.assertIn("generic neat-freak slogans", kwargs["prompt"])
+                self.assertEqual(kwargs["thinking_budget"], 0)
+                self.assertFalse(kwargs["enable_thinking"])
+                self.assertIn("json_schema", kwargs)
                 return json.dumps(table_read)
             return json.dumps([
                 shot(
@@ -753,7 +1567,184 @@ I have classified this as a Level Three problem.
             "This is an internal biological emergency",
             plan.shots[0].video_prompt,
         )
-        self.assertIn("SPEAKER VISIBILITY:", plan.shots[0].video_prompt)
+        self.assertNotIn("SPEAKER VISIBILITY:", plan.shots[0].video_prompt)
+        self.assertIn("medium close-up of Ross", plan.shots[0].video_prompt)
+
+
+class TestDirectorStoryContinuity(unittest.TestCase):
+    @staticmethod
+    def _blueprint_scene(number, location, opening, outgoing, state):
+        return {
+            "scene_number": number,
+            "location_time": location,
+            "active_objective": f"Objective {number}",
+            "story_purpose": f"Story change {number}",
+            "opening_cause": opening,
+            "visible_beats": [f"Visible event {number}"],
+            "choice_or_discovery": f"Choice {number}",
+            "outgoing_handoff": outgoing,
+            "persistent_state_after": state,
+        }
+
+    def test_story_blueprint_schema_and_normalizer_require_complete_handoffs(self):
+        rows = [
+            self._blueprint_scene(
+                99,
+                f"Location {index}",
+                f"Opening cause {index}",
+                f"Outgoing handoff {index}",
+                f"Persistent state {index}",
+            )
+            for index in range(1, 5)
+        ]
+        normalized = _normalize_story_continuity_blueprint(
+            rows,
+            minimum_scenes=4,
+            maximum_scenes=8,
+        )
+
+        self.assertEqual(
+            [scene["scene_number"] for scene in normalized],
+            [1, 2, 3, 4],
+        )
+        self.assertEqual(
+            _story_continuity_blueprint_schema(4, 8)["minItems"],
+            4,
+        )
+        broken = [dict(scene) for scene in rows]
+        broken[2]["outgoing_handoff"] = ""
+        self.assertEqual(
+            _normalize_story_continuity_blueprint(
+                broken,
+                minimum_scenes=4,
+                maximum_scenes=8,
+            ),
+            [],
+        )
+
+    def test_h3_story_continuity_maps_location_groups_and_installs_bridges(self):
+        blueprint = [
+            self._blueprint_scene(
+                1,
+                "Rooftop at night",
+                "Wolverine confronts Superman on the rooftop.",
+                "A police dispatch reports hostages at the bank; Superman asks Wolverine to help, and Wolverine agrees.",
+                "They are now uneasy partners; Wolverine's jacket is torn.",
+            ),
+            self._blueprint_scene(
+                2,
+                "Street outside the bank",
+                "Because they accepted the dispatch, Superman and Wolverine arrive together outside the bank.",
+                "They spot the hostage bus entering the parking garage and pursue it through the gate.",
+                "They know the bus route; Wolverine's jacket remains torn.",
+            ),
+            self._blueprint_scene(
+                3,
+                "Bank parking garage",
+                "Their pursuit brings them into the garage behind the hostage bus.",
+                "They stop the bus, free the hostages, and leave as a working team.",
+                "The hostages are safe and the partnership is established.",
+            ),
+        ]
+
+        def shot(group, goal, ending):
+            return {
+                "continuity_group": group,
+                "scene_goal": goal,
+                "environment": group,
+                "spatial_setup": "Both characters stand in a readable frame",
+                "subjects_on_screen": [],
+                "action_beats": [goal],
+                "dialogue_beats": [],
+                "camera_plan": {"framing": "medium wide shot"},
+                "audio_plan": {"mode": "ambient_only"},
+                "ending_beat": ending,
+                "video_prompt": "Old prompt",
+            }
+
+        shots = [
+            shot("roof", "Wolverine attacks", "Superman stops the attack"),
+            shot("roof", "The rivals talk", "They lower their guard"),
+            shot("street", "They reach the bank", "They see the bus"),
+            shot("garage", "They rescue the hostages", "They walk away"),
+        ]
+        _prepare_h3_story_continuity(shots, blueprint)
+        _enforce_h3_speaker_visual_contract(shots)
+
+        self.assertEqual(
+            [shot_item["story_scene_number"] for shot_item in shots],
+            [1, 1, 2, 3],
+        )
+        self.assertIn("police dispatch reports hostages", shots[1]["ending_beat"])
+        self.assertIn(
+            "Because they accepted the dispatch",
+            shots[2]["action_beats"][0],
+        )
+        self.assertIn("Story handoff:", shots[2]["video_prompt"])
+        self.assertIn("Continuity state:", shots[2]["video_prompt"])
+        self.assertIn("jacket remains torn", shots[2]["video_prompt"])
+
+    def test_long_h3_film_uses_architect_blueprint_in_writer_and_director(self):
+        blueprint = [
+            self._blueprint_scene(
+                index,
+                f"Location {index}",
+                f"Scene {index} opens because scene {index - 1} caused it."
+                if index > 1 else "The conflict begins visibly.",
+                f"Scene {index} visibly causes scene {index + 1}."
+                if index < 4 else "The central conflict is resolved.",
+                f"State after scene {index}.",
+            )
+            for index in range(1, 5)
+        ]
+        captured = {}
+
+        class Planner(ShortFilmPlanner):
+            def _build_h3_character_voice_bible(self, **kwargs):
+                return []
+
+            def _plan_story_h3_native(self, **kwargs):
+                captured.update(kwargs)
+                return [], None
+
+        def generate(**kwargs):
+            system = kwargs["system_prompt"]
+            if "story architect" in system:
+                self.assertEqual(kwargs["thinking_budget"], 0)
+                return json.dumps(blueprint)
+            if "acclaimed screenwriter" in system:
+                self.assertIn("BINDING STORY-ARCHITECT BLUEPRINT", system)
+                self.assertIn("Scene 2 opens because scene 1 caused it", system)
+                return """EXT. ROOFTOP - NIGHT
+
+Two rivals collide, receive one urgent call, choose to work together, pursue the same threat across the city, and resolve that single case before dawn.
+"""
+            raise AssertionError(f"Unexpected LLM pass: {system[:80]}")
+
+        planner = Planner(
+            llm_generate=generate,
+            llm_generate_streaming=generate,
+        )
+        planner.plan(
+            story_description=(
+                "Two rivals become partners while pursuing one connected case."
+            ),
+            target_duration=120,
+            target_scenes=4,
+            # Director's current short_film_story UI snapshot can leave this
+            # optional guide toggle false. Causal architecture is a core film
+            # requirement, not a conditional writing-style feature.
+            narrative_mode=False,
+            video_model="minimax_h3",
+            shot_image_policy="prompt_only",
+            fps=24,
+            frames_steps=17,
+            frames_minimum=124,
+            frames_maximum=345,
+        )
+
+        self.assertEqual(captured["story_continuity_blueprint"], blueprint)
+        self.assertIn("pursue the same threat", captured["screenplay"])
 
 
 class TestH3DirectorDialogueBudget(unittest.TestCase):
@@ -1571,7 +2562,11 @@ Ross turns toward Joey.
             plan.shots[1].dialogue_beats[0].spoken_text,
             "Morning, Joey.",
         )
-        self.assertEqual(plan.shots[1].camera_plan.movement, "static hold")
+        self.assertTrue(plan.shots[1].camera_plan.movement.startswith("static hold"))
+        self.assertIn(
+            "speaker-motivated internal cuts",
+            plan.shots[1].camera_plan.movement,
+        )
         self.assertIn(
             "<d>[English] Morning, Joey.</d>",
             plan.shots[1].video_prompt,

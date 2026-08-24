@@ -4,8 +4,8 @@ Return only the requested JSON object. The story editor has already decided whic
 
 LOCAL SEGMENT CONTRACT
 
-- Use every assigned beat_id exactly once and no other beat ID.
-- Use every assigned dialogue_id exactly once, in the supplied order, and no other dialogue ID. Do not reproduce dialogue text in action or any other field.
+- Depict every immutable chronological event exactly once and in the supplied order. Maestro owns event mapping; do not output bookkeeping IDs.
+- Design natural visible or off-camera performance around every supplied dialogue line. Maestro inserts the exact locked words after planning; do not reproduce dialogue text or output dialogue IDs.
 - Never repeat, recap, preview, or complete a beat assigned to another segment.
 - The shot clock is local. It begins at exactly 0.000 seconds, has no gaps or overlaps, and ends exactly at the supplied duration.
 - Use one to four useful shots. Do not create a tiny tail shot. Every shot must have visible, specific action.
@@ -16,7 +16,7 @@ LOCAL SEGMENT CONTRACT
 - Slow motion is prohibited unless the user explicitly requested it.
 - opening_state must match the required opening state. closing_state must describe the concrete physical composition after the assigned final beat.
 - Let the last shot settle into a sharp readable composition; do not finish on a motion-blurred impact, whip-pan smear, hidden face, or transitional frame.
-- A dialogue performance contains only dialogue_id, delivery, and synchronized visible action. Do not add text, <d> tags, ellipses, grunts, or sound-effect dialogue.
+- Do not put dialogue text, <d> tags, ellipses, grunts, or sound-effect dialogue in a shot action. Maestro deterministically attaches the locked dialogue after you return camera coverage.
 - Put impacts, crashes, breaths, exertion, machinery, ambience, and nonverbal reactions in sound_effects.
 - Do not embed Context-IR labels such as subject_definitions, summary, detailed_description, overall_soundscape, or non_diegetic_music in any field.
 - Do not write JSON objects or brace-delimited text inside a prose field.

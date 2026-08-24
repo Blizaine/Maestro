@@ -55,6 +55,7 @@ _H3_MULTI_WINDOW_CONTROLS_PATH = (
 )
 _GENERATE_BUTTON_PATH = _ROOT / "ui" / "src" / "components" / "Sidebar" / "GenerateButton.tsx"
 _RESOLUTION_PRESETS_PATH = _ROOT / "ui" / "src" / "components" / "Sidebar" / "ResolutionPresets.tsx"
+_DIRECTOR_CHAT_PATH = _ROOT / "ui" / "src" / "components" / "Sidebar" / "DirectorChat.tsx"
 _ASPECT_RATIO_GRID_PATH = _ROOT / "ui" / "src" / "components" / "Sidebar" / "AspectRatioGrid.tsx"
 _MODEL_SELECTOR_PATH = _ROOT / "ui" / "src" / "components" / "Sidebar" / "ModelSelector.tsx"
 _LORA_SELECTOR_PATH = _ROOT / "ui" / "src" / "components" / "SettingsDrawer" / "LoraSelector.tsx"
@@ -217,6 +218,7 @@ def _load_llm_enhance_helpers():
     helper_names = {
         "_canonical_h3_language_tag",
         "_detect_h3_dialogue_language",
+        "_h3_quote_is_visible_text",
         "_extract_h3_quoted_dialogue",
         "_h3_requests_speech",
         "_extract_h3_dialogue_blocks",
@@ -520,22 +522,27 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             self.assertTrue(model_def["supports_auto_aspect"])
             self.assertEqual(
                 model_def["resolution_preset_order"],
-                ["480p", "540p", "720p", "1080p"],
+                ["480p", "540p", "720p", "768p", "1080p"],
             )
             presets = model_def["resolution_presets"]
+            self.assertEqual(presets["480p"]["values"]["21:9"], "1120x480")
             self.assertEqual(presets["480p"]["values"]["9:16"], "480x864")
+            self.assertEqual(presets["540p"]["values"]["21:9"], "1280x544")
             self.assertEqual(presets["540p"]["values"]["9:16"], "544x960")
             self.assertEqual(presets["720p"]["label"], "720p")
             self.assertEqual(presets["720p"]["values"]["16:9"], "1280x704")
             self.assertEqual(presets["720p"]["values"]["9:16"], "704x1280")
+            self.assertEqual(presets["720p"]["values"]["21:9"], "1632x704")
             self.assertEqual(presets["720p"]["values"]["auto"], "auto_720p")
-            self.assertEqual(presets["768p"]["label"], "768p High")
+            self.assertEqual(presets["768p"]["label"], "768p")
             self.assertEqual(presets["768p"]["values"]["16:9"], "1344x768")
+            self.assertEqual(presets["768p"]["values"]["21:9"], "1792x768")
             self.assertEqual(presets["768p"]["values"]["auto"], "auto_768p")
-            self.assertNotIn("768p", model_def["resolution_preset_order"])
+            self.assertIn("native trained resolution", presets["768p"]["hint"])
             self.assertTrue(presets["1080p"]["experimental"])
             self.assertEqual(presets["1080p"]["label"], "1080p")
             self.assertEqual(presets["1080p"]["values"]["16:9"], "1920x1088")
+            self.assertEqual(presets["1080p"]["values"]["21:9"], "2528x1088")
             self.assertEqual(presets["1080p"]["values"]["9:16"], "1088x1920")
             self.assertEqual(presets["1080p"]["values"]["4:3"], "1440x1088")
             self.assertEqual(presets["1080p"]["values"]["3:4"], "1088x1440")
@@ -548,6 +555,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         )
         self.assertEqual(normalize("1280x720"), "1280x704")
         self.assertEqual(normalize("1280x704"), "1280x704")
+        self.assertEqual(normalize("1792x768"), "1792x768")
         self.assertEqual(normalize("720x1280"), "704x1280")
         self.assertEqual(normalize("704x1280"), "704x1280")
         self.assertEqual(normalize("1104x832"), "1024x768")
@@ -1083,6 +1091,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         wgp = _read(_WGP_PATH)
         store = _read(_STORE_PATH)
         presets = _read(_RESOLUTION_PRESETS_PATH)
+        director = _read(_DIRECTOR_CHAT_PATH)
         aspects = _read(_ASPECT_RATIO_GRID_PATH)
         self.assertIn("_recommended_minimax_h3_encoder", launch)
         self.assertIn('"recommended": key == _h3_encoder_default', launch)
@@ -1093,6 +1102,9 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("resolveResolution(get().modelOptions, preset, ratio)", store)
         self.assertIn("findResolutionSelection(res, get().modelOptions)", store)
         self.assertIn("modelOptions?.resolution_preset_order", presets)
+        self.assertNotIn("value !== '768p'", director)
+        self.assertIn("supportsUltraWide", aspects)
+        self.assertIn("supportsUltraWide", director)
         self.assertIn("modelOptions?.supports_auto_aspect", aspects)
 
     def test_full_33b_defaults_are_pinned_and_keep_existing_ids_as_pruned_aliases(self):
@@ -1579,6 +1591,19 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("Do not guess reference numbers", ref2va_dialect_guide)
         self.assertIn("subject_definitions, summary, retention_analysis", ref2va_dialect_guide)
         self.assertIn("proper names", ref2va_dialect_guide)
+        for official_rule in (
+            "350-500 English words",
+            "one or two English sentences",
+            "At MM:SS.mmm",
+            "(S1,S2)",
+            "says in an off-screen voiceover",
+            "<scenetrans>",
+            "<cutoff>",
+            "visible text",
+        ):
+            self.assertIn(official_rule, _read(_H3_REF2VA_GUIDE_PATH))
+        self.assertIn("At MM:SS.mmm", enhance_guide)
+        self.assertIn("480", enhance_guide)
 
     def test_h3_enhance_path_preserves_context_ir_contract(self):
         launch = _read(_LAUNCH_PATH)
@@ -1621,6 +1646,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         wgp = _read(_WGP_PATH)
         store = _read(_STORE_PATH)
         section = _read(_OMNI_REFERENCE_SECTION_PATH)
+        director = _read(_DIRECTOR_CHAT_PATH)
         generate_button = _read(_GENERATE_BUTTON_PATH)
         self.assertIn('if _generation_model_def.get("omni_reference"):', launch)
         self.assertIn("validate_reference_manifest", launch)
@@ -1651,6 +1677,10 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertNotIn('accept="audio/*', section)
         self.assertIn("iOS/WebKit can", section)
         self.assertIn("type !== 'audio' && type !== 'video'", section)
+        self.assertIn("scope?: 'studio' | 'director'", section)
+        self.assertIn('scope="director"', director)
+        self.assertIn("directorH3References", store)
+        self.assertIn("minimax_h3_reference_detail: state.directorH3ReferenceDetail", store)
         self.assertIn("const hasOmniVisualReference = useStore(s =>", generate_button)
         self.assertNotIn(
             "useStore(s => s.params.minimax_h3_references ?? [])",
@@ -1771,6 +1801,26 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("From 0.00 to 2.00 seconds", requirement)
         self.assertIn("no human voice", requirement)
 
+        visible_text_request = (
+            'A red neon sign reading "CALL ME, BABY" glows while the woman says '
+            '"Meet me outside."'
+        )
+        self.assertEqual(
+            helpers["_extract_h3_quoted_dialogue"](visible_text_request),
+            ["Meet me outside."],
+        )
+        self.assertFalse(helpers["_h3_requests_speech"](
+            'A neon sign says "CALL ME, BABY" above the street.',
+        ))
+        compiled_visible_text = helpers["_compile_h3_explicit_dialogue"](
+            visible_text_request,
+        )
+        self.assertIn('sign reading "CALL ME, BABY"', compiled_visible_text)
+        self.assertIn(
+            "<d>[English] Meet me outside.</d>",
+            compiled_visible_text,
+        )
+
         timed = helpers["_build_h3_ref2va_tagged_fallback"](
             'Blaine says, "Snap this, bitch" before punching.',
             "<Picture 1>: Blaine identity\n<Audio 1>: Blaine voice",
@@ -1784,7 +1834,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             )
         )
         duplicated = timed.replace(
-            "summary: A finished video matching the requested action, identity, setting, and explicitly tagged dialogue.",
+            "summary: [reference generation] A finished video matching the requested action, identity, setting, and explicitly tagged dialogue.",
             'summary: Blaine declares, "Snap this, bitch."',
         )
         deduplicated = helpers["_strip_h3_untagged_dialogue_duplicates"](
@@ -2803,9 +2853,21 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
         self.assertIn("<d>[English] Snap this.</d>", voice)
         self.assertNotIn('"Snap this."', voice)
         self.assertIn("source location, background, composition, framing, or pose", voice)
+        self.assertIn(
+            "detailed_description: The target video maintains the requested visual style",
+            voice,
+        )
+        self.assertIn("[Shot 1] <Subject 1>", voice)
         self.assertIn("only spoken words", voice)
         self.assertIn("From 0.00 to 2.00 seconds", voice)
         self.assertIn("From 3.00 to 10.00 seconds", voice)
+
+        visible_text = ensure_ref2va_prompt_relationships(
+            'A neon sign reading "OPEN ALL NIGHT" glows behind Blaine.',
+            [{"type": "image", "path": "blaine.png", "role": "Blaine"}],
+        )
+        self.assertIn('sign reading "OPEN ALL NIGHT"', visible_text)
+        self.assertNotIn("<d>[English] OPEN ALL NIGHT</d>", visible_text)
 
         drive = ensure_ref2va_prompt_relationships(
             "A singer performs.",

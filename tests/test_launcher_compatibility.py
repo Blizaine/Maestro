@@ -116,5 +116,46 @@ class TestPinokioGpuCompatibility(unittest.TestCase):
         self.assertLess(guard, mmgp_import)
 
 
+class TestSamInstallerCompatibility(unittest.TestCase):
+    def test_sam_runtime_stays_on_the_numpy1_compatible_release_lines(self):
+        requirements = (
+            _ROOT / "app" / "services" / "sam" / "requirements.txt"
+        ).read_text(encoding="utf-8")
+
+        self.assertRegex(requirements, r"(?m)^numpy>=1\.26,<2$")
+        self.assertRegex(requirements, r"(?m)^opencv-python-headless<4\.12$")
+        self.assertRegex(requirements, r"(?m)^scipy<1\.18$")
+        self.assertNotRegex(requirements, r"(?m)^numpy>=2$")
+
+    def test_sam_is_resolved_once_then_checked_before_being_marked_ready(self):
+        installer = (_ROOT / "sam_install.js").read_text(encoding="utf-8")
+        marker = "app/services/sam/env/.maestro-sam-ready"
+
+        self.assertIn(
+            "python -m pip install -r app/services/sam/requirements.txt "
+            "app/services/sam/sam3",
+            installer,
+        )
+        self.assertNotIn('"pip install app/services/sam/sam3"', installer)
+        self.assertIn("python -m pip check", installer)
+        self.assertIn("from sam3.model_builder import", installer)
+        self.assertIn("assert major == 1", installer)
+        self.assertIn('method: "fs.write"', installer)
+        self.assertGreaterEqual(installer.count(marker), 2)
+        self.assertLess(installer.index("python -m pip check"), installer.rindex(marker))
+
+    def test_sam_menu_and_update_use_the_health_marker_correctly(self):
+        menu = (_ROOT / "pinokio.js").read_text(encoding="utf-8")
+        updater = (_ROOT / "update.js").read_text(encoding="utf-8")
+        marker = "app/services/sam/env/.maestro-sam-ready"
+
+        self.assertIn(f'const samReady = info.exists("{marker}")', menu)
+        self.assertIn("text: samReady", menu)
+        self.assertIn(f'const samReadyMarker = "{marker}"', updater)
+        self.assertIn("!exists('app/services/sam/env')", updater)
+        self.assertIn("exists('${samReadyMarker}')", updater)
+        self.assertIn("when: \"{{exists('app/services/sam/env')}}\"", updater)
+
+
 if __name__ == "__main__":
     unittest.main()

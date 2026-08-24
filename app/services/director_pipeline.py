@@ -51,6 +51,10 @@ from services.director_video_strategy import (
 )
 from services.h3_window_planner import compute_h3_window_boundaries
 from services.text_integrity import repair_payload
+from models.minimax_h3.reference_manifest import (
+    split_exact_drive_audio_reference,
+    validate_reference_manifest,
+)
 
 # These will be set by launch.py on startup
 _jobs: dict = None          # reference to launch._jobs
@@ -58,6 +62,8 @@ _run_generation = None      # reference to launch._run_generation
 _wgp = None                 # reference to wgp module
 _gen_lock = None            # reference to launch._gen_lock
 _active_gen_states = None   # reference to launch._active_gen_states (abort signaling)
+_terminal_callback = None   # top-level Director completion notification
+_queue_terminal_callback = None  # complete Director queue notification
 
 _pipelines: dict = {}
 _pipeline_lock = threading.Lock()
@@ -600,6 +606,19 @@ def _director_visual_reference_paths(params: dict) -> list[str]:
     """Return user-supplied visual references in stable manifest order."""
 
     paths: list[str] = []
+    omni_references = params.get("minimax_h3_references")
+    if isinstance(omni_references, list):
+        for reference in omni_references:
+            if not isinstance(reference, dict):
+                continue
+            kind = str(
+                reference.get("type") or reference.get("kind") or ""
+            ).strip().lower()
+            if kind not in {"image", "video"}:
+                continue
+            candidate = str(reference.get("path") or "").strip()
+            if candidate:
+                paths.append(candidate)
     primary = str(params.get("reference_image_path") or "").strip()
     if primary:
         paths.append(primary)
@@ -620,6 +639,38 @@ def _director_has_visual_references(
     if not existing_only:
         return bool(paths)
     return any(os.path.isfile(path) for path in paths)
+
+
+def _director_apply_omni_drive_audio(params: dict) -> None:
+    """Route Director's explicit Omni performance reference as target audio.
+
+    Ref2VA audio references are otherwise creative conditioning. The UI's
+    ``drive`` intent promises the exact waveform/timeline, so it must enter the
+    same ``audio_path`` route used by Director's uploaded soundtrack and must
+    not remain packed inside the creative Omni reference sequence.
+    """
+
+    model_type = str(params.get("video_model") or "").strip().lower()
+    references = params.get("minimax_h3_references")
+    if not model_type.startswith("minimax_h3_ref2va") or not isinstance(
+        references, list
+    ):
+        return
+    _runtime, drive_path, _ordinal = split_exact_drive_audio_reference(
+        references
+    )
+    if not drive_path:
+        return
+    previous_audio = str(params.get("audio_path") or "").strip()
+    if previous_audio:
+        previous_real = os.path.normcase(os.path.abspath(previous_audio))
+        drive_real = os.path.normcase(os.path.abspath(drive_path))
+        if previous_real != drive_real:
+            # A vocal stem extracted from a different source track must never
+            # condition mouth motion after the exact driver is replaced.
+            params.pop("audio_vocals_path", None)
+    params["audio_path"] = drive_path
+    params["_director_omni_drive_audio"] = True
 
 
 def _director_effective_shot_image_policy(params: dict) -> str:
@@ -739,9 +790,9 @@ def _validate_director_models(
         and not _director_has_visual_references(params, existing_only=True)
     ):
         raise DirectorModelCompatibilityError(
-            f"{name} needs at least one valid main, character, or location "
-            "image when Director uses references directly. Add a visual "
-            "reference, choose Generate shot images, or use MiniMax H3 FL2VA."
+            f"{name} needs at least one valid image or video reference when "
+            "Director uses references directly. Add an Omni visual reference, "
+            "choose Generate shot images, or use MiniMax H3 FL2VA."
         )
 
 
@@ -2131,6 +2182,59 @@ def _director_h3_reference_manifest(
     from a voice sample.
     """
 
+    submitted_references = params.get("minimax_h3_references")
+    if isinstance(submitted_references, list) and submitted_references:
+        # The Director editor uses the exact same ordered manifest contract as
+        # Studio. Keep that order so <Picture N>, <Video N>, and <Audio N>
+        # continue to match what the user saw while planning the project.
+        normalized = validate_reference_manifest(
+            submitted_references,
+            require_files=True,
+            require_visual=False,
+        )
+        references, _drive_path, _drive_ordinal = (
+            split_exact_drive_audio_reference(normalized)
+        )
+
+        composition = str(clip_image_path or "").strip()
+        if composition and os.path.isfile(composition):
+            composition_real = os.path.normcase(os.path.abspath(composition))
+            already_present = any(
+                str(reference.get("type") or "").lower() == "image"
+                and os.path.normcase(
+                    os.path.abspath(str(reference.get("path") or ""))
+                ) == composition_real
+                for reference in references
+                if reference.get("path")
+            )
+            if not already_present:
+                image_count = sum(
+                    reference.get("type") == "image"
+                    for reference in references
+                )
+                if len(references) >= 12 or image_count >= 9:
+                    raise ValueError(
+                        "H3 Omni Director cannot add this shot's composition "
+                        "image because the ordered reference manifest is full. "
+                        "Remove one image/reference or choose None for the "
+                        "Director image model."
+                    )
+                references.append({
+                    "type": "image",
+                    "path": composition,
+                    "role": (
+                        "the intended composition, cast placement, wardrobe, "
+                        "and setting for this shot"
+                    ),
+                    "image_intent": "composition",
+                })
+
+        return validate_reference_manifest(
+            references,
+            require_files=True,
+            require_visual=True,
+        )
+
     images: list[dict] = []
     seen_images: set[str] = set()
 
@@ -2211,7 +2315,11 @@ def _director_h3_reference_manifest(
                 "role": f"the voice of {voice_role}",
                 "audio_intent": "voice",
             })
-    return references
+    return validate_reference_manifest(
+        references,
+        require_files=True,
+        require_visual=True,
+    )
 
 
 def _director_same_logical_scene(
@@ -2646,6 +2754,7 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
     clip_duration_sec = video_length / fps
     slice_path = None
     vocal_slice_path = None
+    has_story_drive_audio = bool(snapshot.get("_director_omni_drive_audio"))
     if (
         director_strategy == OMNI_REFERENCE
         and pipeline_type != "short_film_story"
@@ -2655,7 +2764,11 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
             "This H3 Omni project no longer has its source soundtrack or "
             "dialogue audio. Restore that file before rerunning the clip."
         )
-    if pipeline_type != "short_film_story" and audio_path and os.path.isfile(audio_path):
+    if (
+        (pipeline_type != "short_film_story" or has_story_drive_audio)
+        and audio_path
+        and os.path.isfile(audio_path)
+    ):
         pid_token = re.sub(r"[^A-Za-z0-9_-]", "_", pid)[:32]
         slice_path = os.path.join(
             clip_out_dir,
@@ -2740,10 +2853,15 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
             for reference in gen_params["minimax_h3_references"]
         ):
             raise ValueError(
-                "This H3 Omni project no longer has a valid main, character, "
-                "or location image. Restore a visual reference before rerunning."
+                "This H3 Omni project no longer has a valid image or video "
+                "reference. Restore an Omni visual reference before rerunning."
             )
-        gen_params["minimax_h3_reference_detail"] = "match"
+        reference_detail = str(
+            manifest_params.get("minimax_h3_reference_detail") or "match"
+        ).strip().lower()
+        gen_params["minimax_h3_reference_detail"] = (
+            reference_detail if reference_detail in {"match", "max"} else "match"
+        )
 
     if str(video_model or "").lower().startswith("minimax_h3"):
         final_prompt_mode = (
@@ -3116,6 +3234,7 @@ def _set_director_queue_entry(
 
 def _run_director_queue(base_out_dir: str) -> None:
     global _director_queue_worker
+    processed_statuses: list[str] = []
     try:
         while True:
             wait_for_active_pipeline = False
@@ -3216,6 +3335,7 @@ def _run_director_queue(base_out_dir: str) -> None:
                     error=terminal.get("error"),
                     completed_at=time.time(),
                 )
+                processed_statuses.append(status)
             except Exception as exc:
                 traceback.print_exc()
                 _set_director_queue_entry(
@@ -3226,13 +3346,41 @@ def _run_director_queue(base_out_dir: str) -> None:
                     error=str(exc),
                     completed_at=time.time(),
                 )
+                processed_statuses.append("failed")
     finally:
+        queue_terminal_event = None
         with _director_queue_lock:
             state = _load_director_queue_locked(base_out_dir)
             state["running"] = False
             _write_director_queue_locked(base_out_dir, state)
             if _director_queue_worker is threading.current_thread():
                 _director_queue_worker = None
+            pending = any(
+                isinstance(item, dict)
+                and item.get("status") in {"held", "queued", "running"}
+                for item in state.get("entries") or []
+            )
+            if processed_statuses and not state.get("paused") and not pending:
+                queue_terminal_event = {
+                    "total": len(processed_statuses),
+                    "completed": sum(
+                        1 for status in processed_statuses
+                        if status == "completed"
+                    ),
+                    "failed": sum(
+                        1 for status in processed_statuses
+                        if status == "failed"
+                    ),
+                    "cancelled": sum(
+                        1 for status in processed_statuses
+                        if status == "cancelled"
+                    ),
+                }
+        if queue_terminal_event is not None and callable(_queue_terminal_callback):
+            try:
+                _queue_terminal_callback(queue_terminal_event)
+            except Exception:
+                pass
 
 
 def start_director_queue(base_out_dir: str) -> dict:
@@ -3393,6 +3541,40 @@ def _materialize_director_assets(
         params[key] = rewritten_values
         if any(item is not None for item in manifest_values):
             manifest[key] = manifest_values
+
+    omni_references = params.get("minimax_h3_references")
+    if isinstance(omni_references, list):
+        rewritten_references: list[object] = []
+        manifest_references: list[object] = []
+        for index, raw in enumerate(omni_references):
+            if not isinstance(raw, dict):
+                rewritten_references.append(raw)
+                manifest_references.append(None)
+                continue
+            reference = dict(raw)
+            reference_manifest: dict[str, object] = {}
+            rewritten, item = copy_one(
+                "minimax_h3_references", reference.get("path"), index
+            )
+            reference["path"] = rewritten
+            if item:
+                reference_manifest["path"] = item
+
+            attached_audio = reference.get("audio_path")
+            if attached_audio:
+                rewritten_audio, audio_item = copy_one(
+                    "minimax_h3_reference_audio", attached_audio, index
+                )
+                reference["audio_path"] = rewritten_audio
+                if audio_item:
+                    reference_manifest["audio_path"] = audio_item
+
+            rewritten_references.append(reference)
+            manifest_references.append(reference_manifest or None)
+
+        params["minimax_h3_references"] = rewritten_references
+        if any(item is not None for item in manifest_references):
+            manifest["minimax_h3_references"] = manifest_references
 
     params["_director_asset_manifest"] = manifest
     return manifest
@@ -4032,14 +4214,25 @@ def cancel_pipeline_repair(out_dir: str, pid: str) -> Optional[dict]:
     return snapshot
 
 
-def init(jobs_dict, run_gen_fn, wgp_module, gen_lock=None, active_gen_states=None):
+def init(
+    jobs_dict,
+    run_gen_fn,
+    wgp_module,
+    gen_lock=None,
+    active_gen_states=None,
+    terminal_callback=None,
+    queue_terminal_callback=None,
+):
     """Called by launch.py to wire up shared references."""
     global _jobs, _run_generation, _wgp, _gen_lock, _active_gen_states
+    global _terminal_callback, _queue_terminal_callback
     _jobs = jobs_dict
     _run_generation = run_gen_fn
     _wgp = wgp_module
     _gen_lock = gen_lock
     _active_gen_states = active_gen_states
+    _terminal_callback = terminal_callback
+    _queue_terminal_callback = queue_terminal_callback
 
 
 class _DirectorOutputs(list):
@@ -4255,15 +4448,53 @@ def _submit_and_wait(
             if _cancelled:
                 _abort_pipeline_jobs(_dir_pid)
                 _abort_signalled = True
-        # Mirror denoising step progress to pipeline status
-        # Only update step/total_steps and message — preserve current/total for pipeline-level counts
-        if _dir_pid and (j.get("step", 0) > 0 or j.get("total_steps", 0) > 0):
+        # Mirror denoising progress and the adaptive clip/project ETA to the
+        # pipeline status. Preserve current/total: those fields belong to the
+        # high-level Director phase, while current_clip/total_clips describe
+        # the video task queue.
+        if _dir_pid:
             with _pipeline_lock:
                 p = _pipelines.get(_dir_pid)
                 if p and "progress" in p:
-                    p["progress"]["step"] = j.get("step", 0)
-                    p["progress"]["total_steps"] = j.get("total_steps", 0)
-                    p["progress"]["message"] = j.get("phase") or j.get("message") or "Generating..."
+                    if (
+                        j.get("step", 0) > 0
+                        or j.get("total_steps", 0) > 0
+                        or j.get("current_clip")
+                    ):
+                        p["progress"]["step"] = j.get("step", 0)
+                        p["progress"]["total_steps"] = j.get("total_steps", 0)
+                        p["progress"]["message"] = (
+                            j.get("phase")
+                            or j.get("message")
+                            or "Generating..."
+                        )
+                    eta_updated_at = j.get("eta_updated_at")
+                    try:
+                        eta_age = max(0.0, time.time() - float(eta_updated_at))
+                    except (TypeError, ValueError):
+                        eta_age = 0.0
+                    for source_key, target_key in (
+                        ("clip_eta_seconds", "clip_eta_seconds"),
+                        ("project_eta_seconds", "project_eta_seconds"),
+                    ):
+                        value = j.get(source_key)
+                        if isinstance(value, (int, float)):
+                            p["progress"][target_key] = max(
+                                0, int(round(float(value) - eta_age)),
+                            )
+                        elif source_key in j:
+                            p["progress"][target_key] = None
+                    for key in (
+                        "current_clip",
+                        "total_clips",
+                        "eta_confidence",
+                        "eta_basis",
+                        "clip_estimates",
+                        "clip_completion_at",
+                        "project_completion_at",
+                    ):
+                        if key in j:
+                            p["progress"][key] = copy.deepcopy(j.get(key))
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
@@ -4286,6 +4517,7 @@ def _submit_and_wait(
 
 def _update_pipeline(pid: str, **kwargs):
     """Thread-safe update; cancellation is an absorbing terminal state."""
+    terminal_event = None
     with _pipeline_lock:
         pipeline = _pipelines.get(pid)
         if not pipeline:
@@ -4295,8 +4527,23 @@ def _update_pipeline(pid: str, **kwargs):
             # but no later phase, completion, or failure may replace Stop.
             if set(kwargs) - _CANCELLED_ARTIFACT_FIELDS:
                 return False
+        previous_status = str(pipeline.get("status") or "").lower()
         pipeline.update(kwargs)
-        return True
+        next_status = str(pipeline.get("status") or "").lower()
+        if (
+            next_status in {"completed", "failed"}
+            and next_status != previous_status
+        ):
+            terminal_event = (dict(pipeline), next_status)
+
+    if terminal_event is not None and callable(_terminal_callback):
+        try:
+            _terminal_callback(*terminal_event)
+        except Exception:
+            # A speaker/notification failure must never change the durable
+            # Director result that was just published.
+            pass
+    return True
 
 
 def _start_pipeline_worker(pid: str, *, resume: bool = False) -> None:
@@ -4349,6 +4596,7 @@ def start_pipeline(params: dict) -> str:
     params.pop("_director_shot_image_policy", None)
     params.pop("_director_video_execution_profile", None)
     params.pop("_director_asset_manifest", None)
+    _director_apply_omni_drive_audio(params)
     params["_director_shot_image_policy"] = (
         _resolve_fresh_shot_image_policy(params)
     )
@@ -4915,6 +5163,9 @@ def _run_pipeline(pid: str, resume: bool = False):
                     "user_prompt": getattr(llm_service, '_last_user_prompt', '') or '',
                     "response_text": getattr(llm_service, '_stream_buffer', '') or '',
                     "thinking_text": getattr(llm_service, '_last_thinking_text', None),
+                    "generation_metrics": dict(
+                        getattr(llm_service, '_last_generation_metrics', {}) or {}
+                    ),
                 }]
             llm_log = {
                 "provider": params.get("llm_provider", "local"),
@@ -4924,6 +5175,7 @@ def _run_pipeline(pid: str, resume: bool = False):
                 "system_prompt": accumulated[-1].get("system_prompt", "") if accumulated else "",
                 "response_text": accumulated[-1].get("response_text", "") if accumulated else "",
                 "thinking_text": accumulated[-1].get("thinking_text") if accumulated else None,
+                "generation_metrics": accumulated[-1].get("generation_metrics", {}) if accumulated else {},
                 "planning_time_sec": round(planning_time, 2),
             }
             # On resume, keep the rehydrated original log instead of clobbering
@@ -5432,6 +5684,9 @@ def _capture_llm_pass(pid: str, pass_name: str):
             "user_prompt": getattr(llm_service, '_last_user_prompt', '') or '',
             "response_text": getattr(llm_service, '_stream_buffer', '') or '',
             "thinking_text": getattr(llm_service, '_last_thinking_text', None),
+            "generation_metrics": dict(
+                getattr(llm_service, '_last_generation_metrics', {}) or {}
+            ),
         }
         with _pipeline_lock:
             p = _pipelines.get(pid)
@@ -6905,6 +7160,9 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
         pipeline_type=pipeline_type,
     )
     if director_strategy == OMNI_REFERENCE:
+        has_exact_target_audio = bool(
+            audio_path and os.path.isfile(audio_path)
+        )
         if uses_shot_images and (
             not image_start_paths or not all(image_start_paths)
         ):
@@ -6912,10 +7170,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                 "MiniMax H3 Omni Director needs a valid generated composition "
                 "image for every shot. Repair the missing start images first."
             )
-        if (
-            pipeline_type != "short_film_story"
-            and (not audio_path or not os.path.isfile(audio_path))
-        ):
+        if pipeline_type != "short_film_story" and not has_exact_target_audio:
             raise RuntimeError(
                 "MiniMax H3 Omni Director needs the uploaded soundtrack or "
                 "dialogue audio for this workflow."
@@ -6938,15 +7193,15 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
             ):
                 raise RuntimeError(
                     "MiniMax H3 Omni Director has no valid visual reference. "
-                    "Restore a main, character, or location image, or enable "
-                    "generated shot images."
+                    "Restore an Omni image/video reference, or enable generated "
+                    "shot images."
                 )
             per_clip_h3_references.append(manifest)
         print(
             f"[Pipeline {pid}] Built {len(per_clip_h3_references)} H3 Omni "
             "shot manifest(s) with explicitly mapped visual and audio roles."
         )
-        if pipeline_type != "short_film_story":
+        if has_exact_target_audio:
             # ``D`` is Maestro's internal exact-drive marker. ``A`` keeps
             # WGP's source-audio slicing active; ``D`` tells Ref2VA to place
             # that slice on the target audio timeline (and mux the pristine
@@ -7187,8 +7442,15 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
             )
         if director_strategy == OMNI_REFERENCE:
             gen_params["per_clip_minimax_h3_references"] = per_clip_h3_references
-            gen_params["minimax_h3_reference_detail"] = "match"
-            if pipeline_type != "short_film_story" and audio_path:
+            reference_detail = str(
+                params.get("minimax_h3_reference_detail") or "match"
+            ).strip().lower()
+            gen_params["minimax_h3_reference_detail"] = (
+                reference_detail
+                if reference_detail in {"match", "max"}
+                else "match"
+            )
+            if has_exact_target_audio and audio_path:
                 # Each Ref2VA task receives its exact target slice through
                 # audio_guide; the final join also uses the pristine
                 # continuous source to avoid audible clip boundaries.

@@ -67,6 +67,7 @@ _stream_lock = threading.Lock()
 _last_system_prompt: str = ""
 _last_user_prompt: str = ""
 _last_thinking_text: str = ""
+_last_generation_metrics: dict = {}
 
 # Defaults — Gemma 4 4B as of 2026-05-03. Smaller (~5 GB weights vs the
 # Qwen3.5 9B Opus build's ~6.85 GB), runs comfortably on lower-VRAM
@@ -85,6 +86,11 @@ import re as _re
 _THINKING_TAG_RE = _re.compile(
     r"<(?:think|thinking|seed:think|reasoning|reflection)>[\s\S]*?"
     r"</(?:think|thinking|seed:think|reasoning|reflection)>\s*",
+    _re.IGNORECASE,
+)
+_THINKING_INNER_RE = _re.compile(
+    r"<(?:think|thinking|seed:think|reasoning|reflection)>\s*([\s\S]*?)"
+    r"</(?:think|thinking|seed:think|reasoning|reflection)>",
     _re.IGNORECASE,
 )
 _THINKING_TAG_UNCLOSED_RE = _re.compile(
@@ -135,6 +141,11 @@ LLM_ARCHITECTURES = {
     "qwen3-4b":   {"layers": 36, "kv_heads": 8,  "head_dim": 128, "sliding_window": None, "global_layer_ratio": 1.0},
     "qwen3-9b":   {"layers": 36, "kv_heads": 8,  "head_dim": 128, "sliding_window": None, "global_layer_ratio": 1.0},
     "qwen3-27b":  {"layers": 48, "kv_heads": 8,  "head_dim": 128, "sliding_window": None, "global_layer_ratio": 1.0},
+    # Qwen3.8-27B is a hybrid stack: 48 recurrent Gated-DeltaNet layers
+    # plus 16 full-attention layers. Only the latter allocate the regular
+    # K/V cache estimated here. The recurrent state has a separate, much
+    # smaller allocation managed by llama.cpp.
+    "qwen38-27b": {"layers": 16, "kv_heads": 4,  "head_dim": 256, "sliding_window": None, "global_layer_ratio": 1.0},
     # Gemma 3/4: 5:1 local:global attention pattern, local window 4096.
     # Most layers' KV is bounded by the window regardless of total ctx.
     "gemma4-2b":  {"layers": 26, "kv_heads": 4,  "head_dim": 256, "sliding_window": 4096, "global_layer_ratio": 1/6},
@@ -277,6 +288,55 @@ MODEL_REGISTRY = {
         "mmproj_file": "mmproj-Q8_0.gguf",
         "weights_gb": 6.85, "mmproj_gb": 0.58, "arch": "qwen3-9b",
         "cache_dir_override": "Huihui-Qwen3.5-9B-Claude-4.6-Opus-abliterated",
+        "extra_flags": [
+            "-c", "65536",
+            "-np", "1",
+            "-fa", "on",
+            "--cache-type-k", "q4_0",
+            "--cache-type-v", "q4_0",
+        ],
+    },
+    "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF": {
+        "label": "Qwen3.8 27B Uncensored Q4_K_M (Vision, Deep Thinking)",
+        # Q4_K_M is the repository author's recommended llama.cpp quant.
+        # Use its no-MTP packaging for now: the target weights/quality are
+        # identical, while upstream still has an open native-MTP state-leak
+        # report across sequential requests (exactly how Director uses an LLM).
+        # At 16.5 GB it leaves enough room on a 24 GB card for the 64K
+        # quantized KV cache, recurrent state, vision projector, and runtime
+        # buffers. Q5_K_M (19.5 GB) is too close to the edge for that goal.
+        "gguf_file": "Qwen3.8-27B-Uncensored-noMTP-Q4_K_M.gguf",
+        "mmproj_file": "Qwen3.8-27B-Uncensored-vision-f16.gguf",
+        "weights_gb": 16.5, "mmproj_gb": 0.928, "arch": "qwen38-27b",
+        "thinking_style": "qwen",
+        # Qwen3.8's own chat template supports explicit reasoning tiers.
+        # Pin the creative path to its strongest tier instead of relying on
+        # whatever default a particular llama.cpp build happens to choose.
+        "default_reasoning_effort": "xhigh",
+        # Qwen3.8 thinks by default. Reserve an answer-independent reasoning
+        # allowance for generic calls; Director callers that request a larger
+        # budget keep their explicit value. Grammar-constrained JSON calls
+        # still force thinking off in generate()/generate_streaming().
+        "enable_thinking_by_default": True,
+        "default_thinking_budget": 8192,
+        # Prompt enhancement is creative prose rather than a machine-readable
+        # serialization pass, so let Qwen3.8 reason before writing it. Exact
+        # H3 field contracts, JSON schemas, repairs, and polish calls retain
+        # their explicit non-thinking routes below.
+        "enable_thinking_for_prompt_enhancement": True,
+        "prompt_enhancement_thinking_budget": 8192,
+        # Official Qwen3.8 thinking-mode sampling. For non-thinking structured
+        # work we retain Maestro's pass-specific frequency/presence penalties,
+        # but use Qwen's temperature/nucleus/top-k recommendations.
+        "sampling_defaults_thinking": {
+            "temperature": 1.0, "top_p": 0.95, "top_k": 20,
+            "min_p": 0.0, "repeat_penalty": 1.0,
+            "frequency_penalty": 0.0, "presence_penalty": 0.0,
+        },
+        "sampling_defaults_nonthinking": {
+            "temperature": 0.7, "top_p": 0.80, "top_k": 20,
+            "min_p": 0.0, "repeat_penalty": 1.0,
+        },
         "extra_flags": [
             "-c", "65536",
             "-np", "1",
@@ -529,6 +589,7 @@ for _repo_id, _info in MODEL_REGISTRY.items():
 # deprecated / experimental variants. A repo id listed here that isn't
 # currently in the registry is simply skipped.
 _PUBLIC_MODEL_ORDER = [
+    "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF",
     "Youssofal/Qwen3.6-27B-Abliterated-Heretic-Uncensored-GGUF",
     "Nesuwka/gemma-4-E2B-it-heretic-ara-Q4_K_M-GGUF",
     "Abhiray/gemma-4-E4B-it-heretic-GGUF",                         # default (Recommended)
@@ -636,6 +697,7 @@ _OPENAI_CHAT_FIELDS = frozenset({
     "top_logprobs",
     "seed",
     "response_format",
+    "reasoning_effort",
     "tools",
     "tool_choice",
     "user",
@@ -691,7 +753,12 @@ def _active_registry_entry() -> dict:
     return MODEL_REGISTRY.get(_model_id, {})
 
 
-def _apply_model_defaults(temperature: float, top_p: float, payload: dict) -> tuple[float, float]:
+def _apply_model_defaults(
+    temperature: float,
+    top_p: float,
+    payload: dict,
+    enable_thinking: Optional[bool] = None,
+) -> tuple[float, float]:
     """Apply per-model sampling defaults from the registry.
 
     Registry values WIN over caller values for any field the registry
@@ -702,7 +769,12 @@ def _apply_model_defaults(temperature: float, top_p: float, payload: dict) -> tu
     that protects Qwen 3.x from repetition cascades shrinks Gemma's
     reasoning-vocabulary diversity and produces shallow thinking output).
 
-    Models with no `sampling_defaults` entry pass through unchanged —
+    A model may additionally provide `sampling_defaults_thinking` and
+    `sampling_defaults_nonthinking`. An explicit `enable_thinking=False`
+    selects the latter; otherwise the model's default-thinking path selects
+    the former. Mode-specific values override the common defaults.
+
+    Models with no sampling-default entries pass through unchanged — the
     caller's values stay. So adding registry tuning for one model never
     affects others.
 
@@ -710,7 +782,13 @@ def _apply_model_defaults(temperature: float, top_p: float, payload: dict) -> tu
     top_k / frequency_penalty / presence_penalty when present.
     """
     entry = _active_registry_entry()
-    defaults = entry.get("sampling_defaults", {})
+    defaults = dict(entry.get("sampling_defaults", {}))
+    mode_key = (
+        "sampling_defaults_nonthinking"
+        if enable_thinking is False
+        else "sampling_defaults_thinking"
+    )
+    defaults.update(entry.get(mode_key, {}))
     if not defaults:
         return temperature, top_p
     if "temperature" in defaults:
@@ -890,7 +968,175 @@ def _prepare_thinking(system_prompt: str, enable_thinking: Optional[bool], think
         stripped = system_prompt.lstrip()
         if not stripped.startswith("<|think|>"):
             system_prompt = "<|think|>\n" + system_prompt
+    elif style == "qwen":
+        # Qwen3.8's template thinks by default, but make that contract
+        # explicit for registered models so a llama.cpp template-default
+        # change cannot silently downgrade Director planning quality.
+        if enable_thinking is False:
+            return system_prompt, False, 0
+        if entry.get("enable_thinking_by_default", False):
+            enable_thinking = True
+        if thinking_budget <= 0:
+            try:
+                thinking_budget = max(0, int(entry.get("default_thinking_budget", 0)))
+            except (TypeError, ValueError):
+                thinking_budget = 0
     return system_prompt, enable_thinking, thinking_budget
+
+
+_QWEN_REASONING_EFFORTS = frozenset({"low", "medium", "xhigh"})
+
+
+def _apply_reasoning_controls(
+    payload: dict,
+    *,
+    enable_thinking: Optional[bool],
+    thinking_budget: int,
+    reasoning_effort: Optional[str] = None,
+) -> Optional[str]:
+    """Apply per-request thinking controls and return the resolved effort.
+
+    ``reasoning_effort`` selects how thoroughly Qwen3.8 reasons. The
+    separate ``thinking_budget_tokens`` llama.cpp extension is a hard
+    per-request ceiling; Maestro's existing ``max_tokens`` allowance remains
+    large enough to hold both the reasoning and the requested answer.
+
+    Structured-output callers force ``enable_thinking=False`` before reaching
+    this helper, so they never receive a reasoning tier or thinking budget.
+    """
+
+    template_kwargs = dict(payload.get("chat_template_kwargs") or {})
+    if enable_thinking is not None:
+        payload["enable_thinking"] = bool(enable_thinking)
+        template_kwargs["enable_thinking"] = bool(enable_thinking)
+
+    entry = _active_registry_entry()
+    resolved_effort: Optional[str] = None
+    if enable_thinking is True and entry.get("thinking_style", "qwen") == "qwen":
+        resolved_effort = str(
+            reasoning_effort or entry.get("default_reasoning_effort") or ""
+        ).strip().lower() or None
+        if resolved_effort and resolved_effort not in _QWEN_REASONING_EFFORTS:
+            raise ValueError(
+                "Unsupported Qwen reasoning effort "
+                f"{resolved_effort!r}; expected low, medium, or xhigh."
+            )
+        if resolved_effort:
+            # llama.cpp accepts the OpenAI-style top-level field, while the
+            # Qwen model card documents the same value as a chat-template
+            # kwarg. Sending both makes the intent explicit across runtimes.
+            payload["reasoning_effort"] = resolved_effort
+            template_kwargs["reasoning_effort"] = resolved_effort
+        if _provider == "local" and thinking_budget > 0:
+            # Supported by current Maestro llama.cpp builds when no global
+            # --reasoning-budget override is supplied.
+            payload["thinking_budget_tokens"] = int(thinking_budget)
+
+    if template_kwargs:
+        payload["chat_template_kwargs"] = template_kwargs
+    return resolved_effort
+
+
+def _metric_int(value) -> Optional[int]:
+    """Return a non-negative integer metric, or None when unavailable."""
+
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _count_local_tokens(text: str) -> Optional[int]:
+    """Count text with the loaded local model tokenizer for diagnostics."""
+
+    if _provider != "local" or not text:
+        return 0 if not text else None
+    try:
+        response = requests.post(
+            f"{_server_url()}/tokenize",
+            json={
+                "content": text,
+                "add_special": False,
+                "parse_special": True,
+            },
+            headers=_api_headers(),
+            timeout=(5, 30),
+        )
+        response.raise_for_status()
+        tokens = response.json().get("tokens")
+        return len(tokens) if isinstance(tokens, list) else None
+    except Exception as exc:
+        print(f"[LLM] Token telemetry unavailable: {exc}")
+        return None
+
+
+def _build_generation_metrics(
+    *,
+    usage: Optional[dict],
+    timings: Optional[dict],
+    finish_reason,
+    reasoning_text: str,
+    answer_text: str,
+    resolved_effort: Optional[str],
+    thinking_budget: int,
+    max_new_tokens: int,
+    total_tokens: int,
+) -> dict:
+    """Normalize completion diagnostics from streaming and non-streaming APIs."""
+
+    usage = usage if isinstance(usage, dict) else {}
+    timings = timings if isinstance(timings, dict) else {}
+    prompt_tokens = _metric_int(usage.get("prompt_tokens"))
+    completion_tokens = _metric_int(usage.get("completion_tokens"))
+    if prompt_tokens is None:
+        prompt_tokens = _metric_int(timings.get("prompt_n"))
+    if completion_tokens is None:
+        completion_tokens = _metric_int(timings.get("predicted_n"))
+
+    details = usage.get("completion_tokens_details")
+    details = details if isinstance(details, dict) else {}
+    reasoning_tokens = _metric_int(details.get("reasoning_tokens"))
+    if reasoning_tokens is None and reasoning_text:
+        reasoning_tokens = _count_local_tokens(reasoning_text)
+    elif reasoning_tokens is None and resolved_effort is None:
+        reasoning_tokens = 0
+
+    answer_tokens = None
+    if completion_tokens is not None and reasoning_tokens is not None:
+        answer_tokens = max(0, completion_tokens - reasoning_tokens)
+    elif answer_text:
+        answer_tokens = _count_local_tokens(answer_text)
+
+    finish = str(finish_reason or "unknown")
+    return {
+        "model_id": _model_id,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "reasoning_tokens": reasoning_tokens,
+        "answer_tokens": answer_tokens,
+        "finish_reason": finish,
+        "truncated": finish.lower() in {"length", "max_tokens", "token_limit"},
+        "reasoning_effort": resolved_effort,
+        "thinking_budget_tokens": int(thinking_budget or 0),
+        "requested_answer_tokens": int(max_new_tokens),
+        "request_max_tokens": int(total_tokens),
+    }
+
+
+def _log_generation_metrics(metrics: dict) -> None:
+    """Emit one compact, useful line instead of opaque reasoning chatter."""
+
+    reasoning = metrics.get("reasoning_tokens")
+    answer = metrics.get("answer_tokens")
+    effort = metrics.get("reasoning_effort") or "off/default"
+    print(
+        "[LLM] Completion telemetry: "
+        f"reasoning={reasoning if reasoning is not None else '?'} tokens, "
+        f"answer={answer if answer is not None else '?'} tokens, "
+        f"effort={effort}, budget={metrics.get('thinking_budget_tokens', 0)}, "
+        f"finish={metrics.get('finish_reason', 'unknown')}"
+    )
 
 
 def is_loaded() -> bool:
@@ -927,12 +1173,16 @@ def _download_gguf(repo_id: str, filename: str, cache_dir: str) -> str:
 
 
 # Minimum llama.cpp build Maestro requires. Builds below this lack correct
-# support for newer model architectures we ship — notably Qwen3.5's hybrid
-# attention/SSM arch ("qwen35") used by the Sulphur prompt enhancer, which
-# crashes on older builds with: "error loading model: missing tensor
-# 'blk.N.ssm_conv1d.weight'". Verified b9632 loads it; b9048 does not. Bump
-# this (and FALLBACK_TAG below) when a newer model needs a newer runtime.
-MIN_LLAMA_BUILD = 9632
+# support for newer model architectures we ship. Qwen3.5's hybrid qwen35
+# architecture first required b9632; Qwen3.8-27B additionally needs the
+# corrected DeltaNet CUDA path in b10450 or newer. Older builds can appear to
+# load and run Qwen3.8 normally while returning corrupted tokens, so this is a
+# hard compatibility floor rather than an optional performance update.
+MIN_LLAMA_BUILD = 10450
+# b10450 contains the required CUDA fix but its release has no platform
+# binaries. b10453 is the first newer release with the normal Windows/Linux
+# asset set, so it is the offline/API-rate-limit fallback.
+FALLBACK_LLAMA_TAG = "b10453"
 
 _LLAMA_RUNTIME_RECEIPT = ".maestro_llama_runtime.json"
 _WINDOWS_LLAMA_CUDA_FILES = (
@@ -970,6 +1220,53 @@ def _llama_release_build(tag: str):
         return None
     build = int(match.group(1))
     return build if build > 0 else None
+
+
+def _llama_release_has_assets(release_info: dict, asset_specs) -> bool:
+    """Return whether a release is a new-enough binary ``bNNNN`` build.
+
+    llama.cpp's stable releases are now lightweight version pointers (for
+    example ``v0.2.0``) whose only asset is ``nightly-tag.txt``.  Treating
+    that version tag as a binary release makes Maestro invent archive names
+    that do not exist.  The actual platform archives remain attached to the
+    referenced ``bNNNN`` nightly release.
+    """
+
+    if not isinstance(release_info, dict):
+        return False
+    build = _llama_release_build(release_info.get("tag_name", ""))
+    if build is None or build < MIN_LLAMA_BUILD:
+        return False
+
+    assets = release_info.get("assets", [])
+    if not isinstance(assets, list):
+        return False
+    for prefix, contains in asset_specs:
+        if not any(
+            str(asset.get("name", "")).startswith(prefix)
+            and contains in str(asset.get("name", ""))
+            and bool(asset.get("browser_download_url"))
+            for asset in assets
+            if isinstance(asset, dict)
+        ):
+            return False
+    return True
+
+
+def _llama_nightly_pointer_url(release_info: dict):
+    """Return the official nightly-tag pointer URL from a stable release."""
+
+    if not isinstance(release_info, dict):
+        return None
+    assets = release_info.get("assets", [])
+    if not isinstance(assets, list):
+        return None
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        if str(asset.get("name", "")).lower() == "nightly-tag.txt":
+            return asset.get("browser_download_url") or None
+    return None
 
 
 def _llama_runtime_receipt_path(bin_dir: str) -> str:
@@ -1039,10 +1336,10 @@ def _ensure_llama_server(bin_dir: str) -> None:
         but if someone gets here, raise with a clear message.
 
     Uses urllib + zipfile/tarfile from the stdlib so no extra deps needed.
-    Queries the GitHub releases API for the latest tag rather than
-    hardcoding a version that goes stale within a week. Falls back to a
-    known-good pinned tag if the API is unreachable (rate-limited,
-    offline, etc.) so this still works on locked-down networks.
+    Resolves GitHub's latest stable release to its referenced binary nightly
+    tag when needed. Falls back to a known-good pinned tag if the API is
+    unreachable (rate-limited, offline, etc.) so this still works on
+    locked-down networks.
 
     Side effect: writes binaries to bin_dir/. Idempotent — exits early
     if a new-enough exe already exists; re-downloads the latest if the
@@ -1053,6 +1350,7 @@ def _ensure_llama_server(bin_dir: str) -> None:
     import zipfile
     import tarfile
     import shutil
+    from urllib.parse import quote
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
@@ -1136,11 +1434,11 @@ def _ensure_llama_server(bin_dir: str) -> None:
         asset_specs = [("llama-", "bin-ubuntu-x64.tar.gz")]
         archive_ext = ".tar.gz"
 
-    # Query GitHub for the latest release. If the API call fails (rate
-    # limit, offline), fall back to a pinned known-good tag so we still
-    # have a chance of downloading. Update the fallback tag occasionally
-    # if a critical fix lands in newer builds.
-    FALLBACK_TAG = "b9632"
+    # Query GitHub for the latest release. llama.cpp's current stable release
+    # contains only a nightly-tag.txt pointer; the real platform archives are
+    # attached to that referenced bNNNN release. Older GitHub layouts exposed
+    # the binary bNNNN release directly, so support both forms. If resolution
+    # fails, use a pinned known-good build.
     if needs_executable and not exe_exists:
         print("[LLM] llama-server not found; resolving a llama.cpp release...")
     elif needs_cudart and not needs_executable:
@@ -1151,18 +1449,73 @@ def _ensure_llama_server(bin_dir: str) -> None:
     else:
         print("[LLM] Resolving the latest compatible llama.cpp release...")
     release_info = None
-    tag = None
-    try:
+    tag = FALLBACK_LLAMA_TAG
+
+    def _github_json(url: str) -> dict:
         req = Request(
-            "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest",
-            headers={"Accept": "application/vnd.github+json"},
+            url,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "Maestro-llama-runtime",
+            },
         )
-        with urlopen(req, timeout=15) as r:
-            release_info = json.load(r)
-        tag = release_info.get("tag_name", FALLBACK_TAG)
-    except (URLError, HTTPError, json.JSONDecodeError, TimeoutError) as e:
-        print(f"[LLM] GitHub API unavailable ({e}); falling back to pinned tag {FALLBACK_TAG}")
-        tag = FALLBACK_TAG
+        with urlopen(req, timeout=15) as response:
+            payload = json.load(response)
+        return payload if isinstance(payload, dict) else {}
+
+    try:
+        latest_release = _github_json(
+            "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+        )
+        if _llama_release_has_assets(latest_release, asset_specs):
+            release_info = latest_release
+            tag = str(release_info.get("tag_name", FALLBACK_LLAMA_TAG))
+        else:
+            pointer_url = _llama_nightly_pointer_url(latest_release)
+            if not pointer_url:
+                raise RuntimeError(
+                    "latest release has neither compatible binaries nor a nightly tag pointer"
+                )
+            pointer_request = Request(
+                pointer_url,
+                headers={"User-Agent": "Maestro-llama-runtime"},
+            )
+            with urlopen(pointer_request, timeout=15) as response:
+                nightly_tag = response.read(64).decode("utf-8", errors="replace").strip()
+            nightly_build = _llama_release_build(nightly_tag)
+            if nightly_build is None or nightly_build < MIN_LLAMA_BUILD:
+                raise RuntimeError(
+                    f"nightly pointer returned incompatible tag {nightly_tag!r}"
+                )
+            candidate = _github_json(
+                "https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/"
+                f"{quote(nightly_tag, safe='')}"
+            )
+            if not _llama_release_has_assets(candidate, asset_specs):
+                raise RuntimeError(
+                    f"nightly release {nightly_tag} lacks the required platform assets"
+                )
+            release_info = candidate
+            tag = nightly_tag
+            print(
+                f"[LLM] llama.cpp stable release points to binary nightly {tag}; "
+                "using its platform archives."
+            )
+    except (
+        URLError,
+        HTTPError,
+        json.JSONDecodeError,
+        TimeoutError,
+        UnicodeDecodeError,
+        RuntimeError,
+    ) as e:
+        print(
+            f"[LLM] Could not resolve a compatible current llama.cpp binary ({e}); "
+            "falling back to pinned tag "
+            f"{FALLBACK_LLAMA_TAG}"
+        )
+        tag = FALLBACK_LLAMA_TAG
+        release_info = None
 
     # Resolve each asset spec to a download URL — prefer GitHub API
     # (handles tag drift gracefully) but fall back to a constructed URL.
@@ -1744,6 +2097,7 @@ def generate(
     image_paths: Optional[list] = None,
     thinking_budget: int = 0,
     enable_thinking: Optional[bool] = None,
+    reasoning_effort: Optional[str] = None,
     frequency_penalty: float = 0.0,
     presence_penalty: float = 0.0,
     stop: Optional[list[str]] = None,
@@ -1759,12 +2113,17 @@ def generate(
             the content budget.
         enable_thinking: If False, disables Qwen3.5's thinking mode via the
             --jinja chat template. If None, uses model default (thinking on).
+        reasoning_effort: Optional Qwen3.8 reasoning tier. When omitted,
+            registered Qwen3.8 creative calls use ``xhigh``.
         json_schema: Optional JSON Schema dict. When set (local llama-server
             only), the output is grammar-constrained to schema-valid JSON —
             the sampler masks every token that would break the schema, so
             the model physically cannot emit prose, markdown fences, or the
             repeat-loop garbage that breaks structured planning passes.
     """
+    global _stream_buffer, _stream_done, _last_system_prompt, _last_user_prompt
+    global _last_thinking_text, _last_generation_metrics
+
     if not is_loaded():
         raise RuntimeError("LLM not loaded. Call load_model() first.")
 
@@ -1785,6 +2144,11 @@ def generate(
 
     # Per-model thinking mode (Gemma vs Qwen)
     system_prompt, enable_thinking, thinking_budget = _prepare_thinking(system_prompt, enable_thinking, thinking_budget)
+
+    _last_system_prompt = system_prompt
+    _last_user_prompt = prompt
+    _last_thinking_text = ""
+    _last_generation_metrics = {}
 
     total_tokens = max_new_tokens + thinking_budget
 
@@ -1812,21 +2176,30 @@ def generate(
         "max_tokens": total_tokens,
         "cache_prompt": False,  # Disable prompt caching — system prompt changes between calls (LoRA hints, etc.)
     }
-    # Per-model sampling defaults (e.g. Gemma 4 wants temp=1.0, top_k=64)
-    temperature, top_p = _apply_model_defaults(temperature, top_p, payload)
-    payload["temperature"] = max(temperature, 0.01)
-    payload["top_p"] = top_p
-
+    # Apply caller penalties first, then model/mode defaults. Registry values
+    # intentionally win (for example Qwen3.8 uses different official sampling
+    # profiles in thinking and non-thinking mode).
     if frequency_penalty > 0:
         payload["frequency_penalty"] = frequency_penalty
     if presence_penalty > 0:
         payload["presence_penalty"] = presence_penalty
+    temperature, top_p = _apply_model_defaults(
+        temperature,
+        top_p,
+        payload,
+        enable_thinking=enable_thinking,
+    )
+    payload["temperature"] = max(temperature, 0.01)
+    payload["top_p"] = top_p
+
     if seed is not None and seed >= 0:
         payload["seed"] = seed
-    # Qwen thinking mode via chat template kwargs (Gemma handled by _prepare_thinking)
-    if enable_thinking is not None:
-        payload["enable_thinking"] = enable_thinking
-        payload["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
+    resolved_effort = _apply_reasoning_controls(
+        payload,
+        enable_thinking=enable_thinking,
+        thinking_budget=thinking_budget,
+        reasoning_effort=reasoning_effort,
+    )
     # Hard stop sequences. The Director Pass 3 polish path uses this with
     # `<think>` to abort generation the moment a Qwen3.5/3.6 model tries
     # to enter thinking mode despite enable_thinking=False being requested.
@@ -1877,8 +2250,11 @@ def generate(
         raise _diagnose_llm_request_failure(e) from e
     data = resp.json()
 
-    raw_content = data["choices"][0]["message"]["content"] or ""
-    finish_reason = data["choices"][0].get("finish_reason", "unknown")
+    choice = data["choices"][0]
+    message = choice["message"]
+    raw_content = message.get("content") or ""
+    reasoning_content = message.get("reasoning_content") or ""
+    finish_reason = choice.get("finish_reason", "unknown")
     usage = data.get("usage", {})
     prompt_tokens = usage.get("prompt_tokens", "?")
     completion_tokens = usage.get("completion_tokens", "?")
@@ -1886,14 +2262,39 @@ def generate(
     if not raw_content:
         print(f"[LLM] WARNING: Server returned empty content despite generating {completion_tokens} tokens (model likely consumed all tokens on internal reasoning)")
         # Check if reasoning_content is available (llama-server may separate it)
-        reasoning = data["choices"][0]["message"].get("reasoning_content", "")
-        if reasoning:
-            print(f"[LLM] Reasoning content detected ({len(reasoning)} chars) — model used thinking mode. reasoning_budget=0 may not be active.")
+        if reasoning_content:
+            print(f"[LLM] Reasoning content detected ({len(reasoning_content)} chars) — model used thinking mode.")
 
-    content = _strip_thinking_tags(raw_content)
+    inline_thinking_match = _THINKING_INNER_RE.search(raw_content)
+    inline_thinking = inline_thinking_match.group(1) if inline_thinking_match else ""
+    inline_gemma_match = _GEMMA_THINKING_INNER_RE.search(raw_content)
+    inline_gemma_thinking = inline_gemma_match.group(1) if inline_gemma_match else ""
+    _last_thinking_text = reasoning_content or inline_thinking or inline_gemma_thinking
+
+    full_raw = raw_content
+    if reasoning_content:
+        full_raw = f"<think>{reasoning_content}</think>\n{raw_content}"
+
+    content = _strip_thinking_tags(full_raw)
 
     if not content.strip() and raw_content:
         print(f"[LLM] WARNING: Model spent all {completion_tokens} tokens on <think> reasoning with nothing left for the answer. Raw starts with: {raw_content[:200]!r}")
+
+    _last_generation_metrics = _build_generation_metrics(
+        usage=usage,
+        timings=data.get("timings"),
+        finish_reason=finish_reason,
+        reasoning_text=_last_thinking_text,
+        answer_text=content,
+        resolved_effort=resolved_effort,
+        thinking_budget=thinking_budget,
+        max_new_tokens=max_new_tokens,
+        total_tokens=total_tokens,
+    )
+    _log_generation_metrics(_last_generation_metrics)
+    with _stream_lock:
+        _stream_buffer = full_raw
+        _stream_done = True
 
     _reset_idle_timer()
     return content.strip()
@@ -1915,6 +2316,7 @@ def generate_streaming(
     image_paths: list = None,
     thinking_budget: int = 0,
     enable_thinking: bool = None,
+    reasoning_effort: Optional[str] = None,
     frequency_penalty: float = 0.0,
     presence_penalty: float = 0.0,
     json_schema: Optional[dict] = None,
@@ -1933,6 +2335,7 @@ def generate_streaming(
             thinking OFF (see generate() for the rationale).
     """
     global _stream_buffer, _stream_done, _last_system_prompt, _last_user_prompt, _last_thinking_text
+    global _last_generation_metrics
     import re as _re
 
     if not is_loaded():
@@ -1953,6 +2356,7 @@ def generate_streaming(
     _last_system_prompt = system_prompt
     _last_user_prompt = prompt
     _last_thinking_text = ""
+    _last_generation_metrics = {}
 
     # Cancel idle timer during active request — prevents auto-unload mid-streaming.
     # Timer is reset at the END of the request (after streaming completes).
@@ -1989,6 +2393,8 @@ def generate_streaming(
         "stream": True,
         "cache_prompt": False,  # Disable prompt caching — system prompt changes between calls
     }
+    if _provider in ("local", "openai"):
+        payload["stream_options"] = {"include_usage": True}
     # Apply caller's penalty values FIRST so they're in the payload
     # before _apply_model_defaults runs. The registry-defaults pass below
     # then overrides them when the active model has tuned values
@@ -2002,15 +2408,22 @@ def generate_streaming(
     # Per-model sampling defaults — registry wins over caller for any
     # field it specifies. Models without sampling_defaults (e.g. Qwen
     # 3.x) pass through unchanged. See _apply_model_defaults().
-    temperature, top_p = _apply_model_defaults(temperature, top_p, payload)
+    temperature, top_p = _apply_model_defaults(
+        temperature,
+        top_p,
+        payload,
+        enable_thinking=enable_thinking,
+    )
     payload["temperature"] = max(temperature, 0.01)
     payload["top_p"] = top_p
     if seed is not None and seed >= 0:
         payload["seed"] = seed
-    # Qwen thinking mode via chat template kwargs (Gemma handled by _prepare_thinking)
-    if enable_thinking is not None:
-        payload["enable_thinking"] = enable_thinking
-        payload["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
+    resolved_effort = _apply_reasoning_controls(
+        payload,
+        enable_thinking=enable_thinking,
+        thinking_budget=thinking_budget,
+        reasoning_effort=reasoning_effort,
+    )
 
     # Auto-inject thinking-marker stop tokens for `disable_thinking: True`
     # models. Mirrors the same protection in generate() — see comment there.
@@ -2070,6 +2483,9 @@ def generate_streaming(
     raw_content = ""
     reasoning_content = ""
     in_reasoning = False
+    final_usage = {}
+    final_timings = {}
+    finish_reason = "unknown"
     try:
         resp = requests.post(
             f"{_server_url()}/v1/chat/completions",
@@ -2089,7 +2505,17 @@ def generate_streaming(
                 break
             try:
                 chunk = _json_mod.loads(data_str)
-                delta = chunk.get("choices", [{}])[0].get("delta", {})
+                if isinstance(chunk.get("usage"), dict):
+                    final_usage = chunk["usage"]
+                if isinstance(chunk.get("timings"), dict):
+                    final_timings = chunk["timings"]
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                choice = choices[0]
+                if choice.get("finish_reason") is not None:
+                    finish_reason = choice.get("finish_reason")
+                delta = choice.get("delta", {})
 
                 # With --jinja, Qwen3.5 may send reasoning via separate field
                 reasoning_token = delta.get("reasoning_content", "")
@@ -2133,14 +2559,29 @@ def generate_streaming(
     #      — emitted by Gemma 4 Heretic and similar fine-tunes whose
     #      chat templates don't extract thinking into reasoning_content.
     # Prefer (1) when present, fall back to (2).
+    inline_thinking_match = _THINKING_INNER_RE.search(raw_content)
+    inline_thinking = inline_thinking_match.group(1) if inline_thinking_match else ""
     inline_gemma_match = _GEMMA_THINKING_INNER_RE.search(raw_content)
     inline_gemma_thinking = inline_gemma_match.group(1) if inline_gemma_match else ""
-    _last_thinking_text = reasoning_content or inline_gemma_thinking
+    _last_thinking_text = reasoning_content or inline_thinking or inline_gemma_thinking
+    _last_generation_metrics = _build_generation_metrics(
+        usage=final_usage,
+        timings=final_timings,
+        finish_reason=finish_reason,
+        reasoning_text=_last_thinking_text,
+        answer_text=raw_content,
+        resolved_effort=resolved_effort,
+        thinking_budget=thinking_budget,
+        max_new_tokens=max_new_tokens,
+        total_tokens=total_tokens,
+    )
     print(
         f"[LLM] Streaming complete: {len(raw_content)} chars, "
         f"reasoning_content: {len(reasoning_content)} chars, "
+        f"inline_thinking: {len(inline_thinking)} chars, "
         f"gemma_inline_thinking: {len(inline_gemma_thinking)} chars"
     )
+    _log_generation_metrics(_last_generation_metrics)
 
     # Build full raw for the UI (includes thinking)
     full_raw = ""
@@ -2722,10 +3163,39 @@ def enhance_prompt(
         # truncate a vision-assisted 15-second rewrite before its sound fields.
         effective_max_tokens = max(effective_max_tokens, 768)
 
-    # TTS: thinking mode for creative dialogue, disabled for fast mode
+    # Route reasoning by task shape rather than applying one model-wide rule:
+    # creative TTS and ordinary prose enhancement can benefit from planning,
+    # while H3's exact Context-IR/Ref2VA field contracts must remain direct.
+    # Raw enhancer models and Director polish return earlier through their own
+    # explicit non-thinking paths.
     is_tts = bool(tts_enhance_mode)
     is_fast = tts_enhance_mode and tts_enhance_mode.endswith('_fast')
-    use_thinking = is_tts and not is_fast
+    active_entry = _active_registry_entry()
+    if is_tts:
+        use_thinking = not is_fast
+        prompt_thinking_budget = 16384 if use_thinking else 0
+    elif is_h3_structured:
+        use_thinking = False
+        prompt_thinking_budget = 0
+    else:
+        use_thinking = bool(
+            active_entry.get("enable_thinking_for_prompt_enhancement", False)
+        )
+        if use_thinking:
+            try:
+                prompt_thinking_budget = max(
+                    0,
+                    int(
+                        active_entry.get(
+                            "prompt_enhancement_thinking_budget",
+                            active_entry.get("default_thinking_budget", 8192),
+                        )
+                    ),
+                )
+            except (TypeError, ValueError):
+                prompt_thinking_budget = 8192
+        else:
+            prompt_thinking_budget = 0
 
     result = generate(
         prompt=user_prompt,
@@ -2734,7 +3204,7 @@ def enhance_prompt(
         temperature=temperature,
         image_paths=image_paths,
         enable_thinking=use_thinking,
-        thinking_budget=16384 if use_thinking else 4096,
+        thinking_budget=prompt_thinking_budget,
         frequency_penalty=0.3,  # prevent repetition loops
         presence_penalty=0.1,   # encourage variety
     )
@@ -2909,6 +3379,60 @@ def enhance_prompt(
             image_paths,
             generate_fn=generate,
         )
+    if is_h3_context_ir:
+        # H3 Base / FL2VA silently truncates plain text after 512 Qwen tokens.
+        # Budget the finished prompt *after* dialogue, silence, music, and
+        # vision repairs so those late safety passes cannot push the actual
+        # spoken line or final action beyond what the model sees. Ref2VA uses a
+        # separate presentation path and intentionally skips this hard limit.
+        from services.h3_prompt_budget import (
+            H3PromptBudgetError,
+            fit_h3_base_prompt,
+        )
+
+        try:
+            budgeted = fit_h3_base_prompt(result)
+        except H3PromptBudgetError as budget_error:
+            print(
+                "[Enhance] H3 Base output could not be compacted directly; "
+                f"trying the deterministic source-faithful form: {budget_error}"
+            )
+            fallback = _build_h3_context_fallback(
+                prompt,
+                has_start_image=(bool(image_paths) and not bool(reference_context)),
+                reference_context=reference_context,
+                duration_seconds=duration_seconds,
+            )
+            fallback = _strip_h3_untagged_dialogue_duplicates(fallback, prompt)
+            fallback = _enforce_h3_soundscape_silence(fallback, prompt)
+            fallback = _enforce_h3_music_request(fallback, prompt, reference_context)
+            budgeted = fit_h3_base_prompt(fallback)
+
+        if budgeted.compacted:
+            print(
+                "[Enhance] H3 Base prompt compacted without truncation: "
+                f"{budgeted.original_token_count} -> {budgeted.token_count} tokens."
+            )
+        result = budgeted.prompt
+        if not _has_complete_h3_context_structure(result):
+            raise H3PromptBudgetError(
+                "MiniMax H3 prompt budgeting could not preserve all three "
+                "required Context-IR fields."
+            )
+        if not _h3_dialogue_contract_satisfied(prompt, result):
+            raise H3PromptBudgetError(
+                "MiniMax H3 prompt budgeting could not preserve the exact "
+                "scripted dialogue. Shorten the visual request or use more windows."
+            )
+        if not _h3_timed_silence_contract_satisfied(
+            prompt,
+            result,
+            duration_seconds,
+        ):
+            raise H3PromptBudgetError(
+                "MiniMax H3 prompt budgeting could not preserve the requested "
+                "dialogue timing. Shorten the visual request or use more windows."
+            )
     return repair_text(result)
 
 
@@ -3006,11 +3530,52 @@ def _detect_h3_dialogue_language(prompt: str) -> str:
     return "English"
 
 
-def _extract_h3_quoted_dialogue(text: str) -> list[str]:
-    """Extract explicit straight- or curly-quoted speech in source order."""
+def _h3_quote_is_visible_text(source: str, match) -> bool:
+    """Distinguish quoted on-screen text/titles from spoken dialogue."""
+
     import re
+    before = str(source or "")[max(0, match.start() - 150):match.start()]
+    after = str(source or "")[match.end():match.end() + 100]
+    if re.search(
+        r"(?i)\b(?:titled|entitled|called|named|captioned)\s*[:,-]?\s*$",
+        before,
+    ):
+        return True
+    visible_noun = re.search(
+        r"(?i)\b(?:sign|banner|label|subtitle|caption|marquee|poster|billboard|"
+        r"screen|monitor|display|neon|placard|headline|logo|shirt|door|wall)\b",
+        before,
+    )
+    visible_cue = re.search(
+        r"(?i)\b(?:reads?|reading|shows?|showing|displays?|displaying|bears?|"
+        r"bearing|marked|printed|written|spells?|saying|with(?:\s+the)?\s+"
+        r"(?:text|words?|lettering))\s*[:,-]?\s*$",
+        before,
+    )
+    if visible_noun and visible_cue:
+        return True
+    if re.search(
+        r"(?i)\b(?:sign|banner|label|subtitle|caption|marquee|poster|billboard|"
+        r"screen|monitor|display|neon|placard|headline|logo|on-screen\s+text)"
+        r"\b[^.!?\r\n]{0,24}\b(?:says?|said)\s*[:,-]?\s*$",
+        before,
+    ):
+        return True
+    return bool(re.match(
+        r"(?i)^\s*(?:appears?|is\s+(?:visible|written|printed|displayed)|glows?)"
+        r"\b[^.!?\r\n]{0,70}\b(?:on|across|above|below|behind|over)\b",
+        after,
+    ))
+
+
+def _extract_h3_quoted_dialogue(text: str) -> list[str]:
+    """Extract explicit quoted speech while preserving quoted visible text."""
+    import re
+    source = str(text or "")
     matches = []
-    for match in re.finditer(r'"([^"\r\n]{1,500})"|“([^”\r\n]{1,500})”', str(text or "")):
+    for match in re.finditer(r'"([^"\r\n]{1,500})"|“([^”\r\n]{1,500})”', source):
+        if _h3_quote_is_visible_text(source, match):
+            continue
         value = (match.group(1) or match.group(2) or "").strip()
         if value:
             matches.append(value)
@@ -3019,13 +3584,23 @@ def _extract_h3_quoted_dialogue(text: str) -> list[str]:
 
 def _h3_requests_speech(text: str) -> bool:
     import re
+    source = str(text or "")
+    # A sign that "says" something is visible text, not a speaking source.
+    # Remove only the narrow visual-text cue before evaluating speech verbs.
+    speech_context = re.sub(
+        r"(?i)\b(?:sign|banner|label|subtitle|caption|marquee|poster|billboard|"
+        r"screen|monitor|display|neon|placard|headline|logo|on-screen\s+text)"
+        r"\b[^.!?\r\n]{0,35}\b(?:says?|reads?|shows?|displays?|bears?)\b",
+        "visible text",
+        source,
+    )
     return bool(
-        _extract_h3_quoted_dialogue(text)
+        _extract_h3_quoted_dialogue(source)
         or re.search(
             r"\b(?:say|says|speak|speaks|talk|talks|discuss|discusses|discussion|"
             r"argue|argues|announce|announces|ask|asks|reply|replies|tell|tells|"
             r"conversation|dialogue)\b",
-            str(text or ""),
+            speech_context,
             flags=re.IGNORECASE,
         )
     )
@@ -3341,6 +3916,8 @@ def _compile_h3_explicit_dialogue(prompt: str) -> str:
 
     def replace(match):
         nonlocal counter
+        if _h3_quote_is_visible_text(str(prompt or ""), match):
+            return match.group(0)
         counter += 1
         value = (match.group(1) or match.group(2) or "").strip()
         return f"(S{counter}) <d>[{language}] {value}</d>"
@@ -3536,24 +4113,47 @@ def _build_h3_ref2va_tagged_fallback(
         raw_mapping,
     )
     subject_bindings = []
+    retention_bindings = []
     for index, picture_label in enumerate(picture_labels, start=1):
         subject_bindings.append(
-            f"<Subject {index}> (S{index}) takes visual identity from {picture_label}."
+            f"<Subject {index}> is the requested visible subject whose identity "
+            f"and appearance come from {picture_label}; reject the picture's "
+            "source background, framing, composition, and pose."
+        )
+        retention_bindings.append(
+            f"<Subject {index}> (appears in [Shot 1]): fully_preserved - "
+            f"preserve the identity and appearance defined by {picture_label}."
         )
     for index, audio_label in enumerate(voice_labels, start=1):
         subject_index = min(index, max(1, len(picture_labels)))
         subject_bindings.append(
             f"{audio_label} is the voice-timbre reference for <Subject {subject_index}> (S{subject_index})."
         )
+        retention_bindings.append(
+            f"{audio_label}: reference - use its voice timbre, emotion, and "
+            "delivery without copying the source signal, words, or timing."
+        )
     subject_mapping = " ".join(subject_bindings + [mapping])
+    retention_mapping = " ".join(retention_bindings) or (
+        "Preserve the supplied reference roles according to the ordered media map."
+    )
     request = _compile_h3_explicit_dialogue(prompt)
     timed_clause = _build_h3_timed_silence_clause(prompt, duration_seconds)
+    task_types = "reference generation"
+    if voice_labels:
+        task_types += " + audio reference"
+    visible_subjects = " ".join(
+        f"<Subject {index}> is visible in the opening composition."
+        for index in range(1, len(picture_labels) + 1)
+    )
     return (
         f"subject_definitions: {subject_mapping}\n"
-        "summary: A finished video matching the requested action, identity, setting, and explicitly "
-        "tagged dialogue.\n"
-        f"retention_analysis: Preserve the mapped identity, motion, and audio roles exactly: {mapping}\n"
-        f"detailed_description: The finished target video follows this request: {request} "
+        f"summary: [{task_types}] A finished video matching the requested action, identity, "
+        "setting, and explicitly tagged dialogue.\n"
+        f"retention_analysis: {retention_mapping}\n"
+        "detailed_description: The target video maintains the requested visual style, lighting, "
+        "color, and cinematic texture. "
+        f"[Shot 1] {visible_subjects} The finished target video follows this request: {request} "
         "Reference pictures provide identity and appearance only, never their original background, "
         "framing, pose, or an opening still. The scripted dialogue is the only speech; all mouths "
         f"remain closed before and after it. {timed_clause}\n"

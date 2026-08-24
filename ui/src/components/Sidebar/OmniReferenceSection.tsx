@@ -1,8 +1,8 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { FileAudio, GripVertical, Image as ImageIcon, Info, Loader2, Plus, Video, X } from 'lucide-react'
 import * as api from '../../api/client'
 import { useStore } from '../../stores/useStore'
-import type { MiniMaxH3AudioIntent, MiniMaxH3Reference, MiniMaxH3ReferenceType } from '../../types'
+import type { MiniMaxH3AudioIntent, MiniMaxH3Reference, MiniMaxH3ReferenceType, ModelOptions } from '../../types'
 
 const IMAGE_RE = /\.(png|jpe?g|webp|bmp|tiff?)$/i
 const VIDEO_RE = /\.(mp4|mov|mkv|webm|avi|m4v)$/i
@@ -41,27 +41,66 @@ function referenceLabels(references: MiniMaxH3Reference[]): string[] {
   })
 }
 
-export function OmniReferenceSection() {
+export function OmniReferenceSection({
+  scope = 'studio',
+  disabled = false,
+}: {
+  scope?: 'studio' | 'director'
+  disabled?: boolean
+}) {
   const params = useStore(s => s.params)
-  const modelOptions = useStore(s => s.modelOptions)
+  const studioModelOptions = useStore(s => s.modelOptions)
   const setParam = useStore(s => s.setParam)
   const setDurationSeconds = useStore(s => s.setDurationSeconds)
   const slidingWindowSeconds = useStore(s => s.slidingWindowSeconds)
+  const directorReferences = useStore(s => s.directorH3References)
+  const setDirectorReferences = useStore(s => s.setDirectorH3References)
+  const directorDetail = useStore(s => s.directorH3ReferenceDetail)
+  const setDirectorDetail = useStore(s => s.setDirectorH3ReferenceDetail)
+  const directorVideoModel = useStore(s => s.selectedModelPerMode.video || '')
+  const setDirectorTargetDuration = useStore(s => s.shortFilmSetTargetDuration)
   const inputRef = useRef<HTMLInputElement>(null)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState('')
   const [dragIndex, setDragIndex] = useState<number | null>(null)
+  const [directorModelOptions, setDirectorModelOptions] = useState<ModelOptions | null>(null)
 
-  const references = params.minimax_h3_references ?? []
+  useEffect(() => {
+    if (scope !== 'director' || !directorVideoModel) return
+    let cancelled = false
+    setDirectorModelOptions(null)
+    void api.fetchModelOptions(directorVideoModel)
+      .then(options => {
+        if (!cancelled) setDirectorModelOptions(options)
+      })
+      .catch(() => {
+        if (!cancelled) setDirectorModelOptions(null)
+      })
+    return () => { cancelled = true }
+  }, [directorVideoModel, scope])
+
+  const modelOptions = scope === 'director' ? directorModelOptions : studioModelOptions
+  const references = scope === 'director'
+    ? directorReferences
+    : (params.minimax_h3_references ?? [])
   const limits = modelOptions?.omni_reference_limits ?? {
     image: 9, video: 3, audio: 3, total: 12,
   }
   const labels = useMemo(() => referenceLabels(references), [references])
 
-  const update = (next: MiniMaxH3Reference[]) => setParam('minimax_h3_references', next)
+  const update = (next: MiniMaxH3Reference[]) => {
+    if (scope === 'director') setDirectorReferences(next)
+    else setParam('minimax_h3_references', next)
+  }
+
+  const currentReferences = (): MiniMaxH3Reference[] => (
+    scope === 'director'
+      ? useStore.getState().directorH3References
+      : (useStore.getState().params.minimax_h3_references ?? [])
+  )
 
   const addFiles = async (files: File[]) => {
-    if (uploading || files.length === 0) return
+    if (disabled || uploading || files.length === 0) return
     setUploading(true)
     setError('')
     try {
@@ -121,6 +160,15 @@ export function OmniReferenceSection() {
     const audioDuration = Number(reference?.duration_seconds)
     if (!Number.isFinite(audioDuration) || audioDuration <= 0) return
 
+    if (scope === 'director') {
+      // Story-driven Director projects do not have a separately analyzed
+      // source track, so the exact performance reference owns their target
+      // duration. Audio/music Director projects validate this duration
+      // against the analyzed project timeline when submitted.
+      setDirectorTargetDuration(Math.max(1, Math.round(audioDuration * 10) / 10))
+      return
+    }
+
     const fps = Math.max(1, Number(modelOptions?.fps) || 24)
     const exceedsNativeWindow = audioDuration > slidingWindowSeconds + (1 / fps)
     if (exceedsNativeWindow) {
@@ -132,7 +180,7 @@ export function OmniReferenceSection() {
   }
 
   const attachAudio = async (referenceId: string, file: File | undefined) => {
-    if (!file || uploading) return
+    if (!file || disabled || uploading) return
     const type = mediaType(file)
     if (type !== 'audio' && type !== 'video') {
       setError(`${file.name} is not a supported audio file or a video with an audio track.`)
@@ -142,7 +190,7 @@ export function OmniReferenceSection() {
     setError('')
     try {
       const uploaded = await api.uploadAudio(file)
-      const current = useStore.getState().params.minimax_h3_references ?? []
+      const current = currentReferences()
       update(current.map(reference => reference.id === referenceId ? {
         ...reference,
         audio_path: uploaded.path,
@@ -165,9 +213,16 @@ export function OmniReferenceSection() {
     update(next)
   }
 
-  const detail = params.minimax_h3_reference_detail
-    ?? modelOptions?.omni_reference_detail_default
-    ?? 'match'
+  const detail = scope === 'director'
+    ? directorDetail
+    : (params.minimax_h3_reference_detail
+      ?? modelOptions?.omni_reference_detail_default
+      ?? 'match')
+
+  const setDetail = (next: 'match' | 'max') => {
+    if (scope === 'director') setDirectorDetail(next)
+    else setParam('minimax_h3_reference_detail', next)
+  }
 
   return (
     <section className="space-y-2">
@@ -175,7 +230,9 @@ export function OmniReferenceSection() {
         <div className="flex items-center gap-1.5">
           <label className="text-[11px] text-text-muted uppercase tracking-wider">Omni References</label>
           <span
-            title="Order matters. Picture, Video, and Audio labels are assigned from top to bottom and can be named in your prompt. Video soundtracks stay attached to their video."
+            title={scope === 'director'
+              ? 'Order matters. These references are attached to every H3 Omni shot. Picture, Video, and Audio labels are assigned from top to bottom and can be named in the project description. A Music / performance timeline becomes Director’s exact audio driver.'
+              : 'Order matters. Picture, Video, and Audio labels are assigned from top to bottom and can be named in your prompt. Video soundtracks stay attached to their video.'}
             className="text-text-muted cursor-help"
           >
             <Info size={12} />
@@ -185,13 +242,15 @@ export function OmniReferenceSection() {
       </div>
 
       <div
-        className="rounded-lg border border-dashed border-border hover:border-border-light px-3 py-2.5 flex items-center justify-center gap-2 cursor-pointer transition-colors"
-        onClick={() => inputRef.current?.click()}
-        onDragOver={event => event.preventDefault()}
+        className={`rounded-lg border border-dashed border-border px-3 py-2.5 flex items-center justify-center gap-2 transition-colors ${disabled ? 'opacity-50 cursor-not-allowed' : 'hover:border-border-light cursor-pointer'}`}
+        onClick={() => { if (!disabled) inputRef.current?.click() }}
+        onDragOver={event => { if (!disabled) event.preventDefault() }}
         onDrop={event => {
           event.preventDefault()
+          if (disabled) return
           void addFiles(Array.from(event.dataTransfer.files))
         }}
+        aria-disabled={disabled}
       >
         {uploading ? <Loader2 size={14} className="animate-spin text-accent-blue" /> : <Plus size={14} className="text-text-muted" />}
         <span className="text-[10px] text-text-secondary">{uploading ? 'Uploading references…' : 'Add images, videos, or audio'}</span>
@@ -202,6 +261,7 @@ export function OmniReferenceSection() {
           ref={inputRef}
           type="file"
           multiple
+          disabled={disabled}
           className="hidden"
           onChange={event => void addFiles(Array.from(event.target.files ?? []))}
         />
@@ -212,7 +272,7 @@ export function OmniReferenceSection() {
           {references.map((reference, index) => (
             <div
               key={reference.id || `${reference.path}-${index}`}
-              draggable
+              draggable={!disabled}
               onDragStart={() => setDragIndex(index)}
               onDragOver={event => event.preventDefault()}
               onDrop={event => {
@@ -244,6 +304,7 @@ export function OmniReferenceSection() {
                 </div>
                 <input
                   value={reference.role ?? ''}
+                  disabled={disabled}
                   onChange={event => patchReference(index, { role: event.target.value })}
                   placeholder="Who or what is this? (helps Enhance)"
                   className="w-full bg-bg-primary border border-border rounded px-2 py-1 text-[10px] text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue"
@@ -251,6 +312,7 @@ export function OmniReferenceSection() {
                 {reference.type === 'audio' && (
                   <select
                     value={reference.audio_intent ?? 'voice'}
+                    disabled={disabled}
                     onChange={event => setAudioIntent(
                       index,
                       event.target.value as MiniMaxH3AudioIntent,
@@ -271,6 +333,7 @@ export function OmniReferenceSection() {
                           Browse freely, then validate in attachAudio(). */}
                       <input
                         type="file"
+                        disabled={disabled}
                         className="hidden"
                         onChange={event => {
                           void attachAudio(reference.id, event.target.files?.[0])
@@ -281,6 +344,7 @@ export function OmniReferenceSection() {
                     {reference.audio_path && (
                       <button
                         type="button"
+                        disabled={disabled}
                         title="Remove attached soundtrack"
                         onClick={() => patchReference(index, {
                           audio_path: undefined,
@@ -299,6 +363,7 @@ export function OmniReferenceSection() {
                   <label className="flex items-center gap-1.5 text-[9px] text-text-secondary cursor-pointer">
                     <input
                       type="checkbox"
+                      disabled={disabled}
                       checked={reference.include_audio !== false}
                       onChange={event => patchReference(index, { include_audio: event.target.checked })}
                       className="w-3 h-3 accent-accent-blue"
@@ -308,6 +373,7 @@ export function OmniReferenceSection() {
                 )}
               </div>
               <button
+                disabled={disabled}
                 onClick={() => update(references.filter((_, itemIndex) => itemIndex !== index))}
                 title="Remove reference"
                 className="p-1 self-start text-text-muted hover:text-indicator-error"
@@ -323,7 +389,8 @@ export function OmniReferenceSection() {
         <div className="flex items-center justify-end gap-2">
           <select
             value={detail}
-            onChange={event => setParam('minimax_h3_reference_detail', event.target.value as 'match' | 'max')}
+            disabled={disabled}
+            onChange={event => setDetail(event.target.value as 'match' | 'max')}
             title="Match output uses less memory and is recommended. Maximum detail follows the official 2048px-short-edge reference preparation and can require substantially more memory."
             className="bg-bg-tertiary border border-border rounded px-2 py-1 text-[9px] text-text-secondary focus:outline-none focus:border-accent-blue"
           >

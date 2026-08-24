@@ -26,6 +26,10 @@ REFERENCE AUTHORITY
 - retention_analysis uses only official visual values fully_preserved,
   partially_preserved, attribute_transfer, or weak_reference, and audio values
   fully_copy, partially_copy, reference, or weak_reference.
+- When an identity image only defines a reusable person or object, cite its
+  <Picture N> inside the matching <Subject N> definition instead of pretending
+  it is a concrete keyframe. Standalone pictures are reserved for actual frame
+  or composition anchors.
 
 FAITHFUL CINEMATIC ADAPTATION
 - Lock the user's premise, identities, exact portrayal and era, location,
@@ -77,11 +81,28 @@ SHOT FIELDS
 - action contains only visible events assigned to that local shot.
 - summary briefly describes this clip's finished story contribution without
   repeating literal dialogue.
+- Supply enough concrete information for Maestro to compile a full-reference
+  detailed_description rather than a plot synopsis: each shot needs current
+  composition, referenced subject appearance and position, environment and
+  lighting, action and state changes, camera motion, and synchronized sound.
+- The compiled detailed_description places one or two visual-style sentences
+  before [Shot 1]. [Shot 1] has no timestamp; later shots use the official
+  [Shot N] At MM:SS.mmm form. Reference labels appear at their first clear use.
 
 DIALOGUE AND AUDIO
 - Preserve every quoted line exactly and assign it to one shot only.
 - Put spoken words only in dialogue objects. Keep stable speaker IDs across all
   clips. Dialogue should remain below roughly two words per second.
+- A group speaking together uses a compound stable ID such as S1,S2. For an
+  off-screen voiceover, set the action/delivery clearly as off-screen
+  voiceover so Maestro emits the official phrase and keeps on-screen lips
+  closed.
+- Keep a line wholly within one shot unless the source explicitly requires it
+  to cross a cut. The final compiler reserves <scenetrans> for a genuinely
+  continuous line across a cut and <cutoff> for speech intentionally truncated
+  by the end of the clip.
+- Preserve visible signs, subtitles, labels, and other on-screen text verbatim
+  inside English double quotation marks in the shot action.
 - If an interactive scene requests speech but supplies no script, create a
   concise, portrayal-appropriate exchange. Do not add filler dialogue.
 - Outside assigned lines, mouths stay closed; no background voices, muttering,

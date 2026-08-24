@@ -14,6 +14,7 @@ import {
   X,
 } from 'lucide-react'
 import { useStore } from '../stores/useStore'
+import { formatEtaDuration } from '../lib/format'
 
 const ACTIVE_JOB_STATUSES = new Set(['held', 'queued', 'running'])
 const ACTIVE_DIRECTOR_STATUSES = new Set(['held', 'queued', 'running'])
@@ -206,7 +207,12 @@ export function GlobalQueuePopover({
                       <div className="truncate text-[10px] text-text-secondary">
                         {pipelineStatus.progress?.message || compactStatus(pipelineStatus.phase)}
                       </div>
-                      <div className="text-[9px] text-text-muted">Director · {compactStatus(pipelineStatus.status)}</div>
+                      <div className="text-[9px] text-text-muted">
+                        Director · {compactStatus(pipelineStatus.status)}
+                        {pipelineStatus.progress?.project_eta_seconds != null
+                          ? ` · ${formatEtaDuration(pipelineStatus.progress.project_eta_seconds)} remaining`
+                          : ''}
+                      </div>
                     </div>
                     <button
                       type="button"
@@ -273,6 +279,9 @@ export function GlobalQueuePopover({
                             <div className="text-[9px] text-text-muted">
                               Studio · {compactStatus(job.status)}
                               {job.totalSteps > 0 ? ` · Step ${job.step}/${job.totalSteps}` : ''}
+                              {job.generationEtaSeconds != null
+                                ? ` · ${formatEtaDuration(job.generationEtaSeconds)} remaining`
+                                : ''}
                             </div>
                           </div>
                           <button

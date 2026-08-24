@@ -13,6 +13,8 @@ import { PreflightBanner } from './components/PreflightBanner'
 import { WelcomeModal } from './components/WelcomeModal'
 import { RecipesOverlay } from './components/Recipes/RecipesOverlay'
 import { GlobalQueuePopover } from './components/GlobalQueuePopover'
+import { NotificationCoordinator } from './components/NotificationCoordinator'
+import { NotificationToastHost } from './components/NotificationToastHost'
 import { useStore } from './stores/useStore'
 import { useIsMobile } from './lib/useIsMobile'
 
@@ -106,6 +108,10 @@ function App() {
       <DownloadStatusBanner />
       {/* WelcomeModal — one-time first-run orientation (localStorage-gated). */}
       <WelcomeModal />
+      {/* One observer covers Studio, Director, and the universal queue.
+          Toasts remain useful even when browser notifications are disabled. */}
+      <NotificationCoordinator />
+      <NotificationToastHost />
     </div>
   )
 }

@@ -12,6 +12,7 @@ module.exports = {
     const runtime = runtimeProfile(kernel)
     const solCapable = isSolCapable(kernel)
     const cuda13DriverUpdateRequired = solCapable && needsCuda13DriverUpdate(kernel)
+    const samReady = info.exists("app/services/sam/env/.maestro-sam-ready")
     // Do not gate this menu on kernel.gpu. Pinokio can render an app menu
     // before its hardware inventory has populated that property, which would
     // hide Start from supported systems. install.js retains the documented
@@ -26,6 +27,7 @@ module.exports = {
       start_classic: info.running("start_classic.js"),
       update: info.running("update.js"),
       huggingface_login: info.running("huggingface_login.js"),
+      tailscale_setup: info.running("tailscale_setup.js"),
       reset: info.running("reset.js")
     }
     if (running.install || running.sol_install) {
@@ -99,6 +101,15 @@ module.exports = {
             text: "Open Classic UI",
             href: local.url + "/classic",
           }, {
+            icon: "fa-solid fa-shield-halved",
+            text: running.tailscale_setup
+              ? "Configuring Secure Remote Access"
+              : "Secure Remote Access (Tailscale)",
+            href: "tailscale_setup.js",
+            params: {
+              port: local.port,
+            },
+          }, {
             icon: 'fa-solid fa-terminal',
             text: "Terminal",
             href: "start.js",
@@ -118,6 +129,15 @@ module.exports = {
             icon: "fa-solid fa-bolt",
             text: "Open Web UI (Sol Runtime)",
             href: local.url,
+          }, {
+            icon: "fa-solid fa-shield-halved",
+            text: running.tailscale_setup
+              ? "Configuring Secure Remote Access"
+              : "Secure Remote Access (Tailscale)",
+            href: "tailscale_setup.js",
+            params: {
+              port: local.port,
+            },
           }, {
             icon: 'fa-solid fa-terminal',
             text: "Sol Runtime Terminal",
@@ -161,6 +181,10 @@ module.exports = {
           icon: "fa-solid fa-power-off",
           text: "Start",
           href: "start.js",
+        }, {
+          icon: "fa-solid fa-shield-halved",
+          text: "<div><strong>Secure Remote Access (Tailscale)</strong><div>Start Maestro first, then run this action again to create its private HTTPS address.</div></div>",
+          href: "tailscale_setup.js",
         }, {
           icon: "fa-solid fa-display",
           text: "Start (Classic UI)",
@@ -220,10 +244,10 @@ module.exports = {
           // needed for the experimental Inpaint feature in Edit
           // mode — most users never need it, which is why install.js
           // no longer runs sam_install.js automatically. Label flips
-          // to "Update Inpaint Support" once installed so users can
-          // refresh SAM independently of the main app update.
+          // to "Update Inpaint Support" only after the installer's dependency
+          // and import health checks pass, so a partial env is never reported ready.
           icon: "fa-solid fa-vector-square",
-          text: info.exists("app/services/sam/env")
+          text: samReady
             ? "Update Inpaint Support (SAM 3.1)"
             : "Install Inpaint Support (SAM 3.1)",
           href: "sam_install.js",

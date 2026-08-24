@@ -323,6 +323,14 @@ class TestMiniMaxH3AssetSharing(unittest.TestCase):
             "text_encoder_filename = get_compatible_local_model_filename(",
             source,
         )
+        self.assertIn(
+            "_local = get_compatible_local_model_filename(\n"
+            "                    _primary_filename,\n"
+            "                    model_type,\n"
+            "                    file_type=0,\n"
+            "                )",
+            source,
+        )
 
         launch_source = _LAUNCH_PATH.read_text(encoding="utf-8")
         self.assertIn(

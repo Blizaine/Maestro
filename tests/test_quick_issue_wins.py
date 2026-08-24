@@ -131,13 +131,14 @@ class TestStudioInterfaceQuickWins(unittest.TestCase):
     def test_lora_selector_is_near_top_of_advanced_panel(self):
         source = _read(_ADVANCED_PATH)
         self.assertEqual(source.count("<LoraSelector />"), 1)
+        self.assertEqual(source.count("<PresetManager />"), 1)
         self.assertLess(
+            source.index("<PresetManager />"),
             source.index("<LoraSelector />"),
-            source.index("H3 Text Encoder"),
         )
         self.assertLess(
             source.index("<LoraSelector />"),
-            source.index("<PresetManager />"),
+            source.index("H3 Text Encoder"),
         )
 
     def test_browser_spellcheck_is_enabled_for_text_inputs(self):

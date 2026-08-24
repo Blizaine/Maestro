@@ -314,6 +314,7 @@ _H3_RESOLUTION_PRESETS = {
         "label": "480p",
         "values": {
             "auto": "auto_480p",
+            "21:9": "1120x480",
             "16:9": "864x480",
             "9:16": "480x864",
             "1:1": "640x640",
@@ -325,6 +326,7 @@ _H3_RESOLUTION_PRESETS = {
         "label": "540p",
         "values": {
             "auto": "auto_540p",
+            "21:9": "1280x544",
             "16:9": "960x544",
             "9:16": "544x960",
             "1:1": "736x736",
@@ -341,6 +343,7 @@ _H3_RESOLUTION_PRESETS = {
         "hint": "Uses a model-aligned 1280x704 canvas for faster H3 generation.",
         "values": {
             "auto": "auto_720p",
+            "21:9": "1632x704",
             "16:9": "1280x704",
             "9:16": "704x1280",
             "1:1": "704x704",
@@ -348,17 +351,19 @@ _H3_RESOLUTION_PRESETS = {
             "3:4": "704x928",
         },
     },
-    # Preserve the released 768px-short-edge canvas for saved settings and
-    # direct API compatibility. It is intentionally omitted from the visible
-    # preset order now that aligned 720p is the consumer default.
+    # H3's native trained tier uses a 768px short edge. Keep it distinct from
+    # the lighter aligned 720p canvas so users can choose the model's native
+    # resolution without jumping all the way to experimental 1080p.
     "768p": {
-        "label": "768p High",
+        "label": "768p",
         "hint": (
-            "H3's released 1344x768 canvas. It uses 14.5% more pixels than "
-            "720p and may require a shorter window on lower-VRAM GPUs."
+            "MiniMax H3's native trained resolution (1344x768 at 16:9). "
+            "It uses 14.5% more pixels than 720p and may require a shorter "
+            "window on lower-VRAM GPUs."
         ),
         "values": {
             "auto": "auto_768p",
+            "21:9": "1792x768",
             "16:9": "1344x768",
             "9:16": "768x1344",
             "1:1": "768x768",
@@ -381,6 +386,7 @@ _H3_RESOLUTION_PRESETS = {
         ),
         "values": {
             "auto": "auto_1080p",
+            "21:9": "2528x1088",
             "16:9": "1920x1088",
             "9:16": "1088x1920",
             "1:1": "1088x1088",
@@ -389,7 +395,7 @@ _H3_RESOLUTION_PRESETS = {
         },
     },
 }
-_H3_RESOLUTION_PRESET_ORDER = ["480p", "540p", "720p", "1080p"]
+_H3_RESOLUTION_PRESET_ORDER = ["480p", "540p", "720p", "768p", "1080p"]
 _H3_AUTO_RESOLUTION_BUDGETS = {
     "auto": 1280 * 704,
     "auto_480p": 864 * 480,
@@ -577,16 +583,19 @@ _H3_FULL_ESTIMATED_PIPELINE_RAM_GB = 54.0
 _H3_FULL_MINIMUM_SYSTEM_RAM_GB = 64.0
 
 _RESOLUTIONS = [
+    ("2528x1088 (21:9 experimental)", "2528x1088"),
     ("1920x1088 (16:9 experimental)", "1920x1088"),
     ("1088x1920 (9:16 experimental)", "1088x1920"),
     ("1440x1088 (4:3 experimental)", "1440x1088"),
     ("1088x1440 (3:4 experimental)", "1088x1440"),
     ("1088x1088 (1:1 experimental)", "1088x1088"),
+    ("1792x768 (21:9 native)", "1792x768"),
     ("1344x768 (16:9 high)", "1344x768"),
     ("768x1344 (9:16 high)", "768x1344"),
     ("1024x768 (4:3 high)", "1024x768"),
     ("768x1024 (3:4 high)", "768x1024"),
     ("768x768 (1:1 high)", "768x768"),
+    ("1632x704 (21:9 720p)", "1632x704"),
     ("1280x704 (16:9 720p)", "1280x704"),
     ("704x1280 (9:16 720p)", "704x1280"),
     ("928x704 (4:3 720p)", "928x704"),
@@ -594,11 +603,13 @@ _RESOLUTIONS = [
     ("704x704 (1:1 720p)", "704x704"),
     ("1152x640 (16:9)", "1152x640"),
     ("640x1152 (9:16)", "640x1152"),
+    ("1280x544 (21:9)", "1280x544"),
     ("960x544 (16:9)", "960x544"),
     ("544x960 (9:16)", "544x960"),
     ("736x544 (4:3)", "736x544"),
     ("544x736 (3:4)", "544x736"),
     ("736x736 (1:1)", "736x736"),
+    ("1120x480 (21:9 low VRAM)", "1120x480"),
     ("864x480 (16:9 low VRAM)", "864x480"),
     ("480x864 (9:16 low VRAM)", "480x864"),
     ("640x480 (4:3 low VRAM)", "640x480"),

@@ -262,12 +262,16 @@ export interface H3WindowPlanWindow {
   shot_count?: number
   injected_keyframes?: H3InjectedKeyframe[]
   prompt: string
+  prompt_tokens?: number
+  prompt_token_limit?: number
+  prompt_compacted?: boolean
 }
 
 export interface H3WindowPlan {
   source_prompt: string
   signature: string
   planned_by: 'llm' | 'deterministic_fallback' | 'not_needed' | 'manual'
+  planning_warnings?: string[]
   plan_kind?: 'sliding_window' | 'reference_sequence'
   camera_coverage?: 'auto' | 'continuous' | 'multi_shot'
   total_frames: number
@@ -282,6 +286,7 @@ export interface H3WindowPlan {
   model_type: string
   subject_continuity?: string
   setting_continuity?: string
+  source_intent?: Record<string, unknown>
   injected_keyframes?: H3InjectedKeyframe[]
   windows: H3WindowPlanWindow[]
   window_prompts: string[]
@@ -318,6 +323,21 @@ export interface GenerationJob {
   oomInfo?: OomInfo | null
   /** Exact prompts assigned to an in-flight H3 sliding-window generation. */
   h3WindowPlan?: H3WindowPlan | null
+  /** Adaptive video ETA fields; omitted for image/audio/tool jobs. */
+  currentClip?: number
+  totalClips?: number
+  currentWindow?: number
+  totalWindows?: number
+  windowEtaSeconds?: number | null
+  clipEtaSeconds?: number | null
+  generationEtaSeconds?: number | null
+  projectEtaSeconds?: number | null
+  windowCompletionAt?: number | null
+  clipCompletionAt?: number | null
+  generationCompletionAt?: number | null
+  projectCompletionAt?: number | null
+  etaConfidence?: 'calibrating' | 'low' | 'medium' | 'high'
+  etaBasis?: 'waiting-for-first-clip' | 'live-adaptive' | 'live-cache-aware'
 }
 
 export interface OutputFile {
@@ -336,7 +356,7 @@ export interface OutputFile {
 }
 
 export type MediaFilter = 'all' | 'images' | 'videos' | 'audio' | 'avatars' | 'multiclip' | 'favorites'
-export type AspectRatio = 'auto' | '16:9' | '9:16' | '1:1' | '4:3' | '3:4'
+export type AspectRatio = 'auto' | '21:9' | '16:9' | '9:16' | '1:1' | '4:3' | '3:4'
 export type ResolutionPreset = 'auto' | '480p' | '540p' | '720p' | '768p' | '1080p'
 export type ScailResolutionProfile = '480p' | '512p' | '704p'
 /** Backward-compatible name for saved Recast/API callers. */
@@ -576,6 +596,10 @@ export interface SystemConfig {
   prompt_enhancer_quantization: string
   attention_modes_available: string[]
   vram_safety_coefficient: number
+  /** Plays once on the computer hosting Maestro, independent of browser
+   * notification permissions and per-browser preferences. */
+  host_notification_sound_enabled: boolean
+  host_notification_sound_volume: number
   // Linked model folders (absolute paths outside the Maestro install,
   // e.g. an existing Wan2GP install's ckpts). Searched read-only for
   // already-downloaded checkpoints; new downloads always go to Maestro's
@@ -608,6 +632,34 @@ export interface OutputMetadata {
   created_at?: number
 }
 
+export interface WebPushStatus {
+  supported: boolean
+  public_key: string
+  subscription_count: number
+  reason: string | null
+}
+
+export interface WebPushMutationResult {
+  subscribed?: boolean
+  unsubscribed?: boolean
+  subscription_count: number
+}
+
+export interface TailscaleRemoteAccessStatus {
+  installed: boolean
+  connected: boolean
+  backend_state: string
+  dns_name: string | null
+  https_url: string | null
+  configured: boolean
+  enabled: boolean
+  target_port: number
+  install_url: string
+  platform: string
+  needs_login: boolean
+  error: string | null
+}
+
 export interface MultiClip {
   prompt: string
   startImage: File | null
@@ -617,7 +669,7 @@ export interface MultiClip {
   durationFrames?: number
 }
 
-export type SettingsTab = 'performance' | 'integrations'
+export type SettingsTab = 'performance' | 'integrations' | 'notifications'
 
 export interface ServicesConfig {
   llm_model_id: string

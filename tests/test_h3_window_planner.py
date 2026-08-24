@@ -16,6 +16,7 @@ if str(APP) not in sys.path:
 
 from services.h3_window_planner import (  # noqa: E402
     _compact,
+    _dialogue_sentence,
     _fallback_plan,
     _narrative_dialogue_expected,
     _plan_contract_violations,
@@ -123,6 +124,30 @@ def _staged_segment(
 
 
 class H3WindowPlannerTests(unittest.TestCase):
+    def test_official_dialogue_format_supports_groups_and_voiceover(self):
+        speaker_ids: dict[str, str] = {}
+        group = _dialogue_sentence({
+            "speaker": "The two children",
+            "speaker_id": "S1, S2",
+            "language": "English",
+            "delivery": "shout together",
+            "action": "running toward the door",
+            "text": "Wait for us!",
+        }, speaker_ids)
+        voiceover = _dialogue_sentence({
+            "speaker": "The narrator",
+            "speaker_id": "",
+            "language": "English",
+            "delivery": "quiet reflective voiceover",
+            "action": "off-screen while his younger self walks",
+            "text": "I still remember that road.",
+        }, speaker_ids)
+
+        self.assertIn("(S1,S2)", group)
+        self.assertIn("<d>[English] Wait for us!</d>", group)
+        self.assertIn("(S3) says in an off-screen voiceover", voiceover)
+        self.assertIn("on-screen character's lips remain completely closed", voiceover)
+
     def test_context_ir_is_unwrapped_before_sequence_planning(self):
         recovered = recover_h3_plain_story(
             "subject_definitions: <Picture 1> defines Superman.\n\n"
@@ -178,6 +203,58 @@ class H3WindowPlannerTests(unittest.TestCase):
             " ".join(closing_states).casefold(),
         )
         self.assertIn("Superman strikes Thanos", closing_states[-1])
+
+    @patch("services.llm_service.generate", side_effect=RuntimeError("offline"))
+    def test_fallback_preserves_first_person_story_across_two_windows(self, _generate):
+        prompt = (
+            "POV: The viewer is Harry Potter as he stands on top of a scenic mountain. "
+            "The scene starts with Hermione Granger and Ron Weasley standing with you, "
+            "each holding a broom. Hermione says, \"Come on! Let's go!\" Ron says in a "
+            "nervous voice, \"Ah, I don't know about this, Hermione.\" The POV off-camera "
+            "voice of Harry Potter yells, \"Leeroy Jenkins!!!\" Then they all laugh as "
+            "they mount their brooms and plummet over the edge above the clouds, dropping "
+            "at an extremely high rate of speed while flying between canyon walls, through "
+            "waterfalls, and through caves. Extremely exciting POV speed with two hands "
+            "holding the end of the broom. Epic, thrilling, cinematic, realistic film."
+        )
+        result = plan_h3_sliding_windows(
+            prompt,
+            model_type="minimax_h3_fl2va_full",
+            resolution="1280x704",
+            total_frames=648,
+            window_frames=345,
+            overlap_frames=18,
+            fps=24,
+        )
+
+        self.assertEqual(result["window_count"], 2)
+        self.assertEqual(result["planned_by"], "deterministic_fallback")
+        self.assertTrue(result.get("planning_warnings"))
+        first, second = result["window_prompts"]
+        joined = "\n".join(result["window_prompts"])
+
+        for line in (
+            "Come on! Let's go!",
+            "Ah, I don't know about this, Hermione.",
+            "Leeroy Jenkins!!!",
+        ):
+            self.assertEqual(joined.count(line), 1)
+        self.assertIn("first-person POV", first)
+        self.assertNotIn("wide or medium-wide establishing view", joined)
+        self.assertIn("mount their brooms", first)
+        self.assertIn("plummet over the edge", first)
+        self.assertIn("between canyon walls", second)
+        self.assertIn("through waterfalls", second)
+        self.assertIn("through caves", second)
+        self.assertIn("hands and held object remain visible", second)
+        self.assertIn("extremely fast real-time movement", second)
+        self.assertNotIn("<d>[English]", second)
+        self.assertIn(
+            "<Picture 1> (from [Shot 1]) is fully referenced",
+            second,
+        )
+        self.assertNotIn("central outcome", joined.casefold())
+        self.assertNotIn("Hermione Granger and Ron.", joined)
 
     def test_native_reference_segment_instruction_rejects_keyframe_restaging(self):
         calls = []
@@ -443,7 +520,7 @@ class H3WindowPlannerTests(unittest.TestCase):
         first_segment_prompt = generate.call_args_list[1].kwargs["prompt"]
         self.assertIn("Segment geometry", ledger_prompt)
         self.assertIn("local duration 0.000", first_segment_prompt)
-        self.assertIn("Assigned beats", first_segment_prompt)
+        self.assertIn("Immutable chronological events", first_segment_prompt)
 
     @patch("services.llm_service.generate")
     def test_mature_mode_uses_fidelity_note_not_general_enhancer(self, generate):
@@ -579,7 +656,7 @@ class H3WindowPlannerTests(unittest.TestCase):
             ],
         }
         compiled = compile_h3_window_prompts(plan, boundaries)
-        self.assertIn("[Shot 2] At 4.00 seconds, hard cut", compiled[0]["prompt"])
+        self.assertIn("[Shot 2] At 00:04.000, hard cut", compiled[0]["prompt"])
         self.assertIn("The first punch lands once", compiled[0]["prompt"])
         self.assertNotIn("They recover and separate", compiled[0]["prompt"])
         self.assertIn(
@@ -667,6 +744,9 @@ class H3WindowPlannerTests(unittest.TestCase):
         )
         self.assertEqual(generate.call_count, 6)
         self.assertEqual(result["planned_by"], "llm")
+        repair_prompt = generate.call_args_list[1].kwargs["prompt"]
+        self.assertIn("PREVIOUS REJECTED CONTEXT JSON", repair_prompt)
+        self.assertIn("golden energy", repair_prompt)
         joined = " ".join(result["window_prompts"])
         self.assertNotIn("golden energy", joined)
         self.assertIn(

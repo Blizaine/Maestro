@@ -66,6 +66,11 @@ Appearance mode is **Dark / Light / Auto** — Auto follows your system's appear
 ### 📂 Workspaces
 Multiple isolated output directories with a quick switcher in the sidebar. Useful for separating client projects, NSFW vs SFW, or experiments. Pinned and favorited outputs are tracked per workspace.
 
+### 🔔 Completion alerts and private phone access
+- In-app alerts, optional browser notifications, per-device chimes, and a host-computer completion sound are available under **Settings → Notifications**.
+- Encrypted Web Push can notify an installed iPhone/iPad Home Screen app or supported desktop browser even after Maestro is closed.
+- Optional **Tailscale Serve** support gives each user a private, trusted HTTPS address for Maestro using their own Tailscale account. It is restricted to that user's tailnet—Maestro never enables public Tailscale Funnel access and does not operate a cloud relay.
+
 ### 🔒 Mature mode + experimental gate
 - **NSFW mode** is opt-in with a disclaimer step. Disabled by default. Gates uncensored model variants, NSFW LoRAs in the CivitAI browser, and the Settings → Services NSFW toggle.
 - **Experimental features gate** hides power-user toggles (external API keys, Voice Reference, Inpaint, Restyle, Wan2GP Enhancer) by default for a focused first-launch experience.
@@ -707,6 +712,46 @@ After clicking **Start**, the launcher shows an **Open Web UI** button once the 
 ## Sharing on the local network
 
 Maestro respects Pinokio's `PINOKIO_SHARE_LOCAL` environment variable. Set it to `false` (in the per-app or global ENVIRONMENT file) to bind the server to loopback only; set to `true` for LAN access. Pinokio's own daemon proxy is a separate concern that may also need to honor the variable depending on your setup.
+
+## Private HTTPS and phone notifications
+
+Tailscale is optional. Its Personal plan is suitable for an individual connecting their own devices; every Maestro user signs into their own Tailscale account rather than joining a Maestro-owned network.
+
+1. Install Tailscale on the Maestro computer and phone, then sign both into the same account.
+2. Start Maestro. In the Pinokio menu choose **Secure Remote Access (Tailscale)**, or use **Settings → Notifications → Private HTTPS access** when the operating system permits non-elevated setup.
+3. Scan/copy the private `https://…ts.net` address shown in Maestro's Notifications settings.
+4. On iPhone/iPad, open that address in Safari, use **Share → Add to Home Screen**, open the installed Maestro app, and enable **System notifications**.
+
+The Tailscale route is refreshed automatically when Pinokio assigns Maestro a different local port. Disable it from Notifications settings or run `tailscale serve --https=443 off`. Maestro will refuse to overwrite a different existing Serve route. Web Push signing keys and browser subscriptions live only in `app/settings/web_push.json` (a gitignored local file). Notification payloads travel directly from the local Maestro host to the browser vendor's encrypted Web Push endpoint.
+
+### Notification and remote-access API
+
+The same local endpoints used by the UI are available for automation. For example:
+
+```bash
+# Curl
+curl http://127.0.0.1:7860/api/v1/remote-access/tailscale/status
+curl http://127.0.0.1:7860/api/v1/notifications/push/status
+```
+
+```python
+# Python
+import requests
+
+status = requests.get(
+    "http://127.0.0.1:7860/api/v1/remote-access/tailscale/status",
+    timeout=10,
+).json()
+print(status.get("https_url"))
+```
+
+```javascript
+// JavaScript
+const status = await fetch('/api/v1/remote-access/tailscale/status').then(r => r.json())
+console.log(status.https_url)
+```
+
+Mutating endpoints are `POST /api/v1/remote-access/tailscale/enable`, `POST /api/v1/remote-access/tailscale/disable`, `POST|DELETE /api/v1/notifications/push/subscribe`, and `POST /api/v1/notifications/push/test`. A Push subscription contains browser-issued endpoint and encryption keys and should be treated as private local configuration.
 
 ## Credits
 

@@ -23,12 +23,14 @@ from services.job_lifecycle import (  # noqa: E402
     finish_job,
     record_job_outputs,
     register_abort_state,
+    register_terminal_listener,
     release_held,
     request_cancel,
     snapshot_job,
     try_requeue,
     try_start,
     unregister_abort_state,
+    unregister_terminal_listener,
     update_job,
 )
 
@@ -255,6 +257,51 @@ class TestJobLifecycle(unittest.TestCase):
         self.assertFalse(result.changed)
         self.assertEqual(job["status"], "completed")
         interrupt.assert_not_called()
+
+    def test_terminal_listener_receives_published_snapshot_once(self):
+        job = _job()
+        listener = Mock()
+        register_terminal_listener(listener)
+        try:
+            self.assertTrue(try_start(job))
+            self.assertTrue(finish_job(
+                job,
+                "completed",
+                message="Done",
+                output_files=["result.mp4"],
+            ))
+            self.assertFalse(finish_job(job, "completed", message="Again"))
+        finally:
+            unregister_terminal_listener(listener)
+
+        listener.assert_called_once()
+        snapshot, status = listener.call_args.args
+        self.assertEqual(status, "completed")
+        self.assertEqual(snapshot["status"], "completed")
+        self.assertEqual(snapshot["output_files"], ["result.mp4"])
+
+    def test_cancelled_job_does_not_emit_terminal_listener_event(self):
+        job = _job()
+        listener = Mock()
+        register_terminal_listener(listener)
+        try:
+            self.assertTrue(try_start(job))
+            request_cancel(job)
+            self.assertFalse(finish_job(job, "completed", message="Too late"))
+        finally:
+            unregister_terminal_listener(listener)
+        listener.assert_not_called()
+
+    def test_terminal_listener_failure_cannot_fail_completion(self):
+        job = _job()
+        listener = Mock(side_effect=RuntimeError("speaker unavailable"))
+        register_terminal_listener(listener)
+        try:
+            self.assertTrue(try_start(job))
+            self.assertTrue(finish_job(job, "completed", message="Done"))
+        finally:
+            unregister_terminal_listener(listener)
+        self.assertEqual(job["status"], "completed")
 
     def test_worker_updates_require_a_running_job(self):
         job = _job()

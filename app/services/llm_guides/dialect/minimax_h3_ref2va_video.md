@@ -6,13 +6,19 @@ MINIMAX H3 REF2VA CONTEXT-IR RULES (apply to video_prompt):
 - Begin summary with the applicable official task types in square brackets, such as [reference generation + audio reference] or [reference generation + audio reuse]. Do not repeat literal dialogue in summary.
 - In retention_analysis, visual subjects/pictures/videos use only fully_preserved, partially_preserved, attribute_transfer, or weak_reference. Audio uses only fully_copy, partially_copy, reference, or weak_reference.
 - When a picture supplies only a reusable person, object, environment, or style, cite it inside that <Subject N> definition instead of pretending it is a concrete keyframe. Identity images never contribute their source background, framing, composition, or pose unless explicitly mapped as composition references.
-- Begin detailed_description with [Shot 1]. Describe visible action, camera behavior, dialogue, and synchronized sound in chronological order.
+- Begin detailed_description with one or two English sentences establishing the visual style, lighting, color, and texture; then write [Shot 1] with no timestamp. Later shots begin [Shot N] At MM:SS.mmm, followed by a concrete cut or transition.
+- Make detailed_description explicit rather than summary-like: establish composition, referenced subject appearance and position, environment, action and state changes, camera movement, current sound, and where each reference actually takes effect. Direct generation rewrites normally use 350-500 English words; dialogue-dense timelines prioritize complete speech over a mechanical word quota.
+- Insert <Subject N>, <Picture N>, <Video N>, and <Audio N> at the first visible or audible point where each role applies. At a subject's first clear appearance, give its referenced traits, frame position, and current action.
 - Assign every speaking person a stable ID such as (S1) or (S2). Keep the same ID throughout the Director project.
+- Use a compound ID such as (S1,S2) when already numbered people speak or sing together. Characters who never vocalize receive no speaker ID.
 - Write literal speech only as <d>[English] Exact words.</d>, changing the language tag when requested. Put speaker identity, voice, action, and delivery outside the tag.
+- For voiceover, use the exact phrase "says in an off-screen voiceover" and state immediately after the <d> block that the corresponding on-screen character's lips remain completely closed.
+- Use <scenetrans> at both connecting points only when the same dialogue or lyrics truly cross a cut, and <cutoff> only when speech is truncated by the video ending.
+- Preserve visible signs, labels, banners, subtitles, and other on-screen text verbatim inside English double quotation marks; never translate it.
 - Preserve supplied dialogue verbatim. When speech is requested without a script, create concise meaningful lines that fit the clip at no more than about two words per second.
 - Preserve recognizable proper names, characters, performers, series, films, and franchises exactly as supplied.
 - When no dialogue is requested, explicitly keep mouths closed and omit voices or speech-like sounds. Never invent speech to fill time.
 - When driving audio is supplied, describe visible performance, lip movement, rhythm, and action synchronized to that timeline; do not transcribe or replace its audible content.
-- overall_soundscape contains ambience, practical effects, and non-verbal human sounds; do not repeat dialogue there.
-- non_diegetic_music describes audience-only music. Use N/A unless music is requested or a driving soundtrack is mapped.
+- overall_soundscape contains ambience and physical sounds in one to four complete English sentences; do not repeat dialogue or shot-local synchronized vocal events there.
+- non_diegetic_music describes audience-only music in one to three complete sentences, including instrumentation, tempo, and dynamic development when present. Use N/A unless music is requested or a driving soundtrack is mapped.
 - No negative prompts, technical parameters, model names, LoRA filenames, or explanatory prose.

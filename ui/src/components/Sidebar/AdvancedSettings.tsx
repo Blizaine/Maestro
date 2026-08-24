@@ -351,6 +351,10 @@ export function AdvancedSettings() {
                 </>
               )}
 
+              {/* Presets belong with the creative adapter controls so users can
+                  save or restore a setup before adjusting its LoRAs. */}
+              <PresetManager />
+
               {/* Keep creative adapters near the top so users can choose them
                   before working through the lower-level tuning controls.
                   Official Outpaint owns its stage-one-only IC-LoRA schedule. */}
@@ -1081,9 +1085,6 @@ export function AdvancedSettings() {
                   )}
                 </div>
               )}
-
-              {/* Presets */}
-              <PresetManager />
 
               {/* Dedicated SCAIL edit endpoints own their source video,
                   edited/reference frames, masks, and process selection. */}

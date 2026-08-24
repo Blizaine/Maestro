@@ -7639,14 +7639,13 @@ def generate_video(
         release_model()
         # Pre-flight: detect first-use download so the UI can show
         # "Downloading model..." instead of "Loading model..." while
-        # the multi-GB safetensors come down. Heuristic — checks
-        # whether the primary weights file exists locally; doesn't
-        # check every dependency (text encoder, VAE, modules) because
-        # replicating load_models' file enumeration here would be
-        # brittle. Edge case: primary file present but a secondary
-        # asset missing → we'd show "Loading" while a small download
-        # happens. Acceptable trade-off; the dominant case (full
-        # first-time download of a fresh model) is correctly tagged.
+        # the multi-GB safetensors come down. Use the same compatibility-
+        # aware resolver as load_models(): H3 Pruned can intentionally load
+        # an existing legacy FP8 or linked WanGP INT8 checkpoint whose name
+        # differs from the currently preferred artifact. An exact-name-only
+        # check mislabeled that ordinary RAM/VRAM load as a download.
+        # This remains a primary-file heuristic; a missing secondary asset
+        # may begin a smaller download while the status still says Loading.
         _model_label = get_model_name(model_type)
         _needs_download = False
         try:
@@ -7658,7 +7657,11 @@ def generate_video(
                 dtype_policy=transformer_dtype_policy,
             )
             if _primary_filename and len(_primary_filename) > 0:
-                _local = get_local_model_filename(_primary_filename)
+                _local = get_compatible_local_model_filename(
+                    _primary_filename,
+                    model_type,
+                    file_type=0,
+                )
                 _needs_download = (_local is None)
         except Exception:
             pass  # never let a UX-only check block generation
@@ -10062,6 +10065,10 @@ def generate_video(
                         concat_name = f"{time_flag}_seed{seed}_multiclip{concat_ext}"
                         concat_path = os.path.join(save_path, concat_name)
                         print(f"[Multi-Clip] Concatenating {len(clip_paths)} clips into {concat_path}")
+                        send_cmd(
+                            "status",
+                            f"Joining {len(clip_paths)} clips into the final video...",
+                        )
                         target_total_frames = int(
                             multi_clip_info.get("target_total_frames", 0) or 0
                         )

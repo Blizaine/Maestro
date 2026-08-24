@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, DirectorShotImageGuidance, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineClipState, PipelineRepairState, SavedPipelineState, DirectorQueueState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping, H3WindowPlan } from '../types'
+import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, DirectorShotImageGuidance, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineClipState, PipelineRepairState, SavedPipelineState, DirectorQueueState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping, H3WindowPlan, MiniMaxH3Reference } from '../types'
 import * as api from '../api/client'
 import { applyThemePrefs, getStoredPrefs, type FamilyId, type ThemeMode, type ThemePrefs } from '../lib/theme'
 import {
@@ -32,6 +32,25 @@ let _dashboardPipelineLoadToken = 0
 let _dashboardPipelineListLoadToken = 0
 let _h3WindowOverridesHydrated = false
 let _h3WindowOverrideSaveTask: Promise<void> = Promise.resolve()
+
+function _adaptiveEtaJobFields(status: api.ApiJobStatus): Partial<GenerationJob> {
+  return {
+    currentClip: status.current_clip,
+    totalClips: status.total_clips,
+    currentWindow: status.current_window,
+    totalWindows: status.total_windows,
+    windowEtaSeconds: status.window_eta_seconds,
+    clipEtaSeconds: status.clip_eta_seconds,
+    generationEtaSeconds: status.generation_eta_seconds,
+    projectEtaSeconds: status.project_eta_seconds,
+    windowCompletionAt: status.window_completion_at,
+    clipCompletionAt: status.clip_completion_at,
+    generationCompletionAt: status.generation_completion_at,
+    projectCompletionAt: status.project_completion_at,
+    etaConfidence: status.eta_confidence,
+    etaBasis: status.eta_basis,
+  }
+}
 
 function _saveH3WindowOverrides(overrides: Record<string, number>) {
   _h3WindowOverrideSaveTask = _h3WindowOverrideSaveTask
@@ -1615,6 +1634,11 @@ interface AppState {
   directorError: string | null
   directorReferenceImage: File | null
   directorReferenceImagePath: string | null
+  /** Ordered mixed-media references used by H3 Omni Director projects. */
+  directorH3References: MiniMaxH3Reference[]
+  directorH3ReferenceDetail: 'match' | 'max'
+  setDirectorH3References: (references: MiniMaxH3Reference[]) => void
+  setDirectorH3ReferenceDetail: (detail: 'match' | 'max') => void
   directorCharacterRefs: File[]
   directorCharacterRefPaths: string[]
   directorCharacterRefLabels: string[]
@@ -1707,7 +1731,7 @@ interface AppState {
   setDirectorSongLyrics: (v: string) => void
   setDirectorSongDuration: (v: number) => void
   directorWriteSong: () => Promise<void>
-  directorGenerateTrack: () => Promise<void>
+  directorGenerateTrack: (mode?: 'now' | 'queue') => Promise<void>
   directorAnalyzeAndPlan: (audioPath: string, opts?: { transcribe?: boolean; lyricsHint?: string }) => Promise<void>
   directorSetEnergyBias: (bias: number) => Promise<void>
   directorConfirmStructure: () => void
@@ -1892,6 +1916,102 @@ async function _buildDirectorRestorePatch(
   const voiceName = typeof ui.directorVoiceRefName === 'string'
     ? ui.directorVoiceRefName
     : _assetName(voicePath, 'Voice reference')
+  const persistedH3References = Array.isArray(params.minimax_h3_references)
+    ? params.minimax_h3_references
+        .map((raw, index): MiniMaxH3Reference | null => {
+          const reference = _record(raw)
+          const kind = reference.type === 'video'
+            ? 'video'
+            : reference.type === 'audio' ? 'audio' : 'image'
+          const path = typeof reference.path === 'string' ? reference.path : ''
+          if (!path) return null
+          const manifestItem = _directorAssetItem(
+            manifest, 'minimax_h3_references', index,
+          )
+          const pathAsset = _record(manifestItem.path)
+          const servePath = typeof pathAsset.serve_path === 'string'
+            ? pathAsset.serve_path
+            : _assetName(path, '')
+          const attachedPath = typeof reference.audio_path === 'string'
+            ? reference.audio_path : undefined
+          const attachedAsset = _record(manifestItem.audio_path)
+          const restoredAttachedPath = typeof attachedAsset.path === 'string'
+            ? attachedAsset.path : attachedPath
+          return {
+            ...(reference as unknown as MiniMaxH3Reference),
+            id: typeof reference.id === 'string' && reference.id
+              ? reference.id : `director-omni-${index + 1}`,
+            type: kind,
+            path: typeof pathAsset.path === 'string' ? pathAsset.path : path,
+            filename: typeof reference.filename === 'string' && reference.filename
+              ? reference.filename : _assetName(path, `${kind}-${index + 1}`),
+            url: servePath ? api.getFileUrl(servePath) : undefined,
+            ...(restoredAttachedPath ? { audio_path: restoredAttachedPath } : {}),
+          }
+        })
+        .filter((reference): reference is MiniMaxH3Reference => reference !== null)
+    : []
+
+  // Older H3 Omni Director projects predate the ordered mixed-media editor.
+  // Upgrade their legacy main/character/location/voice assets in memory so
+  // Open & Edit immediately exposes the modern controls without rewriting the
+  // saved revision until the user submits a new one.
+  const directorH3References: MiniMaxH3Reference[] = [...persistedH3References]
+  const isLegacyH3Omni = String(params.video_model || pipeline.video_model || '')
+    .toLowerCase().startsWith('minimax_h3_ref2va')
+  if (isLegacyH3Omni && directorH3References.length === 0) {
+    if (referencePath) {
+      directorH3References.push({
+        id: 'director-omni-primary',
+        type: 'image',
+        path: referencePath,
+        filename: referenceName,
+        url: referenceServePath ? api.getFileUrl(referenceServePath) : undefined,
+        role: 'the primary cast identity and appearance',
+        image_intent: 'identity',
+      })
+    }
+    characterPaths.forEach((path, index) => directorH3References.push({
+      id: `director-omni-character-${index + 1}`,
+      type: 'image',
+      path,
+      filename: _assetName(path, `character-${index + 1}.png`),
+      url: (() => {
+        const servePath = _directorServePath(
+          manifest, 'character_ref_paths', path, index,
+        )
+        return servePath ? api.getFileUrl(servePath) : undefined
+      })(),
+      role: _stringArray(ui.directorCharacterRefLabels || params.character_ref_labels)[index]
+        || `character ${index + 1}`,
+      image_intent: 'identity',
+    }))
+    locationPaths.forEach((path, index) => directorH3References.push({
+      id: `director-omni-location-${index + 1}`,
+      type: 'image',
+      path,
+      filename: _assetName(path, `location-${index + 1}.png`),
+      url: (() => {
+        const servePath = _directorServePath(
+          manifest, 'location_ref_paths', path, index,
+        )
+        return servePath ? api.getFileUrl(servePath) : undefined
+      })(),
+      role: _stringArray(ui.directorLocationRefLabels || params.location_ref_labels)[index]
+        || `location ${index + 1}`,
+      image_intent: 'scene',
+    }))
+    if (voicePath) {
+      directorH3References.push({
+        id: 'director-omni-voice',
+        type: 'audio',
+        path: voicePath,
+        filename: voiceName,
+        role: 'the primary character voice',
+        audio_intent: 'voice',
+      })
+    }
+  }
   const pipelineType = String(params.pipeline_type || pipeline.pipeline_type || 'music_video')
   const skill: DirectorSkill = pipelineType.startsWith('short_film')
     ? 'short_film'
@@ -1927,6 +2047,10 @@ async function _buildDirectorRestorePatch(
     directorClipImages: clipImages,
     directorReferenceImage: referenceFile,
     directorReferenceImagePath: referencePath,
+    directorH3References,
+    directorH3ReferenceDetail: (
+      params.minimax_h3_reference_detail === 'max' ? 'max' : 'match'
+    ),
     directorCharacterRefs: characterFiles,
     directorCharacterRefPaths: characterPaths,
     directorCharacterRefLabels: _stringArray(ui.directorCharacterRefLabels || params.character_ref_labels),
@@ -2055,6 +2179,7 @@ const BLANK_VIDEO_INPUT_PARAMS: Partial<GenerateParams> = {
 const resolutionMap: Record<ResolutionPreset, Record<AspectRatio, string>> = {
   'auto': {
     'auto': 'auto',
+    '21:9': 'auto',
     '16:9': 'auto',
     '9:16': 'auto',
     '1:1': 'auto',
@@ -2063,6 +2188,7 @@ const resolutionMap: Record<ResolutionPreset, Record<AspectRatio, string>> = {
   },
   '480p': {
     'auto': 'auto_480p',
+    '21:9': '1120x480',
     '16:9': '848x480',
     '9:16': '480x848',
     '1:1': '672x672',
@@ -2071,6 +2197,7 @@ const resolutionMap: Record<ResolutionPreset, Record<AspectRatio, string>> = {
   },
   '540p': {
     'auto': 'auto_540p',
+    '21:9': '1280x544',
     '16:9': '960x544',
     '9:16': '544x960',
     '1:1': '736x736',
@@ -2079,6 +2206,10 @@ const resolutionMap: Record<ResolutionPreset, Record<AspectRatio, string>> = {
   },
   '720p': {
     'auto': 'auto_720p',
+    // H3 is currently the only model that exposes 21:9. Keep the fallback
+    // canvas on its required 32-pixel lattice if model options are briefly
+    // unavailable while Director/Studio is hydrating.
+    '21:9': '1632x704',
     '16:9': '1280x720',
     '9:16': '720x1280',
     '1:1': '1024x1024',
@@ -2087,6 +2218,7 @@ const resolutionMap: Record<ResolutionPreset, Record<AspectRatio, string>> = {
   },
   '768p': {
     'auto': 'auto_768p',
+    '21:9': '1792x768',
     '16:9': '1344x768',
     '9:16': '768x1344',
     '1:1': '768x768',
@@ -2095,6 +2227,7 @@ const resolutionMap: Record<ResolutionPreset, Record<AspectRatio, string>> = {
   },
   '1080p': {
     'auto': 'auto_1080p',
+    '21:9': '2528x1088',
     '16:9': '1920x1088',
     '9:16': '1088x1920',
     '1:1': '1024x1024',
@@ -2184,9 +2317,10 @@ function computeFilteredOutputs(outputs: OutputFile[], mediaFilter: MediaFilter)
  *  browser flow and the durable server pipeline take the same branch. */
 function _directorUsesGeneratedShotImages(state: AppState): boolean {
   const videoModel = state.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
-  const support = state.models.find(
+  const selectedModel = state.models.find(
     model => model.model_type === videoModel,
-  )?.director?.shot_image_support
+  )
+  const support = selectedModel?.director?.shot_image_support
   const guidance = state.directorShotImageGuidance
   if (guidance === 'prompt_only') return false
   if (guidance === 'generate') return true
@@ -2199,6 +2333,12 @@ function _directorUsesGeneratedShotImages(state: AppState): boolean {
     || state.directorCharacterRefPaths.length
     || state.directorLocationRefs.length
     || state.directorLocationRefPaths.length
+    || (
+      selectedModel?.director?.video_strategy === 'omni_reference'
+      && state.directorH3References.some(
+        reference => reference.type === 'image' || reference.type === 'video',
+      )
+    )
   )
 }
 
@@ -6297,6 +6437,7 @@ export const useStore = create<AppState>((set, get) => ({
               outputFiles: status.output_files,
               error: status.error,
               oomInfo: status.oom_info ?? null,
+              ..._adaptiveEtaJobFields(status),
             }),
           }))
 
@@ -6413,6 +6554,7 @@ export const useStore = create<AppState>((set, get) => ({
             error: j.error,
             oomInfo: (j as { oom_info?: import('../types').OomInfo | null }).oom_info ?? null,
             h3WindowPlan: j.h3_window_plan ?? null,
+            ..._adaptiveEtaJobFields(j),
           }))
         if (newJobs.length > 0) {
           set(s => ({
@@ -6438,6 +6580,7 @@ export const useStore = create<AppState>((set, get) => ({
                     outputFiles: status.output_files,
                     error: status.error,
                     oomInfo: status.oom_info ?? null,
+                    ..._adaptiveEtaJobFields(status),
                   }),
                 }))
                 if (status.status === 'completed' || status.status === 'failed' || status.status === 'cancelled') {
@@ -6974,6 +7117,10 @@ export const useStore = create<AppState>((set, get) => ({
             : modelPresetOrder[0]
         }
         if (nextAspectRatio === 'auto' && !options.supports_auto_aspect) {
+          nextAspectRatio = '16:9'
+        }
+        const selectedPresetValues = options.resolution_presets?.[nextResolutionPreset]?.values
+        if (nextAspectRatio === '21:9' && !selectedPresetValues?.['21:9']) {
           nextAspectRatio = '16:9'
         }
         paramUpdates.resolution = resolveResolution(
@@ -7684,6 +7831,10 @@ export const useStore = create<AppState>((set, get) => ({
   directorError: null,
   directorReferenceImage: null,
   directorReferenceImagePath: null,
+  directorH3References: [],
+  directorH3ReferenceDetail: 'match' as const,
+  setDirectorH3References: (references) => set({ directorH3References: references }),
+  setDirectorH3ReferenceDetail: (detail) => set({ directorH3ReferenceDetail: detail }),
   directorCharacterRefs: [],
   directorCharacterRefPaths: [],
   directorCharacterRefLabels: [],
@@ -8154,7 +8305,7 @@ export const useStore = create<AppState>((set, get) => ({
   // gave a description), then hand off to the SAME analyze → plan-structure
   // chain the upload flow uses. In Auto mode, continue straight into the
   // pipeline so it's fully hands-off.
-  directorGenerateTrack: async () => {
+  directorGenerateTrack: async (mode = 'now') => {
     const s = get()
     const instrumental = s.directorSongInstrumental
     const description = s.directorSongDescription.trim()
@@ -8255,7 +8406,14 @@ export const useStore = create<AppState>((set, get) => ({
       // 'style' step isn't needed — proceed straight to planning. Auto runs the
       // full server-side pipeline; manual runs the frontend plan→review chain.
       if (get().directorStep === 'style') {
-        if (get().directorAutoMode) {
+        // A fresh generated-song idea can be held before Director planning or
+        // video generation begins. Music creation still happens here because
+        // the finished track and its analyzed timeline are inputs owned by the
+        // queued project; the expensive Director pipeline waits for Start
+        // Queue just like an uploaded-song or story project.
+        if (mode === 'queue') {
+          await get().startDirectorPipeline('queue')
+        } else if (get().directorAutoMode) {
           await get().startDirectorPipeline()
         } else {
           await get().directorPlanPrompts()
@@ -8799,6 +8957,8 @@ export const useStore = create<AppState>((set, get) => ({
       directorError: null,
       directorReferenceImage: null,
       directorReferenceImagePath: null,
+      directorH3References: [],
+      directorH3ReferenceDetail: 'match' as const,
       directorCharacterRefs: [],
       directorCharacterRefPaths: [],
       directorCharacterRefLabels: [],
@@ -10482,6 +10642,47 @@ export const useStore = create<AppState>((set, get) => ({
 
     const selectedImageModel = selectedModelPerMode.image || 'flux2_klein_9b'
     const selectedVideoModel = selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+    const selectedVideoDefinition = state.models.find(
+      model => model.model_type === selectedVideoModel,
+    )
+    const usesH3OmniReferences = (
+      selectedVideoModel.toLowerCase().startsWith('minimax_h3_ref2va')
+      ||
+      selectedVideoDefinition?.director?.video_strategy === 'omni_reference'
+    )
+    const directorH3References = usesH3OmniReferences
+      ? state.directorH3References.map(reference => ({ ...reference }))
+      : []
+    const exactDriveReferences = directorH3References.filter(
+      reference => reference.type === 'audio'
+        && (reference.audio_intent || 'voice') === 'drive',
+    )
+    if (exactDriveReferences.length > 1) {
+      set({
+        directorLoading: false,
+        directorQueueLoading: false,
+        directorError: 'H3 Omni accepts one Music / performance timeline. Change additional audio references to Voice or Style.',
+      })
+      return
+    }
+    const exactDriveReference = exactDriveReferences[0]
+    const exactDriveDuration = Number(exactDriveReference?.duration_seconds)
+    const analyzedDuration = Number(directorAnalysis?.duration)
+    if (
+      exactDriveReference
+      && shortFilmPath !== 'story'
+      && Number.isFinite(exactDriveDuration) && exactDriveDuration > 0
+      && Number.isFinite(analyzedDuration) && analyzedDuration > 0
+      && Math.abs(exactDriveDuration - analyzedDuration) > 0.75
+    ) {
+      set({
+        directorLoading: false,
+        directorQueueLoading: false,
+        directorError: `The H3 Omni performance timeline is ${exactDriveDuration.toFixed(1)}s, but Director planned this project for ${analyzedDuration.toFixed(1)}s. Use the same track as Director’s main audio, or re-analyze that track first.`,
+      })
+      return
+    }
+    const effectiveDirectorAudioPath = exactDriveReference?.path || directorAudioPath
 
     // Director model choices are independent from whichever Studio model was
     // edited most recently. Hydrate each selected model's own tuned defaults,
@@ -10634,9 +10835,6 @@ export const useStore = create<AppState>((set, get) => ({
     if (locPaths.length > state.directorLocationRefPaths.length) {
       set({ directorLocationRefPaths: locPaths })
     }
-    const selectedVideoDefinition = state.models.find(
-      model => model.model_type === selectedVideoModel,
-    )
     const supportsVoiceReference = (
       selectedVideoDefinition?.director?.supports_voice_reference === true
     )
@@ -10702,12 +10900,18 @@ export const useStore = create<AppState>((set, get) => ({
       _director_project_id: state.directorProjectId || undefined,
       _director_parent_pipeline_id: state.directorSourcePipelineId || undefined,
       scene_description: directorSceneDescription,
-      audio_path: directorAudioPath,
+      audio_path: effectiveDirectorAudioPath,
       // Audio analysis already produced this reusable stem for transcription.
       // LTX-2.5 can condition mouth motion on it while Director keeps the
       // untouched song as the final joined soundtrack.
-      audio_vocals_path: directorAnalysis?.vocals_path || undefined,
+      audio_vocals_path: effectiveDirectorAudioPath === directorAudioPath
+        ? (directorAnalysis?.vocals_path || undefined)
+        : undefined,
       reference_image_path: refImagePath,
+      ...(usesH3OmniReferences ? {
+        minimax_h3_references: directorH3References,
+        minimax_h3_reference_detail: state.directorH3ReferenceDetail,
+      } : {}),
       character_ref_paths: charPaths.length > 0 ? charPaths : undefined,
       character_ref_labels: state.directorCharacterRefLabels.length > 0 ? state.directorCharacterRefLabels : undefined,
       location_ref_paths: locPaths.length > 0 ? locPaths : undefined,
@@ -10796,7 +11000,8 @@ export const useStore = create<AppState>((set, get) => ({
         directorSkill: state.directorSkill,
         directorStep: state.directorStep,
         directorSceneDescription: state.directorSceneDescription,
-        directorAudioName: state.directorAudioFile?.name || null,
+        directorAudioName: exactDriveReference?.filename
+          || state.directorAudioFile?.name || null,
         directorAnalysis: state.directorAnalysis,
         directorPlannedClips: state.directorPlannedClips,
         directorEnergyBias: state.directorEnergyBias,
@@ -10811,6 +11016,7 @@ export const useStore = create<AppState>((set, get) => ({
         directorAspectRatio: state.directorAspectRatio,
         directorCharacterRefLabels: state.directorCharacterRefLabels,
         directorLocationRefLabels: state.directorLocationRefLabels,
+        directorH3ReferenceDetail: state.directorH3ReferenceDetail,
         directorVoiceRefName: state.directorVoiceRef?.name || null,
         directorIdentityGuidanceScale: state.directorIdentityGuidanceScale,
         directorMusicSource: state.directorMusicSource,

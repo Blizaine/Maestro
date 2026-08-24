@@ -5,8 +5,10 @@ import { fetchModelOptions, getFileUrl } from '../../api/client'
 import { DirectorLoraSelector } from '../SettingsDrawer/DirectorLoraSelector'
 import { DirectorSongSetup } from './DirectorSongSetup'
 import { DirectorH3Optimizations } from './DirectorH3Optimizations'
+import { OmniReferenceSection } from './OmniReferenceSection'
 import { InfoTooltip } from './InfoTooltip'
 import { formatSeconds, recommendedWindowProfile } from './DurationSlider'
+import { formatEstimatedClock, formatEtaDuration } from '../../lib/format'
 import type { DirectorPipelineType, DirectorShotImageGuidance, DirectorSkill, ModelOptions, ShortFilmCharacter, ShortFilmPath } from '../../types'
 
 // AUDIO_ACCEPT lists both audio formats AND video formats. When a video
@@ -382,6 +384,12 @@ export function DirectorChat() {
   const selectedDirectorShotImageSupport = useStore(s => s.models.find(
     model => model.model_type === (s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'),
   )?.director?.shot_image_support)
+  const directorUsesOmniManifest = useStore(s => {
+    const selected = s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+    return selected.toLowerCase().startsWith('minimax_h3_ref2va')
+      || s.models.find(model => model.model_type === selected)
+        ?.director?.video_strategy === 'omni_reference'
+  })
   const directorShotImageGuidance = useStore(s => s.directorShotImageGuidance)
   const directorHasVisualReferences = useStore(s => Boolean(
     s.directorReferenceImage
@@ -390,6 +398,14 @@ export function DirectorChat() {
     || s.directorCharacterRefPaths.length
     || s.directorLocationRefs.length
     || s.directorLocationRefPaths.length
+    || (
+      s.models.find(model => model.model_type === (
+        s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+      ))?.director?.video_strategy === 'omni_reference'
+      && s.directorH3References.some(
+        reference => reference.type === 'image' || reference.type === 'video',
+      )
+    )
   ))
   const sceneDescription = useStore(s => s.directorSceneDescription)
   const audioFile = useStore(s => s.directorAudioFile)
@@ -443,6 +459,7 @@ export function DirectorChat() {
     pipelineStatus && !['completed', 'failed', 'cancelled'].includes(pipelineStatus.status),
   )
   const directorQueue = useStore(s => s.directorQueue)
+  const directorQueueLoading = useStore(s => s.directorQueueLoading)
   const directorQueueEditingEntryId = useStore(s => s.directorQueueEditingEntryId)
   const queueCurrentDirectorPipeline = useStore(s => s.queueCurrentDirectorPipeline)
   const usesShotImages = directorWillGenerateShotImages(
@@ -465,6 +482,8 @@ export function DirectorChat() {
   const [showAnalysisDetails, setShowAnalysisDetails] = useState(false)
   const sliderRef = useRef<number | null>(null)
   const [chatInput, setChatInput] = useState('')
+  const [draftQueuePending, setDraftQueuePending] = useState(false)
+  const [draftQueueConfirmation, setDraftQueueConfirmation] = useState<string | null>(null)
 
   // Sync chatInput with store's sceneDescription when entering style step
   useEffect(() => {
@@ -472,6 +491,12 @@ export function DirectorChat() {
       setChatInput(sceneDescription)
     }
   }, [step])
+
+  useEffect(() => {
+    if (!draftQueueConfirmation) return
+    const timer = window.setTimeout(() => setDraftQueueConfirmation(null), 5000)
+    return () => window.clearTimeout(timer)
+  }, [draftQueueConfirmation])
 
   const refImagePreview = useMemo(
     () => referenceImage ? URL.createObjectURL(referenceImage) : null,
@@ -554,7 +579,7 @@ export function DirectorChat() {
     // Music Video "Generate a track": the chat is the song description, and
     // Send runs write-song → render track → analyze → plan → images → video.
     if (mvGenerateSetup) {
-      if (songDescription.trim() && !loading) generateTrack()
+      if (songDescription.trim() && !loading) void generateTrack('now')
       return
     }
     if (step === 'style' && chatInput.trim()) {
@@ -569,6 +594,44 @@ export function DirectorChat() {
       } else {
         planPrompts()
       }
+    }
+  }
+
+  const handleQueueDraft = async () => {
+    const description = (mvGenerateSetup ? songDescription : chatInput).trim()
+    if (!description || !chatInputEnabled || draftQueuePending || directorQueueLoading) return
+
+    // Keep the store authoritative even if the user clicks Queue immediately
+    // after typing. startDirectorPipeline freezes this value along with every
+    // selected model, LoRA, reference, and Director option.
+    if (!mvGenerateSetup) setSceneDescription(description)
+    setDraftQueuePending(true)
+    setDraftQueueConfirmation(null)
+    const before = useStore.getState()
+    const editingEntryId = before.directorQueueEditingEntryId
+    const beforeIds = new Set((before.directorQueue?.entries || []).map(entry => entry.id))
+    try {
+      if (mvGenerateSetup) {
+        await generateTrack('queue')
+      } else {
+        await queueCurrentDirectorPipeline()
+      }
+      const after = useStore.getState()
+      const queue = after.directorQueue
+      const savedEntry = editingEntryId
+        ? queue?.entries.find(entry => entry.id === editingEntryId)
+        : queue?.entries.find(entry => !beforeIds.has(entry.id))
+      if (!queue || !savedEntry || after.directorError) return
+      const waitingCount = queue.entries.filter(
+        entry => ['held', 'queued', 'running'].includes(entry.status),
+      ).length
+      setDraftQueueConfirmation(
+        editingEntryId
+          ? 'Queue changes saved. The project remains paused until Start Queue.'
+          : `Added to Queue · ${waitingCount} Director ${waitingCount === 1 ? 'project' : 'projects'} waiting. Configure another idea or press Start Queue when ready.`,
+      )
+    } finally {
+      setDraftQueuePending(false)
     }
   }
 
@@ -691,8 +754,36 @@ export function DirectorChat() {
         )}
 
         {pipelineActive && step === 'review_video' && (
-          <div className="rounded-lg border border-accent-blue/25 bg-accent-blue/10 px-3 py-2 text-[10px] leading-relaxed text-text-secondary">
-            The current render is frozen. Changes here apply to a new revision; Generate will add it to the held queue.
+          <div className="space-y-1 rounded-lg border border-accent-blue/25 bg-accent-blue/10 px-3 py-2 text-[10px] leading-relaxed text-text-secondary">
+            <div>
+              The current render is frozen. Changes here apply to a new revision; Generate will add it to the held queue.
+            </div>
+            {pipelineStatus?.progress?.current_clip && (
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 border-t border-accent-blue/15 pt-1 text-text-primary">
+                <span>
+                  Clip {pipelineStatus.progress.current_clip}/{pipelineStatus.progress.total_clips || '?'}
+                </span>
+                {pipelineStatus.progress.clip_eta_seconds != null && (
+                  <span>
+                    {formatEtaDuration(pipelineStatus.progress.clip_eta_seconds)} remaining
+                    {pipelineStatus.progress.clip_completion_at
+                      ? ` · around ${formatEstimatedClock(pipelineStatus.progress.clip_completion_at)}`
+                      : ''}
+                  </span>
+                )}
+                {pipelineStatus.progress.project_eta_seconds != null && (
+                  <span className="text-text-muted">
+                    Full render {formatEtaDuration(pipelineStatus.progress.project_eta_seconds)}
+                    {pipelineStatus.progress.project_completion_at
+                      ? ` · around ${formatEstimatedClock(pipelineStatus.progress.project_completion_at)}`
+                      : ''}
+                  </span>
+                )}
+                {pipelineStatus.progress.eta_confidence === 'calibrating' && (
+                  <span className="text-text-muted">Calibrating ETA…</span>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -702,8 +793,12 @@ export function DirectorChat() {
               <SystemBubble>
                 <p className="text-xs text-text-secondary mb-2">
                   {isShortFilm
-                    ? 'Upload dialogue audio, then add optional character and location references.'
-                    : 'Upload or generate a track, then add optional visual references.'}
+                    ? directorUsesOmniManifest
+                      ? 'Upload dialogue audio, then add ordered H3 Omni identity, motion, scene, voice, or style references.'
+                      : 'Upload dialogue audio, then add optional character and location references.'
+                    : directorUsesOmniManifest
+                      ? 'Upload or generate a track, then add ordered H3 Omni identity, motion, scene, voice, or style references.'
+                      : 'Upload or generate a track, then add optional visual references.'}
                 </p>
                 <div className="space-y-3">
                   {/* Music Video: upload a track OR generate one with the selected music model. */}
@@ -739,12 +834,11 @@ export function DirectorChat() {
                       isShortFilm={isShortFilm}
                     />
                   )}
-                  <ReferenceImageUpload
+                  <DirectorReferenceInputs
                     referenceImage={referenceImage}
                     refImagePreview={refImagePreview}
                     setReferenceImage={setReferenceImage}
                   />
-                  {<AdditionalRefsSection />}
                   {isShortFilm && referenceImage && (
                     <CharacterNaming
                       characters={shortFilmCharacters}
@@ -779,12 +873,12 @@ export function DirectorChat() {
                       as "my selections disappeared". Interaction is disabled
                       while loading; the state is untouched. */}
                   <div className={loading ? 'opacity-60 pointer-events-none' : ''}>
-                    <ReferenceImageUpload
+                    <DirectorReferenceInputs
                       referenceImage={referenceImage}
                       refImagePreview={refImagePreview}
                       setReferenceImage={setReferenceImage}
+                      disabled={loading}
                     />
-                    {<AdditionalRefsSection />}
                   </div>
                 </div>
               </SystemBubble>
@@ -823,12 +917,11 @@ export function DirectorChat() {
             {/* Allow adding/changing reference photo after analysis */}
             {!pastStep('style') && (
               <div className="mt-2 pt-2 border-t border-border/50">
-                <ReferenceImageUpload
+                <DirectorReferenceInputs
                   referenceImage={referenceImage}
                   refImagePreview={refImagePreview}
                   setReferenceImage={setReferenceImage}
                 />
-                {<AdditionalRefsSection />}
               </div>
             )}
           </SystemBubble>
@@ -879,15 +972,16 @@ export function DirectorChat() {
             {isStoryPath && atStep('style') && (
               <SystemBubble>
                 <p className="text-xs text-text-secondary mb-2">
-                  Set up your short film. Upload a reference photo, name your characters, and set the target duration.
+                  {directorUsesOmniManifest
+                    ? 'Set up your short film with ordered H3 Omni image, video, and audio references, then set the target duration.'
+                    : 'Set up your short film. Upload a reference photo, name your characters, and set the target duration.'}
                 </p>
                 <div className="space-y-3">
-                  <ReferenceImageUpload
+                  <DirectorReferenceInputs
                     referenceImage={referenceImage}
                     refImagePreview={refImagePreview}
                     setReferenceImage={setReferenceImage}
                   />
-                  {<AdditionalRefsSection />}
                   {referenceImage && (
                     <CharacterNaming
                       characters={shortFilmCharacters}
@@ -1075,6 +1169,7 @@ export function DirectorChat() {
             value={mvGenerateSetup ? songDescription : chatInput}
             onChange={e => {
               const v = e.target.value
+              setDraftQueueConfirmation(null)
               if (mvGenerateSetup) { setSongDescription(v); return }
               setChatInput(v)
               if (step === 'style') setSceneDescription(v)
@@ -1092,18 +1187,46 @@ export function DirectorChat() {
             maxHeight={240}
             className="flex-1 bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary placeholder:text-text-muted resize-none focus:outline-none focus:border-accent-blue transition-colors disabled:opacity-50 disabled:cursor-not-allowed scrollbar-visible"
           />
-          <button
-            onClick={handleChatSubmit}
-            disabled={!chatInputEnabled || !(mvGenerateSetup ? songDescription : chatInput).trim()}
-            className="p-2 rounded-lg bg-accent-blue text-white hover:bg-accent-blue-hover transition-colors disabled:opacity-30 disabled:cursor-not-allowed shrink-0"
-          >
-            {loading && (step === 'style' || isMusicVideo) ? (
-              <Loader2 size={16} className="animate-spin" />
-            ) : (
-              <Send size={16} />
-            )}
-          </button>
+          <div className="flex shrink-0 overflow-hidden rounded-lg border border-accent-blue/60">
+            <button
+              onClick={handleChatSubmit}
+              disabled={!chatInputEnabled || draftQueuePending || !(mvGenerateSetup ? songDescription : chatInput).trim()}
+              className="p-2 bg-accent-blue text-white hover:bg-accent-blue-hover transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+              title={mvGenerateSetup ? 'Generate the song and start this Director project' : 'Start this Director project now'}
+              aria-label={mvGenerateSetup ? 'Generate song and start Director project' : 'Start Director project now'}
+            >
+              {loading && (step === 'style' || isMusicVideo) && !draftQueuePending ? (
+                <Loader2 size={16} className="animate-spin" />
+              ) : (
+                <Send size={16} />
+              )}
+            </button>
+            <button
+              onClick={() => void handleQueueDraft()}
+              disabled={!chatInputEnabled || draftQueuePending || directorQueueLoading || !(mvGenerateSetup ? songDescription : chatInput).trim()}
+              className="border-l border-white/20 bg-accent-blue/85 px-2 text-white hover:bg-accent-blue-hover transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+              title={mvGenerateSetup
+                ? 'Generate the song, then hold the complete Director project in the paused queue'
+                : 'Add this complete Director project to the paused queue without starting it'}
+              aria-label={directorQueueEditingEntryId ? 'Save Director queue changes' : 'Add Director project to queue'}
+            >
+              {draftQueuePending || directorQueueLoading
+                ? <Loader2 size={14} className="animate-spin" />
+                : draftQueueConfirmation
+                  ? <Check size={14} />
+                  : <ListVideo size={14} />}
+            </button>
+          </div>
         </div>
+        {draftQueueConfirmation && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="rounded-md border border-green-500/20 bg-green-500/5 px-2.5 py-2 text-[10px] leading-relaxed text-indicator-success"
+          >
+            {draftQueueConfirmation}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -1180,7 +1303,17 @@ function CharacterNaming({
 function DirectorAspectRatioSelector({ disabled = false }: { disabled?: boolean }) {
   const ratio = useStore(s => s.directorAspectRatio)
   const setRatio = useStore(s => s.setDirectorAspectRatio)
+  const videoModel = useStore(s => s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1')
+  const supportsUltraWide = videoModel.toLowerCase().startsWith('minimax_h3')
+
+  useEffect(() => {
+    if (!supportsUltraWide && ratio === '21:9') setRatio('16:9')
+  }, [ratio, setRatio, supportsUltraWide])
+
   const presets = [
+    ...(supportsUltraWide
+      ? [{ value: '21:9' as const, label: '21:9', desc: 'Cinema' }]
+      : []),
     { value: '16:9' as const, label: '16:9', desc: 'Wide' },
     { value: '9:16' as const, label: '9:16', desc: 'Portrait' },
     { value: '1:1' as const, label: '1:1', desc: 'Square' },
@@ -1229,7 +1362,7 @@ function DirectorResolutionSelector({ disabled = false }: { disabled?: boolean }
 
   const fallbackOrder = ['480p', '540p', '720p', '1080p'] as const
   const modelPresetOrder = (options?.resolution_preset_order || []).filter(
-    value => value !== 'auto' && value !== '768p',
+    value => value !== 'auto',
   )
   const presetOrder = modelPresetOrder.length > 0
     ? modelPresetOrder
@@ -1559,6 +1692,39 @@ function ReferenceImageUpload({
         </div>
       )}
     </div>
+  )
+}
+
+function DirectorReferenceInputs({
+  referenceImage,
+  refImagePreview,
+  setReferenceImage,
+  disabled = false,
+}: {
+  referenceImage: File | null
+  refImagePreview: string | null
+  setReferenceImage: (file: File | null) => void
+  disabled?: boolean
+}) {
+  const usesOmniManifest = useStore(s => {
+    const selected = s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+    return selected.toLowerCase().startsWith('minimax_h3_ref2va')
+      || s.models.find(model => model.model_type === selected)
+        ?.director?.video_strategy === 'omni_reference'
+  })
+
+  if (usesOmniManifest) {
+    return <OmniReferenceSection scope="director" disabled={disabled} />
+  }
+  return (
+    <>
+      <ReferenceImageUpload
+        referenceImage={referenceImage}
+        refImagePreview={refImagePreview}
+        setReferenceImage={setReferenceImage}
+      />
+      <AdditionalRefsSection />
+    </>
   )
 }
 
@@ -2045,6 +2211,13 @@ function DirectorAdvancedAccordion() {
     || s.directorCharacterRefPaths.length
     || s.directorLocationRefs.length
     || s.directorLocationRefPaths.length
+    || (
+      s.models.find(model => model.model_type === videoModel)
+        ?.director?.video_strategy === 'omni_reference'
+      && s.directorH3References.some(
+        reference => reference.type === 'image' || reference.type === 'video',
+      )
+    )
   ))
   const generateShotImages = directorWillGenerateShotImages(
     shotImageSupport,
@@ -2525,6 +2698,14 @@ function DirectorModelSelection({ disabled = false }: { disabled?: boolean }) {
     || s.directorCharacterRefPaths.length
     || s.directorLocationRefs.length
     || s.directorLocationRefPaths.length
+    || (
+      s.models.find(model => model.model_type === (
+        s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+      ))?.director?.video_strategy === 'omni_reference'
+      && s.directorH3References.some(
+        reference => reference.type === 'image' || reference.type === 'video',
+      )
+    )
   ))
   const selectDirectorImageModel = useStore(s => s.selectDirectorImageModel)
   const selectDirectorVideoModel = useStore(s => s.selectDirectorVideoModel)
@@ -2593,6 +2774,13 @@ function DirectorLoraAccordion() {
     || s.directorCharacterRefPaths.length
     || s.directorLocationRefs.length
     || s.directorLocationRefPaths.length
+    || (
+      s.models.find(model => model.model_type === videoModel)
+        ?.director?.video_strategy === 'omni_reference'
+      && s.directorH3References.some(
+        reference => reference.type === 'image' || reference.type === 'video',
+      )
+    )
   ))
   const generateShotImages = directorWillGenerateShotImages(
     shotImageSupport,

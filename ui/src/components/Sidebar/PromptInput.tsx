@@ -14,6 +14,16 @@ const placeholders: Record<string, string> = {
   avatar: 'Describe your avatar animation...',
 }
 
+const H3_TEXT_TOKEN_LIMIT = 512
+const H3_TEXT_TOKEN_TARGET = 480
+
+/** Conservative browser-side estimate used while the user is typing. The
+ * backend uses H3's exact Qwen tokenizer before generation. */
+function estimateH3TextTokens(value: string): number {
+  const lexical = value.match(/[A-Za-z0-9]+(?:['’\-][A-Za-z0-9]+)*|[^\w\s]/g)?.length ?? 0
+  return Math.ceil(lexical * 1.25) + (value.trim() ? 8 : 0)
+}
+
 function useAutoGrowingTextarea(value: string) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
@@ -252,7 +262,7 @@ export function PromptInput() {
         windowFrames: sequenceClipFrames,
         overlapFrames: slidingWindowOverlap,
         nativeContinuation: h3NativeSequence,
-      })
+    })
     : 1
   const manualPromptLineCount = prompt.split('\n').filter(line => line.trim()).length
   const manualPromptCount = (usesH3ManualFirstLast || usesLtxManualPrompts)
@@ -262,6 +272,16 @@ export function PromptInput() {
     ? 'window'
     : (h3NativeSequence ? 'window' : 'clip')
   const usesH3Plan = usesH3WindowPlanner || usesH3SequencePlanner
+  const h3FirstLastPromptUnits = isH3FirstLast && !usesH3Plan
+    ? (usesH3ManualFirstLast
+        ? prompt.split('\n').map(line => line.trim()).filter(Boolean)
+        : [prompt.trim()].filter(Boolean))
+    : []
+  const h3FirstLastPromptCounts = h3FirstLastPromptUnits.map(estimateH3TextTokens)
+  const largestH3PromptCount = h3FirstLastPromptCounts.length
+    ? Math.max(...h3FirstLastPromptCounts)
+    : 0
+  const largestH3PromptIndex = h3FirstLastPromptCounts.indexOf(largestH3PromptCount)
   const expectedPlanCount = usesH3SequencePlanner ? sequenceClipCount : windowCount
   const expectedWindowFrames = usesH3SequencePlanner
     ? Math.max(1, Number(sequenceClipFrames || 1))
@@ -377,6 +397,22 @@ export function PromptInput() {
               <RefreshCw size={11} className={isEnhancing ? 'animate-spin' : ''} />
             </button>
           </div>
+          {!!h3WindowPlan.planning_warnings?.length && (
+            <div
+              role="alert"
+              className="mt-1.5 rounded-lg border border-amber-400/35 bg-amber-400/10 px-2.5 py-2 text-[10px] leading-relaxed text-amber-300"
+            >
+              <div className="font-medium">Maestro repaired this H3 plan</div>
+              {h3WindowPlan.planning_warnings.map((warning, index) => (
+                <div key={`${index}-${warning}`} className="mt-0.5">
+                  {warning}
+                </div>
+              ))}
+              <div className="mt-1 text-text-muted">
+                Review the exact window prompts below or press refresh to try the AI planner again.
+              </div>
+            </div>
+          )}
           {windowPlanOpen && (
             <div className="mt-2 space-y-3">
               {h3WindowPlan.windows.map((window, index) => (
@@ -391,7 +427,17 @@ export function PromptInput() {
                       {usesH3SequencePlanner && !h3NativeSequence ? 'Clip' : 'Window'} {window.index}: {window.title || `Beat ${window.index}`}
                       {activeH3Window === window.index ? ' · Generating now' : ''}
                     </span>
-                    <span>{window.start_seconds.toFixed(1)}–{window.end_seconds.toFixed(1)}s</span>
+                    <span className={usesH3WindowPlanner ? (() => {
+                      const tokens = estimateH3TextTokens(window.prompt)
+                      return tokens > H3_TEXT_TOKEN_LIMIT
+                        ? 'text-indicator-error'
+                        : tokens > H3_TEXT_TOKEN_TARGET
+                          ? 'text-amber-400'
+                          : ''
+                    })() : ''}>
+                      {window.start_seconds.toFixed(1)}–{window.end_seconds.toFixed(1)}s
+                      {usesH3WindowPlanner && ` · ~${estimateH3TextTokens(window.prompt)}/${H3_TEXT_TOKEN_LIMIT} tokens`}
+                    </span>
                   </div>
                   <H3WindowPromptTextarea
                     value={window.prompt}
@@ -414,6 +460,21 @@ export function PromptInput() {
           <span className={manualPromptLineCount === manualPromptCount ? 'text-text-secondary' : 'text-amber-400'}>
             {manualPromptLineCount}/{manualPromptCount} prompts
           </span>
+        </div>
+      )}
+      {largestH3PromptCount > H3_TEXT_TOKEN_TARGET && (
+        <div
+          role="alert"
+          className={`mb-1.5 rounded-lg border px-2.5 py-1.5 text-[10px] leading-relaxed ${
+            largestH3PromptCount > H3_TEXT_TOKEN_LIMIT
+              ? 'border-indicator-error/40 bg-indicator-error/10 text-indicator-error'
+              : 'border-amber-400/35 bg-amber-400/10 text-amber-300'
+          }`}
+        >
+          {h3FirstLastPromptCounts.length > 1 ? `Window ${largestH3PromptIndex + 1}` : 'This H3 prompt'} is approximately {largestH3PromptCount}/{H3_TEXT_TOKEN_LIMIT} text tokens.{' '}
+          {largestH3PromptCount > H3_TEXT_TOKEN_LIMIT
+            ? 'First / Last would cut off the ending. Shorten it or use Auto planning / Prompt Enhance; Maestro will reject it rather than silently lose dialogue.'
+            : 'It fits, but is close to H3’s cutoff. Prompt Enhance targets a safer compact form.'}
         </div>
       )}
       <div className="relative mt-auto">

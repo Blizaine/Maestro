@@ -15,10 +15,16 @@ export function AspectRatioGrid() {
   const generationMode = useStore(s => s.generationMode)
   const modelOptions = useStore(s => s.modelOptions)
   const isImage = generationMode === 'image'
+  const supportsUltraWide = Object.values(modelOptions?.resolution_presets || {}).some(
+    preset => preset?.values?.['21:9'] != null,
+  )
+  const modelRatios = supportsUltraWide
+    ? [{ value: '21:9' as AspectRatio, icon: '━' }, ...standardRatios]
+    : standardRatios
 
   const ratios = isImage || modelOptions?.supports_auto_aspect
-    ? [{ value: 'auto' as AspectRatio, icon: '⊞' }, ...standardRatios]
-    : standardRatios
+    ? [{ value: 'auto' as AspectRatio, icon: '⊞' }, ...modelRatios]
+    : modelRatios
 
   return (
     <div>

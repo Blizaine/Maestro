@@ -30,6 +30,71 @@ from services.h3_sequence_planner import (  # noqa: E402
 
 
 class H3ReferenceSequencePlannerTests(unittest.TestCase):
+    def test_compiler_uses_official_full_reference_detail_shape(self):
+        clips, _ = compute_h3_sequence_clips(226)
+        plan = {
+            "subject_definitions": "Stable speaking identity: S1 is Alex.",
+            "retention_analysis": "",
+            "setting_continuity": "A rain-soaked city street at night",
+            "visual_style": "cinematic live action with cool practical light",
+            "ambient_audio": "Rain and distant traffic",
+            "music": "N/A",
+            "clips": [{
+                "clip": 1,
+                "title": "Rescue",
+                "summary": "Alex reaches the stalled car",
+                "opening_state": "Alex enters screen-left beside the car",
+                "coverage": "dynamic multi-shot coverage",
+                "pacing": "fast real-time pacing",
+                "shots": [{
+                    "shot": 1,
+                    "start_seconds": 0.0,
+                    "end_seconds": 4.0,
+                    "transition": "opening composition",
+                    "framing": "wide tracking shot",
+                    "camera": "the camera trucks right with Alex",
+                    "action": "Alex runs toward the stalled car",
+                    "dialogue": [],
+                    "sound_effects": "Rapid footsteps",
+                }, {
+                    "shot": 2,
+                    "start_seconds": 4.0,
+                    "end_seconds": clips[0]["duration_seconds"],
+                    "transition": "hard cut",
+                    "framing": "low-angle medium shot",
+                    "camera": "the camera pushes toward the open door",
+                    "action": "Alex pulls the driver clear",
+                    "dialogue": [],
+                    "sound_effects": "Door metal creaks",
+                }],
+                "closing_state": "Alex and the driver reach the curb",
+            }],
+        }
+        compiled = compile_h3_reference_sequence_prompts(
+            plan,
+            clips,
+            reference_relationships=(
+                "<Subject 1> is Alex, whose identity and appearance come from "
+                "<Picture 1>; reject the picture's background and pose."
+            ),
+            default_retention=(
+                "<Subject 1>: fully_preserved - preserve the identity and "
+                "appearance defined by <Picture 1>."
+            ),
+            task_types="reference generation",
+        )
+        prompt = compiled[0]["prompt"]
+        detailed = prompt.split("detailed_description: ", 1)[1].split(
+            "\n\noverall_soundscape:", 1,
+        )[0]
+
+        self.assertTrue(detailed.startswith(
+            "The target video uses cinematic live action with cool practical light."
+        ))
+        self.assertGreater(detailed.index("[Shot 1]"), 0)
+        self.assertIn("<Subject 1> (Alex)", detailed)
+        self.assertIn("[Shot 2] At 00:04.000, hard cut", detailed)
+
     def test_manual_native_sequence_preserves_each_prompt_exactly(self):
         source = "First exact window prompt\nSecond exact window prompt\nThird exact window prompt"
         result = build_manual_h3_reference_sequence_plan(
@@ -224,6 +289,58 @@ class H3ReferenceSequencePlannerTests(unittest.TestCase):
             self.assertIn("<Picture 1>", prompt)
         self.assertNotIn("pulls the driver clear", compiled[0]["prompt"])
         self.assertIn("pulls the driver clear", compiled[1]["prompt"])
+
+    def test_requested_nonverbal_reaction_stays_in_its_assigned_omni_clip(self):
+        clips, _ = compute_h3_sequence_clips(500)
+        plan = {
+            "subject_definitions": "S1 is Alex",
+            "retention_analysis": "Keep Alex consistent",
+            "setting_continuity": "A mountain overlook",
+            "visual_style": "Cinematic realism",
+            "ambient_audio": "Mountain wind",
+            "music": "N/A",
+            "requested_nonverbal_vocals": (
+                "Requested nonverbal vocalizations remain audible: laugh"
+            ),
+            "clips": [
+                {
+                    "clip": index + 1,
+                    "title": f"Beat {index + 1}",
+                    "summary": f"Beat {index + 1}",
+                    "opening_state": "Alex stands at the overlook",
+                    "coverage": "continuous coverage",
+                    "pacing": "natural real-time pacing",
+                    "shots": [{
+                        "shot": 1,
+                        "start_seconds": 0.0,
+                        "end_seconds": clip["duration_seconds"],
+                        "transition": "opening composition",
+                        "framing": "medium shot",
+                        "camera": "tracks Alex",
+                        "action": (
+                            "Alex laughs and starts running"
+                            if index == 0 else "Alex keeps running down the trail"
+                        ),
+                        "dialogue": [],
+                        "sound_effects": (
+                            "the requested laughter"
+                            if index == 0 else "rapid footsteps"
+                        ),
+                    }],
+                    "closing_state": "Alex continues along the trail",
+                }
+                for index, clip in enumerate(clips)
+            ],
+        }
+        compiled = compile_h3_reference_sequence_prompts(
+            plan,
+            clips,
+            reference_relationships="",
+            default_retention="",
+            task_types="reference generation",
+        )
+        self.assertIn("nonverbal vocalizations remain audible: laugh", compiled[0]["prompt"])
+        self.assertNotIn("nonverbal vocalizations remain audible: laugh", compiled[1]["prompt"])
 
     @patch("services.llm_service.generate", side_effect=RuntimeError("offline"))
     def test_planner_falls_back_to_reviewable_sequence(self, _generate):

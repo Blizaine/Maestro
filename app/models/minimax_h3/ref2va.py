@@ -102,7 +102,11 @@ def ensure_ref2va_prompt_relationships(
     picture_index = 0
     video_index = 0
     audio_index = 0
+    subject_index = 0
     relationships: list[str] = []
+    retention: list[str] = []
+    role_subjects: dict[str, int] = {}
+    opening_subjects: list[str] = []
 
     for item in items:
         kind = item["type"]
@@ -113,28 +117,54 @@ def ensure_ref2va_prompt_relationships(
             if intent == "composition":
                 relationships.append(
                     f"<Picture {picture_index}> is a soft composition and cast-layout reference for {role} "
-                    "(retention weak_reference); preserve the intended subjects, wardrobe, setting, and "
-                    "spatial arrangement while generating a naturally moving opening rather than copying "
-                    "the picture as a frozen first frame."
+                    "that preserves the intended subjects, wardrobe, setting, and spatial arrangement "
+                    "while generating a naturally moving opening rather than copying the picture as a "
+                    "frozen first frame."
+                )
+                retention.append(
+                    f"<Picture {picture_index}> ([Shot 1] composition anchor): weak_reference - "
+                    "retain broad subject placement, setting, and spatial relationships."
                 )
             elif intent == "scene":
+                subject_index += 1
                 relationships.append(
-                    f"<Picture {picture_index}> defines the environment and location for {role} "
-                    "(retention reference); preserve its architecture, materials, lighting context, and "
-                    "scene identity without treating people in it as target character identities."
+                    f"<Subject {subject_index}> is the environment and location for {role}, defined by "
+                    f"<Picture {picture_index}>; its architecture, materials, lighting context, and scene "
+                    "identity apply without treating incidental people as target character identities."
+                )
+                retention.append(
+                    f"<Subject {subject_index}> (appears in [Shot 1]): fully_preserved - preserve the "
+                    "referenced architecture, materials, lighting context, and location identity."
+                )
+                opening_subjects.append(
+                    f"<Subject {subject_index}> establishes the requested environment and location."
                 )
             elif intent == "style":
+                subject_index += 1
                 relationships.append(
-                    f"<Picture {picture_index}> is a visual style reference for {role} "
-                    "(retention weak_reference); reuse its medium, palette, lighting language, and texture, "
-                    "but do not copy its people, pose, framing, or exact composition."
+                    f"<Subject {subject_index}> is the visual treatment for {role}, guided by "
+                    f"<Picture {picture_index}>; use its medium, palette, lighting language, and texture "
+                    "without copying its people, pose, framing, or exact composition."
+                )
+                retention.append(
+                    f"<Subject {subject_index}>: weak_reference - retain broad similarity in medium, "
+                    "palette, lighting language, and texture."
                 )
             else:
+                subject_index += 1
+                role_subjects[str(role).strip().casefold()] = subject_index
                 relationships.append(
-                    f"<Picture {picture_index}> defines the visual identity and appearance of {role} "
-                    "(retention reference for identity only); "
-                    "use it as identity evidence only, not as an opening freeze-frame, source location, "
-                    "background, composition, framing, or pose."
+                    f"<Subject {subject_index}> is {role}, whose visual identity and appearance come from "
+                    f"<Picture {picture_index}>; use it as identity evidence only, not as an opening "
+                    "freeze-frame, source location, background, composition, framing, or pose."
+                )
+                retention.append(
+                    f"<Subject {subject_index}> (appears in [Shot 1]): fully_preserved - preserve the "
+                    f"identity and appearance defined by <Picture {picture_index}>."
+                )
+                opening_subjects.append(
+                    f"<Subject {subject_index}> ({role}) appears with the referenced identity and "
+                    "appearance in the described frame position and performs the requested action."
                 )
             continue
 
@@ -145,13 +175,20 @@ def ensure_ref2va_prompt_relationships(
                 audio_index += 1
                 relationships.append(
                     f"<Audio {audio_index}> is the synchronized soundtrack paired with "
-                    f"<Video {next_video_index}> (audio reuse, retention partially_copy); "
-                    "reuse its audible timeline and synchronize "
+                    f"<Video {next_video_index}>; reuse its audible timeline and synchronize "
                     "visible action and lip movement to it."
+                )
+                retention.append(
+                    f"<Audio {audio_index}>: partially_copy - reuse the enabled soundtrack timeline "
+                    "while allowing synchronized scene effects."
                 )
             video_index = next_video_index
             relationships.append(
                 f"<Video {video_index}> provides motion, camera, scene, and temporal reference for {role}."
+            )
+            retention.append(
+                f"<Video {video_index}>: partially_preserved - retain the requested motion, camera, "
+                "scene, and temporal structure."
             )
             continue
 
@@ -160,28 +197,71 @@ def ensure_ref2va_prompt_relationships(
         if intent == "drive":
             relationships.append(
                 f"<Audio {audio_index}> is the performance-driving audio timeline for {role} "
-                "(audio reuse, retention partially_copy); "
-                "reuse its audible content and synchronize visible action and lip movement to it."
+                "and supplies the audible content synchronized to visible action and lip movement."
+            )
+            retention.append(
+                f"<Audio {audio_index}>: partially_copy - reuse its audible content and timeline "
+                "while allowing synchronized scene effects."
             )
         elif intent == "style":
             relationships.append(
                 f"<Audio {audio_index}> is an audio style, rhythm, and texture reference for {role} "
-                "(audio reference, retention weak_reference); "
-                "do not copy its waveform, source words, or exact timing."
+                "without copying its waveform, source words, or exact timing."
+            )
+            retention.append(
+                f"<Audio {audio_index}>: weak_reference - retain broad similarity in sound, rhythm, "
+                "texture, or music style."
             )
         else:
+            mapped_subject = role_subjects.get(str(role).strip().casefold())
+            target = (
+                f"<Subject {mapped_subject}> (S{mapped_subject})"
+                if mapped_subject else str(role)
+            )
             relationships.append(
-                f"<Audio {audio_index}> is a voice-timbre, emotion, and delivery reference for {role} "
-                "(audio reference, retention reference); "
-                "generate only explicitly requested dialogue and do not copy its source words, "
-                "timing, or waveform."
+                f"<Audio {audio_index}> is a voice-timbre, emotion, and delivery reference for {target}; "
+                "generate only explicitly requested dialogue and do not copy its source words, timing, "
+                "or waveform."
+            )
+            retention.append(
+                f"<Audio {audio_index}>: reference - use its voice timbre, emotion, and delivery "
+                "without copying the source signal, words, or timing."
             )
 
     dialogue_counter = 0
     dialogue_word_count = 0
 
+    def is_visible_text_quote(match) -> bool:
+        before = text[max(0, match.start() - 150):match.start()]
+        after = text[match.end():match.end() + 100]
+        if re.search(
+            r"(?i)\b(?:titled|entitled|called|named|captioned)\s*[:,-]?\s*$",
+            before,
+        ):
+            return True
+        visible_noun = re.search(
+            r"(?i)\b(?:sign|banner|label|subtitle|caption|marquee|poster|billboard|"
+            r"screen|monitor|display|neon|placard|headline|logo|shirt|door|wall)\b",
+            before,
+        )
+        visible_cue = re.search(
+            r"(?i)\b(?:reads?|reading|shows?|showing|displays?|displaying|bears?|"
+            r"bearing|marked|printed|written|spells?|saying|with(?:\s+the)?\s+"
+            r"(?:text|words?|lettering))\s*[:,-]?\s*$",
+            before,
+        )
+        if visible_noun and visible_cue:
+            return True
+        return bool(re.match(
+            r"(?i)^\s*(?:appears?|is\s+(?:visible|written|printed|displayed)|glows?)"
+            r"\b[^.!?\r\n]{0,70}\b(?:on|across|above|below|behind|over)\b",
+            after,
+        ))
+
     def compile_dialogue(match):
         nonlocal dialogue_counter, dialogue_word_count
+        if is_visible_text_quote(match):
+            return match.group(0)
         dialogue_counter += 1
         words = (match.group(1) or match.group(2) or "").strip()
         dialogue_word_count += len(words.split())
@@ -193,6 +273,7 @@ def ensure_ref2va_prompt_relationships(
         text,
     )
     relationship_block = " ".join(relationships)
+    retention_block = " ".join(retention)
     if dialogue_counter:
         duration = max(2.0, float(duration_seconds or 8.0))
         speech_duration = min(
@@ -227,17 +308,37 @@ def ensure_ref2va_prompt_relationships(
         if requests_music
         else "N/A"
     )
+    task_types = ["reference generation"]
+    if any(
+        item.get("audio_intent") == "drive"
+        or (
+            item.get("type") == "video"
+            and (item.get("has_audio") or item.get("audio_path"))
+            and item.get("include_audio", True)
+        )
+        for item in items
+    ):
+        task_types.append("audio reuse")
+    if any(
+        item.get("type") == "audio"
+        and item.get("audio_intent", "voice") in {"voice", "style"}
+        for item in items
+    ):
+        task_types.append("audio reference")
+    opening_subject_block = " ".join(opening_subjects)
     return (
-        f"subject_definitions: {relationship_block}\n"
-        "summary: A finished video matching the requested action, identity, setting, and explicitly "
-        "tagged dialogue.\n"
-        f"retention_analysis: {relationship_block}\n"
-        f"detailed_description: The finished target video follows this request: {compiled_target} "
-        f"{dialogue_rule}\n"
+        f"subject_definitions: {relationship_block}\n\n"
+        f"summary: [{' + '.join(task_types)}] A finished video matching the requested action, "
+        "identity, setting, reference roles, and explicitly tagged dialogue.\n\n"
+        f"retention_analysis: {retention_block}\n\n"
+        "detailed_description: The target video maintains the requested visual style, lighting, "
+        "color, and cinematic texture. "
+        f"[Shot 1] {opening_subject_block} The finished target video follows this request: "
+        f"{compiled_target} {dialogue_rule}\n\n"
         "overall_soundscape: Continuous scene-appropriate stereo ambience and synchronized practical "
         "sound effects begin at the first frame and continue naturally underneath any scripted dialogue. "
         "Outside tagged dialogue there are no human voices, whispers, grunts, audible breathing, or "
-        "speech-like vocalizations.\n"
+        "speech-like vocalizations.\n\n"
         f"non_diegetic_music: {music_direction}"
     )
 

@@ -61,6 +61,9 @@ from services.checkpoint_compatibility import (
     unsupported_checkpoint_reason,
     validate_checkpoint_file,
 )
+from services.generation_eta import AdaptiveGenerationEta
+from services.remote_access import TailscaleManager
+from services.web_push import WebPushService, WebPushUnavailable
 
 # Protect upgraded installations before WanGP builds its model registry.  Old
 # CivitAI imports could pair any checkpoint with any Maestro architecture; hide
@@ -131,6 +134,33 @@ from models.minimax_h3.turbo import (
     MINIMAX_H3_TURBO_PRESETS,
 )
 print(f"[Maestro] WanGP loaded: {len(wgp.displayed_model_types)} models available")
+
+# Optional private HTTPS + closed-app notification services. Their state is
+# stored under app/settings (already gitignored), never in a Maestro cloud
+# account. Creating them is cheap and does not require Tailscale or Web Push to
+# be installed/enabled.
+_maestro_settings_dir = os.path.join(_app_dir, "settings")
+_web_push = WebPushService(_maestro_settings_dir)
+try:
+    _maestro_server_port = int(os.environ.get("SERVER_PORT", "7860"))
+except (TypeError, ValueError):
+    _maestro_server_port = 7860
+_tailscale = TailscaleManager(_maestro_settings_dir, _maestro_server_port)
+
+# WanGP's legacy notifier fires at low-level output boundaries, which means a
+# multi-window generation or Director project can chime once per internal
+# clip. Maestro owns the top-level Studio/Director lifecycle instead. Migrate
+# an existing preference, then keep the legacy switch off in this process so
+# the listeners below emit exactly one host-computer chime per finished item.
+wgp.server_config.setdefault(
+    "maestro_host_notification_sound_enabled",
+    bool(wgp.server_config.get("notification_sound_enabled", 0)),
+)
+wgp.server_config.setdefault(
+    "maestro_host_notification_sound_volume",
+    int(wgp.server_config.get("notification_sound_volume", 50)),
+)
+wgp.server_config["notification_sound_enabled"] = 0
 # Base save path always comes from server_config["save_path"] (never from wgp.save_path which gets workspace-modified)
 
 # Apply active workspace on startup
@@ -271,6 +301,7 @@ from services.job_lifecycle import (
     generation_slot,
     is_cancel_requested,
     record_job_outputs,
+    register_terminal_listener,
     register_abort_state,
     release_held,
     request_cancel,
@@ -283,6 +314,78 @@ from services.job_lifecycle import (
 
 _jobs: dict = {}
 _gen_lock = threading.Lock()
+
+
+def _play_host_completion_sound() -> None:
+    """Play one asynchronous chime on the computer running Maestro."""
+    if not wgp.server_config.get("maestro_host_notification_sound_enabled", False):
+        return
+    try:
+        volume = int(wgp.server_config.get("maestro_host_notification_sound_volume", 50))
+        wgp.notification_sound.notify_video_completion(
+            volume=max(0, min(100, volume)),
+        )
+    except Exception as exc:
+        print(f"[Notifications] Host completion sound failed: {exc}")
+
+
+def _on_generation_job_terminal(job: dict, status: str) -> None:
+    """Top-level Studio/tool notification; Director child renders stay quiet."""
+    params = job.get("params") or {}
+    if isinstance(params, dict) and params.get("_director_pipeline_id"):
+        return
+    job_id = str(job.get("id") or "studio")
+    if status == "completed":
+        _play_host_completion_sound()
+        _web_push.dispatch(
+            category="completion",
+            title="Studio generation complete",
+            body="Your Maestro generation is ready.",
+            tag=f"studio:{job_id}:completed",
+        )
+    elif status == "failed":
+        _web_push.dispatch(
+            category="failure",
+            title="Studio generation failed",
+            body=str(job.get("error") or "Open Maestro for details."),
+            tag=f"studio:{job_id}:failed",
+        )
+
+
+def _on_director_pipeline_terminal(pipeline: dict, status: str) -> None:
+    pipeline_id = str(pipeline.get("id") or "director")
+    if status == "completed":
+        _play_host_completion_sound()
+        _web_push.dispatch(
+            category="completion",
+            title="Director project complete",
+            body="Your finished Maestro Director project is ready.",
+            tag=f"director:{pipeline_id}:completed",
+        )
+    elif status == "failed":
+        _web_push.dispatch(
+            category="failure",
+            title="Director project failed",
+            body=str(pipeline.get("error") or "Open Maestro for details."),
+            tag=f"director:{pipeline_id}:failed",
+        )
+
+
+def _on_director_queue_terminal(summary: dict) -> None:
+    total = int(summary.get("total") or 0)
+    failed = int(summary.get("failed") or 0)
+    _web_push.dispatch(
+        category="queue",
+        title="Director queue finished",
+        body=(
+            f"{total} queued project{'s' if total != 1 else ''} finished"
+            + (f" with {failed} failure{'s' if failed != 1 else ''}." if failed else ".")
+        ),
+        tag="maestro-director-queue",
+    )
+
+
+register_terminal_listener(_on_generation_job_terminal)
 _active_gen_states: dict = {}  # job_id -> wgp gen state dict (for abort signaling)
 
 
@@ -360,7 +463,15 @@ def _init_pipeline():
     global _pipeline_initialized
     if not _pipeline_initialized:
         from services.director_pipeline import init as pipeline_init
-        pipeline_init(_jobs, _run_generation, wgp, _gen_lock, _active_gen_states)
+        pipeline_init(
+            _jobs,
+            _run_generation,
+            wgp,
+            _gen_lock,
+            _active_gen_states,
+            terminal_callback=_on_director_pipeline_terminal,
+            queue_terminal_callback=_on_director_queue_terminal,
+        )
         _pipeline_initialized = True
 
 
@@ -5767,6 +5878,12 @@ def get_system_config():
         "enhancer_enabled": cfg.get("enhancer_enabled", 0),
         "prompt_enhancer_quantization": cfg.get("prompt_enhancer_quantization", "quanto_int8"),
         "attention_modes_available": list(wgp.attention_modes_supported),
+        "host_notification_sound_enabled": bool(
+            cfg.get("maestro_host_notification_sound_enabled", False)
+        ),
+        "host_notification_sound_volume": int(
+            cfg.get("maestro_host_notification_sound_volume", 50)
+        ),
         # Read from server_config (persisted) rather than wgp.args, which
         # only reflects the CLI default until wgp.py applies the saved
         # value on startup. Either source returns the right value after
@@ -5850,6 +5967,31 @@ async def update_system_config(request: Request):
     if "model_folders" in body:
         updated["model_folders"] = _apply_linked_model_folders(body["model_folders"])
 
+    # These public API names intentionally do not reuse WanGP's legacy
+    # notification keys. WanGP rings those keys at every low-level clip and
+    # sliding-window boundary; Maestro rings once at the top-level Studio or
+    # Director lifecycle boundary instead.
+    if "host_notification_sound_enabled" in body:
+        raw_enabled = body["host_notification_sound_enabled"]
+        if not isinstance(raw_enabled, bool):
+            raise HTTPException(
+                status_code=400,
+                detail="host_notification_sound_enabled must be true or false",
+            )
+        enabled = raw_enabled
+        wgp.server_config["maestro_host_notification_sound_enabled"] = enabled
+        updated["host_notification_sound_enabled"] = enabled
+    if "host_notification_sound_volume" in body:
+        try:
+            volume = max(0, min(100, int(body["host_notification_sound_volume"])))
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400,
+                detail="host_notification_sound_volume must be between 0 and 100",
+            )
+        wgp.server_config["maestro_host_notification_sound_volume"] = volume
+        updated["host_notification_sound_volume"] = volume
+
     for key, value in body.items():
         if key in ALLOWED_KEYS:
             wgp.server_config[key] = value
@@ -5873,6 +6015,123 @@ async def update_system_config(request: Request):
         wgp.args.vram_safety_coefficient = float(updated["vram_safety_coefficient"])
 
     return {"status": "ok", "updated": updated}
+
+
+@api.post("/api/v1/notification-sound/test")
+async def test_host_notification_sound(request: Request):
+    """Play a one-off test chime on the computer running Maestro."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        volume = int(body.get(
+            "volume",
+            wgp.server_config.get("maestro_host_notification_sound_volume", 50),
+        ))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="volume must be between 0 and 100")
+    volume = max(0, min(100, volume))
+    try:
+        wgp.notification_sound.notify_video_completion(volume=volume)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Unable to play notification sound: {exc}")
+    return {"status": "ok", "volume": volume}
+
+
+@api.get("/api/v1/notifications/push/status")
+def get_web_push_status():
+    """Return this host's public VAPID key and enrollment summary."""
+    return _web_push.status()
+
+
+@api.post("/api/v1/notifications/push/subscribe")
+async def subscribe_web_push(request: Request):
+    """Register or refresh one browser's machine-local PushSubscription."""
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("request body must be an object")
+        return _web_push.subscribe(
+            body.get("subscription"),
+            preferences=body.get("preferences"),
+            origin=body.get("origin"),
+            label=body.get("label"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not save this notification subscription: {exc}",
+        ) from exc
+
+
+@api.delete("/api/v1/notifications/push/subscribe")
+async def unsubscribe_web_push(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    endpoint = body.get("endpoint") if isinstance(body, dict) else None
+    if not endpoint:
+        raise HTTPException(status_code=400, detail="endpoint is required")
+    try:
+        return _web_push.unsubscribe(endpoint)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not remove this notification subscription: {exc}",
+        ) from exc
+
+
+@api.post("/api/v1/notifications/push/test")
+async def test_web_push(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        result = _web_push.send_test(
+            body.get("endpoint") if isinstance(body, dict) else None
+        )
+    except WebPushUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if result.attempted == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="This device is not subscribed for background notifications.",
+        )
+    if result.delivered == 0:
+        detail = result.errors[0] if result.errors else "The push service rejected the test."
+        raise HTTPException(status_code=502, detail=detail)
+    return {
+        "status": "ok",
+        "attempted": result.attempted,
+        "delivered": result.delivered,
+        "removed": result.removed,
+    }
+
+
+@api.get("/api/v1/remote-access/tailscale/status")
+def get_tailscale_remote_access_status():
+    return _tailscale.status()
+
+
+@api.post("/api/v1/remote-access/tailscale/enable")
+def enable_tailscale_remote_access():
+    try:
+        return _tailscale.enable()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@api.post("/api/v1/remote-access/tailscale/disable")
+def disable_tailscale_remote_access():
+    try:
+        return _tailscale.disable()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @api.get("/api/v1/model-folders/scan")
@@ -7805,6 +8064,7 @@ async def llm_enhance_prompt(request: Request):
 
     # Use our local LLM service
     from services import llm_service
+    from services.h3_prompt_budget import H3PromptBudgetError
 
     services = wgp.server_config.get("services", {})
     provider = services.get("llm_provider", "local")
@@ -7962,7 +8222,20 @@ async def llm_enhance_prompt(request: Request):
                 prompt,
             )
             result = "\n".join(ltx_prompts)
-        return {"original": prompt, "enhanced": result}
+        response = {"original": prompt, "enhanced": result}
+        if needs_h3_context_ir and not model_type.lower().startswith("minimax_h3_ref2va"):
+            from services.h3_prompt_budget import (
+                H3_BASE_TEXT_TOKEN_LIMIT,
+                h3_prompt_token_count,
+            )
+
+            response["prompt_budget"] = {
+                "token_count": h3_prompt_token_count(result),
+                "token_limit": H3_BASE_TEXT_TOKEN_LIMIT,
+            }
+        return response
+    except H3PromptBudgetError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -9952,6 +10225,40 @@ async def generate(request: Request):
             body.pop("h3_window_prompts", None)
             body.pop("h3_window_plan_signature", None)
             body.pop("h3_window_plan", None)
+
+        # H3 Base / FL2VA's text encoder truncates each native prompt at 512
+        # tokens. Validate the prompts that will actually be selected by the
+        # rolling-window runtime, not the source story retained in ``prompt``.
+        # Auto-enhanced/planned prompts are compacted earlier; user-authored
+        # text is never sliced or silently rewritten here.
+        if not _generation_model_def.get("omni_reference"):
+            from services.h3_prompt_budget import (
+                H3_ENHANCED_TEXT_TOKEN_TARGET,
+                H3PromptBudgetError,
+                validate_h3_base_prompt,
+            )
+
+            submitted_h3_prompts = body.get("h3_window_prompts")
+            if not isinstance(submitted_h3_prompts, list) or not submitted_h3_prompts:
+                submitted_h3_prompts = [str(body.get("prompt") or "")]
+            for prompt_index, submitted_prompt in enumerate(submitted_h3_prompts, start=1):
+                label = (
+                    f"H3 window {prompt_index}"
+                    if len(submitted_h3_prompts) > 1
+                    else "H3 prompt"
+                )
+                try:
+                    prompt_tokens = validate_h3_base_prompt(
+                        submitted_prompt,
+                        label=label,
+                    )
+                except H3PromptBudgetError as error:
+                    raise HTTPException(status_code=400, detail=str(error)) from error
+                if prompt_tokens > H3_ENHANCED_TEXT_TOKEN_TARGET:
+                    print(
+                        f"[MiniMax H3 Prompt] {label} uses {prompt_tokens}/512 "
+                        "tokens. It fits, but has little edit headroom."
+                    )
 
     # LTX 0.9 / 2.x / 2.5 all use WanGP's native rolling-window engine, but
     # Maestro now makes that behavior explicit.  A disabled toggle means one
@@ -22916,6 +23223,49 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
             active_generation_seconds_by_output: dict[str, int] = {}
             active_generation_seconds_by_task: dict[int, int] = {}
 
+            # Video renders can contain differently-sized tasks and internal
+            # sliding windows. Learn their timing from the live sampler
+            # instead of forwarding tqdm's flat seconds-per-step estimate.
+            # The estimator separates First Block Cache warm-up from cache-hit
+            # steps and automatically observes the real Sol/model/LoRA speed.
+            generation_eta = None
+            if str(gen_mode or "").lower() == "video":
+                generation_eta = AdaptiveGenerationEta(queue)
+
+            def _eta_job_updates(snapshot):
+                if not snapshot:
+                    return {}
+                wall_now = time.time()
+                window_eta = snapshot.get("window_eta_seconds")
+                clip_eta = snapshot.get("clip_eta_seconds")
+                generation_eta_seconds = snapshot.get(
+                    "generation_eta_seconds"
+                )
+                project_eta = snapshot.get("project_eta_seconds")
+                return {
+                    **snapshot,
+                    "eta_updated_at": wall_now,
+                    "window_completion_at": (
+                        wall_now + window_eta
+                        if isinstance(window_eta, (int, float)) else None
+                    ),
+                    "clip_completion_at": (
+                        wall_now + clip_eta
+                        if isinstance(clip_eta, (int, float)) else None
+                    ),
+                    "generation_completion_at": (
+                        wall_now + generation_eta_seconds
+                        if isinstance(
+                            generation_eta_seconds,
+                            (int, float),
+                        ) else None
+                    ),
+                    "project_completion_at": (
+                        wall_now + project_eta
+                        if isinstance(project_eta, (int, float)) else None
+                    ),
+                }
+
             def _write_output_sidecars(file_names):
                 """Stamp every produced media file, including abort leftovers.
 
@@ -23050,6 +23400,18 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     cancelled = True
                     break
                 task_no = task_idx + 1
+                task_eta_started_at = time.monotonic()
+                if generation_eta is not None:
+                    generation_eta.start_task(
+                        task_idx,
+                        now=task_eta_started_at,
+                    )
+                    update_job(
+                        job,
+                        **_eta_job_updates(generation_eta.snapshot(
+                            now=task_eta_started_at,
+                        )),
+                    )
                 task_file_start = len(gen.get("file_list") or [])
                 task_artifact_start = len(gen.get("artifact_list") or [])
                 prompt_preview = (task.get('prompt', '') or '')[:60]
@@ -23176,11 +23538,28 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                                         step=step,
                                         total_steps=total,
                                     )
+                                if generation_eta is not None and total > 0:
+                                    eta_snapshot = generation_eta.observe_progress(
+                                        step,
+                                        total,
+                                        msg,
+                                        now=time.monotonic(),
+                                    )
+                                    progress_updates.update(
+                                        _eta_job_updates(eta_snapshot)
+                                    )
                             else:
                                 step = 0
                                 msg = data[1] if len(data) > 1 else str(data[0])
                                 total = 0
                                 progress_updates.update(step=0, total_steps=0)
+                                if generation_eta is not None:
+                                    progress_updates.update(_eta_job_updates(
+                                        generation_eta.observe_status(
+                                            msg,
+                                            now=time.monotonic(),
+                                        )
+                                    ))
                             progress_updates.update(message=msg, phase=msg)
                             if not update_job(job, **progress_updates):
                                 continue
@@ -23189,14 +23568,21 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                             last_msg_len = len(status_line)
                             in_status_line = True
                     elif cmd == "status":
-                        if not update_job(
-                            job,
-                            message=str(data),
-                            phase=str(data),
-                            step=0,
-                            total_steps=0,
-                            progress=0,
-                        ):
+                        status_updates = {
+                            "message": str(data),
+                            "phase": str(data),
+                            "step": 0,
+                            "total_steps": 0,
+                            "progress": 0,
+                        }
+                        if generation_eta is not None:
+                            status_updates.update(_eta_job_updates(
+                                generation_eta.observe_status(
+                                    str(data),
+                                    now=time.monotonic(),
+                                )
+                            ))
+                        if not update_job(job, **status_updates):
                             continue
                         if "Loading" in str(data):
                             print(data)
@@ -23280,6 +23666,17 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     break
 
                 if not task_error:
+                    if generation_eta is not None:
+                        eta_snapshot = generation_eta.complete_task(
+                            task_generation_time
+                            if task_generation_time is not None
+                            else time.monotonic() - task_eta_started_at,
+                            now=time.monotonic(),
+                        )
+                        update_job(
+                            job,
+                            **_eta_job_updates(eta_snapshot),
+                        )
                     completed += 1
                     print(f"\n  Task {task_no} completed")
 
@@ -24870,6 +25267,52 @@ def _run_outpaint_shot_generation(job_id):
                 shutil.rmtree(resolved_temp, ignore_errors=True)
 
 
+_JOB_ETA_IDENTITY_FIELDS = (
+    "current_clip",
+    "total_clips",
+    "current_window",
+    "total_windows",
+    "eta_confidence",
+    "eta_basis",
+    "clip_estimates",
+    "eta_updated_at",
+)
+_JOB_ETA_COMPLETION_FIELDS = {
+    "window_eta_seconds": "window_completion_at",
+    "clip_eta_seconds": "clip_completion_at",
+    "generation_eta_seconds": "generation_completion_at",
+    "project_eta_seconds": "project_completion_at",
+}
+
+
+def _job_eta_response_fields(job_snapshot: dict) -> dict:
+    """Return live, countdown-adjusted ETA fields for a job response."""
+
+    if "eta_updated_at" not in job_snapshot:
+        return {}
+    result = {
+        key: job_snapshot.get(key)
+        for key in _JOB_ETA_IDENTITY_FIELDS
+        if key in job_snapshot
+    }
+    now = time.time()
+    try:
+        age = max(0.0, now - float(job_snapshot.get("eta_updated_at", now)))
+    except (TypeError, ValueError):
+        age = 0.0
+    for eta_key, completion_key in _JOB_ETA_COMPLETION_FIELDS.items():
+        completion = job_snapshot.get(completion_key)
+        remaining = job_snapshot.get(eta_key)
+        if isinstance(completion, (int, float)):
+            result[eta_key] = max(0, int(round(completion - now)))
+        elif isinstance(remaining, (int, float)):
+            result[eta_key] = max(0, int(round(remaining - age)))
+        else:
+            result[eta_key] = None
+        result[completion_key] = completion
+    return result
+
+
 @api.get("/api/v1/status/{job_id}")
 def get_status(job_id: str):
     """Get generation job status."""
@@ -24889,6 +25332,7 @@ def get_status(job_id: str):
         # Present only on failed jobs that look like CUDA OOMs. UI
         # renders the OOM recovery banner when this is non-null.
         "oom_info": j.get("oom_info"),
+        **_job_eta_response_fields(j),
     }
 
 
@@ -24926,6 +25370,16 @@ def _run_held_studio_jobs(job_ids: list[str]) -> None:
             if current == "running":
                 finish_job(job, "failed", message="Failed", error=str(error))
             print(f"[Studio Queue] Job {job_id} failed: {error}")
+    if job_ids:
+        _web_push.dispatch(
+            category="queue",
+            title="Studio queue finished",
+            body=(
+                f"{len(job_ids)} queued generation"
+                f"{'s are' if len(job_ids) != 1 else ' is'} finished."
+            ),
+            tag="maestro-studio-queue",
+        )
 
 
 def _start_held_studio_queue() -> list[str]:
@@ -24982,6 +25436,7 @@ def list_jobs():
                 "error": j["error"],
                 "oom_info": j.get("oom_info"),
                 "created_at": j.get("created_at", 0),
+                **_job_eta_response_fields(j),
                 # Lets a refreshed browser restore the exact H3 prompts that
                 # are already driving an in-flight sliding-window job. This is
                 # planning metadata only; model paths and unrelated params stay
@@ -25759,6 +26214,22 @@ _mimetypes.add_type("text/javascript", ".mjs")
 _mimetypes.add_type("text/css", ".css")
 _mimetypes.add_type("image/svg+xml", ".svg")
 
+# Keep the installable web-app icon sourced from Maestro's canonical tracked
+# artwork instead of maintaining a second binary copy under ui/public. This
+# route is registered before the root StaticFiles mount so the manifest and
+# iOS apple-touch-icon link can both use the same stable URL.
+_maestro_web_icon = os.path.normpath(
+    os.path.join(_app_dir, "..", "maestro_simplified_icon_alpha.png")
+)
+if os.path.isfile(_maestro_web_icon):
+    @api.get("/maestro-icon.png", include_in_schema=False)
+    def maestro_web_icon():
+        return FileResponse(
+            _maestro_web_icon,
+            media_type="image/png",
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
 _ui_dist = os.path.normpath(os.path.join(_app_dir, "..", "ui", "dist"))
 if os.path.isdir(_ui_dist):
     api.mount("/", StaticFiles(directory=_ui_dist, html=True))
@@ -25840,6 +26311,13 @@ if __name__ == "__main__":
             flush=True,
         )
         port = resolved_port
+
+    # Pinokio may assign a different port on every launch (and the fallback
+    # above can move it again). Recreate the manager with the actual port,
+    # then refresh an already-opted-in private Tailscale route in the
+    # background. Local startup never waits on or requires Tailscale.
+    _tailscale = TailscaleManager(_maestro_settings_dir, port)
+    _tailscale.refresh_if_enabled()
 
     # Browsers can't navigate to 0.0.0.0 (it's a non-routable bind
     # address), so when binding wider we still SURFACE the loopback

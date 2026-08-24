@@ -29,3 +29,28 @@ export function formatGenerationDuration(seconds: number): string {
   const minutes = Math.floor(rounded / 60)
   return `${minutes}m ${rounded % 60}s`
 }
+
+/** Human-scale ETA without false precision: "~50s", "~12m", "~1h 25m". */
+export function formatEtaDuration(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds)) return ''
+  const safe = Math.max(0, seconds)
+  if (safe < 90) {
+    return `~${Math.max(10, Math.round(safe / 10) * 10)}s`
+  }
+  if (safe < 3600) {
+    return `~${Math.max(1, Math.round(safe / 60))}m`
+  }
+  const roundedMinutes = Math.max(5, Math.round(safe / 300) * 5)
+  const hours = Math.floor(roundedMinutes / 60)
+  const minutes = roundedMinutes % 60
+  return `~${hours}h${minutes ? ` ${minutes}m` : ''}`
+}
+
+/** Local wall-clock completion time from an epoch-seconds prediction. */
+export function formatEstimatedClock(epochSeconds: number | null | undefined): string {
+  if (epochSeconds == null || !Number.isFinite(epochSeconds)) return ''
+  return new Date(epochSeconds * 1000).toLocaleTimeString([], {
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+}
