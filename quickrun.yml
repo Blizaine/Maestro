@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=https://fgilde.github.io/QuickRun/quickrun.schema.json
+name: Maestro
+description: "Docker-first, as the README says. The first start builds the image, which is not quick."
+
+requires:
+  - tool: docker
+    install: https://docs.docker.com/get-docker/
+
+tasks:
+  - name: app
+    run: docker compose up -d
+    readyWhen: {http: "http://localhost:7860"}
+    open: true
+
+stop:
+  - docker compose down
