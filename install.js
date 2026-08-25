@@ -12,14 +12,6 @@ module.exports = async (kernel) => {
     },
     run: [
     {
-      when: "{{gpu !== 'nvidia'}}",
-      method: "notify",
-      params: {
-        html: "This app requires an NVIDIA GPU on Windows or Linux."
-      },
-      next: null
-    },
-    {
       when: isSolCapable(kernel) && needsCuda13DriverUpdate(kernel),
       method: "notify",
       params: {
