@@ -11,14 +11,12 @@ import { MusicControls } from './MusicControls'
 import { AudioSubModeToggle } from './AudioSubModeToggle'
 import { SfxControls } from './SfxControls'
 import { MixerControls } from './MixerControls'
-import { ModeToggle } from './ModeToggle'
 import { DurationSlider } from './DurationSlider'
 import { AdvancedSettings } from './AdvancedSettings'
 import { GenerateButton } from './GenerateButton'
 import { ModelSelector } from './ModelSelector'
 import { MultiClipEditor } from './MultiClipEditor'
 import { DirectorChat } from './DirectorChat'
-import { EditSubModeToggle } from './EditSubModeToggle'
 import { RestyleControls } from './RestyleControls'
 import { InpaintControls } from './InpaintControls'
 import { OutpaintControls } from './OutpaintControls'
@@ -32,6 +30,7 @@ import { ToolsPanel } from './ToolsPanel'
 import { HardwareStatusBar } from './HardwareStatusBar'
 import { MiniMaxH3Optimizations } from './MiniMaxH3Optimizations'
 import { H3MultiWindowControls } from './H3MultiWindowControls'
+import { VideoWorkflowSelector } from './VideoWorkflowSelector'
 
 export function Sidebar() {
   const toggleSettings = useStore(s => s.toggleSettings)
@@ -54,6 +53,12 @@ export function Sidebar() {
   const audioSubMode = useStore(s => s.audioSubMode)
   const isEdit = generationMode === 'avatar'
   const isTools = generationMode === 'tools'
+  const toolsTool = useStore(s => s.toolsTool)
+  const isUpscale = isTools && toolsTool === 'upscale'
+  const isRevoice = (isTools && toolsTool === 'revoice') || (isAudio && audioSubMode === 'revoice')
+  const isVideoWorkspace = isVideo || isEdit || isUpscale
+  const isAudioWorkspace = isAudio || isRevoice
+  const isStandaloneTool = isUpscale || isRevoice
   const isRetake = isEdit && editSubMode === 'retake'
   const isRestyle = isEdit && editSubMode === 'restyle'
   const isInpaint = isEdit && editSubMode === 'inpaint'
@@ -97,7 +102,7 @@ export function Sidebar() {
     </div>
   )
 
-  // Edit mode sub-controls based on sub-mode
+  // Video Transform controls backed by the legacy edit-mode engines.
   const editControls = (
     <>
       {isRetake && (
@@ -141,7 +146,7 @@ export function Sidebar() {
 
   const studioControls = (
     <>
-      {/* Edit Anything/Recast → Image Mode round-trip banner. Visible while
+      {/* Prompt Edit/Recast → Image Mode round-trip banner. Visible while
           a boundary anchor or Recast reference is being edited; null otherwise. */}
       <AnchorReturnBanner />
 
@@ -152,16 +157,21 @@ export function Sidebar() {
       <div className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-4 min-h-0 [&>*]:shrink-0">
         <GenerationModeSelector />
 
-        {/* Tools mode: standalone post-processing (upscale / revoice) on any
-            existing clip. Renders in place of the generation controls. */}
-        {isTools ? <ToolsPanel /> : (
+        {/* Studio's user-facing hierarchy is media first, workflow second.
+            The workflow selectors route into the legacy video/avatar/tools
+            engines so saved jobs and API behavior remain compatible. */}
+        {isVideoWorkspace && <VideoWorkflowSelector />}
+        {isAudioWorkspace && <AudioSubModeToggle />}
+
+        {isUpscale ? (
+          <ToolsPanel forcedTool="upscale" embedded />
+        ) : isRevoice ? (
+          <ToolsPanel forcedTool="revoice" embedded />
+        ) : (
         <>
-        {/* Edit mode: sub-mode toggle + sub-controls */}
-        {isEdit && <EditSubModeToggle />}
+        {/* Video Transform workflows use the established Edit engines. */}
         {isEdit && editControls}
 
-        {/* Video mode */}
-        {isVideo && !isOmniReference && <ModeToggle />}
         {/* Blend mode manages its own duration (overlap_sec) and its own
             start/end anchors — so the generic Duration slider and
             start/end ImageUpload don't apply there. */}
@@ -193,8 +203,7 @@ export function Sidebar() {
             there. Other video sub-modes + image mode keep AudioModeSection. */}
         {!isEdit && !isAudio && !(isVideo && (imageMode === 0 || imageMode === 3)) && modelOptions?.audio_prompt_type_sources && <AudioModeSection />}
 
-        {/* Audio mode: sub-mode toggle + mode-specific controls */}
-        {isAudio && <AudioSubModeToggle />}
+        {/* Audio mode: workflow-specific controls */}
         {isAudio && audioSubMode === 'speech' && modelOptions?.audio_prompt_type_sources && <AudioModeSection />}
         {isAudio && audioSubMode === 'sfx' && <SfxControls />}
         {isAudio && audioSubMode === 'mixer' && <MixerControls />}
@@ -219,9 +228,9 @@ export function Sidebar() {
       </div>
 
       {/* Bottom Bar: Advanced + LoRA Browser + Model + Generate.
-          Hidden in Tools mode — ToolsPanel has its own Run button and
+          Hidden in standalone tool workflows — ToolsPanel has its own Run button and
           owns no model. */}
-      {!isTools && (
+      {!isStandaloneTool && (
       <div className="px-3 py-2.5 border-t border-border">
         <div className="flex items-center gap-2">
           <AdvancedSettings />

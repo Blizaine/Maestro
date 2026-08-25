@@ -1,28 +1,52 @@
-import { Image, Video, AudioLines, Wand2, Wrench } from 'lucide-react'
+import { Image, Video, AudioLines } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
-import type { GenerationMode } from '../../types'
 
-const modes: { value: GenerationMode; label: string; icon: typeof Image }[] = [
-  { value: 'image', label: 'Image', icon: Image },
+type StudioMediaMode = 'video' | 'image' | 'audio'
+
+const modes: { value: StudioMediaMode; label: string; icon: typeof Image }[] = [
   { value: 'video', label: 'Video', icon: Video },
+  { value: 'image', label: 'Image', icon: Image },
   { value: 'audio', label: 'Audio', icon: AudioLines },
-  { value: 'avatar', label: 'Edit', icon: Wand2 },
-  { value: 'tools', label: 'Tools', icon: Wrench },
 ]
 
 export function GenerationModeSelector() {
   const generationMode = useStore(s => s.generationMode)
   const setGenerationMode = useStore(s => s.setGenerationMode)
+  const toolsTool = useStore(s => s.toolsTool)
+  const audioSubMode = useStore(s => s.audioSubMode)
+  const videoWorkflow = useStore(s => s.studioVideoWorkflow)
+  const setVideoWorkflow = useStore(s => s.setStudioVideoWorkflow)
+  const setToolsTool = useStore(s => s.setToolsTool)
+
+  const activeMode: StudioMediaMode = generationMode === 'avatar'
+    ? 'video'
+    : generationMode === 'tools'
+      ? (toolsTool === 'upscale' ? 'video' : 'audio')
+      : generationMode
+
+  const selectMode = (mode: StudioMediaMode) => {
+    if (mode === activeMode) return
+    if (mode === 'video') {
+      setVideoWorkflow(videoWorkflow)
+      return
+    }
+    if (mode === 'audio' && audioSubMode === 'revoice') {
+      setToolsTool('revoice')
+      setGenerationMode('tools')
+      return
+    }
+    setGenerationMode(mode)
+  }
 
   return (
     <div className="flex bg-bg-tertiary rounded-lg p-0.5 border border-border">
       {modes.map(m => {
         const Icon = m.icon
-        const active = generationMode === m.value
+        const active = activeMode === m.value
         return (
           <button
             key={m.value}
-            onClick={() => setGenerationMode(m.value)}
+            onClick={() => selectMode(m.value)}
             className={`flex-1 flex items-center justify-center gap-1.5 text-xs py-2 rounded-md transition-all ${
               active
                 ? 'bg-bg-active text-text-primary'

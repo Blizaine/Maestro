@@ -362,8 +362,23 @@ export type ScailResolutionProfile = '480p' | '512p' | '704p'
 /** Backward-compatible name for saved Recast/API callers. */
 export type RecastResolutionProfile = ScailResolutionProfile
 export type GenerationMode = 'image' | 'video' | 'audio' | 'avatar' | 'tools'
+/**
+ * User-facing Studio Video workflow. The implementation deliberately keeps
+ * the legacy `avatar` and `tools` generation modes underneath so saved jobs,
+ * API payloads, and the future timeline editor can reuse the proven engines.
+ */
+export type StudioVideoWorkflow =
+  | 'frames'
+  | 'extend'
+  | 'blend'
+  | 'retake'
+  | 'prompt_edit'
+  | 'outpaint'
+  | 'repaint'
+  | 'recast'
+  | 'upscale'
 export type EditSubMode = 'retake' | 'inpaint' | 'restyle' | 'outpaint' | 'edit_anything' | 'recast'
-export type AudioSubMode = 'speech' | 'music' | 'sfx' | 'mixer'
+export type AudioSubMode = 'speech' | 'music' | 'sfx' | 'mixer' | 'revoice'
 
 export interface RecastReferenceAsset {
   file: File | null
@@ -619,6 +634,10 @@ export interface ModelFolderCandidate {
 export interface OutputMetadata {
   source: 'sidecar' | 'embedded' | 'none'
   params: Record<string, unknown> | null
+  /** Standalone Studio post-processing outputs are restored through their
+   *  workflow panels instead of being treated as generation models. */
+  tool?: 'upscale' | 'revoice'
+  tool_source?: string
   upload_filenames?: Record<string, string>
   job_id?: string
   /** Director revision that produced this artifact. Gallery "Load settings"

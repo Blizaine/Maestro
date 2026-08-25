@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, DirectorShotImageGuidance, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineClipState, PipelineRepairState, SavedPipelineState, DirectorQueueState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping, H3WindowPlan, MiniMaxH3Reference } from '../types'
+import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, StudioVideoWorkflow, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, DirectorShotImageGuidance, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineClipState, PipelineRepairState, SavedPipelineState, DirectorQueueState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping, H3WindowPlan, MiniMaxH3Reference } from '../types'
 import * as api from '../api/client'
 import { applyThemePrefs, getStoredPrefs, type FamilyId, type ThemeMode, type ThemePrefs } from '../lib/theme'
 import {
@@ -887,7 +887,7 @@ export function getFamiliesForMode(mode: GenerationMode, allFamilies: ModelFamil
     if (audioSubMode === 'speech') return audioSubFamilies.filter(f => f.id === 'tts_speech')
     if (audioSubMode === 'music') return audioSubFamilies.filter(f => f.id === 'tts_music')
     if (audioSubMode === 'sfx') return audioSubFamilies.filter(f => f.id === 'tts_sfx')
-    if (audioSubMode === 'mixer') return []  // Mixer has no model selector
+    if (audioSubMode === 'mixer' || audioSubMode === 'revoice') return []
     return audioSubFamilies
   }
   return allFamilies.filter(f => getFamilyMode(f.id) === mode)
@@ -984,6 +984,10 @@ interface AppState {
   // Generation mode (top-level: image/video/audio/avatar)
   generationMode: GenerationMode
   setGenerationMode: (mode: GenerationMode) => void
+  /** Last regular workflow selected inside the user-facing Studio Video tab. */
+  studioVideoWorkflow: StudioVideoWorkflow
+  /** Route a Studio workflow to its legacy video/avatar/tools engine. */
+  setStudioVideoWorkflow: (workflow: StudioVideoWorkflow) => void
   editSubMode: import('../types').EditSubMode
   setEditSubMode: (mode: import('../types').EditSubMode) => void
   // Edit mode state (persists across sub-mode switches)
@@ -2345,6 +2349,33 @@ function _directorUsesGeneratedShotImages(state: AppState): boolean {
 export const useStore = create<AppState>((set, get) => ({
   // Generation mode
   generationMode: 'video',
+  studioVideoWorkflow: 'frames' as StudioVideoWorkflow,
+  setStudioVideoWorkflow: (workflow) => {
+    set({ studioVideoWorkflow: workflow })
+
+    if (workflow === 'frames' || workflow === 'extend' || workflow === 'blend') {
+      if (get().generationMode !== 'video') get().setGenerationMode('video')
+      const imageMode = workflow === 'extend' ? 3 : workflow === 'blend' ? 4 : 0
+      if (Number(get().params.image_mode) !== imageMode) {
+        get().setParam('image_mode', imageMode)
+      }
+      return
+    }
+
+    if (workflow === 'upscale') {
+      set({ toolsTool: 'upscale' })
+      if (get().generationMode !== 'tools') get().setGenerationMode('tools')
+      return
+    }
+
+    const editMode: import('../types').EditSubMode = workflow === 'prompt_edit'
+      ? 'edit_anything'
+      : workflow === 'repaint'
+        ? 'restyle'
+        : workflow
+    if (get().generationMode !== 'avatar') get().setGenerationMode('avatar')
+    get().setEditSubMode(editMode)
+  },
   editSubMode: 'retake' as import('../types').EditSubMode,
   setEditSubMode: (mode: import('../types').EditSubMode) => {
     const s = get()
@@ -2746,6 +2777,7 @@ export const useStore = create<AppState>((set, get) => ({
       music: 'ace_step_v1_5_xl_sft_lm_4b',
       sfx: 'mmaudio_v2',
       mixer: '',  // Mixer doesn't use a model — it's an ffmpeg-based tool
+      revoice: '',  // Revoice is a SeedVC post-processing tool
     }
     const saved = savedModels[subMode]
     const targetModel = (saved && models.some(m => m.model_type === saved))
@@ -4417,7 +4449,9 @@ export const useStore = create<AppState>((set, get) => ({
 
   // ── Tools area (standalone post-processing on an existing clip) ──────
   toolsTool: 'upscale',
-  setToolsTool: (t) => set({ toolsTool: t }),
+  setToolsTool: (t) => set(t === 'upscale'
+    ? { toolsTool: t, studioVideoWorkflow: 'upscale' }
+    : { toolsTool: t, audioSubMode: 'revoice' }),
   toolsSourcePath: null,
   toolsSourceName: null,
   toolsSourceUrl: null,
@@ -4508,7 +4542,21 @@ export const useStore = create<AppState>((set, get) => ({
     await get().runTool()
   },
   sendClipToTools: (name, url, tool) => {
-    set({ toolsTool: tool, toolsSourcePath: name, toolsSourceName: name, toolsSourceUrl: url })
+    set(tool === 'upscale'
+      ? {
+          toolsTool: tool,
+          studioVideoWorkflow: 'upscale',
+          toolsSourcePath: name,
+          toolsSourceName: name,
+          toolsSourceUrl: url,
+        }
+      : {
+          toolsTool: tool,
+          audioSubMode: 'revoice',
+          toolsSourcePath: name,
+          toolsSourceName: name,
+          toolsSourceUrl: url,
+        })
     get().setGenerationMode('tools')
   },
 
@@ -9635,6 +9683,50 @@ export const useStore = create<AppState>((set, get) => ({
     const p = selectedOutputMeta.params as Record<string, unknown>
     const uploadFilenames = selectedOutputMeta.upload_filenames as Record<string, string> | undefined
     console.log('[LoadSettings] applying settings — model_type:', p.model_type, '| param keys:', Object.keys(p).length)
+
+    // Standalone Upscale/Revoice sidecars intentionally use the virtual
+    // `post_processing` model id. Restore them into the new grouped Studio
+    // hierarchy rather than asking model discovery to resolve that id. Older
+    // sidecars only carry edit_sub_mode; newer ones also carry top-level tool.
+    const restoredTool = (
+      selectedOutputMeta.tool === 'upscale' || selectedOutputMeta.tool === 'revoice'
+        ? selectedOutputMeta.tool
+        : p.edit_sub_mode === 'upscale' || p.edit_sub_mode === 'revoice'
+          ? p.edit_sub_mode
+          : null
+    ) as 'upscale' | 'revoice' | null
+    if (restoredTool) {
+      const selectedOutput = get().filteredOutputs()[get().selectedOutput]
+      const recordedSource = String(selectedOutputMeta.tool_source || '').trim()
+      const sourceName = (
+        recordedSource.replace(/\\/g, '/').split('/').pop()
+        || selectedOutput?.name
+        || ''
+      )
+      const sourceUrl = sourceName
+        ? api.getFileUrl(sourceName)
+        : selectedOutput?.url || null
+      set(restoredTool === 'upscale'
+        ? {
+            generationMode: 'tools',
+            toolsTool: 'upscale',
+            studioVideoWorkflow: 'upscale',
+            toolsSourcePath: sourceName || null,
+            toolsSourceName: sourceName || null,
+            toolsSourceUrl: sourceUrl,
+            toolsUpscaleMethod: String(p.method || 'flashvsr2'),
+          }
+        : {
+            generationMode: 'tools',
+            toolsTool: 'revoice',
+            audioSubMode: 'revoice',
+            toolsSourcePath: sourceName || null,
+            toolsSourceName: sourceName || null,
+            toolsSourceUrl: sourceUrl,
+            toolsRevoiceMode: p.mode === 'two' ? 'two' : 'single',
+          })
+      return
+    }
 
     let modelType = (p.model_type as string) || ''
     if (!modelType) return

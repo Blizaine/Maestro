@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Wrench, Upload, X, Film, Mic, Play } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
@@ -15,8 +15,14 @@ const upscaleMethods = [
   { value: 'lanczos2', label: 'Lanczos 2x (fast)' },
 ]
 
-export function ToolsPanel() {
-  const tool = useStore(s => s.toolsTool)
+export function ToolsPanel({
+  forcedTool,
+  embedded = false,
+}: {
+  forcedTool?: 'upscale' | 'revoice'
+  embedded?: boolean
+}) {
+  const storedTool = useStore(s => s.toolsTool)
   const setTool = useStore(s => s.setToolsTool)
   const sourcePath = useStore(s => s.toolsSourcePath)
   const sourceName = useStore(s => s.toolsSourceName)
@@ -28,7 +34,6 @@ export function ToolsPanel() {
   const setRevoiceMode = useStore(s => s.setToolsRevoiceMode)
   const revoiceRefs = useStore(s => s.toolsRevoiceRefs)
   const setRevoiceRef = useStore(s => s.setToolsRevoiceRef)
-  const runTool = useStore(s => s.runTool)
 
   const outputs = useStore(s => s.outputs)
   const selectedOutput = useStore(s => s.selectedOutput)
@@ -40,6 +45,11 @@ export function ToolsPanel() {
   const vcFileRefs = [useRef<HTMLInputElement>(null), useRef<HTMLInputElement>(null)]
   const [uploading, setUploading] = useState(false)
   const [vcUploading, setVcUploading] = useState<number | null>(null)
+  const tool = forcedTool || storedTool
+
+  useEffect(() => {
+    if (forcedTool && storedTool !== forcedTool) setTool(forcedTool)
+  }, [forcedTool, setTool, storedTool])
 
   const handleSourceUpload = async (file: File) => {
     setUploading(true)
@@ -73,8 +83,16 @@ export function ToolsPanel() {
   const canRun = !!sourcePath && (tool === 'upscale' || hasRefs)
   const flashvsrOff = flashvsrMode === 0 && method.startsWith('flashvsr')
 
+  const handleRun = () => {
+    // setToolsTool is synchronous; reading from the store immediately after
+    // it guarantees runTool dispatches the workflow displayed by this panel.
+    if (storedTool !== tool) setTool(tool)
+    void useStore.getState().runTool()
+  }
+
   return (
     <div className="flex flex-col gap-4">
+      {!embedded && (
       <div>
         <div className="flex items-center gap-1.5 text-[11px] text-text-muted uppercase tracking-wider mb-2">
           <Wrench size={12} /> Tools — post-process any clip
@@ -94,6 +112,7 @@ export function ToolsPanel() {
           ))}
         </div>
       </div>
+      )}
 
       {/* Source clip — upload, or use the clip currently selected in the gallery */}
       <div>
@@ -218,7 +237,7 @@ export function ToolsPanel() {
 
       {/* Run */}
       <button
-        onClick={() => runTool()}
+        onClick={handleRun}
         disabled={!canRun}
         className={`w-full px-4 py-2.5 rounded-lg flex items-center justify-center gap-1.5 font-medium text-xs transition-all ${
           canRun

@@ -111,7 +111,7 @@ export function GenerateButton() {
         disabled={pending || !queueSupported}
         title={queueSupported
           ? 'Hold current Studio settings in the queue without starting generation'
-          : 'Add to Queue is not available for specialized Edit and Blend workflows yet'}
+          : 'Add to Queue is not available for specialized Transform and Blend workflows yet'}
         aria-label="Add current Studio settings to the queue"
         className="flex items-center justify-center border-l border-white/20 transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:border-text-muted/20 disabled:opacity-40 disabled:hover:bg-transparent"
       >

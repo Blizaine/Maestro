@@ -11,7 +11,7 @@ const placeholders: Record<string, string> = {
   image: 'Describe your image...',
   video: 'Describe your video...',
   audio: 'Enter text to speak or describe audio...',
-  avatar: 'Describe your avatar animation...',
+  avatar: 'Describe the finished video...',
 }
 
 const H3_TEXT_TOKEN_LIMIT = 512
@@ -312,6 +312,12 @@ export function PromptInput() {
     ? 'Describe the finished video and replacement characters...'
     : generationMode === 'avatar' && editSubMode === 'restyle'
       ? 'Describe the finished video...'
+      : generationMode === 'avatar' && editSubMode === 'outpaint'
+        ? 'Describe the expanded scene...'
+        : generationMode === 'avatar' && editSubMode === 'retake'
+          ? 'Describe the replacement performance...'
+          : generationMode === 'avatar' && editSubMode === 'edit_anything'
+            ? 'Describe the change you want...'
       : (placeholders[generationMode] || 'Describe your content...')
 
   // Close TTS menu on outside click

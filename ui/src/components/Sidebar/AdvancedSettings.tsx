@@ -17,6 +17,7 @@ function PresetManager() {
   const deletePreset = useStore(s => s.deletePreset)
   const generationMode = useStore(s => s.generationMode)
   const currentModel = useStore(s => s.params.model_type)
+  const modeLabel = generationMode === 'avatar' ? 'video transform' : generationMode
   const [saveName, setSaveName] = useState('')
   const [showSave, setShowSave] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
@@ -101,7 +102,7 @@ function PresetManager() {
           ))}
         </div>
       ) : (
-        <p className="text-[10px] text-text-muted">No {generationMode} presets for this model</p>
+        <p className="text-[10px] text-text-muted">No {modeLabel} presets for this model</p>
       )}
     </div>
   )
