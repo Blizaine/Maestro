@@ -1033,238 +1033,715 @@ def _ensure_llama_server(bin_dir: str) -> None:
     """Auto-download llama-server from llama.cpp GitHub releases if missing.
 
     Picks the appropriate prebuilt binary for the current platform:
-      - Windows + CUDA (default for Maestro on NVIDIA): bin-win-cuda-12.4-x64.zip
-      - Linux: bin-ubuntu-x64.tar.gz (includes CUDA backend if libs are present)
-      - macOS / AMD: not supported by Maestro itself (Pinokio install gates these),
-        but if someone gets here, raise with a clear message.
+        - Windows + CUDA (default for Maestro on NVIDIA):
+            llama-b<tag>-bin-win-cuda-12.4-x64.zip
+            cudart-llama-bin-win-cuda-12.4-x64.zip
+        - Linux:
+            llama-b<tag>-bin-ubuntu-x64.tar.gz
 
-    Uses urllib + zipfile/tarfile from the stdlib so no extra deps needed.
-    Queries the GitHub releases API for the latest tag rather than
-    hardcoding a version that goes stale within a week. Falls back to a
-    known-good pinned tag if the API is unreachable (rate-limited,
-    offline, etc.) so this still works on locked-down networks.
+    llama.cpp's GitHub "latest release" is not guaranteed to be a binary
+    bNNNNN release. It may point to a semantic/meta release such as v0.3.0
+    which does not contain the Windows/Linux binaries.
 
-    Side effect: writes binaries to bin_dir/. Idempotent — exits early
-    if a new-enough exe already exists; re-downloads the latest if the
-    installed build is older than MIN_LLAMA_BUILD.
+    Therefore this function scans recent GitHub releases and selects the
+    newest bNNNNN release that actually contains all assets required by the
+    current platform.
+
+    Falls back to a pinned known-good binary release if GitHub's API is
+    unavailable.
+
+    Side effect:
+        Writes binaries/runtime libraries to bin_dir.
+
+    Idempotent:
+        Returns immediately if llama-server and the required CUDA runtime
+        files are already present and sufficiently recent.
     """
+    import os
     import sys
     import json
+    import re
     import zipfile
     import tarfile
     import shutil
+
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
     is_windows = sys.platform.startswith("win")
     is_linux = sys.platform.startswith("linux")
+
     exe_name = "llama-server.exe" if is_windows else "llama-server"
     exe_path = os.path.join(bin_dir, exe_name)
+
     exe_exists = os.path.isfile(exe_path)
-    reported_build = _llama_server_build(exe_path) if exe_exists else None
+
+    reported_build = (
+        _llama_server_build(exe_path)
+        if exe_exists
+        else None
+    )
+
     receipt = _read_llama_runtime_receipt(bin_dir)
-    receipt_build = _llama_release_build(receipt.get("release_tag", ""))
+
+    receipt_build = _llama_release_build(
+        receipt.get("release_tag", "")
+    )
+
     if receipt_build is None:
         try:
             stored_build = int(receipt.get("build") or 0)
         except (TypeError, ValueError):
             stored_build = 0
+
         receipt_build = stored_build if stored_build > 0 else None
 
     known_build = reported_build or receipt_build
+
     needs_executable = not exe_exists
-    if exe_exists and known_build is not None and known_build < MIN_LLAMA_BUILD:
+
+    if (
+        exe_exists
+        and known_build is not None
+        and known_build < MIN_LLAMA_BUILD
+    ):
         needs_executable = True
+
         print(
-            f"[LLM] llama-server build {known_build} < required {MIN_LLAMA_BUILD}; "
-            "upgrading to the latest llama.cpp release."
+            f"[LLM] llama-server build {known_build} "
+            f"< required {MIN_LLAMA_BUILD}; "
+            "upgrading to the latest compatible llama.cpp release."
         )
 
+    # ------------------------------------------------------------------
+    # Windows CUDA runtime validation
+    # ------------------------------------------------------------------
+
     missing_cuda_files = []
+
     if is_windows:
         missing_cuda_files = [
             filename
             for filename in _WINDOWS_LLAMA_CUDA_FILES
-            if not os.path.isfile(os.path.join(bin_dir, filename))
+            if not os.path.isfile(
+                os.path.join(bin_dir, filename)
+            )
         ]
+
     needs_cudart = bool(missing_cuda_files)
 
-    # Unknown/zero version metadata is deliberately accepted. Official
-    # llama.cpp archives have occasionally shipped that way; repeatedly
-    # replacing the same binary cannot make its embedded metadata improve.
+    # Unknown/zero embedded version metadata is deliberately accepted.
+    #
+    # Official llama.cpp archives have occasionally shipped binaries whose
+    # embedded version cannot be determined. Reinstalling the same binary
+    # repeatedly won't improve that metadata.
     if not needs_executable and not needs_cudart:
         return
 
+    # ------------------------------------------------------------------
+    # Platform validation
+    # ------------------------------------------------------------------
+
     if not (is_windows or is_linux):
         raise RuntimeError(
-            f"Auto-download of llama-server is supported on Windows and Linux only. "
-            f"Detected platform: {sys.platform}. Download manually from "
-            "https://github.com/ggml-org/llama.cpp/releases and place llama-server "
-            f"in {bin_dir}."
+            "Auto-download of llama-server is supported on Windows "
+            f"and Linux only. Detected platform: {sys.platform}. "
+            "Download manually from "
+            "https://github.com/ggml-org/llama.cpp/releases "
+            f"and place {exe_name} in {bin_dir}."
         )
 
     os.makedirs(bin_dir, exist_ok=True)
 
-    # Asset selection. cu12.4 build chosen because it's broadly compatible
-    # with CUDA 12.x and 13.x drivers (forward compat within major).
+    # ------------------------------------------------------------------
+    # Required release assets
+    # ------------------------------------------------------------------
     #
-    # Windows: download TWO assets:
-    #   1. llama-b<tag>-bin-win-cuda-12.4-x64.zip — the actual binaries
-    #   2. cudart-llama-bin-win-cuda-12.4-x64.zip — CUDA runtime DLLs
-    #      (cudart64_12.dll, cublas64_12.dll, etc). Required because
-    #      llama-server needs them at runtime and we can't assume the
-    #      user has system-wide CUDA — Pinokio's AI bundle installs it
-    #      but a manual install or weird env may not have it on PATH.
-    #      Putting them next to llama-server.exe lets it find them
-    #      regardless of system state.
-    # Linux: just one asset — bin-ubuntu-x64.tar.gz dynamically links
-    # against CUDA libs, which Pinokio's AI bundle has on Linux too.
+    # Windows needs TWO archives:
     #
-    # Both assets are matched by:
-    #   (must_start_with, must_contain)
-    # The startswith check disambiguates "llama-b..." from "cudart-..."
-    # (both contain "bin-win-cuda-12.4-x64.zip" and we must download
-    # the right one — and on Windows, both).
+    #   1. llama-bNNNNN-bin-win-cuda-12.4-x64.zip
+    #      Contains llama-server.exe and related binaries.
+    #
+    #   2. cudart-llama-bin-win-cuda-12.4-x64.zip
+    #      Contains CUDA runtime DLLs such as cudart/cublas.
+    #
+    # Putting the CUDA runtime DLLs next to llama-server.exe avoids
+    # depending on a system-wide CUDA installation or PATH configuration.
+    #
+    # Linux uses one archive:
+    #
+    #   llama-bNNNNN-bin-ubuntu-x64.tar.gz
+    #
+    # Each tuple is:
+    #
+    #   (required filename prefix, required filename substring)
+    #
+    # Prefix matching prevents the llama archive and cudart archive from
+    # being confused with one another.
+
     if is_windows:
         asset_specs = []
+
         if needs_executable:
-            asset_specs.append(("llama-", "bin-win-cuda-12.4-x64.zip"))
+            asset_specs.append(
+                ("llama-", "bin-win-cuda-12.4-x64.zip")
+            )
+
         if needs_cudart:
-            asset_specs.append(("cudart-", "bin-win-cuda-12.4-x64.zip"))
+            asset_specs.append(
+                ("cudart-", "bin-win-cuda-12.4-x64.zip")
+            )
+
         archive_ext = ".zip"
-    else:  # linux
-        asset_specs = [("llama-", "bin-ubuntu-x64.tar.gz")]
+
+    else:
+        asset_specs = [
+            ("llama-", "bin-ubuntu-x64.tar.gz")
+        ]
+
         archive_ext = ".tar.gz"
 
-    # Query GitHub for the latest release. If the API call fails (rate
-    # limit, offline), fall back to a pinned known-good tag so we still
-    # have a chance of downloading. Update the fallback tag occasionally
-    # if a critical fix lands in newer builds.
-    FALLBACK_TAG = "b9632"
+    # ------------------------------------------------------------------
+    # Release resolution
+    # ------------------------------------------------------------------
+    #
+    # IMPORTANT:
+    #
+    # Do NOT use:
+    #
+    #   /repos/ggml-org/llama.cpp/releases/latest
+    #
+    # llama.cpp may use that endpoint for a semantic/meta release which
+    # does not contain platform binaries.
+    #
+    # Instead, inspect recent releases and find the newest bNNNNN release
+    # that actually contains every asset we require.
+
+    FALLBACK_TAG = "b10598"
+
     if needs_executable and not exe_exists:
-        print("[LLM] llama-server not found; resolving a llama.cpp release...")
+        print(
+            "[LLM] llama-server not found; "
+            "resolving a compatible llama.cpp binary release..."
+        )
+
     elif needs_cudart and not needs_executable:
         print(
             "[LLM] llama.cpp CUDA runtime is incomplete "
-            f"(missing {', '.join(missing_cuda_files)}); repairing it..."
+            f"(missing {', '.join(missing_cuda_files)}); "
+            "repairing it..."
         )
+
     else:
-        print("[LLM] Resolving the latest compatible llama.cpp release...")
+        print(
+            "[LLM] Resolving the latest compatible "
+            "llama.cpp binary release..."
+        )
+
     release_info = None
     tag = None
+
+    api_url = (
+        "https://api.github.com/repos/"
+        "ggml-org/llama.cpp/releases?per_page=100"
+    )
+
     try:
         req = Request(
-            "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest",
-            headers={"Accept": "application/vnd.github+json"},
+            api_url,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "Maestro-llama-runtime-installer",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
         )
-        with urlopen(req, timeout=15) as r:
-            release_info = json.load(r)
-        tag = release_info.get("tag_name", FALLBACK_TAG)
-    except (URLError, HTTPError, json.JSONDecodeError, TimeoutError) as e:
-        print(f"[LLM] GitHub API unavailable ({e}); falling back to pinned tag {FALLBACK_TAG}")
+
+        with urlopen(req, timeout=20) as response:
+            releases = json.load(response)
+
+        if not isinstance(releases, list):
+            raise RuntimeError(
+                "GitHub releases API returned unexpected data."
+            )
+
+        # The API normally returns newest releases first, but sort the binary
+        # releases explicitly by bNNNNN number so we're not dependent on
+        # GitHub's ordering semantics.
+        binary_releases = []
+
+        for candidate in releases:
+            if candidate.get("draft"):
+                continue
+
+            candidate_tag = str(
+                candidate.get("tag_name") or ""
+            )
+
+            match = re.fullmatch(
+                r"b(\d+)",
+                candidate_tag
+            )
+
+            if not match:
+                continue
+
+            binary_releases.append(
+                (
+                    int(match.group(1)),
+                    candidate,
+                )
+            )
+
+        binary_releases.sort(
+            key=lambda item: item[0],
+            reverse=True,
+        )
+
+        for _, candidate in binary_releases:
+            candidate_tag = candidate.get(
+                "tag_name",
+                "",
+            )
+
+            assets = candidate.get("assets") or []
+
+            has_everything = True
+
+            for prefix, contains in asset_specs:
+                matching_asset = next(
+                    (
+                        asset
+                        for asset in assets
+                        if str(
+                            asset.get("name") or ""
+                        ).startswith(prefix)
+                        and contains
+                        in str(
+                            asset.get("name") or ""
+                        )
+                        and asset.get(
+                            "browser_download_url"
+                        )
+                    ),
+                    None,
+                )
+
+                if matching_asset is None:
+                    has_everything = False
+                    break
+
+            if has_everything:
+                release_info = candidate
+                tag = candidate_tag
+                break
+
+        if release_info is None:
+            raise RuntimeError(
+                "No recent llama.cpp bNNNNN release contained "
+                "all required platform assets."
+            )
+
+        print(
+            f"[LLM] Using llama.cpp release {tag}"
+        )
+
+    except (
+        URLError,
+        HTTPError,
+        json.JSONDecodeError,
+        TimeoutError,
+        RuntimeError,
+        OSError,
+    ) as e:
+        print(
+            "[LLM] Could not resolve the current llama.cpp "
+            f"binary release ({e}); "
+            f"falling back to pinned tag {FALLBACK_TAG}."
+        )
+
+        release_info = None
         tag = FALLBACK_TAG
 
-    # Resolve each asset spec to a download URL — prefer GitHub API
-    # (handles tag drift gracefully) but fall back to a constructed URL.
-    asset_urls = []
-    api_assets = (release_info or {}).get("assets", [])
-    for prefix, contains in asset_specs:
-        url = None
-        for asset in api_assets:
-            name = asset.get("name", "")
-            if name.startswith(prefix) and contains in name:
-                url = asset.get("browser_download_url")
-                break
-        if not url:
-            # Construct conventional URL — works as long as the asset
-            # naming convention is stable across releases.
-            if prefix == "llama-":
-                guess_name = f"{prefix}{tag}-{contains}"
-            else:
-                # cudart asset name doesn't include the tag (verified
-                # via the API listing — cudart-llama-bin-win-cuda-12.4-x64.zip).
-                guess_name = f"{prefix}llama-{contains}"
-            url = f"https://github.com/ggml-org/llama.cpp/releases/download/{tag}/{guess_name}"
-        asset_urls.append(url)
+    # ------------------------------------------------------------------
+    # Resolve exact asset URLs
+    # ------------------------------------------------------------------
 
-    # Download + extract each asset in turn.
-    for asset_url in asset_urls:
-        print(f"[LLM] Downloading {os.path.basename(asset_url)} (~one-time setup, may take 1-2 min)...")
-        archive_path = os.path.join(bin_dir, f"_llama_download_temp{archive_ext}")
+    asset_urls = []
+
+    api_assets = (
+        (release_info or {}).get("assets")
+        or []
+    )
+
+    for prefix, contains in asset_specs:
+        asset_url = None
+        asset_name = None
+
+        # Prefer the exact URL supplied by GitHub.
+        for asset in api_assets:
+            name = str(
+                asset.get("name") or ""
+            )
+
+            if (
+                name.startswith(prefix)
+                and contains in name
+            ):
+                candidate_url = asset.get(
+                    "browser_download_url"
+                )
+
+                if candidate_url:
+                    asset_url = candidate_url
+                    asset_name = name
+                    break
+
+        # If API resolution wasn't available, construct the conventional
+        # release URL using the pinned fallback tag.
+        if not asset_url:
+            if prefix == "llama-":
+                asset_name = (
+                    f"llama-{tag}-{contains}"
+                )
+
+            elif prefix == "cudart-":
+                # The cudart archive does NOT contain the bNNNNN tag.
+                asset_name = (
+                    f"cudart-llama-{contains}"
+                )
+
+            else:
+                raise RuntimeError(
+                    f"Unknown llama.cpp asset prefix: {prefix}"
+                )
+
+            asset_url = (
+                "https://github.com/"
+                "ggml-org/llama.cpp/releases/download/"
+                f"{tag}/{asset_name}"
+            )
+
+        print(
+            f"[LLM] Resolved asset: {asset_name}"
+        )
+
+        asset_urls.append(
+            (asset_name, asset_url)
+        )
+
+    # ------------------------------------------------------------------
+    # Download and extract
+    # ------------------------------------------------------------------
+
+    for asset_index, (
+        asset_name,
+        asset_url,
+    ) in enumerate(asset_urls):
+        print(
+            f"[LLM] Downloading {asset_name} "
+            "(one-time setup)..."
+        )
+
+        # Unique name prevents weirdness if an interrupted run leaves
+        # something behind.
+        archive_path = os.path.join(
+            bin_dir,
+            f"_llama_download_{asset_index}{archive_ext}",
+        )
+
         try:
-            # Stream download so the user isn't waiting on full buffering
-            with urlopen(asset_url, timeout=600) as r, open(archive_path, "wb") as f:
-                total_bytes = int(r.headers.get("Content-Length", 0))
+            download_req = Request(
+                asset_url,
+                headers={
+                    "User-Agent": (
+                        "Maestro-llama-runtime-installer"
+                    ),
+                    "Accept": "application/octet-stream",
+                },
+            )
+
+            with (
+                urlopen(
+                    download_req,
+                    timeout=600,
+                ) as response,
+                open(
+                    archive_path,
+                    "wb",
+                ) as output_file,
+            ):
+                content_length = response.headers.get(
+                    "Content-Length"
+                )
+
+                try:
+                    total_bytes = int(
+                        content_length or 0
+                    )
+                except (TypeError, ValueError):
+                    total_bytes = 0
+
                 downloaded = 0
-                chunk_size = 1024 * 1024  # 1 MB chunks
+
+                chunk_size = (
+                    1024 * 1024
+                )  # 1 MiB
+
                 last_pct = -10
+
                 while True:
-                    chunk = r.read(chunk_size)
+                    chunk = response.read(
+                        chunk_size
+                    )
+
                     if not chunk:
                         break
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if total_bytes:
-                        pct = (downloaded * 100) // total_bytes
-                        if pct - last_pct >= 10:
-                            print(f"[LLM]   {pct}% ({downloaded // (1024*1024)} / {total_bytes // (1024*1024)} MB)")
-                            last_pct = pct
-            print("[LLM] Extracting...")
 
-            # Extract — Windows zips and Linux tarballs have different layouts.
-            # llama.cpp's win zips put binaries in a top-level "build/bin/"
-            # or similar subdirectory; flatten everything to bin_dir for
-            # simplicity (llama-server expects siblings of itself, not
-            # a nested layout).
+                    output_file.write(chunk)
+
+                    downloaded += len(chunk)
+
+                    if total_bytes:
+                        pct = (
+                            downloaded * 100
+                        ) // total_bytes
+
+                        if (
+                            pct - last_pct >= 10
+                            or downloaded
+                            == total_bytes
+                        ):
+                            print(
+                                "[LLM]   "
+                                f"{pct}% "
+                                f"({downloaded // (1024 * 1024)} / "
+                                f"{total_bytes // (1024 * 1024)} MB)"
+                            )
+
+                            last_pct = pct
+
+            # Sanity check: an HTML error page or truncated download should
+            # not proceed silently into extraction.
+            if not os.path.isfile(archive_path):
+                raise RuntimeError(
+                    "Download completed but archive file "
+                    f"does not exist: {archive_path}"
+                )
+
+            archive_size = os.path.getsize(
+                archive_path
+            )
+
+            if archive_size == 0:
+                raise RuntimeError(
+                    f"Downloaded empty archive: {asset_name}"
+                )
+
+            print(
+                f"[LLM] Downloaded "
+                f"{archive_size // (1024 * 1024)} MB"
+            )
+
+            print(
+                f"[LLM] Extracting {asset_name}..."
+            )
+
+            # ----------------------------------------------------------
+            # Windows ZIP extraction
+            # ----------------------------------------------------------
+            #
+            # llama.cpp archives may contain binaries underneath directories
+            # such as build/bin/. Maestro wants everything directly beside
+            # llama-server, so flatten each archive member to its basename.
+
             if archive_ext == ".zip":
-                with zipfile.ZipFile(archive_path) as z:
-                    for member in z.infolist():
+                if not zipfile.is_zipfile(
+                    archive_path
+                ):
+                    raise RuntimeError(
+                        "Downloaded llama.cpp asset is not "
+                        f"a valid ZIP file: {asset_name}"
+                    )
+
+                with zipfile.ZipFile(
+                    archive_path
+                ) as archive:
+                    for member in archive.infolist():
                         if member.is_dir():
                             continue
-                        flat_name = os.path.basename(member.filename)
+
+                        flat_name = os.path.basename(
+                            member.filename
+                        )
+
                         if not flat_name:
                             continue
-                        target = os.path.join(bin_dir, flat_name)
-                        with z.open(member) as src, open(target, "wb") as dst:
-                            shutil.copyfileobj(src, dst)
-            else:  # tar.gz
-                with tarfile.open(archive_path, "r:gz") as t:
-                    for member in t.getmembers():
+
+                        target = os.path.join(
+                            bin_dir,
+                            flat_name,
+                        )
+
+                        with (
+                            archive.open(
+                                member
+                            ) as src,
+                            open(
+                                target,
+                                "wb",
+                            ) as dst,
+                        ):
+                            shutil.copyfileobj(
+                                src,
+                                dst,
+                            )
+
+            # ----------------------------------------------------------
+            # Linux tar.gz extraction
+            # ----------------------------------------------------------
+
+            else:
+                with tarfile.open(
+                    archive_path,
+                    "r:gz",
+                ) as archive:
+                    for member in archive.getmembers():
                         if not member.isfile():
                             continue
-                        flat_name = os.path.basename(member.name)
+
+                        flat_name = os.path.basename(
+                            member.name
+                        )
+
                         if not flat_name:
                             continue
-                        target = os.path.join(bin_dir, flat_name)
-                        src = t.extractfile(member)
+
+                        target = os.path.join(
+                            bin_dir,
+                            flat_name,
+                        )
+
+                        src = archive.extractfile(
+                            member
+                        )
+
                         if src is None:
                             continue
-                        with open(target, "wb") as dst:
-                            shutil.copyfileobj(src, dst)
-                        # Preserve executable bit on Linux
+
+                        with (
+                            src,
+                            open(
+                                target,
+                                "wb",
+                            ) as dst,
+                        ):
+                            shutil.copyfileobj(
+                                src,
+                                dst,
+                            )
+
+                        # Preserve executable bit on Linux.
                         try:
-                            os.chmod(target, member.mode)
-                        except Exception:
+                            os.chmod(
+                                target,
+                                member.mode,
+                            )
+                        except OSError:
                             pass
+
+        except HTTPError as e:
+            raise RuntimeError(
+                "Failed to download llama.cpp asset "
+                f"{asset_name}: HTTP {e.code} "
+                f"from {asset_url}"
+            ) from e
+
+        except URLError as e:
+            raise RuntimeError(
+                "Failed to download llama.cpp asset "
+                f"{asset_name}: {e.reason}. "
+                f"URL: {asset_url}"
+            ) from e
+
+        except (
+            zipfile.BadZipFile,
+            tarfile.TarError,
+        ) as e:
+            raise RuntimeError(
+                "Failed to extract llama.cpp asset "
+                f"{asset_name}: {e}"
+            ) from e
+
         finally:
             try:
-                os.remove(archive_path)
+                os.remove(
+                    archive_path
+                )
             except OSError:
                 pass
 
+    # ------------------------------------------------------------------
+    # Validate installation
+    # ------------------------------------------------------------------
+
     if not os.path.isfile(exe_path):
+        attempted_urls = [
+            url
+            for _, url in asset_urls
+        ]
+
         raise FileNotFoundError(
-            f"Downloaded llama.cpp release but {exe_name} not found in {bin_dir} "
-            f"after extraction. Tried: {asset_urls}"
+            "Downloaded and extracted llama.cpp release "
+            f"{tag}, but {exe_name} was not found in "
+            f"{bin_dir}. Tried: {attempted_urls}"
         )
+
+    # On Windows, make sure the CUDA runtime repair actually succeeded.
+    if is_windows:
+        still_missing_cuda_files = [
+            filename
+            for filename in _WINDOWS_LLAMA_CUDA_FILES
+            if not os.path.isfile(
+                os.path.join(
+                    bin_dir,
+                    filename,
+                )
+            )
+        ]
+
+        if still_missing_cuda_files:
+            raise FileNotFoundError(
+                "llama.cpp was downloaded, but required "
+                "CUDA runtime files are still missing: "
+                + ", ".join(
+                    still_missing_cuda_files
+                )
+            )
+
+    # ------------------------------------------------------------------
+    # Store release/build receipt
+    # ------------------------------------------------------------------
+
     if needs_executable:
-        installed_build = _llama_server_build(exe_path) or _llama_release_build(tag)
+        installed_build = (
+            _llama_server_build(
+                exe_path
+            )
+            or _llama_release_build(
+                tag
+            )
+        )
+
         _write_llama_runtime_receipt(
             bin_dir,
             tag=tag,
             build=installed_build,
         )
-    print(f"[LLM] llama-server installed to {exe_path}")
+
+    print(
+        f"[LLM] llama-server installed to {exe_path}"
+    )
+
 
 
 def _get_server_exe() -> str:
