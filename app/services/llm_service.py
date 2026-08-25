@@ -933,6 +933,7 @@ def _download_gguf(repo_id: str, filename: str, cache_dir: str) -> str:
 # 'blk.N.ssm_conv1d.weight'". Verified b9632 loads it; b9048 does not. Bump
 # this (and FALLBACK_TAG below) when a newer model needs a newer runtime.
 MIN_LLAMA_BUILD = 9632
+FALLBACK_LLAMA_TAG = "b9632"
 
 _LLAMA_RUNTIME_RECEIPT = ".maestro_llama_runtime.json"
 _WINDOWS_LLAMA_CUDA_FILES = (
@@ -970,6 +971,52 @@ def _llama_release_build(tag: str):
         return None
     build = int(match.group(1))
     return build if build > 0 else None
+
+
+def _llama_release_has_assets(release_info: dict, asset_specs) -> bool:
+    """Return whether a release is a compatible binary ``bNNNN`` build.
+
+    llama.cpp's semantic releases are lightweight version releases whose
+    platform archives remain attached to the referenced nightly build. Treating
+    tags such as ``v0.3.0`` as binary releases makes Maestro invent archive URLs
+    that do not exist.
+    """
+
+    if not isinstance(release_info, dict):
+        return False
+    build = _llama_release_build(release_info.get("tag_name", ""))
+    if build is None or build < MIN_LLAMA_BUILD:
+        return False
+
+    assets = release_info.get("assets", [])
+    if not isinstance(assets, list):
+        return False
+    for prefix, contains in asset_specs:
+        if not any(
+            str(asset.get("name", "")).startswith(prefix)
+            and contains in str(asset.get("name", ""))
+            and bool(asset.get("browser_download_url"))
+            for asset in assets
+            if isinstance(asset, dict)
+        ):
+            return False
+    return True
+
+
+def _llama_nightly_pointer_url(release_info: dict):
+    """Return the official nightly-build pointer from a semantic release."""
+
+    if not isinstance(release_info, dict):
+        return None
+    assets = release_info.get("assets", [])
+    if not isinstance(assets, list):
+        return None
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        if str(asset.get("name", "")).lower() == "nightly-tag.txt":
+            return asset.get("browser_download_url") or None
+    return None
 
 
 def _llama_runtime_receipt_path(bin_dir: str) -> str:
@@ -1039,10 +1086,9 @@ def _ensure_llama_server(bin_dir: str) -> None:
         but if someone gets here, raise with a clear message.
 
     Uses urllib + zipfile/tarfile from the stdlib so no extra deps needed.
-    Queries the GitHub releases API for the latest tag rather than
-    hardcoding a version that goes stale within a week. Falls back to a
-    known-good pinned tag if the API is unreachable (rate-limited,
-    offline, etc.) so this still works on locked-down networks.
+    Resolves GitHub's current semantic release to its referenced binary
+    nightly when necessary. Falls back to a known-good pinned nightly if the
+    API is unreachable or the referenced release is incomplete.
 
     Side effect: writes binaries to bin_dir/. Idempotent — exits early
     if a new-enough exe already exists; re-downloads the latest if the
@@ -1053,6 +1099,7 @@ def _ensure_llama_server(bin_dir: str) -> None:
     import zipfile
     import tarfile
     import shutil
+    from urllib.parse import quote
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
@@ -1136,11 +1183,9 @@ def _ensure_llama_server(bin_dir: str) -> None:
         asset_specs = [("llama-", "bin-ubuntu-x64.tar.gz")]
         archive_ext = ".tar.gz"
 
-    # Query GitHub for the latest release. If the API call fails (rate
-    # limit, offline), fall back to a pinned known-good tag so we still
-    # have a chance of downloading. Update the fallback tag occasionally
-    # if a critical fix lands in newer builds.
-    FALLBACK_TAG = "b9632"
+    # llama.cpp semantic releases contain a nightly-tag.txt pointer; the real
+    # platform archives are attached to the referenced bNNNN release. Older
+    # GitHub layouts exposed the binary nightly directly, so support both.
     if needs_executable and not exe_exists:
         print("[LLM] llama-server not found; resolving a llama.cpp release...")
     elif needs_cudart and not needs_executable:
@@ -1151,18 +1196,74 @@ def _ensure_llama_server(bin_dir: str) -> None:
     else:
         print("[LLM] Resolving the latest compatible llama.cpp release...")
     release_info = None
-    tag = None
-    try:
-        req = Request(
-            "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest",
-            headers={"Accept": "application/vnd.github+json"},
+    tag = FALLBACK_LLAMA_TAG
+
+    def _github_json(url: str) -> dict:
+        request = Request(
+            url,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "Maestro-llama-runtime",
+            },
         )
-        with urlopen(req, timeout=15) as r:
-            release_info = json.load(r)
-        tag = release_info.get("tag_name", FALLBACK_TAG)
-    except (URLError, HTTPError, json.JSONDecodeError, TimeoutError) as e:
-        print(f"[LLM] GitHub API unavailable ({e}); falling back to pinned tag {FALLBACK_TAG}")
-        tag = FALLBACK_TAG
+        with urlopen(request, timeout=15) as response:
+            payload = json.load(response)
+        return payload if isinstance(payload, dict) else {}
+
+    try:
+        latest_release = _github_json(
+            "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest",
+        )
+        if _llama_release_has_assets(latest_release, asset_specs):
+            release_info = latest_release
+            tag = str(release_info.get("tag_name", FALLBACK_LLAMA_TAG))
+        else:
+            pointer_url = _llama_nightly_pointer_url(latest_release)
+            if not pointer_url:
+                raise RuntimeError(
+                    "latest release has neither compatible binaries nor a nightly tag pointer"
+                )
+            pointer_request = Request(
+                pointer_url,
+                headers={"User-Agent": "Maestro-llama-runtime"},
+            )
+            with urlopen(pointer_request, timeout=15) as response:
+                nightly_tag = response.read(64).decode(
+                    "utf-8", errors="replace"
+                ).strip()
+            nightly_build = _llama_release_build(nightly_tag)
+            if nightly_build is None or nightly_build < MIN_LLAMA_BUILD:
+                raise RuntimeError(
+                    f"nightly pointer returned incompatible tag {nightly_tag!r}"
+                )
+            candidate = _github_json(
+                "https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/"
+                f"{quote(nightly_tag, safe='')}"
+            )
+            if not _llama_release_has_assets(candidate, asset_specs):
+                raise RuntimeError(
+                    f"nightly release {nightly_tag} lacks the required platform assets"
+                )
+            release_info = candidate
+            tag = nightly_tag
+            print(
+                f"[LLM] llama.cpp stable release points to binary nightly {tag}; "
+                "using its platform archives."
+            )
+    except (
+        URLError,
+        HTTPError,
+        json.JSONDecodeError,
+        TimeoutError,
+        UnicodeDecodeError,
+        RuntimeError,
+    ) as error:
+        print(
+            f"[LLM] Could not resolve a compatible current llama.cpp binary ({error}); "
+            f"falling back to pinned tag {FALLBACK_LLAMA_TAG}"
+        )
+        tag = FALLBACK_LLAMA_TAG
+        release_info = None
 
     # Resolve each asset spec to a download URL — prefer GitHub API
     # (handles tag drift gracefully) but fall back to a constructed URL.

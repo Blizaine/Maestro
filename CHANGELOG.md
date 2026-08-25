@@ -5,6 +5,15 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-08-25
+
+Local LLM hotfix: fixed fresh Windows installations failing prompt enhancement
+when llama.cpp's latest semantic release contains a `nightly-tag.txt` pointer
+instead of platform binaries. Maestro now follows that pointer to the referenced
+binary nightly, verifies the required llama-server and CUDA runtime archives,
+and falls back to a known-good binary build if current-release resolution is
+unavailable. Existing cached llama-server installations remain untouched.
+
 ## [1.9.0] - 2026-08-19
 
 Universal queue and Director recovery: Studio and Director now share a compact
