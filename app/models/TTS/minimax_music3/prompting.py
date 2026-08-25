@@ -28,8 +28,12 @@ _DISPLAY_TAGS = (
     "[Intro], [Verse], [Pre-Chorus], [Chorus], [Post-Chorus], "
     "[Bridge], [Instrumental], [Solo], [Guitar Solo], or [Outro]"
 )
-_TAG_WITH_TAIL_RE = re.compile(r"^\s*\[([^\[\]]+)\]\s*(.*?)\s*$")
-_TAG_ONLY_RE = re.compile(r"^\s*\[([^\[\]]+)\]\s*$")
+_TAG_WITH_TAIL_RE = re.compile(
+    r"^\s*(?:#{1,6}\s*)?(?:\*\*|\*|__|_)?\s*\[([^\[\]]+)\](?:\*\*|\*|__|_)?\s*(.*?)\s*$"
+)
+_TAG_ONLY_RE = re.compile(
+    r"^\s*(?:#{1,6}\s*)?(?:\*\*|\*|__|_)?\s*\[([^\[\]]+)\](?:\*\*|\*|__|_)?\s*$"
+)
 _DESCRIPTOR_SPLIT_RE = re.compile(r"\s*(?:[-\u2013\u2014:|,;])\s*", re.UNICODE)
 _NUMBERED_SECTION_RE = re.compile(
     r"^(intro|verse|pre[- ]chorus|chorus|post[- ]chorus|bridge|"
@@ -125,6 +129,8 @@ def normalize_generated_music3_song(
     current_section = "Arrangement"
     for source_line in str(lyrics or "").replace("\r\n", "\n").split("\n"):
         stripped = source_line.strip()
+        if not output and re.match(r"^\s*#{1,6}\s+", stripped) and "[" not in stripped:
+            continue
         if _PAREN_INSTRUMENTAL_RE.fullmatch(stripped):
             if not output or output[-1].strip().casefold() != "[instrumental]":
                 output.append("[Instrumental]")
@@ -138,12 +144,14 @@ def normalize_generated_music3_song(
 
         match = _TAG_WITH_TAIL_RE.fullmatch(source_line)
         if not match:
-            output.append(source_line.rstrip())
+            clean_line = re.sub(r"^\s*#{1,6}\s+", "", source_line).rstrip()
+            output.append(clean_line)
             continue
 
         canonical, direction = _canonical_tag_and_direction(match.group(1))
         if canonical is None:
-            output.append(source_line.rstrip())
+            clean_line = re.sub(r"^\s*#{1,6}\s+", "", source_line).rstrip()
+            output.append(clean_line)
             continue
 
         output.append(f"[{canonical}]")
@@ -203,6 +211,8 @@ def validate_music3_lyrics(lyrics: str) -> str | None:
                 f"direction ({production_cue}). Move it to the Music Caption; "
                 "parenthetical production cues may be sung aloud."
             )
+        if re.match(r"^\s*#{1,6}\s+", stripped) and "[" not in stripped:
+            continue
         if "[" not in stripped and "]" not in stripped:
             continue
 
@@ -219,6 +229,10 @@ def validate_music3_lyrics(lyrics: str) -> str | None:
             continue
 
         canonical, direction = _canonical_tag_and_direction(raw_tag)
+        if canonical and not direction:
+            # Canonical numbered or alternate section tags (e.g. [Verse 1], [Chorus 2]) are supported
+            continue
+
         if canonical:
             suffix = (
                 f" and move '{direction}' to the Music Caption"
