@@ -1089,6 +1089,24 @@ def _ensure_llama_server(bin_dir: str) -> None:
         ]
     needs_cudart = bool(missing_cuda_files)
 
+    # llama.cpp's Linux release archives link against the system's
+    # libgomp (GNU OpenMP) but don't bundle it, and minimal images (e.g.
+    # slim WSL/Ubuntu installs) may not have libgomp1 installed, so
+    # llama-server fails with "cannot open shared object file:
+    # libgomp.so.1". llama-server's RUNPATH is $ORIGIN, so a copy placed
+    # next to it in bin_dir is picked up the same way as the bundled
+    # libggml/libllama libs. Reuse the copy PyTorch already bundles
+    # (torch is a hard Maestro dependency, so this is always available)
+    # instead of assuming a system or conda-provided one exists.
+    if is_linux and not os.path.isfile(os.path.join(bin_dir, "libgomp.so.1")):
+        os.makedirs(bin_dir, exist_ok=True)
+        import glob
+        torch_gomp = glob.glob(
+            os.path.join(sys.prefix, "lib", "python*", "site-packages", "torch", "lib", "libgomp-*.so.1")
+        )
+        if torch_gomp:
+            shutil.copyfile(torch_gomp[0], os.path.join(bin_dir, "libgomp.so.1"))
+
     # Unknown/zero version metadata is deliberately accepted. Official
     # llama.cpp archives have occasionally shipped that way; repeatedly
     # replacing the same binary cannot make its embedded metadata improve.
@@ -1140,7 +1158,7 @@ def _ensure_llama_server(bin_dir: str) -> None:
     # limit, offline), fall back to a pinned known-good tag so we still
     # have a chance of downloading. Update the fallback tag occasionally
     # if a critical fix lands in newer builds.
-    FALLBACK_TAG = "b9632"
+    FALLBACK_TAG = "b10566"
     if needs_executable and not exe_exists:
         print("[LLM] llama-server not found; resolving a llama.cpp release...")
     elif needs_cudart and not needs_executable:
@@ -1163,6 +1181,36 @@ def _ensure_llama_server(bin_dir: str) -> None:
     except (URLError, HTTPError, json.JSONDecodeError, TimeoutError) as e:
         print(f"[LLM] GitHub API unavailable ({e}); falling back to pinned tag {FALLBACK_TAG}")
         tag = FALLBACK_TAG
+
+    # ggml-org/llama.cpp's "latest" release is now a rolling marker
+    # (e.g. tag "v0.2.0") that carries no binaries of its own — just a
+    # "nightly-tag.txt" asset pointing at the release that actually has
+    # them (e.g. "b10566"). Follow that pointer so asset resolution
+    # below hits a release with real downloads instead of 404ing on a
+    # guessed "llama-v0.2.0-...” URL.
+    marker_assets = (release_info or {}).get("assets", [])
+    nightly_pointer = next(
+        (a for a in marker_assets if a.get("name") == "nightly-tag.txt"),
+        None,
+    )
+    if nightly_pointer and not any(
+        a.get("name", "").startswith("llama-") for a in marker_assets
+    ):
+        try:
+            with urlopen(nightly_pointer["browser_download_url"], timeout=15) as r:
+                real_tag = r.read().decode("utf-8").strip()
+            if real_tag:
+                req = Request(
+                    f"https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/{real_tag}",
+                    headers={"Accept": "application/vnd.github+json"},
+                )
+                with urlopen(req, timeout=15) as r:
+                    release_info = json.load(r)
+                tag = release_info.get("tag_name", real_tag)
+        except (URLError, HTTPError, json.JSONDecodeError, TimeoutError) as e:
+            print(f"[LLM] Could not resolve nightly build tag ({e}); falling back to pinned tag {FALLBACK_TAG}")
+            tag = FALLBACK_TAG
+            release_info = None
 
     # Resolve each asset spec to a download URL — prefer GitHub API
     # (handles tag drift gracefully) but fall back to a constructed URL.
@@ -1230,22 +1278,37 @@ def _ensure_llama_server(bin_dir: str) -> None:
             else:  # tar.gz
                 with tarfile.open(archive_path, "r:gz") as t:
                     for member in t.getmembers():
-                        if not member.isfile():
-                            continue
                         flat_name = os.path.basename(member.name)
                         if not flat_name:
                             continue
                         target = os.path.join(bin_dir, flat_name)
-                        src = t.extractfile(member)
-                        if src is None:
-                            continue
-                        with open(target, "wb") as dst:
-                            shutil.copyfileobj(src, dst)
-                        # Preserve executable bit on Linux
-                        try:
-                            os.chmod(target, member.mode)
-                        except Exception:
-                            pass
+                        if member.isfile():
+                            src = t.extractfile(member)
+                            if src is None:
+                                continue
+                            with open(target, "wb") as dst:
+                                shutil.copyfileobj(src, dst)
+                            # Preserve executable bit on Linux
+                            try:
+                                os.chmod(target, member.mode)
+                            except Exception:
+                                pass
+                        elif member.issym():
+                            # Versioned shared libs (e.g. libllama-common.so.0
+                            # -> libllama-common.so.0.2.0) ship as symlinks
+                            # alongside the real file. Flatten them the same
+                            # way as regular members -- the archive is a
+                            # single flat directory, so the link target is
+                            # just a sibling basename in bin_dir. Without
+                            # this, llama-server fails to start with
+                            # "cannot open shared object file" since the
+                            # SONAME the loader looks up is the symlink name.
+                            link_target = os.path.basename(member.linkname)
+                            if not link_target:
+                                continue
+                            if os.path.lexists(target):
+                                os.remove(target)
+                            os.symlink(link_target, target)
         finally:
             try:
                 os.remove(archive_path)
