@@ -226,13 +226,21 @@ def normalize_music3_lyrics(lyrics: str) -> str:
 
     output = []
     for line in str(lyrics or "").split("\n"):
-        match = _LEADING_TAGS_RE.match(line)
-        output.append(match.group(1).strip() if match else line)
+        cleaned_line = re.sub(r"^\s*#{1,6}\s+", "", line)
+        cleaned_line = re.sub(r"(?:\*\*|\*|__|_)\s*\[([^\[\]]+)\]\s*(?:\*\*|\*|__|_)", r"[\1]", cleaned_line)
+        match = _LEADING_TAGS_RE.match(cleaned_line)
+        output.append(match.group(1).strip() if match else cleaned_line)
     text = "\n".join(output)
     text = text.replace("] ", "]\n")
     text = text.replace(" [", "\n[")
     text = text.replace(" ^ ", "\n")
-    text = re.sub(r"\[([^\]]+)\]", lambda match: f"[{match.group(1).lower()}]", text)
+    def _lower_and_canonical(m):
+        raw = m.group(1).strip()
+        num_m = re.match(r"^(intro|verse|pre[- ]chorus|chorus|post[- ]chorus|bridge|instrumental|solo|guitar solo|outro)\s+(?:\d+|one|two|three|four|five|six)\s*$", raw, re.I)
+        if num_m:
+            raw = num_m.group(1)
+        return f"[{raw.lower()}]"
+    text = re.sub(r"\[([^\]]+)\]", _lower_and_canonical, text)
     return f"[start]\n{text.strip()}"
 
 
