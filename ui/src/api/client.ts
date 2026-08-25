@@ -58,6 +58,7 @@ export interface ApiOutput {
 
 export interface ApiJobStatus {
   job_id: string
+  kind?: 'generation' | 'editor_export' | string
   status: 'held' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
   progress: number
   step: number
@@ -400,6 +401,111 @@ export async function deleteWorkspace(name: string): Promise<{ switched_to_defau
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Failed to delete workspace' }))
     throw new Error(err.detail || 'Failed to delete workspace')
+  }
+  return res.json()
+}
+
+// --- Editor projects ---
+
+export async function fetchEditorProjects(workspace?: string): Promise<{
+  projects: import('../types').EditorProjectSummary[]
+}> {
+  const params = new URLSearchParams()
+  if (workspace) params.set('workspace', workspace)
+  const query = params.toString()
+  const res = await fetch(`${BASE}/api/v1/editor/projects${query ? `?${query}` : ''}`, {
+    cache: 'no-store',
+  })
+  if (!res.ok) throw new Error('Failed to load Editor projects')
+  return res.json()
+}
+
+export async function createEditorProject(params: {
+  workspace?: string
+  name?: string
+  canvas?: Partial<import('../types').EditorCanvas>
+  project?: import('../types').EditorProject
+}): Promise<import('../types').EditorProject> {
+  const res = await fetch(`${BASE}/api/v1/editor/projects`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'Project creation failed' }))
+    throw new Error(error.detail || 'Project creation failed')
+  }
+  return res.json()
+}
+
+export async function fetchEditorProject(
+  projectId: string,
+  workspace?: string,
+): Promise<import('../types').EditorProject> {
+  const params = new URLSearchParams()
+  if (workspace) params.set('workspace', workspace)
+  const query = params.toString()
+  const res = await fetch(
+    `${BASE}/api/v1/editor/projects/${encodeURIComponent(projectId)}${query ? `?${query}` : ''}`,
+    { cache: 'no-store' },
+  )
+  if (!res.ok) throw new Error('Editor project not found')
+  return res.json()
+}
+
+export async function saveEditorProject(
+  project: import('../types').EditorProject,
+): Promise<import('../types').EditorProject> {
+  const res = await fetch(`${BASE}/api/v1/editor/projects/${encodeURIComponent(project.id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workspace: project.workspace, project }),
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'Project save failed' }))
+    throw new Error(error.detail || 'Project save failed')
+  }
+  return res.json()
+}
+
+export async function deleteEditorProject(projectId: string, workspace?: string): Promise<void> {
+  const params = new URLSearchParams()
+  if (workspace) params.set('workspace', workspace)
+  const query = params.toString()
+  const res = await fetch(
+    `${BASE}/api/v1/editor/projects/${encodeURIComponent(projectId)}${query ? `?${query}` : ''}`,
+    { method: 'DELETE' },
+  )
+  if (!res.ok) throw new Error('Failed to delete Editor project')
+}
+
+export async function probeEditorMedia(
+  asset: Pick<import('../types').EditorAsset, 'name' | 'origin' | 'path'>,
+  workspace?: string,
+): Promise<import('../types').EditorMediaProbe> {
+  const res = await fetch(`${BASE}/api/v1/editor/media/probe`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workspace, asset }),
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'Unable to inspect media' }))
+    throw new Error(error.detail || 'Unable to inspect media')
+  }
+  return res.json()
+}
+
+export async function exportEditorProject(
+  project: import('../types').EditorProject,
+): Promise<{ job_id: string; status: ApiJobStatus['status'] }> {
+  const res = await fetch(`${BASE}/api/v1/editor/export`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workspace: project.workspace, project }),
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'Editor export failed to start' }))
+    throw new Error(error.detail || 'Editor export failed to start')
   }
   return res.json()
 }

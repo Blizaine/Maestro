@@ -311,6 +311,7 @@ export interface OomInfo {
 
 export interface GenerationJob {
   id: string
+  kind?: 'generation' | 'editor_export' | string
   status: 'held' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
   progress: number
   step: number
@@ -353,6 +354,119 @@ export interface OutputFile {
   favorite: boolean
   size: number
   created_at: number
+}
+
+export type AppMode = 'director' | 'studio' | 'editor'
+export type EditorMediaType = 'video' | 'image' | 'audio'
+export type EditorTrackType = 'video' | 'audio' | 'text'
+
+export interface EditorAsset {
+  id: string
+  name: string
+  type: EditorMediaType
+  origin: 'output' | 'upload' | 'project'
+  path?: string
+  url: string
+  duration: number
+  width: number
+  height: number
+  fps: number
+  has_audio: boolean
+  size?: number
+  created_at?: number
+}
+
+export interface EditorTransform {
+  x: number
+  y: number
+  scale: number
+  rotation: number
+}
+
+export interface EditorTextStyle {
+  x: number
+  y: number
+  font_size: number
+  color: string
+}
+
+export interface EditorTimelineItem {
+  id: string
+  asset_id?: string
+  name: string
+  start: number
+  duration: number
+  source_in: number
+  speed: number
+  volume: number
+  opacity: number
+  fit: 'contain' | 'cover'
+  transform: EditorTransform
+  muted?: boolean
+  disabled?: boolean
+  text?: string
+  style?: EditorTextStyle
+}
+
+export interface EditorTrack {
+  id: string
+  name: string
+  type: EditorTrackType
+  z_index: number
+  muted: boolean
+  locked: boolean
+  volume?: number
+  items: EditorTimelineItem[]
+}
+
+export interface EditorCanvas {
+  width: number
+  height: number
+  fps: number
+  background: string
+}
+
+export interface EditorExportSettings {
+  quality: 'draft' | 'balanced' | 'high'
+  codec: 'h264'
+  include_audio: boolean
+}
+
+export interface EditorProject {
+  schema_version: number
+  id: string
+  name: string
+  workspace: string
+  created_at: number
+  updated_at: number
+  canvas: EditorCanvas
+  assets: Record<string, EditorAsset>
+  tracks: EditorTrack[]
+  export: EditorExportSettings
+}
+
+export interface EditorProjectSummary {
+  id: string
+  name: string
+  workspace: string
+  created_at: number
+  updated_at: number
+  duration: number
+  asset_count: number
+}
+
+export interface EditorMediaProbe {
+  name: string
+  type: EditorMediaType
+  duration: number
+  width: number
+  height: number
+  fps: number
+  has_audio: boolean
+  audio_channels: number
+  audio_sample_rate: number
+  size: number
+  path: string
 }
 
 export type MediaFilter = 'all' | 'images' | 'videos' | 'audio' | 'avatars' | 'multiclip' | 'favorites'

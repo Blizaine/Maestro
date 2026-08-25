@@ -64,6 +64,18 @@ from services.checkpoint_compatibility import (
 from services.generation_eta import AdaptiveGenerationEta
 from services.remote_access import TailscaleManager
 from services.web_push import WebPushService, WebPushUnavailable
+from services.editor_projects import (
+    EditorProjectError,
+    EditorRenderCancelled,
+    create_editor_project,
+    delete_editor_project,
+    list_editor_projects,
+    load_editor_project,
+    probe_media,
+    render_editor_project,
+    resolve_editor_asset,
+    save_editor_project,
+)
 
 # Protect upgraded installations before WanGP builds its model registry.  Old
 # CivitAI imports could pair any checkpoint with any Maestro architecture; hide
@@ -335,20 +347,26 @@ def _on_generation_job_terminal(job: dict, status: str) -> None:
     if isinstance(params, dict) and params.get("_director_pipeline_id"):
         return
     job_id = str(job.get("id") or "studio")
+    is_editor = job.get("kind") == "editor_export"
+    surface = "Editor" if is_editor else "Studio"
     if status == "completed":
         _play_host_completion_sound()
         _web_push.dispatch(
             category="completion",
-            title="Studio generation complete",
-            body="Your Maestro generation is ready.",
-            tag=f"studio:{job_id}:completed",
+            title=f"{surface} {'export' if is_editor else 'generation'} complete",
+            body=(
+                "Your Maestro edit is ready."
+                if is_editor
+                else "Your Maestro generation is ready."
+            ),
+            tag=f"{surface.lower()}:{job_id}:completed",
         )
     elif status == "failed":
         _web_push.dispatch(
             category="failure",
-            title="Studio generation failed",
+            title=f"{surface} {'export' if is_editor else 'generation'} failed",
             body=str(job.get("error") or "Open Maestro for details."),
-            tag=f"studio:{job_id}:failed",
+            tag=f"{surface.lower()}:{job_id}:failed",
         )
 
 
@@ -25321,6 +25339,7 @@ def get_status(job_id: str):
     j = snapshot_job(_jobs[job_id])
     return {
         "job_id": j["id"],
+        "kind": j.get("kind", "generation"),
         "status": j["status"],
         "progress": j["progress"],
         "step": j.get("step", 0),
@@ -25426,6 +25445,7 @@ def list_jobs():
         if j["status"] in ("held", "queued", "running"):
             active.append({
                 "job_id": j["id"],
+                "kind": j.get("kind", "generation"),
                 "status": j["status"],
                 "progress": j["progress"],
                 "step": j.get("step", 0),
@@ -26165,6 +26185,222 @@ def serve_upload(filename: str):
     if filepath is not None and os.path.isfile(filepath):
         return share_delete_file_response(filepath)
     return serve_file(filename)
+
+
+# ============================================================================
+# Maestro Editor — non-destructive project persistence and queued export
+# ============================================================================
+
+def _editor_save_root() -> str:
+    return wgp.server_config.get("save_path", "outputs")
+
+
+def _editor_uploads_root() -> str:
+    return os.path.join(os.getcwd(), "uploads")
+
+
+def _run_editor_export(job_id: str) -> bool:
+    """Render a saved Editor timeline through the shared job lifecycle."""
+    job = _jobs[job_id]
+    abort_state = {"abort": False}
+    try:
+        if not try_start(
+            job,
+            message="Preparing Editor timeline...",
+            phase="Preparing",
+        ):
+            return False
+        if not register_abort_state(
+            job,
+            job_id,
+            _active_gen_states,
+            abort_state,
+        ):
+            return False
+
+        project = job["params"]["project"]
+        workspace = job.get("workspace") or _get_active_workspace()
+
+        def _cancelled() -> bool:
+            return bool(abort_state.get("abort")) or is_cancel_requested(job)
+
+        def _progress(percent: int, phase: str) -> None:
+            update_job(
+                job,
+                progress=max(0, min(100, int(percent))),
+                phase=phase,
+                message=phase,
+            )
+
+        output_path = render_editor_project(
+            project,
+            save_root=_editor_save_root(),
+            workspace=workspace,
+            uploads_root=_editor_uploads_root(),
+            progress_callback=_progress,
+            cancel_check=_cancelled,
+        )
+        if _cancelled():
+            return False
+        filename = os.path.basename(output_path)
+        record_job_outputs(job, [filename])
+        return finish_job(
+            job,
+            "completed",
+            progress=100,
+            phase="",
+            message="Editor export complete",
+        )
+    except EditorRenderCancelled:
+        return False
+    except Exception as error:
+        traceback.print_exc()
+        finish_job(
+            job,
+            "failed",
+            error=str(error),
+            message=f"Editor export failed: {error}",
+        )
+        return False
+    finally:
+        unregister_abort_state(job_id, _active_gen_states, abort_state)
+
+
+@api.get("/api/v1/editor/projects")
+def editor_projects_list(workspace: str = ""):
+    workspace = workspace or _get_active_workspace()
+    try:
+        return {
+            "projects": list_editor_projects(
+                _editor_save_root(),
+                workspace,
+            ),
+        }
+    except EditorProjectError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@api.post("/api/v1/editor/projects")
+async def editor_project_create(request: Request):
+    body = await request.json()
+    workspace = body.get("workspace") or _get_active_workspace()
+    try:
+        project = body.get("project")
+        if not isinstance(project, dict):
+            canvas = body.get("canvas") if isinstance(body.get("canvas"), dict) else {}
+            project = create_editor_project(
+                name=body.get("name") or "Untitled project",
+                workspace=workspace,
+                width=int(canvas.get("width") or 1920),
+                height=int(canvas.get("height") or 1080),
+                fps=float(canvas.get("fps") or 30),
+            )
+        return save_editor_project(_editor_save_root(), workspace, project)
+    except (EditorProjectError, TypeError, ValueError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@api.get("/api/v1/editor/projects/{project_id}")
+def editor_project_get(project_id: str, workspace: str = ""):
+    workspace = workspace or _get_active_workspace()
+    try:
+        return load_editor_project(_editor_save_root(), workspace, project_id)
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Editor project not found") from error
+    except EditorProjectError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@api.put("/api/v1/editor/projects/{project_id}")
+async def editor_project_update(project_id: str, request: Request):
+    body = await request.json()
+    workspace = body.get("workspace") or _get_active_workspace()
+    project = body.get("project") if isinstance(body.get("project"), dict) else body
+    project = dict(project)
+    project["id"] = project_id
+    try:
+        return save_editor_project(_editor_save_root(), workspace, project)
+    except EditorProjectError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@api.delete("/api/v1/editor/projects/{project_id}")
+def editor_project_delete(project_id: str, workspace: str = ""):
+    workspace = workspace or _get_active_workspace()
+    try:
+        deleted = delete_editor_project(_editor_save_root(), workspace, project_id)
+    except EditorProjectError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Editor project not found")
+    return {"deleted": project_id}
+
+
+@api.post("/api/v1/editor/media/probe")
+async def editor_media_probe(request: Request):
+    body = await request.json()
+    workspace = body.get("workspace") or _get_active_workspace()
+    asset = body.get("asset") if isinstance(body.get("asset"), dict) else body
+    try:
+        filepath = resolve_editor_asset(
+            asset,
+            save_root=_editor_save_root(),
+            workspace=workspace,
+            uploads_root=_editor_uploads_root(),
+        )
+        return {
+            **probe_media(filepath),
+            "path": filepath,
+        }
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Editor media not found") from error
+    except EditorProjectError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@api.post("/api/v1/editor/export")
+async def editor_export(request: Request):
+    body = await request.json()
+    workspace = body.get("workspace") or _get_active_workspace()
+    try:
+        project = body.get("project")
+        if not isinstance(project, dict):
+            project_id = str(body.get("project_id") or "")
+            project = load_editor_project(
+                _editor_save_root(),
+                workspace,
+                project_id,
+            )
+        project = save_editor_project(_editor_save_root(), workspace, project)
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Editor project not found") from error
+    except EditorProjectError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    job_id = uuid.uuid4().hex[:8]
+    _jobs[job_id] = {
+        "id": job_id,
+        "kind": "editor_export",
+        "status": "queued",
+        "progress": 0,
+        "step": 0,
+        "total_steps": 0,
+        "phase": "",
+        "message": "Editor export queued",
+        "created_at": time.time(),
+        "params": {"project": project},
+        "workspace": workspace,
+        "out_dir": _workspace_dir(workspace),
+        "output_files": [],
+        "error": None,
+    }
+    threading.Thread(
+        target=_run_editor_export,
+        args=(job_id,),
+        daemon=False,
+        name=f"maestro_editor_export_{job_id}",
+    ).start()
+    return {"job_id": job_id, "status": "queued"}
 
 
 # ============================================================================

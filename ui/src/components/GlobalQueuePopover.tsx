@@ -181,7 +181,7 @@ export function GlobalQueuePopover({
                   {totalCount} {totalCount === 1 ? 'item' : 'items'}
                 </span>
               </div>
-              <p className="mt-0.5 text-[9px] text-text-muted">Studio and Director in one place</p>
+              <p className="mt-0.5 text-[9px] text-text-muted">Studio, Director, and Editor in one place</p>
             </div>
             <button
               type="button"
@@ -240,7 +240,7 @@ export function GlobalQueuePopover({
             {studioJobs.length > 0 && (
               <section className="space-y-1.5">
                 <div className="flex items-center justify-between px-1">
-                  <span className="text-[10px] font-medium uppercase tracking-wider text-text-muted">Studio</span>
+                  <span className="text-[10px] font-medium uppercase tracking-wider text-text-muted">Studio &amp; Editor</span>
                   {studioHeldCount > 0 ? (
                     <button
                       type="button"
@@ -277,7 +277,7 @@ export function GlobalQueuePopover({
                           <div className="min-w-0 flex-1">
                             <div className="truncate text-[10px] text-text-secondary">{label}</div>
                             <div className="text-[9px] text-text-muted">
-                              Studio · {compactStatus(job.status)}
+                              {job.kind === 'editor_export' ? 'Editor export' : 'Studio'} · {compactStatus(job.status)}
                               {job.totalSteps > 0 ? ` · Step ${job.step}/${job.totalSteps}` : ''}
                               {job.generationEtaSeconds != null
                                 ? ` · ${formatEtaDuration(job.generationEtaSeconds)} remaining`
@@ -421,7 +421,7 @@ export function GlobalQueuePopover({
                 <ListVideo size={28} className="text-text-muted/60" />
                 <div className="text-xs font-medium text-text-secondary">Queue is empty</div>
                 <p className="text-[10px] leading-relaxed text-text-muted">
-                  Queued Studio generations and held Director projects will appear here.
+                  Queued Studio generations, Editor exports, and held Director projects will appear here.
                 </p>
               </div>
             )}

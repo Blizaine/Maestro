@@ -15,6 +15,7 @@ import { RecipesOverlay } from './components/Recipes/RecipesOverlay'
 import { GlobalQueuePopover } from './components/GlobalQueuePopover'
 import { NotificationCoordinator } from './components/NotificationCoordinator'
 import { NotificationToastHost } from './components/NotificationToastHost'
+import { EditorWorkspace } from './editor/EditorWorkspace'
 import { useStore } from './stores/useStore'
 import { useIsMobile } from './lib/useIsMobile'
 
@@ -32,7 +33,9 @@ function App() {
   const setSidebarOpen = useStore(s => s.setSidebarOpen)
   const toggleSettings = useStore(s => s.toggleSettings)
   const appVersion = useStore(s => s.systemConfig?.app_version)
+  const sidebarMode = useStore(s => s.sidebarMode)
   const isMobile = useIsMobile()
+  const isEditor = sidebarMode === 'editor'
 
   useEffect(() => {
     loadModels()
@@ -55,7 +58,7 @@ function App() {
   return (
     <div className="flex flex-col md:flex-row h-full w-full bg-bg-primary">
       {/* Mobile header */}
-      {isMobile && (
+      {isMobile && !isEditor && (
         <header className="h-12 shrink-0 px-4 border-b border-border flex items-center justify-between bg-bg-secondary">
           <button
             onClick={toggleSidebar}
@@ -83,8 +86,14 @@ function App() {
         </header>
       )}
 
-      <Sidebar />
-      <MainContent />
+      {isEditor ? (
+        <EditorWorkspace />
+      ) : (
+        <>
+          <Sidebar />
+          <MainContent />
+        </>
+      )}
       <SettingsDrawer />
       <LoraBrowser />
       <DirectorDashboard />

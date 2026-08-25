@@ -70,6 +70,7 @@ export function Sidebar() {
   const isContinue = isVideo && !isOmniReference && imageMode === 3
   const isBlend = isVideo && !isOmniReference && imageMode === 4
   const isDirector = sidebarMode === 'director'
+  const isStudio = sidebarMode === 'studio'
   const isI2vOnly = modelOptions?.i2v_class && !modelOptions?.t2v_class
 
   const modeToggle = (size: 'sm' | 'md') => (
@@ -94,10 +95,16 @@ export function Sidebar() {
           // Golden Hour as the reference render. Default theme: flat
           // accent-blue (was bg-bg-active dark elevation — small change
           // that brings the two buttons into visual parity).
-          !isDirector ? 'bg-toggle-active shadow-accent-glow text-white' : 'text-text-secondary hover:text-text-primary'
+          isStudio ? 'bg-toggle-active shadow-accent-glow text-white' : 'text-text-secondary hover:text-text-primary'
         }`}
       >
         Studio
+      </button>
+      <button
+        onClick={() => setSidebarMode('editor')}
+        className={`${size === 'sm' ? 'px-2 py-1 text-[11px]' : 'px-3 py-1 text-xs'} rounded-md text-text-secondary transition-all hover:text-text-primary`}
+      >
+        Editor
       </button>
     </div>
   )

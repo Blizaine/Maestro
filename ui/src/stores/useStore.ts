@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, StudioVideoWorkflow, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, DirectorShotImageGuidance, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineClipState, PipelineRepairState, SavedPipelineState, DirectorQueueState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping, H3WindowPlan, MiniMaxH3Reference } from '../types'
+import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, StudioVideoWorkflow, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, DirectorShotImageGuidance, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineClipState, PipelineRepairState, SavedPipelineState, DirectorQueueState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping, H3WindowPlan, MiniMaxH3Reference, AppMode } from '../types'
 import * as api from '../api/client'
 import { applyThemePrefs, getStoredPrefs, type FamilyId, type ThemeMode, type ThemePrefs } from '../lib/theme'
 import {
@@ -1619,7 +1619,7 @@ interface AppState {
   clearH3WindowPlan: () => void
 
   // Director (Music Video Director)
-  sidebarMode: 'director' | 'studio'
+  sidebarMode: AppMode
   directorStep: 'upload' | 'analyze' | 'structure' | 'style' | 'plan' | 'review' | 'generate_images' | 'plan_video' | 'review_video'
   directorAudioFile: File | null
   directorAudioPath: string | null
@@ -1714,7 +1714,7 @@ interface AppState {
   selectDirectorImageModel: (modelType: string) => void
   selectDirectorVideoModel: (modelType: string) => void
   directorSetLora: (mode: 'image' | 'video', activated_loras: string[], loras_multipliers: string, loraWeights: Record<string, number[]>, availableLoras: string[]) => void
-  setSidebarMode: (mode: 'director' | 'studio') => void
+  setSidebarMode: (mode: AppMode) => void
   directorSetSpeakerMapping: (speakerId: string, name: string, role: SpeakerMapping['role']) => void
   directorInsertSpeakerMention: (speakerId: string) => void
   directorUploadAndAnalyze: (file: File) => Promise<void>
@@ -6592,6 +6592,7 @@ export const useStore = create<AppState>((set, get) => ({
           .filter(j => !existingIds.has(j.job_id))
           .map(j => ({
             id: j.job_id,
+            kind: j.kind || 'generation',
             status: j.status as GenerationJob['status'],
             progress: j.progress / 100,
             step: j.step,
@@ -6619,6 +6620,7 @@ export const useStore = create<AppState>((set, get) => ({
                 set(s => ({
                   jobs: s.jobs.map(j => j.id !== job.id ? j : {
                     ...j,
+                    kind: status.kind || j.kind,
                     status: status.status,
                     progress: status.progress / 100,
                     step: status.step,
@@ -8187,8 +8189,12 @@ export const useStore = create<AppState>((set, get) => ({
         }
       }
       void get().loadDirectorQueue()
-    } else {
+    } else if (mode === 'studio') {
       set({ sidebarMode: 'studio' })
+    } else {
+      // Editor owns the full canvas rather than living inside the Studio
+      // sidebar. Close the mobile drawer as we hand the app shell over.
+      set({ sidebarMode: 'editor', sidebarOpen: false, settingsOpen: false })
     }
   },
 
