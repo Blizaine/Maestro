@@ -5,6 +5,82 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-08-28
+
+Editor: added a third top-level Maestro workspace beside Director and Studio.
+The new non-destructive editor supports layered video, audio, and title tracks;
+trim, split, duplicate, copy/paste, markers, undo/redo, snapping, track mute and
+lock, clip speed/volume/opacity, fades and dissolves, title fonts, and draggable
+canvas transforms. Projects save atomically per workspace and preserve export
+history. The responsive layout moves its media browser and inspector into a
+mobile-friendly panel without changing the desktop timeline. Export supports
+project and delivery resolutions, configurable frame rates, H.264/H.265/AV1,
+automatic hardware-encoder selection, audio mixing, and Maestro's universal
+held/running queue.
+
+Editor integration: media can be browsed across every Maestro workspace,
+uploads, and favorites. Complete Director outputs can be expanded into their
+individual generated shots on the timeline, with a Music Video's source song
+placed on its own audio layer. A selected clip can be sent to the appropriate
+Maestro Studio AI workflow and the finished result returns as a selectable take
+at the same timeline position. Clip overlap is prevented within one track,
+new visual layers stack in compositing order, removable tracks are supported,
+and the preview uses source-sized transform bounds, alignment guides, and a
+lightweight mobile playback path.
+
+Studio navigation: replaced the crowded legacy mode bars with a compact
+hierarchical workflow selector. Video now groups Create/Frames/Extend/Blend,
+Retake/Edit Anything/Outpaint/Repaint/Recast, Upscale, and Finish without using
+the reserved top-level Editor name. Image adds explicit New, Edit, Upscale, and
+Outpaint workflows with model-aware inputs. Audio owns Music, Speech, Sound
+Effects, and Revoice. Film Grain is available as a reusable Finish workflow for
+any saved video, including Editor clips. The Director / Studio / Editor header,
+version label, app icon, and responsive behavior are now shared consistently.
+
+MiniMax H3: added the native 768p tier, 21:9 canvases, and the Regenerate 2K
+workflow. FL2VA and Ref2VA expose their corresponding Alibaba PAI eight-step
+acceleration presets, including native PDD parallel-head loading and sampling.
+Reference conditioning no longer promotes an Omni identity reference into an
+implicit first frame. A new character library stores named image + voice pairs
+or video references, recalls them into Studio and Director Omni jobs, and
+automatically prepares reference videos within H3's per-clip and combined
+duration limits. Improved memory and reference preparation avoids needless
+high-resolution decoding while retaining full-quality identity conditioning.
+
+H3 planning and Director: long-form plans now use a causal story architecture,
+character voice bibles, dialogue table reads, exact locked dialogue manifests,
+conversation-aware shot packing, concrete opening/closing state, and official
+MiniMax Context-IR conventions. Prompt enhancement uses structure-aware token
+estimates instead of a false 512-token rejection, preserves visible quoted text
+without treating it as speech, and compacts only prose that can be shortened
+without losing dialogue or timing. Director and Studio report per-clip,
+multi-window, and project ETAs with observed cache acceleration folded into
+later estimates.
+
+Local LLMs: added Qwen3.8 27B Uncensored Q4_K_M with its vision projector,
+model-aware reasoning tiers, quantized KV planning for 24 GB systems, and
+separate thinking policies for creative work versus grammar-constrained
+structured output. Prompt enhancement can use bounded deep thinking and records
+reasoning/answer telemetry, while JSON and deterministic repair passes disable
+thinking. The llama.cpp compatibility floor was raised for Qwen3.8's corrected
+DeltaNet CUDA path without regressing v1.9.1's semantic-release to binary-
+nightly resolution and cached-runtime reuse.
+
+Notifications and remote access: added in-app completion alerts, optional
+browser and host chimes, event preferences, an installable PWA, and encrypted
+closed-app Web Push. Optional Tailscale Serve integration creates a private
+HTTPS address inside each user's own tailnet, displays a QR code, and remembers
+the selected Maestro backend port across restarts. Dynamic ports remain the
+default for users who never opt in, Maestro never enables public Funnel access,
+and an existing unrelated Serve route is not overwritten.
+
+Launcher and polish: adopted the new orange Maestro icon, simplified Start and
+LoRA-folder actions, removed the normal Classic UI entry points, and kept the
+Pinokio launcher schema version independent from Maestro's application version.
+The release also includes H3 continuation diagnostics, reference manifest and
+Turbo update coverage, safer remote-access persistence, and expanded Editor,
+Studio image, film-grain, character-library, and PDD regression tests.
+
 ## [1.9.1] - 2026-08-25
 
 Local LLM hotfix: fixed fresh Windows installations failing prompt enhancement

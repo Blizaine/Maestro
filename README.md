@@ -1,6 +1,6 @@
 # Maestro
 
-A one-click AI **video, image, and audio studio** for creators. Maestro pairs a modern React UI with a powerful generation backend and adds a **Director mode** that uses an LLM to plan music videos and short films from a single prompt. Optimized for LTX-2.5, MiniMax H3, and the latest local creative models and LoRAs.
+A one-click local AI **creative studio, director, and video editor** for creators. Maestro combines a modern interface with powerful image, video, and audio generation, an LLM-directed production workflow, and a non-destructive multi-track editor. Optimized for LTX-2.5, MiniMax H3, and the latest local creative models and LoRAs.
 
 ![Maestro UI](Maestro_UI_02.jpg)
 
@@ -23,9 +23,9 @@ Detects your GPU, VRAM, and RAM on first launch and picks the right profile, qua
 
 ### 🎨 Studio Mode — full manual control
 Direct access to every model and every knob:
-- **Video** — MiniMax H3 and LTX-2.5 with native synchronized audio, LTX-2.3, Wan1/2, Hunyuan, and many more.
-- **Image** — Flux 2 Klein 9B, Krea 2 RAW/Turbo and Identity Edit, Qwen Image Edit, and many more
-- **Audio** — TTS: Kugelaudio, Qwen3 TTS. Music: MiniMax-Music3 and ACE-Step. SFX: MMAudio
+- **Video** — create, extend, blend, retake, edit anything, outpaint, repaint, recast, upscale, and finish clips with MiniMax H3, LTX-2.5/2.3, SCAIL-2, Wan, Hunyuan, and many more.
+- **Image** — create, edit, upscale, or outpaint with Flux 2 Klein 9B, Krea 2 RAW/Turbo and Identity Edit, Qwen Image Edit, and more.
+- **Audio** — generate music with MiniMax-Music3 or ACE-Step, speech with Kugelaudio or Qwen3 TTS, sound effects with MMAudio, and revoice existing clips.
 - **Multi-clip generation** with per-clip prompts, seamless overlapping (sliding window) transitions, and shared LoRAs
 - **Blend video Mode** Remember Sora 1 blend mode, where you could overlap two videos, and use AI to blend them together? 
 - **Frames Injection (KFI)** for character continuity in long videos
@@ -35,7 +35,7 @@ Direct access to every model and every knob:
 ### 🤖 Local LLM — built-in, no setup
 Maestro auto-downloads `llama-server` (~600 MB one-time) and your chosen GGUF model on first use. Defaults to **Gemma 4 4B (Recommended)** — fast, capable, and runs comfortably on smaller GPUs. Auto-detects CUDA and binds the LLM to GPU when available.
 
-- Pre-curated registry: Gemma 4 (2B / 4B / 26B MoE / 31B) and Qwen3.6 27B — uncensored/abliterated instruct variants tuned for creative prompting
+- Pre-curated registry: Gemma 4 (2B / 4B / 26B MoE / 31B), Qwen3.6 27B, and **Qwen3.8 27B Uncensored** with model-aware deep thinking for creative writing and prompt enhancement
 - **External providers** also supported: OpenAI, Anthropic, custom OpenAI-compatible endpoints (currently experimental)
 - **Vision support** so LLMs can enhance prompting based on reference images
 - Auto-unloads after 60s idle to free VRAM for video gen
@@ -56,12 +56,12 @@ Three theme families, each with a dark and a light variant, switchable in Settin
 
 Appearance mode is **Dark / Light / Auto** — Auto follows your system's appearance and switches live when it changes.
 
-### 🛠️ Edit Mode
-- **Retake** — re-roll a section of an existing video with a new prompt
-- **Edit Anything** — modify, add, or remove elements from existing videos using text prompts and In-Context LoRA models
-- **Outpaint** — extend a video's frame in any direction while preserving its original action, timing, and audio
-- **Repaint** — use SCAIL-2 to repaint characters, objects, or scenes while retaining the source motion and camera work
-- **Recast** — map one or more people in a video to replacement characters, including multi-shot scenes and group shots
+### ✂️ Editor Mode — finish the story on a timeline
+- Arrange video, audio, and title layers on a non-destructive multi-track timeline with snapping, trim, split, duplicate, undo/redo, transitions, speed, opacity, volume, and canvas transforms.
+- Browse outputs across workspaces, uploads, favorites, and complete Director productions; import Director shots as individual clips with their original soundtrack.
+- Send a selected clip back through Maestro AI, then return the generated take to the same timeline position without rebuilding the edit.
+- Export H.264, H.265, or AV1 at project or delivery resolutions with automatic hardware-encoder selection and export history.
+- Responsive desktop and mobile layouts keep core editing controls usable from a phone or tablet.
 
 ### 📂 Workspaces
 Multiple isolated output directories with a quick switcher in the sidebar. Useful for separating client projects, NSFW vs SFW, or experiments. Pinned and favorited outputs are tracked per workspace.
@@ -81,6 +81,26 @@ View all past Director runs with their full state — clip plans, generated imag
 ## Updates
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
+
+### v2.0.0 (2026-08-28)
+
+**A complete create-to-edit workflow**
+- Added the new full-screen **Editor Mode** with multi-track video, audio, and title editing; canvas transforms and snap guides; transitions, speed, opacity, volume, fonts, undo/redo, project history, and hardware-aware export.
+- Director productions can be opened as editable timelines with separate shot clips and the complete soundtrack, while any timeline clip can make a round trip through Maestro AI and return as a new take.
+- Reorganized Studio into clear Video, Image, and Audio workflows. Video editing tools now live beside generation, Image adds dedicated New/Edit/Upscale/Outpaint modes, Audio includes Revoice, and Finish adds reusable film grain.
+
+**MiniMax H3, references, and local intelligence**
+- Added H3's native 768p tier, 21:9 canvases, and Regenerate 2K workflow, plus Alibaba PAI FL2VA and Ref2VA acceleration presets with native PDD support.
+- Added a reusable Omni character library for named image + voice or video references, automatic reference-duration budgeting, and stronger reference isolation so identity media is not mistaken for a start frame.
+- Rebuilt H3 prompt planning around causal story continuity, exact dialogue preservation, official Context-IR guidance, model-aware token fitting, and safer multi-window continuation.
+- Added Qwen3.8 27B Uncensored with creative thinking controls, prompt-enhancement telemetry, and non-thinking structured-output paths.
+
+**Remote workflow and release polish**
+- Added completion alerts, optional chimes, encrypted closed-app Web Push, an installable Maestro web app, and optional private HTTPS access through each user's own Tailscale account.
+- Added per-clip, multi-window, and full Director completion estimates, including cache-aware calibration for First Block Cache.
+- Updated Maestro's orange app icon, unified the Director / Studio / Editor header, simplified the Pinokio menu, and preserved the v1.9.1 llama.cpp nightly-download hotfix.
+
+See the [complete v2.0 release notes](docs/RELEASE_NOTES_V2.0.md) and [Tailscale setup guide](docs/TAILSCALE_REMOTE_ACCESS.md).
 
 ### v1.9.1 (2026-08-25)
 
@@ -711,8 +731,9 @@ Click **Reset** to wipe the install and start over. Removes `app/env/`, `app/env
 
 After clicking **Start**, the launcher shows an **Open Web UI** button once the server is up.
 
-- **Sidebar** — mode toggle (Studio / Director), model picker, prompt, LoRAs, advanced settings
-- **Main feed** — generated outputs, dashboard, Director pipeline status
+- **Top navigation** — switch between Director, Studio, and Editor without leaving the current project
+- **Studio sidecar** — workflow and model picker, prompt, references, LoRAs, and advanced settings
+- **Main workspace** — generated outputs, Director pipeline status, or the full Editor canvas and timeline
 - **Settings drawer** (gear icon) — model visibility, performance auto-tune, services (LLM, API keys, NSFW, theme)
 - **Pinokio menu** — Update, Reset, Install Inpaint Support, LoRA folder shortcuts
 
@@ -721,6 +742,8 @@ After clicking **Start**, the launcher shows an **Open Web UI** button once the 
 Maestro respects Pinokio's `PINOKIO_SHARE_LOCAL` environment variable. Set it to `false` (in the per-app or global ENVIRONMENT file) to bind the server to loopback only; set to `true` for LAN access. Pinokio's own daemon proxy is a separate concern that may also need to honor the variable depending on your setup.
 
 ## Private HTTPS and phone notifications
+
+For complete first-time setup and troubleshooting, see [Use Maestro Remotely with Tailscale](docs/TAILSCALE_REMOTE_ACCESS.md).
 
 Tailscale is optional. Its Personal plan is suitable for an individual connecting their own devices; every Maestro user signs into their own Tailscale account rather than joining a Maestro-owned network.
 
