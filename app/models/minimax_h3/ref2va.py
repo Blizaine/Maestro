@@ -50,6 +50,261 @@ MINIMAX_H3_QWEN_VIDEO_SAMPLE_FPS = 2.0
 MINIMAX_H3_QWEN_TEMPORAL_PATCH = 2
 _REFERENCE_TAG_RE = re.compile(r"<(?:Picture|Video|Audio)\s+\d+>", re.IGNORECASE)
 _PICTURE_TAG_RE = re.compile(r"<Picture\s+(\d+)>", re.IGNORECASE)
+_DIALOGUE_TAG_RE = re.compile(r"<d(?:\s+[^>]*)?>(.*?)</d>", re.IGNORECASE | re.DOTALL)
+_SPEAKER_MARKER_RE = re.compile(r"\(S(\d+)\)", re.IGNORECASE)
+_SPEECH_VERB_RE = re.compile(
+    r"\b(?:say|says|said|ask|asks|asked|reply|replies|replied|respond|responds|"
+    r"responded|answer|answers|answered|speak|speaks|spoke|shout|shouts|shouted|"
+    r"yell|yells|yelled|whisper|whispers|whispered|exclaim|exclaims|exclaimed|"
+    r"murmur|murmurs|murmured|call|calls|called|cry|cries|cried|add|adds|added|"
+    r"remark|remarks|remarked|state|states|stated|declare|declares|declared|"
+    r"warn|warns|warned|demand|demands|demanded|tell|tells|told)\b",
+    re.IGNORECASE,
+)
+
+
+def _normalize_ref2va_speaker_alias(value: Any) -> str:
+    alias = re.sub(r"\s+", " ", str(value or "").strip().casefold())
+    alias = re.sub(
+        r"\s+(?:voice(?:\s+reference)?|audio(?:\s+reference)?|character\s+reference)\s*$",
+        "",
+        alias,
+    )
+    return alias.strip(" \t\r\n.,:;_-–—")
+
+
+def _ref2va_character_visual(item: dict) -> bool:
+    kind = item.get("type")
+    return (
+        kind == "image" and item.get("image_intent", "identity") == "identity"
+    ) or (
+        kind == "video" and item.get("video_intent", "motion") == "character"
+    )
+
+
+def _ref2va_alias_values(item: dict, fallback_role: str = "") -> list[str]:
+    values: list[str] = []
+    for raw in (item.get("character_name"), item.get("role"), fallback_role):
+        alias = _normalize_ref2va_speaker_alias(raw)
+        if alias and alias not in values:
+            values.append(alias)
+    return values
+
+
+def _build_ref2va_character_bindings(items: list[dict]):
+    """Assign character Subjects before scene/style Subjects are described.
+
+    Saved-character media may be interleaved (or contain both an image and a
+    video), but one library character must always remain one Subject.  The
+    returned alias table contains only unambiguous names.
+    """
+
+    key_subjects: dict[str, int] = {}
+    reference_subjects: dict[int, int] = {}
+    character_subjects: dict[str, int] = {}
+    alias_candidates: dict[str, set[int]] = {}
+
+    for reference_index, item in enumerate(items):
+        if not _ref2va_character_visual(item):
+            continue
+        library_id = str(item.get("library_character_id") or "").strip()
+        aliases = _ref2va_alias_values(item)
+        identity_key = (
+            f"library:{library_id}"
+            if library_id
+            else f"name:{aliases[0]}"
+            if aliases
+            else f"reference:{reference_index}"
+        )
+        subject = key_subjects.get(identity_key)
+        if subject is None:
+            subject = len(key_subjects) + 1
+            key_subjects[identity_key] = subject
+        reference_subjects[reference_index] = subject
+        if library_id:
+            character_subjects[library_id] = subject
+        for alias in aliases:
+            alias_candidates.setdefault(alias, set()).add(subject)
+
+    # Audio references often appear before their paired visual reference.
+    # Register their names after all visual subjects have been allocated.
+    for item in items:
+        if item.get("type") != "audio" or item.get("audio_intent", "voice") != "voice":
+            continue
+        library_id = str(item.get("library_character_id") or "").strip()
+        mapped_subject = character_subjects.get(library_id) if library_id else None
+        if mapped_subject is None:
+            for alias in _ref2va_alias_values(item):
+                candidates = alias_candidates.get(alias, set())
+                if len(candidates) == 1:
+                    mapped_subject = next(iter(candidates))
+                    break
+        if mapped_subject is not None:
+            for alias in _ref2va_alias_values(item):
+                alias_candidates.setdefault(alias, set()).add(mapped_subject)
+
+    speaker_aliases = {
+        alias: next(iter(subjects))
+        for alias, subjects in alias_candidates.items()
+        if len(subjects) == 1
+    }
+    role_subjects = dict(speaker_aliases)
+    return (
+        reference_subjects,
+        character_subjects,
+        role_subjects,
+        speaker_aliases,
+        len(key_subjects),
+    )
+
+
+def _ref2va_alias_occurrences(source: str, aliases: dict[str, int]):
+    occurrences: list[tuple[int, int, str, int]] = []
+    for alias, subject in aliases.items():
+        alias_pattern = re.escape(alias).replace(r"\ ", r"\s+")
+        for match in re.finditer(
+            rf"(?<!\w){alias_pattern}(?!\w)",
+            source,
+            re.IGNORECASE,
+        ):
+            occurrences.append((match.start(), match.end(), alias, subject))
+    return sorted(occurrences, key=lambda row: (row[0], -(row[1] - row[0])))
+
+
+def _resolve_ref2va_dialogue_speaker(
+    source: str,
+    dialogue_start: int,
+    dialogue_end: int,
+    speaker_aliases: dict[str, int],
+    valid_subjects: set[int],
+) -> int | None:
+    """Resolve a dialogue speaker from natural-language cues around one line."""
+
+    before_start = max(0, dialogue_start - 360)
+    before = source[before_start:dialogue_start]
+    after = source[dialogue_end:dialogue_end + 180]
+    clause_start = max(
+        before.rfind("."),
+        before.rfind("!"),
+        before.rfind("?"),
+        before.rfind(";"),
+        before.rfind("\n"),
+    ) + 1
+    clause = before[clause_start:]
+    occurrences = _ref2va_alias_occurrences(clause, speaker_aliases)
+
+    # Direct screenplay syntax: ``Yoda: "..."`` or ``Yoda's voice: "..."``.
+    for start, end, _alias, subject in reversed(occurrences):
+        tail = clause[end:]
+        if re.fullmatch(r"\s*(?:'s\s+voice\s*)?[:,\-–—]\s*", tail, re.IGNORECASE):
+            return subject
+
+    # Postposed attribution is highly specific and takes precedence over an
+    # unrelated speech verb in the preceding sentence.
+    after_verb = re.match(
+        rf"\s*[,;:\-–—]?\s*({_SPEECH_VERB_RE.pattern})",
+        after,
+        re.IGNORECASE,
+    )
+    if after_verb:
+        after_occurrences = _ref2va_alias_occurrences(after, speaker_aliases)
+        candidates = [
+            (start - after_verb.end(), -len(alias), subject)
+            for start, _end, alias, subject in after_occurrences
+            if start >= after_verb.end()
+        ]
+        if candidates:
+            return min(candidates)[-1]
+
+    # Natural syntax before the line: ``Blaine turns to Yoda and says, ...``.
+    # Select the last non-object character before the final speech verb.
+    verbs = list(_SPEECH_VERB_RE.finditer(clause))
+    if verbs:
+        verb = verbs[-1]
+        candidates = []
+        for start, end, alias, subject in occurrences:
+            if end > verb.start():
+                continue
+            leading = clause[max(0, start - 28):start]
+            is_object = bool(re.search(
+                r"(?:\bto|\bat|\btoward|\btowards|\bwith|\bbeside|\bnear|\bbehind)\s+$",
+                leading,
+                re.IGNORECASE,
+            ))
+            candidates.append((is_object, verb.start() - end, -len(alias), subject))
+        non_objects = [candidate for candidate in candidates if not candidate[0]]
+        if non_objects:
+            return min(non_objects)[-1]
+        if candidates:
+            return min(candidates)[-1]
+
+    # An explicit valid marker is still accepted for advanced manual prompts.
+    markers = list(_SPEAKER_MARKER_RE.finditer(before[-140:]))
+    if markers:
+        subject = int(markers[-1].group(1))
+        if subject in valid_subjects:
+            return subject
+    return None
+
+
+def _ambiguous_ref2va_dialogue_error(words: str) -> ValueError:
+    excerpt = re.sub(r"\s+", " ", words).strip()[:80]
+    return ValueError(
+        "MiniMax H3 Omni could not determine which saved character speaks "
+        f"{excerpt!r}. Name the speaker beside the line (for example, Yoda says, "
+        '"Do or do not.") or use that character\'s explicit (S#) marker.'
+    )
+
+
+def _canonicalize_ref2va_tagged_dialogue(
+    text: str,
+    speaker_aliases: dict[str, int],
+    character_subject_count: int,
+) -> str:
+    """Repair named H3 dialogue tags and reject phantom speaker Subjects."""
+
+    valid_subjects = set(range(1, character_subject_count + 1))
+    matches = list(_DIALOGUE_TAG_RE.finditer(text))
+    if not matches:
+        return text
+    edits: list[tuple[int, int, str]] = []
+    previous_dialogue_end = 0
+    for match in matches:
+        words = match.group(1).strip()
+        subject = _resolve_ref2va_dialogue_speaker(
+            text,
+            match.start(),
+            match.end(),
+            speaker_aliases,
+            valid_subjects,
+        )
+        context_start = max(previous_dialogue_end, match.start() - 240)
+        markers = list(_SPEAKER_MARKER_RE.finditer(text, context_start, match.start()))
+        marker = markers[-1] if markers else None
+        if subject is None and marker is not None:
+            marked_subject = int(marker.group(1))
+            if marked_subject in valid_subjects:
+                subject = marked_subject
+            else:
+                raise ValueError(
+                    f"MiniMax H3 Omni dialogue uses (S{marked_subject}), but the reference "
+                    f"manifest defines only {character_subject_count} speaking character(s)."
+                )
+        if subject is None and character_subject_count == 1:
+            subject = 1
+        if subject is None and character_subject_count > 1:
+            raise _ambiguous_ref2va_dialogue_error(words)
+        if subject is not None:
+            if marker is not None:
+                if int(marker.group(1)) != subject:
+                    edits.append((marker.start(), marker.end(), f"(S{subject})"))
+            else:
+                edits.append((match.start(), match.start(), f"(S{subject}) "))
+        previous_dialogue_end = match.end()
+
+    for start, end, replacement in reversed(edits):
+        text = f"{text[:start]}{replacement}{text[end:]}"
+    return text
 
 
 @dataclass
@@ -90,27 +345,37 @@ def ensure_ref2va_prompt_relationships(
     MiniMax H3 uses natural-language Context-IR to decide whether audio is
     copied/reused or merely referenced. Media tensors alone cannot communicate
     that distinction, so a raw Studio prompt receives a complete relationship
-    map and literal dialogue tags. An already enhanced/tagged prompt is
-    preserved verbatim.
+    map and literal dialogue tags. An already enhanced/tagged prompt keeps its
+    creative content, while its dialogue speaker markers are checked against
+    the same immutable character manifest used for raw prompts.
     """
 
     text = str(prompt or "").strip()
-    if _REFERENCE_TAG_RE.search(text):
-        return text
-
     items = validate_reference_manifest(references, require_files=False)
+    (
+        character_reference_subjects,
+        character_subjects,
+        role_subjects,
+        speaker_aliases,
+        character_subject_count,
+    ) = _build_ref2va_character_bindings(items)
+    if _REFERENCE_TAG_RE.search(text):
+        return _canonicalize_ref2va_tagged_dialogue(
+            text,
+            speaker_aliases,
+            character_subject_count,
+        )
+
     picture_index = 0
     video_index = 0
     audio_index = 0
-    subject_index = 0
+    subject_index = character_subject_count
     relationships: list[str] = []
     retention: list[str] = []
-    role_subjects: dict[str, int] = {}
-    character_subjects: dict[str, int] = {}
-    pending_voice_references: list[tuple[int, dict, str]] = []
     opening_subjects: list[str] = []
+    opening_character_subjects: set[int] = set()
 
-    for item in items:
+    for reference_index, item in enumerate(items):
         kind = item["type"]
         role = item.get("role") or f"the supplied {kind} reference"
         if kind == "image":
@@ -153,24 +418,22 @@ def ensure_ref2va_prompt_relationships(
                     "palette, lighting language, and texture."
                 )
             else:
-                subject_index += 1
-                role_subjects[str(role).strip().casefold()] = subject_index
-                character_key = str(item.get("library_character_id") or "").strip()
-                if character_key:
-                    character_subjects[character_key] = subject_index
+                character_subject = character_reference_subjects[reference_index]
                 relationships.append(
-                    f"<Subject {subject_index}> is {role}, whose visual identity and appearance come from "
+                    f"<Subject {character_subject}> is {role}, whose visual identity and appearance come from "
                     f"<Picture {picture_index}>; use it as identity evidence only, not as an opening "
                     "freeze-frame, source location, background, composition, framing, or pose."
                 )
                 retention.append(
-                    f"<Subject {subject_index}> (appears in [Shot 1]): fully_preserved - preserve the "
+                    f"<Subject {character_subject}> (appears in [Shot 1]): fully_preserved - preserve the "
                     f"identity and appearance defined by <Picture {picture_index}>."
                 )
-                opening_subjects.append(
-                    f"<Subject {subject_index}> ({role}) appears with the referenced identity and "
-                    "appearance in the described frame position and performs the requested action."
-                )
+                if character_subject not in opening_character_subjects:
+                    opening_subjects.append(
+                        f"<Subject {character_subject}> ({role}) appears with the referenced identity and "
+                        "appearance in the described frame position and performs the requested action."
+                    )
+                    opening_character_subjects.add(character_subject)
             continue
 
         if kind == "video":
@@ -190,26 +453,24 @@ def ensure_ref2va_prompt_relationships(
             video_index = next_video_index
             video_intent = item.get("video_intent", "motion")
             if video_intent == "character":
-                subject_index += 1
-                role_subjects[str(role).strip().casefold()] = subject_index
-                character_key = str(item.get("library_character_id") or "").strip()
-                if character_key:
-                    character_subjects[character_key] = subject_index
+                character_subject = character_reference_subjects[reference_index]
                 relationships.append(
-                    f"<Subject {subject_index}> is {role}, whose identity, appearance, and characteristic "
+                    f"<Subject {character_subject}> is {role}, whose identity, appearance, and characteristic "
                     f"motion come from <Video {video_index}>; use the video as character evidence only, "
                     "not as the target opening frame, source location, background, composition, camera, "
                     "edit rhythm, or action to copy."
                 )
                 retention.append(
-                    f"<Subject {subject_index}> (appears in [Shot 1]): fully_preserved - preserve the "
+                    f"<Subject {character_subject}> (appears in [Shot 1]): fully_preserved - preserve the "
                     f"identity and appearance defined by <Video {video_index}> while generating the "
                     "requested target action and setting."
                 )
-                opening_subjects.append(
-                    f"<Subject {subject_index}> ({role}) appears with the referenced identity and "
-                    "appearance in the described frame position and performs the requested action."
-                )
+                if character_subject not in opening_character_subjects:
+                    opening_subjects.append(
+                        f"<Subject {character_subject}> ({role}) appears with the referenced identity and "
+                        "appearance in the described frame position and performs the requested action."
+                    )
+                    opening_character_subjects.add(character_subject)
             elif video_intent == "scene":
                 relationships.append(
                     f"<Video {video_index}> provides environment, lighting, and scene continuity for {role}; "
@@ -251,13 +512,12 @@ def ensure_ref2va_prompt_relationships(
             )
         else:
             character_key = str(item.get("library_character_id") or "").strip()
-            mapped_subject = (
-                character_subjects.get(character_key)
-                if character_key else role_subjects.get(str(role).strip().casefold())
-            )
-            if mapped_subject is None and (character_key or str(role).strip()):
-                pending_voice_references.append((audio_index, item, role))
-                continue
+            mapped_subject = character_subjects.get(character_key) if character_key else None
+            if mapped_subject is None:
+                for alias in _ref2va_alias_values(item, role):
+                    mapped_subject = role_subjects.get(alias)
+                    if mapped_subject is not None:
+                        break
             target = (
                 f"<Subject {mapped_subject}> (S{mapped_subject})"
                 if mapped_subject else str(role)
@@ -272,27 +532,10 @@ def ensure_ref2va_prompt_relationships(
                 "without copying the source signal, words, or timing."
             )
 
-    for pending_audio_index, item, role in pending_voice_references:
-        character_key = str(item.get("library_character_id") or "").strip()
-        mapped_subject = (
-            character_subjects.get(character_key)
-            if character_key else role_subjects.get(str(role).strip().casefold())
-        )
-        target = (
-            f"<Subject {mapped_subject}> (S{mapped_subject})"
-            if mapped_subject else str(role)
-        )
-        relationships.append(
-            f"<Audio {pending_audio_index}> is a voice-timbre, emotion, and delivery reference for {target}; "
-            "generate only explicitly requested dialogue and do not copy its source words, timing, or waveform."
-        )
-        retention.append(
-            f"<Audio {pending_audio_index}>: reference - use its voice timbre, emotion, and delivery "
-            "without copying the source signal, words, or timing."
-        )
-
     dialogue_counter = 0
     dialogue_word_count = 0
+    unnamed_dialogue_subject = 0
+    valid_speaking_subjects = set(range(1, character_subject_count + 1))
 
     def is_visible_text_quote(match) -> bool:
         before = text[max(0, match.start() - 150):match.start()]
@@ -322,18 +565,43 @@ def ensure_ref2va_prompt_relationships(
         ))
 
     def compile_dialogue(match):
-        nonlocal dialogue_counter, dialogue_word_count
+        nonlocal dialogue_counter, dialogue_word_count, unnamed_dialogue_subject
         if is_visible_text_quote(match):
             return match.group(0)
         dialogue_counter += 1
         words = (match.group(1) or match.group(2) or "").strip()
         dialogue_word_count += len(words.split())
-        return f"(S{dialogue_counter}) <d>[English] {words}</d>"
+        speaking_subject = _resolve_ref2va_dialogue_speaker(
+            text,
+            match.start(),
+            match.end(),
+            speaker_aliases,
+            valid_speaking_subjects,
+        )
+        if speaking_subject is None and character_subject_count == 1:
+            speaking_subject = 1
+        if speaking_subject is None and character_subject_count > 1:
+            raise _ambiguous_ref2va_dialogue_error(words)
+        if speaking_subject is None:
+            unnamed_dialogue_subject += 1
+            speaking_subject = unnamed_dialogue_subject
+        return f"(S{speaking_subject}) <d>[English] {words}</d>"
 
     compiled_target = re.sub(
         r'"([^"\r\n]{1,500})"|“([^”\r\n]{1,500})”',
         compile_dialogue,
         text,
+    )
+    compiled_target = _canonicalize_ref2va_tagged_dialogue(
+        compiled_target,
+        speaker_aliases,
+        character_subject_count,
+    )
+    tagged_dialogue = list(_DIALOGUE_TAG_RE.finditer(compiled_target))
+    dialogue_counter = len(tagged_dialogue)
+    dialogue_word_count = sum(
+        len(re.sub(r"^\s*\[[^]]+\]\s*", "", match.group(1)).split())
+        for match in tagged_dialogue
     )
     relationship_block = " ".join(relationships)
     retention_block = " ".join(retention)

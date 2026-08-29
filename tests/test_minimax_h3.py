@@ -3253,6 +3253,109 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
             tagged,
         )
 
+    def test_ref2va_manual_dialogue_follows_saved_character_names_not_quote_order(self):
+        from models.minimax_h3.ref2va import ensure_ref2va_prompt_relationships
+
+        references = [
+            {
+                "type": "image",
+                "path": "blaine.png",
+                "role": "Blaine",
+                "library_character_id": "saved-blaine",
+                "character_name": "Blaine",
+            },
+            {
+                "type": "audio",
+                "path": "blaine.wav",
+                "role": "Blaine voice",
+                "audio_intent": "voice",
+                "library_character_id": "saved-blaine",
+                "character_name": "Blaine",
+            },
+            {
+                "type": "image",
+                "path": "yoda.png",
+                "role": "Yoda",
+                "library_character_id": "saved-yoda",
+                "character_name": "Yoda",
+            },
+            {
+                "type": "audio",
+                "path": "yoda.wav",
+                "role": "Yoda voice",
+                "audio_intent": "voice",
+                "library_character_id": "saved-yoda",
+                "character_name": "Yoda",
+            },
+        ]
+        compiled = ensure_ref2va_prompt_relationships(
+            'Yoda says, "Do or do not." Blaine replies, "I understand."',
+            references,
+            duration_seconds=10,
+        )
+
+        self.assertIn("<Subject 1> is Blaine", compiled)
+        self.assertIn("<Subject 2> is Yoda", compiled)
+        self.assertIn("<Audio 1> is a voice-timbre, emotion, and delivery reference for <Subject 1> (S1)", compiled)
+        self.assertIn("<Audio 2> is a voice-timbre, emotion, and delivery reference for <Subject 2> (S2)", compiled)
+        self.assertIn("Yoda says, (S2) <d>[English] Do or do not.</d>", compiled)
+        self.assertIn("Blaine replies, (S1) <d>[English] I understand.</d>", compiled)
+
+        object_cue = ensure_ref2va_prompt_relationships(
+            'Blaine turns to Yoda and says, "Stay behind me."',
+            references,
+        )
+        self.assertIn("(S1) <d>[English] Stay behind me.</d>", object_cue)
+
+        postposed = ensure_ref2va_prompt_relationships(
+            '"Patience," replies Yoda.',
+            references,
+        )
+        self.assertIn("(S2) <d>[English] Patience,</d> replies Yoda", postposed)
+
+    def test_ref2va_runtime_repairs_structured_speakers_and_rejects_ambiguity(self):
+        from models.minimax_h3.ref2va import ensure_ref2va_prompt_relationships
+
+        references = [
+            {
+                "type": "image",
+                "path": "blaine.png",
+                "role": "Blaine",
+                "library_character_id": "saved-blaine",
+                "character_name": "Blaine",
+            },
+            {
+                "type": "image",
+                "path": "yoda.png",
+                "role": "Yoda",
+                "library_character_id": "saved-yoda",
+                "character_name": "Yoda",
+            },
+        ]
+        structured = (
+            "subject_definitions: <Picture 1> defines <Subject 1>; "
+            "<Picture 2> defines <Subject 2>.\n\n"
+            "detailed_description: Yoda (S1) speaks: "
+            "<d>[English] Ready, you are.</d>. Blaine (S2) replies: "
+            "<d>[English] Ready.</d>"
+        )
+        repaired = ensure_ref2va_prompt_relationships(structured, references)
+        self.assertIn("Yoda (S2) speaks", repaired)
+        self.assertIn("Blaine (S1) replies", repaired)
+
+        with self.assertRaisesRegex(ValueError, "could not determine which saved character"):
+            ensure_ref2va_prompt_relationships(
+                'Someone says, "Hello there."',
+                references,
+            )
+
+        with self.assertRaisesRegex(ValueError, "defines only 2 speaking character"):
+            ensure_ref2va_prompt_relationships(
+                "subject_definitions: <Picture 1> and <Picture 2>.\n\n"
+                "detailed_description: (S3) <d>[English] Hello there.</d>",
+                references,
+            )
+
     def test_ref2va_reference_detail_policy_is_bounded_and_grid_aligned(self):
         from models.minimax_h3.ref2va import (
             resolve_reference_image_size,

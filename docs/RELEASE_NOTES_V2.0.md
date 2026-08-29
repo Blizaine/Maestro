@@ -64,6 +64,10 @@ can be applied to any video—including a clip selected in Editor.
   pictures, videos, and voice references. The enhancer rejects `<Subject N>`,
   unexpected Subject 3/4 entries, and cross-wired dialogue rather than passing
   an ambiguous two-character prompt into H3.
+- Applied that same character binder at generation time, including when Prompt
+  Enhance is off. Manual prompts can name the speaker naturally beside each
+  quoted line; Maestro repairs a mismatched `(S#)` tag and rejects an ambiguous
+  or nonexistent speaker before loading H3 instead of guessing by quote order.
 - Automatically trims and budgets character video references to H3's supported
   per-reference and combined duration limits.
 - Added stronger reference-role manifests, diagnostic logging, and tests for
@@ -134,4 +138,4 @@ select **Secure Remote Access (Tailscale)**.
 The v2.0 release candidate passes the production React build, the complete
 frontend ESLint policy, launcher syntax checks, JSON grammar regression runner,
 clean-repository boundary guard, first-party Python compile checks, and the
-complete 1,079-test Python suite.
+complete 1,081-test Python suite.

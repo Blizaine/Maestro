@@ -51,7 +51,12 @@ duration limits. Named Omni characters now receive immutable Subject/Speaker
 IDs with their own visual and voice media. Enhancement rejects placeholder,
 duplicate, or phantom subjects and repairs dialogue back onto its explicitly
 named speaker, preventing two-character voices and lines from being reversed.
-Improved memory and reference preparation avoids needless high-resolution
+The same binding now runs at generation time for manual prompts as well as
+enhanced prompts: natural cues such as `Yoda says, "..."` are resolved against
+the saved-character manifest, incorrect structured `(S#)` tags are repaired,
+and ambiguous or phantom speakers stop with an actionable error instead of
+silently swapping identities or voices. Improved memory and reference
+preparation avoids needless high-resolution
 decoding while retaining full-quality identity conditioning.
 
 H3 planning and Director: long-form plans now use a causal story architecture,
