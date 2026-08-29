@@ -244,13 +244,49 @@ def _resolve_ref2va_dialogue_speaker(
         subject = int(markers[-1].group(1))
         if subject in valid_subjects:
             return subject
+
+    # A manually authored Context-IR prompt may put the <d> tag in the sentence
+    # after the named performance cue, for example: ``Yoda nods. He answers.
+    # <d>...</d>``. Follow that short discourse chain, but only when the latest
+    # named sentence has one unambiguous grammatical subject. This is purposely
+    # conservative: ``Yoda and Blaine react. They answer.`` remains ambiguous.
+    preceding_dialogue_end = 0
+    for previous_match in _DIALOGUE_TAG_RE.finditer(source, 0, dialogue_start):
+        preceding_dialogue_end = previous_match.end()
+    discourse_start = max(preceding_dialogue_end, dialogue_start - 720)
+    discourse = source[discourse_start:dialogue_start]
+    segments = [
+        segment.strip()
+        for segment in re.split(r"(?<=[.!?;])\s+|[\r\n]+", discourse)
+        if segment.strip()
+    ]
+    for segment in reversed(segments):
+        segment_occurrences = _ref2va_alias_occurrences(segment, speaker_aliases)
+        if not segment_occurrences:
+            continue
+        candidate_subjects: set[int] = set()
+        for start, _end, _alias, candidate_subject in segment_occurrences:
+            leading = segment[max(0, start - 32):start]
+            is_object = bool(re.search(
+                r"(?:\bto|\bat|\btoward|\btowards|\bwith|\bbeside|\bnear|"
+                r"\bbehind|\bfrom|\bfor|\bof|\bby)\s+$",
+                leading,
+                re.IGNORECASE,
+            ))
+            if not is_object:
+                candidate_subjects.add(candidate_subject)
+        if len(candidate_subjects) == 1:
+            return next(iter(candidate_subjects))
+        # Do not reach past a more recent sentence that names multiple possible
+        # speakers. Guessing here would recreate the original voice-swap bug.
+        return None
     return None
 
 
 def _ambiguous_ref2va_dialogue_error(words: str) -> ValueError:
     excerpt = re.sub(r"\s+", " ", words).strip()[:80]
     return ValueError(
-        "MiniMax H3 Omni could not determine which saved character speaks "
+        "MiniMax H3 Omni could not determine which referenced character speaks "
         f"{excerpt!r}. Name the speaker beside the line (for example, Yoda says, "
         '"Do or do not.") or use that character\'s explicit (S#) marker.'
     )
@@ -281,15 +317,15 @@ def _canonicalize_ref2va_tagged_dialogue(
         context_start = max(previous_dialogue_end, match.start() - 240)
         markers = list(_SPEAKER_MARKER_RE.finditer(text, context_start, match.start()))
         marker = markers[-1] if markers else None
+        if marker is not None and int(marker.group(1)) not in valid_subjects:
+            marked_subject = int(marker.group(1))
+            raise ValueError(
+                f"MiniMax H3 Omni dialogue uses (S{marked_subject}), but the reference "
+                f"manifest defines only {character_subject_count} speaking character(s)."
+            )
         if subject is None and marker is not None:
             marked_subject = int(marker.group(1))
-            if marked_subject in valid_subjects:
-                subject = marked_subject
-            else:
-                raise ValueError(
-                    f"MiniMax H3 Omni dialogue uses (S{marked_subject}), but the reference "
-                    f"manifest defines only {character_subject_count} speaking character(s)."
-                )
+            subject = marked_subject
         if subject is None and character_subject_count == 1:
             subject = 1
         if subject is None and character_subject_count > 1:

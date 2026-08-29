@@ -66,8 +66,10 @@ can be applied to any video—including a clip selected in Editor.
   an ambiguous two-character prompt into H3.
 - Applied that same character binder at generation time, including when Prompt
   Enhance is off. Manual prompts can name the speaker naturally beside each
-  quoted line; Maestro repairs a mismatched `(S#)` tag and rejects an ambiguous
-  or nonexistent speaker before loading H3 instead of guessing by quote order.
+  quoted line or in the immediately preceding performance cue—even when the
+  dialogue itself is already written as `<d>...</d>`. Maestro repairs a
+  mismatched `(S#)` tag and rejects an ambiguous or nonexistent speaker instead
+  of guessing by quote order.
 - Automatically trims and budgets character video references to H3's supported
   per-reference and combined duration limits.
 - Added stronger reference-role manifests, diagnostic logging, and tests for

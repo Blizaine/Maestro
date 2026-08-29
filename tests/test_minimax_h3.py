@@ -3313,6 +3313,24 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
         )
         self.assertIn("(S2) <d>[English] Patience,</d> replies Yoda", postposed)
 
+        manually_tagged = ensure_ref2va_prompt_relationships(
+            "Blaine shows Maestro to Yoda. Yoda nods thoughtfully. "
+            "<d>Saved characters, an Editor, and push notifications, Maestro has. "
+            "Powerful, your creation tools have become.</d>",
+            references,
+        )
+        self.assertIn(
+            "Yoda nods thoughtfully. (S2) <d>Saved characters",
+            manually_tagged,
+        )
+
+        pronoun_continuation = ensure_ref2va_prompt_relationships(
+            "Yoda studies the interface beside Blaine. He pauses before answering. "
+            "<d>Useful, this will be.</d>",
+            references,
+        )
+        self.assertIn("(S2) <d>Useful, this will be.</d>", pronoun_continuation)
+
     def test_ref2va_runtime_repairs_structured_speakers_and_rejects_ambiguity(self):
         from models.minimax_h3.ref2va import ensure_ref2va_prompt_relationships
 
@@ -3343,9 +3361,16 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
         self.assertIn("Yoda (S2) speaks", repaired)
         self.assertIn("Blaine (S1) replies", repaired)
 
-        with self.assertRaisesRegex(ValueError, "could not determine which saved character"):
+        with self.assertRaisesRegex(ValueError, "could not determine which referenced character"):
             ensure_ref2va_prompt_relationships(
                 'Someone says, "Hello there."',
+                references,
+            )
+
+        with self.assertRaisesRegex(ValueError, "could not determine which referenced character"):
+            ensure_ref2va_prompt_relationships(
+                "Blaine and Yoda study the interface together. They answer in unison. "
+                "<d>Ready.</d>",
                 references,
             )
 
@@ -3353,6 +3378,14 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
             ensure_ref2va_prompt_relationships(
                 "subject_definitions: <Picture 1> and <Picture 2>.\n\n"
                 "detailed_description: (S3) <d>[English] Hello there.</d>",
+                references,
+            )
+
+        with self.assertRaisesRegex(ValueError, "defines only 2 speaking character"):
+            ensure_ref2va_prompt_relationships(
+                "subject_definitions: <Picture 1> and <Picture 2>.\n\n"
+                "detailed_description: Yoda (S3) speaks: "
+                "<d>[English] Hello there.</d>",
                 references,
             )
 

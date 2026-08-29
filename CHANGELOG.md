@@ -55,7 +55,10 @@ The same binding now runs at generation time for manual prompts as well as
 enhanced prompts: natural cues such as `Yoda says, "..."` are resolved against
 the saved-character manifest, incorrect structured `(S#)` tags are repaired,
 and ambiguous or phantom speakers stop with an actionable error instead of
-silently swapping identities or voices. Improved memory and reference
+silently swapping identities or voices. Manually authored Context-IR can also
+place a `<d>...</d>` line after an adjacent, unambiguous named performance cue;
+the runtime follows that short discourse chain without reverting to quote-order
+guessing. Improved memory and reference
 preparation avoids needless high-resolution
 decoding while retaining full-quality identity conditioning.
 
