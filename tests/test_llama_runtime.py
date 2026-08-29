@@ -129,7 +129,9 @@ class TestLlamaRuntimeReceipt(unittest.TestCase):
 class TestLlamaRuntimeIdempotency(unittest.TestCase):
     @staticmethod
     def _write_complete_runtime(directory: str) -> None:
-        executable = "llama-server.exe" if sys.platform.startswith("win") else "llama-server"
+        executable = (
+            "llama-server.exe" if sys.platform.startswith("win") else "llama-server"
+        )
         with open(os.path.join(directory, executable), "wb") as handle:
             handle.write(b"installed")
         if sys.platform.startswith("win"):

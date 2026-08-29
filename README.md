@@ -82,6 +82,13 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.9.1 (2026-08-25)
+
+**Local LLM hotfix**
+- Fixed prompt enhancement failing with an HTTP 404 on fresh Windows installations after llama.cpp changed its latest-release packaging.
+- Maestro now follows llama.cpp's official nightly-build pointer, verifies the required Windows CUDA archives before downloading, and safely falls back to a known-good binary build.
+- Existing cached llama-server installations continue to be reused without another download.
+
 ### v1.9.0 (2026-08-19)
 
 **Universal queue and Director recovery**
