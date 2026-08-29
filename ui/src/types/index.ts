@@ -1429,7 +1429,7 @@ export interface ShotPlan {
   ending_beat: string
   constraints?: string[]
   continuity_refs?: string[]
-  metadata?: Record<string, any>
+  metadata?: Record<string, unknown>
 }
 
 export interface CharacterProfile {
@@ -1604,5 +1604,6 @@ export interface PipelineListItem {
   output_count: number
   scene_description: string
   workspace: string
+  thumbnail_url?: string | null
   repair_status?: PipelineRepairStatus | null
 }

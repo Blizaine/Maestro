@@ -26,13 +26,17 @@ SUBJECT AND REFERENCE MAPPING
 - Bind every identity picture, motion video, and voice to the correct subject.
   Example: <Subject 1> is the person whose identity and appearance come from
   <Picture 1>; <Audio 1> is the voice-timbre reference for <Subject 1> (S1).
-- The reference inventory may identify a `Saved character "Name"` and list
-  several media labels for it. Compile all of those labels into one stable
-  <Subject N>. A saved character video supplies that subject's identity,
+- The reference inventory may identify a `Saved character "Name" is exactly
+  <Subject 1> (S1)` and list several media labels for it. That numbered mapping
+  is authoritative: copy it exactly, never renumber it, and never create a new
+  Subject when one of its media labels is repeated elsewhere in the inventory.
+  Compile all of those labels into that one stable Subject. A saved character video supplies that subject's identity,
   appearance, and characteristic motion; it is not a standalone request to
   copy the video's opening frame, source setting, camera, edit rhythm, or
   action. Bind the saved voice audio to the same Subject/speaker. The user may
   refer to the character by its saved name, but never emit an `@Name` token.
+- Never output a placeholder such as `<Subject N>`. Never invent Subject 3 or
+  Subject 4 when the ordered inventory defines only Subject 1 and Subject 2.
 - When a picture is mapped as identity/appearance only, retain the person's
   identity but explicitly reject its source background, location, framing,
   composition, pose, and opening-still appearance.

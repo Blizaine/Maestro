@@ -16,7 +16,7 @@ import { GlobalQueuePopover } from './components/GlobalQueuePopover'
 import { NotificationCoordinator } from './components/NotificationCoordinator'
 import { NotificationToastHost } from './components/NotificationToastHost'
 import { EditorWorkspace } from './editor/EditorWorkspace'
-import { MaestroBrand } from './components/AppModeNavigation'
+import { AppModeToggle, MaestroBrand } from './components/AppModeNavigation'
 import { EditorRoundTripBanner } from './editor/EditorRoundTripBanner'
 import { useStore } from './stores/useStore'
 import { useIsMobile } from './lib/useIsMobile'
@@ -60,15 +60,16 @@ function App() {
     <div className="flex flex-col md:flex-row h-full w-full bg-bg-primary">
       {/* Mobile header */}
       {isMobile && !isEditor && (
-        <header className="h-12 shrink-0 px-4 border-b border-border flex items-center justify-between bg-bg-secondary">
+        <header className="h-12 shrink-0 gap-1 px-2 border-b border-border flex items-center bg-bg-secondary">
           <button
             onClick={toggleSidebar}
             className="p-2 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors"
           >
             <Menu size={20} />
           </button>
-          <MaestroBrand />
-          <div className="flex items-center gap-1">
+          <MaestroBrand compact />
+          <AppModeToggle size="sm" />
+          <div className="ml-auto flex items-center gap-0.5">
             <GlobalQueuePopover iconSize={20} panelAlign="header-edge" />
             <button
               onClick={() => { setSidebarOpen(false); toggleSettings() }}

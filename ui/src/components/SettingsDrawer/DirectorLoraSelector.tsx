@@ -7,6 +7,16 @@ import { LoraGuideTooltip, LoraAgeChip, LoraSortToggle, sortLoraNames } from './
 import type { LoraDates } from './LoraSelector'
 import type { LoraRecommendedWeights } from '../../types'
 
+function serializeDirectorLoraMultipliers(
+  loras: string[],
+  weights: Record<string, number[]>,
+) {
+  return loras.map(name => {
+    const values = weights[name] || [1.0]
+    return values.map(value => value.toFixed(2)).join(';')
+  }).join(' ')
+}
+
 /**
  * Compact preset picker for Director mode LoRA sections.
  */
@@ -78,11 +88,30 @@ export function DirectorLoraSelector({ mode, modelType }: {
   const sortMode = useStore(s => s.loraPickerSort)
   const setSortSticky = useStore(s => s.setLoraPickerSort)
 
+  const persist = useCallback((newLoras: string[], newWeights: Record<string, number[]>) => {
+    const multipliers = serializeDirectorLoraMultipliers(newLoras, newWeights)
+    directorSetLora(mode, newLoras, multipliers, newWeights, availableLoras)
+  }, [mode, availableLoras, directorSetLora])
+
+  const updateWeight = useCallback((filename: string, phaseIndex: number, value: number) => {
+    setLoraWeights(prev => {
+      const next = { ...prev }
+      if (!next[filename]) return prev
+      next[filename] = [...next[filename]]
+      // Keep typed values aligned with the slider's supported range and
+      // avoid persisting NaN while a numeric field is temporarily empty.
+      if (!Number.isFinite(value)) return prev
+      next[filename][phaseIndex] = Math.max(0, Math.min(2, Math.round(value * 100) / 100))
+      persist(activatedLoras, next)
+      return next
+    })
+  }, [activatedLoras, persist])
+
   // Load available LoRAs when model changes
   useEffect(() => {
     if (!modelType) return
     let cancelled = false
-    setLoading(true)
+    queueMicrotask(() => { if (!cancelled) setLoading(true) })
     api.fetchLoras(modelType).then(data => {
       if (cancelled) return
       const newPhases = data.guidance_max_phases ?? 1
@@ -100,7 +129,7 @@ export function DirectorLoraSelector({ mode, modelType }: {
           }
         })
         if (valid.length !== prev.length || newPhases !== (loraWeights[valid[0]]?.length ?? 1)) {
-          const multipliers = serializeMultipliers(valid, adjustedWeights)
+          const multipliers = serializeDirectorLoraMultipliers(valid, adjustedWeights)
           directorSetLora(mode, valid, multipliers, adjustedWeights, data.loras)
         }
         setLoraWeights(adjustedWeights)
@@ -166,24 +195,16 @@ export function DirectorLoraSelector({ mode, modelType }: {
 
   // Sync from store when savedLora changes externally
   useEffect(() => {
-    if (savedLora) {
+    if (!savedLora) return
+    let cancelled = false
+    queueMicrotask(() => {
+      if (cancelled) return
       setActivatedLoras(savedLora.activated_loras || [])
       setLoraWeights(savedLora.loraWeights || {})
       if (savedLora.availableLoras?.length) setAvailableLoras(savedLora.availableLoras)
-    }
+    })
+    return () => { cancelled = true }
   }, [savedLora])
-
-  const serializeMultipliers = (loras: string[], weights: Record<string, number[]>) => {
-    return loras.map(name => {
-      const w = weights[name] || [1.0]
-      return w.map(v => v.toFixed(2)).join(';')
-    }).join(' ')
-  }
-
-  const persist = useCallback((newLoras: string[], newWeights: Record<string, number[]>) => {
-    const multipliers = serializeMultipliers(newLoras, newWeights)
-    directorSetLora(mode, newLoras, multipliers, newWeights, availableLoras)
-  }, [mode, availableLoras, directorSetLora])
 
   const toggleLora = useCallback((filename: string) => {
     setActivatedLoras(prev => {
@@ -211,20 +232,6 @@ export function DirectorLoraSelector({ mode, modelType }: {
       return next
     })
   }, [loraWeights, phases, persist, loraWeightRecs])
-
-  const updateWeight = useCallback((filename: string, phaseIndex: number, value: number) => {
-    setLoraWeights(prev => {
-      const next = { ...prev }
-      if (!next[filename]) return prev
-      next[filename] = [...next[filename]]
-      // Keep typed values aligned with the slider's supported range and
-      // avoid persisting NaN while a numeric field is temporarily empty.
-      if (!Number.isFinite(value)) return prev
-      next[filename][phaseIndex] = Math.max(0, Math.min(2, Math.round(value * 100) / 100))
-      persist(activatedLoras, next)
-      return next
-    })
-  }, [activatedLoras, persist])
 
   const handleGenerateGuide = async (filename: string) => {
     if (!modelType) return

@@ -389,7 +389,10 @@ export function EditorPreview() {
     if (!playing || !project) return
     const startedAt = performance.now()
     const originalPlayhead = playheadRef.current
-    const publishInterval = 1000 / (isMobile ? 15 : 30)
+    // The iOS fallback must publish at the same rate as Maestro's mobile
+    // proxy. If Safari declines a delayed play() call, timeline-driven seeks
+    // still present a real 30 fps preview instead of a 15 fps slideshow.
+    const publishInterval = 1000 / 30
     let latestPlayhead = originalPlayhead
     let lastPublishedAt = startedAt - publishInterval
     let frame = 0
@@ -402,8 +405,8 @@ export function EditorPreview() {
         return
       }
       // Media elements render natively between clock publications. Keeping the
-      // global timeline at 15 Hz on phones avoids rebuilding the full Editor UI
-      // on every display frame while video remains smooth at its source FPS.
+      // global timeline aligned to the 30 fps mobile proxy avoids visible
+      // stepping when Safari falls back to timeline-driven seeking.
       if (now - lastPublishedAt >= publishInterval) {
         setPlayhead(next)
         lastPublishedAt = now
@@ -421,6 +424,16 @@ export function EditorPreview() {
 
   const seek = (value: number) => setPlayhead(Math.max(0, Math.min(duration, value)))
   const frameDuration = 1 / project.canvas.fps
+  const startPlaybackFromGesture = () => {
+    // iOS Safari requires unmuted media playback to begin inside the original
+    // tap handler. Calling play() only from PreviewVisual's React effect can
+    // be rejected, after which the old 15 Hz playhead sync looked like slow
+    // playback. Unlock every currently visible media element synchronously.
+    canvasRef.current?.querySelectorAll<HTMLMediaElement>('video, audio').forEach(element => {
+      void element.play().catch(() => {})
+    })
+    setPlaying(true)
+  }
 
   const snapTargets = (excludedItemId: string): CanvasGuides => {
     const x = [-project.canvas.width / 2, 0, project.canvas.width / 2]
@@ -811,7 +824,8 @@ export function EditorPreview() {
           type="button"
           onClick={() => {
             if (!playing && playhead >= duration && duration > 0) seek(0)
-            setPlaying(!playing)
+            if (playing) setPlaying(false)
+            else startPlaybackFromGesture()
           }}
           disabled={duration <= 0}
           className="flex h-7 w-7 items-center justify-center rounded-full bg-text-primary text-bg-primary hover:opacity-90 disabled:opacity-30"

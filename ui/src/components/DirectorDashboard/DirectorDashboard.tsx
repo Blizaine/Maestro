@@ -154,7 +154,7 @@ function LlmLogPanel({ pipeline }: { pipeline: SavedPipelineState }) {
   const log = pipeline.llm_log
   if (!log) return <p className="text-xs text-text-muted italic">No LLM log captured</p>
 
-  const passes = (log as any).passes as Array<{ pass: string; system_prompt: string; user_prompt?: string; response_text: string; thinking_text?: string | null }> | undefined
+  const passes = log.passes
 
   return (
     <div className="space-y-2">

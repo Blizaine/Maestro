@@ -22,15 +22,20 @@ Editor is now a full top-level Maestro mode alongside Director and Studio.
   favorites.
 - Import a complete Director production as separate shot clips. Music Videos
   also bring the full source song onto an audio track.
+- Recognize Director productions by the real first frame of their first shot
+  instead of a generic project icon.
 - Choose **Edit clip with Maestro AI** to send a timeline clip through an
   appropriate Studio workflow and return the result as a new take in the edit.
 - Export H.264, H.265, or AV1 with delivery resolution, frame-rate, quality,
   audio, and hardware-encoder controls. Exports can run immediately or wait in
   Maestro's universal queue.
+- Edit standard, vertical, square, classic, and 21:9 ultrawide canvases.
 
 The Editor is responsive: desktop keeps the complete multi-panel workspace,
 while phone and tablet layouts turn the media browser, inspector, projects, and
-timeline into focused panels suitable for quick edits and remote review.
+timeline into focused panels suitable for quick edits and remote review. Its
+iOS preview path uses a lightweight 30 fps proxy and starts playback directly
+inside the initiating tap, avoiding Safari's delayed-playback throttling.
 
 ## A cleaner Studio
 
@@ -55,6 +60,10 @@ can be applied to any video—including a clip selected in Editor.
   interpreted as the opening frame.
 - Added a reusable named character library. Save an image and voice reference,
   or save a character video, then recall it in later Omni generations.
+- Locked every named character to one immutable Subject/Speaker ID and its own
+  pictures, videos, and voice references. The enhancer rejects `<Subject N>`,
+  unexpected Subject 3/4 entries, and cross-wired dialogue rather than passing
+  an ambiguous two-character prompt into H3.
 - Automatically trims and budgets character video references to H3's supported
   per-reference and combined duration limits.
 - Added stronger reference-role manifests, diagnostic logging, and tests for
@@ -100,7 +109,8 @@ Maestro restarts. See [Use Maestro Remotely with Tailscale](TAILSCALE_REMOTE_ACC
 ## Interface and quality-of-life improvements
 
 - New orange Maestro icon for the app, PWA, and shared header.
-- Consistent Director / Studio / Editor navigation and version display.
+- Consistent responsive Director / Studio / Editor navigation, icon placement,
+  and version display on desktop and mobile.
 - Per-clip, multi-window, and complete Director ETA estimates, with observed
   First Block Cache acceleration reflected as generation progresses.
 - Cleaner Pinokio Start and LoRA-folder menus without normal Classic UI links.
@@ -121,6 +131,7 @@ select **Secure Remote Access (Tailscale)**.
 
 ## Release validation
 
-The v2.0 release candidate passes the production React build, launcher syntax
-checks, JSON grammar regression runner, clean-repository boundary guard, and
-the complete 1,076-test Python suite.
+The v2.0 release candidate passes the production React build, the complete
+frontend ESLint policy, launcher syntax checks, JSON grammar regression runner,
+clean-repository boundary guard, first-party Python compile checks, and the
+complete 1,079-test Python suite.

@@ -223,6 +223,7 @@ def _load_llm_enhance_helpers():
         "_canonical_h3_language_tag",
         "_detect_h3_dialogue_language",
         "_h3_quote_is_visible_text",
+        "_extract_h3_source_dialogue_entries",
         "_extract_h3_quoted_dialogue",
         "_h3_requests_speech",
         "_extract_h3_dialogue_blocks",
@@ -232,6 +233,15 @@ def _load_llm_enhance_helpers():
         "_build_h3_dialogue_requirement",
         "_h3_dialogue_contract_satisfied",
         "_h3_timed_silence_contract_satisfied",
+        "_h3_ref2va_reference_rows",
+        "_h3_ref2va_normalized_name",
+        "_parse_h3_ref2va_subject_manifest",
+        "_canonical_h3_ref2va_subject_fields",
+        "_replace_h3_structured_field",
+        "_canonicalize_h3_ref2va_reference_fields",
+        "_canonicalize_h3_ref2va_dialogue_speakers",
+        "_h3_ref2va_reference_contract_satisfied",
+        "_h3_ref2va_dialogue_binding_contract_satisfied",
         "_h3_voice_binding_contract_satisfied",
         "_has_complete_h3_ref2va_structure",
         "_has_complete_h3_context_structure",
@@ -1920,7 +1930,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             )
         )
         duplicated = timed.replace(
-            "summary: [reference generation] A finished video matching the requested action, identity, setting, and explicitly tagged dialogue.",
+            "summary: [reference generation + audio reference] A finished video matching the requested action, identity, setting, and explicitly tagged dialogue.",
             'summary: Blaine declares, "Snap this, bitch."',
         )
         deduplicated = helpers["_strip_h3_untagged_dialogue_duplicates"](
@@ -1967,6 +1977,83 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             )
         )
         self.assertNotIn("Ignore this narration", generated)
+
+    def test_ref2va_saved_characters_keep_exact_subjects_voices_and_dialogue(self):
+        helpers = _load_llm_enhance_helpers()
+        references = "\n".join((
+            'Saved character "Yoda" is exactly <Subject 1> (S1): <Picture 1> + '
+            '<Audio 1> all define this one stable character.',
+            'Saved character "Blaine" is exactly <Subject 2> (S2): <Picture 2> + '
+            '<Audio 2> all define this one stable character.',
+            '<Picture 1>: visual identity/appearance reference for Yoda; retention=reference',
+            '<Audio 1>: Yoda voice; intent=VOICE REFERENCE; retention=reference',
+            '<Picture 2>: visual identity/appearance reference for Blaine; retention=reference',
+            '<Audio 2>: Blaine voice; intent=VOICE REFERENCE; retention=reference',
+        ))
+        prompt = (
+            'Blaine says to Yoda, <d>Master Yoda, how powerful is Maestro?</d> '
+            'Yoda waves his hand while saying, <d>Powerful, it has become.</d>'
+        )
+        manifest = helpers["_parse_h3_ref2va_subject_manifest"](references)
+        self.assertEqual([item["index"] for item in manifest], [1, 2])
+        self.assertEqual(manifest[0]["name"], "Yoda")
+        self.assertEqual(manifest[0]["pictures"], ["<Picture 1>"])
+        self.assertEqual(manifest[0]["audios"], ["<Audio 1>"])
+        self.assertEqual(manifest[1]["name"], "Blaine")
+
+        source_dialogue = helpers["_extract_h3_source_dialogue_entries"](
+            prompt, references
+        )
+        self.assertEqual(
+            [(entry["speaker_id"], entry["words"]) for entry in source_dialogue],
+            [
+                (2, "Master Yoda, how powerful is Maestro?"),
+                (1, "Powerful, it has become."),
+            ],
+        )
+
+        fallback = helpers["_build_h3_ref2va_tagged_fallback"](
+            prompt, references, duration_seconds=14
+        )
+        self.assertNotIn("<Subject N>", fallback)
+        self.assertNotIn("<Subject 3>", fallback)
+        self.assertNotIn("<Subject 4>", fallback)
+        self.assertIn(
+            "(S2) <d>[English] Master Yoda, how powerful is Maestro?</d>",
+            fallback,
+        )
+        self.assertIn("(S1) <d>[English] Powerful, it has become.</d>", fallback)
+        self.assertTrue(
+            helpers["_h3_ref2va_reference_contract_satisfied"](
+                fallback, references
+            )
+        )
+        self.assertTrue(
+            helpers["_h3_ref2va_dialogue_binding_contract_satisfied"](
+                prompt, fallback, references
+            )
+        )
+
+        bad = fallback.replace(
+            "(S2) <d>[English] Master Yoda, how powerful is Maestro?</d>",
+            "(S1) <d>[English] Master Yoda, how powerful is Maestro?</d>",
+        ).replace(
+            "(S1) <d>[English] Powerful, it has become.</d>",
+            "(S2) <d>[English] Powerful, it has become.</d>",
+        )
+        self.assertFalse(
+            helpers["_h3_ref2va_dialogue_binding_contract_satisfied"](
+                prompt, bad, references
+            )
+        )
+        repaired = helpers["_canonicalize_h3_ref2va_dialogue_speakers"](
+            bad, prompt, references
+        )
+        self.assertTrue(
+            helpers["_h3_ref2va_dialogue_binding_contract_satisfied"](
+                prompt, repaired, references
+            )
+        )
 
     def test_frame_aligner_preserves_h3_and_legacy_grids(self):
         align = _load_frame_aligner()

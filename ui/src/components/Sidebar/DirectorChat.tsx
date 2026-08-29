@@ -490,7 +490,7 @@ export function DirectorChat() {
     if (step === 'style' && sceneDescription && !chatInput) {
       setChatInput(sceneDescription)
     }
-  }, [step])
+  }, [chatInput, sceneDescription, step])
 
   useEffect(() => {
     if (!draftQueueConfirmation) return
@@ -1917,7 +1917,7 @@ function AdditionalRefsSection() {
 }
 
 function AnalysisSummary({
-  analysis, showDetails, setShowDetails, speakerMappings: _speakerMappings, isShortFilm,
+  analysis, showDetails, setShowDetails, isShortFilm,
 }: {
   analysis: NonNullable<ReturnType<typeof useStore.getState>['directorAnalysis']>
   showDetails: boolean
@@ -2950,7 +2950,7 @@ function StyleForm({
 
 function ImagePromptsReview({
   clipPlans, plannedClips, speakerMappings, editClipPlan, planPrompts,
-  planVideoPrompts: _planVideoPrompts, generateStartImages, loading, isActive, isShortFilm,
+  generateStartImages, loading, isActive, isShortFilm,
 }: {
   clipPlans: ReturnType<typeof useStore.getState>['directorClipPlans']
   plannedClips: ReturnType<typeof useStore.getState>['directorPlannedClips']
@@ -3032,7 +3032,7 @@ function ImagePromptsReview({
 }
 
 function ImageGenView({
-  loading, imageGenProgress, clipImages, planVideoPrompts: _planVideoPrompts2,
+  loading, imageGenProgress, clipImages,
 }: {
   loading: boolean
   imageGenProgress: ReturnType<typeof useStore.getState>['directorImageGenProgress']

@@ -82,23 +82,23 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
-### v2.0.0 (2026-08-28)
+### v2.0.0 (2026-08-29)
 
 **A complete create-to-edit workflow**
-- Added the new full-screen **Editor Mode** with multi-track video, audio, and title editing; canvas transforms and snap guides; transitions, speed, opacity, volume, fonts, undo/redo, project history, and hardware-aware export.
+- Added the new full-screen **Editor Mode** with multi-track video, audio, and title editing; 21:9 canvases; canvas transforms and snap guides; transitions, speed, opacity, volume, fonts, undo/redo, project history, and hardware-aware export.
 - Director productions can be opened as editable timelines with separate shot clips and the complete soundtrack, while any timeline clip can make a round trip through Maestro AI and return as a new take.
 - Reorganized Studio into clear Video, Image, and Audio workflows. Video editing tools now live beside generation, Image adds dedicated New/Edit/Upscale/Outpaint modes, Audio includes Revoice, and Finish adds reusable film grain.
 
 **MiniMax H3, references, and local intelligence**
 - Added H3's native 768p tier, 21:9 canvases, and Regenerate 2K workflow, plus Alibaba PAI FL2VA and Ref2VA acceleration presets with native PDD support.
-- Added a reusable Omni character library for named image + voice or video references, automatic reference-duration budgeting, and stronger reference isolation so identity media is not mistaken for a start frame.
+- Added a reusable Omni character library for named image + voice or video references, automatic reference-duration budgeting, and stronger reference isolation so identity media is not mistaken for a start frame. Exact Subject/Speaker bindings keep each character's face, voice, and dialogue together and reject phantom subjects.
 - Rebuilt H3 prompt planning around causal story continuity, exact dialogue preservation, official Context-IR guidance, model-aware token fitting, and safer multi-window continuation.
 - Added Qwen3.8 27B Uncensored with creative thinking controls, prompt-enhancement telemetry, and non-thinking structured-output paths.
 
 **Remote workflow and release polish**
 - Added completion alerts, optional chimes, encrypted closed-app Web Push, an installable Maestro web app, and optional private HTTPS access through each user's own Tailscale account.
 - Added per-clip, multi-window, and full Director completion estimates, including cache-aware calibration for First Block Cache.
-- Updated Maestro's orange app icon, unified the Director / Studio / Editor header, simplified the Pinokio menu, and preserved the v1.9.1 llama.cpp nightly-download hotfix.
+- Updated Maestro's orange app icon, unified the responsive Director / Studio / Editor header and version display, added Director first-frame thumbnails and full-rate iOS Editor preview playback, simplified the Pinokio menu, and preserved the v1.9.1 llama.cpp nightly-download hotfix.
 
 See the [complete v2.0 release notes](docs/RELEASE_NOTES_V2.0.md) and [Tailscale setup guide](docs/TAILSCALE_REMOTE_ACCESS.md).
 

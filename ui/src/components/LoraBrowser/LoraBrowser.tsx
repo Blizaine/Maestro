@@ -698,12 +698,12 @@ export function LoraBrowser() {
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8 gap-3">
                 {filtered.map(lora => {
                   const cardKey = `${lora.directory}/${lora.filename}`
-                  const clickable = Boolean(lora.civitai_model_id || (lora as any).hf_repo_id)
+                  const clickable = Boolean(lora.civitai_model_id || lora.hf_repo_id)
                   const openCard = () => {
                     if (lora.civitai_model_id) {
                       selectModel(lora.civitai_model_id)
-                    } else if ((lora as any).hf_repo_id) {
-                      window.open(`https://huggingface.co/${(lora as any).hf_repo_id}`, '_blank')
+                    } else if (lora.hf_repo_id) {
+                      window.open(`https://huggingface.co/${lora.hf_repo_id}`, '_blank')
                     }
                   }
                   return (
@@ -772,8 +772,8 @@ export function LoraBrowser() {
                     </div>
                     {!lora.civitai_model_id && (
                       <div className="absolute top-1.5 right-1.5">
-                        <span className={`text-[8px] px-1 py-0.5 rounded bg-black/60 ${(lora as any).hf_repo_id ? 'text-amber-300/80' : 'text-white/50'}`}>
-                          {(lora as any).hf_repo_id ? 'HuggingFace' : 'Local only'}
+                        <span className={`text-[8px] px-1 py-0.5 rounded bg-black/60 ${lora.hf_repo_id ? 'text-amber-300/80' : 'text-white/50'}`}>
+                          {lora.hf_repo_id ? 'HuggingFace' : 'Local only'}
                         </span>
                       </div>
                     )}

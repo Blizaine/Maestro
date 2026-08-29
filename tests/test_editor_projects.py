@@ -34,6 +34,7 @@ from services.editor_projects import (  # noqa: E402
     resolve_editor_export_encoder,
     save_editor_project,
 )
+from services.director_pipeline import build_pipeline_first_frame_thumbnail  # noqa: E402
 
 
 class TestEditorProjects(unittest.TestCase):
@@ -733,6 +734,44 @@ class TestEditorProjects(unittest.TestCase):
             "proxy-mobile",
         )
         self.assertTrue(os.path.isfile(proxy_path))
+
+    def test_director_gallery_thumbnail_uses_first_clip_and_cache(self):
+        pipeline_id = "thumbnail-test"
+        source = self._media("director-first-shot.mp4")
+        os.utime(source, (1, 1))
+        pipeline_path = os.path.join(
+            self.save_root, f"_director_pipeline_{pipeline_id}.json"
+        )
+        with open(pipeline_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "pipeline_id": pipeline_id,
+                "clips": [{"video_filename": os.path.basename(source)}],
+                "output_files": [],
+            }, handle)
+
+        def fake_ffmpeg(command, **_kwargs):
+            output = command[-1]
+            os.makedirs(os.path.dirname(output), exist_ok=True)
+            with open(output, "wb") as handle:
+                handle.write(b"director-first-frame")
+            return Mock(returncode=0)
+
+        with patch(
+            "services.director_pipeline.subprocess.run",
+            side_effect=fake_ffmpeg,
+        ) as run:
+            first = build_pipeline_first_frame_thumbnail(
+                self.save_root, pipeline_id, ffmpeg="mock-ffmpeg"
+            )
+            second = build_pipeline_first_frame_thumbnail(
+                self.save_root, pipeline_id, ffmpeg="mock-ffmpeg"
+            )
+
+        self.assertEqual(first, second)
+        self.assertTrue(os.path.isfile(first))
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("-frames:v", run.call_args.args[0])
+        self.assertEqual(run.call_args.args[0][run.call_args.args[0].index("-i") + 1], source)
 
     def test_hardware_encoder_selection_is_capability_aware(self):
         export = {"codec": "h264", "quality": "high", "encoder": "auto"}

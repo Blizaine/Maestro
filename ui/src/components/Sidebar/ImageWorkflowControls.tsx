@@ -49,7 +49,7 @@ export function ImageWorkflowControls() {
     }
   }
 
-  const useSelectedImage = async () => {
+  const applySelectedImage = async () => {
     if (!currentIsImage || !current) return
     setUploading('source')
     setError(null)
@@ -129,7 +129,7 @@ export function ImageWorkflowControls() {
               <button
                 type="button"
                 disabled={!currentIsImage}
-                onClick={() => void useSelectedImage()}
+                onClick={() => void applySelectedImage()}
                 className="flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-bg-tertiary py-1.5 text-[11px] text-text-secondary transition-colors hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
               >
                 <ImageIcon size={12} />

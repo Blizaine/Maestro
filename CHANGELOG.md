@@ -5,7 +5,7 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [Unreleased]
 
-## [2.0.0] - 2026-08-28
+## [2.0.0] - 2026-08-29
 
 Editor: added a third top-level Maestro workspace beside Director and Studio.
 The new non-destructive editor supports layered video, audio, and title tracks;
@@ -26,7 +26,10 @@ Maestro Studio AI workflow and the finished result returns as a selectable take
 at the same timeline position. Clip overlap is prevented within one track,
 new visual layers stack in compositing order, removable tracks are supported,
 and the preview uses source-sized transform bounds, alignment guides, and a
-lightweight mobile playback path.
+lightweight mobile playback path. Director productions now use their actual
+first generated frame in the Editor media browser, 21:9 is available as an
+Editor canvas, and iOS playback starts its media elements directly from the
+user gesture so preview no longer degrades into low-frame-rate playback.
 
 Studio navigation: replaced the crowded legacy mode bars with a compact
 hierarchical workflow selector. Video now groups Create/Frames/Extend/Blend,
@@ -44,8 +47,12 @@ Reference conditioning no longer promotes an Omni identity reference into an
 implicit first frame. A new character library stores named image + voice pairs
 or video references, recalls them into Studio and Director Omni jobs, and
 automatically prepares reference videos within H3's per-clip and combined
-duration limits. Improved memory and reference preparation avoids needless
-high-resolution decoding while retaining full-quality identity conditioning.
+duration limits. Named Omni characters now receive immutable Subject/Speaker
+IDs with their own visual and voice media. Enhancement rejects placeholder,
+duplicate, or phantom subjects and repairs dialogue back onto its explicitly
+named speaker, preventing two-character voices and lines from being reversed.
+Improved memory and reference preparation avoids needless high-resolution
+decoding while retaining full-quality identity conditioning.
 
 H3 planning and Director: long-form plans now use a causal story architecture,
 character voice bibles, dialogue table reads, exact locked dialogue manifests,
@@ -79,7 +86,10 @@ LoRA-folder actions, removed the normal Classic UI entry points, and kept the
 Pinokio launcher schema version independent from Maestro's application version.
 The release also includes H3 continuation diagnostics, reference manifest and
 Turbo update coverage, safer remote-access persistence, and expanded Editor,
-Studio image, film-grain, character-library, and PDD regression tests.
+Studio image, film-grain, character-library, and PDD regression tests. Final
+hardening cleared the frontend lint backlog, fixed a hidden invalid image-hook
+call and incomplete Director v2 clip metadata, and repaired a shipped LongCat
+block-sparse attention indentation error found by the first-party compile pass.
 
 ## [1.9.1] - 2026-08-25
 

@@ -16,7 +16,7 @@ const placeholders: Record<string, string> = {
 
 /** Lightweight display-only estimate for reviewed AI window prompts. */
 function estimateH3TextTokens(value: string): number {
-  const lexical = value.match(/[A-Za-z0-9]+(?:['’\-][A-Za-z0-9]+)*|[^\w\s]/g)?.length ?? 0
+  const lexical = value.match(/[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*|[^\w\s]/g)?.length ?? 0
   return Math.ceil(lexical * 1.25) + (value.trim() ? 8 : 0)
 }
 
@@ -75,12 +75,11 @@ function useEnhanceStatus(isEnhancing: boolean) {
   const [status, setStatus] = useState<{ phase: 'loading' | 'thinking' | 'writing' | 'idle'; chars: number }>({ phase: 'idle', chars: 0 })
 
   useEffect(() => {
-    if (!isEnhancing) {
-      setStatus({ phase: 'idle', chars: 0 })
-      return
-    }
-    setStatus({ phase: 'loading', chars: 0 })
+    if (!isEnhancing) return
     let active = true
+    queueMicrotask(() => {
+      if (active) setStatus({ phase: 'loading', chars: 0 })
+    })
     const poll = async () => {
       let streamStarted = false
       while (active) {
@@ -121,7 +120,7 @@ function useEnhanceStatus(isEnhancing: boolean) {
     return () => { active = false }
   }, [isEnhancing])
 
-  return status
+  return isEnhancing ? status : { phase: 'idle' as const, chars: 0 }
 }
 
 export function PromptInput() {
@@ -163,7 +162,7 @@ export function PromptInput() {
     && !!item.h3WindowPlan
   ))?.h3WindowPlan?.signature || '')
   const [ttsMenuOpen, setTtsMenuOpen] = useState(false)
-  const [windowPlanOpen, setWindowPlanOpen] = useState(false)
+  const [closedWindowPlanSignature, setClosedWindowPlanSignature] = useState<string | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
 
   const isAudioOnly = modelOptions?.audio_only
@@ -316,14 +315,14 @@ export function PromptInput() {
     return () => document.removeEventListener('mousedown', handler)
   }, [ttsMenuOpen])
 
-  // A server-created plan used to arrive collapsed, making the exact prompts
-  // effectively invisible once an expensive generation had started. Open a
-  // newly planned storyboard once; the user can still collapse it afterward.
-  useEffect(() => {
-    if (usesH3Plan && h3WindowPlan?.signature) {
-      setWindowPlanOpen(true)
-    }
-  }, [usesH3Plan, h3WindowPlan?.signature])
+  // A newly planned storyboard opens automatically. Store only the signature
+  // the user explicitly closed so a replacement plan opens without a state-
+  // synchronization effect or an extra render.
+  const windowPlanOpen = Boolean(
+    usesH3Plan
+    && h3WindowPlan?.signature
+    && closedWindowPlanSignature !== h3WindowPlan.signature
+  )
 
   // Keep the prompt area at the bottom when the sidebar has spare room. The
   // textarea itself grows to its complete content height, and the sidebar's
@@ -364,7 +363,9 @@ export function PromptInput() {
           <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-border bg-bg-tertiary/70">
             <button
               type="button"
-              onClick={() => setWindowPlanOpen(open => !open)}
+              onClick={() => setClosedWindowPlanSignature(current => (
+                current === h3WindowPlan?.signature ? null : (h3WindowPlan?.signature ?? null)
+              ))}
               className="flex-1 min-w-0 flex items-center gap-1.5 text-left"
               title="Review the complete Context-IR prompt assigned to each H3 continuation window."
             >

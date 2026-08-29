@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { BookUser, ChevronDown, FileAudio, GripVertical, Image as ImageIcon, Info, Loader2, Plus, Trash2, UserPlus, Video, X } from 'lucide-react'
 import * as api from '../../api/client'
 import { useStore } from '../../stores/useStore'
@@ -102,7 +102,7 @@ export function OmniReferenceSection({
   const limits = modelOptions?.omni_reference_limits ?? {
     image: 9, video: 3, audio: 3, total: 12,
   }
-  const labels = useMemo(() => referenceLabels(references), [references])
+  const labels = referenceLabels(references)
 
   const update = (next: MiniMaxH3Reference[]) => {
     if (scope === 'director') setDirectorReferences(next)

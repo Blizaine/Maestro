@@ -18,6 +18,7 @@ import json
 import uuid
 import math
 import shutil
+import subprocess
 import threading
 import traceback
 from functools import wraps
@@ -1378,6 +1379,81 @@ def list_pipeline_states(out_dir: str) -> list[dict]:
                     pass
     results.sort(key=lambda x: x.get("created_at") or 0, reverse=True)
     return results
+
+
+def build_pipeline_first_frame_thumbnail(
+    out_dir: str,
+    pid: str,
+    *,
+    ffmpeg: str = "ffmpeg",
+) -> Optional[str]:
+    """Return a cached first-frame thumbnail for a saved Director film."""
+    filepath = _find_pipeline_file(out_dir, pid)
+    if not filepath:
+        return None
+    pipeline_dir = os.path.dirname(filepath)
+    try:
+        with _pipeline_file_lock:
+            with open(filepath, "r", encoding="utf-8") as handle:
+                state = _backfill_clip_video_filenames(json.load(handle), pipeline_dir)
+    except (OSError, ValueError):
+        return None
+
+    candidates = [
+        clip.get("video_filename")
+        for clip in (state.get("clips") or [])
+        if isinstance(clip, dict) and clip.get("video_filename")
+    ]
+    candidates.extend(state.get("output_files") or [])
+    root = os.path.realpath(os.path.abspath(pipeline_dir))
+    source_path = None
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            continue
+        extension = os.path.splitext(candidate)[1].lower()
+        if extension not in {".mp4", ".mov", ".mkv", ".webm"}:
+            continue
+        path = candidate if os.path.isabs(candidate) else os.path.join(root, candidate)
+        resolved = os.path.realpath(os.path.abspath(path))
+        try:
+            if os.path.commonpath([root, resolved]) != root:
+                continue
+        except ValueError:
+            continue
+        if os.path.isfile(resolved):
+            source_path = resolved
+            break
+    if not source_path:
+        return None
+
+    cache_dir = os.path.join(pipeline_dir, ".maestro-editor", "director-thumbnails")
+    thumbnail_path = os.path.join(cache_dir, f"{pid}.jpg")
+    try:
+        if (
+            os.path.isfile(thumbnail_path)
+            and os.path.getmtime(thumbnail_path) >= os.path.getmtime(source_path)
+        ):
+            return thumbnail_path
+        os.makedirs(cache_dir, exist_ok=True)
+        temporary = os.path.join(cache_dir, f"{pid}.{uuid.uuid4().hex[:8]}.part.jpg")
+        completed = subprocess.run(
+            [
+                ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                "-ss", "0", "-i", source_path, "-frames:v", "1",
+                "-vf", "scale=640:360:force_original_aspect_ratio=decrease,"
+                "pad=640:360:(ow-iw)/2:(oh-ih)/2:color=black",
+                "-q:v", "3", temporary,
+            ],
+            capture_output=True,
+            timeout=90,
+        )
+        if completed.returncode == 0 and os.path.isfile(temporary):
+            os.replace(temporary, thumbnail_path)
+        elif os.path.isfile(temporary):
+            os.remove(temporary)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return thumbnail_path if os.path.isfile(thumbnail_path) else None
 
 
 def _backfill_clip_video_filenames(state: dict, state_dir: str) -> dict:

@@ -191,7 +191,14 @@ function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop
   const phase = stripTimeSuffix(job.phase || job.message)
   const isFailed = job.status === 'failed' || job.status === 'cancelled'
   const errorText = job.error || job.message || (job.status === 'cancelled' ? 'Cancelled' : 'Generation failed')
-  const [showH3Prompts, setShowH3Prompts] = useState(false)
+  const h3PlanSignature = job.h3WindowPlan?.signature
+  const [h3PromptDisclosure, setH3PromptDisclosure] = useState({
+    signature: h3PlanSignature,
+    open: false,
+  })
+  const showH3Prompts = (
+    h3PromptDisclosure.signature === h3PlanSignature && h3PromptDisclosure.open
+  )
   const h3WindowMatch = (job.phase || job.message || '').match(/Sliding Window\s+(\d+)\/(\d+)/i)
   const activeH3Window = job.currentWindow ?? (h3WindowMatch ? Number(h3WindowMatch[1]) : 1)
   const totalStudioWindows = job.totalWindows ?? (h3WindowMatch ? Number(h3WindowMatch[2]) : 1)
@@ -204,10 +211,6 @@ function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop
   const activeH3PlanWindow = job.h3WindowPlan?.windows.find(
     window => window.index === activeH3Window,
   ) || job.h3WindowPlan?.windows[0]
-
-  useEffect(() => {
-    setShowH3Prompts(false)
-  }, [job.h3WindowPlan?.signature])
 
   return (
     <div className={`rounded-xl border overflow-hidden ${
@@ -294,7 +297,10 @@ function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop
             </span>
             <button
               type="button"
-              onClick={() => setShowH3Prompts(open => !open)}
+              onClick={() => setH3PromptDisclosure(current => ({
+                signature: h3PlanSignature,
+                open: current.signature === h3PlanSignature ? !current.open : true,
+              }))}
               className="flex items-center gap-1 text-accent-blue hover:text-accent-blue/80"
             >
               {showH3Prompts ? 'Hide all' : 'View all'}

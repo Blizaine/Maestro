@@ -22,6 +22,7 @@ import { useEditorStore } from './useEditorStore'
 
 const CANVAS_PRESETS = [
   { label: '16:9 · 1080p', width: 1920, height: 1080 },
+  { label: '21:9 · Ultrawide', width: 2560, height: 1080 },
   { label: '9:16 · 1080p', width: 1080, height: 1920 },
   { label: '1:1 · 1080p', width: 1080, height: 1080 },
   { label: '4:3 · 1080p', width: 1440, height: 1080 },
@@ -98,15 +99,15 @@ export function EditorTopBar() {
   }, [projectMenuOpen])
 
   return (
-    <header className={`flex shrink-0 items-center gap-2 border-b border-border bg-bg-secondary px-2.5 md:h-14 md:px-4 ${isMobile ? 'h-auto flex-wrap py-2' : ''}`}>
+    <header className={`flex shrink-0 items-center border-b border-border bg-bg-secondary ${isMobile ? 'h-auto flex-wrap gap-1 px-2 py-1.5' : 'h-14 gap-2 px-4'}`}>
       {isMobile && (
         <button
           type="button"
           onClick={toggleSidebar}
-          className="rounded-lg p-1.5 text-text-secondary hover:bg-bg-hover hover:text-text-primary"
+          className="rounded-lg p-2 text-text-secondary hover:bg-bg-hover hover:text-text-primary"
           title="Media and Editor settings"
         >
-          <Menu size={18} />
+          <Menu size={20} />
         </button>
       )}
       <MaestroBrand compact={isMobile} className={isMobile ? '' : 'w-[158px]'} />
@@ -131,6 +132,29 @@ export function EditorTopBar() {
           >
             <ChevronDown size={14} />
           </button>
+          {isMobile && (
+            <>
+              <button
+                type="button"
+                onClick={() => void saveProject()}
+                disabled={saving || !project}
+                className={`border-l border-border p-2 transition-colors ${dirty ? 'text-accent-blue hover:bg-accent-blue/10' : 'text-text-muted hover:bg-bg-hover'} disabled:opacity-40`}
+                title={dirty ? 'Save project' : 'Project saved'}
+              >
+                {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+              </button>
+              <button
+                type="button"
+                onClick={() => setExportDialogOpen(true)}
+                disabled={!project}
+                className="relative flex h-8 shrink-0 items-center gap-1 overflow-hidden border-l border-border bg-cta px-2.5 text-[10px] font-semibold text-white disabled:opacity-50"
+                title={exportJobId ? 'View export progress' : 'Export finished video'}
+              >
+                {exportJobId ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
+                <span>{exportJobId ? `${Math.round(exportProgress * 100)}%` : 'Export'}</span>
+              </button>
+            </>
+          )}
         </div>
         {projectMenuOpen && (
           <div className="absolute left-0 top-full z-[90] mt-1.5 w-[min(330px,calc(100vw-1rem))] overflow-hidden rounded-xl border border-border bg-bg-secondary shadow-2xl">
@@ -220,29 +244,33 @@ export function EditorTopBar() {
             </button>
           </>
         )}
-        <button
-          type="button"
-          onClick={() => void saveProject()}
-          disabled={saving || !project}
-          className={`rounded-lg p-2 transition-colors ${dirty ? 'text-accent-blue hover:bg-accent-blue/10' : 'text-text-muted hover:bg-bg-hover'} disabled:opacity-40`}
-          title={dirty ? 'Save project (Ctrl+S)' : 'Project saved'}
-        >
-          {saving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
-        </button>
-        <button
-          type="button"
-          onClick={() => setExportDialogOpen(true)}
-          disabled={!project}
-          className="relative flex h-8 items-center gap-1.5 overflow-hidden rounded-lg bg-cta px-2.5 text-[10px] font-semibold text-white shadow-accent-glow disabled:opacity-50 md:px-3 md:text-xs"
-          title={exportJobId ? 'View export progress' : 'Export finished video'}
-        >
-          {exportJobId ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
-          <span>{exportJobId ? `${Math.round(exportProgress * 100)}%` : 'Export'}</span>
-          {exportJobId && <span className="absolute inset-x-0 bottom-0 h-0.5 bg-white/20"><span className="block h-full bg-white" style={{ width: `${exportProgress * 100}%` }} /></span>}
-        </button>
-        <GlobalQueuePopover />
+        {!isMobile && (
+          <>
+            <button
+              type="button"
+              onClick={() => void saveProject()}
+              disabled={saving || !project}
+              className={`rounded-lg p-2 transition-colors ${dirty ? 'text-accent-blue hover:bg-accent-blue/10' : 'text-text-muted hover:bg-bg-hover'} disabled:opacity-40`}
+              title={dirty ? 'Save project (Ctrl+S)' : 'Project saved'}
+            >
+              {saving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
+            </button>
+            <button
+              type="button"
+              onClick={() => setExportDialogOpen(true)}
+              disabled={!project}
+              className="relative flex h-8 items-center gap-1.5 overflow-hidden rounded-lg bg-cta px-3 text-xs font-semibold text-white shadow-accent-glow disabled:opacity-50"
+              title={exportJobId ? 'View export progress' : 'Export finished video'}
+            >
+              {exportJobId ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+              <span>{exportJobId ? `${Math.round(exportProgress * 100)}%` : 'Export'}</span>
+              {exportJobId && <span className="absolute inset-x-0 bottom-0 h-0.5 bg-white/20"><span className="block h-full bg-white" style={{ width: `${exportProgress * 100}%` }} /></span>}
+            </button>
+          </>
+        )}
+        <GlobalQueuePopover iconSize={isMobile ? 20 : undefined} panelAlign={isMobile ? 'header-edge' : undefined} />
         <button type="button" onClick={toggleSettings} className="rounded-lg p-2 text-text-secondary hover:bg-bg-hover hover:text-text-primary" title="Settings">
-          <Settings size={16} />
+          <Settings size={isMobile ? 20 : 16} />
         </button>
       </div>
       <EditorExportDialog open={exportDialogOpen} onClose={() => setExportDialogOpen(false)} />

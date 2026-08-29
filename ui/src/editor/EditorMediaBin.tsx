@@ -13,7 +13,7 @@ import {
   Type,
   Upload,
 } from 'lucide-react'
-import type { EditorAsset, EditorMediaType } from '../types'
+import type { EditorAsset, EditorMediaType, PipelineListItem } from '../types'
 import { useEditorStore } from './useEditorStore'
 
 type Filter = 'all' | 'favorites' | 'director' | EditorMediaType
@@ -29,6 +29,31 @@ function MediaPreview({ asset }: { asset: EditorAsset }) {
   return (
     <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-accent-blue/20 to-accent-cool-to/10">
       <AudioLines size={20} className="text-accent-blue" />
+    </div>
+  )
+}
+
+function DirectorRunPreview({ run, compact }: { run: PipelineListItem; compact: boolean }) {
+  const [failed, setFailed] = useState(false)
+  return (
+    <div className={`${compact ? 'aspect-video' : 'h-16'} relative flex w-full items-center justify-center overflow-hidden bg-black/35`}>
+      {run.thumbnail_url && !failed ? (
+        <img
+          src={run.thumbnail_url}
+          alt=""
+          className="h-full w-full object-cover"
+          loading="lazy"
+          onError={() => setFailed(true)}
+        />
+      ) : (
+        <Clapperboard size={compact ? 28 : 22} className="text-accent-warm/80" />
+      )}
+      <span className="absolute left-1.5 top-1.5 rounded bg-black/60 px-1.5 py-0.5 text-[7px] uppercase tracking-wide text-white/75">
+        {run.pipeline_type === 'music_video' ? 'Music video' : run.pipeline_type === 'short_film_story' ? 'Short film' : 'Director'}
+      </span>
+      <span className="absolute bottom-1.5 right-1.5 rounded bg-black/60 px-1.5 py-0.5 text-[7px] text-white/75">
+        {run.clip_count} shot{run.clip_count === 1 ? '' : 's'}
+      </span>
     </div>
   )
 }
@@ -187,15 +212,11 @@ export function EditorMediaBin({ compact = false }: { compact?: boolean }) {
             key={run.id}
             className={`group overflow-hidden rounded-xl border border-accent-warm/20 bg-gradient-to-br from-accent-warm/10 via-bg-tertiary to-bg-tertiary transition-all hover:border-accent-warm/40 ${compact ? 'shadow-sm' : 'p-2'}`}
           >
-            <div className={`${compact ? 'aspect-video' : 'h-16'} relative flex w-full items-center justify-center overflow-hidden bg-black/20`}>
-              <Clapperboard size={compact ? 28 : 22} className="text-accent-warm/80" />
-              <span className="absolute left-1.5 top-1.5 rounded bg-black/60 px-1.5 py-0.5 text-[7px] uppercase tracking-wide text-white/75">
-                {run.pipeline_type === 'music_video' ? 'Music video' : run.pipeline_type === 'short_film_story' ? 'Short film' : 'Director'}
-              </span>
-              <span className="absolute bottom-1.5 right-1.5 rounded bg-black/60 px-1.5 py-0.5 text-[7px] text-white/75">
-                {run.clip_count} shot{run.clip_count === 1 ? '' : 's'}
-              </span>
-            </div>
+            <DirectorRunPreview
+              key={run.thumbnail_url || 'director-thumbnail-pending'}
+              run={run}
+              compact={compact}
+            />
             <div className={compact ? 'p-2' : 'pt-2'}>
               <div className="line-clamp-2 text-[9px] font-medium leading-snug text-text-primary" title={run.scene_description}>
                 {run.scene_description || `Director run ${run.id}`}

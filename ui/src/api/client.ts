@@ -1,4 +1,4 @@
-import type { DirectorModelCompatibility, H3WindowPlan, LTXWindowPlan, MiniMaxH3Reference, SavedOmniCharacter, ScailResolutionProfile } from '../types'
+import type { DirectorModelCompatibility, H3WindowPlan, LTXWindowPlan, MiniMaxH3Reference, ProductionPlan, SavedOmniCharacter, ScailResolutionProfile } from '../types'
 
 const BASE = ''  // same origin in production; Vite proxy handles /api in dev
 
@@ -1104,7 +1104,7 @@ export interface DirectorV2PlanRequest {
 
 export interface DirectorV2PlanResponse {
   clip_plans: Array<{ video_prompt: string; image_prompt: string }>
-  production_plan: Record<string, unknown>
+  production_plan: ProductionPlan
   skill_type: string
 }
 

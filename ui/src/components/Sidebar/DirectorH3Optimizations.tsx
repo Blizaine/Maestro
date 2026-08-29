@@ -30,15 +30,18 @@ export function DirectorH3Optimizations() {
   const setCacheWarmup = useStore(s => s.setDirectorH3FirstBlockCacheWarmup)
   const savedVideoLoras = useStore(s => s.savedLoraPerMode.video)
   const directorSetLora = useStore(s => s.directorSetLora)
-  const [modelOptions, setModelOptions] = useState<ModelOptions | null>(null)
+  const [loadedOptions, setLoadedOptions] = useState<{
+    model: string
+    options: ModelOptions | null
+  }>({ model: '', options: null })
+  const modelOptions = loadedOptions.model === videoModel ? loadedOptions.options : null
 
   useEffect(() => {
     let cancelled = false
-    setModelOptions(null)
     fetchModelOptions(videoModel)
       .then(options => {
         if (cancelled) return
-        setModelOptions(options)
+        setLoadedOptions({ model: videoModel, options })
         const defaultSteps = options.default_num_inference_steps
         if (defaultSteps != null && Number.isFinite(defaultSteps)) {
           const current = useStore.getState().directorVideoInferenceStepsByModel[videoModel]
@@ -46,7 +49,7 @@ export function DirectorH3Optimizations() {
         }
       })
       .catch(() => {
-        if (!cancelled) setModelOptions(null)
+        if (!cancelled) setLoadedOptions({ model: videoModel, options: null })
       })
     return () => { cancelled = true }
   }, [setVideoSteps, videoModel])

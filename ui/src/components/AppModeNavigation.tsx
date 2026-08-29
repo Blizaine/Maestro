@@ -23,14 +23,14 @@ export function MaestroBrand({
         alt=""
         className={`${compact ? 'h-7 w-7 rounded-[7px]' : 'h-8 w-8 rounded-lg'} shrink-0`}
       />
-      {!compact && (
-        <>
+      <>
+        {!compact && (
           <span className="text-sm font-semibold tracking-tight text-text-primary">Maestro</span>
-          {appVersion && (
-            <span className="mt-0.5 text-[10px] font-normal text-text-muted">v{appVersion}</span>
-          )}
-        </>
-      )}
+        )}
+        {appVersion && (
+          <span className={`${compact ? 'text-[9px]' : 'mt-0.5 text-[10px]'} whitespace-nowrap font-normal text-text-muted`}>v{appVersion}</span>
+        )}
+      </>
     </div>
   )
 }

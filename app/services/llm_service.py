@@ -3215,6 +3215,14 @@ def enhance_prompt(
     # valid Context-IR response at its first repeated <Picture>/<Audio> mapping.
     if result:
         result = _clean_enhance_output(result, preserve_structure=is_h3_structured)
+    if is_h3_ref2va and result:
+        # Reference ownership is data, not prose. Preserve the LLM's creative
+        # timeline while replacing its fallible numbering with the exact UI
+        # inventory and correcting explicit dialogue to the mapped speaker.
+        result = _canonicalize_h3_ref2va_reference_fields(result, reference_context)
+        result = _canonicalize_h3_ref2va_dialogue_speakers(
+            result, prompt, reference_context
+        )
 
     structure_is_valid = (
         _has_complete_h3_ref2va_structure(result)
@@ -3232,6 +3240,13 @@ def enhance_prompt(
         if is_h3_ref2va
         else True
     )
+    dialogue_binding_is_valid = (
+        _h3_ref2va_dialogue_binding_contract_satisfied(
+            prompt, result, reference_context
+        )
+        if is_h3_ref2va
+        else True
+    )
 
     # Small local LLMs can either repeat the first Ref2VA mapping or summarize
     # quoted dialogue as the word "speaks". Retry malformed H3 output once with
@@ -3241,6 +3256,7 @@ def enhance_prompt(
         and dialogue_is_valid
         and timed_silence_is_valid
         and voice_binding_is_valid
+        and dialogue_binding_is_valid
     ):
         failures = []
         if not structure_is_valid:
@@ -3251,6 +3267,8 @@ def enhance_prompt(
             failures.append("timed silence")
         if not voice_binding_is_valid:
             failures.append("voice binding")
+        if not dialogue_binding_is_valid:
+            failures.append("dialogue speaker binding")
         print(f"[Enhance] Invalid MiniMax H3 {'/'.join(failures)}; retrying once.")
         field_requirement = (
             "Emit each of the six required field labels exactly once, in order."
@@ -3263,7 +3281,9 @@ def enhance_prompt(
                 system
                 + f"\n\nRETRY REQUIREMENT: Be concise. {field_requirement} "
                 "Do not repeat a subject definition or reference mapping. Never replace a requested "
-                "spoken line with the words 'speaks', 'talks', or 'dialogue'; write the actual <d> block."
+                "spoken line with the words 'speaks', 'talks', or 'dialogue'; write the actual <d> block. "
+                "The numbered Saved character Subject/Speaker map in the request is immutable: never "
+                "renumber it, never emit <Subject N>, and never add another Subject for a repeated label."
             ),
             max_new_tokens=effective_max_tokens,
             temperature=min(float(temperature), 0.35),
@@ -3275,6 +3295,11 @@ def enhance_prompt(
         )
         retry = repair_text(retry)
         retry = _clean_enhance_output(retry, preserve_structure=True) if retry else ""
+        if is_h3_ref2va and retry:
+            retry = _canonicalize_h3_ref2va_reference_fields(retry, reference_context)
+            retry = _canonicalize_h3_ref2va_dialogue_speakers(
+                retry, prompt, reference_context
+            )
         retry_structure_is_valid = (
             _has_complete_h3_ref2va_structure(retry)
             if is_h3_ref2va
@@ -3291,11 +3316,19 @@ def enhance_prompt(
             if is_h3_ref2va
             else True
         )
+        retry_dialogue_binding_is_valid = (
+            _h3_ref2va_dialogue_binding_contract_satisfied(
+                prompt, retry, reference_context
+            )
+            if is_h3_ref2va
+            else True
+        )
         if (
             retry_structure_is_valid
             and retry_dialogue_is_valid
             and retry_timed_silence_is_valid
             and retry_voice_binding_is_valid
+            and retry_dialogue_binding_is_valid
         ):
             result = retry
         else:
@@ -3367,11 +3400,35 @@ def enhance_prompt(
     # Explicit user dialogue is immutable. Even if both LLM attempts omit it,
     # compile every quoted line into H3 syntax before returning the prompt.
     if is_h3_structured and not _h3_dialogue_contract_satisfied(prompt, result):
-        result = _inject_missing_h3_dialogue(result, prompt, ref2va=is_h3_ref2va)
+        result = _inject_missing_h3_dialogue(
+            result,
+            prompt,
+            ref2va=is_h3_ref2va,
+            reference_context=reference_context,
+        )
     if is_h3_structured:
         result = _strip_h3_untagged_dialogue_duplicates(result, prompt)
         result = _enforce_h3_soundscape_silence(result, prompt)
         result = _enforce_h3_music_request(result, prompt, reference_context)
+    if is_h3_ref2va:
+        result = _canonicalize_h3_ref2va_reference_fields(result, reference_context)
+        result = _canonicalize_h3_ref2va_dialogue_speakers(
+            result, prompt, reference_context
+        )
+        if not (
+            _has_complete_h3_ref2va_structure(result)
+            and _h3_dialogue_contract_satisfied(prompt, result)
+            and _h3_voice_binding_contract_satisfied(result, reference_context)
+            and _h3_ref2va_dialogue_binding_contract_satisfied(
+                prompt, result, reference_context
+            )
+        ):
+            print("[Enhance] Enforcing deterministic Omni character/dialogue contract.")
+            result = _build_h3_ref2va_tagged_fallback(
+                prompt,
+                reference_context,
+                duration_seconds=duration_seconds,
+            )
     if is_h3_context_ir and image_paths:
         result = _ensure_h3_visual_grounding(
             result,
@@ -3552,17 +3609,94 @@ def _h3_quote_is_visible_text(source: str, match) -> bool:
 
 
 def _extract_h3_quoted_dialogue(text: str) -> list[str]:
-    """Extract explicit quoted speech while preserving quoted visible text."""
+    """Extract user-authored speech from quotes or existing ``<d>`` tags.
+
+    Studio accepts both natural quoted dialogue and convenient bare H3 tags
+    such as ``<d>Hello</d>``.  Treat both forms as immutable source dialogue;
+    previously the bare-tag form was invisible to the validation path.
+    """
+    return [entry["words"] for entry in _extract_h3_source_dialogue_entries(text)]
+
+
+def _extract_h3_source_dialogue_entries(
+    text: str,
+    reference_context: Optional[str] = None,
+) -> list[dict]:
+    """Return ordered source-dialogue spans with inferred H3 speaker IDs."""
     import re
+
     source = str(text or "")
-    matches = []
+    spans: list[dict] = []
+    tagged_ranges: list[tuple[int, int]] = []
+    tag_pattern = re.compile(
+        r"<d>\s*(?:\[([^\]\r\n]+)\])?\s*(.*?)\s*</d>",
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    for match in tag_pattern.finditer(source):
+        words = (match.group(2) or "").strip()
+        if not words:
+            continue
+        tagged_ranges.append((match.start(), match.end()))
+        spans.append({
+            "start": match.start(),
+            "end": match.end(),
+            "words": words,
+            "language": _canonical_h3_language_tag(match.group(1) or "")
+            or _detect_h3_dialogue_language(source),
+        })
+
     for match in re.finditer(r'"([^"\r\n]{1,500})"|“([^”\r\n]{1,500})”', source):
+        if any(start <= match.start() < end for start, end in tagged_ranges):
+            continue
         if _h3_quote_is_visible_text(source, match):
             continue
-        value = (match.group(1) or match.group(2) or "").strip()
-        if value:
-            matches.append(value)
-    return matches
+        words = (match.group(1) or match.group(2) or "").strip()
+        if words:
+            spans.append({
+                "start": match.start(),
+                "end": match.end(),
+                "words": words,
+                "language": _detect_h3_dialogue_language(source),
+            })
+
+    spans.sort(key=lambda entry: entry["start"])
+    manifest = _parse_h3_ref2va_subject_manifest(reference_context)
+    for index, entry in enumerate(spans, start=1):
+        prefix = source[max(0, int(entry["start"]) - 280):int(entry["start"])]
+        explicit = re.findall(r"\(S(\d+)\)", prefix[-80:], flags=re.IGNORECASE)
+        if explicit:
+            entry["speaker_id"] = int(explicit[-1])
+            continue
+        explicit_subject = re.findall(
+            r"<Subject\s+(\d+)>", prefix[-120:], flags=re.IGNORECASE
+        )
+        if explicit_subject:
+            entry["speaker_id"] = int(explicit_subject[-1])
+            continue
+
+        candidates: list[tuple[int, int]] = []
+        for subject in manifest:
+            name = str(subject.get("name") or "").strip()
+            if not name:
+                continue
+            escaped = re.escape(name)
+            speaker_before_verb = re.compile(
+                rf"(?i)\b{escaped}\b[^.!?\r\n]{{0,100}}\b(?:says?|saying|asks?|"
+                r"replies?|responds?|answers?|yells?|shouts?|whispers?|declares?|"
+                r"announces?|speaks?|tells?)\b[^.!?\r\n]{0,140}$"
+            )
+            matches = list(speaker_before_verb.finditer(prefix))
+            if matches:
+                candidates.append((matches[-1].end(), int(subject["index"])))
+        if candidates:
+            entry["speaker_id"] = max(candidates)[1]
+        elif manifest:
+            # Deterministic fallback for tersely authored dialogue: preserve
+            # source order but never create a speaker outside the manifest.
+            entry["speaker_id"] = int(manifest[(index - 1) % len(manifest)]["index"])
+        else:
+            entry["speaker_id"] = index
+    return spans
 
 
 def _h3_requests_speech(text: str) -> bool:
@@ -3839,28 +3973,358 @@ def _h3_timed_silence_contract_satisfied(
     return has_opening_interval and has_closed_mouths and has_no_voice and has_remaining_interval
 
 
+def _h3_ref2va_reference_rows(reference_context: Optional[str]) -> list[tuple[str, str]]:
+    """Return each numbered Omni media row once, preserving source order."""
+    import re
+    rows: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for label, description in re.findall(
+        r"(?mi)^\s*(<(?:Picture|Video|Audio)\s+\d+>)\s*:\s*(.*?)\s*$",
+        str(reference_context or ""),
+    ):
+        key = label.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append((label, description.strip()))
+    return rows
+
+
+def _h3_ref2va_normalized_name(value: str) -> str:
+    import re
+    value = re.sub(
+        r"(?i)\b(?:voice|visual|identity|appearance|reference|soundtrack)\b",
+        " ",
+        str(value or ""),
+    )
+    return " ".join(re.findall(r"[\w'-]+", value.casefold())).strip()
+
+
+def _parse_h3_ref2va_subject_manifest(
+    reference_context: Optional[str],
+) -> list[dict]:
+    """Compile the ordered Omni inventory into immutable Subject bindings.
+
+    The browser emits an explicit saved-character contract.  Older saved runs
+    used a generic ``<Subject N>`` placeholder, so this parser also upgrades
+    those rows and can infer a conservative mapping from ordinary media rows.
+    """
+    import re
+
+    source = str(reference_context or "")
+    rows = _h3_ref2va_reference_rows(source)
+    subjects: dict[int, dict] = {}
+    claimed: set[str] = set()
+
+    def ensure(index: int, name: str = "") -> dict:
+        item = subjects.setdefault(index, {
+            "index": index,
+            "name": name.strip() or f"requested subject {index}",
+            "pictures": [],
+            "videos": [],
+            "audios": [],
+        })
+        if name.strip() and str(item.get("name", "")).startswith("requested subject"):
+            item["name"] = name.strip()
+        return item
+
+    def attach(item: dict, label: str) -> None:
+        kind = label[1:].split(None, 1)[0].casefold()
+        key = {"picture": "pictures", "video": "videos", "audio": "audios"}.get(kind)
+        if key and label not in item[key]:
+            item[key].append(label)
+            claimed.add(label.casefold())
+
+    exact_pattern = re.compile(
+        r'(?mi)^\s*Saved character\s+"([^"]+)"\s+is\s+(?:exactly\s+)?'
+        r'<Subject\s+(\d+)>\s+\(S(\d+)\)\s*:\s*(.*?)\s*$'
+    )
+    for name, subject_no, speaker_no, body in exact_pattern.findall(source):
+        if int(subject_no) != int(speaker_no):
+            continue
+        item = ensure(int(subject_no), name)
+        for label in re.findall(r"<(?:Picture|Video|Audio)\s+\d+>", body):
+            attach(item, label)
+
+    # Compatibility with pre-v2 saved-character context. Assign one Subject
+    # per saved character instead of preserving the literal N placeholder.
+    old_pattern = re.compile(
+        r'(?mi)^\s*Saved character\s+"([^"]+)"\s*:\s*(.*?)\s+'
+        r'all define one stable <Subject\s+N>.*$'
+    )
+    next_index = max(subjects, default=0) + 1
+    for name, body in old_pattern.findall(source):
+        labels = re.findall(r"<(?:Picture|Video|Audio)\s+\d+>", body)
+        if labels and all(label.casefold() in claimed for label in labels):
+            continue
+        item = ensure(next_index, name)
+        next_index += 1
+        for label in labels:
+            attach(item, label)
+
+    # Add visual identities that were not part of a saved-character row.
+    for label, description in rows:
+        if label.casefold() in claimed or not label.startswith(("<Picture", "<Video")):
+            continue
+        name_match = re.search(
+            r"(?i)(?:reference|evidence)\s+for\s+([^;]+)", description
+        )
+        name = (name_match.group(1) if name_match else "").strip()
+        normalized = _h3_ref2va_normalized_name(name)
+        existing = next((
+            item for item in subjects.values()
+            if normalized and _h3_ref2va_normalized_name(item.get("name", "")) == normalized
+        ), None)
+        if existing is None:
+            existing = ensure(next_index, name or f"requested subject {next_index}")
+            next_index += 1
+        attach(existing, label)
+
+    voice_rows = [
+        (label, description)
+        for label, description in rows
+        if label.startswith("<Audio")
+        and re.search(r"(?i)intent=VOICE REFERENCE|\bvoice(?:-|\s)?timbre\b|\bvoice\b", description)
+    ]
+    unbound_voice_position = 0
+    ordered_subjects = lambda: [subjects[index] for index in sorted(subjects)]
+    for label, description in voice_rows:
+        if label.casefold() in claimed:
+            continue
+        voice_name = description.split(";", 1)[0].strip()
+        normalized_voice = _h3_ref2va_normalized_name(voice_name)
+        match = next((
+            item for item in ordered_subjects()
+            if normalized_voice
+            and (
+                _h3_ref2va_normalized_name(item.get("name", "")) in normalized_voice
+                or normalized_voice in _h3_ref2va_normalized_name(item.get("name", ""))
+            )
+        ), None)
+        if match is None and subjects:
+            match = ordered_subjects()[min(unbound_voice_position, len(subjects) - 1)]
+            unbound_voice_position += 1
+        if match is None:
+            match = ensure(next_index, voice_name or f"requested subject {next_index}")
+            next_index += 1
+        attach(match, label)
+
+    # Preserve deterministic numbering but remove accidental empty subjects.
+    return [
+        subjects[index]
+        for index in sorted(subjects)
+        if any(subjects[index][key] for key in ("pictures", "videos", "audios"))
+    ]
+
+
+def _canonical_h3_ref2va_subject_fields(
+    reference_context: Optional[str],
+) -> tuple[str, str]:
+    """Build authoritative subject_definitions and retention_analysis text."""
+    manifest = _parse_h3_ref2va_subject_manifest(reference_context)
+    rows = _h3_ref2va_reference_rows(reference_context)
+    definitions: list[str] = []
+    retention: list[str] = []
+    claimed: set[str] = set()
+    for subject in manifest:
+        index = int(subject["index"])
+        name = str(subject.get("name") or f"requested subject {index}")
+        parts = [f'<Subject {index}> (S{index}) is the stable character "{name}".']
+        for label in subject["pictures"]:
+            parts.append(
+                f"{label} defines this Subject's identity and appearance only; reject its "
+                "source background, framing, composition, pose, and opening frame."
+            )
+            claimed.add(label.casefold())
+        for label in subject["videos"]:
+            parts.append(
+                f"{label} defines this Subject's identity, appearance, and characteristic motion "
+                "only; reject its source setting, camera, edit rhythm, action, and opening frame."
+            )
+            claimed.add(label.casefold())
+        for label in subject["audios"]:
+            parts.append(
+                f"{label} is the voice-timbre reference for <Subject {index}> (S{index}); use its "
+                "timbre, emotion, and delivery without copying source words, waveform, or timing."
+            )
+            claimed.add(label.casefold())
+        definitions.append(" ".join(parts))
+        retention.append(
+            f"<Subject {index}> (appears in [Shot 1]): fully_preserved - preserve the stable "
+            f"identity and appearance of {name}."
+        )
+
+    for label, description in rows:
+        if label.casefold() in claimed:
+            if label.startswith("<Audio"):
+                retention.append(
+                    f"{label}: reference - preserve voice timbre, emotion, and delivery only."
+                )
+            elif label.startswith("<Video"):
+                retention.append(
+                    f"{label}: partially_preserved - retain the mapped character evidence only."
+                )
+            else:
+                retention.append(
+                    f"{label}: fully_preserved - retain mapped identity and appearance only."
+                )
+            continue
+        if label.startswith("<Audio"):
+            marker = "fully_copy" if "AUDIO REUSE" in description.upper() else "weak_reference"
+        elif label.startswith("<Video"):
+            marker = "partially_preserved"
+        else:
+            marker = "weak_reference"
+        retention.append(f"{label}: {marker} - follow its ordered reference role.")
+
+    return (
+        " ".join(definitions) or "Use the supplied ordered references according to their roles.",
+        " ".join(retention) or "Preserve the supplied reference roles according to the ordered media map.",
+    )
+
+
+def _replace_h3_structured_field(
+    result: str,
+    field: str,
+    next_field: str,
+    value: str,
+) -> str:
+    import re
+    pattern = re.compile(
+        rf"(?ms)(^\s*{re.escape(field)}\s*:).*?(?=^\s*{re.escape(next_field)}\s*:)",
+    )
+    if not pattern.search(str(result or "")):
+        return result
+    return pattern.sub(lambda match: f"{match.group(1)} {value}\n", result, count=1)
+
+
+def _canonicalize_h3_ref2va_reference_fields(
+    result: str,
+    reference_context: Optional[str],
+) -> str:
+    definitions, retention = _canonical_h3_ref2va_subject_fields(reference_context)
+    result = _replace_h3_structured_field(
+        result, "subject_definitions", "summary", definitions
+    )
+    return _replace_h3_structured_field(
+        result, "retention_analysis", "detailed_description", retention
+    )
+
+
+def _canonicalize_h3_ref2va_dialogue_speakers(
+    result: str,
+    prompt: str,
+    reference_context: Optional[str],
+) -> str:
+    """Repair exact user dialogue to the speaker bound by the reference map."""
+    import re
+    text = str(result or "")
+    cursor = 0
+    for entry in _extract_h3_source_dialogue_entries(prompt, reference_context):
+        speaker_id = entry.get("speaker_id")
+        if not speaker_id:
+            continue
+        words_pattern = re.escape(str(entry["words"])).replace(r"\ ", r"\s+")
+        match = re.compile(
+            rf"<d>\s*\[[^\]]+\]\s*{words_pattern}\s*</d>",
+            flags=re.DOTALL | re.IGNORECASE,
+        ).search(text, cursor)
+        if not match:
+            continue
+        prefix_start = max(cursor, match.start() - 180)
+        prefix = text[prefix_start:match.start()]
+        ids = list(re.finditer(r"\(S\d+\)", prefix, flags=re.IGNORECASE))
+        if ids:
+            last = ids[-1]
+            absolute_start = prefix_start + last.start()
+            absolute_end = prefix_start + last.end()
+            text = text[:absolute_start] + f"(S{speaker_id})" + text[absolute_end:]
+            delta = len(f"(S{speaker_id})") - (absolute_end - absolute_start)
+            cursor = match.end() + delta
+        else:
+            text = text[:match.start()] + f"(S{speaker_id}) " + text[match.start():]
+            cursor = match.end() + len(f"(S{speaker_id}) ")
+    return text
+
+
+def _h3_ref2va_reference_contract_satisfied(
+    result: str,
+    reference_context: Optional[str],
+) -> bool:
+    """Reject placeholder, duplicate, invented, or cross-wired Omni subjects."""
+    import re
+    manifest = _parse_h3_ref2va_subject_manifest(reference_context)
+    if not manifest:
+        return True
+    text = str(result or "")
+    if re.search(r"<Subject\s+N>", text, flags=re.IGNORECASE):
+        return False
+    expected = {int(subject["index"]) for subject in manifest}
+    actual_subjects = {
+        int(value) for value in re.findall(r"<Subject\s+(\d+)>", text, flags=re.IGNORECASE)
+    }
+    actual_speakers = {
+        int(value) for value in re.findall(r"\(S(\d+)\)", text, flags=re.IGNORECASE)
+    }
+    if not expected.issubset(actual_subjects):
+        return False
+    if not actual_subjects.issubset(expected) or not actual_speakers.issubset(expected):
+        return False
+    definitions_match = re.search(
+        r"(?ms)^\s*subject_definitions\s*:(.*?)(?=^\s*summary\s*:)", text
+    )
+    if not definitions_match:
+        return False
+    definitions = definitions_match.group(1)
+    for subject in manifest:
+        index = int(subject["index"])
+        if f"<Subject {index}>" not in definitions or f"(S{index})" not in definitions:
+            return False
+        for label in subject["pictures"] + subject["videos"] + subject["audios"]:
+            if label not in definitions:
+                return False
+        for audio_label in subject["audios"]:
+            audio_pos = definitions.find(audio_label)
+            nearby = definitions[max(0, audio_pos - 220):audio_pos + 260]
+            if f"<Subject {index}>" not in nearby or f"(S{index})" not in nearby:
+                return False
+    return True
+
+
+def _h3_ref2va_dialogue_binding_contract_satisfied(
+    prompt: str,
+    result: str,
+    reference_context: Optional[str],
+) -> bool:
+    """Require every explicit line to use its named character's voice ID."""
+    import re
+    text = str(result or "")
+    cursor = 0
+    for entry in _extract_h3_source_dialogue_entries(prompt, reference_context):
+        speaker_id = entry.get("speaker_id")
+        if not speaker_id:
+            continue
+        words_pattern = re.escape(str(entry["words"])).replace(r"\ ", r"\s+")
+        match = re.compile(
+            rf"<d>\s*\[[^\]]+\]\s*{words_pattern}\s*</d>",
+            flags=re.DOTALL | re.IGNORECASE,
+        ).search(text, cursor)
+        if not match:
+            return False
+        prefix = text[max(cursor, match.start() - 180):match.start()]
+        ids = re.findall(r"\(S(\d+)\)", prefix, flags=re.IGNORECASE)
+        if not ids or int(ids[-1]) != int(speaker_id):
+            return False
+        cursor = match.end()
+    return True
+
+
 def _h3_voice_binding_contract_satisfied(
     result: str,
     reference_context: Optional[str],
 ) -> bool:
-    """Require every Omni voice reference inside the subject/speaker mapping."""
-    import re
-    voice_labels = re.findall(
-        r"(?mi)^(<Audio\s+\d+>).*?intent=VOICE REFERENCE.*$",
-        str(reference_context or ""),
-    )
-    if not voice_labels:
-        return True
-    match = re.search(
-        r"(?ms)^\s*subject_definitions\s*:(.*?)(?=^\s*summary\s*:)",
-        str(result or ""),
-    )
-    if not match:
-        return False
-    definitions = match.group(1)
-    return all(label in definitions for label in voice_labels) and bool(
-        re.search(r"\(S\d+\)", definitions)
-    )
+    """Compatibility wrapper for the full immutable Omni reference contract."""
+    return _h3_ref2va_reference_contract_satisfied(result, reference_context)
 
 
 def _has_complete_h3_ref2va_structure(text: str) -> bool:
@@ -3891,40 +4355,52 @@ def _has_complete_h3_context_structure(text: str) -> bool:
     return positions == sorted(positions)
 
 
-def _compile_h3_explicit_dialogue(prompt: str) -> str:
-    """Replace user quotation marks with literal H3 dialogue blocks."""
-    import re
-    counter = 0
-    language = _detect_h3_dialogue_language(prompt)
+def _compile_h3_explicit_dialogue(
+    prompt: str,
+    reference_context: Optional[str] = None,
+) -> str:
+    """Compile quotes and bare tags into canonical, speaker-bound H3 dialogue."""
+    result = str(prompt or "")
+    entries = _extract_h3_source_dialogue_entries(result, reference_context)
+    for entry in reversed(entries):
+        start = int(entry["start"])
+        end = int(entry["end"])
+        speaker_id = int(entry.get("speaker_id") or 1)
+        replacement = (
+            f"(S{speaker_id}) <d>[{entry['language']}] {entry['words']}</d>"
+        )
+        # Keep the prose around the line, but avoid duplicating an explicit ID
+        # immediately preceding an already-tagged source line.
+        prefix = result[max(0, start - 16):start]
+        import re
+        existing = re.search(r"\(S\d+\)\s*$", prefix, flags=re.IGNORECASE)
+        if existing:
+            absolute = max(0, start - 16) + existing.start()
+            result = result[:absolute] + replacement + result[end:]
+        else:
+            result = result[:start] + replacement + result[end:]
+    return result
 
-    def replace(match):
-        nonlocal counter
-        if _h3_quote_is_visible_text(str(prompt or ""), match):
-            return match.group(0)
-        counter += 1
-        value = (match.group(1) or match.group(2) or "").strip()
-        return f"(S{counter}) <d>[{language}] {value}</d>"
 
-    return re.sub(
-        r'"([^"\r\n]{1,500})"|“([^”\r\n]{1,500})”',
-        replace,
-        str(prompt or ""),
-    )
-
-
-def _inject_missing_h3_dialogue(result: str, prompt: str, *, ref2va: bool) -> str:
+def _inject_missing_h3_dialogue(
+    result: str,
+    prompt: str,
+    *,
+    ref2va: bool,
+    reference_context: Optional[str] = None,
+) -> str:
     """Deterministically append omitted literal dialogue to the correct H3 field."""
-    quotes = _extract_h3_quoted_dialogue(prompt)
-    if not quotes:
+    requested = _extract_h3_source_dialogue_entries(prompt, reference_context)
+    if not requested:
         return result
     existing = set(_extract_h3_dialogue_blocks(result))
-    missing = [line for line in quotes if line not in existing]
+    missing = [entry for entry in requested if entry["words"] not in existing]
     if not missing:
         return result
-    language = _detect_h3_dialogue_language(prompt)
     additions = " ".join(
-        f"The intended speaker (S{index}) says exactly once: <d>[{language}] {line}</d>."
-        for index, line in enumerate(missing, start=1)
+        f"The intended speaker (S{int(entry.get('speaker_id') or index)}) says exactly once: "
+        f"<d>[{entry['language']}] {entry['words']}</d>."
+        for index, entry in enumerate(missing, start=1)
     )
     additions += (
         " These are the only spoken words in the video; before and after them, everyone remains "
@@ -4087,47 +4563,18 @@ def _build_h3_ref2va_tagged_fallback(
     duration_seconds: Optional[float] = None,
 ) -> str:
     """Create a deterministic six-field fallback when the local LLM loops."""
-    raw_mapping = reference_context or "Use the supplied ordered references according to their roles."
-    mapping = " ".join(raw_mapping.split())
-    import re
-    picture_labels = re.findall(r"<Picture\s+\d+>", raw_mapping)
-    voice_labels = re.findall(
-        r"(?mi)^(<Audio\s+\d+>).*?intent=VOICE REFERENCE.*$",
-        raw_mapping,
+    manifest = _parse_h3_ref2va_subject_manifest(reference_context)
+    subject_mapping, retention_mapping = _canonical_h3_ref2va_subject_fields(
+        reference_context
     )
-    subject_bindings = []
-    retention_bindings = []
-    for index, picture_label in enumerate(picture_labels, start=1):
-        subject_bindings.append(
-            f"<Subject {index}> is the requested visible subject whose identity "
-            f"and appearance come from {picture_label}; reject the picture's "
-            "source background, framing, composition, and pose."
-        )
-        retention_bindings.append(
-            f"<Subject {index}> (appears in [Shot 1]): fully_preserved - "
-            f"preserve the identity and appearance defined by {picture_label}."
-        )
-    for index, audio_label in enumerate(voice_labels, start=1):
-        subject_index = min(index, max(1, len(picture_labels)))
-        subject_bindings.append(
-            f"{audio_label} is the voice-timbre reference for <Subject {subject_index}> (S{subject_index})."
-        )
-        retention_bindings.append(
-            f"{audio_label}: reference - use its voice timbre, emotion, and "
-            "delivery without copying the source signal, words, or timing."
-        )
-    subject_mapping = " ".join(subject_bindings + [mapping])
-    retention_mapping = " ".join(retention_bindings) or (
-        "Preserve the supplied reference roles according to the ordered media map."
-    )
-    request = _compile_h3_explicit_dialogue(prompt)
+    request = _compile_h3_explicit_dialogue(prompt, reference_context)
     timed_clause = _build_h3_timed_silence_clause(prompt, duration_seconds)
     task_types = "reference generation"
-    if voice_labels:
+    if any(subject["audios"] for subject in manifest):
         task_types += " + audio reference"
     visible_subjects = " ".join(
-        f"<Subject {index}> is visible in the opening composition."
-        for index in range(1, len(picture_labels) + 1)
+        f"<Subject {int(subject['index'])}> is visible in the opening composition."
+        for subject in manifest
     )
     return (
         f"subject_definitions: {subject_mapping}\n"

@@ -262,6 +262,23 @@ type SavedModeParams = Partial<GenerateParams> & {
   durationSeconds?: number
 }
 
+function _snapshotModeParams(params: GenerateParams): SavedModeParams {
+  const snapshot: SavedModeParams = { ...params }
+  delete snapshot.model_type
+  delete snapshot.prompt
+  delete snapshot.activated_loras
+  delete snapshot.loras_multipliers
+  return snapshot
+}
+
+function _restoreModeParams(snapshot?: SavedModeParams): Partial<GenerateParams> {
+  const restored: SavedModeParams = { ...(snapshot || {}) }
+  delete restored.filmGrainIntensity
+  delete restored.filmGrainSaturation
+  delete restored.durationSeconds
+  return restored
+}
+
 interface PersistedModeSettings {
   generationMode: GenerationMode
   selectedModelPerMode: Partial<Record<GenerationMode, string>>
@@ -2883,7 +2900,7 @@ export const useStore = create<AppState>((set, get) => ({
       const s = get()
       const prev = s.generationMode
       if (prev === 'tools') { set({ generationMode: 'tools' }); return }
-      const { model_type: _mt, prompt: _p, activated_loras: _al, loras_multipliers: _lm, ...paramsSnapshot } = s.params
+      const paramsSnapshot = _snapshotModeParams(s.params)
       const savedModels = { ...s.selectedModelPerMode, [prev]: s.params.model_type }
       const savedParams = {
         ...s.savedParamsPerMode,
@@ -2927,7 +2944,7 @@ export const useStore = create<AppState>((set, get) => ({
     // video_guide, image_refs, frames_positions, MMAudio_*, etc. — is
     // captured here so it survives a switch-and-return AND doesn't
     // leak into other modes.
-    const { model_type: _mt, prompt: _p, activated_loras: _al, loras_multipliers: _lm, ...paramsSnapshot } = params
+    const paramsSnapshot = _snapshotModeParams(params)
     const savedParams = {
       ...savedParamsPerMode,
       [prevMode]: {
@@ -2969,7 +2986,7 @@ export const useStore = create<AppState>((set, get) => ({
       ? restoredSnapshot.durationSeconds as number
       : 5
     // Strip filmGrain + durationSeconds keys before applying — they don't belong in params
-    const { filmGrainIntensity: _fgi, filmGrainSaturation: _fgs, durationSeconds: _ds, ...restoredParams } = restoredSnapshot || {}
+    const restoredParams = _restoreModeParams(restoredSnapshot)
     // Restore saved prompt for target mode (or empty for first visit)
     const restoredPrompt = savedPrompts[mode] ?? ''
     const restoredImageWorkflow = (
@@ -2979,7 +2996,7 @@ export const useStore = create<AppState>((set, get) => ({
       || restoredParams._studio_image_workflow === 'new'
     ) ? restoredParams._studio_image_workflow : get().studioImageWorkflow
 
-    set(_s => ({
+    set(() => ({
       generationMode: mode,
       selectedModelPerMode: savedModels,
       savedLoraPerMode: savedLoras,
@@ -3179,7 +3196,7 @@ export const useStore = create<AppState>((set, get) => ({
     if (key !== 'model_type' && key !== 'prompt' && key !== 'activated_loras' && key !== 'loras_multipliers') {
       const s = get()
       const mode = s.generationMode
-      const { model_type: _mt, prompt: _p, activated_loras: _al, loras_multipliers: _lm, ...paramsSnapshot } = s.params
+      const paramsSnapshot = _snapshotModeParams(s.params)
       const updatedSavedParams = {
         ...s.savedParamsPerMode,
         [mode]: {
@@ -4163,7 +4180,7 @@ export const useStore = create<AppState>((set, get) => ({
         // Restore saved generation mode
         mode = saved.generationMode || mode
         // Validate saved model for this mode still exists
-        let savedModel = saved.selectedModelPerMode?.[mode]
+        const savedModel = saved.selectedModelPerMode?.[mode]
         initialModelType = savedModel
           && get().enabledModels.has(savedModel)
           && models.some(m => m.model_type === savedModel)
@@ -7846,11 +7863,18 @@ export const useStore = create<AppState>((set, get) => ({
             }
           }
         }
-        const savedCharacterLines = Array.from(savedCharacterMedia.values()).map(binding => (
-          `Saved character "${binding.name}": ${binding.labels.join(' + ')} all define one stable <Subject N>. `
-          + `Whenever the user names ${binding.name}, use that same Subject identity and bind its voice Audio to the same speaker. `
-          + 'Do not emit an @ token; compile the saved name into official H3 Subject and media labels.'
-        ))
+        const savedCharacterLines = Array.from(savedCharacterMedia.values()).map((binding, index) => {
+          const subjectNumber = index + 1
+          const subjectLabel = `<Subject ${subjectNumber}>`
+          const speakerLabel = `(S${subjectNumber})`
+          return (
+            `Saved character "${binding.name}" is exactly ${subjectLabel} ${speakerLabel}: `
+            + `${binding.labels.join(' + ')} all define this one stable character. `
+            + `Whenever the user names ${binding.name}, use ${subjectLabel} and ${speakerLabel}; `
+            + `bind every listed voice Audio to that same speaker. Do not create another Subject for `
+            + 'a repeated media label, do not renumber this mapping, and do not emit an @ token.'
+          )
+        })
         referenceContext = [...savedCharacterLines, ...labelLines].join('\n')
       } else if (generationMode === 'image') {
         if (
@@ -9570,7 +9594,7 @@ export const useStore = create<AppState>((set, get) => ({
       // hasn't loaded yet or the field is undefined.
       const useV2 = get().servicesConfig?.use_director_v2 ?? true
       let plans: Array<{ video_prompt: string; image_prompt: string }>
-      let storyClips: any[] | undefined
+      let storyClips: PlannedClip[] | undefined
 
       if (useV2) {
         const result = await api.directorV2Plan({
@@ -9592,18 +9616,23 @@ export const useStore = create<AppState>((set, get) => ({
           image_prompt: p.image_prompt || '',
         }))
         // Extract clips from production plan shots
-        const pp = result.production_plan as any
+        const pp = result.production_plan
         if (pp?.shots) {
           let cumulative = 0
-          storyClips = pp.shots.map((s: any) => {
+          storyClips = pp.shots.map((shot) => {
+            const duration = shot.duration_sec || 15
             const clip = {
               start: cumulative,
-              end: cumulative + (s.duration_sec || 15),
-              duration_frames: s.metadata?.duration_frames || Math.round((s.duration_sec || 15) * (get().modelOptions?.fps ?? 24)),
-              label: s.narrative_role || s.scene_type || 'scene',
+              end: cumulative + duration,
+              duration_frames: typeof shot.metadata?.duration_frames === 'number'
+                ? shot.metadata.duration_frames
+                : Math.round(duration * (get().modelOptions?.fps ?? 24)),
+              section_label: shot.narrative_role || shot.scene_type || 'scene',
+              energy: 0.5,
+              suggested_prompt_hint: shot.ending_beat || shot.spatial_setup || '',
               beat_count: 0,
             }
-            cumulative += s.duration_sec || 15
+            cumulative += duration
             return clip
           })
         }

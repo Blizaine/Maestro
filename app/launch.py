@@ -9371,7 +9371,23 @@ def list_saved_pipelines():
     from services.director_pipeline import list_pipeline_states
     base = wgp.server_config.get("save_path", "outputs")
     pipelines = list_pipeline_states(base)
+    for pipeline in pipelines:
+        if pipeline.get("output_count") or pipeline.get("clip_count"):
+            pipeline["thumbnail_url"] = (
+                f"/api/v1/director/pipelines/{quote(str(pipeline.get('id') or ''), safe='')}/thumbnail"
+            )
     return {"pipelines": pipelines}
+
+
+@api.get("/api/v1/director/pipelines/{pid}/thumbnail")
+def get_saved_pipeline_thumbnail(pid: str):
+    """Serve a cached first frame for the Editor's Director-run gallery."""
+    from services.director_pipeline import build_pipeline_first_frame_thumbnail
+    base = wgp.server_config.get("save_path", "outputs")
+    thumbnail = build_pipeline_first_frame_thumbnail(base, pid)
+    if not thumbnail:
+        raise HTTPException(status_code=404, detail="Director thumbnail not available")
+    return FileResponse(thumbnail, media_type="image/jpeg")
 
 
 @api.get("/api/v1/director/pipelines/{pid}")
@@ -27137,7 +27153,7 @@ def editor_media_cache(preview_id: str, kind: str, workspace: str = ""):
         raise HTTPException(status_code=404, detail="Editor preview not found") from error
     except EditorProjectError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
-    media_type = "video/mp4" if kind == "proxy" else "image/jpeg"
+    media_type = "video/mp4" if kind in {"proxy", "proxy-mobile"} else "image/jpeg"
     return FileResponse(path, media_type=media_type)
 
 

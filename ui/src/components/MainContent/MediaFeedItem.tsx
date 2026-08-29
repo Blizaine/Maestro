@@ -33,11 +33,6 @@ function RetryImage({ url, alt }: { url: string; alt: string }) {
   const retries = useRef(0)
   const maxRetries = 5
 
-  useEffect(() => {
-    retries.current = 0
-    setSrc(url)
-  }, [url])
-
   const scheduleRetry = useCallback(() => {
     if (retries.current < maxRetries) {
       retries.current++
@@ -429,7 +424,7 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
             <audio key={file.url} src={file.url} controls className="w-64" />
           </div>
         ) : (
-          <RetryImage url={file.url} alt={file.name} />
+          <RetryImage key={file.url} url={file.url} alt={file.name} />
         )}
       </div>
 

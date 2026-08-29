@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- the advanced badge hooks share this settings contract */
 import { useState, useEffect, useRef } from 'react'
 import { X, Save, Trash2, FolderOpen, SlidersHorizontal } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
@@ -8,6 +9,7 @@ import { ResolutionPresets } from './ResolutionPresets'
 import { AspectRatioGrid } from './AspectRatioGrid'
 import { WindowSettings } from './DurationSlider'
 import { DirectorH3Optimizations } from './DirectorH3Optimizations'
+import type { GenerateParams } from '../../types'
 
 const H3_LONG_SEQUENCE_EXPERIMENTS = [
   {
@@ -421,7 +423,10 @@ export function AdvancedSettings() {
                   </label>
                   <select
                     value={params.minimax_h3_text_encoder || modelOptions.minimax_h3_text_encoder_default || modelOptions.minimax_h3_text_encoder_choices[0]?.value}
-                    onChange={e => setParam('minimax_h3_text_encoder', e.target.value as any)}
+                    onChange={e => setParam(
+                      'minimax_h3_text_encoder',
+                      e.target.value as NonNullable<GenerateParams['minimax_h3_text_encoder']>,
+                    )}
                     className="w-full bg-bg-tertiary border border-border rounded px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent-blue"
                   >
                     {modelOptions.minimax_h3_text_encoder_choices.map(choice => (
@@ -725,7 +730,7 @@ export function AdvancedSettings() {
               {!isAudio && !isScailEdit && <PostProcessing />}
 
               {/* Seed */}
-              {((
+              {
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
                     <label className="text-[11px] text-text-muted uppercase tracking-wider">Seed</label>
@@ -741,7 +746,7 @@ export function AdvancedSettings() {
                     placeholder="-1 for random"
                   />
                 </div>
-              ) as any)}
+              }
 
               {/* Self Refiner */}
               {!isScailEdit && modelOptions?.self_refiner && (

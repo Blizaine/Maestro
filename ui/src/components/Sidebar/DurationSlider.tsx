@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- Director imports the shared H3 duration helpers */
 import { useEffect, useRef } from 'react'
 import { Lock, Save, Unlock } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
