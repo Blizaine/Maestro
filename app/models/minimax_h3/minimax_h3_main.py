@@ -72,8 +72,15 @@ from .transformer import (
 )
 from .turbo import (
     MINIMAX_H3_TURBO_MIN_STEPS,
+    find_minimax_h3_pdd_loras,
     find_minimax_h3_turbo_loras,
     h3_scheduler_grid_points,
+    minimax_h3_turbo_preset_for_path,
+)
+from .pdd import (
+    PDD_NUM_EVALUATIONS,
+    install_pdd_parallel_heads,
+    release_pdd_parallel_heads,
 )
 from .video_vae import AutoencoderKLMiniMaxH3
 
@@ -961,14 +968,85 @@ class MiniMaxH3Model:
         self.audio_scheduler = MiniMaxH3Scheduler(shift=3.0)
         self._turbo_lora_active = False
         self._turbo_lora_paths: tuple[str, ...] = ()
+        self._pdd_lora_active = False
+        self._pdd_lora_path: str | None = None
+        self._pdd_lora_strength = 1.0
+        self._pdd_controller = None
         self.__interrupt = False
 
     def validate_loras(self, loras_selected) -> None:
         """Validate special H3 adapter requirements before MMGP loads them."""
 
+        # A retained model can be reused across jobs. Always restore its
+        # ordinary heads before inspecting the next job's adapter selection.
+        self.release_special_loras()
         turbo_paths = tuple(find_minimax_h3_turbo_loras(loras_selected))
+        if len(turbo_paths) > 1:
+            raise ValueError(
+                "MiniMax H3 supports one Turbo accelerator at a time; "
+                "select one preset in H3 Optimizations."
+            )
+        pdd_paths = tuple(find_minimax_h3_pdd_loras(loras_selected))
+        if len(pdd_paths) > 1:
+            raise ValueError(
+                "MiniMax H3 supports one Parallel Decoding Distillation "
+                "adapter at a time."
+            )
+        for path in pdd_paths:
+            preset = minimax_h3_turbo_preset_for_path(path)
+            if preset is None:
+                continue
+            expected = "ref2va" if self.omni_reference else "fl2va"
+            actual = str(preset.get("workflow") or "all").lower()
+            if actual not in {"all", expected}:
+                raise ValueError(
+                    f"{os.path.basename(path)} is for {actual.upper()}, "
+                    f"but the selected model uses {expected.upper()}."
+                )
+            if (
+                preset.get("full_checkpoint_only")
+                and not self.model_def.get("minimax_h3_full_checkpoint", False)
+            ):
+                required_model = (
+                    "H3 Omni — Full"
+                    if actual == "ref2va"
+                    else "H3 First / Last — Full"
+                )
+                raise ValueError(
+                    f"{preset.get('label') or os.path.basename(path)} requires "
+                    f"{required_model}. Choose {required_model} or another "
+                    "Turbo preset."
+                )
         self._turbo_lora_paths = turbo_paths
         self._turbo_lora_active = bool(turbo_paths)
+        self._pdd_lora_active = bool(pdd_paths)
+        self._pdd_lora_path = pdd_paths[0] if pdd_paths else None
+        self._pdd_lora_strength = 1.0
+
+    def configure_special_loras(self, loras_selected, multipliers) -> None:
+        """Capture the PDD head strength before MMGP preprocesses its tensors."""
+
+        if not self._pdd_lora_active or self._pdd_lora_path is None:
+            return
+        selected = [str(path) for path in (loras_selected or [])]
+        try:
+            index = selected.index(self._pdd_lora_path)
+        except ValueError as error:
+            raise ValueError("MiniMax H3 PDD adapter selection became inconsistent.") from error
+        values = list(multipliers or [])
+        strength = values[index] if index < len(values) else 1.0
+        if isinstance(strength, (list, tuple)):
+            unique = {float(value) for value in strength}
+            if len(unique) != 1:
+                raise ValueError(
+                    "MiniMax H3 PDD requires one constant adapter strength "
+                    "for the full eight-step schedule."
+                )
+            strength = unique.pop()
+        strength = float(strength)
+        if not 0.0 <= strength <= 2.0:
+            raise ValueError("MiniMax H3 PDD strength must be between 0 and 2.")
+        self._pdd_lora_strength = strength
 
     def finalize_loras(self) -> None:
         """Preserve ConvRot math after MMGP attaches active LoRA hooks."""
@@ -988,6 +1066,28 @@ class MiniMaxH3Model:
                 "[MiniMax H3 LoRA] Preserved native ConvRot activation math for "
                 f"{installed} adapter-targeted layer(s)."
             )
+        if self._pdd_lora_active:
+            try:
+                self._pdd_controller = install_pdd_parallel_heads(
+                    self.transformer,
+                    self._pdd_lora_path,
+                    strength=self._pdd_lora_strength,
+                )
+                if self._pdd_controller.num_steps != PDD_NUM_EVALUATIONS:
+                    raise ValueError(
+                        "MiniMax H3 PDD checkpoint does not expose the "
+                        f"required {PDD_NUM_EVALUATIONS} evaluations."
+                    )
+            except Exception:
+                self.release_special_loras()
+                raise
+
+    def release_special_loras(self) -> None:
+        """Restore ordinary output heads after a PDD job or failed setup."""
+
+        if hasattr(self, "transformer"):
+            release_pdd_parallel_heads(self.transformer)
+        self._pdd_controller = None
 
     @property
     def _interrupt(self) -> bool:
@@ -1370,6 +1470,13 @@ class MiniMaxH3Model:
             )
         frame_num = align_num_frames(int(frame_num))
         duration = frame_num / fps
+        if self._pdd_lora_active and duration > 10.13:
+            print(
+                "[MiniMax H3 PDD] Long accelerated clip: "
+                f"{duration:.2f}s. Alibaba's published Ref2VA PDD examples "
+                "cover up to 10.13s; Maestro will continue, but quality "
+                "beyond that demonstrated envelope is experimental."
+            )
         if not MINIMAX_H3_MIN_DURATION <= duration <= MINIMAX_H3_MAX_DURATION:
             raise ValueError(
                 f"MiniMax H3 supports {MINIMAX_H3_MIN_DURATION:g}-{MINIMAX_H3_MAX_DURATION:g}s at 24 fps; "
@@ -1382,6 +1489,12 @@ class MiniMaxH3Model:
                 "MiniMax H3 Turbo LoRA needs at least "
                 f"{MINIMAX_H3_TURBO_MIN_STEPS} denoising steps; "
                 f"received {int(sampling_steps)}."
+            )
+        if self._pdd_lora_active and int(sampling_steps) != PDD_NUM_EVALUATIONS:
+            raise ValueError(
+                "Alibaba PAI MiniMax H3 Acc-LoRAs require exactly "
+                f"{PDD_NUM_EVALUATIONS} model evaluations; received "
+                f"{int(sampling_steps)}."
             )
 
         audio_prompt_type = str(audio_prompt_type or "")
@@ -1753,6 +1866,23 @@ class MiniMaxH3Model:
 
         audio_condition_rows = None
         if self.omni_reference:
+            minimax_h3_reference_detail = str(
+                minimax_h3_reference_detail or "match"
+            ).strip().lower()
+            if minimax_h3_reference_detail not in {"match", "max"}:
+                raise ValueError(
+                    "MiniMax H3 reference detail must be 'match' or 'max'."
+                )
+            if self._pdd_lora_active:
+                reference_preparation = (
+                    "official high detail (2048px short edge)"
+                    if minimax_h3_reference_detail == "max"
+                    else "Match output (no reference upscaling)"
+                )
+                print(
+                    "[MiniMax H3 PDD] Runtime reference preparation: "
+                    f"{reference_preparation}."
+                )
             if source_audio_mode:
                 input_prompt = apply_exact_drive_audio_prompt_contract(
                     input_prompt,
@@ -1968,6 +2098,21 @@ class MiniMaxH3Model:
         timesteps = self.scheduler.timesteps
         audio_timesteps = self.audio_scheduler.timesteps
         model_steps = len(timesteps)
+        if self._pdd_controller is not None:
+            self._pdd_controller.configure_sigmas(
+                self.scheduler.sigmas,
+                self.audio_scheduler.sigmas,
+            )
+            if self._pdd_controller.num_steps != model_steps:
+                raise ValueError(
+                    "MiniMax H3 PDD produced "
+                    f"{self._pdd_controller.num_steps} head plans for "
+                    f"{model_steps} denoising evaluations."
+                )
+            print(
+                "[MiniMax H3 PDD] Aligned interval heads to the exact "
+                f"{model_steps}-evaluation video/audio sigma schedules."
+            )
         denoising_start_step = int(
             round(model_steps * (1.0 - denoising_strength), 4)
         )
@@ -2116,6 +2261,8 @@ class MiniMaxH3Model:
                 for index, (video_timestep, audio_timestep) in enumerate(zip(timesteps, audio_timesteps)):
                     if self._interrupt:
                         return None
+                    if self._pdd_controller is not None:
+                        self._pdd_controller.set_step(index)
                     if first_block_cache is not None:
                         first_block_cache.begin_step(index)
                     unique_timesteps, timestep_indices = row_plan[index]

@@ -91,6 +91,8 @@ def _load_handler_class():
             "normalize_h3_overlap_frames",
             "pace_h3_sliding_window_prompt",
             "enforce_h3_source_continuation_prompt",
+            "resolve_h3_long_sequence_discard_frames",
+            "resolve_h3_long_sequence_window_policy",
         }:
             selected.append(node)
         elif isinstance(node, ast.ClassDef) and node.name == "family_handler":
@@ -141,6 +143,8 @@ def _load_h3_memory_helpers():
         "normalize_h3_clip_frame_schedule",
         "normalize_h3_overlap_frames",
         "pace_h3_sliding_window_prompt",
+        "resolve_h3_long_sequence_discard_frames",
+        "resolve_h3_long_sequence_window_policy",
     }
     tree = ast.parse(_read(_HANDLER_PATH), filename=str(_HANDLER_PATH))
     selected = []
@@ -380,6 +384,16 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("converts Full adapters", model_def["lora_compatibility_note"])
         self.assertTrue(model_def["director_endpoint_continuity"])
         self.assertFalse(model_def["director_trim_end_frames"])
+        self.assertEqual(
+            set(model_def["runtime_custom_settings"]),
+            {
+                "h3_long_sequence_clean_tail",
+                "h3_long_sequence_single_frame_after_three",
+                "h3_long_sequence_vary_seed",
+                "h3_long_sequence_periodic_reset",
+                "h3_long_sequence_diagnostics",
+            },
+        )
         self.assertIn("qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", model_def["text_encoder_URLs"][0])
         self.assertEqual(model_def["minimax_h3_text_encoder_default"], "nvfp4_awq")
         self.assertEqual(
@@ -1340,6 +1354,78 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("the sequence planner LLM is bypassed", launch)
         self.assertIn('minimax_h3_sequence_prompt_mode="auto"', wgp)
 
+    def test_long_sequence_experiments_are_opt_in_and_window_local(self):
+        helpers = _load_h3_memory_helpers()
+        discard = helpers["resolve_h3_long_sequence_discard_frames"]
+        policy = helpers["resolve_h3_long_sequence_window_policy"]
+
+        self.assertEqual(discard({}, enabled=True), 0)
+        self.assertEqual(
+            discard({"h3_long_sequence_clean_tail": True}, enabled=False),
+            0,
+        )
+        self.assertEqual(
+            discard({"h3_long_sequence_clean_tail": True}, enabled=True),
+            17,
+        )
+
+        default = policy(4, 18, 123, {})
+        self.assertEqual(default["conditioning_frames"], 18)
+        self.assertEqual(default["seed"], 123)
+        self.assertFalse(default["periodic_reset"])
+
+        fallback = policy(
+            4,
+            18,
+            123,
+            {"h3_long_sequence_single_frame_after_three": True},
+        )
+        self.assertEqual(fallback["conditioning_frames"], 1)
+        self.assertTrue(fallback["persistent_single_frame"])
+
+        periodic = policy(
+            7,
+            18,
+            123,
+            {"h3_long_sequence_periodic_reset": True},
+        )
+        self.assertEqual(periodic["conditioning_frames"], 1)
+        self.assertTrue(periodic["periodic_reset"])
+        self.assertEqual(
+            policy(
+                8,
+                18,
+                123,
+                {"h3_long_sequence_periodic_reset": True},
+            )["conditioning_frames"],
+            18,
+        )
+
+        varied = policy(
+            4,
+            18,
+            123,
+            {"h3_long_sequence_vary_seed": True},
+        )
+        self.assertNotEqual(varied["seed"], 123)
+        self.assertEqual(
+            varied["seed"],
+            policy(
+                4,
+                18,
+                123,
+                {"h3_long_sequence_vary_seed": True},
+            )["seed"],
+        )
+
+        advanced = _read(_ADVANCED_SETTINGS_PATH)
+        store = _read(_STORE_PATH)
+        wgp = _read(_WGP_PATH)
+        self.assertIn("Long-sequence tests", advanced)
+        self.assertIn("Single-frame handoff after window 3", advanced)
+        self.assertIn("newParams.custom_settings", store)
+        self.assertIn("_h3_sequence_tensor_fingerprint", wgp)
+
     def test_first_last_manual_sequence_routes_one_prompt_per_window(self):
         launch = _read(_LAUNCH_PATH)
         store = _read(_STORE_PATH)
@@ -1616,7 +1702,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("is_h3_structured = is_h3_context_ir or is_h3_ref2va", llm_service)
         self.assertIn('mode in ("video", "avatar") and not is_h3_structured', llm_service)
         self.assertIn("CRITICAL MINIMAX H3 OUTPUT CONTRACT", llm_service)
-        self.assertIn("effective_max_tokens = max(effective_max_tokens, 768)", llm_service)
+        self.assertIn("effective_max_tokens = max(effective_max_tokens, 1280)", llm_service)
         self.assertIn("effective_max_tokens = max(effective_max_tokens, 1200)", llm_service)
 
     def test_ref2va_prompt_guide_uses_official_labels_and_six_sections(self):
@@ -1667,7 +1753,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("Include soundtrack", section)
         self.assertIn("Attach audio", section)
         self.assertIn("audio_path", section)
-        self.assertIn("Maximum detail", section)
+        self.assertIn("High detail (official PDD recipe)", section)
         self.assertIn("Voice reference", section)
         self.assertIn("Music / performance timeline", section)
         self.assertIn("Music / sound style only", section)
@@ -2247,7 +2333,7 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
         self.assertEqual(full["weight"], 1.0)
         self.assertTrue(full["experimental"])
         self.assertEqual(full["preset_id"], "v4-step600-ema")
-        self.assertEqual(len(full["presets"]), 2)
+        self.assertEqual(len(full["presets"]), 3)
         current_option = next(
             preset for preset in full["presets"]
             if preset["id"] == "v4-step600-ema"
@@ -2260,6 +2346,66 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
             current_option["revision"],
             "afc0346516372a17162c14df3c5264de1d9aa1c0",
         )
+        fl_pdd = next(
+            preset for preset in full["presets"]
+            if preset["id"] == "alibaba-pai-fl2va-pdd-8step"
+        )
+        self.assertEqual(fl_pdd["steps"], 8)
+        self.assertEqual(fl_pdd["workflow"], "fl2va")
+        self.assertEqual(fl_pdd["runtime"], "pdd")
+
+        option = _load_source_function(_LAUNCH_PATH, "_minimax_h3_turbo_option")
+        sys.path.insert(0, str(_APP))
+        try:
+            pruned_ref = option({
+                "architecture": "minimax_h3_ref2va",
+                "omni_reference": True,
+                "minimax_h3_full_checkpoint": False,
+            })
+            full_ref = option({
+                "architecture": "minimax_h3_ref2va_full",
+                "omni_reference": True,
+                "minimax_h3_full_checkpoint": True,
+            })
+        finally:
+            if sys.path and sys.path[0] == str(_APP):
+                sys.path.pop(0)
+        pruned_preset_ids = {preset["id"] for preset in pruned_ref["presets"]}
+        full_preset_ids = {preset["id"] for preset in full_ref["presets"]}
+        self.assertIn("alibaba-pai-ref2va-pdd-8step", pruned_preset_ids)
+        self.assertIn("alibaba-pai-ref2va-pdd-8step", full_preset_ids)
+        self.assertNotIn("alibaba-pai-fl2va-pdd-8step", full_preset_ids)
+
+        compatible_lora = _load_source_function(
+            _LAUNCH_PATH,
+            "_lora_is_compatible_with_model",
+        )
+        ref_pdd_path = "MiniMax-H3-Ref2VA-Acc-8Step.safetensors"
+        sys.path.insert(0, str(_APP))
+        try:
+            self.assertTrue(
+                compatible_lora(
+                    {
+                        "architecture": "minimax_h3_ref2va",
+                        "omni_reference": True,
+                        "minimax_h3_full_checkpoint": False,
+                    },
+                    ref_pdd_path,
+                )
+            )
+            self.assertTrue(
+                compatible_lora(
+                    {
+                        "architecture": "minimax_h3_ref2va_full",
+                        "omni_reference": True,
+                        "minimax_h3_full_checkpoint": True,
+                    },
+                    ref_pdd_path,
+                )
+            )
+        finally:
+            if sys.path and sys.path[0] == str(_APP):
+                sys.path.pop(0)
 
     def test_consumer_checkpoint_shapes_are_kept_native(self):
         transformer = _read(_TRANSFORMER_PATH)
@@ -2278,6 +2424,22 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
         self.assertIn("dtype=torch.float32", transformer)
         self.assertIn('if qkv_layout == "interleaved"', main)
         self.assertIn("else 'fused projection'", main)
+
+    def test_conditioner_passes_complete_h3_prompt_without_text_truncation(self):
+        conditioner = _read(_CONDITIONER_PATH)
+
+        self.assertNotIn("max_text_tokens", conditioner)
+        self.assertNotIn("truncation=True", conditioner)
+        self.assertNotIn("max_length=", conditioner)
+
+    def test_h3_long_prompt_is_not_blocked_by_generation_api_or_ui(self):
+        launch = _read(_LAUNCH_PATH)
+        prompt_input = _read(_PROMPT_INPUT_PATH)
+
+        self.assertNotIn("validate_h3_base_prompt", launch)
+        self.assertNotIn("H3_BASE_TEXT_TOKEN_LIMIT", launch)
+        self.assertNotIn("H3_TEXT_TOKEN_LIMIT", prompt_input)
+        self.assertNotIn("would cut off the ending", prompt_input)
 
     def test_compact_vae_adapters_and_nvfp4_awq_scale_are_present(self):
         checkpoint = _read(_CHECKPOINT_PATH)
@@ -2404,6 +2566,75 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
     def tearDownClass(cls):
         if sys.path and sys.path[0] == str(_APP):
             sys.path.pop(0)
+
+    def test_plain_conditioner_keeps_more_than_512_text_tokens(self):
+        from models.minimax_h3.conditioner import MiniMaxH3Conditioner
+
+        class RecordingTokenizer:
+            def __init__(self, torch_module):
+                self.torch = torch_module
+                self.kwargs = None
+
+            def __call__(self, _prompt, **kwargs):
+                self.kwargs = kwargs
+                return {
+                    "input_ids": self.torch.arange(700).unsqueeze(0),
+                    "attention_mask": self.torch.ones((1, 700), dtype=self.torch.long),
+                }
+
+        tokenizer = RecordingTokenizer(self.torch)
+        conditioner = MiniMaxH3Conditioner(
+            types.SimpleNamespace(),
+            tokenizer=tokenizer,
+            processor=None,
+        )
+
+        input_ids, attention_mask, _, _ = conditioner._plain_inputs(
+            "long H3 prompt",
+            self.torch.device("cpu"),
+        )
+
+        self.assertEqual(tuple(input_ids.shape), (1, 700))
+        self.assertEqual(tuple(attention_mask.shape), (1, 700))
+        self.assertNotIn("truncation", tokenizer.kwargs)
+        self.assertNotIn("max_length", tokenizer.kwargs)
+
+    def test_visual_conditioner_has_no_combined_text_media_cutoff(self):
+        from models.minimax_h3.conditioner import MiniMaxH3Conditioner
+
+        class ProcessorBatch(dict):
+            def to(self, _device):
+                return self
+
+        class RecordingProcessor:
+            def __init__(self, torch_module):
+                self.torch = torch_module
+                self.kwargs = None
+
+            def __call__(self, **kwargs):
+                self.kwargs = kwargs
+                return ProcessorBatch({
+                    "input_ids": self.torch.arange(5000).unsqueeze(0),
+                    "attention_mask": self.torch.ones((1, 5000), dtype=self.torch.long),
+                })
+
+        processor = RecordingProcessor(self.torch)
+        conditioner = MiniMaxH3Conditioner(
+            types.SimpleNamespace(),
+            tokenizer=None,
+            processor=processor,
+        )
+
+        input_ids, attention_mask, _, _ = conditioner._vision_inputs(
+            "long H3 prompt",
+            [object()],
+            self.torch.device("cpu"),
+        )
+
+        self.assertEqual(tuple(input_ids.shape), (1, 5000))
+        self.assertEqual(tuple(attention_mask.shape), (1, 5000))
+        self.assertNotIn("truncation", processor.kwargs)
+        self.assertNotIn("max_length", processor.kwargs)
 
     def test_gguf_vision_forward_uses_cuda_fp16_autocast(self):
         from models.minimax_h3.conditioner import MiniMaxH3Conditioner
@@ -2899,6 +3130,32 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
         self.assertIn("soft composition and cast-layout reference", director_images)
         self.assertIn("environment and location", director_images)
         self.assertIn("rather than copying the picture as a frozen first frame", director_images)
+
+        saved_video_character = ensure_ref2va_prompt_relationships(
+            "Blaine walks into a new restaurant and speaks.",
+            [
+                {
+                    "type": "audio",
+                    "path": "blaine.wav",
+                    "role": "Blaine",
+                    "audio_intent": "voice",
+                    "library_character_id": "saved-blaine",
+                    "character_name": "Blaine",
+                },
+                {
+                    "type": "video",
+                    "path": "blaine.mp4",
+                    "role": "Blaine",
+                    "video_intent": "character",
+                    "include_audio": False,
+                    "library_character_id": "saved-blaine",
+                    "character_name": "Blaine",
+                },
+            ],
+        )
+        self.assertIn("identity, appearance, and characteristic motion come from <Video 1>", saved_video_character)
+        self.assertIn("voice-timbre, emotion, and delivery reference for <Subject 1>", saved_video_character)
+        self.assertIn("not as the target opening frame, source location", saved_video_character)
 
         tagged = "<Picture 1> defines <Subject 1>."
         self.assertEqual(
@@ -3769,7 +4026,10 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
 
         turbo_path = "minimax_h3_turbo_4step.safetensors"
         full = types.SimpleNamespace(
-            transformer=types.SimpleNamespace(use_adaln_curves=False)
+            transformer=types.SimpleNamespace(use_adaln_curves=False),
+            release_special_loras=lambda: None,
+            omni_reference=False,
+            model_def={},
         )
         MiniMaxH3Model.validate_loras(full, [turbo_path])
         self.assertTrue(full._turbo_lora_active)
@@ -3778,7 +4038,10 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
         self.assertFalse(full._turbo_lora_active)
 
         pruned = types.SimpleNamespace(
-            transformer=types.SimpleNamespace(use_adaln_curves=True)
+            transformer=types.SimpleNamespace(use_adaln_curves=True),
+            release_special_loras=lambda: None,
+            omni_reference=False,
+            model_def={},
         )
         MiniMaxH3Model.validate_loras(pruned, [turbo_path])
         self.assertTrue(pruned._turbo_lora_active)

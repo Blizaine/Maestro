@@ -722,7 +722,7 @@ Tailscale is optional. Its Personal plan is suitable for an individual connectin
 3. Scan/copy the private `https://…ts.net` address shown in Maestro's Notifications settings.
 4. On iPhone/iPad, open that address in Safari, use **Share → Add to Home Screen**, open the installed Maestro app, and enable **System notifications**.
 
-The Tailscale route is refreshed automatically when Pinokio assigns Maestro a different local port. Disable it from Notifications settings or run `tailscale serve --https=443 off`. Maestro will refuse to overwrite a different existing Serve route. Web Push signing keys and browser subscriptions live only in `app/settings/web_push.json` (a gitignored local file). Notification payloads travel directly from the local Maestro host to the browser vendor's encrypted Web Push endpoint.
+The one-time Secure Remote Access action remembers Maestro's actual backend port and reuses it on future starts, so Tailscale's persistent background route remains valid without running setup again. `PINOKIO_SHARE_LOCAL_PORT` controls Pinokio's separate LAN proxy and does not need to be set for Tailscale. If the saved port is occupied and Maestro falls back to another one, run Secure Remote Access once to adopt the new port. Disable it from Notifications settings or run `tailscale serve --https=443 off`. Maestro will refuse to overwrite a different existing Serve route. Web Push signing keys and browser subscriptions live only in `app/settings/web_push.json` (a gitignored local file). Notification payloads travel directly from the local Maestro host to the browser vendor's encrypted Web Push endpoint.
 
 ### Notification and remote-access API
 

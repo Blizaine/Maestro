@@ -2,9 +2,11 @@ import { useEffect, useRef, useState } from 'react'
 import {
   Check,
   ChevronDown,
+  CopyPlus,
   Download,
   FilePlus2,
   Loader2,
+  Menu,
   Redo2,
   Save,
   Settings,
@@ -12,8 +14,10 @@ import {
   Undo2,
 } from 'lucide-react'
 import { GlobalQueuePopover } from '../components/GlobalQueuePopover'
+import { AppModeToggle, MaestroBrand } from '../components/AppModeNavigation'
 import { useIsMobile } from '../lib/useIsMobile'
 import { useStore } from '../stores/useStore'
+import { EditorExportDialog } from './EditorExportDialog'
 import { useEditorStore } from './useEditorStore'
 
 const CANVAS_PRESETS = [
@@ -59,6 +63,7 @@ export function EditorTopBar() {
   const isMobile = useIsMobile()
   const rootRef = useRef<HTMLDivElement>(null)
   const [projectMenuOpen, setProjectMenuOpen] = useState(false)
+  const [exportDialogOpen, setExportDialogOpen] = useState(false)
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
   const project = useEditorStore(state => state.project)
   const projects = useEditorStore(state => state.projects)
@@ -70,15 +75,15 @@ export function EditorTopBar() {
   const exportProgress = useEditorStore(state => state.exportProgress)
   const loadProject = useEditorStore(state => state.loadProject)
   const createProject = useEditorStore(state => state.createProject)
+  const duplicateProject = useEditorStore(state => state.duplicateProject)
   const deleteProject = useEditorStore(state => state.deleteProject)
   const renameProject = useEditorStore(state => state.renameProject)
   const saveProject = useEditorStore(state => state.saveProject)
   const setCanvas = useEditorStore(state => state.setCanvas)
   const undo = useEditorStore(state => state.undo)
   const redo = useEditorStore(state => state.redo)
-  const exportProject = useEditorStore(state => state.exportProject)
-  const setSidebarMode = useStore(state => state.setSidebarMode)
   const toggleSettings = useStore(state => state.toggleSettings)
+  const toggleSidebar = useStore(state => state.toggleSidebar)
 
   useEffect(() => {
     if (!projectMenuOpen) return
@@ -93,28 +98,20 @@ export function EditorTopBar() {
   }, [projectMenuOpen])
 
   return (
-    <header className={`flex shrink-0 items-center gap-2 border-b border-border bg-bg-secondary px-2.5 md:h-14 md:px-4 ${isMobile ? 'h-auto flex-wrap py-2' : 'h-12'}`}>
-      <div className="flex shrink-0 items-center gap-2">
-        <img src="/maestro-home-icon-orange.png" alt="" className="h-7 w-7 rounded-[7px] md:h-8 md:w-8" />
-        {!isMobile && <span className="text-sm font-semibold tracking-tight text-text-primary">Maestro</span>}
-      </div>
+    <header className={`flex shrink-0 items-center gap-2 border-b border-border bg-bg-secondary px-2.5 md:h-14 md:px-4 ${isMobile ? 'h-auto flex-wrap py-2' : ''}`}>
+      {isMobile && (
+        <button
+          type="button"
+          onClick={toggleSidebar}
+          className="rounded-lg p-1.5 text-text-secondary hover:bg-bg-hover hover:text-text-primary"
+          title="Media and Editor settings"
+        >
+          <Menu size={18} />
+        </button>
+      )}
+      <MaestroBrand compact={isMobile} className={isMobile ? '' : 'w-[158px]'} />
 
-      <div className="flex shrink-0 rounded-lg border border-border bg-bg-tertiary p-0.5">
-        {(['director', 'studio', 'editor'] as const).map(mode => (
-          <button
-            key={mode}
-            type="button"
-            onClick={() => setSidebarMode(mode)}
-            className={`rounded-md px-2 py-1 text-[10px] capitalize transition-colors md:px-3 md:text-xs ${
-              mode === 'editor'
-                ? 'bg-toggle-active text-white shadow-accent-glow'
-                : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
-            }`}
-          >
-            {mode}
-          </button>
-        ))}
-      </div>
+      <AppModeToggle size={isMobile ? 'sm' : 'md'} />
 
       <div ref={rootRef} className={`relative min-w-0 md:ml-2 md:max-w-[440px] ${isMobile ? 'order-3 w-full flex-none' : 'flex-1'}`}>
         <div className="flex min-w-0 items-center rounded-lg border border-border bg-bg-tertiary focus-within:border-accent-blue/60">
@@ -137,15 +134,26 @@ export function EditorTopBar() {
         </div>
         {projectMenuOpen && (
           <div className="absolute left-0 top-full z-[90] mt-1.5 w-[min(330px,calc(100vw-1rem))] overflow-hidden rounded-xl border border-border bg-bg-secondary shadow-2xl">
-            <div className="flex items-center justify-between border-b border-border px-3 py-2">
+            <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
               <span className="text-[10px] font-medium uppercase tracking-wider text-text-muted">Editor projects</span>
-              <button
-                type="button"
-                onClick={() => { void createProject(); setProjectMenuOpen(false); setDeleteConfirmId(null) }}
-                className="flex items-center gap-1 rounded-md bg-accent-blue/10 px-2 py-1 text-[10px] text-accent-blue hover:bg-accent-blue/20"
-              >
-                <FilePlus2 size={11} /> New
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => { void duplicateProject(); setProjectMenuOpen(false); setDeleteConfirmId(null) }}
+                  disabled={!project}
+                  className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] text-text-secondary hover:bg-bg-hover hover:text-text-primary disabled:opacity-35"
+                  title="Save the current edit as a new version"
+                >
+                  <CopyPlus size={11} /> Version
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { void createProject(); setProjectMenuOpen(false); setDeleteConfirmId(null) }}
+                  className="flex items-center gap-1 rounded-md bg-accent-blue/10 px-2 py-1 text-[10px] text-accent-blue hover:bg-accent-blue/20"
+                >
+                  <FilePlus2 size={11} /> New
+                </button>
+              </div>
             </div>
             <div className="max-h-64 overflow-y-auto p-1.5">
               {projects.map(summary => (
@@ -223,10 +231,10 @@ export function EditorTopBar() {
         </button>
         <button
           type="button"
-          onClick={() => void exportProject()}
-          disabled={!project || Boolean(exportJobId)}
+          onClick={() => setExportDialogOpen(true)}
+          disabled={!project}
           className="relative flex h-8 items-center gap-1.5 overflow-hidden rounded-lg bg-cta px-2.5 text-[10px] font-semibold text-white shadow-accent-glow disabled:opacity-50 md:px-3 md:text-xs"
-          title="Export finished video"
+          title={exportJobId ? 'View export progress' : 'Export finished video'}
         >
           {exportJobId ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
           <span>{exportJobId ? `${Math.round(exportProgress * 100)}%` : 'Export'}</span>
@@ -237,6 +245,7 @@ export function EditorTopBar() {
           <Settings size={16} />
         </button>
       </div>
+      <EditorExportDialog open={exportDialogOpen} onClose={() => setExportDialogOpen(false)} />
     </header>
   )
 }

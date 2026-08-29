@@ -861,8 +861,17 @@ class MiniMaxH3Transformer(nn.Module):
         """
 
         from .lora_affine import convert_adaln_loras
+        from .pdd import is_pdd_state_dict, preprocess_pdd_lora_state_dict
 
-        converted = dict(state_dict)
+        pdd_adapter = is_pdd_state_dict(state_dict)
+        converted = (
+            preprocess_pdd_lora_state_dict(
+                state_dict,
+                split_qkv=hasattr(self.blocks[0].attn, "q_proj"),
+            )
+            if pdd_adapter
+            else dict(state_dict)
+        )
         started = time.perf_counter()
         count, architecture, source_width, target_width = convert_adaln_loras(
             model_type,
@@ -884,6 +893,12 @@ class MiniMaxH3Transformer(nn.Module):
                 f"[MiniMax H3 LoRA] Converted {count} AdaLN adapter(s) "
                 f"from {source} to {target} in "
                 f"{time.perf_counter() - started:.2f}s."
+            )
+        if pdd_adapter:
+            print(
+                "[MiniMax H3 PDD] Mapped Alibaba PAI's interval adapter "
+                f"to {len(converted)} MMGP-managed low-rank tensors "
+                f"({'split' if hasattr(self.blocks[0].attn, 'q_proj') else 'fused'} QKV)."
             )
         return converted
 

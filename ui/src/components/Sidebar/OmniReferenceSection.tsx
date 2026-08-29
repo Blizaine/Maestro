@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { FileAudio, GripVertical, Image as ImageIcon, Info, Loader2, Plus, Video, X } from 'lucide-react'
+import { BookUser, ChevronDown, FileAudio, GripVertical, Image as ImageIcon, Info, Loader2, Plus, Trash2, UserPlus, Video, X } from 'lucide-react'
 import * as api from '../../api/client'
 import { useStore } from '../../stores/useStore'
-import type { MiniMaxH3AudioIntent, MiniMaxH3Reference, MiniMaxH3ReferenceType, ModelOptions } from '../../types'
+import type { MiniMaxH3AudioIntent, MiniMaxH3Reference, MiniMaxH3ReferenceType, ModelOptions, SavedOmniCharacter } from '../../types'
 
 const IMAGE_RE = /\.(png|jpe?g|webp|bmp|tiff?)$/i
 const VIDEO_RE = /\.(mp4|mov|mkv|webm|avi|m4v)$/i
@@ -64,6 +64,14 @@ export function OmniReferenceSection({
   const [error, setError] = useState('')
   const [dragIndex, setDragIndex] = useState<number | null>(null)
   const [directorModelOptions, setDirectorModelOptions] = useState<ModelOptions | null>(null)
+  const [characters, setCharacters] = useState<SavedOmniCharacter[]>([])
+  const [libraryOpen, setLibraryOpen] = useState(false)
+  const [characterFormOpen, setCharacterFormOpen] = useState(false)
+  const [characterName, setCharacterName] = useState('')
+  const [characterVisual, setCharacterVisual] = useState<File | null>(null)
+  const [characterVoice, setCharacterVoice] = useState<File | null>(null)
+  const [useVideoVoice, setUseVideoVoice] = useState(false)
+  const [savingCharacter, setSavingCharacter] = useState(false)
 
   useEffect(() => {
     if (scope !== 'director' || !directorVideoModel) return
@@ -78,6 +86,14 @@ export function OmniReferenceSection({
       })
     return () => { cancelled = true }
   }, [directorVideoModel, scope])
+
+  useEffect(() => {
+    let cancelled = false
+    void api.fetchCharacters()
+      .then(items => { if (!cancelled) setCharacters(items) })
+      .catch(() => { if (!cancelled) setCharacters([]) })
+    return () => { cancelled = true }
+  }, [])
 
   const modelOptions = scope === 'director' ? directorModelOptions : studioModelOptions
   const references = scope === 'director'
@@ -148,6 +164,116 @@ export function OmniReferenceSection({
 
   const patchReference = (index: number, patch: Partial<MiniMaxH3Reference>) => {
     update(references.map((reference, itemIndex) => itemIndex === index ? { ...reference, ...patch } : reference))
+  }
+
+  const addCharacter = (character: SavedOmniCharacter) => {
+    const current = currentReferences()
+    const currentCharacterReferences = current.filter(
+      reference => reference.library_character_id === character.id,
+    )
+    const additions: MiniMaxH3Reference[] = []
+    if (!currentCharacterReferences.some(reference => reference.type !== 'audio')) additions.push({
+      id: newId(),
+      type: character.visual.type,
+      path: character.visual.path,
+      filename: character.visual.filename,
+      url: character.visual.url,
+      role: character.name,
+      character_name: character.name,
+      library_character_id: character.id,
+      image_intent: character.visual.type === 'image' ? 'identity' : undefined,
+      video_intent: character.visual.type === 'video' ? 'character' : undefined,
+      duration_seconds: character.visual.duration_seconds ?? null,
+      has_audio: character.visual.type === 'video' ? Boolean(character.visual.has_audio) : undefined,
+      include_audio: character.visual.type === 'video' ? false : undefined,
+    })
+    if (character.voice && !currentCharacterReferences.some(reference => reference.type === 'audio')) {
+      additions.push({
+        id: newId(),
+        type: 'audio',
+        path: character.voice.path,
+        filename: character.voice.filename,
+        url: character.voice.url,
+        role: character.name,
+        character_name: character.name,
+        library_character_id: character.id,
+        audio_intent: 'voice',
+        duration_seconds: character.voice.duration_seconds ?? null,
+        has_audio: true,
+      })
+    }
+    if (additions.length === 0) return
+    const counts = {
+      image: current.filter(item => item.type === 'image').length,
+      video: current.filter(item => item.type === 'video').length,
+      audio: current.filter(item => item.type === 'audio').length,
+    }
+    for (const addition of additions) counts[addition.type] += 1
+    if (
+      current.length + additions.length > limits.total
+      || counts.image > limits.image
+      || counts.video > limits.video
+      || counts.audio > limits.audio
+    ) {
+      setError(`Adding ${character.name} would exceed this model's Omni reference limits.`)
+      return
+    }
+    setError('')
+    update([...current, ...additions])
+  }
+
+  const saveCharacter = async () => {
+    const visualType = characterVisual ? mediaType(characterVisual) : null
+    if (!characterName.trim()) {
+      setError('Give this character a name.')
+      return
+    }
+    if (!characterVisual || (visualType !== 'image' && visualType !== 'video')) {
+      setError('Choose one character image or video.')
+      return
+    }
+    if (characterVoice && mediaType(characterVoice) !== 'audio' && mediaType(characterVoice) !== 'video') {
+      setError('The optional voice reference must be audio, or a video containing audio.')
+      return
+    }
+    setSavingCharacter(true)
+    setError('')
+    try {
+      const visualUpload = await api.uploadImage(characterVisual)
+      const voiceUpload = characterVoice ? await api.uploadAudio(characterVoice) : null
+      const character = await api.createCharacter({
+        name: characterName.trim(),
+        visual_path: visualUpload.path,
+        visual_type: visualType,
+        voice_path: voiceUpload?.path,
+        use_video_voice: visualType === 'video' && !voiceUpload && useVideoVoice,
+      })
+      setCharacters(current => [...current, character])
+      setCharacterName('')
+      setCharacterVisual(null)
+      setCharacterVoice(null)
+      setUseVideoVoice(false)
+      setCharacterFormOpen(false)
+      addCharacter(character)
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : 'Character save failed.')
+    } finally {
+      setSavingCharacter(false)
+    }
+  }
+
+  const removeCharacter = async (character: SavedOmniCharacter) => {
+    if (references.some(reference => reference.library_character_id === character.id)) {
+      setError(`Remove ${character.name} from the current Omni references before deleting it.`)
+      return
+    }
+    if (!window.confirm(`Delete saved character “${character.name}”?`)) return
+    try {
+      await api.deleteCharacter(character.id)
+      setCharacters(current => current.filter(item => item.id !== character.id))
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : 'Character delete failed.')
+    }
   }
 
   const setAudioIntent = (index: number, intent: MiniMaxH3AudioIntent) => {
@@ -265,6 +391,150 @@ export function OmniReferenceSection({
           className="hidden"
           onChange={event => void addFiles(Array.from(event.target.files ?? []))}
         />
+      </div>
+
+      <div className="rounded-lg border border-border bg-bg-tertiary/50 overflow-hidden">
+        <button
+          type="button"
+          disabled={disabled}
+          aria-expanded={libraryOpen}
+          onClick={() => setLibraryOpen(open => !open)}
+          className="w-full flex items-center justify-between gap-2 px-2.5 py-2 text-left hover:bg-bg-tertiary disabled:opacity-50"
+        >
+          <span className="flex items-center gap-1.5 text-[10px] font-medium text-text-primary">
+            <BookUser size={13} className="text-accent-blue" />
+            Character library
+            <span className="text-[9px] font-normal text-text-muted">{characters.length}</span>
+          </span>
+          <ChevronDown size={13} className={`text-text-muted transition-transform ${libraryOpen ? 'rotate-180' : ''}`} />
+        </button>
+
+        {libraryOpen && (
+          <div className="border-t border-border p-2 space-y-2">
+            <p className="text-[9px] leading-relaxed text-text-muted">
+              Add a saved name to your prompt normally. Maestro binds its picture or video and voice to one H3 Subject automatically.
+            </p>
+
+            {characters.length > 0 && (
+              <div className="grid grid-cols-2 gap-1.5">
+                {characters.map(character => {
+                  const characterReferences = references.filter(
+                    reference => reference.library_character_id === character.id,
+                  )
+                  const added = (
+                    characterReferences.some(reference => reference.type !== 'audio')
+                    && (!character.voice || characterReferences.some(reference => reference.type === 'audio'))
+                  )
+                  return (
+                    <div key={character.id} className="rounded-md border border-border bg-bg-primary p-1.5 flex items-center gap-1.5 min-w-0">
+                      <div className="w-9 h-9 rounded border border-border overflow-hidden bg-bg-tertiary shrink-0 flex items-center justify-center">
+                        {character.visual.type === 'image' ? (
+                          <img src={character.visual.url} alt="" className="w-full h-full object-cover" />
+                        ) : (
+                          <video src={character.visual.url} muted preload="metadata" className="w-full h-full object-cover" />
+                        )}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[10px] text-text-primary truncate" title={character.name}>{character.name}</p>
+                        <p className="text-[8px] text-text-muted truncate">
+                          {character.visual.type === 'video' ? 'video' : 'image'}{character.voice ? ' + voice' : ''}
+                        </p>
+                        <button
+                          type="button"
+                          disabled={disabled || added}
+                          onClick={() => addCharacter(character)}
+                          className={`text-[9px] ${added ? 'text-indicator-success' : 'text-accent-blue hover:text-text-primary'}`}
+                        >
+                          {added ? 'Added' : 'Add to run'}
+                        </button>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={disabled}
+                        onClick={() => void removeCharacter(character)}
+                        title="Delete saved character"
+                        className="self-start p-0.5 text-text-muted hover:text-indicator-error"
+                      >
+                        <Trash2 size={11} />
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() => setCharacterFormOpen(open => !open)}
+              className="flex items-center gap-1 text-[9px] text-accent-blue hover:text-text-primary"
+            >
+              <UserPlus size={11} /> {characterFormOpen ? 'Close new character' : 'Save a new character'}
+            </button>
+
+            {characterFormOpen && (
+              <div className="rounded-md border border-border bg-bg-primary p-2 space-y-1.5">
+                <input
+                  value={characterName}
+                  disabled={disabled || savingCharacter}
+                  onChange={event => setCharacterName(event.target.value)}
+                  placeholder="Character name"
+                  className="w-full bg-bg-tertiary border border-border rounded px-2 py-1 text-[10px] text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue"
+                />
+                <label className="block rounded border border-dashed border-border px-2 py-1.5 text-[9px] text-text-secondary cursor-pointer hover:border-border-light">
+                  <span className="font-medium">Image or video:</span> {characterVisual?.name || 'Choose visual reference'}
+                  <input
+                    type="file"
+                    disabled={disabled || savingCharacter}
+                    className="hidden"
+                    onChange={event => {
+                      const file = event.target.files?.[0] ?? null
+                      setCharacterVisual(file)
+                      if (file && mediaType(file) !== 'video') setUseVideoVoice(false)
+                      event.currentTarget.value = ''
+                    }}
+                  />
+                </label>
+                <label className="block rounded border border-dashed border-border px-2 py-1.5 text-[9px] text-text-secondary cursor-pointer hover:border-border-light">
+                  <span className="font-medium">Voice (optional):</span> {characterVoice?.name || 'Choose audio or video'}
+                  <input
+                    type="file"
+                    disabled={disabled || savingCharacter}
+                    className="hidden"
+                    onChange={event => {
+                      setCharacterVoice(event.target.files?.[0] ?? null)
+                      event.currentTarget.value = ''
+                    }}
+                  />
+                </label>
+                {characterVisual && mediaType(characterVisual) === 'video' && !characterVoice && (
+                  <label className="flex items-center gap-1.5 text-[9px] text-text-secondary cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={useVideoVoice}
+                      disabled={disabled || savingCharacter}
+                      onChange={event => setUseVideoVoice(event.target.checked)}
+                      className="w-3 h-3 accent-accent-blue"
+                    />
+                    Use this video's audio as the voice reference
+                  </label>
+                )}
+                <p className="text-[8px] leading-relaxed text-text-muted">
+                  Videos remain saved at full length. For each run Maestro makes H3-ready cached copies: 2–15 seconds each and 15 seconds total (three 10s clips become 5s each).
+                </p>
+                <button
+                  type="button"
+                  disabled={disabled || savingCharacter}
+                  onClick={() => void saveCharacter()}
+                  className="w-full rounded bg-accent-blue px-2 py-1.5 text-[9px] font-medium text-white disabled:opacity-50 flex items-center justify-center gap-1"
+                >
+                  {savingCharacter ? <Loader2 size={11} className="animate-spin" /> : <UserPlus size={11} />}
+                  {savingCharacter ? 'Saving…' : 'Save and add'}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {references.length > 0 && (
@@ -391,15 +661,21 @@ export function OmniReferenceSection({
             value={detail}
             disabled={disabled}
             onChange={event => setDetail(event.target.value as 'match' | 'max')}
-            title="Match output uses less memory and is recommended. Maximum detail follows the official 2048px-short-edge reference preparation and can require substantially more memory."
+            title="Match output preserves the selected output-sized preparation and avoids reference upscaling. High detail follows the official Ref2VA PDD 2048px-short-edge recipe, but can use substantially more memory and time."
             className="bg-bg-tertiary border border-border rounded px-2 py-1 text-[9px] text-text-secondary focus:outline-none focus:border-accent-blue"
           >
             {(modelOptions?.omni_reference_detail_choices ?? [
-              ['Match output', 'match'],
-              ['Maximum detail', 'max'],
+              ['Match output (faster)', 'match'],
+              ['High detail (official PDD recipe)', 'max'],
             ]).map(([label, value]) => <option key={value} value={value}>{label}</option>)}
           </select>
         </div>
+      )}
+
+      {references.filter(reference => reference.type === 'video').reduce((sum, reference) => sum + (Number(reference.duration_seconds) || 0), 0) > 15 && (
+        <p className="text-[8px] leading-relaxed text-text-muted">
+          These video references exceed H3's 15-second combined limit. Maestro will balance cached trimmed copies across them; your originals and saved characters remain unchanged.
+        </p>
       )}
 
       {error && <p className="text-[9px] text-indicator-error">{error}</p>}

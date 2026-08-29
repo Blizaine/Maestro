@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { AlertTriangle, ListPlus, Loader2, Play } from 'lucide-react'
-import { useStore } from '../../stores/useStore'
+import { modelSupportsImageWorkflow, useStore } from '../../stores/useStore'
 
 export function GenerateButton() {
   const startGeneration = useStore(s => s.startGeneration)
@@ -34,7 +34,29 @@ export function GenerateButton() {
     || outpaintVideoBox.y + outpaintVideoBox.h < 0.9995
   )
   const needsOutpaintArea = isOutpaint && !!editVideoPath && !hasOutpaintArea
+  const imageWorkflow = useStore(s => s.studioImageWorkflow)
+  const imageSourcePath = useStore(s => s.imageWorkflowSourcePath)
+  const imageMaskPath = useStore(s => s.imageWorkflowMaskPath)
+  const imageRefs = useStore(s => s.imageRefs)
+  const imagePadding = useStore(s => s.imageOutpaintPadding)
+  const currentModel = useStore(s => s.models.find(model => model.model_type === s.params.model_type))
+  const needsImageEditSource = generationMode === 'image'
+    && imageWorkflow === 'edit'
+    && imageRefs.length === 0
+  const needsImageWorkflowSource = generationMode === 'image'
+    && (imageWorkflow === 'inpaint' || imageWorkflow === 'outpaint')
+    && !imageSourcePath
+  const needsImageMask = generationMode === 'image'
+    && imageWorkflow === 'inpaint'
+    && !imageMaskPath
+  const needsImageOutpaintArea = generationMode === 'image'
+    && imageWorkflow === 'outpaint'
+    && Object.values(imagePadding).every(value => value === 0)
+  const incompatibleImageModel = generationMode === 'image'
+    && !modelSupportsImageWorkflow(currentModel, imageWorkflow)
   const blocked = needsImage || needsReference || needsOutpaintSource || needsOutpaintArea
+    || needsImageEditSource || needsImageWorkflowSource || needsImageMask
+    || needsImageOutpaintArea || incompatibleImageModel
   const imageMode = useStore(s => Number(s.params.image_mode || 0))
   const queueSupported = generationMode !== 'avatar'
     && !(generationMode === 'video' && imageMode === 4)
@@ -55,6 +77,14 @@ export function GenerateButton() {
       ? 'Need image'
       : needsReference
         ? 'Need reference'
+      : incompatibleImageModel
+        ? 'Need model'
+      : needsImageEditSource || needsImageWorkflowSource
+        ? 'Need source'
+      : needsImageMask
+        ? 'Need mask'
+      : needsImageOutpaintArea
+        ? 'Choose canvas'
       : needsOutpaintSource
         ? 'Need source'
         : 'Choose canvas'
@@ -62,6 +92,12 @@ export function GenerateButton() {
       ? 'Choose a larger output aspect or resize the source to create an area for Outpaint to generate.'
       : needsReference
         ? 'Add at least one image or video reference. Audio cannot be the only reference.'
+        : incompatibleImageModel
+          ? 'Enable or select a model compatible with this Image workflow.'
+        : needsImageMask
+          ? 'Upload a black-and-white mask. White areas will be regenerated.'
+        : needsImageOutpaintArea
+          ? 'Expand at least one side of the source canvas.'
         : undefined
     return (
       <div className="grid w-[132px] shrink-0 grid-cols-[2fr_1fr] overflow-hidden rounded-lg bg-amber-500/20 text-indicator-warning">

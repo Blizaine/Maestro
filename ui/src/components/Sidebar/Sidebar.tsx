@@ -31,6 +31,9 @@ import { HardwareStatusBar } from './HardwareStatusBar'
 import { MiniMaxH3Optimizations } from './MiniMaxH3Optimizations'
 import { H3MultiWindowControls } from './H3MultiWindowControls'
 import { VideoWorkflowSelector } from './VideoWorkflowSelector'
+import { ImageWorkflowSelector } from './ImageWorkflowSelector'
+import { ImageWorkflowControls } from './ImageWorkflowControls'
+import { AppModeToggle, MaestroBrand } from '../AppModeNavigation'
 
 export function Sidebar() {
   const toggleSettings = useStore(s => s.toggleSettings)
@@ -38,10 +41,8 @@ export function Sidebar() {
   const imageMode = useStore(s => s.params.image_mode)
   const modelOptions = useStore(s => s.modelOptions)
   const sidebarOpen = useStore(s => s.sidebarOpen)
-  const appVersion = useStore(s => s.systemConfig?.app_version)
   const setSidebarOpen = useStore(s => s.setSidebarOpen)
   const sidebarMode = useStore(s => s.sidebarMode)
-  const setSidebarMode = useStore(s => s.setSidebarMode)
   const editSubMode = useStore(s => s.editSubMode)
   const modelType = useStore(s => s.params.model_type)
   const openLoraBrowser = useStore(s => s.setLoraBrowserOpen)
@@ -54,11 +55,17 @@ export function Sidebar() {
   const isEdit = generationMode === 'avatar'
   const isTools = generationMode === 'tools'
   const toolsTool = useStore(s => s.toolsTool)
+  const toolsUpscaleMedia = useStore(s => s.toolsUpscaleMedia)
+  const imageWorkflow = useStore(s => s.studioImageWorkflow)
   const isUpscale = isTools && toolsTool === 'upscale'
+  const isImageUpscale = isUpscale && toolsUpscaleMedia === 'image'
+  const isVideoUpscale = isUpscale && toolsUpscaleMedia === 'video'
+  const isFilmGrain = isTools && toolsTool === 'film_grain'
   const isRevoice = (isTools && toolsTool === 'revoice') || (isAudio && audioSubMode === 'revoice')
-  const isVideoWorkspace = isVideo || isEdit || isUpscale
+  const isVideoWorkspace = isVideo || isEdit || isVideoUpscale || isFilmGrain
+  const isImageWorkspace = isImage || isImageUpscale
   const isAudioWorkspace = isAudio || isRevoice
-  const isStandaloneTool = isUpscale || isRevoice
+  const isStandaloneTool = isUpscale || isFilmGrain || isRevoice
   const isRetake = isEdit && editSubMode === 'retake'
   const isRestyle = isEdit && editSubMode === 'restyle'
   const isInpaint = isEdit && editSubMode === 'inpaint'
@@ -70,44 +77,7 @@ export function Sidebar() {
   const isContinue = isVideo && !isOmniReference && imageMode === 3
   const isBlend = isVideo && !isOmniReference && imageMode === 4
   const isDirector = sidebarMode === 'director'
-  const isStudio = sidebarMode === 'studio'
   const isI2vOnly = modelOptions?.i2v_class && !modelOptions?.t2v_class
-
-  const modeToggle = (size: 'sm' | 'md') => (
-    <div className="flex bg-bg-tertiary rounded-lg p-0.5 border border-border">
-      <button
-        onClick={() => setSidebarMode('director')}
-        className={`${size === 'sm' ? 'px-2 py-1 text-[11px]' : 'px-3 py-1 text-xs'} rounded-md transition-all ${
-          // bg-toggle-active is flat accent-blue in the default theme
-          // (preserves the original blue pill) and a red→orange sunset
-          // gradient in Golden Hour. shadow-accent-glow is empty in
-          // default and a warm bloom in Golden Hour.
-          isDirector ? 'bg-toggle-active shadow-accent-glow text-white' : 'text-text-secondary hover:text-text-primary'
-        }`}
-      >
-        Director
-      </button>
-      <button
-        onClick={() => setSidebarMode('studio')}
-        className={`${size === 'sm' ? 'px-2 py-1 text-[11px]' : 'px-3 py-1 text-xs'} rounded-md transition-all ${
-          // Studio active intentionally uses bg-toggle-active too so the
-          // currently-active mode reads with the same prominence in
-          // Golden Hour as the reference render. Default theme: flat
-          // accent-blue (was bg-bg-active dark elevation — small change
-          // that brings the two buttons into visual parity).
-          isStudio ? 'bg-toggle-active shadow-accent-glow text-white' : 'text-text-secondary hover:text-text-primary'
-        }`}
-      >
-        Studio
-      </button>
-      <button
-        onClick={() => setSidebarMode('editor')}
-        className={`${size === 'sm' ? 'px-2 py-1 text-[11px]' : 'px-3 py-1 text-xs'} rounded-md text-text-secondary transition-all hover:text-text-primary`}
-      >
-        Editor
-      </button>
-    </div>
-  )
 
   // Video Transform controls backed by the legacy edit-mode engines.
   const editControls = (
@@ -168,10 +138,13 @@ export function Sidebar() {
             The workflow selectors route into the legacy video/avatar/tools
             engines so saved jobs and API behavior remain compatible. */}
         {isVideoWorkspace && <VideoWorkflowSelector />}
+        {isImageWorkspace && <ImageWorkflowSelector />}
         {isAudioWorkspace && <AudioSubModeToggle />}
 
         {isUpscale ? (
-          <ToolsPanel forcedTool="upscale" embedded />
+          <ToolsPanel forcedTool="upscale" mediaKind={toolsUpscaleMedia} embedded />
+        ) : isFilmGrain ? (
+          <ToolsPanel forcedTool="film_grain" mediaKind="video" embedded />
         ) : isRevoice ? (
           <ToolsPanel forcedTool="revoice" embedded />
         ) : (
@@ -201,8 +174,9 @@ export function Sidebar() {
         {isVideo && <H3MultiWindowControls />}
         {isBlend && <BlendControls />}
 
-        {/* Image mode: reference images */}
-        {isImage && modelOptions?.image_ref_choices && <ImageRefSection />}
+        {/* Image workflows expose only the inputs their native pipeline uses. */}
+        {isImage && <ImageWorkflowControls />}
+        {isImage && imageWorkflow === 'edit' && modelOptions?.image_ref_choices && <ImageRefSection />}
 
         {/* Video/Image mode: audio controls (soundtrack, control video, etc.).
             In Frames mode (video, image_mode 0) the unified InputsPanel routes
@@ -284,15 +258,9 @@ export function Sidebar() {
         }`}>
           {/* Header */}
           <div className="px-4 py-3 border-b border-border flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <div className="w-7 h-7 rounded-lg bg-accent-blue flex items-center justify-center text-white font-bold text-sm">
-                M
-              </div>
-              <span className="font-semibold text-sm">Maestro</span>
-              {appVersion && <span className="text-[10px] text-text-muted font-normal mt-0.5">v{appVersion}</span>}
-            </div>
+            <MaestroBrand compact />
             <div className="flex items-center gap-1.5">
-              {modeToggle('sm')}
+              <AppModeToggle size="sm" />
               <button
                 onClick={() => setSidebarOpen(false)}
                 className="p-1.5 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors"
@@ -312,16 +280,10 @@ export function Sidebar() {
   return (
     <aside className="w-[420px] h-full bg-bg-secondary border-r border-border flex flex-col shrink-0">
       {/* Header */}
-      <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+      <div className="flex h-14 items-center justify-between border-b border-border px-4">
+        <MaestroBrand />
         <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-lg bg-accent-blue flex items-center justify-center text-white font-bold text-sm">
-            M
-          </div>
-          <span className="font-semibold text-sm">Maestro</span>
-              {appVersion && <span className="text-[10px] text-text-muted font-normal mt-0.5">v{appVersion}</span>}
-        </div>
-        <div className="flex items-center gap-2">
-          {modeToggle('md')}
+          <AppModeToggle />
           <button
             onClick={toggleSettings}
             className="p-1.5 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors"

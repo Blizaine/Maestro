@@ -119,9 +119,14 @@ class TailscaleManager:
 
     def _save_preference(self, enabled: bool) -> None:
         _atomic_write(self._path, {
-            "version": 1,
+            "version": 2,
             "enabled": bool(enabled),
             "target_port": self._server_port,
+            # Pinokio's launcher reads this opt-in flag and reuses the exact
+            # backend port on later starts. PINOKIO_SHARE_LOCAL_PORT controls
+            # a separate LAN proxy and cannot keep a Tailscale Serve target
+            # stable by itself.
+            "pinokio_port_lock": bool(enabled),
         })
 
     def _run(
@@ -280,7 +285,24 @@ class TailscaleManager:
 
     def refresh_if_enabled(self) -> None:
         """Retarget Serve after Pinokio assigns a different startup port."""
-        if not self._read_preference().get("enabled"):
+        preference = self._read_preference()
+        if not preference.get("enabled"):
+            return
+
+        # `tailscale serve --bg` persists across app and machine restarts. If
+        # the launcher reused its saved target port, there is nothing to
+        # refresh. This is especially important on Windows, where probing or
+        # changing Serve from Maestro's non-elevated backend can be denied even
+        # though the already-configured route is healthy.
+        try:
+            saved_port = int(preference.get("target_port"))
+        except (TypeError, ValueError):
+            saved_port = None
+        if saved_port == self._server_port:
+            print(
+                "[Remote Access] Reusing the saved Maestro port; "
+                "the persistent Tailscale route remains valid."
+            )
             return
 
         def worker() -> None:

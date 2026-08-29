@@ -15,7 +15,7 @@ import re
 from typing import Any, Iterable
 
 from services.h3_prompt_budget import (
-    H3_BASE_TEXT_TOKEN_LIMIT,
+    H3_PROMPT_QUALITY_TARGET,
     fit_h3_base_prompt,
 )
 from services.h3_story_ledger import (
@@ -253,6 +253,76 @@ def h3_window_plan_signature(
     }
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:24]
+
+
+def reviewed_h3_window_plan_matches(
+    plan: Any,
+    window_prompts: Any,
+    *,
+    source_prompt: str,
+    model_type: str,
+    resolution: str,
+    window_frames: int,
+    boundaries: Iterable[dict[str, Any]],
+    camera_coverage: str = "auto",
+) -> bool:
+    """Validate a user-reviewed H3 plan without trusting a stale signature.
+
+    Studio keeps the short story concept separate from the compiled prompt for
+    every native H3 pass.  Once those prompts are visible (and potentially
+    edited), Generate or Add to Queue must preserve that exact snapshot.  A
+    planner-version bump or a harmless client/server signature disagreement
+    must not silently invoke the LLM again and replace the reviewed prompts.
+
+    Geometry is compared window by window, so duration, overlap, discard, and
+    window-length changes still invalidate the plan.  The UI also clears its
+    reviewed plan whenever media anchors, model, resolution, or the source
+    concept changes.
+    """
+
+    if not isinstance(plan, dict) or not isinstance(window_prompts, (list, tuple)):
+        return False
+    prompts = [
+        item.strip()
+        for item in window_prompts
+        if isinstance(item, str) and item.strip()
+    ]
+    expected = [item for item in boundaries if isinstance(item, dict)]
+    windows = plan.get("windows")
+    if not prompts or not isinstance(windows, list):
+        return False
+    if len(prompts) != len(expected) or len(windows) != len(expected):
+        return False
+    if str(plan.get("plan_kind") or "sliding_window") != "sliding_window":
+        return False
+    if str(plan.get("source_prompt") or "").strip() != str(source_prompt or "").strip():
+        return False
+    if str(plan.get("model_type") or "") != str(model_type or ""):
+        return False
+    if str(plan.get("resolution") or "") != str(resolution or ""):
+        return False
+    if int(plan.get("window_frames") or 0) != int(window_frames):
+        return False
+    if normalize_h3_camera_coverage(plan.get("camera_coverage")) != normalize_h3_camera_coverage(camera_coverage):
+        return False
+
+    for index, (window, boundary, prompt) in enumerate(
+        zip(windows, expected, prompts),
+        start=1,
+    ):
+        if not isinstance(window, dict):
+            return False
+        try:
+            geometry_matches = (
+                int(window.get("index") or index) == int(boundary.get("index") or index)
+                and int(window.get("start_frame") or 0) == int(boundary.get("start_frame") or 0)
+                and int(window.get("end_frame") or 0) == int(boundary.get("end_frame") or 0)
+            )
+        except (TypeError, ValueError):
+            return False
+        if not geometry_matches or str(window.get("prompt") or "").strip() != prompt:
+            return False
+    return True
 
 
 def _compact(value: Any, limit: int) -> str:
@@ -694,7 +764,7 @@ def compile_h3_window_prompts(
                 "injected_keyframes": window_keyframes,
                 "prompt": budgeted_prompt.prompt,
                 "prompt_tokens": budgeted_prompt.token_count,
-                "prompt_token_limit": H3_BASE_TEXT_TOKEN_LIMIT,
+                "prompt_quality_target": H3_PROMPT_QUALITY_TARGET,
                 "prompt_compacted": budgeted_prompt.compacted,
             }
         )

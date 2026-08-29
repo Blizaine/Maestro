@@ -9,6 +9,39 @@ import { AspectRatioGrid } from './AspectRatioGrid'
 import { WindowSettings } from './DurationSlider'
 import { DirectorH3Optimizations } from './DirectorH3Optimizations'
 
+const H3_LONG_SEQUENCE_EXPERIMENTS = [
+  {
+    id: 'h3_long_sequence_clean_tail',
+    label: 'Clean-tail handoff',
+    activeLabel: 'H3 clean-tail handoff',
+    description: 'Drops the final 17 generated frames before selecting the next continuation tail.',
+  },
+  {
+    id: 'h3_long_sequence_single_frame_after_three',
+    label: 'Single-frame handoff after window 3',
+    activeLabel: 'H3 one-frame fallback',
+    description: 'From window 4 onward, keeps only the last boundary frame instead of recursive motion history.',
+  },
+  {
+    id: 'h3_long_sequence_vary_seed',
+    label: 'Vary seed per window',
+    activeLabel: 'H3 per-window seeds',
+    description: 'Keeps window 1 unchanged, then derives a repeatable seed for every continuation window.',
+  },
+  {
+    id: 'h3_long_sequence_periodic_reset',
+    label: 'Reset motion history every 3 windows',
+    activeLabel: 'H3 periodic handoff reset',
+    description: 'Windows 4, 7, 10, and so on use only the last boundary frame, then full motion history resumes.',
+  },
+  {
+    id: 'h3_long_sequence_diagnostics',
+    label: 'Log continuation diagnostics',
+    activeLabel: 'H3 continuation logging',
+    description: 'Prints each window seed, handoff mode, and sampled video/audio fingerprints to the console.',
+  },
+] as const
+
 function PresetManager() {
   const presets = useStore(s => s.presets)
   const loadPresets = useStore(s => s.loadPresets)
@@ -143,6 +176,18 @@ export function useAdvancedActiveItems(): string[] {
     && slidingWindowLocked
   ) items.push('H3 window override')
   if (
+    String(modelOptions?.architecture || '').startsWith('minimax_h3')
+    && modelOptions?.omni_reference !== true
+    && params.minimax_h3_multi_window === true
+  ) {
+    const customSettings = params.custom_settings || {}
+    for (const experiment of H3_LONG_SEQUENCE_EXPERIMENTS) {
+      if (customSettings[experiment.id] === true) {
+        items.push(experiment.activeLabel)
+      }
+    }
+  }
+  if (
     (
       modelOptions?.sliding_window_auto_prompt_pacing === true
       || (
@@ -251,6 +296,12 @@ export function AdvancedSettings() {
     && modelOptions?.minimax_h3_turbo != null
   )
   const isH3 = String(modelOptions?.architecture || '').startsWith('minimax_h3')
+  const showH3LongSequenceExperiments = (
+    isVideo
+    && isH3
+    && modelOptions?.omni_reference !== true
+    && params.minimax_h3_multi_window === true
+  )
   const showInferenceSteps = (
     !isAudioOnly
     && (isScailEdit || !modelOptions?.lock_inference_steps)
@@ -1107,6 +1158,65 @@ export function AdvancedSettings() {
                   className="w-full"
                 />
               </div>}
+
+              {showH3LongSequenceExperiments && (
+                <div className="space-y-2.5 rounded-lg border border-amber-400/30 bg-amber-400/5 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="text-[11px] uppercase tracking-wider text-amber-300">
+                      Long-sequence tests
+                    </label>
+                    <span className="rounded border border-amber-400/30 px-1 py-0.5 text-[8px] text-amber-300/90">
+                      Experimental
+                    </span>
+                  </div>
+                  <p className="text-[10px] leading-relaxed text-text-muted">
+                    A/B controls for diagnosing repetition and cumulative over-processing in long H3 First / Last sequences. Defaults remain off.
+                  </p>
+                  <div className="space-y-2.5">
+                    {H3_LONG_SEQUENCE_EXPERIMENTS.map(experiment => {
+                      const customSettings = params.custom_settings || {}
+                      const checked = customSettings[experiment.id] === true
+                      return (
+                        <label
+                          key={experiment.id}
+                          className="flex cursor-pointer items-start gap-2 group"
+                          title={experiment.description}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={event => {
+                              const nextSettings = {
+                                ...(params.custom_settings || {}),
+                              }
+                              if (event.target.checked) {
+                                nextSettings[experiment.id] = true
+                              } else {
+                                delete nextSettings[experiment.id]
+                              }
+                              setParam(
+                                'custom_settings',
+                                Object.keys(nextSettings).length > 0
+                                  ? nextSettings
+                                  : undefined,
+                              )
+                            }}
+                            className="mt-0.5 accent-accent-blue"
+                          />
+                          <span className="min-w-0">
+                            <span className="block text-[11px] text-text-secondary transition-colors group-hover:text-text-primary">
+                              {experiment.label}
+                            </span>
+                            <span className="mt-0.5 block text-[9px] leading-relaxed text-text-muted">
+                              {experiment.description}
+                            </span>
+                          </span>
+                        </label>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
                 </>
               )}
             </div>

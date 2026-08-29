@@ -16,18 +16,25 @@ export function GenerationModeSelector() {
   const audioSubMode = useStore(s => s.audioSubMode)
   const videoWorkflow = useStore(s => s.studioVideoWorkflow)
   const setVideoWorkflow = useStore(s => s.setStudioVideoWorkflow)
+  const imageWorkflow = useStore(s => s.studioImageWorkflow)
+  const setImageWorkflow = useStore(s => s.setStudioImageWorkflow)
+  const toolsUpscaleMedia = useStore(s => s.toolsUpscaleMedia)
   const setToolsTool = useStore(s => s.setToolsTool)
 
   const activeMode: StudioMediaMode = generationMode === 'avatar'
     ? 'video'
     : generationMode === 'tools'
-      ? (toolsTool === 'upscale' ? 'video' : 'audio')
+      ? (toolsTool === 'upscale' ? toolsUpscaleMedia : toolsTool === 'film_grain' ? 'video' : 'audio')
       : generationMode
 
   const selectMode = (mode: StudioMediaMode) => {
     if (mode === activeMode) return
     if (mode === 'video') {
       setVideoWorkflow(videoWorkflow)
+      return
+    }
+    if (mode === 'image') {
+      setImageWorkflow(imageWorkflow)
       return
     }
     if (mode === 'audio' && audioSubMode === 'revoice') {

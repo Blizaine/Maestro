@@ -26,6 +26,7 @@ from services.h3_window_planner import (  # noqa: E402
     normalize_h3_injected_keyframes,
     parse_h3_manual_window_prompts,
     plan_h3_sliding_windows,
+    reviewed_h3_window_plan_matches,
 )
 from services.h3_story_ledger import (  # noqa: E402
     extract_source_events,
@@ -565,6 +566,60 @@ class H3WindowPlannerTests(unittest.TestCase):
             ),
         )
 
+    def test_reviewed_plan_snapshot_survives_only_matching_geometry(self):
+        boundaries = compute_h3_window_boundaries(
+            540,
+            192,
+            fps=24,
+            overlap_frames=18,
+            discard_frames=0,
+        )
+        prompts = [f"Exact reviewed prompt {index}." for index in range(1, len(boundaries) + 1)]
+        plan = {
+            "source_prompt": "Two women browse an outdoor market.",
+            "signature": "older-planner-signature",
+            "plan_kind": "sliding_window",
+            "camera_coverage": "auto",
+            "model_type": "minimax_h3",
+            "resolution": "864x480",
+            "window_frames": 192,
+            "windows": [
+                {
+                    **boundary,
+                    "prompt": prompts[index],
+                }
+                for index, boundary in enumerate(boundaries)
+            ],
+            "window_prompts": prompts,
+        }
+        common = {
+            "source_prompt": plan["source_prompt"],
+            "model_type": plan["model_type"],
+            "resolution": plan["resolution"],
+            "window_frames": 192,
+            "boundaries": boundaries,
+            "camera_coverage": "auto",
+        }
+        self.assertTrue(
+            reviewed_h3_window_plan_matches(plan, prompts, **common)
+        )
+        self.assertFalse(
+            reviewed_h3_window_plan_matches(
+                plan,
+                prompts,
+                **{**common, "source_prompt": "A different story."},
+            )
+        )
+        changed_geometry = [dict(item) for item in boundaries]
+        changed_geometry[-1]["end_frame"] -= 1
+        self.assertFalse(
+            reviewed_h3_window_plan_matches(
+                plan,
+                prompts,
+                **{**common, "boundaries": changed_geometry},
+            )
+        )
+
     def test_fallback_holds_an_obligation_out_of_the_opening_window(self):
         plan = _fallback_plan(
             "Clark Kent walks down the street in Smallville and has to save a runaway truck",
@@ -775,6 +830,9 @@ class H3WindowPlannerTests(unittest.TestCase):
         self.assertIn('/api/v1/llm/plan-h3-windows', launch)
         self.assertIn("h3_window_plan_signature", launch)
         self.assertIn("api.planH3Windows", store)
+        self.assertIn("params._h3_window_plan_reviewed = true", store)
+        self.assertIn("preserve_reviewed_h3_plan", launch)
+        self.assertIn("planner LLM bypassed", launch)
         self.assertNotIn("Plan Prompt Across Windows", advanced)
         self.assertIn("Window prompts", multi_window)
         self.assertIn("Exact H3 prompts", prompt_input)

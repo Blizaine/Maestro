@@ -16,6 +16,8 @@ import { GlobalQueuePopover } from './components/GlobalQueuePopover'
 import { NotificationCoordinator } from './components/NotificationCoordinator'
 import { NotificationToastHost } from './components/NotificationToastHost'
 import { EditorWorkspace } from './editor/EditorWorkspace'
+import { MaestroBrand } from './components/AppModeNavigation'
+import { EditorRoundTripBanner } from './editor/EditorRoundTripBanner'
 import { useStore } from './stores/useStore'
 import { useIsMobile } from './lib/useIsMobile'
 
@@ -32,7 +34,6 @@ function App() {
   const toggleSidebar = useStore(s => s.toggleSidebar)
   const setSidebarOpen = useStore(s => s.setSidebarOpen)
   const toggleSettings = useStore(s => s.toggleSettings)
-  const appVersion = useStore(s => s.systemConfig?.app_version)
   const sidebarMode = useStore(s => s.sidebarMode)
   const isMobile = useIsMobile()
   const isEditor = sidebarMode === 'editor'
@@ -66,13 +67,7 @@ function App() {
           >
             <Menu size={20} />
           </button>
-          <div className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded-lg bg-accent-blue flex items-center justify-center text-white font-bold text-sm">
-              M
-            </div>
-            <span className="font-semibold text-sm">Maestro</span>
-            {appVersion && <span className="text-[10px] text-text-muted font-normal mt-0.5">v{appVersion}</span>}
-          </div>
+          <MaestroBrand />
           <div className="flex items-center gap-1">
             <GlobalQueuePopover iconSize={20} panelAlign="header-edge" />
             <button
@@ -121,6 +116,7 @@ function App() {
           Toasts remain useful even when browser notifications are disabled. */}
       <NotificationCoordinator />
       <NotificationToastHost />
+      <EditorRoundTripBanner />
     </div>
   )
 }

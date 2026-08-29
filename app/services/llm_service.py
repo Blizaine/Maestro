@@ -3158,10 +3158,10 @@ def enhance_prompt(
     if is_h3_ref2va:
         effective_max_tokens = max(effective_max_tokens, 1200)
     elif is_h3_context_ir:
-        # Leave enough room for the three required fields plus a compact timed
-        # dialogue. Most H3 prompts finish well below this ceiling, but 512 can
-        # truncate a vision-assisted 15-second rewrite before its sound fields.
-        effective_max_tokens = max(effective_max_tokens, 768)
+        # Leave enough room for all three required fields plus timed dialogue.
+        # H3 receives the complete prompt; this output allowance is a quality
+        # target for the enhancer, not a model-side input limit.
+        effective_max_tokens = max(effective_max_tokens, 1280)
 
     # Route reasoning by task shape rather than applying one model-wide rule:
     # creative TTS and ordinary prose enhancement can benefit from planning,
@@ -3380,37 +3380,20 @@ def enhance_prompt(
             generate_fn=generate,
         )
     if is_h3_context_ir:
-        # H3 Base / FL2VA silently truncates plain text after 512 Qwen tokens.
-        # Budget the finished prompt *after* dialogue, silence, music, and
-        # vision repairs so those late safety passes cannot push the actual
-        # spoken line or final action beyond what the model sees. Ref2VA uses a
-        # separate presentation path and intentionally skips this hard limit.
+        # Compact unusually verbose AI-authored prose only when the
+        # structure-aware fitter can preserve every protected line and timing
+        # marker. This is a readability/adherence optimization, not a runtime
+        # token gate; an irreducible prompt is passed through in full.
         from services.h3_prompt_budget import (
             H3PromptBudgetError,
             fit_h3_base_prompt,
         )
 
-        try:
-            budgeted = fit_h3_base_prompt(result)
-        except H3PromptBudgetError as budget_error:
-            print(
-                "[Enhance] H3 Base output could not be compacted directly; "
-                f"trying the deterministic source-faithful form: {budget_error}"
-            )
-            fallback = _build_h3_context_fallback(
-                prompt,
-                has_start_image=(bool(image_paths) and not bool(reference_context)),
-                reference_context=reference_context,
-                duration_seconds=duration_seconds,
-            )
-            fallback = _strip_h3_untagged_dialogue_duplicates(fallback, prompt)
-            fallback = _enforce_h3_soundscape_silence(fallback, prompt)
-            fallback = _enforce_h3_music_request(fallback, prompt, reference_context)
-            budgeted = fit_h3_base_prompt(fallback)
+        budgeted = fit_h3_base_prompt(result)
 
         if budgeted.compacted:
             print(
-                "[Enhance] H3 Base prompt compacted without truncation: "
+                "[Enhance] H3 prompt compacted for instruction clarity: "
                 f"{budgeted.original_token_count} -> {budgeted.token_count} tokens."
             )
         result = budgeted.prompt

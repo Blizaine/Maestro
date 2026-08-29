@@ -164,7 +164,6 @@ class MiniMaxH3Conditioner(nn.Module):
         qwen: MiniMaxH3Qwen3VL,
         tokenizer,
         processor,
-        max_text_tokens: int = 512,
         *,
         gguf_vision_autocast: bool = False,
     ):
@@ -172,7 +171,6 @@ class MiniMaxH3Conditioner(nn.Module):
         self.qwen = qwen
         self.tokenizer = tokenizer
         self.processor = processor
-        self.max_text_tokens = max_text_tokens
         # GGUF Qwen3-VL vision checkpoints deliberately mix FP16 projection
         # and quantized attention weights with FP32 LayerNorm parameters. A
         # single input cast cannot satisfy that tower: patch embedding forces
@@ -195,8 +193,6 @@ class MiniMaxH3Conditioner(nn.Module):
         encoded = self.tokenizer(
             prompt,
             add_special_tokens=False,
-            truncation=True,
-            max_length=self.max_text_tokens,
             return_tensors="pt",
         )
         input_ids = encoded["input_ids"].to(device)
@@ -216,8 +212,6 @@ class MiniMaxH3Conditioner(nn.Module):
             images=images,
             add_special_tokens=False,
             padding=False,
-            truncation=True,
-            max_length=self.max_text_tokens + 4096,
             return_tensors="pt",
         ).to(device)
         input_ids = encoded["input_ids"]

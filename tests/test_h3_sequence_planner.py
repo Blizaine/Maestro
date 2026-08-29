@@ -19,17 +19,88 @@ from services.h3_sequence_continuity import (  # noqa: E402
     augment_prompt_with_continuity,
 )
 from services.h3_sequence_planner import (  # noqa: E402
+    _reference_context,
     build_manual_h3_reference_sequence_plan,
     compile_h3_reference_sequence_prompts,
     compute_h3_native_sequence_windows,
     compute_h3_sequence_clips,
     plan_h3_reference_sequence,
     parse_h3_manual_sequence_prompts,
+    reviewed_h3_sequence_plan_matches,
     resolve_h3_sequence_source_prompt,
 )
 
 
 class H3ReferenceSequencePlannerTests(unittest.TestCase):
+    def test_saved_video_character_and_voice_share_one_subject(self):
+        relationships, retention, task_types = _reference_context([
+            {
+                "type": "audio",
+                "path": "voice.wav",
+                "role": "Blaine",
+                "audio_intent": "voice",
+                "library_character_id": "blaine",
+            },
+            {
+                "type": "video",
+                "path": "blaine.mp4",
+                "role": "Blaine",
+                "video_intent": "character",
+                "include_audio": False,
+                "library_character_id": "blaine",
+            },
+        ])
+        self.assertIn("<Subject 1> is Blaine", relationships)
+        self.assertIn("<Audio 1> supplies voice timbre", relationships)
+        self.assertIn("for <Subject 1>", relationships)
+        self.assertIn("fully_preserved", retention)
+        self.assertIn("audio reference", task_types)
+
+    def test_reviewed_sequence_snapshot_requires_exact_geometry(self):
+        geometry = compute_h3_native_sequence_windows(
+            800,
+            window_frames=345,
+            overlap_frames=18,
+            fps=24,
+        )
+        prompts = [f"Reviewed Omni prompt {index}." for index in range(1, len(geometry) + 1)]
+        plan = {
+            "source_prompt": "A hero crosses a ruined city.",
+            "plan_kind": "reference_sequence",
+            "camera_coverage": "auto",
+            "model_type": "minimax_h3_ref2va",
+            "resolution": "1280x704",
+            "window_frames": 345,
+            "native_continuation": True,
+            "overlap_frames": 18,
+            "per_clip_frames": [item["frames"] for item in geometry],
+            "windows": [
+                {**item, "prompt": prompts[index]}
+                for index, item in enumerate(geometry)
+            ],
+            "window_prompts": prompts,
+        }
+        common = {
+            "source_prompt": plan["source_prompt"],
+            "model_type": plan["model_type"],
+            "resolution": plan["resolution"],
+            "geometry": geometry,
+            "window_frames": 345,
+            "camera_coverage": "auto",
+            "overlap_frames": 18,
+            "native_continuation": True,
+        }
+        self.assertTrue(
+            reviewed_h3_sequence_plan_matches(plan, prompts, **common)
+        )
+        self.assertFalse(
+            reviewed_h3_sequence_plan_matches(
+                plan,
+                prompts,
+                **{**common, "overlap_frames": 1},
+            )
+        )
+
     def test_compiler_uses_official_full_reference_detail_shape(self):
         clips, _ = compute_h3_sequence_clips(226)
         plan = {

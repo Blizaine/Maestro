@@ -106,6 +106,8 @@ def ensure_ref2va_prompt_relationships(
     relationships: list[str] = []
     retention: list[str] = []
     role_subjects: dict[str, int] = {}
+    character_subjects: dict[str, int] = {}
+    pending_voice_references: list[tuple[int, dict, str]] = []
     opening_subjects: list[str] = []
 
     for item in items:
@@ -153,6 +155,9 @@ def ensure_ref2va_prompt_relationships(
             else:
                 subject_index += 1
                 role_subjects[str(role).strip().casefold()] = subject_index
+                character_key = str(item.get("library_character_id") or "").strip()
+                if character_key:
+                    character_subjects[character_key] = subject_index
                 relationships.append(
                     f"<Subject {subject_index}> is {role}, whose visual identity and appearance come from "
                     f"<Picture {picture_index}>; use it as identity evidence only, not as an opening "
@@ -183,13 +188,45 @@ def ensure_ref2va_prompt_relationships(
                     "while allowing synchronized scene effects."
                 )
             video_index = next_video_index
-            relationships.append(
-                f"<Video {video_index}> provides motion, camera, scene, and temporal reference for {role}."
-            )
-            retention.append(
-                f"<Video {video_index}>: partially_preserved - retain the requested motion, camera, "
-                "scene, and temporal structure."
-            )
+            video_intent = item.get("video_intent", "motion")
+            if video_intent == "character":
+                subject_index += 1
+                role_subjects[str(role).strip().casefold()] = subject_index
+                character_key = str(item.get("library_character_id") or "").strip()
+                if character_key:
+                    character_subjects[character_key] = subject_index
+                relationships.append(
+                    f"<Subject {subject_index}> is {role}, whose identity, appearance, and characteristic "
+                    f"motion come from <Video {video_index}>; use the video as character evidence only, "
+                    "not as the target opening frame, source location, background, composition, camera, "
+                    "edit rhythm, or action to copy."
+                )
+                retention.append(
+                    f"<Subject {subject_index}> (appears in [Shot 1]): fully_preserved - preserve the "
+                    f"identity and appearance defined by <Video {video_index}> while generating the "
+                    "requested target action and setting."
+                )
+                opening_subjects.append(
+                    f"<Subject {subject_index}> ({role}) appears with the referenced identity and "
+                    "appearance in the described frame position and performs the requested action."
+                )
+            elif video_intent == "scene":
+                relationships.append(
+                    f"<Video {video_index}> provides environment, lighting, and scene continuity for {role}; "
+                    "do not copy incidental people as target character identities."
+                )
+                retention.append(
+                    f"<Video {video_index}>: partially_preserved - retain the requested environment, "
+                    "lighting, and scene continuity."
+                )
+            else:
+                relationships.append(
+                    f"<Video {video_index}> provides motion, camera, scene, and temporal reference for {role}."
+                )
+                retention.append(
+                    f"<Video {video_index}>: partially_preserved - retain the requested motion, camera, "
+                    "scene, and temporal structure."
+                )
             continue
 
         audio_index += 1
@@ -213,7 +250,14 @@ def ensure_ref2va_prompt_relationships(
                 "texture, or music style."
             )
         else:
-            mapped_subject = role_subjects.get(str(role).strip().casefold())
+            character_key = str(item.get("library_character_id") or "").strip()
+            mapped_subject = (
+                character_subjects.get(character_key)
+                if character_key else role_subjects.get(str(role).strip().casefold())
+            )
+            if mapped_subject is None and (character_key or str(role).strip()):
+                pending_voice_references.append((audio_index, item, role))
+                continue
             target = (
                 f"<Subject {mapped_subject}> (S{mapped_subject})"
                 if mapped_subject else str(role)
@@ -227,6 +271,25 @@ def ensure_ref2va_prompt_relationships(
                 f"<Audio {audio_index}>: reference - use its voice timbre, emotion, and delivery "
                 "without copying the source signal, words, or timing."
             )
+
+    for pending_audio_index, item, role in pending_voice_references:
+        character_key = str(item.get("library_character_id") or "").strip()
+        mapped_subject = (
+            character_subjects.get(character_key)
+            if character_key else role_subjects.get(str(role).strip().casefold())
+        )
+        target = (
+            f"<Subject {mapped_subject}> (S{mapped_subject})"
+            if mapped_subject else str(role)
+        )
+        relationships.append(
+            f"<Audio {pending_audio_index}> is a voice-timbre, emotion, and delivery reference for {target}; "
+            "generate only explicitly requested dialogue and do not copy its source words, timing, or waveform."
+        )
+        retention.append(
+            f"<Audio {pending_audio_index}>: reference - use its voice timbre, emotion, and delivery "
+            "without copying the source signal, words, or timing."
+        )
 
     dialogue_counter = 0
     dialogue_word_count = 0

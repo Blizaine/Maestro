@@ -562,6 +562,11 @@ def _prepare_director_generation_params(params: dict) -> None:
             full_checkpoint=bool(
                 (model_def or {}).get("minimax_h3_full_checkpoint", False)
             ),
+            workflow=(
+                "ref2va"
+                if (model_def or {}).get("omni_reference")
+                else "fl2va"
+            ),
         )
 
 

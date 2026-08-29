@@ -34,9 +34,20 @@ module.exports = {
     },
   }, {
     when: "{{which('tailscale') && args.port}}",
+    method: "json.set",
+    params: {
+      "app/settings/remote_access.json": {
+        version: 2,
+        enabled: true,
+        target_port: "{{args.port}}",
+        pinokio_port_lock: true,
+      },
+    },
+  }, {
+    when: "{{which('tailscale') && args.port}}",
     method: "notify",
     params: {
-      html: "Private Maestro access is ready. Open Maestro Settings → Notifications to copy or scan the secure URL and finish phone notification setup.",
+      html: "Private Maestro access is ready and will be restored automatically on future Maestro starts. Open Maestro Settings → Notifications to copy or scan the secure URL and finish phone notification setup.",
     },
   }],
 }

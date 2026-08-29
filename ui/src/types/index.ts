@@ -49,6 +49,11 @@ export interface ModelDef {
   supports_audio_input?: boolean
   generates_audio?: boolean
   supports_ref_images?: boolean
+  /** Image-suite capability flags published by the model definition. */
+  supports_image_edit?: boolean
+  requires_image_reference?: boolean
+  supports_image_inpaint?: boolean
+  supports_image_outpaint?: boolean
   director?: DirectorModelCompatibility
   is_downloaded?: boolean
   // True when this model is only available with Mature Mode enabled.
@@ -106,6 +111,11 @@ export interface GenerateParams {
   audio_scale?: number
   video_guide?: string
   video_mask?: string
+  /** Still-image control inputs used by Image Edit/Inpaint/Outpaint. */
+  image_guide?: string
+  image_mask?: string
+  /** Top, bottom, left, right expansion percentages. */
+  video_guide_outpainting?: string
   denoising_strength?: number
   masking_strength?: number
   /** Maestro's friendly UI state for MiniMax H3 FL2VA control-video editing. */
@@ -119,6 +129,8 @@ export interface GenerateParams {
   generation_mode?: string
   per_clip_frames?: number[]
   remove_background_images_ref?: number
+  /** UI-only workflow marker retained in output sidecars. */
+  _studio_image_workflow?: StudioImageWorkflow
   // TTS-specific
   audio_guide2?: string
   duration_seconds?: number
@@ -228,12 +240,35 @@ export interface MiniMaxH3Reference {
   role?: string
   audio_intent?: MiniMaxH3AudioIntent
   image_intent?: 'identity' | 'scene' | 'style' | 'composition'
+  video_intent?: 'character' | 'motion' | 'scene'
+  library_character_id?: string
+  character_name?: string
   include_audio?: boolean
   has_audio?: boolean
   audio_path?: string
   audio_filename?: string
   audio_duration_seconds?: number | null
   duration_seconds?: number | null
+  source_duration_seconds?: number | null
+  effective_duration_seconds?: number | null
+}
+
+export interface SavedOmniCharacterMedia {
+  type?: 'image' | 'video' | 'audio'
+  path: string
+  filename: string
+  url: string
+  duration_seconds?: number | null
+  has_audio?: boolean
+}
+
+export interface SavedOmniCharacter {
+  id: string
+  name: string
+  created_at: number
+  updated_at: number
+  visual: SavedOmniCharacterMedia & { type: 'image' | 'video' }
+  voice?: SavedOmniCharacterMedia | null
 }
 
 export interface H3InjectedKeyframe {
@@ -263,7 +298,7 @@ export interface H3WindowPlanWindow {
   injected_keyframes?: H3InjectedKeyframe[]
   prompt: string
   prompt_tokens?: number
-  prompt_token_limit?: number
+  prompt_quality_target?: number
   prompt_compacted?: boolean
 }
 
@@ -359,12 +394,25 @@ export interface OutputFile {
 export type AppMode = 'director' | 'studio' | 'editor'
 export type EditorMediaType = 'video' | 'image' | 'audio'
 export type EditorTrackType = 'video' | 'audio' | 'text'
+export type EditorTransitionType = 'none' | 'dissolve' | 'fade_black'
+export type EditorAIRoundTripTool =
+  | 'retake'
+  | 'edit_anything'
+  | 'recast'
+  | 'repaint'
+  | 'outpaint'
+  | 'upscale'
+  | 'film_grain'
+  | 'revoice'
+export type EditorAIReturnMode = 'replace' | 'alternate'
 
 export interface EditorAsset {
   id: string
   name: string
   type: EditorMediaType
   origin: 'output' | 'upload' | 'project'
+  workspace?: string
+  favorite?: boolean
   path?: string
   url: string
   duration: number
@@ -374,6 +422,8 @@ export interface EditorAsset {
   has_audio: boolean
   size?: number
   created_at?: number
+  /** Runtime-only availability flag populated when an Editor project opens. */
+  missing?: boolean
 }
 
 export interface EditorTransform {
@@ -386,8 +436,41 @@ export interface EditorTransform {
 export interface EditorTextStyle {
   x: number
   y: number
+  font_family?: string
   font_size: number
   color: string
+  background_color?: string
+  background_opacity?: number
+  text_align?: 'left' | 'center' | 'right'
+}
+
+export interface EditorMarker {
+  id: string
+  time: number
+  label: string
+  color: string
+}
+
+export interface EditorAIHistoryEntry {
+  id: string
+  tool: EditorAIRoundTripTool | 'director_rerun'
+  asset_id: string
+  created_at: number
+}
+
+export interface EditorTakeState {
+  source_in: number
+  speed: number
+}
+
+/** Saved Director provenance for a shot imported into the Editor timeline. */
+export interface EditorDirectorClipSource {
+  pipeline_id: string
+  clip_index: number
+  pipeline_type: string
+  workspace: string
+  video_prompt: string
+  window_prompts?: string[]
 }
 
 export interface EditorTimelineItem {
@@ -404,6 +487,19 @@ export interface EditorTimelineItem {
   transform: EditorTransform
   muted?: boolean
   disabled?: boolean
+  fade_in?: number
+  fade_out?: number
+  transition_in?: EditorTransitionType
+  transition_out?: EditorTransitionType
+  /** Items with the same link id move, trim, split, and delete together. */
+  link_group_id?: string
+  /** Non-destructive source alternatives created manually or by Maestro AI. */
+  take_asset_ids?: string[]
+  /** Source timing belongs to each take so switching back restores the exact original trim. */
+  take_states?: Record<string, EditorTakeState>
+  ai_history?: EditorAIHistoryEntry[]
+  /** Lets Editor rerun this exact shot with the original Director workflow. */
+  director?: EditorDirectorClipSource
   text?: string
   style?: EditorTextStyle
 }
@@ -428,8 +524,26 @@ export interface EditorCanvas {
 
 export interface EditorExportSettings {
   quality: 'draft' | 'balanced' | 'high'
-  codec: 'h264'
+  codec: 'h264' | 'h265'
+  encoder: 'auto' | 'software' | 'nvidia' | 'intel' | 'apple'
   include_audio: boolean
+  resolution: 'canvas' | '2160p' | '1080p' | '720p' | '480p'
+  frame_rate: 'project' | 24 | 30 | 60
+  filename: string
+}
+
+export interface EditorExportRecord {
+  id: string
+  filename: string
+  workspace: string
+  created_at: number
+  duration: number
+  width: number
+  height: number
+  fps: number
+  codec: EditorExportSettings['codec']
+  quality: EditorExportSettings['quality']
+  encoder?: EditorExportSettings['encoder']
 }
 
 export interface EditorProject {
@@ -442,7 +556,9 @@ export interface EditorProject {
   canvas: EditorCanvas
   assets: Record<string, EditorAsset>
   tracks: EditorTrack[]
+  markers: EditorMarker[]
   export: EditorExportSettings
+  exports: EditorExportRecord[]
 }
 
 export interface EditorProjectSummary {
@@ -469,6 +585,30 @@ export interface EditorMediaProbe {
   path: string
 }
 
+export interface EditorMediaStatus {
+  asset_id: string
+  available: boolean
+  path?: string
+  error?: string
+}
+
+export interface EditorMediaPreview {
+  preview_id: string
+  thumbnail_url?: string
+  proxy_url?: string
+  waveform: number[]
+}
+
+export interface EditorExportCapabilities {
+  encoders: {
+    software: boolean
+    nvidia: boolean
+    intel: boolean
+    apple: boolean
+  }
+  recommended: EditorExportSettings['encoder']
+}
+
 export type MediaFilter = 'all' | 'images' | 'videos' | 'audio' | 'avatars' | 'multiclip' | 'favorites'
 export type AspectRatio = 'auto' | '21:9' | '16:9' | '9:16' | '1:1' | '4:3' | '3:4'
 export type ResolutionPreset = 'auto' | '480p' | '540p' | '720p' | '768p' | '1080p'
@@ -490,6 +630,14 @@ export type StudioVideoWorkflow =
   | 'outpaint'
   | 'repaint'
   | 'recast'
+  | 'upscale'
+  | 'film_grain'
+/** User-facing Studio Image workflow. */
+export type StudioImageWorkflow =
+  | 'new'
+  | 'edit'
+  | 'inpaint'
+  | 'outpaint'
   | 'upscale'
 export type EditSubMode = 'retake' | 'inpaint' | 'restyle' | 'outpaint' | 'edit_anything' | 'recast'
 export type AudioSubMode = 'speech' | 'music' | 'sfx' | 'mixer' | 'revoice'
@@ -581,6 +729,10 @@ export interface ModelOptions {
   i2v_class: boolean
   t2v_class: boolean
   image_outputs: boolean
+  inpaint_support?: boolean
+  outpaint_support?: boolean
+  inpaint_video_prompt_type?: string
+  image_video_prompt_type?: string
   supports_end_frame: boolean
   /** Model accepts additional pictures pinned to exact target-frame positions. */
   custom_frames_injection?: boolean
@@ -626,6 +778,9 @@ export interface ModelOptions {
       weight_max: number
       description: string
       revision: string
+      workflow?: 'all' | 'fl2va' | 'ref2va'
+      runtime?: 'standard_lora' | 'pdd'
+      full_checkpoint_only?: boolean
     }>
     upstream_url: string
     guide: string
@@ -750,7 +905,8 @@ export interface OutputMetadata {
   params: Record<string, unknown> | null
   /** Standalone Studio post-processing outputs are restored through their
    *  workflow panels instead of being treated as generation models. */
-  tool?: 'upscale' | 'revoice'
+  tool?: 'upscale' | 'film_grain' | 'revoice'
+  tool_media_type?: 'image' | 'video'
   tool_source?: string
   upload_filenames?: Record<string, string>
   job_id?: string

@@ -42,6 +42,31 @@ class ManagedTurboAssetTests(unittest.TestCase):
             "5f3a626cd72c93a8b9318d6760c510bc5092d2ab13aaba1f932c5bab07a416d3",
         )
 
+        fl2va = presets["alibaba-pai-fl2va-pdd-8step"]
+        ref2va = presets["alibaba-pai-ref2va-pdd-8step"]
+        for preset, workflow, digest in (
+            (
+                fl2va,
+                "fl2va",
+                "0b29be7042d883970eb0c20774a9ba03d95669ed80a721bb4d21be8ea0d0a196",
+            ),
+            (
+                ref2va,
+                "ref2va",
+                "111c82e669f6e20e628228172edf39395f1a9fc3ad049793895e542c0f55b18c",
+            ),
+        ):
+            self.assertEqual(preset["repo_id"], "alibaba-pai/MiniMax-H3-Acc-LoRAs")
+            self.assertEqual(preset["workflow"], workflow)
+            self.assertEqual(preset["runtime"], "pdd")
+            self.assertEqual(preset["steps"], 8)
+            self.assertEqual(preset["weight"], 1.0)
+            self.assertEqual(preset["size"], 1_372_450_680)
+            self.assertEqual(preset["sha256"], digest)
+        self.assertEqual(ref2va["reference_detail"], "max")
+        self.assertNotIn("full_checkpoint_only", ref2va)
+        self.assertNotIn("full_checkpoint_only", fl2va)
+
     def test_managed_asset_receipt_revalidates_changed_manifest_or_file(self):
         managed_assets = _load_module("maestro_managed_assets_test", _MANAGED_ASSETS_PATH)
         payload = b"maestro-managed-turbo"

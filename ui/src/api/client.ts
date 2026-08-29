@@ -1,4 +1,4 @@
-import type { DirectorModelCompatibility, H3WindowPlan, LTXWindowPlan, MiniMaxH3Reference, ScailResolutionProfile } from '../types'
+import type { DirectorModelCompatibility, H3WindowPlan, LTXWindowPlan, MiniMaxH3Reference, SavedOmniCharacter, ScailResolutionProfile } from '../types'
 
 const BASE = ''  // same origin in production; Vite proxy handles /api in dev
 
@@ -48,6 +48,7 @@ export interface ApiOutput {
   size: number
   created_at: number
   url: string
+  workspace?: string
   /** Edit-mode sub-classification (retake / inpaint / outpaint / restyle /
    *  edit_anything). Field added as a recovery stub after a git
    *  filter-repo reset wiped the original Stream C/D work that
@@ -324,7 +325,10 @@ export async function generateMusic(params: {
 // --- Tools: standalone post-processing on an existing clip ---
 
 export async function submitToolUpscale(params: {
-  video_path: string
+  /** `video_path` remains accepted by older backends; new callers use media_path. */
+  video_path?: string
+  media_path?: string
+  media_type?: 'image' | 'video'
   method?: string
   seed?: number
   workspace?: string
@@ -337,6 +341,24 @@ export async function submitToolUpscale(params: {
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Upscale failed' }))
     throw new Error(err.detail || 'Upscale failed')
+  }
+  return res.json()
+}
+
+export async function submitToolFilmGrain(params: {
+  video_path: string
+  intensity: number
+  saturation: number
+  workspace?: string
+}): Promise<{ job_id: string }> {
+  const res = await fetch(`${BASE}/api/v1/tools/film-grain`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Film grain failed' }))
+    throw new Error(err.detail || 'Film grain failed')
   }
   return res.json()
 }
@@ -480,7 +502,7 @@ export async function deleteEditorProject(projectId: string, workspace?: string)
 }
 
 export async function probeEditorMedia(
-  asset: Pick<import('../types').EditorAsset, 'name' | 'origin' | 'path'>,
+  asset: Pick<import('../types').EditorAsset, 'name' | 'origin' | 'path' | 'workspace'>,
   workspace?: string,
 ): Promise<import('../types').EditorMediaProbe> {
   const res = await fetch(`${BASE}/api/v1/editor/media/probe`, {
@@ -495,13 +517,57 @@ export async function probeEditorMedia(
   return res.json()
 }
 
+export async function fetchEditorMediaStatus(
+  project: import('../types').EditorProject,
+): Promise<{ assets: import('../types').EditorMediaStatus[] }> {
+  const res = await fetch(`${BASE}/api/v1/editor/media/status`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workspace: project.workspace, project }),
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'Unable to verify Editor media' }))
+    throw new Error(error.detail || 'Unable to verify Editor media')
+  }
+  return res.json()
+}
+
+export async function fetchEditorMediaPreview(
+  asset: import('../types').EditorAsset,
+  workspace: string,
+  includeProxy = false,
+  proxyProfile: 'auto' | 'mobile' = 'auto',
+): Promise<import('../types').EditorMediaPreview> {
+  const res = await fetch(`${BASE}/api/v1/editor/media/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workspace, asset, include_proxy: includeProxy, proxy_profile: proxyProfile }),
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'Unable to prepare Editor preview' }))
+    throw new Error(error.detail || 'Unable to prepare Editor preview')
+  }
+  return res.json()
+}
+
+export async function fetchEditorExportCapabilities(): Promise<import('../types').EditorExportCapabilities> {
+  const res = await fetch(`${BASE}/api/v1/editor/export/capabilities`)
+  if (!res.ok) throw new Error('Unable to inspect export encoders')
+  return res.json()
+}
+
 export async function exportEditorProject(
   project: import('../types').EditorProject,
+  mode: 'now' | 'queue' = 'now',
 ): Promise<{ job_id: string; status: ApiJobStatus['status'] }> {
   const res = await fetch(`${BASE}/api/v1/editor/export`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ workspace: project.workspace, project }),
+    body: JSON.stringify({
+      workspace: project.workspace,
+      project,
+      queue_mode: mode === 'queue' ? 'held' : 'now',
+    }),
   })
   if (!res.ok) {
     const error = await res.json().catch(() => ({ detail: 'Editor export failed to start' }))
@@ -576,7 +642,7 @@ export async function fetchOutputs(limit = 0, offset = 0, opts?: { favoritesOnly
   return { outputs: data.outputs, total: data.total ?? data.outputs.length }
 }
 
-export function getFileUrl(filename: string): string {
+export function getFileUrl(filename: string, workspace?: string): string {
   // Preserve path separators for Director-owned assets such as
   // `_director_assets/<project>/<file>`. Encoding the entire value turns `/`
   // into `%2F`, which some ASGI/proxy combinations reject before FastAPI's
@@ -587,7 +653,8 @@ export function getFileUrl(filename: string): string {
     .filter(part => part.length > 0)
     .map(part => encodeURIComponent(part))
     .join('/')
-  return `${BASE}/api/v1/file/${safePath}`
+  const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
+  return `${BASE}/api/v1/file/${safePath}${query}`
 }
 
 export function getUploadUrl(filename: string): string {
@@ -1610,6 +1677,42 @@ export async function updateSystemConfig(
   return res.json()
 }
 
+export async function fetchCharacters(): Promise<SavedOmniCharacter[]> {
+  const res = await fetch(`${BASE}/api/v1/characters`)
+  if (!res.ok) throw new Error('Failed to load saved characters')
+  const data = await res.json()
+  return Array.isArray(data.characters) ? data.characters : []
+}
+
+export async function createCharacter(params: {
+  name: string
+  visual_path: string
+  visual_type: 'image' | 'video'
+  voice_path?: string
+  use_video_voice?: boolean
+}): Promise<SavedOmniCharacter> {
+  const res = await fetch(`${BASE}/api/v1/characters`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'Character save failed' }))
+    throw new Error(error.detail || 'Character save failed')
+  }
+  return res.json()
+}
+
+export async function deleteCharacter(characterId: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/v1/characters/${encodeURIComponent(characterId)}`, {
+    method: 'DELETE',
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'Character delete failed' }))
+    throw new Error(error.detail || 'Character delete failed')
+  }
+}
+
 export async function testHostNotificationSound(
   volume?: number,
 ): Promise<{ status: string; volume: number }> {
@@ -1830,7 +1933,6 @@ export async function llmEnhancePrompt(params: {
 }): Promise<{
   original: string
   enhanced: string
-  prompt_budget?: { token_count: number; token_limit: number }
 }> {
   const res = await fetch(`${BASE}/api/v1/llm/enhance-prompt`, {
     method: 'POST',

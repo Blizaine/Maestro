@@ -173,6 +173,26 @@ class TestTailscaleManager(unittest.TestCase):
                 Path(directory, "remote_access.json").read_text(encoding="utf-8")
             )
             self.assertEqual(preference["target_port"], 42123)
+            self.assertTrue(preference["pinokio_port_lock"])
+
+    def test_refresh_skips_cli_when_saved_port_is_reused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            preference = {
+                "version": 2,
+                "enabled": True,
+                "target_port": 42123,
+                "pinokio_port_lock": True,
+            }
+            Path(directory, "remote_access.json").write_text(
+                json.dumps(preference),
+                encoding="utf-8",
+            )
+            manager = TailscaleManager(directory, 42123)
+
+            with patch.object(manager, "enable") as enable:
+                manager.refresh_if_enabled()
+
+            enable.assert_not_called()
 
     def test_enable_preserves_an_unrelated_existing_serve_route(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -230,6 +250,15 @@ class TestRemoteNotificationWiring(unittest.TestCase):
         self.assertNotIn("input: true", source)
         self.assertNotIn('}}\" up', source)
         self.assertNotIn("serve status", source)
+        self.assertIn('"app/settings/remote_access.json"', source)
+        self.assertIn("pinokio_port_lock: true", source)
+
+    def test_launchers_reuse_the_opted_in_tailscale_port(self):
+        for filename in ("start.js", "start_sol.js"):
+            source = Path(_ROOT, filename).read_text(encoding="utf-8")
+            self.assertIn('method: "json.get"', source)
+            self.assertIn("local.remote_access.pinokio_port_lock", source)
+            self.assertIn("local.remote_access.target_port", source)
 
     def test_noop_update_still_repairs_web_push_runtime(self):
         source = Path(_ROOT, "update.js").read_text(encoding="utf-8")

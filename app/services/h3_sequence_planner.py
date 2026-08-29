@@ -205,6 +205,73 @@ def h3_sequence_plan_signature(
     return hashlib.sha256(encoded).hexdigest()[:24]
 
 
+def reviewed_h3_sequence_plan_matches(
+    plan: Any,
+    window_prompts: Any,
+    *,
+    source_prompt: str,
+    model_type: str,
+    resolution: str,
+    geometry: list[dict[str, Any]],
+    window_frames: int,
+    camera_coverage: str,
+    overlap_frames: int,
+    native_continuation: bool,
+) -> bool:
+    """Return whether a visible Omni sequence plan still fits this request."""
+
+    if not isinstance(plan, dict) or not isinstance(window_prompts, (list, tuple)):
+        return False
+    prompts = [
+        item.strip()
+        for item in window_prompts
+        if isinstance(item, str) and item.strip()
+    ]
+    windows = plan.get("windows")
+    if not prompts or not isinstance(windows, list):
+        return False
+    if len(prompts) != len(geometry) or len(windows) != len(geometry):
+        return False
+    if str(plan.get("plan_kind") or "") != "reference_sequence":
+        return False
+    if str(plan.get("source_prompt") or "").strip() != str(source_prompt or "").strip():
+        return False
+    if str(plan.get("model_type") or "") != str(model_type or ""):
+        return False
+    if str(plan.get("resolution") or "") != str(resolution or ""):
+        return False
+    if int(plan.get("window_frames") or 0) != int(window_frames):
+        return False
+    if normalize_h3_camera_coverage(plan.get("camera_coverage")) != normalize_h3_camera_coverage(camera_coverage):
+        return False
+    if bool(plan.get("native_continuation")) != bool(native_continuation):
+        return False
+    if int(plan.get("overlap_frames") or 0) != int(overlap_frames):
+        return False
+    if [int(value) for value in (plan.get("per_clip_frames") or [])] != [
+        int(item.get("frames") or 0) for item in geometry
+    ]:
+        return False
+
+    for index, (window, expected, prompt) in enumerate(
+        zip(windows, geometry, prompts),
+        start=1,
+    ):
+        if not isinstance(window, dict):
+            return False
+        try:
+            geometry_matches = (
+                int(window.get("index") or index) == int(expected.get("index") or index)
+                and int(window.get("start_frame") or 0) == int(expected.get("start_frame") or 0)
+                and int(window.get("end_frame") or 0) == int(expected.get("end_frame") or 0)
+            )
+        except (TypeError, ValueError):
+            return False
+        if not geometry_matches or str(window.get("prompt") or "").strip() != prompt:
+            return False
+    return True
+
+
 def parse_h3_manual_sequence_prompts(
     prompt: str,
     *,
@@ -349,6 +416,8 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
     retention: list[str] = []
     task_types = ["reference generation"]
     role_subjects: dict[str, int] = {}
+    character_subjects: dict[str, int] = {}
+    pending_voice: list[tuple[int, dict, str]] = []
     for item in items:
         kind = item["type"]
         role = item.get("role") or f"the supplied {kind} reference"
@@ -384,6 +453,9 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
             else:
                 subject += 1
                 role_subjects[str(role).strip().casefold()] = subject
+                character_key = str(item.get("library_character_id") or "").strip()
+                if character_key:
+                    character_subjects[character_key] = subject
                 relationships.append(
                     f"<Subject {subject}> is {role}, whose identity and appearance "
                     f"come from <Picture {picture}>; reject the picture's source "
@@ -395,10 +467,33 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
                 )
         elif kind == "video":
             video += 1
-            relationships.append(
-                f"<Video {video}> provides motion, camera, scene, or timing reference for {role}."
-            )
-            retention.append(f"<Video {video}>: partially_preserved")
+            video_intent = item.get("video_intent", "motion")
+            if video_intent == "character":
+                subject += 1
+                role_subjects[str(role).strip().casefold()] = subject
+                character_key = str(item.get("library_character_id") or "").strip()
+                if character_key:
+                    character_subjects[character_key] = subject
+                relationships.append(
+                    f"<Subject {subject}> is {role}, whose identity, appearance, and characteristic "
+                    f"motion come from <Video {video}>; reject its source background, framing, camera, "
+                    "edit rhythm, opening frame, and action."
+                )
+                retention.append(
+                    f"<Subject {subject}>: fully_preserved - preserve the identity and appearance "
+                    f"defined by <Video {video}> while generating each requested target action."
+                )
+            elif video_intent == "scene":
+                relationships.append(
+                    f"<Video {video}> provides environment, lighting, and scene continuity for {role}; "
+                    "do not copy incidental people as target identities."
+                )
+                retention.append(f"<Video {video}>: partially_preserved")
+            else:
+                relationships.append(
+                    f"<Video {video}> provides motion, camera, scene, or timing reference for {role}."
+                )
+                retention.append(f"<Video {video}>: partially_preserved")
             if (item.get("has_audio") or item.get("audio_path")) and item.get("include_audio", True):
                 audio += 1
                 relationships.append(
@@ -430,7 +525,14 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
                     task_types.append("audio reference")
             else:
                 audio += 1
-                mapped_subject = role_subjects.get(str(role).strip().casefold())
+                character_key = str(item.get("library_character_id") or "").strip()
+                mapped_subject = (
+                    character_subjects.get(character_key)
+                    if character_key else role_subjects.get(str(role).strip().casefold())
+                )
+                if mapped_subject is None and (character_key or str(role).strip()):
+                    pending_voice.append((audio, item, role))
+                    continue
                 target = (
                     f"<Subject {mapped_subject}>"
                     if mapped_subject else str(role)
@@ -442,6 +544,20 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
                 retention.append(f"<Audio {audio}>: reference")
                 if "audio reference" not in task_types:
                     task_types.append("audio reference")
+    for audio_index, item, role in pending_voice:
+        character_key = str(item.get("library_character_id") or "").strip()
+        mapped_subject = (
+            character_subjects.get(character_key)
+            if character_key else role_subjects.get(str(role).strip().casefold())
+        )
+        target = f"<Subject {mapped_subject}>" if mapped_subject else str(role)
+        relationships.append(
+            f"<Audio {audio_index}> supplies voice timbre, emotion, and delivery "
+            f"for {target}, without copying its words or timing."
+        )
+        retention.append(f"<Audio {audio_index}>: reference")
+        if "audio reference" not in task_types:
+            task_types.append("audio reference")
     return " ".join(relationships), "; ".join(retention), " + ".join(task_types)
 
 

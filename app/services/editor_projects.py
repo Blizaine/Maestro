@@ -8,6 +8,9 @@ validation, and render-graph compiler stay inexpensive to unit test.
 from __future__ import annotations
 
 import copy
+from array import array
+import functools
+import hashlib
 import json
 import math
 import os
@@ -22,9 +25,12 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
 
-EDITOR_SCHEMA_VERSION = 1
+EDITOR_SCHEMA_VERSION = 5
 EDITOR_PROJECT_DIR = ".maestro_editor"
+EDITOR_MEDIA_CACHE_DIR = "media_cache"
+EDITOR_MEDIA_PREVIEW_VERSION = 2
 _PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
+_PREVIEW_ID_RE = re.compile(r"^[a-f0-9]{24}$")
 _HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 _MEDIA_EXTENSIONS = {
     ".aac", ".flac", ".gif", ".jpeg", ".jpg", ".m4a", ".mkv",
@@ -34,7 +40,23 @@ _MEDIA_EXTENSIONS = {
 _VIDEO_EXTENSIONS = {".gif", ".mkv", ".mov", ".mp4", ".webm"}
 _AUDIO_EXTENSIONS = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav"}
 _IMAGE_EXTENSIONS = {".jpeg", ".jpg", ".png", ".webp"}
+_EDITOR_TRANSITIONS = {"none", "dissolve", "fade_black"}
+_EDITOR_AI_TOOLS = {
+    "retake", "edit_anything", "recast", "repaint", "outpaint", "upscale",
+    "film_grain", "revoice", "director_rerun",
+}
+_EDITOR_FONT_FAMILIES = {
+    "Arial",
+    "Arial Black",
+    "Georgia",
+    "Times New Roman",
+    "Verdana",
+    "Trebuchet MS",
+    "Courier New",
+    "Impact",
+}
 _project_lock = threading.RLock()
+_media_cache_lock = threading.RLock()
 
 
 class EditorProjectError(ValueError):
@@ -55,6 +77,11 @@ def _finite_number(value: Any, default: float) -> float:
 
 def _bounded_number(value: Any, default: float, low: float, high: float) -> float:
     return min(high, max(low, _finite_number(value, default)))
+
+
+def _editor_font_family(value: Any) -> str:
+    family = str(value or "Arial").strip()
+    return family if family in _EDITOR_FONT_FAMILIES else "Arial"
 
 
 def _safe_identifier(value: Any, *, fallback: Optional[str] = None) -> str:
@@ -149,6 +176,7 @@ def create_editor_project(
             "background": "#000000",
         },
         "assets": {},
+        "markers": [],
         "tracks": [
             {
                 "id": "video-main",
@@ -181,8 +209,13 @@ def create_editor_project(
         "export": {
             "quality": "high",
             "codec": "h264",
+            "encoder": "auto",
             "include_audio": True,
+            "resolution": "canvas",
+            "frame_rate": "project",
+            "filename": "",
         },
+        "exports": [],
     }
 
 
@@ -226,7 +259,7 @@ def normalize_editor_project(project: Mapping[str, Any], *, workspace: str | Non
             origin = str(value.get("origin") or "output").lower()
             if origin not in {"output", "upload", "project"}:
                 origin = "output"
-            assets[asset_id] = {
+            normalized_asset = {
                 **dict(value),
                 "id": asset_id,
                 "name": os.path.basename(str(value.get("name") or "asset"))[:255],
@@ -238,6 +271,11 @@ def normalize_editor_project(project: Mapping[str, Any], *, workspace: str | Non
                 "fps": max(0.0, _finite_number(value.get("fps"), 0.0)),
                 "has_audio": bool(value.get("has_audio", media_type == "audio")),
             }
+            # Availability and generated preview metadata are runtime state,
+            # not part of the portable, non-destructive project document.
+            normalized_asset.pop("missing", None)
+            normalized_asset.pop("preview", None)
+            assets[asset_id] = normalized_asset
     normalized["assets"] = assets
 
     raw_tracks = normalized.get("tracks")
@@ -264,10 +302,190 @@ def normalize_editor_project(project: Mapping[str, Any], *, workspace: str | Non
                     item["speed"] = _bounded_number(item.get("speed"), 1.0, 0.1, 8.0)
                     item["volume"] = _bounded_number(item.get("volume"), 1.0, 0.0, 4.0)
                     item["opacity"] = _bounded_number(item.get("opacity"), 1.0, 0.0, 1.0)
-                    item["disabled"] = bool(item.get("disabled", False))
-                    if track_type != "text" and str(item.get("asset_id") or "") not in assets:
+                    asset_id = str(item.get("asset_id") or "")
+                    if track_type != "text" and asset_id not in assets:
                         continue
+                    asset = assets.get(asset_id)
+                    if asset and asset.get("type") != "image":
+                        asset_duration = max(0.0, _finite_number(asset.get("duration"), 0.0))
+                        if asset_duration > 0:
+                            minimum_timeline_duration = 1 / 240
+                            minimum_source_duration = minimum_timeline_duration * item["speed"]
+                            item["source_in"] = min(
+                                item["source_in"],
+                                max(0.0, asset_duration - minimum_source_duration),
+                            )
+                            available_duration = max(
+                                minimum_timeline_duration,
+                                (asset_duration - item["source_in"]) / item["speed"],
+                            )
+                            item["duration"] = min(item["duration"], available_duration)
+                    item["fade_in"] = _bounded_number(
+                        item.get("fade_in"), 0.0, 0.0, item["duration"]
+                    )
+                    item["fade_out"] = _bounded_number(
+                        item.get("fade_out"), 0.0, 0.0, item["duration"]
+                    )
+                    transition_in = str(item.get("transition_in") or "none")
+                    transition_out = str(item.get("transition_out") or "none")
+                    item["transition_in"] = (
+                        transition_in if transition_in in _EDITOR_TRANSITIONS else "none"
+                    )
+                    item["transition_out"] = (
+                        transition_out if transition_out in _EDITOR_TRANSITIONS else "none"
+                    )
+                    link_group_id = str(item.get("link_group_id") or "").strip()
+                    if link_group_id and _PROJECT_ID_RE.fullmatch(link_group_id):
+                        item["link_group_id"] = link_group_id
+                    else:
+                        item.pop("link_group_id", None)
+                    raw_take_ids = item.get("take_asset_ids")
+                    take_ids: list[str] = []
+                    if isinstance(raw_take_ids, list):
+                        for raw_take_id in raw_take_ids[:100]:
+                            take_id = str(raw_take_id or "")
+                            if take_id in assets and take_id not in take_ids:
+                                take_ids.append(take_id)
+                    if asset_id and asset_id in assets and asset_id not in take_ids:
+                        take_ids.insert(0, asset_id)
+                    if take_ids:
+                        item["take_asset_ids"] = take_ids
+                    else:
+                        item.pop("take_asset_ids", None)
+                    raw_take_states = item.get("take_states")
+                    take_states: dict[str, dict[str, float]] = {}
+                    if isinstance(raw_take_states, Mapping):
+                        for take_id in take_ids:
+                            raw_take_state = raw_take_states.get(take_id)
+                            if not isinstance(raw_take_state, Mapping):
+                                continue
+                            take_asset = assets.get(take_id)
+                            take_speed = _bounded_number(
+                                raw_take_state.get("speed"), 1.0, 0.1, 8.0
+                            )
+                            take_source_in = max(
+                                0.0, _finite_number(raw_take_state.get("source_in"), 0.0)
+                            )
+                            take_duration = max(
+                                0.0, _finite_number(
+                                    take_asset.get("duration") if isinstance(take_asset, Mapping) else 0.0,
+                                    0.0,
+                                )
+                            )
+                            if take_duration > 0:
+                                take_source_in = min(
+                                    take_source_in,
+                                    max(0.0, take_duration - (1 / 240) * take_speed),
+                                )
+                            take_states[take_id] = {
+                                "source_in": take_source_in,
+                                "speed": take_speed,
+                            }
+                    # The active timeline item's values are authoritative. A stale
+                    # cached take state must never move the current edit on reload.
+                    if asset_id and asset_id in take_ids:
+                        take_states[asset_id] = {
+                            "source_in": item["source_in"],
+                            "speed": item["speed"],
+                        }
+                    if take_states:
+                        item["take_states"] = take_states
+                    else:
+                        item.pop("take_states", None)
+                    raw_history = item.get("ai_history")
+                    ai_history: list[dict[str, Any]] = []
+                    if isinstance(raw_history, list):
+                        for raw_entry in raw_history[-100:]:
+                            if not isinstance(raw_entry, Mapping):
+                                continue
+                            history_asset_id = str(raw_entry.get("asset_id") or "")
+                            history_tool = str(raw_entry.get("tool") or "")
+                            if history_asset_id not in assets or history_tool not in _EDITOR_AI_TOOLS:
+                                continue
+                            ai_history.append({
+                                "id": _safe_identifier(
+                                    raw_entry.get("id"), fallback=uuid.uuid4().hex[:16]
+                                ),
+                                "tool": history_tool,
+                                "asset_id": history_asset_id,
+                                "created_at": _finite_number(raw_entry.get("created_at"), now),
+                            })
+                    if ai_history:
+                        item["ai_history"] = ai_history
+                    else:
+                        item.pop("ai_history", None)
+                    raw_director = item.get("director")
+                    if isinstance(raw_director, Mapping):
+                        pipeline_id = str(raw_director.get("pipeline_id") or "").strip()
+                        try:
+                            clip_index = int(raw_director.get("clip_index"))
+                        except (TypeError, ValueError):
+                            clip_index = -1
+                        if _PROJECT_ID_RE.fullmatch(pipeline_id) and clip_index >= 0:
+                            director_workspace = _safe_workspace_name(
+                                raw_director.get("workspace") or normalized["workspace"]
+                            )
+                            window_prompts = raw_director.get("window_prompts")
+                            item["director"] = {
+                                "pipeline_id": pipeline_id,
+                                "clip_index": clip_index,
+                                "pipeline_type": str(
+                                    raw_director.get("pipeline_type") or ""
+                                )[:80],
+                                "workspace": director_workspace,
+                                "video_prompt": str(
+                                    raw_director.get("video_prompt") or ""
+                                )[:200000],
+                                "window_prompts": [
+                                    str(prompt)[:200000]
+                                    for prompt in window_prompts[:100]
+                                    if str(prompt).strip()
+                                ] if isinstance(window_prompts, list) else [],
+                            }
+                        else:
+                            item.pop("director", None)
+                    else:
+                        item.pop("director", None)
+                    transform = item.get("transform") if isinstance(item.get("transform"), Mapping) else {}
+                    item["transform"] = {
+                        "x": _finite_number(transform.get("x"), 0.0),
+                        "y": _finite_number(transform.get("y"), 0.0),
+                        "scale": _bounded_number(transform.get("scale"), 1.0, 0.05, 4.0),
+                        "rotation": _bounded_number(transform.get("rotation"), 0.0, -360.0, 360.0),
+                    }
+                    item["fit"] = "cover" if str(item.get("fit")) == "cover" else "contain"
+                    item["muted"] = bool(item.get("muted", False))
+                    item["disabled"] = bool(item.get("disabled", False))
+                    if track_type == "text":
+                        style = item.get("style") if isinstance(item.get("style"), Mapping) else {}
+                        color = str(style.get("color") or "#ffffff")
+                        background_color = str(style.get("background_color") or "#000000")
+                        text_align = str(style.get("text_align") or "center")
+                        item["style"] = {
+                            "x": _finite_number(style.get("x"), 0.0),
+                            "y": _finite_number(style.get("y"), 0.0),
+                            "font_family": _editor_font_family(style.get("font_family")),
+                            "font_size": int(_bounded_number(style.get("font_size"), 64, 8, 400)),
+                            "color": color if _HEX_COLOR_RE.fullmatch(color) else "#ffffff",
+                            "background_color": background_color
+                            if _HEX_COLOR_RE.fullmatch(background_color) else "#000000",
+                            "background_opacity": _bounded_number(
+                                style.get("background_opacity"), 0.32, 0.0, 1.0
+                            ),
+                            "text_align": text_align
+                            if text_align in {"left", "center", "right"} else "center",
+                        }
                     items.append(item)
+            # A timeline track is a single editing lane: clips may meet at an
+            # edit point but cannot occupy the same time range. Normalize old
+            # or externally edited projects by retaining their order and
+            # moving any overlap to the preceding clip's end.
+            items.sort(key=lambda item: (item["start"], item["id"]))
+            previous_end = 0.0
+            for item in items:
+                if item["start"] < previous_end - 1e-9:
+                    item["start"] = previous_end
+                previous_end = item["start"] + item["duration"]
             tracks.append({
                 **dict(raw_track),
                 "id": track_id,
@@ -276,18 +494,89 @@ def normalize_editor_project(project: Mapping[str, Any], *, workspace: str | Non
                 "z_index": int(_finite_number(raw_track.get("z_index"), 0)),
                 "muted": bool(raw_track.get("muted", False)),
                 "locked": bool(raw_track.get("locked", False)),
+                "volume": _bounded_number(raw_track.get("volume"), 1.0, 0.0, 4.0),
                 "items": items,
             })
     if not tracks:
         tracks = create_editor_project(workspace=normalized["workspace"])["tracks"]
     normalized["tracks"] = tracks
+    raw_markers = normalized.get("markers")
+    markers: list[dict[str, Any]] = []
+    if isinstance(raw_markers, list):
+        for raw_marker in raw_markers[:1000]:
+            if not isinstance(raw_marker, Mapping):
+                continue
+            color = str(raw_marker.get("color") or "#f59e0b")
+            markers.append({
+                "id": _safe_identifier(
+                    raw_marker.get("id"), fallback=uuid.uuid4().hex[:16]
+                ),
+                "time": max(0.0, _finite_number(raw_marker.get("time"), 0.0)),
+                "label": (str(raw_marker.get("label") or "Marker").strip() or "Marker")[:120],
+                "color": color if _HEX_COLOR_RE.fullmatch(color) else "#f59e0b",
+            })
+    markers.sort(key=lambda marker: (marker["time"], marker["id"]))
+    normalized["markers"] = markers
     export = normalized.get("export") if isinstance(normalized.get("export"), Mapping) else {}
+    quality = str(export.get("quality") or "high").lower()
+    codec = str(export.get("codec") or "h264").lower()
+    encoder = str(export.get("encoder") or "auto").lower()
+    resolution = str(export.get("resolution") or "canvas").lower()
+    raw_frame_rate = export.get("frame_rate", "project")
+    try:
+        numeric_frame_rate = int(raw_frame_rate)
+    except (TypeError, ValueError):
+        numeric_frame_rate = 0
     normalized["export"] = {
-        **dict(export),
-        "quality": str(export.get("quality") or "high"),
-        "codec": str(export.get("codec") or "h264"),
+        "quality": quality if quality in {"draft", "balanced", "high"} else "high",
+        "codec": codec if codec in {"h264", "h265"} else "h264",
+        "encoder": encoder
+        if encoder in {"auto", "software", "nvidia", "intel", "apple"}
+        else "auto",
         "include_audio": bool(export.get("include_audio", True)),
+        "resolution": resolution
+        if resolution in {"canvas", "2160p", "1080p", "720p", "480p"}
+        else "canvas",
+        "frame_rate": numeric_frame_rate
+        if numeric_frame_rate in {24, 30, 60}
+        else "project",
+        "filename": str(export.get("filename") or "").strip()[:120],
     }
+    raw_exports = normalized.get("exports")
+    export_history: list[dict[str, Any]] = []
+    if isinstance(raw_exports, list):
+        for raw_record in raw_exports[-50:]:
+            if not isinstance(raw_record, Mapping):
+                continue
+            filename = os.path.basename(str(raw_record.get("filename") or ""))[:255]
+            if not filename:
+                continue
+            record_codec = str(raw_record.get("codec") or "h264").lower()
+            record_quality = str(raw_record.get("quality") or "high").lower()
+            record_encoder = str(raw_record.get("encoder") or "auto").lower()
+            export_history.append({
+                "id": _safe_identifier(
+                    raw_record.get("id"), fallback=uuid.uuid4().hex[:16]
+                ),
+                "filename": filename,
+                "workspace": _safe_workspace_name(
+                    raw_record.get("workspace") or normalized["workspace"]
+                ),
+                "created_at": _finite_number(raw_record.get("created_at"), now),
+                "duration": max(0.0, _finite_number(raw_record.get("duration"), 0.0)),
+                "width": max(0, int(_finite_number(raw_record.get("width"), 0))),
+                "height": max(0, int(_finite_number(raw_record.get("height"), 0))),
+                "fps": max(0.0, _finite_number(raw_record.get("fps"), 0.0)),
+                "codec": record_codec if record_codec in {"h264", "h265"} else "h264",
+                "quality": record_quality
+                if record_quality in {"draft", "balanced", "high"}
+                else "high",
+                "encoder": record_encoder
+                if record_encoder in {"auto", "software", "nvidia", "intel", "apple"}
+                else "auto",
+            })
+    export_history.sort(key=lambda record: record["created_at"], reverse=True)
+    normalized["exports"] = export_history[:50]
     return normalized
 
 
@@ -379,6 +668,14 @@ def resolve_editor_asset(
     if origin == "upload":
         candidates.append(os.path.join(uploads_root, name))
     else:
+        asset_workspace = asset.get("workspace")
+        if asset_workspace:
+            candidates.append(
+                os.path.join(
+                    workspace_directory(save_root, str(asset_workspace)),
+                    name,
+                )
+            )
         candidates.append(os.path.join(workspace_directory(save_root, workspace), name))
         candidates.append(os.path.join(save_root, name))
     for candidate in candidates:
@@ -442,6 +739,251 @@ def probe_media(path: str, *, ffprobe: str = "ffprobe") -> dict[str, Any]:
     }
 
 
+def inspect_editor_assets(
+    project: Mapping[str, Any],
+    *,
+    save_root: str,
+    workspace: str,
+    uploads_root: str,
+) -> list[dict[str, Any]]:
+    """Return source availability without mutating or leaking project state."""
+    normalized = normalize_editor_project(project, workspace=workspace)
+    results: list[dict[str, Any]] = []
+    for asset_id, asset in normalized["assets"].items():
+        try:
+            path = resolve_editor_asset(
+                asset,
+                save_root=save_root,
+                workspace=workspace,
+                uploads_root=uploads_root,
+            )
+            results.append({"asset_id": asset_id, "available": True, "path": path})
+        except (EditorProjectError, FileNotFoundError, OSError) as error:
+            results.append({
+                "asset_id": asset_id,
+                "available": False,
+                "error": str(error),
+            })
+    return results
+
+
+def editor_media_cache_directory(save_root: str, workspace: str) -> str:
+    return os.path.join(
+        editor_project_directory(save_root, workspace),
+        EDITOR_MEDIA_CACHE_DIR,
+    )
+
+
+def _editor_preview_id(path: str) -> str:
+    stat = os.stat(path)
+    identity = f"{os.path.realpath(path)}|{stat.st_size}|{stat.st_mtime_ns}"
+    return hashlib.sha256(identity.encode("utf-8", errors="surrogatepass")).hexdigest()[:24]
+
+
+def resolve_editor_media_cache_file(
+    save_root: str,
+    workspace: str,
+    preview_id: str,
+    kind: str,
+) -> str:
+    if not _PREVIEW_ID_RE.fullmatch(str(preview_id or "")):
+        raise EditorProjectError("Invalid Editor preview identifier")
+    filename = {
+        "thumbnail": "thumbnail.jpg",
+        "proxy": "proxy.mp4",
+        "proxy-mobile": "proxy-mobile.mp4",
+    }.get(str(kind or ""))
+    if not filename:
+        raise EditorProjectError("Invalid Editor preview type")
+    root = editor_media_cache_directory(save_root, workspace)
+    path = _safe_join(root, preview_id, filename)
+    if not path or not os.path.isfile(path):
+        raise FileNotFoundError(filename)
+    return path
+
+
+def _run_preview_command(command: list[str], *, timeout: int = 180) -> bool:
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            timeout=timeout,
+            startupinfo=(
+                subprocess.STARTUPINFO()
+                if os.name == "nt"
+                else None
+            ),
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _build_editor_waveform(path: str, *, ffmpeg: str, bins: int = 512) -> list[float]:
+    try:
+        result = subprocess.run(
+            [
+                ffmpeg, "-hide_banner", "-loglevel", "error", "-i", path,
+                "-vn", "-ac", "1", "-ar", "2000", "-f", "f32le", "pipe:1",
+            ],
+            capture_output=True,
+            timeout=180,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0 or not result.stdout:
+        return []
+    samples = array("f")
+    samples.frombytes(result.stdout[:len(result.stdout) - (len(result.stdout) % 4)])
+    if not samples:
+        return []
+    block = max(1, math.ceil(len(samples) / bins))
+    peaks = [
+        max((abs(value) for value in samples[start:start + block]), default=0.0)
+        for start in range(0, len(samples), block)
+    ][:bins]
+    maximum = max(0.001, *peaks)
+    return [round(max(0.02, min(1.0, value / maximum)), 4) for value in peaks]
+
+
+def build_editor_media_preview(
+    asset: Mapping[str, Any],
+    *,
+    save_root: str,
+    workspace: str,
+    uploads_root: str,
+    include_proxy: bool = False,
+    proxy_profile: str = "auto",
+    ffmpeg: str = "ffmpeg",
+) -> dict[str, Any]:
+    """Build reusable disk-cached thumbnails, waveform peaks, and a proxy.
+
+    Browser-only analysis forced remote/mobile clients to download and decode
+    entire source files whenever the Editor reopened. The cache is keyed by
+    path, size, and mtime, so replacing a source invalidates it naturally.
+    """
+    path = resolve_editor_asset(
+        asset,
+        save_root=save_root,
+        workspace=workspace,
+        uploads_root=uploads_root,
+    )
+    preview_id = _editor_preview_id(path)
+    cache_dir = os.path.join(editor_media_cache_directory(save_root, workspace), preview_id)
+    metadata_path = os.path.join(cache_dir, "preview.json")
+    media_type = str(asset.get("type") or "video")
+    duration = max(0.0, _finite_number(asset.get("duration"), 0.0))
+    has_audio = bool(asset.get("has_audio", media_type == "audio"))
+    with _media_cache_lock:
+        os.makedirs(cache_dir, exist_ok=True)
+        metadata: dict[str, Any] = {}
+        if os.path.isfile(metadata_path):
+            try:
+                with open(metadata_path, "r", encoding="utf-8") as handle:
+                    loaded = json.load(handle)
+                if (
+                    isinstance(loaded, dict)
+                    and loaded.get("version") == EDITOR_MEDIA_PREVIEW_VERSION
+                ):
+                    metadata = loaded
+            except (OSError, ValueError):
+                metadata = {}
+
+        thumbnail_path = os.path.join(cache_dir, "thumbnail.jpg")
+        if media_type == "video" and not os.path.isfile(thumbnail_path):
+            interval = max(0.12, duration / 8.0) if duration > 0 else 1.0
+            filter_chain = (
+                f"fps=1/{interval:.8f},"
+                "scale=160:90:force_original_aspect_ratio=increase,"
+                "crop=160:90,tile=8x1"
+            )
+            _run_preview_command([
+                ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", path,
+                "-vf", filter_chain, "-frames:v", "1", "-q:v", "5", thumbnail_path,
+            ])
+
+        waveform = metadata.get("waveform") if isinstance(metadata.get("waveform"), list) else []
+        if has_audio and not waveform:
+            waveform = _build_editor_waveform(path, ffmpeg=ffmpeg)
+
+        mobile_proxy = str(proxy_profile or "auto").strip().lower() == "mobile"
+        standard_proxy_path = os.path.join(cache_dir, "proxy.mp4")
+        mobile_proxy_path = os.path.join(cache_dir, "proxy-mobile.mp4")
+        proxy_path = mobile_proxy_path if mobile_proxy else standard_proxy_path
+        width = max(0, int(_finite_number(asset.get("width"), 0)))
+        height = max(0, int(_finite_number(asset.get("height"), 0)))
+        size = max(0, int(_finite_number(asset.get("size"), 0)))
+        needs_proxy = (
+            include_proxy
+            and media_type == "video"
+            and (
+                mobile_proxy
+                or width > 1280
+                or height > 720
+                or size > 256 * 1024 * 1024
+            )
+        )
+        if needs_proxy and not os.path.isfile(proxy_path):
+            temporary_proxy = os.path.join(cache_dir, f"proxy.{uuid.uuid4().hex[:8]}.part.mp4")
+            video_filter = (
+                "scale=960:540:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+                "fps=30,format=yuv420p"
+                if mobile_proxy else
+                "scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p"
+            )
+            built = _run_preview_command([
+                ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", path,
+                "-map", "0:v:0", "-map", "0:a?", "-vf", video_filter,
+                "-c:v", "libx264", "-preset", "veryfast",
+                "-crf", "27" if mobile_proxy else "25",
+                *(["-profile:v", "main", "-level:v", "3.1"] if mobile_proxy else []),
+                "-c:a", "aac", "-b:a", "80k" if mobile_proxy else "96k",
+                "-movflags", "+faststart", temporary_proxy,
+            ], timeout=900)
+            if built and os.path.isfile(temporary_proxy):
+                os.replace(temporary_proxy, proxy_path)
+            elif os.path.isfile(temporary_proxy):
+                os.remove(temporary_proxy)
+
+        metadata = {
+            "version": EDITOR_MEDIA_PREVIEW_VERSION,
+            "preview_id": preview_id,
+            "waveform": waveform,
+            "thumbnail": os.path.isfile(thumbnail_path),
+            "proxy": os.path.isfile(standard_proxy_path),
+            "proxy_mobile": os.path.isfile(mobile_proxy_path),
+            "updated_at": time.time(),
+        }
+        _atomic_write_json(metadata_path, metadata)
+    return metadata
+
+
+@functools.lru_cache(maxsize=4)
+def editor_export_capabilities(ffmpeg: str = "ffmpeg") -> dict[str, Any]:
+    """Inspect the active FFmpeg build once for safe hardware encoders."""
+    try:
+        result = subprocess.run(
+            [ffmpeg, "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        listing = result.stdout if result.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        listing = ""
+    encoders = {
+        "software": True,
+        "nvidia": "h264_nvenc" in listing and "hevc_nvenc" in listing,
+        "intel": "h264_qsv" in listing and "hevc_qsv" in listing,
+        "apple": "h264_videotoolbox" in listing and "hevc_videotoolbox" in listing,
+    }
+    recommended = next(
+        (name for name in ("nvidia", "apple", "intel") if encoders[name]),
+        "software",
+    )
+    return {"encoders": encoders, "recommended": recommended}
+
+
 def _atempo_chain(speed: float) -> list[str]:
     value = max(0.1, min(8.0, float(speed)))
     filters: list[str] = []
@@ -466,7 +1008,7 @@ def _escape_drawtext(value: str) -> str:
     )
 
 
-def _drawtext_font_option() -> str:
+def _drawtext_font_option(font_family: Any = None) -> str:
     """Return a portable explicit font option when a system font is known.
 
     Windows FFmpeg builds often include fontconfig support without shipping a
@@ -475,13 +1017,59 @@ def _drawtext_font_option() -> str:
     export working while Linux/macOS retain sensible native fallbacks.
     """
     configured = os.environ.get("MAESTRO_EDITOR_FONT", "").strip()
-    candidates = [
-        configured,
-        os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", "arial.ttf"),
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-    ]
+    windows_fonts = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
+    family = _editor_font_family(font_family)
+    family_candidates = {
+        "Arial": [
+            os.path.join(windows_fonts, "arial.ttf"),
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ],
+        "Arial Black": [
+            os.path.join(windows_fonts, "ariblk.ttf"),
+            "/System/Library/Fonts/Supplemental/Arial Black.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        ],
+        "Georgia": [
+            os.path.join(windows_fonts, "georgia.ttf"),
+            "/System/Library/Fonts/Supplemental/Georgia.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSerif-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+        ],
+        "Times New Roman": [
+            os.path.join(windows_fonts, "times.ttf"),
+            "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSerif-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+        ],
+        "Verdana": [
+            os.path.join(windows_fonts, "verdana.ttf"),
+            "/System/Library/Fonts/Supplemental/Verdana.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ],
+        "Trebuchet MS": [
+            os.path.join(windows_fonts, "trebuc.ttf"),
+            "/System/Library/Fonts/Supplemental/Trebuchet MS.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ],
+        "Courier New": [
+            os.path.join(windows_fonts, "cour.ttf"),
+            "/System/Library/Fonts/Supplemental/Courier New.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationMono-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        ],
+        "Impact": [
+            os.path.join(windows_fonts, "impact.ttf"),
+            "/System/Library/Fonts/Supplemental/Impact.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf",
+        ],
+    }
+    candidates = [configured, *family_candidates[family]]
     font = next((candidate for candidate in candidates if candidate and os.path.isfile(candidate)), "")
     if not font:
         return ""
@@ -489,13 +1077,91 @@ def _drawtext_font_option() -> str:
     return f":fontfile='{escaped}'"
 
 
-def _quality_settings(value: str) -> tuple[str, str]:
+def _quality_settings(value: str, codec: str = "h264") -> tuple[str, str]:
     quality = str(value or "high").lower()
+    if codec == "h265":
+        if quality == "draft":
+            return "veryfast", "30"
+        if quality == "balanced":
+            return "fast", "25"
+        return "medium", "20"
     if quality == "draft":
         return "veryfast", "27"
     if quality == "balanced":
         return "fast", "22"
     return "medium", "18"
+
+
+def resolve_editor_export_encoder(
+    export_settings: Mapping[str, Any],
+    capabilities: Mapping[str, Any] | None = None,
+) -> tuple[str, str, list[str]]:
+    """Return the selected backend, FFmpeg codec, and quality arguments."""
+    codec = str(export_settings.get("codec") or "h264")
+    quality = str(export_settings.get("quality") or "high")
+    requested = str(export_settings.get("encoder") or "auto")
+    available = (
+        capabilities.get("encoders")
+        if isinstance(capabilities, Mapping)
+        and isinstance(capabilities.get("encoders"), Mapping)
+        else {}
+    )
+    if requested == "auto":
+        selected = next(
+            (name for name in ("nvidia", "apple", "intel") if available.get(name)),
+            "software",
+        )
+    elif requested in {"nvidia", "apple", "intel"} and available.get(requested):
+        selected = requested
+    else:
+        selected = "software"
+
+    if selected == "software":
+        preset, crf = _quality_settings(quality, codec)
+        return selected, "libx265" if codec == "h265" else "libx264", [
+            "-preset", preset, "-crf", crf,
+        ]
+
+    quality_level = {"draft": "30", "balanced": "24", "high": "19"}.get(quality, "19")
+    if selected == "nvidia":
+        encoder = "hevc_nvenc" if codec == "h265" else "h264_nvenc"
+        preset = "p4" if quality == "draft" else "p5"
+        return selected, encoder, [
+            "-preset", preset, "-rc", "vbr", "-cq", quality_level, "-b:v", "0",
+        ]
+    if selected == "intel":
+        encoder = "hevc_qsv" if codec == "h265" else "h264_qsv"
+        preset = "faster" if quality == "draft" else "medium"
+        return selected, encoder, [
+            "-preset", preset, "-global_quality", quality_level,
+        ]
+
+    encoder = "hevc_videotoolbox" if codec == "h265" else "h264_videotoolbox"
+    bitrate = {"draft": "4M", "balanced": "8M", "high": "16M"}.get(quality, "16M")
+    return "apple", encoder, ["-b:v", bitrate, "-realtime", "true"]
+
+
+def editor_export_dimensions(project: Mapping[str, Any]) -> tuple[int, int, float]:
+    """Return even delivery dimensions and FPS without mutating the edit canvas."""
+    normalized = normalize_editor_project(project)
+    canvas = normalized["canvas"]
+    export = normalized["export"]
+    width = int(canvas["width"])
+    height = int(canvas["height"])
+    resolution = str(export.get("resolution") or "canvas")
+    if resolution != "canvas":
+        edge = int(resolution.removesuffix("p"))
+        if width == height:
+            width = height = edge
+        elif width > height:
+            width = max(2, int(round((edge * width / height) / 2) * 2))
+            height = edge
+        else:
+            height = max(2, int(round((edge * height / width) / 2) * 2))
+            width = edge
+    frame_rate = export.get("frame_rate")
+    fps = float(frame_rate if frame_rate in {24, 30, 60} else canvas["fps"])
+    return width, height, fps
 
 
 def compile_editor_render(
@@ -507,6 +1173,7 @@ def compile_editor_render(
     filter_script_path: str,
     output_path: str,
     ffmpeg: str = "ffmpeg",
+    encoder_capabilities: Mapping[str, Any] | None = None,
 ) -> tuple[list[str], float]:
     """Compile a project into one FFmpeg command and return it with duration."""
     project = normalize_editor_project(project, workspace=workspace)
@@ -517,6 +1184,7 @@ def compile_editor_render(
     width = int(canvas["width"])
     height = int(canvas["height"])
     fps = float(canvas["fps"])
+    export_width, export_height, export_fps = editor_export_dimensions(project)
     background = str(canvas["background"]).lstrip("#")
     assets = project["assets"]
 
@@ -568,6 +1236,10 @@ def compile_editor_render(
         y = _finite_number(transform.get("y"), 0.0)
         rotation = _finite_number(transform.get("rotation"), 0.0)
         opacity = _bounded_number(item.get("opacity"), 1.0, 0.0, 1.0)
+        fade_in = min(clip_duration, _bounded_number(item.get("fade_in"), 0.0, 0.0, clip_duration))
+        fade_out = min(clip_duration, _bounded_number(item.get("fade_out"), 0.0, 0.0, clip_duration))
+        transition_in = str(item.get("transition_in") or "none")
+        transition_out = str(item.get("transition_out") or "none")
         fit = str(item.get("fit") or "contain")
         clip_label = f"editor_clip_{visual_index}"
         output_label = f"editor_base_{visual_index}"
@@ -593,8 +1265,21 @@ def compile_editor_render(
             rotation_filter = (
                 f",rotate={radians:.10f}:c=none:ow=rotw({radians:.10f}):oh=roth({radians:.10f})"
             )
+        fade_filters: list[str] = []
+        if fade_in > 1e-6:
+            fade_filters.append(
+                f"fade=t=in:st={start:.8f}:d={fade_in:.8f}"
+                + (":color=black" if transition_in == "fade_black" else ":alpha=1")
+            )
+        if fade_out > 1e-6:
+            fade_filters.append(
+                f"fade=t=out:st={max(start, start + clip_duration - fade_out):.8f}:"
+                f"d={fade_out:.8f}"
+                + (":color=black" if transition_out == "fade_black" else ":alpha=1")
+            )
+        fade_chain = "".join(f",{value}" for value in fade_filters)
         filters.append(
-            f"{prefix},fps={fps:.8f},{resize}{rotation_filter},format=rgba,"
+            f"{prefix},fps={fps:.8f},{resize}{rotation_filter},format=rgba{fade_chain},"
             f"colorchannelmixer=aa={opacity:.8f}[{clip_label}]"
         )
         x_expression = f"(main_w-overlay_w)/2+({x:.8f})"
@@ -625,16 +1310,46 @@ def compile_editor_render(
         end = start + float(item["duration"])
         x = _finite_number(style.get("x"), 0.0)
         y = _finite_number(style.get("y"), 0.0)
+        background_color = str(style.get("background_color") or "#000000")
+        if not _HEX_COLOR_RE.fullmatch(background_color):
+            background_color = "#000000"
+        background_opacity = _bounded_number(style.get("background_opacity"), 0.32, 0.0, 1.0)
+        text_align = str(style.get("text_align") or "center")
+        if text_align == "left":
+            x_expression = f"w/2+({x:.8f})"
+        elif text_align == "right":
+            x_expression = f"w/2-text_w+({x:.8f})"
+        else:
+            x_expression = f"(w-text_w)/2+({x:.8f})"
+        fade_in = min(float(item["duration"]), _bounded_number(item.get("fade_in"), 0.0, 0.0, float(item["duration"])))
+        fade_out = min(float(item["duration"]), _bounded_number(item.get("fade_out"), 0.0, 0.0, float(item["duration"])))
+        text_opacity = _bounded_number(item.get("opacity"), 1.0, 0.0, 1.0)
+        alpha_parts: list[str] = [f"{text_opacity:.8f}"]
+        if fade_in > 1e-6:
+            alpha_parts.append(f"if(lt(t,{start + fade_in:.8f}),(t-{start:.8f})/{fade_in:.8f},1)")
+        if fade_out > 1e-6:
+            alpha_parts.append(f"if(gt(t,{end - fade_out:.8f}),({end:.8f}-t)/{fade_out:.8f},1)")
+        alpha_expression = "*".join(alpha_parts) if alpha_parts else "1"
         output_label = f"editor_text_{text_index}"
-        font_option = _drawtext_font_option()
+        font_option = _drawtext_font_option(style.get("font_family"))
         filters.append(
             f"[{base_label}]drawtext=text='{text}'{font_option}:fontcolor={color}:fontsize={font_size}:"
-            f"x='(w-text_w)/2+({x:.8f})':y='(h-text_h)/2+({y:.8f})':"
-            f"box=1:boxcolor=black@0.32:boxborderw=12:enable='between(t,{start:.8f},{end:.8f})'"
+            f"x='{x_expression}':y='(h-text_h)/2+({y:.8f})':alpha='{alpha_expression}':"
+            f"box={1 if background_opacity > 1e-6 else 0}:"
+            f"boxcolor={background_color}@{background_opacity:.8f}:boxborderw=12:"
+            f"enable='between(t,{start:.8f},{end:.8f})'"
             f"[{output_label}]"
         )
         base_label = output_label
-    filters.append(f"[{base_label}]format=yuv420p[editor_video]")
+    if export_width != width or export_height != height:
+        filters.append(
+            f"[{base_label}]scale={export_width}:{export_height}:flags=lanczos,"
+            f"fps={export_fps:.8f},format=yuv420p[editor_video]"
+        )
+    else:
+        filters.append(
+            f"[{base_label}]fps={export_fps:.8f},format=yuv420p[editor_video]"
+        )
 
     audio_labels: list[str] = []
     include_audio = bool((project.get("export") or {}).get("include_audio", True))
@@ -651,14 +1366,22 @@ def compile_editor_render(
             source_span = clip_duration * speed
             volume = _bounded_number(item.get("volume"), 1.0, 0.0, 4.0)
             track_volume = _bounded_number(track.get("volume"), 1.0, 0.0, 4.0)
+            fade_in = min(clip_duration, _bounded_number(item.get("fade_in"), 0.0, 0.0, clip_duration))
+            fade_out = min(clip_duration, _bounded_number(item.get("fade_out"), 0.0, 0.0, clip_duration))
             chain = [
                 f"atrim=start={source_in:.8f}:duration={source_span:.8f}",
                 "asetpts=PTS-STARTPTS",
                 *_atempo_chain(speed),
                 "aresample=48000",
                 "aformat=sample_fmts=fltp:channel_layouts=stereo",
-                f"volume={volume * track_volume:.8f}",
             ]
+            if fade_in > 1e-6:
+                chain.append(f"afade=t=in:st=0:d={fade_in:.8f}")
+            if fade_out > 1e-6:
+                chain.append(
+                    f"afade=t=out:st={max(0.0, clip_duration - fade_out):.8f}:d={fade_out:.8f}"
+                )
+            chain.append(f"volume={volume * track_volume:.8f}")
             delay_ms = max(0, int(round(start * 1000)))
             if delay_ms:
                 chain.append(f"adelay={delay_ms}:all=1")
@@ -671,14 +1394,19 @@ def compile_editor_render(
             f"{joined}amix=inputs={len(audio_labels)}:duration=longest:normalize=0,"
             f"alimiter=limit=0.98,atrim=duration={duration:.8f}[editor_audio]"
         )
-    else:
+    elif include_audio:
         filters.append(f"anullsrc=r=48000:cl=stereo:d={duration:.8f}[editor_audio]")
 
     os.makedirs(os.path.dirname(filter_script_path), exist_ok=True)
     with open(filter_script_path, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(";\n".join(filters))
 
-    preset, crf = _quality_settings((project.get("export") or {}).get("quality"))
+    export_settings = project.get("export") or {}
+    codec = str(export_settings.get("codec") or "h264")
+    _encoder_name, video_codec, encoder_args = resolve_editor_export_encoder(
+        export_settings,
+        encoder_capabilities,
+    )
     command = [
         ffmpeg,
         "-y",
@@ -690,15 +1418,14 @@ def compile_editor_render(
         # do not understand the newer `-/filter_complex` file-option syntax.
         "-filter_complex_script", filter_script_path,
         "-map", "[editor_video]",
-        "-map", "[editor_audio]",
-        "-r", f"{fps:.8f}",
+        *(["-map", "[editor_audio]"] if include_audio else []),
+        "-r", f"{export_fps:.8f}",
         "-t", f"{duration:.8f}",
-        "-c:v", "libx264",
-        "-preset", preset,
-        "-crf", crf,
+        "-c:v", video_codec,
+        *encoder_args,
         "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", "192k",
+        *(["-tag:v", "hvc1"] if codec == "h265" else []),
+        *(["-c:a", "aac", "-b:a", "192k"] if include_audio else ["-an"]),
         "-movflags", "+faststart",
         "-progress", "pipe:1",
         "-nostats",
@@ -708,7 +1435,8 @@ def compile_editor_render(
 
 
 def _safe_output_stem(name: str) -> str:
-    stem = re.sub(r"[^A-Za-z0-9 _-]+", "", str(name or "Editor export")).strip()
+    requested = os.path.splitext(os.path.basename(str(name or "Editor export")))[0]
+    stem = re.sub(r"[^A-Za-z0-9 _-]+", "", requested).strip()
     stem = re.sub(r"\s+", " ", stem)[:64]
     return stem or "Editor export"
 
@@ -727,7 +1455,12 @@ def render_editor_project(
     output_dir = workspace_directory(save_root, workspace)
     os.makedirs(output_dir, exist_ok=True)
     timestamp = time.strftime("%Y-%m-%d-%Hh%Mm%Ss")
-    stem = f"{timestamp}_{_safe_output_stem(project['name'])}_edit"
+    custom_name = str((project.get("export") or {}).get("filename") or "").strip()
+    stem = (
+        f"{timestamp}_{_safe_output_stem(custom_name)}"
+        if custom_name
+        else f"{timestamp}_{_safe_output_stem(project['name'])}_edit"
+    )
     output_path = os.path.join(output_dir, f"{stem}.mp4")
     suffix = 2
     while os.path.exists(output_path):
@@ -743,6 +1476,7 @@ def render_editor_project(
     filter_script = os.path.join(temporary_dir, "timeline_filter.txt")
     process: subprocess.Popen[str] | None = None
     try:
+        capabilities = editor_export_capabilities(ffmpeg)
         command, duration = compile_editor_render(
             project,
             save_root=save_root,
@@ -751,6 +1485,7 @@ def render_editor_project(
             filter_script_path=filter_script,
             output_path=temporary_output,
             ffmpeg=ffmpeg,
+            encoder_capabilities=capabilities,
         )
         if progress_callback:
             progress_callback(1, "Preparing timeline")
@@ -758,41 +1493,77 @@ def render_editor_project(
         if os.name == "nt":
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            startupinfo=startupinfo,
-        )
-        assert process.stdout is not None
-        while True:
-            if cancel_check and cancel_check():
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                raise EditorRenderCancelled("Editor export cancelled")
-            line = process.stdout.readline()
-            if line:
-                key, _, value = line.strip().partition("=")
-                if key in {"out_time_us", "out_time_ms"}:
+        def _execute(render_command: list[str], phase: str) -> str:
+            nonlocal process
+            process = subprocess.Popen(
+                render_command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                startupinfo=startupinfo,
+            )
+            assert process.stdout is not None
+            while True:
+                if cancel_check and cancel_check():
+                    process.terminate()
                     try:
-                        microseconds = float(value)
-                        percent = int(min(98, max(1, (microseconds / 1_000_000.0) / duration * 100)))
-                        if progress_callback:
-                            progress_callback(percent, "Rendering timeline")
-                    except (TypeError, ValueError, ZeroDivisionError):
-                        pass
-            if process.poll() is not None:
-                break
-            if not line:
-                time.sleep(0.05)
-        stderr = process.stderr.read() if process.stderr is not None else ""
-        if process.returncode != 0 or not os.path.isfile(temporary_output):
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                    raise EditorRenderCancelled("Editor export cancelled")
+                line = process.stdout.readline()
+                if line:
+                    key, _, value = line.strip().partition("=")
+                    if key in {"out_time_us", "out_time_ms"}:
+                        try:
+                            microseconds = float(value)
+                            percent = int(min(98, max(1, (microseconds / 1_000_000.0) / duration * 100)))
+                            if progress_callback:
+                                progress_callback(percent, phase)
+                        except (TypeError, ValueError, ZeroDivisionError):
+                            pass
+                if process.poll() is not None:
+                    break
+                if not line:
+                    time.sleep(0.05)
+            return process.stderr.read() if process.stderr is not None else ""
+
+        stderr = _execute(command, "Rendering timeline")
+        selected_encoder, _codec, _args = resolve_editor_export_encoder(
+            project.get("export") or {}, capabilities
+        )
+        failed = process.returncode != 0 or not os.path.isfile(temporary_output)
+        if failed and selected_encoder != "software" and str(
+            (project.get("export") or {}).get("encoder") or "auto"
+        ) == "auto":
+            if os.path.isfile(temporary_output):
+                os.remove(temporary_output)
+            if progress_callback:
+                progress_callback(1, "Hardware export unavailable; retrying in software")
+            software_capabilities = {
+                "encoders": {
+                    "software": True,
+                    "nvidia": False,
+                    "intel": False,
+                    "apple": False,
+                },
+                "recommended": "software",
+            }
+            command, duration = compile_editor_render(
+                project,
+                save_root=save_root,
+                workspace=workspace,
+                uploads_root=uploads_root,
+                filter_script_path=filter_script,
+                output_path=temporary_output,
+                ffmpeg=ffmpeg,
+                encoder_capabilities=software_capabilities,
+            )
+            stderr = _execute(command, "Rendering timeline in software")
+            failed = process.returncode != 0 or not os.path.isfile(temporary_output)
+        if failed:
             raise RuntimeError((stderr or "FFmpeg could not render this Editor project")[-2000:])
         os.replace(temporary_output, output_path)
         sidecar = {

@@ -7273,6 +7273,70 @@ def _joined_output_frame_target(
     return requested + source_frames - source_overlap
 
 
+def _h3_sequence_tensor_fingerprint(value, sample_limit=16_384):
+    """Return a cheap deterministic fingerprint for opt-in H3 diagnostics."""
+
+    if value is None:
+        return None
+    try:
+        import hashlib
+
+        if torch.is_tensor(value):
+            shape = tuple(int(item) for item in value.shape)
+            flat = value.detach().reshape(-1)
+            if int(flat.numel()) == 0:
+                return None
+            stride = max(1, int(flat.numel()) // int(sample_limit))
+            sampled = flat[::stride][:sample_limit].float().cpu().contiguous()
+            array = sampled.numpy()
+        else:
+            source = np.asarray(value)
+            shape = tuple(int(item) for item in source.shape)
+            flat = source.reshape(-1)
+            if int(flat.size) == 0:
+                return None
+            stride = max(1, int(flat.size) // int(sample_limit))
+            array = np.asarray(
+                flat[::stride][:sample_limit],
+                dtype=np.float32,
+            )
+        return {
+            "digest": hashlib.sha256(array.tobytes()).hexdigest()[:12],
+            "shape": shape,
+            "mean": float(array.mean()),
+            "std": float(array.std()),
+        }
+    except Exception as error:
+        return {"error": str(error)}
+
+
+def _format_h3_sequence_fingerprint(fingerprint):
+    if not fingerprint:
+        return "none"
+    if fingerprint.get("error"):
+        return f"unavailable ({fingerprint['error']})"
+    return (
+        f"{fingerprint['digest']} shape={fingerprint['shape']} "
+        f"mean={fingerprint['mean']:.4f} std={fingerprint['std']:.4f}"
+    )
+
+
+def _h3_sequence_audio_tail(waveform, sample_count):
+    """Slice the newest samples from channel-first or channel-last audio."""
+
+    if waveform is None:
+        return None
+    count = max(0, int(sample_count or 0))
+    if count == 0:
+        return None
+    shape = tuple(int(item) for item in getattr(waveform, "shape", ()))
+    if len(shape) <= 1:
+        return waveform[-count:]
+    if shape[0] in (1, 2) and shape[-1] > shape[0]:
+        return waveform[..., -count:]
+    return waveform[-count:, ...]
+
+
 def _resolve_image_ref_fit(model_def, auto_aspect):
     """Choose shared reference fitting without pre-empting model postprocessing.
 
@@ -7949,6 +8013,11 @@ def generate_video(
 
     if hasattr(wan_model, "validate_loras"):
         wan_model.validate_loras(loras_selected)
+    if hasattr(wan_model, "configure_special_loras"):
+        wan_model.configure_special_loras(
+            loras_selected,
+            loras_list_mult_choices_nums,
+        )
 
     if hasattr(wan_model, "get_trans_lora"):
         trans_lora, trans2_lora = wan_model.get_trans_lora()
@@ -8331,10 +8400,45 @@ def generate_video(
         sliding_window_size = current_video_length
         reuse_frames = 0
 
+    h3_long_sequence_policy_resolver = None
+    h3_long_sequence_setting_ids = (
+        "h3_long_sequence_clean_tail",
+        "h3_long_sequence_single_frame_after_three",
+        "h3_long_sequence_vary_seed",
+        "h3_long_sequence_periodic_reset",
+        "h3_long_sequence_diagnostics",
+    )
+    h3_long_sequence_active_settings = [
+        setting_id
+        for setting_id in h3_long_sequence_setting_ids
+        if isinstance(custom_settings, dict)
+        and custom_settings.get(setting_id) is True
+    ]
+    if (
+        sliding_window
+        and str(model_def.get("architecture") or "").startswith("minimax_h3")
+        and not model_def.get("omni_reference", False)
+        and h3_long_sequence_active_settings
+    ):
+        from models.minimax_h3.minimax_h3_handler import (
+            resolve_h3_long_sequence_window_policy,
+        )
+
+        h3_long_sequence_policy_resolver = (
+            resolve_h3_long_sequence_window_policy
+        )
+        print(
+            "[MiniMax H3 Long Sequence] Experimental controls: "
+            + ", ".join(h3_long_sequence_active_settings)
+            + "."
+        )
+
     def _cleanup_generation_resources():
         """Release preparation/runtime state on success, failure, or abort."""
         clear_status(state)
         trans.cache = None
+        if hasattr(wan_model, "release_special_loras"):
+            wan_model.release_special_loras()
         if not model_def.get("external_runtime"):
             offload.unload_loras_from_model(trans_lora)
             if trans2_lora is not None:
@@ -8415,6 +8519,7 @@ def generate_video(
         keep_frames_parsed = [] # aligned to the first control frame of current window (therefore ignore previous reuse_frames)
         pre_video_guide = None # reuse_frames of previous window
         pre_audio_guide, pre_audio_guide_sample_rate = None, 0 # trailing generated audio from previous window, used as clean prefix for next
+        h3_long_sequence_tail_fingerprints = {}
         image_size = default_image_size #  default frame dimensions for budget until it is change due to a resize
         sample_fit_canvas = fit_canvas
         current_video_length = first_window_video_length
@@ -9093,6 +9198,68 @@ def generate_video(
                 # need their generated history as input_video.
                 input_video_for_model = None if fake_start_image and window_no == 1 else pre_video_guide
                 prefix_frames_count = source_video_overlap_frames_count if window_no <= 1 else reuse_frames
+                generation_seed = seed
+                h3_long_sequence_window_policy = None
+                if h3_long_sequence_policy_resolver is not None:
+                    h3_long_sequence_window_policy = (
+                        h3_long_sequence_policy_resolver(
+                            window_no,
+                            reuse_frames,
+                            seed,
+                            custom_settings,
+                        )
+                    )
+                    generation_seed = h3_long_sequence_window_policy["seed"]
+                    if window_no > 1 and input_video_for_model is not None:
+                        conditioning_frames = min(
+                            int(input_video_for_model.shape[1]),
+                            int(
+                                h3_long_sequence_window_policy[
+                                    "conditioning_frames"
+                                ]
+                            ),
+                        )
+                        input_video_for_model = input_video_for_model[
+                            :, -conditioning_frames:
+                        ]
+                        prefix_frames_count = conditioning_frames
+                        if (
+                            input_waveform is pre_audio_guide
+                            and _audio_waveform_sample_count(
+                                pre_audio_guide
+                            ) > 0
+                            and pre_audio_guide_sample_rate > 0
+                        ):
+                            input_waveform = _h3_sequence_audio_tail(
+                                pre_audio_guide,
+                                round(
+                                    conditioning_frames
+                                    * pre_audio_guide_sample_rate
+                                    / fps
+                                ),
+                            )
+                    if h3_long_sequence_window_policy["diagnostics"]:
+                        reset_mode = (
+                            "single-frame persistent"
+                            if h3_long_sequence_window_policy[
+                                "persistent_single_frame"
+                            ]
+                            else "single-frame periodic"
+                            if h3_long_sequence_window_policy[
+                                "periodic_reset"
+                            ]
+                            else "full motion history"
+                        )
+                        print(
+                            "[MiniMax H3 Long Sequence] "
+                            f"Window {window_no}/{gen.get('total_windows', 1)} "
+                            f"input: mode={reset_mode}, "
+                            f"condition={prefix_frames_count}, "
+                            f"trim={h3_long_sequence_window_policy['output_trim_frames']}, "
+                            f"seed={generation_seed}, visual="
+                            f"{_format_h3_sequence_fingerprint(_h3_sequence_tensor_fingerprint(input_video_for_model))}, "
+                            f"audio={_format_h3_sequence_fingerprint(_h3_sequence_tensor_fingerprint(input_waveform))}."
+                        )
                 prefix_video_for_model = prefix_video
                 if prefix_video is not None and prefix_video.dtype == torch.uint8:
                     prefix_video_for_model = prefix_video.float().div_(127.5).sub_(1.0)
@@ -9145,7 +9312,7 @@ def generate_video(
                     model_switch_phase = model_switch_phase,
                     embedded_guidance_scale=embedded_guidance_scale,
                     n_prompt=negative_prompt,
-                    seed=seed,
+                    seed=generation_seed,
                     callback=callback,
                     enable_RIFLEx = enable_RIFLEx,
                     VAE_tile_size = VAE_tile_size,
@@ -9282,6 +9449,8 @@ def generate_video(
                     cleanup_temp_audio_files(control_audio_tracks + source_audio_tracks)
                 remove_temp_filenames(temp_filenames_list)
                 clear_gen_cache()
+                if hasattr(wan_model, "release_special_loras"):
+                    wan_model.release_special_loras()
                 offloadobj.unload_all()
                 trans.cache = None 
                 if trans2 is not None: 
@@ -9432,6 +9601,39 @@ def generate_video(
                         pre_video_guide =  sample[:, -reuse_frames:].clone()
                     if pre_video_guide.dtype == torch.uint8:
                         pre_video_guide =  pre_video_guide.float().div_(127.5).sub_(1.0)
+                    if (
+                        h3_long_sequence_window_policy is not None
+                        and h3_long_sequence_window_policy["diagnostics"]
+                    ):
+                        tail_fingerprint = _h3_sequence_tensor_fingerprint(
+                            pre_video_guide
+                        )
+                        tail_digest = (
+                            tail_fingerprint.get("digest")
+                            if isinstance(tail_fingerprint, dict)
+                            else None
+                        )
+                        repeated_from = (
+                            h3_long_sequence_tail_fingerprints.get(tail_digest)
+                            if tail_digest
+                            else None
+                        )
+                        if tail_digest:
+                            h3_long_sequence_tail_fingerprints.setdefault(
+                                tail_digest,
+                                window_no,
+                            )
+                        repeat_note = (
+                            f", exact sampled repeat of window {repeated_from}"
+                            if repeated_from is not None
+                            else ""
+                        )
+                        print(
+                            "[MiniMax H3 Long Sequence] "
+                            f"Window {window_no} output tail: "
+                            f"{_format_h3_sequence_fingerprint(tail_fingerprint)}"
+                            f"{repeat_note}."
+                        )
                 if not (audio_only or is_image):                    
                     sample = _video_tensor_to_uint8_chunk_inplace(sample)
 

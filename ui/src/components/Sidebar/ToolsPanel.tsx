@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Wrench, Upload, X, Film, Mic, Play } from 'lucide-react'
+import { Wrench, Upload, X, Film, Image as ImageIcon, Mic, Play } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
 
@@ -15,21 +15,37 @@ const upscaleMethods = [
   { value: 'lanczos2', label: 'Lanczos 2x (fast)' },
 ]
 
+const imageUpscaleMethods = [
+  { value: 'flashvsr2', label: 'FlashVSR 2x (AI detail)' },
+  { value: 'lanczos1.5', label: 'Lanczos 1.5x (fast)' },
+  { value: 'lanczos2', label: 'Lanczos 2x (fast)' },
+  { value: 'lanczos3', label: 'Lanczos 3x (fast)' },
+  { value: 'lanczos4', label: 'Lanczos 4x (fast)' },
+]
+
 export function ToolsPanel({
   forcedTool,
+  mediaKind = 'video',
   embedded = false,
 }: {
-  forcedTool?: 'upscale' | 'revoice'
+  forcedTool?: 'upscale' | 'film_grain' | 'revoice'
+  mediaKind?: 'image' | 'video'
   embedded?: boolean
 }) {
   const storedTool = useStore(s => s.toolsTool)
   const setTool = useStore(s => s.setToolsTool)
+  const storedUpscaleMedia = useStore(s => s.toolsUpscaleMedia)
+  const setUpscaleMedia = useStore(s => s.setToolsUpscaleMedia)
   const sourcePath = useStore(s => s.toolsSourcePath)
   const sourceName = useStore(s => s.toolsSourceName)
   const sourceUrl = useStore(s => s.toolsSourceUrl)
   const setSource = useStore(s => s.setToolsSource)
   const method = useStore(s => s.toolsUpscaleMethod)
   const setMethod = useStore(s => s.setToolsUpscaleMethod)
+  const grainIntensity = useStore(s => s.filmGrainIntensity)
+  const setGrainIntensity = useStore(s => s.setFilmGrainIntensity)
+  const grainSaturation = useStore(s => s.filmGrainSaturation)
+  const setGrainSaturation = useStore(s => s.setFilmGrainSaturation)
   const revoiceMode = useStore(s => s.toolsRevoiceMode)
   const setRevoiceMode = useStore(s => s.setToolsRevoiceMode)
   const revoiceRefs = useStore(s => s.toolsRevoiceRefs)
@@ -39,7 +55,7 @@ export function ToolsPanel({
   const selectedOutput = useStore(s => s.selectedOutput)
   const flashvsrMode = useStore(s => s.servicesConfig?.flashvsr_mode ?? 1)
   const current = outputs[selectedOutput]
-  const currentIsVideo = !!current && current.type === 'video'
+  const currentMatchesMedia = !!current && current.type === mediaKind
 
   const fileRef = useRef<HTMLInputElement>(null)
   const vcFileRefs = [useRef<HTMLInputElement>(null), useRef<HTMLInputElement>(null)]
@@ -50,6 +66,25 @@ export function ToolsPanel({
   useEffect(() => {
     if (forcedTool && storedTool !== forcedTool) setTool(forcedTool)
   }, [forcedTool, setTool, storedTool])
+
+  useEffect(() => {
+    if (tool === 'upscale' && storedUpscaleMedia !== mediaKind) {
+      setUpscaleMedia(mediaKind)
+      setSource(null)
+    }
+  }, [mediaKind, setSource, setUpscaleMedia, storedUpscaleMedia, tool])
+
+  // Video exposes several temporal/two-pass FlashVSR variants that do not
+  // apply to a still image. If the user moves from Video Upscale to Image
+  // Upscale, select the nearest valid still-image method instead of leaving
+  // a hidden, invalid value behind the dropdown.
+  useEffect(() => {
+    if (tool !== 'upscale') return
+    const choices = mediaKind === 'image' ? imageUpscaleMethods : upscaleMethods
+    if (!choices.some(choice => choice.value === method)) {
+      setMethod('flashvsr2')
+    }
+  }, [mediaKind, method, setMethod, tool])
 
   const handleSourceUpload = async (file: File) => {
     setUploading(true)
@@ -64,7 +99,7 @@ export function ToolsPanel({
   }
 
   const useCurrentClip = () => {
-    if (currentIsVideo) setSource({ path: current.name, name: current.name, url: current.url })
+    if (currentMatchesMedia && current) setSource({ path: current.name, name: current.name, url: current.url })
   }
 
   const handleVcUpload = async (index: number, file: File) => {
@@ -80,7 +115,11 @@ export function ToolsPanel({
   }
 
   const hasRefs = revoiceRefs.some(r => r && r.path)
-  const canRun = !!sourcePath && (tool === 'upscale' || hasRefs)
+  const canRun = !!sourcePath && (
+    tool === 'upscale'
+    || (tool === 'film_grain' && grainIntensity > 0)
+    || (tool === 'revoice' && hasRefs)
+  )
   const flashvsrOff = flashvsrMode === 0 && method.startsWith('flashvsr')
 
   const handleRun = () => {
@@ -99,7 +138,7 @@ export function ToolsPanel({
         </div>
         {/* Tool selector */}
         <div className="flex bg-bg-tertiary rounded-lg p-0.5 border border-border">
-          {([['upscale', 'Upscale'], ['revoice', 'Revoice']] as const).map(([val, label]) => (
+          {([['upscale', 'Upscale'], ['film_grain', 'Film Grain'], ['revoice', 'Revoice']] as const).map(([val, label]) => (
             <button
               key={val}
               onClick={() => setTool(val)}
@@ -114,16 +153,23 @@ export function ToolsPanel({
       </div>
       )}
 
-      {/* Source clip — upload, or use the clip currently selected in the gallery */}
+      {/* Source media — upload, or use the matching gallery selection. */}
       <div>
-        <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">Source Clip</label>
+        <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">
+          Source {mediaKind === 'image' ? 'Image' : 'Clip'}
+        </label>
         {sourcePath ? (
           <div className="bg-bg-tertiary border border-border rounded-lg p-2 space-y-2">
-            {sourceUrl && (
+            {sourceUrl && mediaKind === 'video' && (
               <video src={sourceUrl} className="w-full rounded-md max-h-44 bg-black" muted controls playsInline />
             )}
+            {sourceUrl && mediaKind === 'image' && (
+              <img src={sourceUrl} alt="Upscale source" className="w-full rounded-md max-h-56 object-contain bg-black" />
+            )}
             <div className="flex items-center gap-2">
-              <Film size={12} className="text-accent-blue shrink-0" />
+              {mediaKind === 'image'
+                ? <ImageIcon size={12} className="text-accent-blue shrink-0" />
+                : <Film size={12} className="text-accent-blue shrink-0" />}
               <span className="flex-1 min-w-0 truncate text-[11px] text-text-primary">{sourceName}</span>
               <button onClick={() => setSource(null)} className="p-0.5 text-text-muted hover:text-red-400 transition-colors" title="Clear">
                 <X size={12} />
@@ -137,21 +183,25 @@ export function ToolsPanel({
               className={`border-2 border-dashed border-border rounded-lg p-3 text-center cursor-pointer hover:border-accent-blue transition-colors ${uploading ? 'opacity-50 pointer-events-none' : ''}`}
             >
               <Upload size={16} className="mx-auto mb-1 text-text-muted" />
-              <p className="text-[11px] text-text-secondary">{uploading ? 'Uploading...' : 'Upload a video clip'}</p>
+              <p className="text-[11px] text-text-secondary">
+                {uploading ? 'Uploading...' : `Upload ${mediaKind === 'image' ? 'an image' : 'a video clip'}`}
+              </p>
               <input
                 ref={fileRef}
                 type="file"
-                accept="video/*"
+                accept={mediaKind === 'image' ? 'image/*' : 'video/*'}
                 className="hidden"
                 onChange={e => { const f = e.target.files?.[0]; if (f) handleSourceUpload(f) }}
               />
             </div>
             <button
               onClick={useCurrentClip}
-              disabled={!currentIsVideo}
+              disabled={!currentMatchesMedia}
               className="w-full text-[11px] py-1.5 rounded-md border border-border bg-bg-tertiary text-text-secondary hover:text-text-primary disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
             >
-              {currentIsVideo ? 'Use selected gallery clip' : 'Select a video in the gallery first'}
+              {currentMatchesMedia
+                ? `Use selected gallery ${mediaKind}`
+                : `Select ${mediaKind === 'image' ? 'an image' : 'a video'} in the gallery first`}
             </button>
           </div>
         )}
@@ -166,7 +216,9 @@ export function ToolsPanel({
             onChange={e => setMethod(e.target.value)}
             className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
           >
-            {upscaleMethods.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            {(mediaKind === 'image' ? imageUpscaleMethods : upscaleMethods).map(o => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
           </select>
           {flashvsrOff && (
             <p className="text-[10px] text-indicator-warning mt-1.5 leading-snug">
@@ -174,7 +226,42 @@ export function ToolsPanel({
             </p>
           )}
           <p className="text-[10px] text-text-muted mt-1.5 leading-snug">
-            FlashVSR is model-based super-resolution (sharper, slower; weights download on first use). Lanczos is a fast classic resize. The clip's audio is preserved.
+            FlashVSR is model-based super-resolution (sharper, slower; weights download on first use). Lanczos is a fast classic resize.
+            {mediaKind === 'video' ? " The clip's audio is preserved." : ''}
+          </p>
+        </div>
+      ) : tool === 'film_grain' ? (
+        <div className="space-y-4">
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="text-[11px] text-text-muted uppercase tracking-wider">Grain Intensity</label>
+              <span className="text-xs text-text-secondary">{grainIntensity.toFixed(2)}</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={grainIntensity}
+              onChange={event => setGrainIntensity(Number(event.target.value))}
+            />
+          </div>
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="text-[11px] text-text-muted uppercase tracking-wider">Grain Saturation</label>
+              <span className="text-xs text-text-secondary">{grainSaturation.toFixed(2)}</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={grainSaturation}
+              onChange={event => setGrainSaturation(Number(event.target.value))}
+            />
+          </div>
+          <p className="text-[10px] text-text-muted leading-snug">
+            Adds film grain to the full clip as a new finished copy. The original video and its audio are preserved.
           </p>
         </div>
       ) : (
@@ -246,7 +333,11 @@ export function ToolsPanel({
         }`}
       >
         <Play size={13} fill={canRun ? 'white' : 'currentColor'} />
-        {tool === 'upscale' ? 'Upscale Clip' : 'Replace Voice'}
+        {tool === 'upscale'
+          ? `Upscale ${mediaKind === 'image' ? 'Image' : 'Clip'}`
+          : tool === 'film_grain'
+            ? 'Apply Film Grain'
+            : 'Replace Voice'}
       </button>
     </div>
   )

@@ -1,4 +1,4 @@
-"""Regressions for MiniMax H3 First / Last text-token budgeting."""
+"""Regressions for MiniMax H3 prompt measurement and safe compaction."""
 
 from __future__ import annotations
 
@@ -14,12 +14,10 @@ if str(APP) not in sys.path:
     sys.path.insert(0, str(APP))
 
 from services.h3_prompt_budget import (  # noqa: E402
-    H3_BASE_TEXT_TOKEN_LIMIT,
     H3_ENHANCED_TEXT_TOKEN_TARGET,
-    H3PromptBudgetError,
+    H3_PROMPT_QUALITY_TARGET,
     fit_h3_base_prompt,
     h3_prompt_token_count,
-    validate_h3_base_prompt,
 )
 from services.h3_window_planner import compile_h3_window_prompts  # noqa: E402
 from services import llm_service  # noqa: E402
@@ -67,7 +65,7 @@ class H3PromptBudgetTests(unittest.TestCase):
         verbose_clauses = " ".join(
             "The expansive mountain environment contains richly described distant "
             "ridges, atmospheric haze, layered clouds, rocks, grasses, and sunlight."
-            for _index in range(22)
+            for _index in range(70)
         )
         prompt = (
             f"{alignment}\n\n"
@@ -105,14 +103,40 @@ class H3PromptBudgetTests(unittest.TestCase):
             "overall_soundscape: Quiet room tone.\n\n"
             "non_diegetic_music: N/A"
         )
-        with self.assertRaisesRegex(H3PromptBudgetError, "without removing"):
-            fit_h3_base_prompt(prompt)
+        result = fit_h3_base_prompt(prompt, target_tokens=128)
 
-    def test_validation_rejects_text_the_model_would_truncate(self):
+        self.assertEqual(result.prompt.count(dialogue), 1)
+        self.assertGreater(result.token_count, 128)
+
+    def test_long_unstructured_prompt_is_preserved_instead_of_rejected(self):
         prompt = " ".join(f"word{index}" for index in range(600))
-        self.assertGreater(h3_prompt_token_count(prompt), H3_BASE_TEXT_TOKEN_LIMIT)
-        with self.assertRaisesRegex(H3PromptBudgetError, "reads only 512"):
-            validate_h3_base_prompt(prompt, label="H3 window 2")
+        self.assertGreater(h3_prompt_token_count(prompt), 512)
+
+        result = fit_h3_base_prompt(prompt, target_tokens=480)
+
+        self.assertEqual(result.prompt, prompt)
+        self.assertFalse(result.compacted)
+        self.assertGreater(result.token_count, 512)
+
+    def test_structured_prompt_above_old_cutoff_is_not_compacted_unnecessarily(self):
+        detail = " ".join(
+            "The camera tracks the detailed room and preserves the requested action."
+            for _index in range(34)
+        )
+        prompt = (
+            "integrated_multimodal_description: [Shot 1] "
+            f"{detail} The final frame shows the open doorway.\n\n"
+            "overall_soundscape: Quiet room tone and footsteps.\n\n"
+            "non_diegetic_music: N/A"
+        )
+        count = h3_prompt_token_count(prompt)
+        self.assertGreater(count, 512)
+        self.assertLessEqual(count, H3_PROMPT_QUALITY_TARGET)
+
+        result = fit_h3_base_prompt(prompt)
+
+        self.assertEqual(result.prompt, prompt)
+        self.assertFalse(result.compacted)
 
     def test_window_compiler_records_individual_prompt_budget(self):
         boundaries = [{
@@ -152,7 +176,10 @@ class H3PromptBudgetTests(unittest.TestCase):
         compiled = compile_h3_window_prompts(plan, boundaries)
 
         self.assertEqual(len(compiled), 1)
-        self.assertEqual(compiled[0]["prompt_token_limit"], H3_BASE_TEXT_TOKEN_LIMIT)
+        self.assertEqual(
+            compiled[0]["prompt_quality_target"],
+            H3_PROMPT_QUALITY_TARGET,
+        )
         self.assertEqual(
             compiled[0]["prompt_tokens"],
             h3_prompt_token_count(compiled[0]["prompt"]),

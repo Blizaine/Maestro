@@ -13,9 +13,7 @@ import re
 from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 
 from services.h3_prompt_budget import (
-    H3_BASE_TEXT_TOKEN_LIMIT as _H3_BASE_TEXT_TOKEN_LIMIT,
     H3_ENHANCED_TEXT_TOKEN_TARGET as _H3_DIRECTOR_TEXT_TOKEN_BUDGET,
-    H3PromptBudgetError,
     fit_h3_base_prompt,
     h3_prompt_token_count,
 )
@@ -715,8 +713,8 @@ def _source_prompt_parts(
     closing = _normalized_space(normalize_h3_text(closing_blocking))
     # Native shot prompts already carry a concise ``Final beat``. Appending
     # Director's expanded closing cast table repeated every identity, outfit,
-    # and position near the end of the prompt, often pushing dialogue beyond
-    # H3 Base's 512-token text window.
+    # and position near the end of the prompt, making the actual action and
+    # dialogue less prominent to the conditioner.
     if (
         closing
         and "final beat:" not in body.casefold()
@@ -897,12 +895,11 @@ def _compact_h3_visual_body(
 ) -> str:
     """Remove planner repetition while retaining H3's highest-value visuals.
 
-    H3 Base silently truncates plain text at 512 tokens.  Director's planning
-    JSON intentionally contains redundant continuity data, but sending every
-    copy caused late dialogue tags to disappear while the early visual prompt
-    still rendered beautifully.  Rebuild the visual body from its structured
-    labels so identity, wardrobe, action, camera, and the final state each
-    appear once.
+    Director's planning JSON intentionally contains redundant continuity data.
+    Sending every copy can dilute late dialogue and final-action instructions
+    even though H3 now receives the complete sequence. Rebuild the visual body
+    from its structured labels so identity, wardrobe, action, camera, and the
+    final state each appear once.
     """
 
     text = _normalized_space(body)
@@ -1131,9 +1128,8 @@ def _compile_official_dialogue(
 
     if valid_beats:
         # Structured dialogue is authoritative. Remove any planner-authored
-        # copies and insert one compact, early sequence. H3 Base truncates
-        # plain text at 512 tokens; retaining dialogue at the tail produced a
-        # visually excellent clip whose intended words never reached Qwen.
+        # copies and insert one concise, prominent sequence so visual prose
+        # cannot bury the exact lines and their timing cues.
         body = _replace_spans(body, spans, [""] * len(spans))
         beat_count = len(valid_beats)
         dialogue_parts: list[str] = []
@@ -1704,43 +1700,30 @@ def compile_h3_official_prompt(
             if token_count <= _H3_DIRECTOR_TEXT_TOKEN_BUDGET:
                 break
 
-        if final_tokens > _H3_BASE_TEXT_TOKEN_LIMIT:
-            # Dense conversation shots can legitimately spend most of H3's
-            # text window on exact dialogue.  The Director-specific rebuild
-            # above preserves generous cast/action context, so give the shared
-            # structure-aware H3 fitter one final opportunity to select the
-            # highest-value clauses.  It protects every canonical dialogue
-            # block, shot/timing marker, field boundary, and first/final state;
-            # unlike string slicing it cannot silently truncate a line.
-            fit_error: Exception | None = None
-            for target in (
-                _H3_DIRECTOR_TEXT_TOKEN_BUDGET,
-                _H3_BASE_TEXT_TOKEN_LIMIT,
-            ):
-                try:
-                    fitted = fit_h3_base_prompt(
-                        compiled,
-                        target_tokens=target,
-                    )
-                    compiled = fitted.prompt
-                    final_tokens = fitted.token_count
-                    used_level = max(used_level, 4)
-                    fit_error = None
-                    break
-                except H3PromptBudgetError as exc:
-                    fit_error = exc
-            if final_tokens > _H3_BASE_TEXT_TOKEN_LIMIT:
-                detail = f" ({fit_error})" if fit_error else ""
-                raise H3DialogueContractError(
-                    "MiniMax H3 Director prompt cannot fit H3 Base's "
-                    "512-token text limit after deterministic compaction "
-                    f"({final_tokens} tokens){detail}."
-                )
-        if used_level:
+        if final_tokens > _H3_DIRECTOR_TEXT_TOKEN_BUDGET:
+            # Give unusually dense Director prompts one final structure-aware
+            # quality pass. Exact dialogue, timing, and first/final states are
+            # protected; if the target cannot be reached safely the complete
+            # prompt remains valid and is sent to H3 intact.
+            fitted = fit_h3_base_prompt(
+                compiled,
+                target_tokens=_H3_DIRECTOR_TEXT_TOKEN_BUDGET,
+            )
+            compiled = fitted.prompt
+            final_tokens = fitted.token_count
+            if fitted.compacted:
+                used_level = max(used_level, 4)
+        if used_level and final_tokens < initial_tokens:
             print(
                 "[MiniMax H3] Compacted Director prompt from "
-                f"{initial_tokens} to {final_tokens} text tokens so dialogue "
-                "and sound instructions remain inside H3's 512-token limit."
+                f"{initial_tokens} to {final_tokens} text tokens for clearer "
+                "instruction adherence."
+            )
+        elif final_tokens > _H3_DIRECTOR_TEXT_TOKEN_BUDGET:
+            print(
+                "[MiniMax H3] Preserving complete Director prompt at "
+                f"{final_tokens} text tokens; the quality target is not a "
+                "generation limit."
             )
     return normalize_h3_text(compiled).strip(), vocal_contract
 
@@ -1795,19 +1778,6 @@ def validate_h3_prompt_contract(
         errors.append("legacy Maestro prompt wrapper remains in the H3 payload")
     if any(0x80 <= ord(character) <= 0x9F for character in text):
         errors.append("prompt contains an orphaned C1 control character")
-    if mode != "ref2va":
-        token_count = h3_prompt_token_count(text)
-        if token_count > _H3_BASE_TEXT_TOKEN_LIMIT:
-            errors.append(
-                "prompt exceeds H3 Base's 512-token text-conditioning limit "
-                f"({token_count} tokens)"
-            )
-        dialogue_spans, _ = _dialogue_spans(text)
-        for index, (_, end) in enumerate(dialogue_spans, start=1):
-            if h3_prompt_token_count(text[:end]) > _H3_BASE_TEXT_TOKEN_LIMIT:
-                errors.append(
-                    f"dialogue block {index} would be truncated before H3 receives it"
-                )
     if mode == "i2va" and not text.startswith(
         "For the target video, at 0.00 seconds into the target video, <Picture 1>"
     ):

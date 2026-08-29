@@ -1,6 +1,6 @@
 import { ChevronDown, Check, Plus } from 'lucide-react'
 import { useState, useRef, useEffect } from 'react'
-import { useStore, getFamiliesForMode, getModelsForFamily } from '../../stores/useStore'
+import { useStore, getFamiliesForMode, getModelsForFamily, modelSupportsImageWorkflow } from '../../stores/useStore'
 import { InfoTooltip } from './InfoTooltip'
 
 export function ModelSelector() {
@@ -9,6 +9,7 @@ export function ModelSelector() {
   const enabledModels = useStore(s => s.enabledModels)
   const generationMode = useStore(s => s.generationMode)
   const editSubMode = useStore(s => s.editSubMode)
+  const imageWorkflow = useStore(s => s.studioImageWorkflow)
   const currentModelType = useStore(s => s.params.model_type)
   const selectModel = useStore(s => s.selectModel)
   const openModelVisibility = useStore(s => s.openModelVisibility)
@@ -43,9 +44,12 @@ export function ModelSelector() {
   // Build grouped model list, filtered by:
   //   1. enabledModels (Settings → System → Model Visibility),
   //   2. nsfw_only gate (Mature Mode must be on for those to appear).
+  const workflowFilter = (model: typeof models[number]) => generationMode !== 'image'
+    || modelSupportsImageWorkflow(model, imageWorkflow)
   const groups = modeFamilies.map(family => ({
     family,
     models: getModelsForFamily(family.id, models, generationMode, effectiveSubMode)
+      .filter(workflowFilter)
       .filter(m => enabledModels.has(m.model_type))
       .filter(m => !m.nsfw_only || nsfwMode),
   })).filter(g => g.models.length > 0)
@@ -54,6 +58,7 @@ export function ModelSelector() {
   // "+N" hint that nudges users toward Settings → Enabled Models.
   const disabledCount = modeFamilies.reduce((n, family) => {
     const avail = getModelsForFamily(family.id, models, generationMode, effectiveSubMode)
+      .filter(workflowFilter)
       .filter(m => !m.nsfw_only || nsfwMode)
     return n + avail.filter(m => !enabledModels.has(m.model_type)).length
   }, 0)

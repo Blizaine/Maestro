@@ -22,6 +22,7 @@ _VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"}
 _AUDIO_EXTENSIONS = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav"}
 _AUDIO_INTENTS = {"voice", "drive", "style"}
 _IMAGE_INTENTS = {"identity", "scene", "style", "composition"}
+_VIDEO_INTENTS = {"character", "motion", "scene"}
 _AUDIO_REFERENCE_TAG_RE = re.compile(
     r"(?P<tag><Audio\s+(?P<tag_index>\d+)>)|(?P<plain>\bAudio\s+(?P<plain_index>\d+)\b)",
     re.IGNORECASE,
@@ -79,6 +80,12 @@ def validate_reference_manifest(
         item["type"] = kind
         item["path"] = path
         item["role"] = str(raw.get("role") or "").strip()[:500]
+        library_character_id = str(raw.get("library_character_id") or "").strip()[:128]
+        character_name = str(raw.get("character_name") or "").strip()[:120]
+        if library_character_id:
+            item["library_character_id"] = library_character_id
+        if character_name:
+            item["character_name"] = character_name
         if kind == "image":
             image_intent = str(raw.get("image_intent") or "identity").strip().lower()
             if image_intent not in _IMAGE_INTENTS:
@@ -100,6 +107,14 @@ def validate_reference_manifest(
             if audio_intent == "drive":
                 drive_audio_count += 1
         if kind == "video":
+            video_intent = str(raw.get("video_intent") or "motion").strip().lower()
+            if video_intent not in _VIDEO_INTENTS:
+                choices = ", ".join(sorted(_VIDEO_INTENTS))
+                raise ValueError(
+                    f"Reference {index + 1} has invalid video intent "
+                    f"{video_intent!r}; expected one of: {choices}."
+                )
+            item["video_intent"] = video_intent
             item["include_audio"] = bool(raw.get("include_audio", True))
             audio_path = str(raw.get("audio_path") or "").strip()
             if audio_path:

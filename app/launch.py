@@ -28,6 +28,7 @@ import threading
 import traceback
 import requests
 from pathlib import Path, PureWindowsPath
+from urllib.parse import quote
 
 # --- Bootstrap: CWD must be app/ and sys.argv must be patched before importing wgp ---
 _app_dir = os.path.dirname(os.path.abspath(__file__))
@@ -65,15 +66,21 @@ from services.generation_eta import AdaptiveGenerationEta
 from services.remote_access import TailscaleManager
 from services.web_push import WebPushService, WebPushUnavailable
 from services.editor_projects import (
+    build_editor_media_preview,
     EditorProjectError,
     EditorRenderCancelled,
     create_editor_project,
     delete_editor_project,
+    editor_export_dimensions,
+    editor_export_capabilities,
+    editor_project_duration,
+    inspect_editor_assets,
     list_editor_projects,
     load_editor_project,
     probe_media,
     render_editor_project,
     resolve_editor_asset,
+    resolve_editor_media_cache_file,
     save_editor_project,
 )
 
@@ -434,6 +441,27 @@ def _workspace_dir(workspace: str = None) -> str:
     return ws_dir
 
 
+def _workspace_browse_dir(workspace: str) -> str | None:
+    """Resolve an existing/legacy workspace name without creating it.
+
+    Workspace creation currently restricts names to simple identifiers, but
+    older output folders may legitimately contain spaces. Browsing therefore
+    accepts any single safe path segment while still rejecting traversal and
+    paths that escape the configured output root.
+    """
+    name = str(workspace or "default").strip() or "default"
+    base = wgp.server_config.get("save_path", "outputs")
+    if name == "default":
+        return os.path.realpath(base)
+    if (
+        name in {".", ".."}
+        or os.path.basename(name) != name
+        or any(character in name for character in ("/", "\\", "\0"))
+    ):
+        return None
+    return _safe_join(base, name)
+
+
 def _workspace_file_count(path: str) -> int:
     """Non-hidden files directly inside a workspace folder (for delete
     confirms). scandir answers is_file() from the enumeration data on
@@ -684,6 +712,15 @@ def list_models():
             ),
             "generates_audio": bool(md.get("returns_audio", False)),
             "supports_ref_images": bool(md.get("image_ref_choices") or md.get("omni_reference")),
+            # Studio's Image workflow selector uses the model definition's
+            # native capabilities instead of name/architecture heuristics.
+            "supports_image_edit": bool(md.get("image_ref_choices")),
+            "requires_image_reference": bool(md.get("one_image_ref_needed", False)),
+            "supports_image_inpaint": bool(md.get("inpaint_support", False)),
+            "supports_image_outpaint": bool(
+                md.get("inpaint_support", False)
+                and 2 in (md.get("video_guide_outpainting") or [])
+            ),
             "director": director_compat,
             "is_downloaded": _check_model_downloaded(mt),
             # When True, the UI hides this model unless Mature Mode is
@@ -1344,6 +1381,76 @@ def _normalize_video_prompt_type(body: dict) -> None:
         body["video_prompt_type"] = new_vpt
 
 
+def _prepare_studio_image_outpaint_mask(body: dict, model_def: dict) -> None:
+    """Create the protected-source mask required by WanGP image Outpaint.
+
+    WanGP's image in/outpainting contract consumes a source image plus a mask.
+    Its Gradio ImageEditor silently supplies an empty (black) mask when the
+    user only asks to expand the canvas; preprocessing then pads that mask
+    with white in the new margins. Maestro's simpler Outpaint UI deliberately
+    asks only for the source and expansion amounts, so reproduce that exact
+    contract here before validation instead of making users upload a pointless
+    all-black file themselves.
+    """
+    if (
+        body.get("_studio_image_workflow") != "outpaint"
+        or int(body.get("image_mode") or 0) != 2
+        or body.get("image_mask")
+        or not body.get("image_guide")
+    ):
+        return
+
+    raw_source = str(body.get("image_guide") or "").strip()
+    workspace = str(body.get("workspace") or _get_active_workspace())
+    candidates = []
+    if os.path.isabs(raw_source):
+        candidates.append(raw_source)
+    else:
+        candidates.extend(
+            [
+                os.path.join(_workspace_dir(workspace), raw_source),
+                os.path.join(_workspace_dir(workspace), os.path.basename(raw_source)),
+                os.path.join(os.getcwd(), raw_source),
+                os.path.join(os.getcwd(), "uploads", os.path.basename(raw_source)),
+            ]
+        )
+    source_path = next(
+        (candidate for candidate in candidates if os.path.isfile(candidate)),
+        None,
+    )
+    if source_path is None:
+        return
+
+    from PIL import Image as PILImage
+
+    with PILImage.open(source_path) as source_image:
+        mask = PILImage.new("RGB", source_image.size, (0, 0, 0))
+    uploads_dir = os.path.join(os.getcwd(), "uploads")
+    os.makedirs(uploads_dir, exist_ok=True)
+    mask_path = os.path.join(
+        uploads_dir,
+        f"image_outpaint_protect_{uuid.uuid4().hex[:8]}.png",
+    )
+    mask.save(mask_path)
+    body["image_mask"] = mask_path
+
+    # Preserve model-specific guide letters (Qwen uses VA; Krea Edit uses
+    # VAG) while ensuring the mask-bearing V/A contract is present.
+    prompt_type = str(body.get("video_prompt_type") or "")
+    native_prompt_type = str(model_def.get("inpaint_video_prompt_type") or "VA")
+    for letter in native_prompt_type:
+        if letter not in prompt_type:
+            prompt_type += letter
+    for letter in "VA":
+        if letter not in prompt_type:
+            prompt_type += letter
+    body["video_prompt_type"] = prompt_type
+    print(
+        "[Image Outpaint] Built protected-source mask for native "
+        f"{prompt_type} conditioning: {os.path.basename(mask_path)}"
+    )
+
+
 def _h3_injected_keyframes_from_body(body: dict) -> list[dict]:
     """Return the stable path/position contract used by H3 prompt planning."""
 
@@ -1817,9 +1924,27 @@ def delete_lora_file(directory: str, filename: str):
 def _lora_is_compatible_with_model(model_def: dict, path: str) -> bool:
     """Keep special adapters out of model selectors that cannot run them."""
 
-    del model_def, path
-    # MiniMax H3 Full/Pruned AdaLN conversion happens in the transformer
-    # preprocessor, so H3 adapters no longer need a checkpoint-size filter.
+    # Most MiniMax H3 adapters can cross Full/Pruned through Maestro's AdaLN
+    # conversion. Presets may still opt out explicitly when an upstream
+    # adapter is tied to one checkpoint shape.
+    architecture = str((model_def or {}).get("architecture") or "")
+    if architecture.startswith("minimax_h3"):
+        from models.minimax_h3.turbo import minimax_h3_turbo_preset_for_path
+
+        preset = minimax_h3_turbo_preset_for_path(path)
+        if preset is not None:
+            adapter_workflow = str(preset.get("workflow") or "all").lower()
+            model_workflow = (
+                "ref2va" if (model_def or {}).get("omni_reference") else "fl2va"
+            )
+            if adapter_workflow not in {"all", model_workflow}:
+                return False
+            if (
+                preset.get("full_checkpoint_only")
+                and not (model_def or {}).get("minimax_h3_full_checkpoint", False)
+            ):
+                return False
+            return True
     return True
 
 
@@ -1833,11 +1958,22 @@ def _minimax_h3_turbo_option(model_def: dict) -> dict | None:
     from models.minimax_h3.turbo import (
         MINIMAX_H3_TURBO_DEFAULT_PRESET_ID,
         MINIMAX_H3_TURBO_MANIFEST,
-        MINIMAX_H3_TURBO_PRESETS,
         minimax_h3_turbo_preset,
+        minimax_h3_turbo_presets_for_workflow,
     )
 
-    default_preset = minimax_h3_turbo_preset()
+    workflow = "ref2va" if (model_def or {}).get("omni_reference") else "fl2va"
+    full_checkpoint = bool(
+        (model_def or {}).get("minimax_h3_full_checkpoint", False)
+    )
+    compatible_presets = minimax_h3_turbo_presets_for_workflow(
+        workflow,
+        full_checkpoint=full_checkpoint,
+    )
+    default_preset = minimax_h3_turbo_preset(
+        workflow=workflow,
+        full_checkpoint=full_checkpoint,
+    )
     presets = [
         {
             "id": str(preset["id"]),
@@ -1850,8 +1986,11 @@ def _minimax_h3_turbo_option(model_def: dict) -> dict | None:
             "weight_max": float(preset.get("weight_max", 2.0)),
             "description": str(preset.get("description") or ""),
             "revision": str(preset["revision"]),
+            "workflow": str(preset.get("workflow") or "all"),
+            "runtime": str(preset.get("runtime") or "standard_lora"),
+            "full_checkpoint_only": bool(preset.get("full_checkpoint_only", False)),
         }
-        for preset in MINIMAX_H3_TURBO_PRESETS
+        for preset in compatible_presets
     ]
     upstream = MINIMAX_H3_TURBO_MANIFEST.get("upstream_watch") or {}
     return {
@@ -1865,10 +2004,13 @@ def _minimax_h3_turbo_option(model_def: dict) -> dict | None:
         "presets": presets,
         "upstream_url": str(upstream.get("model_card_url") or ""),
         "guide": (
-            "Experimental MiniMax H3 accelerator for Full and Pruned "
-            "checkpoints. Choose a pinned Maestro-validated version or an "
-            "explicit candidate; mutable Hugging Face main is never loaded "
-            "silently. Adjust the selected adapter strength in Advanced."
+            "Experimental MiniMax H3 accelerators filtered for this "
+            f"{workflow.upper()} checkpoint. Standard LoRAs use Maestro's "
+            "normal low-step schedule; Alibaba PAI Acc presets use their "
+            "required Parallel Decoding Distillation heads and eight-step "
+            "schedule. Alibaba's official Ref2VA PDD recipe recommends "
+            "high-detail references, while Maestro also honors the faster "
+            "Match output setting. Mutable Hugging Face main is never loaded silently."
         ),
     }
 
@@ -5677,6 +5819,17 @@ def get_model_options(model_type: str):
         "i2v_class": md.get("i2v_class", False),
         "t2v_class": md.get("t2v_class", False),
         "image_outputs": md.get("image_outputs", False),
+        "inpaint_support": md.get("inpaint_support", False),
+        "outpaint_support": bool(
+            md.get("inpaint_support", False)
+            and 2 in (md.get("video_guide_outpainting") or [])
+        ),
+        "inpaint_video_prompt_type": md.get(
+            "inpaint_video_prompt_type", "VAG"
+        ),
+        "image_video_prompt_type": md.get(
+            "image_video_prompt_type", "KI"
+        ),
         "supports_end_frame": "E" in md.get("image_prompt_types_allowed", ""),
         "custom_frames_injection": md.get("custom_frames_injection", False),
         "omni_reference": md.get("omni_reference", False),
@@ -8240,18 +8393,7 @@ async def llm_enhance_prompt(request: Request):
                 prompt,
             )
             result = "\n".join(ltx_prompts)
-        response = {"original": prompt, "enhanced": result}
-        if needs_h3_context_ir and not model_type.lower().startswith("minimax_h3_ref2va"):
-            from services.h3_prompt_budget import (
-                H3_BASE_TEXT_TOKEN_LIMIT,
-                h3_prompt_token_count,
-            )
-
-            response["prompt_budget"] = {
-                "token_count": h3_prompt_token_count(result),
-                "token_limit": H3_BASE_TEXT_TOKEN_LIMIT,
-            }
-        return response
+        return {"original": prompt, "enhanced": result}
     except H3PromptBudgetError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
@@ -8504,6 +8646,58 @@ def serve_audio_upload(filename: str):
     if filepath is None or not os.path.isfile(filepath):
         raise HTTPException(status_code=404, detail="File not found")
     return share_delete_file_response(filepath)
+
+
+# ============================================================================
+# API Routes: Saved Omni characters
+# ============================================================================
+
+@api.get("/api/v1/characters")
+def list_saved_characters():
+    """List reusable local image/video + voice character bundles."""
+    from services.character_library import list_characters
+
+    return {"characters": list_characters()}
+
+
+@api.post("/api/v1/characters")
+async def create_saved_character(request: Request):
+    """Copy temporary uploads into Maestro's persistent character library."""
+    from services.character_library import create_character
+
+    body = await request.json()
+    try:
+        character = await asyncio.to_thread(
+            create_character,
+            name=body.get("name", ""),
+            visual_path=body.get("visual_path", ""),
+            visual_type=body.get("visual_type", ""),
+            voice_path=body.get("voice_path") or None,
+            use_video_voice=body.get("use_video_voice") is True,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return character
+
+
+@api.delete("/api/v1/characters/{character_id}")
+def delete_saved_character(character_id: str):
+    from services.character_library import delete_character
+
+    if not delete_character(character_id):
+        raise HTTPException(status_code=404, detail="Saved character not found")
+    return {"deleted": character_id}
+
+
+@api.get("/api/v1/characters/{character_id}/media/{slot}")
+def serve_saved_character_media(character_id: str, slot: str):
+    from services.character_library import get_character_media
+    from services.win_safe_files import share_delete_file_response
+
+    media_path = get_character_media(character_id, slot)
+    if media_path is None:
+        raise HTTPException(status_code=404, detail="Saved character media not found")
+    return share_delete_file_response(str(media_path))
 
 
 @api.post("/api/v1/audio/mix")
@@ -9480,6 +9674,13 @@ async def generate(request: Request):
             detail="_queue_mode must be either 'now' or 'held'",
         )
     hold_for_queue = queue_mode == "held"
+    # The Studio client sets this only when the per-window prompts currently
+    # visible to the user are included in the request.  Consume it here so the
+    # internal marker is never written to sidecar metadata.
+    preserve_reviewed_h3_plan = body.pop(
+        "_h3_window_plan_reviewed",
+        False,
+    ) is True
     h3_window_plan_response = None
     ltx_window_plan_response = None
 
@@ -9561,14 +9762,36 @@ async def generate(request: Request):
                 normalize_minimax_h3_turbo_request,
             )
 
-            if normalize_minimax_h3_turbo_request(
+            turbo_applied = normalize_minimax_h3_turbo_request(
                 body,
                 full_checkpoint=bool(
                     _generation_model_def.get(
                         "minimax_h3_full_checkpoint", False
                     )
                 ),
-            ):
+                workflow=(
+                    "ref2va"
+                    if _generation_model_def.get("omni_reference")
+                    else "fl2va"
+                ),
+            )
+            if _generation_model_def.get("omni_reference"):
+                from models.minimax_h3.turbo import find_minimax_h3_pdd_loras
+
+                if find_minimax_h3_pdd_loras(body.get("activated_loras")):
+                    pdd_reference_detail = str(
+                        body.get("minimax_h3_reference_detail") or "match"
+                    ).strip().lower()
+                    pdd_reference_label = (
+                        "official high detail (2048px short edge)"
+                        if pdd_reference_detail == "max"
+                        else "Match output (no reference upscaling)"
+                    )
+                    print(
+                        "[MiniMax H3 PDD] Ref2VA reference preparation: "
+                        f"{pdd_reference_label}."
+                    )
+            if turbo_applied:
                 print(
                     "[MiniMax H3 Turbo] Experimental preset enabled: "
                     f"{body.get('minimax_h3_turbo_preset', 'default')}, "
@@ -9582,6 +9805,7 @@ async def generate(request: Request):
             apply_h3_window_memory_policy,
             h3_runtime_preflight,
             normalize_h3_clip_frame_schedule,
+            resolve_h3_long_sequence_discard_frames,
         )
 
         raw_h3_clip_frames = body.get("per_clip_frames")
@@ -9641,6 +9865,29 @@ async def generate(request: Request):
                 f"{h3_window_adjustment['requested_window_frames']} -> "
                 f"{h3_window_adjustment['effective_window_frames']} frames. "
                 "Requested output duration is unchanged."
+            )
+
+        try:
+            h3_long_sequence_active = (
+                not bool(_generation_model_def.get("omni_reference"))
+                and body.get("minimax_h3_multi_window") is True
+                and int(body.get("video_length") or 0)
+                > int(body.get("sliding_window_size") or 0)
+            )
+        except (TypeError, ValueError):
+            h3_long_sequence_active = False
+        body["sliding_window_discard_last_frames"] = (
+            resolve_h3_long_sequence_discard_frames(
+                body.get("custom_settings"),
+                enabled=h3_long_sequence_active,
+            )
+        )
+        if body["sliding_window_discard_last_frames"]:
+            print(
+                "[MiniMax H3 Long Sequence] Clean-tail handoff enabled: "
+                f"discarding the final "
+                f"{body['sliding_window_discard_last_frames']} frames before "
+                "selecting each continuation tail."
             )
 
         h3_native_omni_adjustment = apply_h3_native_omni_memory_policy(
@@ -9774,6 +10021,7 @@ async def generate(request: Request):
                 compute_h3_sequence_clips,
                 h3_sequence_plan_signature,
                 plan_h3_reference_sequence,
+                reviewed_h3_sequence_plan_matches,
                 resolve_h3_sequence_source_prompt,
             )
 
@@ -9839,7 +10087,7 @@ async def generate(request: Request):
                 )
             cached_prompts = body.get("h3_window_prompts")
             cached_plan = body.get("h3_window_plan")
-            cached_is_valid = (
+            signature_cache_is_valid = (
                 isinstance(cached_prompts, list)
                 and len(cached_prompts) == len(h3_sequence_geometry)
                 and all(
@@ -9856,6 +10104,44 @@ async def generate(request: Request):
                     )
                 )
                 and body.get("h3_window_plan_signature") == h3_sequence_signature
+            )
+            reviewed_cache_is_valid = (
+                preserve_reviewed_h3_plan
+                and not h3_manual_sequence
+                and signature_cache_is_valid
+                and reviewed_h3_sequence_plan_matches(
+                    cached_plan,
+                    cached_prompts,
+                    source_prompt=h3_sequence_source_prompt,
+                    model_type=str(body.get("model_type") or ""),
+                    resolution=str(body.get("resolution") or ""),
+                    geometry=h3_sequence_geometry,
+                    window_frames=h3_sequence_max_frames,
+                    camera_coverage=str(
+                        body.get("minimax_h3_camera_coverage") or "auto"
+                    ),
+                    overlap_frames=h3_sequence_overlap,
+                    native_continuation=h3_native_sequence,
+                )
+            )
+            if (
+                preserve_reviewed_h3_plan
+                and not h3_manual_sequence
+                and not reviewed_cache_is_valid
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "The reviewed MiniMax H3 Omni prompts no longer match "
+                        "the current sequence settings or references. Press "
+                        "Prompt Enhance to refresh the plan before generating "
+                        "or adding it to the queue."
+                    ),
+                )
+            cached_is_valid = (
+                reviewed_cache_is_valid
+                if preserve_reviewed_h3_plan and not h3_manual_sequence
+                else signature_cache_is_valid
             )
             if h3_manual_sequence:
                 try:
@@ -9892,9 +10178,10 @@ async def generate(request: Request):
             elif cached_is_valid:
                 h3_window_plan_response = cached_plan
                 print(
-                    "[MiniMax H3 Omni] Reusing reviewed "
+                    "[MiniMax H3 Omni] Preserving reviewed "
                     f"{len(cached_prompts)}-"
-                    f"{'window' if h3_native_sequence else 'clip'} sequence plan."
+                    f"{'window' if h3_native_sequence else 'clip'} sequence plan; "
+                    "planner LLM bypassed."
                 )
             else:
                 from services import llm_service
@@ -10122,6 +10409,7 @@ async def generate(request: Request):
                 compute_h3_window_boundaries,
                 h3_window_plan_signature,
                 plan_h3_sliding_windows,
+                reviewed_h3_window_plan_matches,
             )
 
             h3_fps = float(_generation_model_def.get("fps", 24) or 24)
@@ -10146,25 +10434,69 @@ async def generate(request: Request):
                 ),
                 injected_keyframes=h3_injected_keyframes or None,
             )
-            h3_expected_count = len(
-                compute_h3_window_boundaries(
-                    h3_total_frames,
-                    h3_window_frames,
-                    fps=h3_fps,
-                    overlap_frames=h3_overlap_frames,
-                    discard_frames=h3_discard_frames,
-                )
+            h3_expected_boundaries = compute_h3_window_boundaries(
+                h3_total_frames,
+                h3_window_frames,
+                fps=h3_fps,
+                overlap_frames=h3_overlap_frames,
+                discard_frames=h3_discard_frames,
             )
+            h3_expected_count = len(h3_expected_boundaries)
             cached_prompts = body.get("h3_window_prompts")
             cached_plan = body.get("h3_window_plan")
-            cached_is_valid = (
+            signature_cache_is_valid = (
                 isinstance(cached_prompts, list)
                 and len(cached_prompts) == h3_expected_count
                 and all(isinstance(item, str) and item.strip() for item in cached_prompts)
                 and body.get("h3_window_plan_signature") == h3_expected_signature
             )
+            reviewed_cache_is_valid = (
+                preserve_reviewed_h3_plan
+                and reviewed_h3_window_plan_matches(
+                    cached_plan,
+                    cached_prompts,
+                    source_prompt=str(body.get("prompt") or ""),
+                    model_type=str(body.get("model_type") or ""),
+                    resolution=str(body.get("resolution") or ""),
+                    window_frames=h3_window_frames,
+                    boundaries=h3_expected_boundaries,
+                    camera_coverage=str(
+                        body.get("minimax_h3_camera_coverage") or "auto"
+                    ),
+                )
+            )
+            if preserve_reviewed_h3_plan and not reviewed_cache_is_valid:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "The reviewed MiniMax H3 window prompts no longer match "
+                        "the current Duration, Window Length, model, resolution, "
+                        "or source prompt. Press Prompt Enhance to refresh the "
+                        "plan before generating or adding it to the queue."
+                    ),
+                )
+            cached_is_valid = (
+                reviewed_cache_is_valid
+                if preserve_reviewed_h3_plan
+                else signature_cache_is_valid
+            )
             if cached_is_valid:
-                print(f"[MiniMax H3] Reusing reviewed {h3_expected_count}-window prompt plan.")
+                if reviewed_cache_is_valid:
+                    # Freeze the exact prompts the user saw, including manual
+                    # edits. Rebase an older planner signature to the current
+                    # request only after structural/geometry validation; never
+                    # call the LLM again behind Add to Queue.
+                    cached_plan = dict(cached_plan)
+                    cached_plan["signature"] = h3_expected_signature
+                    cached_plan["window_prompts"] = list(cached_prompts)
+                    body["h3_window_plan"] = cached_plan
+                    body["h3_window_plan_signature"] = h3_expected_signature
+                    print(
+                        f"[MiniMax H3] Preserving reviewed "
+                        f"{h3_expected_count}-window prompt plan; planner LLM bypassed."
+                    )
+                else:
+                    print(f"[MiniMax H3] Reusing reviewed {h3_expected_count}-window prompt plan.")
                 if isinstance(cached_plan, dict):
                     h3_window_plan_response = cached_plan
             else:
@@ -10243,40 +10575,6 @@ async def generate(request: Request):
             body.pop("h3_window_prompts", None)
             body.pop("h3_window_plan_signature", None)
             body.pop("h3_window_plan", None)
-
-        # H3 Base / FL2VA's text encoder truncates each native prompt at 512
-        # tokens. Validate the prompts that will actually be selected by the
-        # rolling-window runtime, not the source story retained in ``prompt``.
-        # Auto-enhanced/planned prompts are compacted earlier; user-authored
-        # text is never sliced or silently rewritten here.
-        if not _generation_model_def.get("omni_reference"):
-            from services.h3_prompt_budget import (
-                H3_ENHANCED_TEXT_TOKEN_TARGET,
-                H3PromptBudgetError,
-                validate_h3_base_prompt,
-            )
-
-            submitted_h3_prompts = body.get("h3_window_prompts")
-            if not isinstance(submitted_h3_prompts, list) or not submitted_h3_prompts:
-                submitted_h3_prompts = [str(body.get("prompt") or "")]
-            for prompt_index, submitted_prompt in enumerate(submitted_h3_prompts, start=1):
-                label = (
-                    f"H3 window {prompt_index}"
-                    if len(submitted_h3_prompts) > 1
-                    else "H3 prompt"
-                )
-                try:
-                    prompt_tokens = validate_h3_base_prompt(
-                        submitted_prompt,
-                        label=label,
-                    )
-                except H3PromptBudgetError as error:
-                    raise HTTPException(status_code=400, detail=str(error)) from error
-                if prompt_tokens > H3_ENHANCED_TEXT_TOKEN_TARGET:
-                    print(
-                        f"[MiniMax H3 Prompt] {label} uses {prompt_tokens}/512 "
-                        "tokens. It fits, but has little edit headroom."
-                    )
 
     # LTX 0.9 / 2.x / 2.5 all use WanGP's native rolling-window engine, but
     # Maestro now makes that behavior explicit.  A disabled toggle means one
@@ -10471,6 +10769,11 @@ async def generate(request: Request):
             body["multi_prompts_gen_type"] = 2
             body.pop("ltx_window_prompts", None)
             body.pop("_ltx_original_prompt", None)
+
+    # Studio Image Outpaint intentionally exposes no mask picker. Reproduce
+    # WanGP's empty ImageEditor layer so its normal outpainting preprocessing
+    # can turn only the expanded margins into generated pixels.
+    _prepare_studio_image_outpaint_mask(body, _generation_model_def)
 
     # Defense: normalize video_prompt_type so flags whose required input
     # is missing get stripped before wgp.py's validation rejects the job.
@@ -10954,18 +11257,23 @@ _MANAGED_LORAS = {
 }
 
 for _turbo_preset in MINIMAX_H3_TURBO_PRESETS:
+    _turbo_repo_id = str(
+        _turbo_preset.get("repo_id")
+        or MINIMAX_H3_TURBO_MANIFEST["repo_id"]
+    )
     _MANAGED_LORAS[str(_turbo_preset["filename"])] = {
-        "repo_id": str(MINIMAX_H3_TURBO_MANIFEST["repo_id"]),
+        "repo_id": _turbo_repo_id,
         "revision": str(_turbo_preset["revision"]),
         "remote_path": str(_turbo_preset["remote_path"]),
         "sha256": str(_turbo_preset["sha256"]),
         "size": int(_turbo_preset["size"]),
         "label": f"MiniMax H3 Turbo — {_turbo_preset['label']}",
         "support_url": str(
-            (MINIMAX_H3_TURBO_MANIFEST.get("upstream_watch") or {}).get(
+            _turbo_preset.get("model_card_url")
+            or (MINIMAX_H3_TURBO_MANIFEST.get("upstream_watch") or {}).get(
                 "model_card_url"
             )
-            or f"https://huggingface.co/{MINIMAX_H3_TURBO_MANIFEST['repo_id']}"
+            or f"https://huggingface.co/{_turbo_repo_id}"
         ),
     }
 
@@ -22193,8 +22501,8 @@ def _apply_spatial_upsampling_to_file(video_path: str, method: str, job: dict = 
 
 
 # ============================================================================
-# Standalone post-processing "Tools" — apply FlashVSR upscale or SeedVC
-# revoice to ANY existing clip (a gallery output or an uploaded file),
+# Standalone post-processing "Tools" — apply FlashVSR upscale, film grain,
+# or SeedVC revoice to ANY existing clip (a gallery output or an uploaded file),
 # independent of a generation. These reuse the job plumbing (_jobs /
 # _gen_lock / /status / /cancel) but run a thin post-processing path instead
 # of the full model pipeline. (edit_video in wgp.py does the same work but is
@@ -22223,13 +22531,17 @@ def _resolve_tool_clip_path(raw_path, workspace=None):
     return raw_path if os.path.isfile(raw_path) else None
 
 
-def _write_tool_sidecar(out_dir, filename, *, source_name, tool, params, elapsed, job_id):
+def _write_tool_sidecar(
+    out_dir, filename, *, source_name, tool, params, elapsed, job_id,
+    media_type="video",
+):
     """Write a .meta.json sidecar so a Tools output shows up in the gallery
     with the right mode + edit_sub_mode tag (mirrors _run_sfx_generation)."""
     sidecar = {
         "params": {**params, "edit_sub_mode": tool},
-        "generation_mode": "video",
+        "generation_mode": media_type,
         "tool": tool,
+        "tool_media_type": media_type,
         "tool_source": source_name,
         "job_id": job_id,
         "generation_time": round(elapsed),
@@ -22244,9 +22556,7 @@ def _write_tool_sidecar(out_dir, filename, *, source_name, tool, params, elapsed
 
 
 def _run_tool_upscale(job_id: str):
-    """Background worker: upscale an existing clip with the configured spatial
-    upsampler (FlashVSR / Lanczos), preserving the original audio. Thin extract
-    of edit_video's postprocessing path — no model generation/Gradio state."""
+    """Upscale an existing image or clip with FlashVSR/Lanczos."""
     job = _jobs[job_id]
     start_time = time.time()
     abort_state = {"abort": False}
@@ -22271,15 +22581,133 @@ def _run_tool_upscale(job_id: str):
             wgp.save_path = out_dir
 
             method = params.get("method") or "flashvsr2"
-            video_source = _resolve_tool_clip_path(params.get("video_path"), workspace)
-            if not video_source:
+            media_type = "image" if params.get("media_type") == "image" else "video"
+            media_source = _resolve_tool_clip_path(
+                params.get("media_path") or params.get("video_path"), workspace
+            )
+            if not media_source:
                 finish_job(
-                    job, "failed", error="Input clip not found",
-                    message="Error: input clip not found",
+                    job, "failed", error="Input media not found",
+                    message="Error: input media not found",
                 )
                 return False
 
             before = set(os.listdir(out_dir)) if os.path.isdir(out_dir) else set()
+
+            def _abort():
+                return bool(abort_state.get("abort")) or is_cancel_requested(job)
+
+            # FlashVSR has an explicit still-image path. Keep this separate
+            # from the temporal video engine so image Upscale never invokes
+            # video probing, audio extraction, or container encoding.
+            if media_type == "image":
+                import numpy as np
+                from PIL import Image as PILImage
+
+                if not update_job(
+                    job, message="Upscaling image...", phase="Upscaling", progress=5,
+                ):
+                    return False
+                source_image = PILImage.open(media_source).convert("RGB")
+                final_path = wgp.get_available_filename(
+                    out_dir,
+                    os.path.basename(media_source),
+                    "_upscaled",
+                    force_extension=".png",
+                )
+                if wgp.flashvsr.is_upsampling(method):
+                    services = wgp.server_config.get("services", {})
+                    for key in ("flashvsr_mode", "flashvsr_topk_ratio", "flashvsr_backend"):
+                        if key in services:
+                            wgp.server_config[key] = services[key]
+
+                    frame = torch.from_numpy(
+                        np.asarray(source_image, dtype=np.uint8).copy()
+                    ).permute(2, 0, 1).unsqueeze(1)
+
+                    def _image_progress(phase, current_step=None, total_steps=None):
+                        changes = {"message": str(phase), "phase": str(phase)} if phase else {}
+                        if total_steps:
+                            step = int(current_step or 0)
+                            total = int(total_steps)
+                            changes.update(
+                                step=step,
+                                total_steps=total,
+                                progress=max(5, min(95, int(step / total * 100))),
+                            )
+                        if changes:
+                            update_job(job, **changes)
+
+                    profile = wgp.loaded_profile if wgp.loaded_profile >= 0 else wgp.get_default_profile("image")
+                    result, _ = wgp.flashvsr.upscale(
+                        frame,
+                        method,
+                        seed=int(params.get("seed", -1)),
+                        continue_cache=None,
+                        return_continue_cache=False,
+                        vae_tile_size=None,
+                        process_files=wgp.process_files_def,
+                        vae_config=wgp.vae_config,
+                        init_pipe=wgp.init_pipe,
+                        profile=profile,
+                        still_image=True,
+                        abort_callback=_abort,
+                        progress_callback=_image_progress,
+                    )
+                    if result is None or _abort():
+                        return False
+                    output_frame = result[:, 0]
+                    if output_frame.dtype == torch.uint8:
+                        output_array = output_frame.permute(1, 2, 0).cpu().numpy()
+                    else:
+                        output_array = (
+                            output_frame.float().clamp(-1, 1).add(1).mul(127.5)
+                            .round().to(torch.uint8).permute(1, 2, 0).cpu().numpy()
+                        )
+                    PILImage.fromarray(output_array, mode="RGB").save(final_path)
+                    del frame, result, output_frame
+                else:
+                    match = re.fullmatch(r"lanczos(1\.5|2|3|4)", str(method))
+                    scale = float(match.group(1)) if match else 2.0
+                    out_width = max(1, round(source_image.width * scale))
+                    out_height = max(1, round(source_image.height * scale))
+                    source_image.resize(
+                        (out_width, out_height), PILImage.Resampling.LANCZOS
+                    ).save(final_path)
+
+                if _abort():
+                    return False
+                after = set(os.listdir(out_dir)) if os.path.isdir(out_dir) else set()
+                new_files = sorted(
+                    file for file in (after - before)
+                    if not file.endswith(".meta.json")
+                )
+                record_job_outputs(job, new_files)
+                for filename in new_files:
+                    _write_tool_sidecar(
+                        out_dir,
+                        filename,
+                        source_name=os.path.basename(media_source),
+                        tool="upscale",
+                        params={
+                            "method": method,
+                            "model_type": "post_processing",
+                            "_studio_image_workflow": "upscale",
+                        },
+                        elapsed=time.time() - start_time,
+                        job_id=job_id,
+                        media_type="image",
+                    )
+                completed = finish_job(
+                    job, "completed", progress=100, phase="", message="Done",
+                )
+                print(
+                    f"[Tools/upscale] {os.path.basename(media_source)} -> "
+                    f"{new_files} ({wgp.format_time(time.time() - start_time)})"
+                )
+                return completed
+
+            video_source = media_source
 
             from shared.utils.utils import get_video_info
             fps, _width, _height, _frames = get_video_info(video_source)
@@ -22293,9 +22721,6 @@ def _run_tool_upscale(job_id: str):
             ):
                 wgp.cleanup_temp_audio_files(audio_tracks)
                 return False
-
-            def _abort():
-                return bool(abort_state.get("abort")) or is_cancel_requested(job)
 
             # FlashVSR's _report_progress always calls back with
             # (phase, current_step, total_steps); the latter two may be None.
@@ -22378,7 +22803,15 @@ def _run_tool_upscale(job_id: str):
             if is_cancel_requested(job):
                 return False
             for fname in new_files:
-                _write_tool_sidecar(out_dir, fname, source_name=os.path.basename(video_source), tool="upscale", params={"method": method, "model_type": "post_processing"}, elapsed=time.time() - start_time, job_id=job_id)
+                _write_tool_sidecar(
+                    out_dir, fname,
+                    source_name=os.path.basename(video_source),
+                    tool="upscale",
+                    params={"method": method, "model_type": "post_processing"},
+                    elapsed=time.time() - start_time,
+                    job_id=job_id,
+                    media_type="video",
+                )
 
             completed = finish_job(
                 job,
@@ -22403,6 +22836,119 @@ def _run_tool_upscale(job_id: str):
                 wgp.release_flashvsr_vram()
             except Exception:
                 pass
+
+
+def _run_tool_film_grain(job_id: str):
+    """Apply Maestro's film-grain finish to a NEW copy of any video."""
+    import shutil
+
+    job = _jobs[job_id]
+    start_time = time.time()
+    abort_state = {"abort": False}
+    final_path = None
+    with generation_slot(_gen_lock, job) as acquired:
+        if not acquired:
+            return False
+        try:
+            if not try_start(
+                job, message="Preparing film grain...", phase="Preparing",
+            ):
+                return False
+            if not register_abort_state(
+                job, job_id, _active_gen_states, abort_state,
+            ):
+                return False
+
+            params = job["params"]
+            workspace = job.get("workspace")
+            out_dir = job.get("out_dir") or wgp.save_path
+            os.makedirs(out_dir, exist_ok=True)
+
+            video_source = _resolve_tool_clip_path(
+                params.get("video_path"), workspace,
+            )
+            if not video_source:
+                finish_job(
+                    job, "failed", error="Input clip not found",
+                    message="Error: input clip not found",
+                )
+                return False
+
+            intensity = max(0.0, min(1.0, float(params.get("intensity", 0))))
+            saturation = max(
+                0.0, min(1.0, float(params.get("saturation", 0.5)))
+            )
+            if intensity <= 0:
+                finish_job(
+                    job, "failed", error="Film grain intensity must be above zero",
+                    message="Error: choose a film grain intensity above zero",
+                )
+                return False
+
+            container = str(wgp.server_config.get("video_container", "mp4"))
+            final_path = wgp.get_available_filename(
+                out_dir,
+                os.path.basename(video_source),
+                "_film_grain",
+                force_extension=f".{container}",
+            )
+            if is_cancel_requested(job):
+                return False
+            shutil.copyfile(video_source, final_path)
+
+            if not update_job(
+                job,
+                message="Applying film grain...",
+                phase="Film Grain",
+                progress=10,
+            ):
+                os.remove(final_path)
+                final_path = None
+                return False
+
+            _apply_film_grain_to_file(final_path, intensity, saturation)
+            if is_cancel_requested(job):
+                os.remove(final_path)
+                final_path = None
+                return False
+
+            filename = os.path.basename(final_path)
+            record_job_outputs(job, [filename])
+            _write_tool_sidecar(
+                out_dir,
+                filename,
+                source_name=os.path.basename(video_source),
+                tool="film_grain",
+                params={
+                    "intensity": intensity,
+                    "saturation": saturation,
+                    "model_type": "post_processing",
+                    "_studio_video_workflow": "film_grain",
+                },
+                elapsed=time.time() - start_time,
+                job_id=job_id,
+            )
+            completed = finish_job(
+                job, "completed", progress=100, phase="", message="Done",
+            )
+            print(
+                f"[Tools/film-grain] {os.path.basename(video_source)} -> "
+                f"{filename} ({wgp.format_time(time.time() - start_time)})"
+            )
+            return completed
+        except Exception as error:
+            traceback.print_exc()
+            if final_path and os.path.isfile(final_path):
+                try:
+                    os.remove(final_path)
+                except OSError:
+                    pass
+            finish_job(
+                job, "failed", error=str(error), message=f"Error: {error}",
+            )
+            return False
+        finally:
+            unregister_abort_state(job_id, _active_gen_states, abort_state)
 
 
 def _run_tool_revoice(job_id: str):
@@ -22532,11 +23078,46 @@ def _run_tool_revoice(job_id: str):
 
 @api.post("/api/v1/tools/upscale")
 async def tools_upscale(request: Request):
-    """Upscale an existing clip (a gallery output or an uploaded file) with the
-    configured spatial upsampler. Returns a job_id; poll /api/v1/status/{job_id}.
+    """Upscale an existing image or clip. Poll /api/v1/status/{job_id}.
 
-    Body: { video_path: str, method?: str (default "flashvsr2"),
-            seed?: int, workspace?: str }
+    Body: { media_path: str, media_type?: "image"|"video",
+            method?: str (default "flashvsr2"), seed?: int, workspace?: str }
+    `video_path` remains accepted for older Maestro clients.
+    """
+    body = await request.json()
+    media_path = body.get("media_path") or body.get("video_path")
+    if not media_path:
+        raise HTTPException(status_code=400, detail="media_path is required")
+    workspace = body.get("workspace") or _get_active_workspace()
+    resolved = _resolve_tool_clip_path(media_path, workspace)
+    if not resolved:
+        raise HTTPException(status_code=400, detail=f"Media not found: {media_path}")
+    media_type = "image" if body.get("media_type") == "image" else "video"
+
+    job_id = uuid.uuid4().hex[:8]
+    _jobs[job_id] = {
+        "id": job_id, "status": "queued", "progress": 0, "step": 0, "total_steps": 0,
+        "phase": "", "message": "Queued (upscale)", "created_at": time.time(),
+        "params": {
+            "media_path": resolved,
+            "video_path": resolved if media_type == "video" else None,
+            "media_type": media_type,
+            "method": body.get("method") or "flashvsr2",
+            "seed": body.get("seed", -1),
+        },
+        "output_files": [], "error": None,
+        "workspace": workspace, "out_dir": _workspace_dir(workspace),
+    }
+    threading.Thread(target=_run_tool_upscale, args=(job_id,), daemon=False).start()
+    return {"job_id": job_id, "status": "queued"}
+
+
+@api.post("/api/v1/tools/film-grain")
+async def tools_film_grain(request: Request):
+    """Add film grain to an existing clip. Poll /api/v1/status/{job_id}.
+
+    Body: { video_path: str, intensity: float, saturation?: float,
+            workspace?: str }
     """
     body = await request.json()
     video_path = body.get("video_path")
@@ -22547,19 +23128,52 @@ async def tools_upscale(request: Request):
     if not resolved:
         raise HTTPException(status_code=400, detail=f"Clip not found: {video_path}")
 
+    try:
+        intensity = float(body.get("intensity", 0))
+        saturation = float(body.get("saturation", 0.5))
+    except (TypeError, ValueError) as error:
+        raise HTTPException(
+            status_code=400,
+            detail="intensity and saturation must be numbers",
+        ) from error
+    if not math.isfinite(intensity) or not math.isfinite(saturation):
+        raise HTTPException(
+            status_code=400,
+            detail="intensity and saturation must be finite numbers",
+        )
+    intensity = max(0.0, min(1.0, intensity))
+    saturation = max(0.0, min(1.0, saturation))
+    if intensity <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Film grain intensity must be above zero",
+        )
+
     job_id = uuid.uuid4().hex[:8]
     _jobs[job_id] = {
-        "id": job_id, "status": "queued", "progress": 0, "step": 0, "total_steps": 0,
-        "phase": "", "message": "Queued (upscale)", "created_at": time.time(),
+        "id": job_id,
+        "status": "queued",
+        "progress": 0,
+        "step": 0,
+        "total_steps": 0,
+        "phase": "",
+        "message": "Queued (film grain)",
+        "created_at": time.time(),
         "params": {
             "video_path": resolved,
-            "method": body.get("method") or "flashvsr2",
-            "seed": body.get("seed", -1),
+            "intensity": intensity,
+            "saturation": saturation,
         },
-        "output_files": [], "error": None,
-        "workspace": workspace, "out_dir": _workspace_dir(workspace),
+        "output_files": [],
+        "error": None,
+        "workspace": workspace,
+        "out_dir": _workspace_dir(workspace),
     }
-    threading.Thread(target=_run_tool_upscale, args=(job_id,), daemon=False).start()
+    threading.Thread(
+        target=_run_tool_film_grain,
+        args=(job_id,),
+        daemon=False,
+    ).start()
     return {"job_id": job_id, "status": "queued"}
 
 
@@ -22622,6 +23236,43 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
             return False
         try:
             if not try_start(job, message="Preparing..."):
+                return False
+
+            # Director submits child jobs directly to this worker instead of
+            # passing through /api/v1/generate. Keep H3 Omni's official
+            # 2-15s-per-reference / 15s-total preparation contract here as a
+            # common runtime safety net for both Director and Studio.
+            try:
+                _runtime_params = job.get("params") or {}
+                _runtime_model_def = wgp.get_model_def(
+                    _runtime_params.get("model_type")
+                ) or {}
+                if _runtime_model_def.get("omni_reference"):
+                    from models.minimax_h3.reference_media import (
+                        normalize_reference_manifest,
+                    )
+
+                    update_job(
+                        job,
+                        message="Preparing H3 Omni reference media…",
+                        phase="Preparing references",
+                    )
+                    _per_clip_refs = _runtime_params.get(
+                        "per_clip_minimax_h3_references"
+                    )
+                    if isinstance(_per_clip_refs, list) and _per_clip_refs:
+                        _runtime_params["per_clip_minimax_h3_references"] = [
+                            normalize_reference_manifest(manifest)
+                            for manifest in _per_clip_refs
+                        ]
+                    elif _runtime_params.get("minimax_h3_references"):
+                        _runtime_params["minimax_h3_references"] = (
+                            normalize_reference_manifest(
+                                _runtime_params["minimax_h3_references"]
+                            )
+                        )
+            except ValueError as error:
+                finish_job(job, "failed", error=str(error), message=str(error))
                 return False
 
             # Per-job VRAM coefficient adjustment — accounts for active
@@ -23297,7 +23948,8 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     return
                 upload_filenames = {}
                 for key in [
-                    "image_start", "image_end", "video_guide", "audio_guide",
+                    "image_start", "image_end", "image_guide", "image_mask",
+                    "video_guide", "audio_guide",
                     "audio_guide2", "audio_guide3", "audio_guide4",
                     "audio_guide5", "audio_guide6",
                 ]:
@@ -25379,7 +26031,10 @@ def _run_held_studio_jobs(job_ids: list[str]) -> None:
         if job is None or snapshot_job(job).get("status") != "queued":
             continue
         try:
-            _run_generation(job_id)
+            if snapshot_job(job).get("kind") == "editor_export":
+                _run_editor_export(job_id)
+            else:
+                _run_generation(job_id)
         except Exception as error:
             # `_run_generation` normally owns all failure publication. Keep
             # the batch moving if an unexpected exception escapes its guard.
@@ -25475,15 +26130,15 @@ def list_jobs():
 # API Routes: Favorites
 # ============================================================================
 
-def _favorites_path() -> str:
-    """Path to favorites JSON file for the active workspace."""
-    return os.path.join(_workspace_dir(), ".favorites.json")
+def _favorites_path(workspace: str | None = None) -> str:
+    """Path to favorites JSON for the requested (or active) workspace."""
+    return os.path.join(_workspace_dir(workspace), ".favorites.json")
 
 
-def _load_favorites() -> set:
-    """Load favorites set for the active workspace."""
+def _load_favorites(workspace: str | None = None) -> set:
+    """Load favorites set for the requested (or active) workspace."""
     from services.win_safe_files import favorites_lock
-    fp = _favorites_path()
+    fp = _favorites_path(workspace)
     if os.path.isfile(fp):
         try:
             with favorites_lock:
@@ -25495,14 +26150,14 @@ def _load_favorites() -> set:
     return set()
 
 
-def _save_favorites(favs: set):
-    """Save favorites set for the active workspace.
+def _save_favorites(favs: set, workspace: str | None = None):
+    """Save favorites set for the requested (or active) workspace.
 
     favorites_lock (shared with director_pipeline's delete sweep, which
     rewrites the same file) serializes read-modify-write cycles so a
     concurrent pipeline delete can't be clobbered by a stale write."""
     from services.win_safe_files import favorites_lock
-    fp = _favorites_path()
+    fp = _favorites_path(workspace)
     with favorites_lock:
         with open(fp, "w", encoding="utf-8") as f:
             json.dump(sorted(favs), f)
@@ -25541,16 +26196,25 @@ def list_outputs(limit: int = 0, offset: int = 0, favorites_only: bool = False, 
     Returns {outputs, total} where total is the full count before pagination.
     When limit=0 (default), returns all items (backwards compatible).
 
+    A named workspace browses that workspace without changing the active one.
     workspace="__uploads__" lists the uploads folder instead (the gallery's
     virtual "Uploads" view) so user-supplied media can be previewed and
     reused. Browse-only: the server-side active workspace is untouched and
     generations never save here. Uploads have no sidecars, so the metadata
     passes below fall through naturally.
     """
-    if workspace == "__uploads__":
+    requested_workspace = str(workspace or "").strip()
+    if requested_workspace == "__uploads__":
         out_dir = os.path.join(os.getcwd(), "uploads")
+        browsed_workspace = "__uploads__"
+    elif requested_workspace:
+        out_dir = _workspace_browse_dir(requested_workspace)
+        if out_dir is None:
+            raise HTTPException(status_code=400, detail="Invalid workspace name")
+        browsed_workspace = requested_workspace
     else:
         out_dir = _workspace_dir()
+        browsed_workspace = _get_active_workspace()
     if not os.path.isdir(out_dir):
         return {"outputs": [], "total": 0}
 
@@ -25558,7 +26222,7 @@ def list_outputs(limit: int = 0, offset: int = 0, favorites_only: bool = False, 
     video_exts = {".mp4", ".webm", ".gif"}
     audio_exts = {".wav", ".mp3"}
 
-    favs = _load_favorites()
+    favs = set() if browsed_workspace == "__uploads__" else _load_favorites(browsed_workspace)
 
     # Build a quick listing with mtime — avoid reading JSON for every file
     # We only read sidecar JSON for files in the visible page
@@ -25646,6 +26310,7 @@ def list_outputs(limit: int = 0, offset: int = 0, favorites_only: bool = False, 
             # identify retake/inpaint/outpaint/restyle/edit_anything outputs.
             "edit_sub_mode": edit_sub_mode,
             "favorite": name in favs,
+            "workspace": browsed_workspace,
             "size": size,
             "created_at": mtime,
             "url": f"/api/v1/file/{name}",
@@ -25712,7 +26377,7 @@ def list_outputs(limit: int = 0, offset: int = 0, favorites_only: bool = False, 
 
 
 @api.get("/api/v1/file/{filename:path}")
-def serve_file(filename: str):
+def serve_file(filename: str, workspace: str = ""):
     """Serve an output file. Checks active workspace first, then all workspaces.
 
     Uses share_delete_file_response so that on Windows the file can be
@@ -25723,6 +26388,18 @@ def serve_file(filename: str):
     """
     from services.win_safe_files import share_delete_file_response
     save_root = wgp.server_config.get("save_path", "outputs")
+    requested_workspace = str(workspace or "").strip()
+    if requested_workspace:
+        if requested_workspace == "__uploads__":
+            requested_root = os.path.join(os.getcwd(), "uploads")
+        else:
+            requested_root = _workspace_browse_dir(requested_workspace)
+            if requested_root is None:
+                raise HTTPException(status_code=400, detail="Invalid workspace name")
+        filepath = _safe_join(requested_root, filename)
+        if filepath and os.path.isfile(filepath):
+            return share_delete_file_response(filepath)
+        raise HTTPException(status_code=404, detail="File not found")
     # 1. Check active workspace
     filepath = _safe_join(_workspace_dir(), filename)
     if filepath and os.path.isfile(filepath):
@@ -26243,6 +26920,37 @@ def _run_editor_export(job_id: str) -> bool:
         if _cancelled():
             return False
         filename = os.path.basename(output_path)
+        try:
+            latest_project = load_editor_project(
+                _editor_save_root(), workspace, project["id"]
+            )
+            export_width, export_height, export_fps = editor_export_dimensions(project)
+            export_settings = project.get("export") or {}
+            export_record = {
+                "id": f"export-{job_id}",
+                "filename": filename,
+                "workspace": workspace,
+                "created_at": time.time(),
+                "duration": editor_project_duration(project),
+                "width": export_width,
+                "height": export_height,
+                "fps": export_fps,
+                "codec": export_settings.get("codec") or "h264",
+                "quality": export_settings.get("quality") or "high",
+                "encoder": export_settings.get("encoder") or "auto",
+            }
+            latest_project["exports"] = [
+                export_record,
+                *[
+                    record for record in (latest_project.get("exports") or [])
+                    if record.get("filename") != filename
+                ],
+            ][:50]
+            save_editor_project(_editor_save_root(), workspace, latest_project)
+        except Exception as history_error:
+            # The media export succeeded. A history-write problem must never
+            # turn that valid deliverable into a failed render.
+            print(f"[Editor] Could not save export history: {history_error}")
         record_job_outputs(job, [filename])
         return finish_job(
             job,
@@ -26358,10 +27066,94 @@ async def editor_media_probe(request: Request):
         raise HTTPException(status_code=400, detail=str(error)) from error
 
 
+@api.post("/api/v1/editor/media/status")
+async def editor_media_status(request: Request):
+    body = await request.json()
+    workspace = body.get("workspace") or _get_active_workspace()
+    project = body.get("project") if isinstance(body.get("project"), dict) else body
+    try:
+        return {
+            "assets": inspect_editor_assets(
+                project,
+                save_root=_editor_save_root(),
+                workspace=workspace,
+                uploads_root=_editor_uploads_root(),
+            ),
+        }
+    except EditorProjectError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@api.post("/api/v1/editor/media/preview")
+async def editor_media_preview(request: Request):
+    body = await request.json()
+    workspace = body.get("workspace") or _get_active_workspace()
+    asset = body.get("asset") if isinstance(body.get("asset"), dict) else body
+    proxy_profile = (
+        "mobile"
+        if str(body.get("proxy_profile") or "auto").strip().lower() == "mobile"
+        else "auto"
+    )
+    try:
+        preview = await asyncio.to_thread(
+            build_editor_media_preview,
+            asset,
+            save_root=_editor_save_root(),
+            workspace=workspace,
+            uploads_root=_editor_uploads_root(),
+            include_proxy=bool(body.get("include_proxy", False)),
+            proxy_profile=proxy_profile,
+        )
+        preview_id = preview["preview_id"]
+        workspace_query = f"?workspace={quote(str(workspace), safe='')}"
+        proxy_field = "proxy_mobile" if proxy_profile == "mobile" else "proxy"
+        proxy_kind = "proxy-mobile" if proxy_profile == "mobile" else "proxy"
+        return {
+            "preview_id": preview_id,
+            "thumbnail_url": (
+                f"/api/v1/editor/media/cache/{preview_id}/thumbnail{workspace_query}"
+                if preview.get("thumbnail") else None
+            ),
+            "proxy_url": (
+                f"/api/v1/editor/media/cache/{preview_id}/{proxy_kind}{workspace_query}"
+                if preview.get(proxy_field) else None
+            ),
+            "waveform": preview.get("waveform") or [],
+        }
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Editor media not found") from error
+    except EditorProjectError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@api.get("/api/v1/editor/media/cache/{preview_id}/{kind}")
+def editor_media_cache(preview_id: str, kind: str, workspace: str = ""):
+    workspace = workspace or _get_active_workspace()
+    try:
+        path = resolve_editor_media_cache_file(
+            _editor_save_root(), workspace, preview_id, kind
+        )
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Editor preview not found") from error
+    except EditorProjectError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    media_type = "video/mp4" if kind == "proxy" else "image/jpeg"
+    return FileResponse(path, media_type=media_type)
+
+
+@api.get("/api/v1/editor/export/capabilities")
+def editor_export_capability_list():
+    return editor_export_capabilities()
+
+
 @api.post("/api/v1/editor/export")
 async def editor_export(request: Request):
     body = await request.json()
     workspace = body.get("workspace") or _get_active_workspace()
+    queue_mode = str(body.get("queue_mode") or "now").lower()
+    if queue_mode not in {"now", "held"}:
+        raise HTTPException(status_code=400, detail="queue_mode must be 'now' or 'held'")
+    hold_for_queue = queue_mode == "held"
     try:
         project = body.get("project")
         if not isinstance(project, dict):
@@ -26381,12 +27173,12 @@ async def editor_export(request: Request):
     _jobs[job_id] = {
         "id": job_id,
         "kind": "editor_export",
-        "status": "queued",
+        "status": "held" if hold_for_queue else "queued",
         "progress": 0,
         "step": 0,
         "total_steps": 0,
         "phase": "",
-        "message": "Editor export queued",
+        "message": "Editor export held" if hold_for_queue else "Editor export queued",
         "created_at": time.time(),
         "params": {"project": project},
         "workspace": workspace,
@@ -26394,13 +27186,14 @@ async def editor_export(request: Request):
         "output_files": [],
         "error": None,
     }
-    threading.Thread(
-        target=_run_editor_export,
-        args=(job_id,),
-        daemon=False,
-        name=f"maestro_editor_export_{job_id}",
-    ).start()
-    return {"job_id": job_id, "status": "queued"}
+    if not hold_for_queue:
+        threading.Thread(
+            target=_run_editor_export,
+            args=(job_id,),
+            daemon=False,
+            name=f"maestro_editor_export_{job_id}",
+        ).start()
+    return {"job_id": job_id, "status": "held" if hold_for_queue else "queued"}
 
 
 # ============================================================================

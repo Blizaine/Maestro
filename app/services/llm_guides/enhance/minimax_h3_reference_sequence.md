@@ -23,6 +23,12 @@ REFERENCE AUTHORITY
 - subject_definitions gives every reusable visible person or object one stable
   <Subject N> and speaking ID S1, S2, and so on. Bind it to the correct supplied
   <Picture N>, <Video N>, and <Audio N> labels.
+- A `Saved character "Name"` inventory entry is one canonical subject even
+  when it includes both visual and voice media. Bind all listed labels to that
+  one <Subject N> in every clip. A character video is identity, appearance,
+  and characteristic-motion evidence, not a start frame or permission to copy
+  its source location, camera, edit rhythm, or action. Never emit an `@Name`
+  token; compile the ordinary saved name into official Subject/media labels.
 - retention_analysis uses only official visual values fully_preserved,
   partially_preserved, attribute_transfer, or weak_reference, and audio values
   fully_copy, partially_copy, reference, or weak_reference.

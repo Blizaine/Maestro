@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, StudioVideoWorkflow, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, DirectorShotImageGuidance, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineClipState, PipelineRepairState, SavedPipelineState, DirectorQueueState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping, H3WindowPlan, MiniMaxH3Reference, AppMode } from '../types'
+import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, StudioVideoWorkflow, StudioImageWorkflow, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, DirectorShotImageGuidance, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineClipState, PipelineRepairState, SavedPipelineState, DirectorQueueState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping, H3WindowPlan, MiniMaxH3Reference, AppMode } from '../types'
 import * as api from '../api/client'
 import { applyThemePrefs, getStoredPrefs, type FamilyId, type ThemeMode, type ThemePrefs } from '../lib/theme'
 import {
@@ -374,6 +374,8 @@ const EPHEMERAL_PARAM_FIELDS: ReadonlyArray<keyof SavedModeParams> = [
   'image_start',
   'image_end',
   'image_refs',
+  'image_guide',
+  'image_mask',
   'video_guide',
   'video_mask',
   'video_source',
@@ -932,6 +934,19 @@ export function getModelsForFamily(familyId: string, allModels: ModelDef[], mode
   return familyModels
 }
 
+/** Native image-suite capability filter shared by workflow/model selectors. */
+export function modelSupportsImageWorkflow(
+  model: ModelDef | undefined,
+  workflow: StudioImageWorkflow,
+): boolean {
+  if (!model || getModelMode(model.model_type, model.family) !== 'image') return false
+  if (workflow === 'upscale') return true
+  if (workflow === 'edit') return model.supports_image_edit === true
+  if (workflow === 'inpaint') return model.supports_image_inpaint === true
+  if (workflow === 'outpaint') return model.supports_image_outpaint === true
+  return model.requires_image_reference !== true
+}
+
 /** Get the display family ID for a model (handles audio sub-families) */
 export function getDisplayFamily(model: ModelDef): string {
   if (model.family === 'tts') {
@@ -988,6 +1003,10 @@ interface AppState {
   studioVideoWorkflow: StudioVideoWorkflow
   /** Route a Studio workflow to its legacy video/avatar/tools engine. */
   setStudioVideoWorkflow: (workflow: StudioVideoWorkflow) => void
+  /** Last workflow selected inside Studio's Image tab. */
+  studioImageWorkflow: StudioImageWorkflow
+  /** Route an Image workflow to native generation or standalone upscale. */
+  setStudioImageWorkflow: (workflow: StudioImageWorkflow) => void
   editSubMode: import('../types').EditSubMode
   setEditSubMode: (mode: import('../types').EditSubMode) => void
   // Edit mode state (persists across sub-mode switches)
@@ -1373,6 +1392,19 @@ interface AppState {
   setStartImage: (f: File | null) => void
   setEndImage: (f: File | null) => void
 
+  // Source media for Image Edit/Inpaint/Outpaint.
+  imageWorkflowSourceFile: File | null
+  imageWorkflowSourcePath: string
+  imageWorkflowSourceUrl: string
+  setImageWorkflowSource: (source: { file: File | null; path: string; url: string } | null) => void
+  imageWorkflowMaskFile: File | null
+  imageWorkflowMaskPath: string
+  imageWorkflowMaskUrl: string
+  setImageWorkflowMask: (source: { file: File | null; path: string; url: string } | null) => void
+  imageOutpaintPadding: { top: number; bottom: number; left: number; right: number }
+  setImageOutpaintPadding: (side: 'top' | 'bottom' | 'left' | 'right', value: number) => void
+  resetImageOutpaintPadding: () => void
+
   // Image references (for models with image_ref_choices)
   imageRefs: File[]
   imageRefType: string
@@ -1405,11 +1437,12 @@ interface AppState {
   setVoiceCloneRef: (index: number, ref: { filename: string; path: string } | null) => void
 
   // ── Tools area (standalone post-processing on an existing clip) ──────
-  // Apply FlashVSR upscale or SeedVC revoice to any gallery output or an
-  // uploaded clip, independent of a generation. See ToolsPanel.tsx + the
-  // /api/v1/tools/* endpoints.
-  toolsTool: 'upscale' | 'revoice'
-  setToolsTool: (t: 'upscale' | 'revoice') => void
+  // Apply a finishing pass to any gallery output or uploaded clip,
+  // independent of a generation. See ToolsPanel.tsx + /api/v1/tools/*.
+  toolsTool: 'upscale' | 'film_grain' | 'revoice'
+  setToolsTool: (t: 'upscale' | 'film_grain' | 'revoice') => void
+  toolsUpscaleMedia: 'image' | 'video'
+  setToolsUpscaleMedia: (media: 'image' | 'video') => void
   /** Gallery filename (resolved against the workspace) OR an absolute upload path. */
   toolsSourcePath: string | null
   toolsSourceName: string | null
@@ -1426,7 +1459,7 @@ interface AppState {
   quickUpscaleClip: (name: string, url: string | null) => Promise<void>
   /** Gallery one-click: load a clip into the Tools panel for a tool that needs
    *  setup before running (e.g. revoice needs voice references), and switch to it. */
-  sendClipToTools: (name: string, url: string | null, tool: 'upscale' | 'revoice') => void
+  sendClipToTools: (name: string, url: string | null, tool: 'upscale' | 'film_grain' | 'revoice') => void
 
   // Director-mode post-processing (separate image/video)
   directorImageSpatialUpsampling: string
@@ -2363,7 +2396,28 @@ export const useStore = create<AppState>((set, get) => ({
     }
 
     if (workflow === 'upscale') {
-      set({ toolsTool: 'upscale' })
+      set(state => ({
+        toolsTool: 'upscale',
+        toolsUpscaleMedia: 'video',
+        ...(state.toolsUpscaleMedia === 'image' ? {
+          toolsSourcePath: null, toolsSourceName: null, toolsSourceUrl: null,
+        } : {}),
+      }))
+      if (get().generationMode !== 'tools') get().setGenerationMode('tools')
+      return
+    }
+
+    if (workflow === 'film_grain') {
+      set(state => ({
+        toolsTool: 'film_grain',
+        toolsUpscaleMedia: 'video',
+        filmGrainIntensity: state.filmGrainIntensity > 0
+          ? state.filmGrainIntensity
+          : 0.15,
+        ...(state.toolsUpscaleMedia === 'image' ? {
+          toolsSourcePath: null, toolsSourceName: null, toolsSourceUrl: null,
+        } : {}),
+      }))
       if (get().generationMode !== 'tools') get().setGenerationMode('tools')
       return
     }
@@ -2375,6 +2429,31 @@ export const useStore = create<AppState>((set, get) => ({
         : workflow
     if (get().generationMode !== 'avatar') get().setGenerationMode('avatar')
     get().setEditSubMode(editMode)
+  },
+  studioImageWorkflow: 'new' as StudioImageWorkflow,
+  setStudioImageWorkflow: (workflow) => {
+    if (workflow === 'upscale') {
+      set(state => ({
+        studioImageWorkflow: 'upscale',
+        toolsTool: 'upscale',
+        toolsUpscaleMedia: 'image',
+        ...(state.toolsUpscaleMedia === 'video' ? {
+          toolsSourcePath: null, toolsSourceName: null, toolsSourceUrl: null,
+        } : {}),
+      }))
+      if (get().generationMode !== 'tools') get().setGenerationMode('tools')
+      return
+    }
+
+    if (get().generationMode !== 'image') get().setGenerationMode('image')
+    set(state => ({
+      studioImageWorkflow: workflow,
+      params: {
+        ...state.params,
+        image_mode: workflow === 'inpaint' || workflow === 'outpaint' ? 2 : 1,
+        _studio_image_workflow: workflow,
+      },
+    }))
   },
   editSubMode: 'retake' as import('../types').EditSubMode,
   setEditSubMode: (mode: import('../types').EditSubMode) => {
@@ -2893,6 +2972,12 @@ export const useStore = create<AppState>((set, get) => ({
     const { filmGrainIntensity: _fgi, filmGrainSaturation: _fgs, durationSeconds: _ds, ...restoredParams } = restoredSnapshot || {}
     // Restore saved prompt for target mode (or empty for first visit)
     const restoredPrompt = savedPrompts[mode] ?? ''
+    const restoredImageWorkflow = (
+      restoredParams._studio_image_workflow === 'edit'
+      || restoredParams._studio_image_workflow === 'inpaint'
+      || restoredParams._studio_image_workflow === 'outpaint'
+      || restoredParams._studio_image_workflow === 'new'
+    ) ? restoredParams._studio_image_workflow : get().studioImageWorkflow
 
     set(_s => ({
       generationMode: mode,
@@ -2902,6 +2987,7 @@ export const useStore = create<AppState>((set, get) => ({
       savedPromptPerMode: savedPrompts,
       // Default to Auto resolution + aspect in image mode (matches reference image)
       ...(mode === 'image' ? { resolutionPreset: 'auto' as ResolutionPreset, aspectRatio: 'auto' as AspectRatio } : {}),
+      ...(mode === 'image' ? { studioImageWorkflow: restoredImageWorkflow } : {}),
       ...restoredFilmGrain,
       durationSeconds: restoredDuration,
       // Build params from defaults + restored snapshot. We deliberately
@@ -2916,7 +3002,10 @@ export const useStore = create<AppState>((set, get) => ({
         ...restoredParams,
         model_type: newModelType,
         prompt: restoredPrompt,
-        image_mode: mode === 'image' ? 1 : (restoredParams.image_mode ?? 0),
+        image_mode: mode === 'image'
+          ? (restoredImageWorkflow === 'inpaint' || restoredImageWorkflow === 'outpaint' ? 2 : 1)
+          : (restoredParams.image_mode ?? 0),
+        ...(mode === 'image' ? { _studio_image_workflow: restoredImageWorkflow } : {}),
         activated_loras: sameModel ? restoredLora.activated_loras : [],
         loras_multipliers: sameModel ? restoredLora.loras_multipliers : '',
       },
@@ -4408,6 +4497,39 @@ export const useStore = create<AppState>((set, get) => ({
     h3WindowPlan: null,
   })),
 
+  imageWorkflowSourceFile: null,
+  imageWorkflowSourcePath: '',
+  imageWorkflowSourceUrl: '',
+  setImageWorkflowSource: (source) => set(state => ({
+    imageWorkflowSourceFile: source?.file ?? null,
+    imageWorkflowSourcePath: source?.path ?? '',
+    imageWorkflowSourceUrl: source?.url ?? '',
+    params: source
+      ? state.params
+      : { ...state.params, image_guide: undefined },
+  })),
+  imageWorkflowMaskFile: null,
+  imageWorkflowMaskPath: '',
+  imageWorkflowMaskUrl: '',
+  setImageWorkflowMask: (source) => set(state => ({
+    imageWorkflowMaskFile: source?.file ?? null,
+    imageWorkflowMaskPath: source?.path ?? '',
+    imageWorkflowMaskUrl: source?.url ?? '',
+    params: source
+      ? state.params
+      : { ...state.params, image_mask: undefined },
+  })),
+  imageOutpaintPadding: { top: 25, bottom: 25, left: 25, right: 25 },
+  setImageOutpaintPadding: (side, value) => set(state => ({
+    imageOutpaintPadding: {
+      ...state.imageOutpaintPadding,
+      [side]: Math.max(0, Math.min(100, Math.round(value / 5) * 5)),
+    },
+  })),
+  resetImageOutpaintPadding: () => set({
+    imageOutpaintPadding: { top: 25, bottom: 25, left: 25, right: 25 },
+  }),
+
   // Image references
   imageRefs: [],
   imageRefType: '',
@@ -4449,9 +4571,33 @@ export const useStore = create<AppState>((set, get) => ({
 
   // ── Tools area (standalone post-processing on an existing clip) ──────
   toolsTool: 'upscale',
-  setToolsTool: (t) => set(t === 'upscale'
-    ? { toolsTool: t, studioVideoWorkflow: 'upscale' }
-    : { toolsTool: t, audioSubMode: 'revoice' }),
+  toolsUpscaleMedia: 'video',
+  setToolsUpscaleMedia: (media) => set(state => ({
+    toolsUpscaleMedia: media,
+    ...(media === 'image'
+      ? { studioImageWorkflow: 'upscale' as StudioImageWorkflow }
+      : { studioVideoWorkflow: 'upscale' as StudioVideoWorkflow }),
+    ...(state.toolsUpscaleMedia !== media ? {
+      toolsSourcePath: null, toolsSourceName: null, toolsSourceUrl: null,
+    } : {}),
+  })),
+  setToolsTool: (t) => set(state => t === 'upscale'
+    ? state.toolsUpscaleMedia === 'image'
+      ? { toolsTool: t, studioImageWorkflow: 'upscale' }
+      : { toolsTool: t, studioVideoWorkflow: 'upscale' }
+    : t === 'film_grain'
+      ? {
+          toolsTool: t,
+          toolsUpscaleMedia: 'video',
+          studioVideoWorkflow: 'film_grain',
+          filmGrainIntensity: state.filmGrainIntensity > 0
+            ? state.filmGrainIntensity
+            : 0.15,
+          ...(state.toolsUpscaleMedia === 'image' ? {
+            toolsSourcePath: null, toolsSourceName: null, toolsSourceUrl: null,
+          } : {}),
+        }
+      : { toolsTool: t, audioSubMode: 'revoice' }),
   toolsSourcePath: null,
   toolsSourceName: null,
   toolsSourceUrl: null,
@@ -4480,23 +4626,47 @@ export const useStore = create<AppState>((set, get) => ({
       .filter((r): r is { filename: string; path: string } => !!r && !!r.path)
       .map(r => r.path)
     if (tool === 'revoice' && refPaths.length === 0) return
+    if (tool === 'film_grain' && s.filmGrainIntensity <= 0) return
+
+    const submittingMessage = tool === 'upscale'
+      ? 'Submitting upscale...'
+      : tool === 'film_grain'
+        ? 'Submitting film grain...'
+        : 'Submitting revoice...'
+    const runningMessage = tool === 'upscale'
+      ? 'Upscaling...'
+      : tool === 'film_grain'
+        ? 'Applying film grain...'
+        : 'Replacing voice...'
 
     // Placeholder job tile — mirrors the blend/edit submit pattern so the
     // progress shows in the main feed and the gallery refreshes on completion.
     const newJob: GenerationJob = {
       id: '', status: 'queued', progress: 0, step: 0, totalSteps: 0,
-      phase: '', message: tool === 'upscale' ? 'Submitting upscale...' : 'Submitting revoice...',
+      phase: '', message: submittingMessage,
       outputFiles: [], error: null, oomInfo: null,
     }
     set(st => ({ isGenerating: true, jobs: [newJob, ...st.jobs] }))
 
     try {
       const result = tool === 'upscale'
-        ? await api.submitToolUpscale({ video_path: source, method: s.toolsUpscaleMethod, workspace: s.activeWorkspace })
-        : await api.submitToolRevoice({ video_path: source, voice_ref_paths: refPaths, mode: s.toolsRevoiceMode, workspace: s.activeWorkspace })
+        ? await api.submitToolUpscale({
+            media_path: source,
+            media_type: s.toolsUpscaleMedia,
+            method: s.toolsUpscaleMethod,
+            workspace: s.activeWorkspace,
+          })
+        : tool === 'film_grain'
+          ? await api.submitToolFilmGrain({
+              video_path: source,
+              intensity: s.filmGrainIntensity,
+              saturation: s.filmGrainSaturation,
+              workspace: s.activeWorkspace,
+            })
+          : await api.submitToolRevoice({ video_path: source, voice_ref_paths: refPaths, mode: s.toolsRevoiceMode, workspace: s.activeWorkspace })
 
       set(st => ({
-        jobs: st.jobs.map(j => j === newJob ? { ...j, id: result.job_id, status: 'running', message: tool === 'upscale' ? 'Upscaling...' : 'Replacing voice...' } : j),
+        jobs: st.jobs.map(j => j === newJob ? { ...j, id: result.job_id, status: 'running', message: runningMessage } : j),
       }))
 
       const pollInterval = setInterval(async () => {
@@ -4526,7 +4696,13 @@ export const useStore = create<AppState>((set, get) => ({
         } catch { /* ignore poll errors */ }
       }, 2000)
     } catch (e) {
-      const msg = e instanceof Error ? e.message : (tool === 'upscale' ? 'Upscale failed' : 'Revoice failed')
+      const msg = e instanceof Error
+        ? e.message
+        : tool === 'upscale'
+          ? 'Upscale failed'
+          : tool === 'film_grain'
+            ? 'Film grain failed'
+            : 'Revoice failed'
       set(st => ({
         jobs: st.jobs.map(j => j === newJob ? { ...j, id: j.id || `tool-fail-${Date.now()}`, status: 'failed', message: msg, error: msg } : j),
         isGenerating: st.jobs.some(j => j !== newJob && (j.status === 'running' || j.status === 'queued')),
@@ -4538,25 +4714,38 @@ export const useStore = create<AppState>((set, get) => ({
     // Point the Tools state at this clip and run an upscale immediately,
     // reusing runTool()'s submit+poll. The Tools panel reflects this clip
     // afterward (harmless — and convenient if the user opens it).
-    set({ toolsTool: 'upscale', toolsSourcePath: name, toolsSourceName: name, toolsSourceUrl: url })
+    set({ toolsTool: 'upscale', toolsUpscaleMedia: 'video', toolsSourcePath: name, toolsSourceName: name, toolsSourceUrl: url })
     await get().runTool()
   },
   sendClipToTools: (name, url, tool) => {
     set(tool === 'upscale'
       ? {
           toolsTool: tool,
+          toolsUpscaleMedia: 'video',
           studioVideoWorkflow: 'upscale',
           toolsSourcePath: name,
           toolsSourceName: name,
           toolsSourceUrl: url,
         }
-      : {
-          toolsTool: tool,
-          audioSubMode: 'revoice',
-          toolsSourcePath: name,
-          toolsSourceName: name,
-          toolsSourceUrl: url,
-        })
+      : tool === 'film_grain'
+        ? state => ({
+            toolsTool: tool,
+            toolsUpscaleMedia: 'video',
+            studioVideoWorkflow: 'film_grain',
+            toolsSourcePath: name,
+            toolsSourceName: name,
+            toolsSourceUrl: url,
+            filmGrainIntensity: state.filmGrainIntensity > 0
+              ? state.filmGrainIntensity
+              : 0.15,
+          })
+        : {
+            toolsTool: tool,
+            audioSubMode: 'revoice',
+            toolsSourcePath: name,
+            toolsSourceName: name,
+            toolsSourceUrl: url,
+          })
     get().setGenerationMode('tools')
   },
 
@@ -5452,6 +5641,10 @@ export const useStore = create<AppState>((set, get) => ({
     }
 
     const params: Record<string, unknown> = { ...state.params, generation_mode: state.generationMode, workspace: state.activeWorkspace }
+    // This is an ephemeral submit contract, never durable Studio state. It is
+    // set again below only when the exact visible H3 window plan is included
+    // in this submission.
+    delete params._h3_window_plan_reviewed
     let effectiveH3SequenceClipFrames: number | null = null
     let h3ManualSequencePrompts: string[] | null = null
     let h3ManualFirstLastPrompts: string[] | null = null
@@ -5933,10 +6126,37 @@ export const useStore = create<AppState>((set, get) => ({
     // Backend uses image_mode > 0 to determine output as image (.jpg) vs video (.mp4)
     if (state.generationMode === 'image') {
       params.video_length = 1
-      params.image_mode = 1
-      // WanGP expects control input in image_guide (not video_guide) for image mode
-      if (params.video_guide && !params.image_guide) {
-        params.image_guide = params.video_guide
+      const workflow = state.studioImageWorkflow === 'upscale'
+        ? 'new'
+        : state.studioImageWorkflow
+      params._studio_image_workflow = workflow
+      params.image_mode = workflow === 'inpaint' || workflow === 'outpaint' ? 2 : 1
+
+      if (workflow === 'inpaint' || workflow === 'outpaint') {
+        params.image_guide = state.imageWorkflowSourcePath
+        params.image_mask = workflow === 'inpaint'
+          ? state.imageWorkflowMaskPath
+          : undefined
+        params.video_prompt_type = state.modelOptions?.inpaint_video_prompt_type || 'VAG'
+        params.video_guide_outpainting = workflow === 'outpaint'
+          ? [
+              state.imageOutpaintPadding.top,
+              state.imageOutpaintPadding.bottom,
+              state.imageOutpaintPadding.left,
+              state.imageOutpaintPadding.right,
+            ].join(' ')
+          : ''
+        delete params.image_refs
+        params.remove_background_images_ref = 0
+      } else {
+        delete params.image_guide
+        delete params.image_mask
+        delete params.video_guide_outpainting
+        if (workflow === 'new') {
+          delete params.image_refs
+          params.remove_background_images_ref = 0
+          params.video_prompt_type = ''
+        }
       }
     }
 
@@ -6086,7 +6306,11 @@ export const useStore = create<AppState>((set, get) => ({
     }
 
     // Multi-clip path
-    if (!isOmniReference && state.params.image_mode === 2) {
+    if (
+      state.generationMode === 'video'
+      && !isOmniReference
+      && state.params.image_mode === 2
+    ) {
       const clips = state.clips
       const imagePaths: string[] = []
       const endImagePaths: string[] = []
@@ -6226,7 +6450,9 @@ export const useStore = create<AppState>((set, get) => ({
     }
 
     // Image references (from ImageRefSection)
-    if (state.imageRefType && state.imageRefs.length > 0) {
+    const imageReferenceWorkflowActive = state.generationMode !== 'image'
+      || state.studioImageWorkflow === 'edit'
+    if (imageReferenceWorkflowActive && state.imageRefType && state.imageRefs.length > 0) {
       const refPaths: string[] = []
       for (const file of state.imageRefs) {
         try {
@@ -6357,6 +6583,7 @@ export const useStore = create<AppState>((set, get) => ({
         params.h3_window_prompts = state.h3WindowPlan.windows.map(window => window.prompt)
         params.h3_window_plan_signature = state.h3WindowPlan.signature
         params.h3_window_plan = state.h3WindowPlan
+        params._h3_window_plan_reviewed = true
       } else {
         delete params.h3_window_prompts
         delete params.h3_window_plan_signature
@@ -6368,6 +6595,7 @@ export const useStore = create<AppState>((set, get) => ({
         params.h3_window_prompts = state.h3WindowPlan.windows.map(window => window.prompt)
         params.h3_window_plan_signature = state.h3WindowPlan.signature
         params.h3_window_plan = state.h3WindowPlan
+        params._h3_window_plan_reviewed = true
       } else {
         delete params.h3_window_prompts
         delete params.h3_window_plan_signature
@@ -7574,6 +7802,14 @@ export const useStore = create<AppState>((set, get) => ({
         let videoIndex = 0
         let audioIndex = 0
         const labelLines: string[] = []
+        const savedCharacterMedia = new Map<string, { name: string; labels: string[] }>()
+        const bindSavedCharacter = (reference: MiniMaxH3Reference, label: string) => {
+          if (!reference.library_character_id) return
+          const name = (reference.character_name || reference.role || 'Saved character').trim()
+          const binding = savedCharacterMedia.get(reference.library_character_id) ?? { name, labels: [] }
+          binding.labels.push(label)
+          savedCharacterMedia.set(reference.library_character_id, binding)
+        }
         for (const reference of params.minimax_h3_references ?? []) {
           const note = (reference.role || reference.filename || 'reference').trim()
           if (reference.type === 'audio') {
@@ -7581,12 +7817,17 @@ export const useStore = create<AppState>((set, get) => ({
             if (intent === 'drive') {
               labelLines.push(`Exact target soundtrack: ${note}; intent=AUDIO REUSE / PERFORMANCE DRIVER; retention=fully_preserved; preserve its waveform and audible timeline exactly and synchronize visible action and lip movement to it; this is target conditioning rather than a numbered Omni audio reference`)
             } else if (intent === 'style') {
-              labelLines.push(`<Audio ${++audioIndex}>: ${note}; intent=AUDIO REFERENCE; retention=weak_reference; borrow only rhythm/style/texture and do not copy the source signal or words`)
+              const label = `<Audio ${++audioIndex}>`
+              labelLines.push(`${label}: ${note}; intent=AUDIO REFERENCE; retention=weak_reference; borrow only rhythm/style/texture and do not copy the source signal or words`)
             } else {
-              labelLines.push(`<Audio ${++audioIndex}>: ${note}; intent=VOICE REFERENCE; retention=reference; use timbre/emotion/delivery for new scripted dialogue without copying source words, timing, or waveform`)
+              const label = `<Audio ${++audioIndex}>`
+              labelLines.push(`${label}: ${note}; intent=VOICE REFERENCE; retention=reference; use timbre/emotion/delivery for new scripted dialogue without copying source words, timing, or waveform`)
+              bindSavedCharacter(reference, label)
             }
           } else if (reference.type === 'image') {
-            labelLines.push(`<Picture ${++pictureIndex}>: visual identity/appearance reference for ${note}; retention=reference for identity only; do not reproduce its background, framing, composition, or pose`)
+            const label = `<Picture ${++pictureIndex}>`
+            labelLines.push(`${label}: visual identity/appearance reference for ${note}; retention=reference for identity only; do not reproduce its background, framing, composition, or pose`)
+            bindSavedCharacter(reference, label)
             if (reference.path) imagePaths.push(reference.path)
           } else {
             const nextVideoIndex = videoIndex + 1
@@ -7594,17 +7835,39 @@ export const useStore = create<AppState>((set, get) => ({
               labelLines.push(`<Audio ${++audioIndex}>: soundtrack paired with <Video ${nextVideoIndex}>; intent=AUDIO REUSE / PERFORMANCE DRIVER; retention=partially_copy; preserve its audible timeline and synchronize action to it`)
             }
             videoIndex = nextVideoIndex
-            labelLines.push(`<Video ${videoIndex}>: motion/camera/scene/timing reference for ${note}`)
+            const label = `<Video ${videoIndex}>`
+            if (reference.video_intent === 'character') {
+              labelLines.push(`${label}: identity, appearance, and characteristic-motion evidence for ${note}; compile it into that character's Subject; reject its source background, framing, camera, edit rhythm, opening frame, and action`)
+              bindSavedCharacter(reference, label)
+            } else if (reference.video_intent === 'scene') {
+              labelLines.push(`${label}: environment, lighting, and scene-continuity reference for ${note}; do not copy incidental people as target identities`)
+            } else {
+              labelLines.push(`${label}: motion/camera/scene/timing reference for ${note}`)
+            }
           }
         }
-        referenceContext = labelLines.join('\n')
+        const savedCharacterLines = Array.from(savedCharacterMedia.values()).map(binding => (
+          `Saved character "${binding.name}": ${binding.labels.join(' + ')} all define one stable <Subject N>. `
+          + `Whenever the user names ${binding.name}, use that same Subject identity and bind its voice Audio to the same speaker. `
+          + 'Do not emit an @ token; compile the saved name into official H3 Subject and media labels.'
+        ))
+        referenceContext = [...savedCharacterLines, ...labelLines].join('\n')
       } else if (generationMode === 'image') {
-        // Image mode: send reference images only
-        for (const ref of imageRefs) {
-          try {
-            const uploaded = await api.uploadImage(ref)
-            imagePaths.push(uploaded.path)
-          } catch { /* best effort */ }
+        if (
+          (state.studioImageWorkflow === 'inpaint' || state.studioImageWorkflow === 'outpaint')
+          && state.imageWorkflowSourcePath
+        ) {
+          imagePaths.push(state.imageWorkflowSourcePath)
+          referenceContext = state.studioImageWorkflow === 'inpaint'
+            ? 'Picture 1 is the source image. Preserve everything outside the supplied edit mask; describe the finished image, not mask instructions.'
+            : 'Picture 1 is the protected source image. Extend its scene naturally beyond the existing canvas; describe the complete finished image.'
+        } else if (state.studioImageWorkflow === 'edit') {
+          for (const ref of imageRefs) {
+            try {
+              const uploaded = await api.uploadImage(ref)
+              imagePaths.push(uploaded.path)
+            } catch { /* best effort */ }
+          }
         }
       } else {
         // Video/Avatar mode normally sends the start image. H3 First / Last
@@ -9690,17 +9953,21 @@ export const useStore = create<AppState>((set, get) => ({
     const uploadFilenames = selectedOutputMeta.upload_filenames as Record<string, string> | undefined
     console.log('[LoadSettings] applying settings — model_type:', p.model_type, '| param keys:', Object.keys(p).length)
 
-    // Standalone Upscale/Revoice sidecars intentionally use the virtual
+    // Standalone finishing sidecars intentionally use the virtual
     // `post_processing` model id. Restore them into the new grouped Studio
     // hierarchy rather than asking model discovery to resolve that id. Older
     // sidecars only carry edit_sub_mode; newer ones also carry top-level tool.
     const restoredTool = (
-      selectedOutputMeta.tool === 'upscale' || selectedOutputMeta.tool === 'revoice'
+      selectedOutputMeta.tool === 'upscale'
+      || selectedOutputMeta.tool === 'film_grain'
+      || selectedOutputMeta.tool === 'revoice'
         ? selectedOutputMeta.tool
-        : p.edit_sub_mode === 'upscale' || p.edit_sub_mode === 'revoice'
+        : p.edit_sub_mode === 'upscale'
+          || p.edit_sub_mode === 'film_grain'
+          || p.edit_sub_mode === 'revoice'
           ? p.edit_sub_mode
           : null
-    ) as 'upscale' | 'revoice' | null
+    ) as 'upscale' | 'film_grain' | 'revoice' | null
     if (restoredTool) {
       const selectedOutput = get().filteredOutputs()[get().selectedOutput]
       const recordedSource = String(selectedOutputMeta.tool_source || '').trim()
@@ -9712,25 +9979,43 @@ export const useStore = create<AppState>((set, get) => ({
       const sourceUrl = sourceName
         ? api.getFileUrl(sourceName)
         : selectedOutput?.url || null
+      const restoredUpscaleMedia = selectedOutputMeta.tool_media_type === 'image'
+        ? 'image'
+        : 'video'
       set(restoredTool === 'upscale'
         ? {
             generationMode: 'tools',
             toolsTool: 'upscale',
-            studioVideoWorkflow: 'upscale',
+            toolsUpscaleMedia: restoredUpscaleMedia,
+            ...(restoredUpscaleMedia === 'image'
+              ? { studioImageWorkflow: 'upscale' as StudioImageWorkflow }
+              : { studioVideoWorkflow: 'upscale' as StudioVideoWorkflow }),
             toolsSourcePath: sourceName || null,
             toolsSourceName: sourceName || null,
             toolsSourceUrl: sourceUrl,
             toolsUpscaleMethod: String(p.method || 'flashvsr2'),
           }
-        : {
-            generationMode: 'tools',
-            toolsTool: 'revoice',
-            audioSubMode: 'revoice',
-            toolsSourcePath: sourceName || null,
-            toolsSourceName: sourceName || null,
-            toolsSourceUrl: sourceUrl,
-            toolsRevoiceMode: p.mode === 'two' ? 'two' : 'single',
-          })
+        : restoredTool === 'film_grain'
+          ? {
+              generationMode: 'tools',
+              toolsTool: 'film_grain',
+              toolsUpscaleMedia: 'video',
+              studioVideoWorkflow: 'film_grain' as StudioVideoWorkflow,
+              toolsSourcePath: sourceName || null,
+              toolsSourceName: sourceName || null,
+              toolsSourceUrl: sourceUrl,
+              filmGrainIntensity: Number(p.intensity ?? p.film_grain_intensity ?? 0.15),
+              filmGrainSaturation: Number(p.saturation ?? p.film_grain_saturation ?? 0.5),
+            }
+          : {
+              generationMode: 'tools',
+              toolsTool: 'revoice',
+              audioSubMode: 'revoice',
+              toolsSourcePath: sourceName || null,
+              toolsSourceName: sourceName || null,
+              toolsSourceUrl: sourceUrl,
+              toolsRevoiceMode: p.mode === 'two' ? 'two' : 'single',
+            })
       return
     }
 
@@ -10054,6 +10339,25 @@ export const useStore = create<AppState>((set, get) => ({
     newParams.minimax_h3_turbo_preset = restoredTurboPreset?.id
     newParams.minimax_h3_text_encoder = restoredTextEncoder
     newParams.ltx25_video_vae = restoredLtx25VideoVae
+    const restoredCustomSettings = (
+      p.custom_settings
+      && typeof p.custom_settings === 'object'
+      && !Array.isArray(p.custom_settings)
+    ) ? p.custom_settings as Record<string, unknown> : {}
+    const restoredH3LongSequenceSettings = Object.fromEntries(
+      [
+        'h3_long_sequence_clean_tail',
+        'h3_long_sequence_single_frame_after_three',
+        'h3_long_sequence_vary_seed',
+        'h3_long_sequence_periodic_reset',
+        'h3_long_sequence_diagnostics',
+      ]
+        .filter(key => restoredCustomSettings[key] === true)
+        .map(key => [key, true]),
+    )
+    newParams.custom_settings = Object.keys(
+      restoredH3LongSequenceSettings,
+    ).length > 0 ? restoredH3LongSequenceSettings : undefined
     newParams.minimax_h3_window_storyboard = (p.minimax_h3_window_storyboard as boolean) ?? undefined
     newParams.minimax_h3_multi_window = (p.minimax_h3_multi_window as boolean) ?? undefined
     const legacyLtxLongForm = (
@@ -10231,7 +10535,23 @@ export const useStore = create<AppState>((set, get) => ({
     const restoredSpatialUpsampling = (p.spatial_upsampling as string) || ''
     const restoredFilmGrainIntensity = (p.film_grain_intensity as number) || 0
     const restoredFilmGrainSaturation = (p.film_grain_saturation as number) || 0.5
-
+    const restoredImageWorkflow: StudioImageWorkflow = (
+      p._studio_image_workflow === 'edit'
+      || p._studio_image_workflow === 'inpaint'
+      || p._studio_image_workflow === 'outpaint'
+      || p._studio_image_workflow === 'new'
+    ) ? p._studio_image_workflow : (
+      Number(p.image_mode || 0) === 2
+        ? (String(p.video_guide_outpainting || '').replace(/^#/, '').trim()
+            ? 'outpaint'
+            : 'inpaint')
+        : Array.isArray(p.image_refs) && p.image_refs.length > 0
+          ? 'edit'
+          : 'new'
+    )
+    if (model && getModelMode(modelType, model.family) === 'image') {
+      newParams._studio_image_workflow = restoredImageWorkflow
+    }
     // Restore audio guide filename from upload_filenames. Fall back to
     // deriving basename from params.audio_guide for sidecars that pre-date
     // the upload_filenames extraction code.
@@ -10240,6 +10560,8 @@ export const useStore = create<AppState>((set, get) => ({
       const bn = val.replace(/\\/g, '/').split('/').pop()
       return bn || null
     }
+    const restoredImageGuide = _deriveBase(p.image_guide)
+    const restoredImageMask = _deriveBase(p.image_mask)
     const restoredAudioGuideFilename =
       (typeof uploadFilenames?.audio_guide === 'string' ? uploadFilenames.audio_guide : null)
       || _deriveBase(p.audio_guide)
@@ -10265,6 +10587,19 @@ export const useStore = create<AppState>((set, get) => ({
       startImage: null,
       endImage: null,
       imageRefs: [],  // Clear — will repopulate below if image_refs exist
+      ...(model && getModelMode(modelType, model.family) === 'image' ? {
+        studioImageWorkflow: restoredImageWorkflow,
+        imageWorkflowSourceFile: null,
+        imageWorkflowSourcePath: String(p.image_guide || ''),
+        imageWorkflowSourceUrl: restoredImageGuide
+          ? api.getUploadUrl(restoredImageGuide)
+          : '',
+        imageWorkflowMaskFile: null,
+        imageWorkflowMaskPath: String(p.image_mask || ''),
+        imageWorkflowMaskUrl: restoredImageMask
+          ? api.getUploadUrl(restoredImageMask)
+          : '',
+      } : {}),
       outputCount: 1,
       ...(restoredDuration > 0 ? { durationSeconds: restoredDuration } : {}),
       spatialUpsampling: restoredSpatialUpsampling,

@@ -1,13 +1,11 @@
-"""MiniMax H3 plain-text prompt budgeting.
+"""MiniMax H3 prompt measurement and quality-oriented compaction.
 
-H3 First / Last reserves 512 Qwen text tokens for every native pass.  The
-conditioner intentionally truncates longer text, which is especially damaging
-when dialogue or a final action sits near the end of an otherwise excellent
-prompt.  This module gives Studio, Director, and the window planners one exact
-counter plus a conservative, structure-aware compactor.
-
-Omni / Ref2VA uses a different presentation path and is deliberately not
-subjected to this hard Base/FL2VA budget.
+MiniMax H3 does not publish a 512-token prompt limit, and Maestro's conditioner
+passes the complete token sequence to Qwen.  This module therefore must never
+act as a generation gate.  It gives Studio, Director, and the window planners
+one exact counter plus a conservative structure-aware compactor for overly
+verbose AI-authored prompts.  If a prompt cannot be shortened without changing
+protected dialogue or timing, the complete prompt is retained.
 """
 
 from __future__ import annotations
@@ -22,13 +20,14 @@ from typing import Any, Iterable
 from services.text_integrity import repair_text
 
 
-H3_BASE_TEXT_TOKEN_LIMIT = 512
-H3_ENHANCED_TEXT_TOKEN_TARGET = 480
-H3_ENHANCER_REQUESTED_TOKEN_TARGET = 450
+H3_PROMPT_QUALITY_TARGET = 1024
+# Compatibility name used by the Director and window planners.  This is a
+# quality target for AI-authored prose, not a model or runtime limit.
+H3_ENHANCED_TEXT_TOKEN_TARGET = H3_PROMPT_QUALITY_TARGET
 
 
 class H3PromptBudgetError(ValueError):
-    """Raised when an H3 Base prompt cannot fit without losing protected data."""
+    """Raised when required H3 prompt structure or dialogue is invalid."""
 
 
 @dataclass(frozen=True)
@@ -115,8 +114,8 @@ def h3_prompt_token_count(value: Any) -> int:
         )
     )
     # Qwen splits markup, names, punctuation, and uncommon words more often
-    # than a whitespace lexer. This margin prevents a fresh install (before
-    # tokenizer assets download) from accepting a prompt that later truncates.
+    # than a whitespace lexer. Keep a conservative estimate before tokenizer
+    # assets are downloaded so quality compaction behaves consistently.
     return int(math.ceil(lexical * 1.25)) + 8
 
 
@@ -337,12 +336,13 @@ def fit_h3_base_prompt(
     *,
     target_tokens: int = H3_ENHANCED_TEXT_TOKEN_TARGET,
 ) -> H3PromptBudgetResult:
-    """Fit a structured H3 Base prompt while preserving protected dialogue.
+    """Compact verbose structured H3 prose while preserving protected data.
 
     No string slicing is used.  Alignment instructions, all literal ``<d>``
     blocks, field order, timed clauses, shot boundaries, and the first/final
-    visual states receive priority.  If those protected elements alone cannot
-    fit, the caller receives an actionable error instead of silent truncation.
+    visual states receive priority.  ``target_tokens`` is only a quality goal;
+    if it cannot be reached safely, the best safe form (or the untouched input)
+    is returned and generation remains allowed.
     """
 
     text = _normalize(prompt)
@@ -352,10 +352,7 @@ def fit_h3_base_prompt(
 
     parsed = _parse_base_fields(text)
     if parsed is None:
-        raise H3PromptBudgetError(
-            "MiniMax H3 First / Last prompt is over its safe text budget and "
-            "does not contain the three Context-IR fields required for safe compaction."
-        )
+        return H3PromptBudgetResult(text, original_count, original_count, False)
     prefix, visual_body, sound_body, music_body = parsed
     dialogue_blocks = _DIALOGUE_RE.findall(visual_body)
 
@@ -373,10 +370,8 @@ def fit_h3_base_prompt(
         )
         candidate_blocks = _DIALOGUE_RE.findall(candidate)
         if candidate_blocks != dialogue_blocks:
-            raise H3PromptBudgetError(
-                "MiniMax H3 prompt compaction would change scripted dialogue; "
-                "shorten the visual description instead."
-            )
+            # Never trade exact speech for a cosmetic prompt-length target.
+            return H3PromptBudgetResult(text, original_count, original_count, False)
         candidate_count = h3_prompt_token_count(candidate)
         if candidate_count < best_count:
             best, best_count = candidate, candidate_count
@@ -388,22 +383,9 @@ def fit_h3_base_prompt(
                 True,
             )
 
-    raise H3PromptBudgetError(
-        "MiniMax H3 First / Last prompt cannot fit its safe "
-        f"{target_tokens}-token budget without removing alignment, timing, or "
-        f"dialogue (best safe form is {best_count} tokens). Shorten the prompt "
-        "or split the action into additional windows."
+    return H3PromptBudgetResult(
+        best,
+        best_count,
+        original_count,
+        best != text,
     )
-
-
-def validate_h3_base_prompt(prompt: Any, *, label: str = "Prompt") -> int:
-    """Reject text H3 would silently truncate; return its measured size."""
-
-    count = h3_prompt_token_count(prompt)
-    if count > H3_BASE_TEXT_TOKEN_LIMIT:
-        raise H3PromptBudgetError(
-            f"{label} is {count} MiniMax H3 text tokens, but First / Last reads "
-            f"only {H3_BASE_TEXT_TOKEN_LIMIT}. Shorten it or use Prompt Enhance "
-            "so Maestro can compact it without losing dialogue or the ending."
-        )
-    return count

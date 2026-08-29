@@ -77,6 +77,89 @@ _H3_SLIDING_WINDOW_DEFAULTS = {
     "discard_last_frames": 0,
 }
 
+# Opt-in diagnostics for investigating very long FL2VA continuations. These
+# live in ``custom_settings`` so they remain out of the ordinary H3 workflow,
+# survive presets/metadata, and can be removed without expanding the shared
+# WanGP generation signature. None of them changes the default pipeline.
+_H3_LONG_SEQUENCE_RUNTIME_SETTINGS = (
+    "h3_long_sequence_clean_tail",
+    "h3_long_sequence_single_frame_after_three",
+    "h3_long_sequence_vary_seed",
+    "h3_long_sequence_periodic_reset",
+    "h3_long_sequence_diagnostics",
+)
+_H3_LONG_SEQUENCE_CLEAN_TAIL_FRAMES = _H3_FRAME_STEP
+_H3_LONG_SEQUENCE_SEED_STRIDE = 1_000_003
+
+
+def resolve_h3_long_sequence_discard_frames(
+    custom_settings,
+    *,
+    enabled: bool,
+) -> int:
+    """Return the opt-in clean-tail discard for a rolling FL2VA sequence."""
+
+    settings = custom_settings if isinstance(custom_settings, dict) else {}
+    if enabled and settings.get("h3_long_sequence_clean_tail") is True:
+        return _H3_LONG_SEQUENCE_CLEAN_TAIL_FRAMES
+    return 0
+
+
+def resolve_h3_long_sequence_window_policy(
+    window_no: int,
+    overlap_frames: int,
+    seed,
+    custom_settings,
+):
+    """Resolve one experimental FL2VA continuation handoff.
+
+    The scheduler's output stride remains based on ``overlap_frames``. A
+    one-frame handoff therefore uses the remaining overlap as generated
+    warm-up that the outer assembler trims, preserving the exact requested
+    total duration while removing recursive multi-frame history.
+    """
+
+    settings = custom_settings if isinstance(custom_settings, dict) else {}
+    window = max(1, int(window_no or 1))
+    overlap = max(0, int(overlap_frames or 0))
+    is_continuation = window > 1 and overlap > 0
+    persistent_single_frame = (
+        is_continuation
+        and window >= 4
+        and settings.get(
+            "h3_long_sequence_single_frame_after_three"
+        ) is True
+    )
+    periodic_reset = (
+        is_continuation
+        and (window - 1) % 3 == 0
+        and settings.get("h3_long_sequence_periodic_reset") is True
+    )
+    conditioning_frames = (
+        1
+        if persistent_single_frame or periodic_reset
+        else overlap
+    )
+    effective_seed = seed
+    if (
+        settings.get("h3_long_sequence_vary_seed") is True
+        and window > 1
+        and seed is not None
+    ):
+        effective_seed = (
+            int(seed) + (window - 1) * _H3_LONG_SEQUENCE_SEED_STRIDE
+        ) % 2_147_483_647
+    return {
+        "conditioning_frames": conditioning_frames,
+        "output_trim_frames": overlap,
+        "seed": effective_seed,
+        "persistent_single_frame": persistent_single_frame,
+        "periodic_reset": periodic_reset,
+        "diagnostics": settings.get(
+            "h3_long_sequence_diagnostics"
+        ) is True,
+    }
+
 
 def align_h3_num_frames(num_frames: int) -> int:
     """Snap a request to the next ``17 * n + 5`` H3 frame count."""
@@ -1517,6 +1600,9 @@ class family_handler:
             "first_block_cache_thresholds": _FIRST_BLOCK_CACHE_THRESHOLDS,
             "skip_steps_multiplier_choices": _FIRST_BLOCK_CACHE_STRENGTHS,
             "skip_steps_multiplier_label": "First Block Cache Threshold",
+            "runtime_custom_settings": list(
+                _H3_LONG_SEQUENCE_RUNTIME_SETTINGS
+            ),
             "resolutions": _RESOLUTIONS,
             "resolution_presets": _H3_RESOLUTION_PRESETS,
             "resolution_preset_order": _H3_RESOLUTION_PRESET_ORDER,
@@ -1630,8 +1716,8 @@ class family_handler:
                         "total": 12,
                     },
                     "omni_reference_detail_choices": [
-                        ("Match output (recommended)", "match"),
-                        ("Maximum reference detail", "max"),
+                        ("Match output (faster)", "match"),
+                        ("High detail (official PDD recipe)", "max"),
                     ],
                     "omni_reference_detail_default": "match",
                     # Native Ref2VA continuation has the same target-pass
@@ -2152,7 +2238,17 @@ class family_handler:
                 window_frames=inputs["sliding_window_size"],
             )
 
-        inputs["sliding_window_discard_last_frames"] = 0
+        inputs["sliding_window_discard_last_frames"] = (
+            resolve_h3_long_sequence_discard_frames(
+                inputs.get("custom_settings"),
+                enabled=(
+                    not omni_reference
+                    and inputs.get("minimax_h3_multi_window") is True
+                    and int(inputs.get("video_length") or 0)
+                    > int(inputs.get("sliding_window_size") or 0)
+                ),
+            )
+        )
         inputs["sliding_window_overlap_noise"] = 0
         inputs["sliding_window_color_correction_strength"] = 0
         try:

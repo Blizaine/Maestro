@@ -5,7 +5,13 @@ const {
 } = require("./launcher_profile")
 
 module.exports = async (kernel) => {
-  let port = await kernel.port()
+  const fallbackPort = await kernel.port()
+  // A successful one-time Tailscale setup records the exact Maestro backend
+  // port it proxies. Reuse that port on later launches so the persistent
+  // `tailscale serve --bg` route does not become stale when Pinokio assigns a
+  // new dynamic port. If the user has never opted in, keep Pinokio's normal
+  // conflict-safe dynamic port behavior.
+  const port = `{{local.remote_access && local.remote_access.enabled && local.remote_access.pinokio_port_lock && local.remote_access.target_port ? local.remote_access.target_port : ${fallbackPort}}}`
   const runtime = runtimeProfile(kernel)
   const legacyRuntime = legacyRuntimeProfile(kernel)
   const hasRecoveryRuntime = runtime.env !== legacyRuntime.env
@@ -38,6 +44,13 @@ module.exports = async (kernel) => {
     daemon: true,
     run: [
       ...runtimeGuard,
+      {
+        when: "{{exists('app/settings/remote_access.json')}}",
+        method: "json.get",
+        params: {
+          remote_access: "app/settings/remote_access.json",
+        },
+      },
       ...(hasRecoveryRuntime ? [{
         when: `{{!exists('${runtime.marker}')}}`,
         method: "log",

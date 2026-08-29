@@ -97,10 +97,6 @@ module.exports = {
             text: "Open Web UI",
             href: local.url,
           }, {
-            icon: "fa-solid fa-rocket",
-            text: "Open Classic UI",
-            href: local.url + "/classic",
-          }, {
             icon: "fa-solid fa-shield-halved",
             text: running.tailscale_setup
               ? "Configuring Secure Remote Access"
@@ -186,10 +182,6 @@ module.exports = {
           text: "<div><strong>Secure Remote Access (Tailscale)</strong><div>Start Maestro first, then run this action again to create its private HTTPS address.</div></div>",
           href: "tailscale_setup.js",
         }, {
-          icon: "fa-solid fa-display",
-          text: "Start (Classic UI)",
-          href: "start_classic.js",
-        }, {
           icon: "fa-solid fa-power-off",
           text: "Advanced",
           menu: [{
@@ -218,13 +210,8 @@ module.exports = {
           }] : [])]
         }, {
           icon: "fa-regular fa-folder-open",
-          text: "T2V Loras (save lora files here)",
+          text: "Loras (save lora files here)",
           href: "app/loras",
-          fs: true
-        }, {
-          icon: "fa-regular fa-folder-open",
-          text: "I2V Loras (save lora files here)",
-          href: "app/loras_i2v",
           fs: true
         }, {
           icon: "fa-solid fa-plug",

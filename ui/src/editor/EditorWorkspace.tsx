@@ -1,12 +1,11 @@
 import { useEffect } from 'react'
-import { FolderOpen, Layers3, SlidersHorizontal } from 'lucide-react'
 import { useIsMobile } from '../lib/useIsMobile'
 import { useStore } from '../stores/useStore'
-import { EditorInspector } from './EditorInspector'
-import { EditorMediaBin } from './EditorMediaBin'
+import { EditorLeftPanel } from './EditorLeftPanel'
 import { EditorPreview } from './EditorPreview'
 import { EditorTimeline } from './EditorTimeline'
 import { EditorTopBar } from './EditorTopBar'
+import { editorProjectDuration } from './editorUtils'
 import { useEditorStore } from './useEditorStore'
 
 export function EditorWorkspace() {
@@ -15,14 +14,22 @@ export function EditorWorkspace() {
   const initialize = useEditorStore(state => state.initialize)
   const loading = useEditorStore(state => state.loading)
   const dirty = useEditorStore(state => state.dirty)
+  const project = useEditorStore(state => state.project)
   const error = useEditorStore(state => state.error)
-  const mobilePanel = useEditorStore(state => state.mobilePanel)
-  const setMobilePanel = useEditorStore(state => state.setMobilePanel)
   const saveProject = useEditorStore(state => state.saveProject)
   const undo = useEditorStore(state => state.undo)
   const redo = useEditorStore(state => state.redo)
   const splitSelected = useEditorStore(state => state.splitSelected)
   const deleteSelected = useEditorStore(state => state.deleteSelected)
+  const duplicateSelected = useEditorStore(state => state.duplicateSelected)
+  const copySelected = useEditorStore(state => state.copySelected)
+  const cutSelected = useEditorStore(state => state.cutSelected)
+  const pasteClipboard = useEditorStore(state => state.pasteClipboard)
+  const jumpToEdit = useEditorStore(state => state.jumpToEdit)
+  const addMarker = useEditorStore(state => state.addMarker)
+  const selectItem = useEditorStore(state => state.selectItem)
+  const playhead = useEditorStore(state => state.playhead)
+  const setPlayhead = useEditorStore(state => state.setPlayhead)
   const playing = useEditorStore(state => state.playing)
   const setPlaying = useEditorStore(state => state.setPlaying)
 
@@ -51,60 +58,96 @@ export function EditorWorkspace() {
       } else if (command && event.key.toLowerCase() === 'y') {
         event.preventDefault()
         redo()
+      } else if (command && !editingText && event.key.toLowerCase() === 'c') {
+        event.preventDefault()
+        copySelected()
+      } else if (command && !editingText && event.key.toLowerCase() === 'x') {
+        event.preventDefault()
+        cutSelected()
+      } else if (command && !editingText && event.key.toLowerCase() === 'v') {
+        event.preventDefault()
+        pasteClipboard()
+      } else if (command && !editingText && event.key.toLowerCase() === 'd') {
+        event.preventDefault()
+        duplicateSelected()
       } else if (!editingText && event.code === 'Space') {
         event.preventDefault()
         setPlaying(!playing)
       } else if (!editingText && event.key.toLowerCase() === 's') {
         event.preventDefault()
         splitSelected()
+      } else if (!editingText && event.key.toLowerCase() === 'm') {
+        event.preventDefault()
+        addMarker(playhead)
+      } else if (!editingText && event.key.toLowerCase() === 'j') {
+        event.preventDefault()
+        setPlaying(false)
+        setPlayhead(Math.max(0, playhead - (event.shiftKey ? 5 : 1)))
+      } else if (!editingText && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        setPlaying(false)
+      } else if (!editingText && event.key.toLowerCase() === 'l') {
+        event.preventDefault()
+        if (playhead >= editorProjectDuration(project)) setPlayhead(0)
+        setPlaying(true)
       } else if (!editingText && (event.key === 'Delete' || event.key === 'Backspace')) {
         event.preventDefault()
         deleteSelected()
+      } else if (!editingText && event.key === 'ArrowLeft') {
+        event.preventDefault()
+        const amount = event.shiftKey ? 1 : 1 / Math.max(1, project?.canvas.fps || 30)
+        setPlaying(false)
+        setPlayhead(playhead - amount)
+      } else if (!editingText && event.key === 'ArrowRight') {
+        event.preventDefault()
+        const amount = event.shiftKey ? 1 : 1 / Math.max(1, project?.canvas.fps || 30)
+        setPlaying(false)
+        setPlayhead(Math.min(editorProjectDuration(project), playhead + amount))
+      } else if (!editingText && event.key === 'ArrowUp') {
+        event.preventDefault()
+        jumpToEdit(-1)
+      } else if (!editingText && event.key === 'ArrowDown') {
+        event.preventDefault()
+        jumpToEdit(1)
+      } else if (!editingText && event.key === 'Home') {
+        event.preventDefault()
+        setPlaying(false)
+        setPlayhead(0)
+      } else if (!editingText && event.key === 'End') {
+        event.preventDefault()
+        setPlaying(false)
+        setPlayhead(editorProjectDuration(project))
+      } else if (!editingText && event.key === 'Escape') {
+        selectItem(null, null)
       }
     }
     window.addEventListener('keydown', keyboard)
     return () => window.removeEventListener('keydown', keyboard)
-  }, [deleteSelected, playing, redo, saveProject, setPlaying, splitSelected, undo])
+  }, [addMarker, copySelected, cutSelected, deleteSelected, duplicateSelected, jumpToEdit, pasteClipboard, playhead, playing, project, redo, saveProject, selectItem, setPlayhead, setPlaying, splitSelected, undo])
 
   return (
     <main className="relative flex h-full w-full min-w-0 flex-col overflow-hidden bg-bg-primary text-text-primary">
       <EditorTopBar />
 
       {isMobile ? (
-        <div className="flex min-h-0 flex-1 flex-col">
-          <div className="min-h-[220px] flex-[0.9]">
-            <EditorPreview />
+        <>
+          <EditorLeftPanel mobile />
+          <div className="flex min-h-0 flex-1 flex-col">
+            <div className="min-h-[220px] flex-[0.9]">
+              <EditorPreview />
+            </div>
+            <div className="min-h-0 flex-[1.1] border-t border-border">
+              <EditorTimeline compact />
+            </div>
           </div>
-          <div className="min-h-0 flex-[1.1] border-t border-border">
-            {mobilePanel === 'media' && <EditorMediaBin compact />}
-            {mobilePanel === 'timeline' && <EditorTimeline compact />}
-            {mobilePanel === 'inspector' && <EditorInspector compact />}
-          </div>
-          <nav className="grid h-13 shrink-0 grid-cols-3 border-t border-border bg-bg-secondary px-4 pb-[env(safe-area-inset-bottom)]">
-            {([
-              ['media', FolderOpen, 'Media'],
-              ['timeline', Layers3, 'Timeline'],
-              ['inspector', SlidersHorizontal, 'Adjust'],
-            ] as const).map(([panel, Icon, label]) => (
-              <button
-                key={panel}
-                type="button"
-                onClick={() => setMobilePanel(panel)}
-                className={`flex flex-col items-center justify-center gap-0.5 text-[9px] ${mobilePanel === panel ? 'text-accent-blue' : 'text-text-muted'}`}
-              >
-                <Icon size={16} /> {label}
-              </button>
-            ))}
-          </nav>
-        </div>
+        </>
       ) : (
         <div className="flex min-h-0 flex-1">
-          <EditorMediaBin />
+          <EditorLeftPanel />
           <div className="flex min-w-0 flex-1 flex-col">
             <EditorPreview />
             <EditorTimeline />
           </div>
-          <EditorInspector />
         </div>
       )}
 

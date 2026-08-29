@@ -23,6 +23,7 @@ from services.director.h3_dialogue import (  # noqa: E402
     validate_h3_prompt_contract,
     validate_h3_vocal_contract,
 )
+from services.h3_prompt_budget import H3_PROMPT_QUALITY_TARGET  # noqa: E402
 from services.director.planners.short_film import (  # noqa: E402
     ShortFilmPlanner,
     _apply_h3_character_table_read,
@@ -308,8 +309,14 @@ class TestH3DirectorDialogueCompiler(unittest.TestCase):
         )
 
         dialogue_end = prompt.index("</d>") + len("</d>")
-        self.assertLessEqual(h3_prompt_token_count(prompt), 512)
-        self.assertLessEqual(h3_prompt_token_count(prompt[:dialogue_end]), 512)
+        self.assertLessEqual(
+            h3_prompt_token_count(prompt),
+            H3_PROMPT_QUALITY_TARGET,
+        )
+        self.assertLessEqual(
+            h3_prompt_token_count(prompt[:dialogue_end]),
+            H3_PROMPT_QUALITY_TARGET,
+        )
         self.assertIn(f"<d>[English] {spoken}</d>", prompt)
         self.assertIn("Dialogue timing:", prompt)
         self.assertNotIn("SPEAKER VISIBILITY:", prompt)
@@ -374,7 +381,10 @@ class TestH3DirectorDialogueCompiler(unittest.TestCase):
         compile_h3_clip_plans(plans)
         prompt = plans[0]["video_prompt"]
 
-        self.assertLessEqual(h3_prompt_token_count(prompt), 512)
+        self.assertLessEqual(
+            h3_prompt_token_count(prompt),
+            H3_PROMPT_QUALITY_TARGET,
+        )
         self.assertEqual(prompt.count("<d>"), len(lines))
         for _, words in lines:
             self.assertIn(f"<d>[English] {words}</d>", prompt)
@@ -493,7 +503,10 @@ class TestH3DirectorDialogueCompiler(unittest.TestCase):
             },
         )
 
-        self.assertLessEqual(h3_prompt_token_count(prompt), 512)
+        self.assertLessEqual(
+            h3_prompt_token_count(prompt),
+            H3_PROMPT_QUALITY_TARGET,
+        )
         self.assertEqual(prompt.count("<d>"), len(lines))
         for _, words in lines:
             self.assertIn(f"<d>[English] {words}</d>", prompt)

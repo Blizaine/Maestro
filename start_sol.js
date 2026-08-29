@@ -6,7 +6,8 @@ module.exports = async (kernel) => {
       "The optimized H3 Sol Engine requires an NVIDIA SM89, SM90, SM100, or SM120 GPU."
     )
   }
-  const port = await kernel.port()
+  const fallbackPort = await kernel.port()
+  const port = `{{local.remote_access && local.remote_access.enabled && local.remote_access.pinokio_port_lock && local.remote_access.target_port ? local.remote_access.target_port : ${fallbackPort}}}`
   const runtime = solRuntimeProfile(kernel)
   return {
     requires: {
@@ -21,6 +22,12 @@ module.exports = async (kernel) => {
         description: "Run Maestro's normal Update action to install or repair the H3 performance runtime, then use the normal Start button.",
       },
       next: null,
+    }, {
+      when: "{{exists('app/settings/remote_access.json')}}",
+      method: "json.get",
+      params: {
+        remote_access: "app/settings/remote_access.json",
+      },
     }, {
       method: "shell.run",
       params: {

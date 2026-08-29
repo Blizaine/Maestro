@@ -44,6 +44,7 @@ const VIDEO_WORKFLOW_GROUPS: StudioWorkflowGroup<DisplayVideoWorkflow>[] = [
     label: 'Finish',
     options: [
       { value: 'upscale', label: 'Upscale', description: 'Enhance resolution and detail', icon: Sparkles },
+      { value: 'film_grain', label: 'Film Grain', description: 'Add a cinematic grain finish', icon: FlaskConical },
     ],
   },
 ]
@@ -73,6 +74,7 @@ function deriveActiveWorkflow(
   toolsTool: string,
 ): DisplayVideoWorkflow {
   if (generationMode === 'tools' && toolsTool === 'upscale') return 'upscale'
+  if (generationMode === 'tools' && toolsTool === 'film_grain') return 'film_grain'
   if (generationMode === 'avatar') {
     if (editSubMode === 'inpaint') return 'legacy_inpaint'
     if (editSubMode === 'edit_anything') return 'prompt_edit'
