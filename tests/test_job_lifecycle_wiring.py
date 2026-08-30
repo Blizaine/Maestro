@@ -84,26 +84,39 @@ class TestJobLifecycleWiring(unittest.TestCase):
 
     def test_studio_queue_uses_explicit_held_lifecycle(self):
         generate = _function(self.launch, "generate")
-        generate_constants = {
-            node.value
-            for node in ast.walk(generate)
-            if isinstance(node, ast.Constant) and isinstance(node.value, str)
-        }
-        self.assertIn("_queue_mode", generate_constants)
-        self.assertIn("held", generate_constants)
-        self.assertTrue(any(
-            isinstance(node, ast.If)
-            and isinstance(node.test, ast.UnaryOp)
-            and isinstance(node.test.op, ast.Not)
-            and isinstance(node.test.operand, ast.Name)
-            and node.test.operand.id == "hold_for_queue"
-            and any(
-                isinstance(child, ast.Name)
-                and child.id == "_run_generation"
-                for child in ast.walk(node)
-            )
-            for node in ast.walk(generate)
-        ))
+        self.assertTrue({
+            "_enqueue_deferred_generation_preparation",
+            "_prepare_generation_submission",
+        } <= _called_names(generate))
+
+        # Both the ordinary submission path and the planner-deferred path
+        # preserve held jobs without starting a worker. Automatic planning is
+        # now deliberately represented as a job before its LLM may load.
+        for function_name in (
+            "_prepare_generation_submission",
+            "_enqueue_deferred_generation_preparation",
+        ):
+            submission = _function(self.launch, function_name)
+            submission_constants = {
+                node.value
+                for node in ast.walk(submission)
+                if isinstance(node, ast.Constant) and isinstance(node.value, str)
+            }
+            self.assertIn("_queue_mode", submission_constants)
+            self.assertIn("held", submission_constants)
+            self.assertTrue(any(
+                isinstance(node, ast.If)
+                and isinstance(node.test, ast.UnaryOp)
+                and isinstance(node.test.op, ast.Not)
+                and isinstance(node.test.operand, ast.Name)
+                and node.test.operand.id == "hold_for_queue"
+                and any(
+                    isinstance(child, ast.Name)
+                    and child.id == "_run_generation"
+                    for child in ast.walk(node)
+                )
+                for node in ast.walk(submission)
+            ), function_name)
 
         release_queue = _function(self.launch, "_start_held_studio_queue")
         self.assertIn("release_held", _called_names(release_queue))
@@ -121,6 +134,46 @@ class TestJobLifecycleWiring(unittest.TestCase):
             if isinstance(node, ast.Constant) and isinstance(node.value, str)
         }
         self.assertIn("held", list_constants)
+
+    def test_direct_ai_planning_submit_is_visible_and_reconnectable(self):
+        for function_name in (
+            "_prepare_generation_submission",
+            "_enqueue_deferred_generation_preparation",
+        ):
+            submission = _function(self.launch, function_name)
+            constants = {
+                node.value
+                for node in ast.walk(submission)
+                if isinstance(node, ast.Constant) and isinstance(node.value, str)
+            }
+            self.assertIn("_client_submission_id", constants)
+            self.assertIn("client_submission_id", constants)
+            self.assertIn("show_in_gallery", constants)
+
+        with open(
+            os.path.join(_ROOT, "ui", "src", "stores", "useStore.ts"),
+            "r",
+            encoding="utf-8",
+        ) as handle:
+            store = handle.read()
+        with open(
+            os.path.join(
+                _ROOT,
+                "ui",
+                "src",
+                "components",
+                "MainContent",
+                "MainContent.tsx",
+            ),
+            "r",
+            encoding="utf-8",
+        ) as handle:
+            gallery = handle.read()
+        self.assertIn("pendingJobId", store)
+        self.assertIn("_client_submission_id", store)
+        self.assertIn("job.client_submission_id === clientSubmissionId", store)
+        self.assertIn("showInGallery: j.show_in_gallery === true", store)
+        self.assertIn("job.showInGallery === true", gallery)
 
     def test_studio_queue_release_preserves_submission_order(self):
         started_threads = []

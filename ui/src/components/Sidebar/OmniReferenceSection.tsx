@@ -7,6 +7,7 @@ import type { MiniMaxH3AudioIntent, MiniMaxH3Reference, MiniMaxH3ReferenceType, 
 const IMAGE_RE = /\.(png|jpe?g|webp|bmp|tiff?)$/i
 const VIDEO_RE = /\.(mp4|mov|mkv|webm|avi|m4v)$/i
 const AUDIO_RE = /\.(wav|mp3|flac|ogg|m4a|aac)$/i
+const EMPTY_REFERENCES: MiniMaxH3Reference[] = []
 
 function mediaType(file: File): MiniMaxH3ReferenceType | null {
   // Prefer a recognized extension. Some iOS document providers expose M4A
@@ -41,6 +42,38 @@ function referenceLabels(references: MiniMaxH3Reference[]): string[] {
   })
 }
 
+type ActiveReferenceItem =
+  | {
+      kind: 'character'
+      characterId: string
+      entries: Array<{ reference: MiniMaxH3Reference; index: number }>
+    }
+  | {
+      kind: 'reference'
+      reference: MiniMaxH3Reference
+      index: number
+    }
+
+function groupActiveReferences(references: MiniMaxH3Reference[]): ActiveReferenceItem[] {
+  const items: ActiveReferenceItem[] = []
+  const characterItems = new Map<string, Extract<ActiveReferenceItem, { kind: 'character' }>>()
+  references.forEach((reference, index) => {
+    const characterId = reference.library_character_id?.trim()
+    if (!characterId) {
+      items.push({ kind: 'reference', reference, index })
+      return
+    }
+    let item = characterItems.get(characterId)
+    if (!item) {
+      item = { kind: 'character', characterId, entries: [] }
+      characterItems.set(characterId, item)
+      items.push(item)
+    }
+    item.entries.push({ reference, index })
+  })
+  return items
+}
+
 export function OmniReferenceSection({
   scope = 'studio',
   disabled = false,
@@ -62,7 +95,7 @@ export function OmniReferenceSection({
   const inputRef = useRef<HTMLInputElement>(null)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState('')
-  const [dragIndex, setDragIndex] = useState<number | null>(null)
+  const [dragIndices, setDragIndices] = useState<number[] | null>(null)
   const [directorModelOptions, setDirectorModelOptions] = useState<ModelOptions | null>(null)
   const [characters, setCharacters] = useState<SavedOmniCharacter[]>([])
   const [libraryOpen, setLibraryOpen] = useState(false)
@@ -98,11 +131,27 @@ export function OmniReferenceSection({
   const modelOptions = scope === 'director' ? directorModelOptions : studioModelOptions
   const references = scope === 'director'
     ? directorReferences
-    : (params.minimax_h3_references ?? [])
+    : (params.minimax_h3_references ?? EMPTY_REFERENCES)
   const limits = modelOptions?.omni_reference_limits ?? {
     image: 9, video: 3, audio: 3, total: 12,
   }
   const labels = referenceLabels(references)
+
+  useEffect(() => {
+    const needsVoiceLock = references.some(reference => (
+      Boolean(reference.library_character_id)
+      && reference.type === 'audio'
+      && reference.audio_intent !== 'voice'
+    ))
+    if (!needsVoiceLock) return
+    const normalized = references.map(reference => (
+      reference.library_character_id && reference.type === 'audio'
+        ? { ...reference, audio_intent: 'voice' as const }
+        : reference
+    ))
+    if (scope === 'director') setDirectorReferences(normalized)
+    else setParam('minimax_h3_references', normalized)
+  }, [references, scope, setDirectorReferences, setParam])
 
   const update = (next: MiniMaxH3Reference[]) => {
     if (scope === 'director') setDirectorReferences(next)
@@ -331,12 +380,15 @@ export function OmniReferenceSection({
     }
   }
 
-  const reorder = (from: number, to: number) => {
-    if (from === to) return
-    const next = [...references]
-    const [item] = next.splice(from, 1)
-    next.splice(to, 0, item)
-    update(next)
+  const reorder = (fromIndices: number[], to: number) => {
+    const uniqueIndices = [...new Set(fromIndices)].sort((left, right) => left - right)
+    if (uniqueIndices.length === 0 || uniqueIndices.includes(to)) return
+    const moving = uniqueIndices.map(index => references[index]).filter(Boolean)
+    const movingSet = new Set(uniqueIndices)
+    const remaining = references.filter((_, index) => !movingSet.has(index))
+    const adjustedTarget = Math.max(0, to - uniqueIndices.filter(index => index < to).length)
+    remaining.splice(adjustedTarget, 0, ...moving)
+    update(remaining)
   }
 
   const detail = scope === 'director'
@@ -350,15 +402,19 @@ export function OmniReferenceSection({
     else setParam('minimax_h3_reference_detail', next)
   }
 
+  const activeItems = groupActiveReferences(references)
+
   return (
     <section className="space-y-2">
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5">
-          <label className="text-[11px] text-text-muted uppercase tracking-wider">Omni References</label>
+          <label className="text-[11px] text-text-muted uppercase tracking-wider">
+            {scope === 'director' ? 'Omni References' : 'References & Characters'}
+          </label>
           <span
             title={scope === 'director'
               ? 'Order matters. These references are attached to every H3 Omni shot. Picture, Video, and Audio labels are assigned from top to bottom and can be named in the project description. A Music / performance timeline becomes Director’s exact audio driver.'
-              : 'Order matters. Picture, Video, and Audio labels are assigned from top to bottom and can be named in your prompt. Video soundtracks stay attached to their video.'}
+              : 'Adding an identity, scene, motion, voice, or style reference automatically limits the model list to H3 Omni. Set audio to Music / performance timeline to use either H3 Omni or LTX instead.'}
             className="text-text-muted cursor-help"
           >
             <Info size={12} />
@@ -539,119 +595,197 @@ export function OmniReferenceSection({
 
       {references.length > 0 && (
         <div className="space-y-1.5">
-          {references.map((reference, index) => (
-            <div
-              key={reference.id || `${reference.path}-${index}`}
-              draggable={!disabled}
-              onDragStart={() => setDragIndex(index)}
-              onDragOver={event => event.preventDefault()}
-              onDrop={event => {
-                event.preventDefault()
-                if (dragIndex !== null) reorder(dragIndex, index)
-                setDragIndex(null)
-              }}
-              onDragEnd={() => setDragIndex(null)}
-              className={`rounded-lg border bg-bg-tertiary p-2 flex gap-2 transition-colors ${dragIndex === index ? 'border-accent-blue' : 'border-border'}`}
-            >
-              <GripVertical size={14} className="mt-2 text-text-muted cursor-grab shrink-0" />
-              <div className="w-12 h-12 rounded-md border border-border overflow-hidden bg-bg-primary flex items-center justify-center shrink-0">
-                {reference.type === 'image' && reference.url ? (
-                  <img src={reference.url} alt="" className="w-full h-full object-cover" />
-                ) : reference.type === 'video' && reference.url ? (
-                  <video src={reference.url} muted preload="metadata" className="w-full h-full object-cover" />
-                ) : reference.type === 'audio' ? (
-                  <FileAudio size={18} className="text-accent-blue" />
-                ) : reference.type === 'video' ? (
-                  <Video size={18} className="text-accent-blue" />
-                ) : (
-                  <ImageIcon size={18} className="text-accent-blue" />
-                )}
-              </div>
-              <div className="min-w-0 flex-1 space-y-1">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] font-medium text-text-primary">{labels[index]}</span>
-                  <span className="text-[9px] text-text-muted truncate">{reference.filename}</span>
-                </div>
-                <input
-                  value={reference.role ?? ''}
-                  disabled={disabled}
-                  onChange={event => patchReference(index, { role: event.target.value })}
-                  placeholder="Who or what is this? (helps Enhance)"
-                  className="w-full bg-bg-primary border border-border rounded px-2 py-1 text-[10px] text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue"
-                />
-                {reference.type === 'audio' && (
-                  <select
-                    value={reference.audio_intent ?? 'voice'}
-                    disabled={disabled}
-                    onChange={event => setAudioIntent(
-                      index,
-                      event.target.value as MiniMaxH3AudioIntent,
-                    )}
-                    title="Voice reference is reused for identity in every clip. Music / performance timeline adopts the track duration, preserves the exact soundtrack and advances through it across sequence clips. It automatically enables a multi-window sequence when needed. Style-only borrows musical character rather than exact audio or timing."
-                    className="w-full bg-bg-primary border border-border rounded px-2 py-1 text-[10px] text-text-secondary focus:outline-none focus:border-accent-blue"
-                  >
-                    <option value="voice">Voice reference</option>
-                    <option value="drive">Music / performance timeline</option>
-                    <option value="style">Music / sound style only</option>
-                  </select>
-                )}
-                {reference.type === 'video' && (
-                  <div className="flex items-center gap-1.5 text-[9px] text-text-secondary">
-                    <label className="cursor-pointer hover:text-text-primary">
-                      {reference.audio_path ? 'Replace audio' : 'Attach audio'}
-                      {/* iOS has also shipped audio-only picker regressions.
-                          Browse freely, then validate in attachAudio(). */}
-                      <input
-                        type="file"
-                        disabled={disabled}
-                        className="hidden"
-                        onChange={event => {
-                          void attachAudio(reference.id, event.target.files?.[0])
-                          event.currentTarget.value = ''
-                        }}
-                      />
-                    </label>
-                    {reference.audio_path && (
-                      <button
-                        type="button"
-                        disabled={disabled}
-                        title="Remove attached soundtrack"
-                        onClick={() => patchReference(index, {
-                          audio_path: undefined,
-                          audio_filename: undefined,
-                          audio_duration_seconds: undefined,
-                          include_audio: reference.has_audio === true,
-                        })}
-                        className="truncate text-text-muted hover:text-indicator-error"
-                      >
-                        × {reference.audio_filename || 'attached audio'}
-                      </button>
+          {activeItems.map(item => {
+            if (item.kind === 'character') {
+              const character = characters.find(candidate => candidate.id === item.characterId)
+              const visualEntry = item.entries.find(entry => entry.reference.type !== 'audio')
+              const voiceEntry = item.entries.find(entry => entry.reference.type === 'audio')
+              const characterName = (
+                character?.name
+                || visualEntry?.reference.character_name
+                || voiceEntry?.reference.character_name
+                || visualEntry?.reference.role
+                || voiceEntry?.reference.role
+                || 'Saved character'
+              )
+              const visual = visualEntry?.reference
+              const entryIndices = item.entries.map(entry => entry.index)
+              const firstIndex = entryIndices[0]
+              const active = dragIndices?.some(index => entryIndices.includes(index)) === true
+              return (
+                <div
+                  key={`character-${item.characterId}`}
+                  draggable={!disabled}
+                  onDragStart={() => setDragIndices(entryIndices)}
+                  onDragOver={event => event.preventDefault()}
+                  onDrop={event => {
+                    event.preventDefault()
+                    if (dragIndices) reorder(dragIndices, firstIndex)
+                    setDragIndices(null)
+                  }}
+                  onDragEnd={() => setDragIndices(null)}
+                  className={`rounded-lg border bg-bg-tertiary p-2 flex gap-2 transition-colors ${active ? 'border-accent-blue' : 'border-border'}`}
+                >
+                  <GripVertical size={14} className="mt-2 text-text-muted cursor-grab shrink-0" />
+                  <div className="w-12 h-12 rounded-md border border-border overflow-hidden bg-bg-primary flex items-center justify-center shrink-0">
+                    {visual?.type === 'image' && visual.url ? (
+                      <img src={visual.url} alt="" className="w-full h-full object-cover" />
+                    ) : visual?.type === 'video' && visual.url ? (
+                      <video src={visual.url} muted preload="metadata" className="w-full h-full object-cover" />
+                    ) : visual?.type === 'video' ? (
+                      <Video size={18} className="text-accent-blue" />
+                    ) : (
+                      <ImageIcon size={18} className="text-accent-blue" />
                     )}
                   </div>
-                )}
-                {reference.type === 'video' && (reference.has_audio || reference.audio_path) && (
-                  <label className="flex items-center gap-1.5 text-[9px] text-text-secondary cursor-pointer">
-                    <input
-                      type="checkbox"
-                      disabled={disabled}
-                      checked={reference.include_audio !== false}
-                      onChange={event => patchReference(index, { include_audio: event.target.checked })}
-                      className="w-3 h-3 accent-accent-blue"
-                    />
-                    Include soundtrack
-                  </label>
-                )}
-              </div>
-              <button
-                disabled={disabled}
-                onClick={() => update(references.filter((_, itemIndex) => itemIndex !== index))}
-                title="Remove reference"
-                className="p-1 self-start text-text-muted hover:text-indicator-error"
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <BookUser size={12} className="text-accent-blue shrink-0" />
+                      <span className="text-[10px] font-medium text-text-primary truncate" title={characterName}>{characterName}</span>
+                      <span className="rounded-full bg-accent-blue/10 px-1.5 py-0.5 text-[8px] text-accent-blue shrink-0">Character</span>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[9px] text-text-muted">
+                      <span>{visual?.type === 'video' ? 'Video identity' : 'Image identity'}</span>
+                      {voiceEntry && (
+                        <span
+                          className="flex items-center gap-1 text-text-secondary"
+                          title="Saved character audio is automatically bound as a Voice Reference."
+                        >
+                          <FileAudio size={10} className="text-accent-blue" /> Voice reference
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[8px] text-text-muted truncate" title={item.entries.map(entry => labels[entry.index]).join(' + ')}>
+                      {item.entries.map(entry => labels[entry.index]).join(' + ')} · Bound together as one H3 subject
+                    </p>
+                  </div>
+                  <button
+                    disabled={disabled}
+                    onClick={() => update(references.filter(reference => reference.library_character_id !== item.characterId))}
+                    title={`Remove ${characterName} from this run`}
+                    className="p-1 self-start text-text-muted hover:text-indicator-error"
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+              )
+            }
+
+            const { reference, index } = item
+            return (
+              <div
+                key={reference.id || `${reference.path}-${index}`}
+                draggable={!disabled}
+                onDragStart={() => setDragIndices([index])}
+                onDragOver={event => event.preventDefault()}
+                onDrop={event => {
+                  event.preventDefault()
+                  if (dragIndices) reorder(dragIndices, index)
+                  setDragIndices(null)
+                }}
+                onDragEnd={() => setDragIndices(null)}
+                className={`rounded-lg border bg-bg-tertiary p-2 flex gap-2 transition-colors ${dragIndices?.includes(index) ? 'border-accent-blue' : 'border-border'}`}
               >
-                <X size={13} />
-              </button>
-            </div>
-          ))}
+                <GripVertical size={14} className="mt-2 text-text-muted cursor-grab shrink-0" />
+                <div className="w-12 h-12 rounded-md border border-border overflow-hidden bg-bg-primary flex items-center justify-center shrink-0">
+                  {reference.type === 'image' && reference.url ? (
+                    <img src={reference.url} alt="" className="w-full h-full object-cover" />
+                  ) : reference.type === 'video' && reference.url ? (
+                    <video src={reference.url} muted preload="metadata" className="w-full h-full object-cover" />
+                  ) : reference.type === 'audio' ? (
+                    <FileAudio size={18} className="text-accent-blue" />
+                  ) : reference.type === 'video' ? (
+                    <Video size={18} className="text-accent-blue" />
+                  ) : (
+                    <ImageIcon size={18} className="text-accent-blue" />
+                  )}
+                </div>
+                <div className="min-w-0 flex-1 space-y-1">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[10px] font-medium text-text-primary">{labels[index]}</span>
+                    <span className="text-[9px] text-text-muted truncate">{reference.filename}</span>
+                  </div>
+                  <input
+                    value={reference.role ?? ''}
+                    disabled={disabled}
+                    onChange={event => patchReference(index, { role: event.target.value })}
+                    placeholder="Who or what is this? (helps Enhance)"
+                    className="w-full bg-bg-primary border border-border rounded px-2 py-1 text-[10px] text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue"
+                  />
+                  {reference.type === 'audio' && (
+                    <select
+                      value={reference.audio_intent ?? 'voice'}
+                      disabled={disabled}
+                      onChange={event => setAudioIntent(
+                        index,
+                        event.target.value as MiniMaxH3AudioIntent,
+                      )}
+                      title="Voice reference is reused for identity in every clip. Music / performance timeline adopts the track duration, preserves the exact soundtrack and advances through it across sequence clips. It automatically enables a multi-window sequence when needed. Style-only borrows musical character rather than exact audio or timing."
+                      className="w-full bg-bg-primary border border-border rounded px-2 py-1 text-[10px] text-text-secondary focus:outline-none focus:border-accent-blue"
+                    >
+                      <option value="voice">Voice reference</option>
+                      <option value="drive">Music / performance timeline</option>
+                      <option value="style">Music / sound style only</option>
+                    </select>
+                  )}
+                  {reference.type === 'video' && (
+                    <div className="flex items-center gap-1.5 text-[9px] text-text-secondary">
+                      <label className="cursor-pointer hover:text-text-primary">
+                        {reference.audio_path ? 'Replace audio' : 'Attach audio'}
+                        {/* iOS has also shipped audio-only picker regressions.
+                            Browse freely, then validate in attachAudio(). */}
+                        <input
+                          type="file"
+                          disabled={disabled}
+                          className="hidden"
+                          onChange={event => {
+                            void attachAudio(reference.id, event.target.files?.[0])
+                            event.currentTarget.value = ''
+                          }}
+                        />
+                      </label>
+                      {reference.audio_path && (
+                        <button
+                          type="button"
+                          disabled={disabled}
+                          title="Remove attached soundtrack"
+                          onClick={() => patchReference(index, {
+                            audio_path: undefined,
+                            audio_filename: undefined,
+                            audio_duration_seconds: undefined,
+                            include_audio: reference.has_audio === true,
+                          })}
+                          className="truncate text-text-muted hover:text-indicator-error"
+                        >
+                          × {reference.audio_filename || 'attached audio'}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  {reference.type === 'video' && (reference.has_audio || reference.audio_path) && (
+                    <label className="flex items-center gap-1.5 text-[9px] text-text-secondary cursor-pointer">
+                      <input
+                        type="checkbox"
+                        disabled={disabled}
+                        checked={reference.include_audio !== false}
+                        onChange={event => patchReference(index, { include_audio: event.target.checked })}
+                        className="w-3 h-3 accent-accent-blue"
+                      />
+                      Include soundtrack
+                    </label>
+                  )}
+                </div>
+                <button
+                  disabled={disabled}
+                  onClick={() => update(references.filter((_, itemIndex) => itemIndex !== index))}
+                  title="Remove reference"
+                  className="p-1 self-start text-text-muted hover:text-indicator-error"
+                >
+                  <X size={13} />
+                </button>
+              </div>
+            )
+          })}
         </div>
       )}
 

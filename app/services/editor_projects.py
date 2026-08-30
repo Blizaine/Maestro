@@ -28,7 +28,7 @@ from typing import Any, Callable, Mapping, Optional
 EDITOR_SCHEMA_VERSION = 5
 EDITOR_PROJECT_DIR = ".maestro_editor"
 EDITOR_MEDIA_CACHE_DIR = "media_cache"
-EDITOR_MEDIA_PREVIEW_VERSION = 2
+EDITOR_MEDIA_PREVIEW_VERSION = 3
 _PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 _PREVIEW_ID_RE = re.compile(r"^[a-f0-9]{24}$")
 _HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
@@ -44,6 +44,10 @@ _EDITOR_TRANSITIONS = {"none", "dissolve", "fade_black"}
 _EDITOR_AI_TOOLS = {
     "retake", "edit_anything", "recast", "repaint", "outpaint", "upscale",
     "film_grain", "revoice", "director_rerun",
+}
+_EDITOR_UPSCALE_METHODS = {
+    "", "flashvsr2", "flashvsr3", "flashvsr4", "flashvsr2pass2",
+    "flashvsr2pass4",
 }
 _EDITOR_FONT_FAMILIES = {
     "Arial",
@@ -214,6 +218,9 @@ def create_editor_project(
             "resolution": "canvas",
             "frame_rate": "project",
             "filename": "",
+            "spatial_upsampling": "",
+            "film_grain_intensity": 0.0,
+            "film_grain_saturation": 0.5,
         },
         "exports": [],
     }
@@ -522,6 +529,7 @@ def normalize_editor_project(project: Mapping[str, Any], *, workspace: str | Non
     codec = str(export.get("codec") or "h264").lower()
     encoder = str(export.get("encoder") or "auto").lower()
     resolution = str(export.get("resolution") or "canvas").lower()
+    spatial_upsampling = str(export.get("spatial_upsampling") or "").lower()
     raw_frame_rate = export.get("frame_rate", "project")
     try:
         numeric_frame_rate = int(raw_frame_rate)
@@ -541,6 +549,17 @@ def normalize_editor_project(project: Mapping[str, Any], *, workspace: str | Non
         if numeric_frame_rate in {24, 30, 60}
         else "project",
         "filename": str(export.get("filename") or "").strip()[:120],
+        "spatial_upsampling": spatial_upsampling
+        if spatial_upsampling in _EDITOR_UPSCALE_METHODS
+        else "",
+        "film_grain_intensity": max(
+            0.0,
+            min(1.0, _finite_number(export.get("film_grain_intensity"), 0.0)),
+        ),
+        "film_grain_saturation": max(
+            0.0,
+            min(1.0, _finite_number(export.get("film_grain_saturation"), 0.5)),
+        ),
     }
     raw_exports = normalized.get("exports")
     export_history: list[dict[str, Any]] = []
@@ -554,6 +573,9 @@ def normalize_editor_project(project: Mapping[str, Any], *, workspace: str | Non
             record_codec = str(raw_record.get("codec") or "h264").lower()
             record_quality = str(raw_record.get("quality") or "high").lower()
             record_encoder = str(raw_record.get("encoder") or "auto").lower()
+            record_upscale = str(
+                raw_record.get("spatial_upsampling") or ""
+            ).lower()
             export_history.append({
                 "id": _safe_identifier(
                     raw_record.get("id"), fallback=uuid.uuid4().hex[:16]
@@ -574,6 +596,23 @@ def normalize_editor_project(project: Mapping[str, Any], *, workspace: str | Non
                 "encoder": record_encoder
                 if record_encoder in {"auto", "software", "nvidia", "intel", "apple"}
                 else "auto",
+                "spatial_upsampling": record_upscale
+                if record_upscale in _EDITOR_UPSCALE_METHODS
+                else "",
+                "film_grain_intensity": max(
+                    0.0,
+                    min(
+                        1.0,
+                        _finite_number(raw_record.get("film_grain_intensity"), 0.0),
+                    ),
+                ),
+                "film_grain_saturation": max(
+                    0.0,
+                    min(
+                        1.0,
+                        _finite_number(raw_record.get("film_grain_saturation"), 0.5),
+                    ),
+                ),
             })
     export_history.sort(key=lambda record: record["created_at"], reverse=True)
     normalized["exports"] = export_history[:50]
@@ -791,7 +830,7 @@ def resolve_editor_media_cache_file(
     filename = {
         "thumbnail": "thumbnail.jpg",
         "proxy": "proxy.mp4",
-        "proxy-mobile": "proxy-mobile.mp4",
+        "proxy-mobile": "proxy-mobile-v3.mp4",
     }.get(str(kind or ""))
     if not filename:
         raise EditorProjectError("Invalid Editor preview type")
@@ -908,7 +947,7 @@ def build_editor_media_preview(
 
         mobile_proxy = str(proxy_profile or "auto").strip().lower() == "mobile"
         standard_proxy_path = os.path.join(cache_dir, "proxy.mp4")
-        mobile_proxy_path = os.path.join(cache_dir, "proxy-mobile.mp4")
+        mobile_proxy_path = os.path.join(cache_dir, "proxy-mobile-v3.mp4")
         proxy_path = mobile_proxy_path if mobile_proxy else standard_proxy_path
         width = max(0, int(_finite_number(asset.get("width"), 0)))
         height = max(0, int(_finite_number(asset.get("height"), 0)))
@@ -926,8 +965,8 @@ def build_editor_media_preview(
         if needs_proxy and not os.path.isfile(proxy_path):
             temporary_proxy = os.path.join(cache_dir, f"proxy.{uuid.uuid4().hex[:8]}.part.mp4")
             video_filter = (
-                "scale=960:540:force_original_aspect_ratio=decrease:force_divisible_by=2,"
-                "fps=30,format=yuv420p"
+                "scale=854:480:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+                "format=yuv420p"
                 if mobile_proxy else
                 "scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p"
             )

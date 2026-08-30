@@ -51,7 +51,7 @@ class H3ReferenceSequencePlannerTests(unittest.TestCase):
             },
         ])
         self.assertIn("<Subject 1> is Blaine", relationships)
-        self.assertIn("<Audio 1> supplies voice timbre", relationships)
+        self.assertIn("<Audio 1> is the voice-timbre reference", relationships)
         self.assertIn("for <Subject 1>", relationships)
         self.assertIn("fully_preserved", retention)
         self.assertIn("audio reference", task_types)
@@ -163,7 +163,7 @@ class H3ReferenceSequencePlannerTests(unittest.TestCase):
             "The target video uses cinematic live action with cool practical light."
         ))
         self.assertGreater(detailed.index("[Shot 1]"), 0)
-        self.assertIn("<Subject 1> (Alex)", detailed)
+        self.assertIn("<Subject 1> enters screen-left", detailed)
         self.assertIn("[Shot 2] At 00:04.000, hard cut", detailed)
 
     def test_manual_native_sequence_preserves_each_prompt_exactly(self):
@@ -489,6 +489,255 @@ class H3ReferenceSequencePlannerTests(unittest.TestCase):
         self.assertNotIn("fully_preserved", subjects)
         self.assertIn("fully_preserved", remainder)
 
+    @patch("services.llm_service.generate", side_effect=RuntimeError("offline"))
+    def test_spaced_dialogue_tags_keep_character_ownership_and_event_order(
+        self,
+        _generate,
+    ):
+        from models.minimax_h3.ref2va import (
+            align_ref2va_voice_reference_order,
+            ensure_ref2va_prompt_relationships,
+        )
+
+        prompt = (
+            "Yoda is in Dagobah swamp looking through a bag he found. "
+            "Thanos is standing in the swamp and says to Yoda, "
+            "< d>You could not live without Maestro. And where did it bring you? "
+            "Back to me.</d> Yoda waves his hand slowly while saying, "
+            "<d>Powerful, the creative tool has become. Perfectly balanced, "
+            "Maestro is.</d> Thanos responds <d>as all things should be.</d> "
+            "Atmospheric ambiance. Character voices sound natural in the environment. "
+            "Camera pans to Blaine who waves and says "
+            "<d>hey guys! check out Maestro version two! it has so many...</d> "
+            "Thanos snaps his fingers. Blaine turns to dust. Yoda grunts approvingly. "
+            "Cinematic film. Cinematic camera movements."
+        )
+        references = []
+        for role in ("Yoda", "Thanos", "Blaine"):
+            character_id = role.casefold()
+            references.extend([
+                {
+                    "type": "image",
+                    "path": f"{character_id}.png",
+                    "role": role,
+                    "image_intent": "identity",
+                    "library_character_id": character_id,
+                },
+                {
+                    "type": "audio",
+                    "path": f"{character_id}.wav",
+                    "role": role,
+                    "audio_intent": "voice",
+                    "library_character_id": character_id,
+                },
+            ])
+
+        result = plan_h3_reference_sequence(
+            prompt,
+            model_type="minimax_h3_ref2va_pruned",
+            resolution="896x512",
+            total_frames=621,
+            references=references,
+            max_clip_frames=328,
+            overlap_frames=18,
+            native_continuation=True,
+            camera_coverage="multi_shot",
+        )
+        self.assertEqual(result["window_count"], 2)
+        prompts = result["window_prompts"]
+        locked_lines = (
+            "You could not live without Maestro. And where did it bring you? Back to me.",
+            "Powerful, the creative tool has become. Perfectly balanced, Maestro is.",
+            "as all things should be.",
+            "hey guys! check out Maestro version two! it has so many...",
+        )
+        joined = "\n".join(prompts)
+        for line in locked_lines:
+            self.assertEqual(joined.count(line), 1)
+        self.assertIn("<Subject 2> snaps his fingers", prompts[1])
+        self.assertNotIn("<Subject 2> snaps his fingers", prompts[0])
+        self.assertIn("<Subject 3> turns to dust", prompts[1])
+        self.assertNotIn("Silent visual action, never spoken narration", prompts[1])
+        self.assertNotIn("No words are spoken or mouthed", prompts[1])
+        self.assertNotIn("only Thanos's mouth moves", prompts[0])
+        self.assertNotIn("every other visible mouth stays closed", prompts[0])
+        self.assertIn(
+            "<Subject 2> (S1) says in the voice referenced from <Audio 2>",
+            prompts[0],
+        )
+        self.assertNotIn("only on-camera speaker", joined)
+        self.assertNotIn("hold Thanos's visible face", joined)
+        self.assertNotIn("Atmospheric ambiance", prompts[0].split("overall_soundscape:", 1)[0])
+
+        for window_prompt in prompts:
+            aligned_prompt, aligned_refs, ordinal_maps = (
+                align_ref2va_voice_reference_order(window_prompt, references)
+            )
+            self.assertEqual(ordinal_maps, {})
+            self.assertEqual(
+                [item["type"] for item in aligned_refs],
+                ["image", "image", "image", "audio", "audio", "audio"],
+            )
+            repaired = ensure_ref2va_prompt_relationships(
+                aligned_prompt,
+                aligned_refs,
+            )
+            if "You could not live without Maestro" in repaired:
+                self.assertRegex(
+                    repaired,
+                    r"<Subject 2>\s+\(S1\).*?<Audio 2>.*?<d>\[English\] "
+                    r"You could not live without Maestro",
+                )
+            if "Powerful, the creative tool" in repaired:
+                self.assertRegex(
+                    repaired,
+                    r"<Subject 1>\s+\(S2\).*?<Audio 1>.*?<d>\[English\] Powerful",
+                )
+            if "hey guys!" in repaired:
+                self.assertRegex(
+                    repaired,
+                    r"<Subject 3>\s+\(S\d+\).*?<Audio 3>.*?<d>\[English\] hey guys!",
+                )
+
+    @patch("services.llm_service.generate")
+    def test_two_window_three_character_plan_keeps_refs_and_dialogue_local(self, generate):
+        prompt = (
+            "Yoda is in Dagobah, a remote swamp-covered planet. "
+            "Thanos is standing in the swamp and says, "
+            "<d>Small green creature, tell me what you know of Maestro.</d> "
+            "Yoda waves his hand slowly while saying, "
+            "<d>Powerful, the creative tool has become.</d> "
+            "Thanos responds <d>As all things should be.</d> "
+            "Camera pans to Blaine who waves and says "
+            "<d>Hey guys, I created Maestro version two.</d> "
+            "Thanos, while standing near Yoda, snaps his fingers. "
+            "Blaine turns to dust. Yoda grunts approvingly."
+        )
+        ledger = {
+            "subject_continuity": (
+                "Thanos, Yoda, and Blaine retain their requested identities, "
+                "wardrobe, proportions, and stable speaking roles"
+            ),
+            "setting_continuity": "The same murky Dagobah swamp and jungle geography",
+            "visual_continuity": "Grounded cinematic live-action realism",
+            "editing_style": "Motivated dialogue coverage followed by a consequence cut",
+            "initial_state": "Yoda searches the bag while Thanos stands nearby in the swamp",
+            "ambient_audio": "Wetland insects, water, foliage, and synchronized movement",
+            "music": "N/A",
+            "required_final_outcome": "Blaine is gone and Yoda grunts approvingly",
+            "beats": [
+                {
+                    "segment": 1,
+                    "source_event_ids": ["E1"],
+                    "dialogue_ids": [],
+                    "state_after": "Yoda looks up from the bag toward Thanos",
+                    "sound_effects": "Bag rustle and swamp ambience",
+                },
+                {
+                    "segment": 1,
+                    "source_event_ids": ["E2", "E3"],
+                    "dialogue_ids": ["D1", "D2"],
+                    "state_after": "Yoda lowers his hand while Thanos holds his gaze",
+                    "sound_effects": "Subtle robe movement and wetland ambience",
+                },
+                {
+                    "segment": 2,
+                    "source_event_ids": ["E4", "E5"],
+                    "dialogue_ids": ["D3", "D4"],
+                    "state_after": "Blaine finishes speaking as Thanos raises the gauntlet",
+                    "sound_effects": "A hand wave and quiet swamp movement",
+                },
+                {
+                    "segment": 2,
+                    "source_event_ids": ["E6", "E7", "E8"],
+                    "dialogue_ids": [],
+                    "state_after": "Blaine is gone; Yoda remains beside Thanos and grunts",
+                    "sound_effects": "Finger snap, dust scattering, and Yoda's grunt",
+                },
+            ],
+            "generated_dialogue": [],
+        }
+
+        def segment(number: int, duration: float) -> dict:
+            return {
+                "segment": number,
+                "title": f"Dagobah beat {number}",
+                "opening_state": "The supplied opening state",
+                "coverage": "motivated multi-shot cinematic coverage",
+                "pacing": "natural real-time pacing",
+                "shots": [{
+                    "shot": 1,
+                    "start_seconds": 0.0,
+                    "end_seconds": duration,
+                    "transition": "opening composition",
+                    "framing": "readable medium-wide shot",
+                    "camera": "motivated pan and speaker coverage",
+                    "action": f"The assigned Dagobah events for window {number} unfold once",
+                    "sound_effects": "Natural synchronized swamp effects",
+                }],
+                "closing_state": "The supplied closing state",
+            }
+
+        references = []
+        for role in ("Thanos", "Yoda", "Blaine"):
+            key = role.casefold()
+            references.extend([
+                {
+                    "type": "image",
+                    "path": f"{key}.png",
+                    "role": role,
+                    "image_intent": "identity",
+                    "library_character_id": key,
+                },
+                {
+                    "type": "audio",
+                    "path": f"{key}.wav",
+                    "role": role,
+                    "audio_intent": "voice",
+                    "library_character_id": key,
+                },
+            ])
+        clips = compute_h3_native_sequence_windows(
+            614,
+            window_frames=328,
+            overlap_frames=18,
+        )
+        generate.side_effect = [
+            json.dumps(ledger),
+            json.dumps(segment(1, clips[0]["duration_seconds"])),
+            json.dumps(segment(2, clips[1]["duration_seconds"])),
+        ]
+
+        result = plan_h3_reference_sequence(
+            prompt,
+            model_type="minimax_h3_ref2va_pruned",
+            resolution="1280x704",
+            total_frames=614,
+            references=references,
+            max_clip_frames=328,
+            overlap_frames=18,
+            native_continuation=True,
+            camera_coverage="multi_shot",
+        )
+
+        self.assertEqual(result["planned_by"], "llm")
+        self.assertEqual(generate.call_count, 3)
+        self.assertEqual(len(result["window_prompts"]), 2)
+        first, second = result["window_prompts"]
+        self.assertIn("Small green creature", first)
+        self.assertIn("Powerful, the creative tool", first)
+        self.assertNotIn("As all things should be", first)
+        self.assertNotIn("Hey guys, I created Maestro", first)
+        self.assertIn("As all things should be", second)
+        self.assertIn("Hey guys, I created Maestro", second)
+        self.assertNotIn("Small green creature", second)
+        for compiled_prompt in result["window_prompts"]:
+            for ordinal in range(1, 4):
+                self.assertIn(f"<Subject {ordinal}>", compiled_prompt)
+                self.assertIn(f"<Picture {ordinal}>", compiled_prompt)
+                self.assertIn(f"<Audio {ordinal}>", compiled_prompt)
+        self.assertNotIn("Thanos. Then Thanos", second)
+
     def test_compiler_deduplicates_semantically_identical_reference_contracts(self):
         clips, _ = compute_h3_sequence_clips(500)
         relationships = (
@@ -541,6 +790,96 @@ class H3ReferenceSequencePlannerTests(unittest.TestCase):
         self.assertEqual(subjects.count("<Picture 1>"), 1)
         self.assertEqual(subjects.count("<Audio 1>"), 1)
 
+    def test_compiler_uses_window_local_speaker_ids_with_stable_subject_refs(self):
+        clips, _ = compute_h3_sequence_clips(500)
+        relationships = (
+            "<Subject 1> is Thanos, whose identity comes from <Picture 1>. "
+            "<Audio 1> supplies voice timbre for <Subject 1>. "
+            "<Subject 2> is Yoda, whose identity comes from <Picture 2>. "
+            "<Audio 2> supplies voice timbre for <Subject 2>. "
+            "<Subject 3> is Blaine, whose identity comes from <Picture 3>. "
+            "<Audio 3> supplies voice timbre for <Subject 3>."
+        )
+
+        def dialogue(speaker: str, speaker_id: str, text: str) -> dict:
+            return {
+                "speaker": speaker,
+                "speaker_id": speaker_id,
+                "language": "English",
+                "delivery": "speaks naturally",
+                "action": "maintaining the visible performance",
+                "text": text,
+            }
+
+        planned_clips = []
+        for index, clip in enumerate(clips):
+            lines = (
+                [
+                    dialogue("Thanos", "S1", "First line."),
+                    dialogue("Yoda", "S2", "Second line."),
+                    dialogue("Thanos", "S1", "Third line."),
+                ]
+                if index == 0 else
+                [dialogue("Blaine", "S3", "Fourth line.")]
+            )
+            planned_clips.append({
+                "clip": index + 1,
+                "title": f"Clip {index + 1}",
+                "summary": f"Story phase {index + 1}",
+                "opening_state": "The same swamp scene continues",
+                "coverage": "motivated speaker coverage",
+                "pacing": "natural real-time pacing",
+                "shots": [{
+                    "shot": 1,
+                    "start_seconds": 0.0,
+                    "end_seconds": clip["duration_seconds"],
+                    "transition": "opening composition",
+                    "framing": "readable medium shot",
+                    "camera": "the camera follows the active speaker",
+                    "action": f"The requested phase {index + 1} unfolds",
+                    "dialogue": lines,
+                    "sound_effects": "Natural swamp ambience",
+                }],
+                "closing_state": f"Story phase {index + 1} is complete",
+            })
+        plan = {
+            "subject_definitions": (
+                "Stable speaking identities: S1 is Thanos; S2 is Yoda; S3 is Blaine. "
+                "All three retain their requested appearance."
+            ),
+            "retention_analysis": "",
+            "setting_continuity": "The same Dagobah swamp",
+            "visual_style": "grounded cinematic live action",
+            "ambient_audio": "Wetland insects and water",
+            "music": "N/A",
+            "clips": planned_clips,
+        }
+        compiled = compile_h3_reference_sequence_prompts(
+            plan,
+            clips,
+            reference_relationships=relationships,
+            default_retention=(
+                "<Subject 1>: fully_preserved; <Audio 1>: reference; "
+                "<Subject 2>: fully_preserved; <Audio 2>: reference; "
+                "<Subject 3>: fully_preserved; <Audio 3>: reference"
+            ),
+            task_types="reference generation + audio reference",
+        )
+
+        first = compiled[0]["prompt"]
+        second = compiled[1]["prompt"]
+        self.assertIn("<Subject 1> (S1)", first)
+        self.assertIn("<Subject 2> (S2)", first)
+        self.assertIn("<Subject 3> (S1)", second)
+        self.assertNotIn("<Subject 3> (S3)", second)
+        self.assertNotIn("Stable speaking identities", first)
+        self.assertNotIn("Stable speaking identities", second)
+        for prompt in (first, second):
+            for ordinal in range(1, 4):
+                self.assertIn(f"<Subject {ordinal}>", prompt)
+                self.assertIn(f"<Picture {ordinal}>", prompt)
+                self.assertIn(f"<Audio {ordinal}>", prompt)
+
     @patch("services.llm_service.generate", side_effect=RuntimeError("offline"))
     def test_already_enhanced_omni_prompt_is_replanned_as_local_story_beats(self, _generate):
         expanded = (
@@ -572,11 +911,11 @@ class H3ReferenceSequencePlannerTests(unittest.TestCase):
         )
         self.assertEqual(result["window_count"], 3)
         first, second, third = result["window_prompts"]
-        self.assertIn("Superman is fighting Thanos", first)
+        self.assertIn("<Subject 1> is fighting <Subject 2>", first)
         self.assertNotIn("flies through a destroyed city", first)
         self.assertIn("flies through a destroyed city", second)
         self.assertNotIn("flying through Thanos", second)
-        self.assertIn("flying through Thanos", third)
+        self.assertIn("flying through <Subject 2>", third)
         for prompt in result["window_prompts"]:
             subjects = prompt.split("\n\nsummary:", 1)[0]
             self.assertEqual(subjects.count("<Picture 1>"), 1)
@@ -706,7 +1045,11 @@ class H3ReferenceSequencePlannerTests(unittest.TestCase):
         self.assertEqual(generate.call_count, 5)
         self.assertEqual(result["window_count"], 4)
         for index, clip_prompt in enumerate(result["window_prompts"]):
-            self.assertIn(ledger["beats"][index]["description"], clip_prompt)
+            expected_beat = ledger["beats"][index]["description"].replace(
+                "Alex",
+                "<Subject 1>",
+            )
+            self.assertIn(expected_beat, clip_prompt)
             for other_index, beat in enumerate(ledger["beats"]):
                 if other_index != index:
                     self.assertNotIn(beat["description"], clip_prompt)

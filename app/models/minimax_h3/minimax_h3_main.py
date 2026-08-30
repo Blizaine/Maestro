@@ -57,9 +57,11 @@ from .packing import (
 from .ref2va import (
     MiniMaxH3PreparedReference,
     add_ref2va_continuation_context,
+    align_ref2va_voice_reference_order,
     build_ref2va_packed_sequence,
     ensure_ref2va_prompt_relationships,
     prepare_references,
+    select_ref2va_window_voice_references,
     trim_reference_num_frames,
 )
 from .reference_manifest import apply_exact_drive_audio_prompt_contract
@@ -1888,18 +1890,82 @@ class MiniMaxH3Model:
                     input_prompt,
                     minimax_h3_exact_drive_audio_ordinal,
                 )
+            input_prompt, runtime_references, reference_remap = (
+                align_ref2va_voice_reference_order(
+                    input_prompt,
+                    minimax_h3_references,
+                )
+            )
+            if reference_remap:
+                mapping = "; ".join(
+                    f"{kind} " + ", ".join(
+                        f"{old} -> {new}" for old, new in sorted(remap.items())
+                    )
+                    for kind, remap in reference_remap.items()
+                )
+                print(
+                    "[MiniMax H3 Ref2VA] Canonicalized physical reference order "
+                    f"and prompt labels ({mapping})."
+                )
+            input_prompt, runtime_references, voice_scope = (
+                select_ref2va_window_voice_references(
+                    input_prompt,
+                    runtime_references,
+                )
+            )
+            if voice_scope["voice_total"]:
+                kept = ", ".join(voice_scope["kept_roles"]) or "none"
+                print(
+                    "[MiniMax H3 Ref2VA] Window-scoped voice references: "
+                    f"kept {voice_scope['voice_kept']}/{voice_scope['voice_total']} "
+                    f"({kept})."
+                )
+                if voice_scope["voice_omitted"]:
+                    omitted = ", ".join(voice_scope["omitted_roles"])
+                    print(
+                        "[MiniMax H3 Ref2VA] Omitted non-speaking or over-limit "
+                        f"voice references for this window: {omitted}."
+                    )
             conditioned_prompt = ensure_ref2va_prompt_relationships(
                 input_prompt,
-                minimax_h3_references,
+                runtime_references,
                 duration_seconds=target_frame_num / fps,
             )
             if conditioned_prompt != str(input_prompt or "").strip():
                 print(
-                    "[MiniMax H3 Ref2VA] Added explicit reference relationships "
-                    "to an untagged prompt."
+                    "[MiniMax H3 Ref2VA] Applied canonical Subject/Speaker/Audio "
+                    "bindings to the final model prompt."
                 )
+            picture_no = video_no = audio_no = 0
+            presentation_order = []
+            for reference in runtime_references:
+                kind = reference.get("type")
+                role = str(
+                    reference.get("character_name")
+                    or reference.get("role")
+                    or kind
+                ).strip()
+                if kind == "image":
+                    picture_no += 1
+                    presentation_order.append(f"Picture {picture_no}={role}")
+                elif kind == "video":
+                    video_no += 1
+                    presentation_order.append(f"Video {video_no}={role}")
+                    if (
+                        (reference.get("has_audio") or reference.get("audio_path"))
+                        and reference.get("include_audio", True)
+                    ):
+                        audio_no += 1
+                        presentation_order.append(f"Audio {audio_no}={role}")
+                elif kind == "audio":
+                    audio_no += 1
+                    presentation_order.append(f"Audio {audio_no}={role}")
+            print(
+                "[MiniMax H3 Ref2VA] Runtime reference bindings: "
+                + "; ".join(presentation_order)
+            )
             references = prepare_references(
-                minimax_h3_references,
+                runtime_references,
                 num_frames=frame_num,
                 target_height=height,
                 target_width=width,

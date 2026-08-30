@@ -5,13 +5,14 @@ import {
   ExternalLink,
   Film,
   Loader2,
+  Sparkles,
   Volume2,
   VolumeX,
   X,
 } from 'lucide-react'
 import * as api from '../api/client'
 import { useStore } from '../stores/useStore'
-import type { EditorExportCapabilities, EditorExportSettings } from '../types'
+import type { EditorExportCapabilities, EditorExportSettings, EditorUpscaleMethod } from '../types'
 import { editorExportDimensions, editorExportFps, editorProjectDuration, formatEditorTime } from './editorUtils'
 import { useEditorStore } from './useEditorStore'
 
@@ -27,6 +28,15 @@ const QUALITY: Array<{ value: EditorExportSettings['quality']; label: string; de
   { value: 'draft', label: 'Draft', detail: 'Fastest' },
   { value: 'balanced', label: 'Balanced', detail: 'Smaller file' },
   { value: 'high', label: 'High', detail: 'Best quality' },
+]
+
+const UPSCALE_OPTIONS: Array<{ value: EditorUpscaleMethod; label: string; scale: number }> = [
+  { value: '', label: 'Off', scale: 1 },
+  { value: 'flashvsr2', label: 'FlashVSR 2×', scale: 2 },
+  { value: 'flashvsr3', label: 'FlashVSR 3×', scale: 3 },
+  { value: 'flashvsr4', label: 'FlashVSR 4×', scale: 4 },
+  { value: 'flashvsr2pass2', label: 'FlashVSR two-pass 2×', scale: 2 },
+  { value: 'flashvsr2pass4', label: 'FlashVSR two-pass 4×', scale: 4 },
 ]
 
 function safeFilename(value: string): string {
@@ -68,6 +78,13 @@ export function EditorExportDialog({ open, onClose }: { open: boolean; onClose: 
   const dimensions = useMemo(() => (
     project ? editorExportDimensions(project) : { width: 0, height: 0 }
   ), [project])
+  const upscaleOption = UPSCALE_OPTIONS.find(option => (
+    option.value === (project?.export.spatial_upsampling || '')
+  )) || UPSCALE_OPTIONS[0]
+  const deliveryDimensions = {
+    width: dimensions.width * upscaleOption.scale,
+    height: dimensions.height * upscaleOption.scale,
+  }
   const outputFps = project ? editorExportFps(project) : 0
   const duration = editorProjectDuration(project)
   const lastExport = project?.exports?.[0]
@@ -75,11 +92,17 @@ export function EditorExportDialog({ open, onClose }: { open: boolean; onClose: 
   if (!open || !project) return null
 
   return (
-    <div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/65 p-3 backdrop-blur-sm" onMouseDown={event => {
+    <div
+      className="fixed inset-0 z-[150] flex h-[100dvh] items-center justify-center overflow-hidden bg-black/65 px-3 backdrop-blur-sm"
+      style={{
+        paddingTop: 'max(0.75rem, env(safe-area-inset-top))',
+        paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))',
+      }}
+      onMouseDown={event => {
       if (event.target === event.currentTarget) onClose()
     }}>
-      <section role="dialog" aria-modal="true" aria-label="Export Editor project" className="flex max-h-[min(820px,calc(100vh-1.5rem))] w-full max-w-[720px] flex-col overflow-hidden rounded-2xl border border-border bg-bg-secondary shadow-2xl">
-        <header className="flex items-center justify-between border-b border-border px-4 py-3.5">
+      <section role="dialog" aria-modal="true" aria-label="Export Editor project" className="flex max-h-full w-full max-w-[720px] flex-col overflow-hidden rounded-2xl border border-border bg-bg-secondary shadow-2xl">
+        <header className="flex shrink-0 items-center justify-between border-b border-border px-4 py-3.5">
           <div className="flex items-center gap-2.5">
             <span className="grid h-8 w-8 place-items-center rounded-lg bg-cta/15 text-cta"><Film size={16} /></span>
             <div>
@@ -201,13 +224,83 @@ export function EditorExportDialog({ open, onClose }: { open: boolean; onClose: 
                   <span className={`block h-3 w-3 rounded-full bg-white transition-transform ${project.export.include_audio ? 'translate-x-3' : ''}`} />
                 </span>
               </button>
+
+              <div className="space-y-3 rounded-xl border border-border bg-bg-tertiary p-3">
+                <div className="flex items-start gap-2">
+                  <span className="mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-md bg-cta/10 text-cta">
+                    <Sparkles size={12} />
+                  </span>
+                  <div>
+                    <div className="text-[10px] font-medium text-text-primary">Finishing</div>
+                    <p className="mt-0.5 text-[8px] leading-relaxed text-text-muted">Optional passes run after the timeline is rendered. Upscale runs before grain.</p>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-[9px] font-medium uppercase tracking-wider text-text-muted">AI upscale</label>
+                  <select
+                    value={project.export.spatial_upsampling || ''}
+                    onChange={event => setExportSettings({ spatial_upsampling: event.target.value as EditorUpscaleMethod })}
+                    className="w-full rounded-lg border border-border bg-bg-secondary px-2.5 py-2 text-[10px] text-text-primary outline-none focus:border-accent-blue/60"
+                  >
+                    {UPSCALE_OPTIONS.map(option => (
+                      <option key={option.value || 'off'} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                  {upscaleOption.scale > 1 && (
+                    <p className="text-[8px] leading-relaxed text-text-muted">FlashVSR may download its model on first use and substantially increases render time.</p>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setExportSettings({
+                    film_grain_intensity: (project.export.film_grain_intensity || 0) > 0 ? 0 : 0.15,
+                  })}
+                  className={`flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left ${(project.export.film_grain_intensity || 0) > 0 ? 'border-accent-blue/35 bg-accent-blue/5' : 'border-border bg-bg-secondary'}`}
+                >
+                  <span className="text-[10px] text-text-secondary">Film grain</span>
+                  <span className={`h-4 w-7 rounded-full p-0.5 transition-colors ${(project.export.film_grain_intensity || 0) > 0 ? 'bg-accent-blue' : 'bg-bg-active'}`}>
+                    <span className={`block h-3 w-3 rounded-full bg-white transition-transform ${(project.export.film_grain_intensity || 0) > 0 ? 'translate-x-3' : ''}`} />
+                  </span>
+                </button>
+
+                {(project.export.film_grain_intensity || 0) > 0 && (
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="space-y-1 text-[8px] text-text-muted">
+                      <span className="flex justify-between"><span>Intensity</span><span>{(project.export.film_grain_intensity || 0).toFixed(2)}</span></span>
+                      <input
+                        type="range"
+                        min="0.01"
+                        max="1"
+                        step="0.01"
+                        value={project.export.film_grain_intensity || 0.15}
+                        onChange={event => setExportSettings({ film_grain_intensity: Number(event.target.value) })}
+                        className="w-full accent-accent-blue"
+                      />
+                    </label>
+                    <label className="space-y-1 text-[8px] text-text-muted">
+                      <span className="flex justify-between"><span>Color</span><span>{(project.export.film_grain_saturation ?? 0.5).toFixed(2)}</span></span>
+                      <input
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.01"
+                        value={project.export.film_grain_saturation ?? 0.5}
+                        onChange={event => setExportSettings({ film_grain_saturation: Number(event.target.value) })}
+                        className="w-full accent-accent-blue"
+                      />
+                    </label>
+                  </div>
+                )}
+              </div>
             </div>
 
             <aside className="space-y-3">
               <div className="rounded-xl border border-border bg-bg-tertiary p-3">
                 <div className="text-[9px] font-medium uppercase tracking-wider text-text-muted">Delivery summary</div>
                 <dl className="mt-2.5 space-y-1.5 text-[10px]">
-                  <div className="flex justify-between gap-3"><dt className="text-text-muted">Frame</dt><dd className="font-mono text-text-secondary">{dimensions.width}×{dimensions.height}</dd></div>
+                  <div className="flex justify-between gap-3"><dt className="text-text-muted">Frame</dt><dd className="font-mono text-text-secondary">{deliveryDimensions.width}×{deliveryDimensions.height}</dd></div>
                   <div className="flex justify-between gap-3"><dt className="text-text-muted">Rate</dt><dd className="font-mono text-text-secondary">{outputFps.toFixed(outputFps % 1 ? 2 : 0)} fps</dd></div>
                   <div className="flex justify-between gap-3"><dt className="text-text-muted">Duration</dt><dd className="font-mono text-text-secondary">{formatEditorTime(duration)}</dd></div>
                   <div className="flex justify-between gap-3"><dt className="text-text-muted">Format</dt><dd className="text-right text-text-secondary">MP4 · {project.export.codec.toUpperCase()}</dd></div>
@@ -246,7 +339,7 @@ export function EditorExportDialog({ open, onClose }: { open: boolean; onClose: 
           </div>
         </div>
 
-        <footer className="border-t border-border bg-bg-tertiary/50 px-4 py-3">
+        <footer className="shrink-0 border-t border-border bg-bg-tertiary/50 px-4 py-3">
           {exportJobId ? (
             <div className="space-y-2">
               <div className="flex items-center justify-between text-[10px]">

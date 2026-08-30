@@ -712,6 +712,7 @@ def list_models():
             ),
             "generates_audio": bool(md.get("returns_audio", False)),
             "supports_ref_images": bool(md.get("image_ref_choices") or md.get("omni_reference")),
+            "omni_reference": bool(md.get("omni_reference", False)),
             # Studio's Image workflow selector uses the model definition's
             # native capabilities instead of name/architecture heuristics.
             "supports_image_edit": bool(md.get("image_ref_choices")),
@@ -7591,6 +7592,25 @@ def _ensure_llm_loaded():
         llm_service.load_model(model_id=desired, device=desired_device, provider=desired_provider, remote_url=desired_remote_url, api_key=desired_api_key)
 
 
+def _guard_interactive_llm_against_generation() -> None:
+    """Reject an interactive planner that would compete with generation."""
+
+    generation_busy = _gen_lock.locked() or any(
+        snapshot_job(job).get("status") in {"queued", "running"}
+        for job in list(_jobs.values())
+    )
+    if generation_busy:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "A generation is already using or waiting for the GPU. "
+                "AI prompt planning has not started. Add this setup to the "
+                "queue and Maestro will run its planner safely when the job "
+                "reaches the front."
+            ),
+        )
+
+
 @api.post("/api/v1/llm/generate")
 async def llm_generate(request: Request):
     """Generate text with the local LLM."""
@@ -7956,6 +7976,7 @@ async def director_generate_music(request: Request):
 async def llm_plan_h3_windows(request: Request):
     """Expand one H3 First/Last concept into exact per-window prompts."""
 
+    _guard_interactive_llm_against_generation()
     body = await request.json()
     prompt = str(body.get("prompt") or "").strip()
     model_type = str(body.get("model_type") or "")
@@ -8061,6 +8082,7 @@ async def llm_plan_h3_windows(request: Request):
 async def llm_plan_h3_sequence(request: Request):
     """Expand one H3 Omni concept into reference-driven windows."""
 
+    _guard_interactive_llm_against_generation()
     body = await request.json()
     prompt = str(body.get("prompt") or "").strip()
     model_type = str(body.get("model_type") or "")
@@ -8180,10 +8202,14 @@ async def llm_plan_h3_sequence(request: Request):
         raise HTTPException(status_code=500, detail=str(error)) from error
 
 
-@api.post("/api/v1/llm/enhance-prompt")
-async def llm_enhance_prompt(request: Request):
-    """Enhance a generation prompt. Routes to Wan2GP enhancer or local LLM based on config."""
-    body = await request.json()
+async def _llm_enhance_prompt_payload(body: dict):
+    """Enhance one already-decoded request payload.
+
+    Keeping the implementation independent from FastAPI's ``Request`` lets a
+    queued generation run the exact same enhancer only after it owns the GPU
+    generation slot.  This prevents a large local LLM from loading alongside
+    an active diffusion model merely because the user queued the next job.
+    """
 
     prompt = body.get("prompt", "")
     if not prompt:
@@ -8398,6 +8424,13 @@ async def llm_enhance_prompt(request: Request):
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@api.post("/api/v1/llm/enhance-prompt")
+async def llm_enhance_prompt(request: Request):
+    """Enhance a generation prompt immediately for interactive review."""
+    _guard_interactive_llm_against_generation()
+    return await _llm_enhance_prompt_payload(await request.json())
 
 
 async def _enhance_with_wangp(prompt: str, mode: str, enhancer_enabled: int, image_paths: list = None):
@@ -9679,10 +9712,122 @@ async def director_v2_plan(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _generation_request_uses_serial_auto_planner(body: dict) -> bool:
+    """Return whether request preparation may load the prompt-planner LLM.
+
+    Automatic H3/LTX multi-window plans used to be compiled inside the HTTP
+    request, before a generation job existed.  A second submission could
+    therefore load a 4B/27B LLM while the current diffusion model still owned
+    the GPU.  Keep every automatic sequence planner in the same serialized
+    lifecycle as generation; manual plans never need this detour.
+    """
+
+    model_type = str(body.get("model_type") or "")
+    model_def = wgp.get_model_def(model_type) or {}
+    architecture = str(model_def.get("architecture") or "")
+    if architecture.startswith("minimax_h3"):
+        if model_def.get("omni_reference"):
+            return (
+                body.get("minimax_h3_reference_sequence") is True
+                and body.get("minimax_h3_sequence_prompt_mode") != "manual"
+            )
+        return (
+            body.get("minimax_h3_multi_window") is True
+            and body.get("minimax_h3_window_storyboard", True) is not False
+        )
+    return (
+        model_def.get("multi_window_sequence_controls") is True
+        and body.get("ltx_multi_window") is True
+        and body.get("ltx_window_prompt_mode") != "manual"
+    )
+
+
+def _enqueue_deferred_generation_preparation(body: dict) -> dict:
+    """Create a visible job before any automatic sequence planning begins."""
+
+    body = dict(body)
+    client_submission_id = str(
+        body.pop("_client_submission_id", "") or ""
+    ).strip()
+    queue_mode = str(body.get("_queue_mode", "now") or "now").strip().lower()
+    if queue_mode not in {"now", "held"}:
+        raise HTTPException(
+            status_code=400,
+            detail="_queue_mode must be either 'now' or 'held'",
+        )
+    is_sfx = body.get("sfx_mode")
+    model_type = str(body.get("model_type") or "")
+    if not model_type:
+        raise HTTPException(status_code=400, detail="model_type is required")
+    if not is_sfx and not body.get("prompt"):
+        raise HTTPException(status_code=400, detail="prompt is required")
+    if not is_sfx and wgp.get_model_def(model_type) is None:
+        raise HTTPException(status_code=400, detail=f"Unknown model: {model_type}")
+
+    # Freeze workspace selection now, even though full request preparation is
+    # deliberately delayed until this job owns the generation slot.
+    workspace = body.get("workspace") or _get_active_workspace()
+    body["workspace"] = workspace
+    body["_deferred_generation_prepare"] = True
+    hold_for_queue = queue_mode == "held"
+    job_id = uuid.uuid4().hex[:8]
+    initial_status = "held" if hold_for_queue else "queued"
+    job = {
+        "id": job_id,
+        "show_in_gallery": not hold_for_queue,
+        "status": initial_status,
+        "progress": 0,
+        "step": 0,
+        "total_steps": 0,
+        "phase": "",
+        "message": (
+            "Ready - AI planning will run when queue starts"
+            if hold_for_queue
+            else "Queued - AI planning waits for generation resources"
+        ),
+        "created_at": time.time(),
+        "client_submission_id": client_submission_id or None,
+        "params": body,
+        "output_files": [],
+        "error": None,
+        "workspace": workspace,
+        "out_dir": _workspace_dir(workspace),
+    }
+    _jobs[job_id] = job
+
+    if not hold_for_queue:
+        threading.Thread(
+            target=_run_generation,
+            args=(job_id,),
+            daemon=False,
+        ).start()
+    return {
+        "job_id": job_id,
+        "status": initial_status,
+        "client_submission_id": client_submission_id or None,
+    }
+
+
 @api.post("/api/v1/generate")
 async def generate(request: Request):
     """Submit a generation job. Returns immediately with a job_id."""
     body = await request.json()
+    if _generation_request_uses_serial_auto_planner(body):
+        return _enqueue_deferred_generation_preparation(body)
+    return await _prepare_generation_submission(body)
+
+
+async def _prepare_generation_submission(
+    body: dict,
+    *,
+    prepare_only: bool = False,
+):
+    """Normalize/plan a request, then submit it or return prepared params."""
+
+    body = dict(body)
+    client_submission_id = str(
+        body.pop("_client_submission_id", "") or ""
+    ).strip()
     queue_mode = str(body.pop("_queue_mode", "now") or "now").strip().lower()
     if queue_mode not in {"now", "held"}:
         raise HTTPException(
@@ -10941,10 +11086,20 @@ async def generate(request: Request):
     workspace = body.pop("workspace", None) or _get_active_workspace()
     job_out_dir = _workspace_dir(workspace)
 
+    if prepare_only:
+        return {
+            "params": body,
+            "workspace": workspace,
+            "out_dir": job_out_dir,
+            "h3_window_plan": h3_window_plan_response,
+            "ltx_window_plan": ltx_window_plan_response,
+        }
+
     job_id = uuid.uuid4().hex[:8]
     initial_status = "held" if hold_for_queue else "queued"
     job = {
         "id": job_id,
+        "show_in_gallery": not hold_for_queue,
         "status": initial_status,
         "progress": 0,
         "step": 0,
@@ -10956,6 +11111,7 @@ async def generate(request: Request):
             else "Queued"
         ),
         "created_at": time.time(),
+        "client_submission_id": client_submission_id or None,
         "params": body,
         "output_files": [],
         "error": None,
@@ -10975,7 +11131,11 @@ async def generate(request: Request):
         )
         thread.start()
 
-    response = {"job_id": job_id, "status": initial_status}
+    response = {
+        "job_id": job_id,
+        "status": initial_status,
+        "client_submission_id": client_submission_id or None,
+    }
     if h3_window_plan_response is not None:
         response["h3_window_plan"] = h3_window_plan_response
     if ltx_window_plan_response is not None:
@@ -22462,7 +22622,12 @@ def _chunked_flashvsr_upscale(video_path: str, method: str, *, job: dict = None,
                     pass
 
 
-def _apply_spatial_upsampling_to_file(video_path: str, method: str, job: dict = None):
+def _apply_spatial_upsampling_to_file(
+    video_path: str,
+    method: str,
+    job: dict = None,
+    progress_callback=None,
+):
     """Upscale an already-saved video file IN PLACE (post-generation pass).
 
     Used to defer FlashVSR from the per-sliding-window inline path to a
@@ -22487,7 +22652,11 @@ def _apply_spatial_upsampling_to_file(video_path: str, method: str, job: dict = 
             (lambda: is_cancel_requested(job)) if job is not None else None
         )
         tmp_video = _chunked_flashvsr_upscale(
-            video_path, method, job=job, abort_check=abort_check,
+            video_path,
+            method,
+            job=job,
+            abort_check=abort_check,
+            progress_callback=progress_callback,
         )
         if tmp_video is None:
             raise RuntimeError("FlashVSR upscale was aborted")
@@ -23238,6 +23407,138 @@ async def tools_revoice(request: Request):
     return {"job_id": job_id, "status": "queued"}
 
 
+def _apply_deferred_prompt_enhancement(job: dict, raw_params: dict) -> None:
+    """Enhance a frozen queued prompt only after its generation slot opens."""
+
+    payload = raw_params.pop("_deferred_prompt_enhance", None)
+    job_params = job.get("params")
+    if isinstance(job_params, dict):
+        job_params.pop("_deferred_prompt_enhance", None)
+    if not isinstance(payload, dict):
+        return
+
+    source_prompt = str(payload.get("prompt") or raw_params.get("prompt") or "").strip()
+    if not source_prompt:
+        raise ValueError("The queued AI prompt is empty.")
+
+    payload = dict(payload)
+    payload["prompt"] = source_prompt
+    update_job(
+        job,
+        phase="Prompt enhancement",
+        message="Enhancing queued prompt…",
+    )
+    print(
+        f"[Queue] Job {job.get('id', '')}: running deferred AI prompt "
+        "enhancement after the GPU generation slot became available."
+    )
+    try:
+        result = asyncio.run(_llm_enhance_prompt_payload(payload))
+        enhanced = str((result or {}).get("enhanced") or "").strip()
+        if not enhanced:
+            raise ValueError("The prompt enhancer returned an empty prompt.")
+        raw_params["prompt"] = enhanced
+        if isinstance(job_params, dict):
+            job_params["prompt"] = enhanced
+
+        model_type = str(raw_params.get("model_type") or "").lower()
+        if model_type.startswith("minimax_h3"):
+            # Deferred enhancement happens after /generate has already applied
+            # its single-pass multiline guard. H3's enhancer returns one
+            # Context-IR document whose section breaks are semantic structure,
+            # not manual window boundaries.
+            try:
+                deferred_window_count = int(payload.get("window_count") or 1)
+            except (TypeError, ValueError):
+                deferred_window_count = 1
+            if deferred_window_count <= 1 and "\n" in enhanced:
+                raw_params["multi_prompts_gen_type"] = 2
+                if isinstance(job_params, dict):
+                    job_params["multi_prompts_gen_type"] = 2
+                print(
+                    "[Queue] Preserving deferred MiniMax H3 Context-IR "
+                    "as one native prompt."
+                )
+            raw_params["_h3_original_prompt"] = source_prompt
+            if isinstance(job_params, dict):
+                job_params["_h3_original_prompt"] = source_prompt
+        elif model_type.startswith("ltx"):
+            raw_params["_ltx_original_prompt"] = source_prompt
+            if isinstance(job_params, dict):
+                job_params["_ltx_original_prompt"] = source_prompt
+    finally:
+        # Generation owns the slot now; never leave a local prompt model in
+        # VRAM while the requested diffusion checkpoint begins loading.
+        try:
+            from services import llm_service
+
+            if llm_service.is_loaded():
+                llm_service.unload_model()
+        except Exception as unload_error:
+            print(f"[Queue] Deferred prompt LLM unload skipped: {unload_error}")
+
+    update_job(job, phase="", message="Preparing…")
+
+
+def _apply_deferred_generation_preparation(job: dict) -> None:
+    """Plan/normalize an automatic sequence after this job owns the GPU slot."""
+
+    job_params = job.get("params")
+    if not isinstance(job_params, dict) or not job_params.get(
+        "_deferred_generation_prepare"
+    ):
+        return
+
+    request_body = dict(job_params)
+    request_body.pop("_deferred_generation_prepare", None)
+    update_job(
+        job,
+        phase="Prompt planning",
+        message="Planning window prompts with AI…",
+    )
+    print(
+        f"[Queue] Job {job.get('id', '')}: automatic sequence planning "
+        "started after the generation slot became available."
+    )
+    try:
+        prepared = asyncio.run(
+            _prepare_generation_submission(request_body, prepare_only=True)
+        )
+        prepared_params = prepared.get("params")
+        if not isinstance(prepared_params, dict):
+            raise RuntimeError("Generation preparation returned invalid parameters.")
+        prepared_params.pop("_deferred_generation_prepare", None)
+        updates = {
+            "params": prepared_params,
+            "workspace": prepared.get("workspace") or job.get("workspace"),
+            "out_dir": prepared.get("out_dir") or job.get("out_dir"),
+            "phase": "",
+            "message": "Preparing…",
+        }
+        if prepared.get("h3_window_plan") is not None:
+            updates["h3_window_plan"] = prepared["h3_window_plan"]
+        if prepared.get("ltx_window_plan") is not None:
+            updates["ltx_window_plan"] = prepared["ltx_window_plan"]
+        update_job(job, **updates)
+    finally:
+        # Automatic planning and diffusion share one serialized slot, but not
+        # one residency budget.  Release a local planner before any video
+        # checkpoint starts loading. Remote providers own no local VRAM.
+        try:
+            from services import llm_service
+
+            if (
+                llm_service.is_loaded()
+                and llm_service.get_status().get("provider") == "local"
+            ):
+                llm_service.unload_model()
+        except Exception as unload_error:
+            print(
+                "[Queue] Automatic sequence planner unload skipped: "
+                f"{unload_error}"
+            )
+
+
 def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
     """Build and run a job, optionally deferring success finalization."""
     from shared.utils.thread_utils import AsyncStream, async_run
@@ -23252,6 +23553,17 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
             return False
         try:
             if not try_start(job, message="Preparing..."):
+                return False
+
+            # Automatic H3/LTX window planners are intentionally part of the
+            # queued job. They must never load before this worker owns the
+            # generation lock, otherwise a second submission can place the
+            # prompt LLM beside an active diffusion model and freeze the host.
+            try:
+                _apply_deferred_generation_preparation(job)
+            except Exception as error:
+                detail = getattr(error, "detail", None) or str(error)
+                finish_job(job, "failed", error=str(detail), message=str(detail))
                 return False
 
             # Director submits child jobs directly to this worker instead of
@@ -23291,6 +23603,17 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                 finish_job(job, "failed", error=str(error), message=str(error))
                 return False
 
+            # Freeze and, when requested, enhance this job's own prompt only
+            # after the generation lock is held. No model-specific generation
+            # work or memory budgeting starts until the prompt LLM is gone.
+            raw_params = job["params"].copy()
+            try:
+                _apply_deferred_prompt_enhancement(job, raw_params)
+            except Exception as error:
+                detail = getattr(error, "detail", None) or str(error)
+                finish_job(job, "failed", error=str(detail), message=str(detail))
+                return False
+
             # Per-job VRAM coefficient adjustment — accounts for active
             # LoRAs and pipeline stage count beyond what the auto-tuned
             # base captures. Mutates wgp.args.vram_safety_coefficient
@@ -23321,9 +23644,6 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                 },
                 "loras": [],
             }
-
-            # Build task manifest from user params
-            raw_params = job["params"].copy()
 
             # Register the exact state before any model work. SFX uses the
             # same queue but does not own the Wan model interrupt.
@@ -26005,8 +26325,11 @@ def get_status(job_id: str):
     if job_id not in _jobs:
         raise HTTPException(status_code=404, detail="Job not found")
     j = snapshot_job(_jobs[job_id])
+    params = j.get("params") if isinstance(j.get("params"), dict) else {}
     return {
         "job_id": j["id"],
+        "client_submission_id": j.get("client_submission_id"),
+        "show_in_gallery": bool(j.get("show_in_gallery", False)),
         "kind": j.get("kind", "generation"),
         "status": j["status"],
         "progress": j["progress"],
@@ -26019,6 +26342,11 @@ def get_status(job_id: str):
         # Present only on failed jobs that look like CUDA OOMs. UI
         # renders the OOM recovery banner when this is non-null.
         "oom_info": j.get("oom_info"),
+        # Automatic multi-window plans may be produced after submission, once
+        # the queued job owns the generation slot. Publish them through normal
+        # polling so the placeholder can show the exact prompts being used.
+        "h3_window_plan": j.get("h3_window_plan") or params.get("h3_window_plan"),
+        "ltx_window_plan": j.get("ltx_window_plan"),
         **_job_eta_response_fields(j),
     }
 
@@ -26116,6 +26444,8 @@ def list_jobs():
         if j["status"] in ("held", "queued", "running"):
             active.append({
                 "job_id": j["id"],
+                "client_submission_id": j.get("client_submission_id"),
+                "show_in_gallery": bool(j.get("show_in_gallery", False)),
                 "kind": j.get("kind", "generation"),
                 "status": j["status"],
                 "progress": j["progress"],
@@ -26133,10 +26463,12 @@ def list_jobs():
                 # planning metadata only; model paths and unrelated params stay
                 # private.
                 "h3_window_plan": (
-                    (j.get("params") or {}).get("h3_window_plan")
+                    j.get("h3_window_plan")
+                    or (j.get("params") or {}).get("h3_window_plan")
                     if isinstance(j.get("params"), dict)
                     else None
                 ),
+                "ltx_window_plan": j.get("ltx_window_plan"),
             })
     active.sort(key=lambda x: x["created_at"])
     return {"jobs": active}
@@ -26913,6 +27245,25 @@ def _run_editor_export(job_id: str) -> bool:
 
         project = job["params"]["project"]
         workspace = job.get("workspace") or _get_active_workspace()
+        export_settings = project.get("export") or {}
+        spatial_upsampling = str(
+            export_settings.get("spatial_upsampling") or ""
+        )
+        film_grain_intensity = max(
+            0.0,
+            min(1.0, float(export_settings.get("film_grain_intensity") or 0.0)),
+        )
+        film_grain_saturation = max(
+            0.0,
+            min(1.0, float(export_settings.get("film_grain_saturation") or 0.5)),
+        )
+        finishing_enabled = bool(spatial_upsampling) or film_grain_intensity > 0
+        render_progress_ceiling = (
+            65 if spatial_upsampling and film_grain_intensity > 0
+            else 74 if spatial_upsampling
+            else 90 if film_grain_intensity > 0
+            else 100
+        )
 
         def _cancelled() -> bool:
             return bool(abort_state.get("abort")) or is_cancel_requested(job)
@@ -26920,7 +27271,13 @@ def _run_editor_export(job_id: str) -> bool:
         def _progress(percent: int, phase: str) -> None:
             update_job(
                 job,
-                progress=max(0, min(100, int(percent))),
+                progress=max(
+                    0,
+                    min(
+                        render_progress_ceiling,
+                        int(float(percent) * render_progress_ceiling / 100.0),
+                    ),
+                ),
                 phase=phase,
                 message=phase,
             )
@@ -26935,25 +27292,108 @@ def _run_editor_export(job_id: str) -> bool:
         )
         if _cancelled():
             return False
+
+        if finishing_enabled:
+            if not update_job(
+                job,
+                progress=render_progress_ceiling,
+                phase="Finishing",
+                message="Waiting for finishing resources...",
+            ):
+                return False
+            with generation_slot(_gen_lock, job) as acquired:
+                if not acquired or _cancelled():
+                    return False
+
+                if spatial_upsampling:
+                    upscale_end = 92 if film_grain_intensity > 0 else 99
+
+                    def _upscale_progress(phase, current_step=None, total_steps=None):
+                        try:
+                            fraction = (
+                                float(current_step or 0) / float(total_steps)
+                                if total_steps
+                                else 0.0
+                            )
+                        except (TypeError, ValueError, ZeroDivisionError):
+                            fraction = 0.0
+                        progress = render_progress_ceiling + int(
+                            max(0.0, min(1.0, fraction))
+                            * (upscale_end - render_progress_ceiling)
+                        )
+                        update_job(
+                            job,
+                            progress=progress,
+                            phase="Upscaling",
+                            message=str(phase or "Upscaling with FlashVSR..."),
+                            step=int(current_step or 0),
+                            total_steps=int(total_steps or 0),
+                        )
+
+                    if not update_job(
+                        job,
+                        progress=render_progress_ceiling,
+                        phase="Upscaling",
+                        message="Upscaling export with FlashVSR...",
+                    ):
+                        return False
+                    _apply_spatial_upsampling_to_file(
+                        output_path,
+                        spatial_upsampling,
+                        job=job,
+                        progress_callback=_upscale_progress,
+                    )
+                    if _cancelled():
+                        return False
+
+                if film_grain_intensity > 0:
+                    if not update_job(
+                        job,
+                        progress=94 if spatial_upsampling else 92,
+                        phase="Film Grain",
+                        message="Applying film grain to export...",
+                        step=0,
+                        total_steps=0,
+                    ):
+                        return False
+                    _apply_film_grain_to_file(
+                        output_path,
+                        film_grain_intensity,
+                        film_grain_saturation,
+                    )
+                    if _cancelled():
+                        return False
+                    update_job(
+                        job,
+                        progress=99,
+                        phase="Finishing",
+                        message="Finalizing finished export...",
+                    )
+
         filename = os.path.basename(output_path)
         try:
             latest_project = load_editor_project(
                 _editor_save_root(), workspace, project["id"]
             )
             export_width, export_height, export_fps = editor_export_dimensions(project)
-            export_settings = project.get("export") or {}
+            upscale_factor = (
+                wgp.flashvsr.scale_for_upsampling(spatial_upsampling) or 1.0
+            )
             export_record = {
                 "id": f"export-{job_id}",
                 "filename": filename,
                 "workspace": workspace,
                 "created_at": time.time(),
                 "duration": editor_project_duration(project),
-                "width": export_width,
-                "height": export_height,
+                "width": int(round(export_width * upscale_factor)),
+                "height": int(round(export_height * upscale_factor)),
                 "fps": export_fps,
                 "codec": export_settings.get("codec") or "h264",
                 "quality": export_settings.get("quality") or "high",
                 "encoder": export_settings.get("encoder") or "auto",
+                "spatial_upsampling": spatial_upsampling,
+                "film_grain_intensity": film_grain_intensity,
+                "film_grain_saturation": film_grain_saturation,
             }
             latest_project["exports"] = [
                 export_record,
@@ -27154,7 +27594,15 @@ def editor_media_cache(preview_id: str, kind: str, workspace: str = ""):
     except EditorProjectError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     media_type = "video/mp4" if kind in {"proxy", "proxy-mobile"} else "image/jpeg"
-    return FileResponse(path, media_type=media_type)
+    # Preview IDs include the source path, size, and mtime, so these artifacts
+    # are immutable. Explicit caching lets iOS reuse the standby deck's range
+    # data when the persistent playback deck reaches the edit instead of
+    # competing with itself over Tailscale for the same proxy.
+    return FileResponse(
+        path,
+        media_type=media_type,
+        headers={"Cache-Control": "public, max-age=86400, immutable"},
+    )
 
 
 @api.get("/api/v1/editor/export/capabilities")

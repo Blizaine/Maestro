@@ -1,24 +1,25 @@
-MINIMAX H3 REF2VA CONTEXT-IR RULES (apply to video_prompt):
-- Describe the finished target shot, not an instruction to copy, replace, or animate a reference.
-- Maestro maps the exact per-shot ordered media manifest after planning. Do not guess reference numbers; the deterministic final compiler binds the actual <Picture N>, <Video N>, and <Audio N> labels.
-- The final model prompt uses exactly these ordered fields: subject_definitions, summary, retention_analysis, detailed_description, overall_soundscape, and non_diegetic_music.
-- subject_definitions identifies each <Subject N>, stable speaking ID (S1), and the reference media that defines identity, scene, motion, or voice.
-- Begin summary with the applicable official task types in square brackets, such as [reference generation + audio reference] or [reference generation + audio reuse]. Do not repeat literal dialogue in summary.
-- In retention_analysis, visual subjects/pictures/videos use only fully_preserved, partially_preserved, attribute_transfer, or weak_reference. Audio uses only fully_copy, partially_copy, reference, or weak_reference.
-- When a picture supplies only a reusable person, object, environment, or style, cite it inside that <Subject N> definition instead of pretending it is a concrete keyframe. Identity images never contribute their source background, framing, composition, or pose unless explicitly mapped as composition references.
-- Begin detailed_description with one or two English sentences establishing the visual style, lighting, color, and texture; then write [Shot 1] with no timestamp. Later shots begin [Shot N] At MM:SS.mmm, followed by a concrete cut or transition.
-- Make detailed_description explicit rather than summary-like: establish composition, referenced subject appearance and position, environment, action and state changes, camera movement, current sound, and where each reference actually takes effect. Direct generation rewrites normally use 350-500 English words; dialogue-dense timelines prioritize complete speech over a mechanical word quota.
-- Insert <Subject N>, <Picture N>, <Video N>, and <Audio N> at the first visible or audible point where each role applies. At a subject's first clear appearance, give its referenced traits, frame position, and current action.
-- Assign every speaking person a stable ID such as (S1) or (S2). Keep the same ID throughout the Director project.
-- Use a compound ID such as (S1,S2) when already numbered people speak or sing together. Characters who never vocalize receive no speaker ID.
-- Write literal speech only as <d>[English] Exact words.</d>, changing the language tag when requested. Put speaker identity, voice, action, and delivery outside the tag.
-- For voiceover, use the exact phrase "says in an off-screen voiceover" and state immediately after the <d> block that the corresponding on-screen character's lips remain completely closed.
-- Use <scenetrans> at both connecting points only when the same dialogue or lyrics truly cross a cut, and <cutoff> only when speech is truncated by the video ending.
-- Preserve visible signs, labels, banners, subtitles, and other on-screen text verbatim inside English double quotation marks; never translate it.
-- Preserve supplied dialogue verbatim. When speech is requested without a script, create concise meaningful lines that fit the clip at no more than about two words per second.
-- Preserve recognizable proper names, characters, performers, series, films, and franchises exactly as supplied.
-- When no dialogue is requested, explicitly keep mouths closed and omit voices or speech-like sounds. Never invent speech to fill time.
-- When driving audio is supplied, describe visible performance, lip movement, rhythm, and action synchronized to that timeline; do not transcribe or replace its audible content.
-- overall_soundscape contains ambience and physical sounds in one to four complete English sentences; do not repeat dialogue or shot-local synchronized vocal events there.
-- non_diegetic_music describes audience-only music in one to three complete sentences, including instrumentation, tempo, and dynamic development when present. Use N/A unless music is requested or a driving soundtrack is mapped.
-- No negative prompts, technical parameters, model names, LoRA filenames, or explanatory prose.
+MINIMAX H3 REF2VA RULES (apply to video_prompt):
+- Describe the finished target clip in concise chronological prose using exactly these fields:
+  subject_definitions, summary, retention_analysis, detailed_description, overall_soundscape,
+  and non_diegetic_music.
+- Treat Maestro's ordered reference inventory as authoritative. Never invent or renumber
+  <Subject N>, <Picture N>, <Video N>, or <Audio N> labels.
+- <Subject N> is a stable visible identity. Identity references supply appearance rather than
+  their source pose, background, framing, dialogue, action, or opening frame.
+- Bind each voice to its visible subject: `<Audio N> is the voice-timbre reference for
+  <Subject N> (Sx), guiding emotion and delivery.` Reuse the same local (Sx) beside that Subject's
+  dialogue. Voice timbre is retained while the new speech uses the target scene's acoustics.
+- Subject IDs and speaker IDs are independent. Keep Subject IDs fixed; assign (S1), (S2), etc.
+  by first vocal-event order within the current generated clip.
+- Preserve every supplied quoted line verbatim, once, in source order. Use direct dialogue syntax:
+  `<Subject 2> (S1) says in the voice referenced from <Audio 1>,
+  <d>[English] Exact words.</d>` Put only literal spoken words inside <d>.
+- Keep scene description, camera direction, action, ambience, and delivery outside <d>. Do not
+  turn those descriptions into narration or filler dialogue.
+- `[Shot 1]` has no timestamp. Later cuts use `[Shot N] At MM:SS.mmm, ...`. Every shot must fit
+  the requested clip duration and advance toward a concrete final state.
+- For multi-clip work, include only the current clip's assigned events. Keep reference Subjects
+  stable between clips and recalculate speaker IDs locally in each generated clip.
+- Keep overall_soundscape to target-scene ambience and synchronized effects. Use
+  non_diegetic_music: N/A unless music is requested.
+- Prefer positive, performable visual direction and do not pad the prompt to a fixed word count.

@@ -25,7 +25,7 @@ const VIDEO_WORKFLOW_GROUPS: StudioWorkflowGroup<DisplayVideoWorkflow>[] = [
   {
     label: 'Create',
     options: [
-      { value: 'frames', label: 'Frames', description: 'Text, frame, and reference generation', icon: PanelsTopLeft },
+      { value: 'frames', label: 'Generate', description: 'Text, guided-frame, or Omni generation', icon: PanelsTopLeft },
       { value: 'extend', label: 'Extend', description: 'Continue an existing clip', icon: StepForward },
       { value: 'blend', label: 'Blend', description: 'Bridge two visual anchors', icon: Blend },
     ],

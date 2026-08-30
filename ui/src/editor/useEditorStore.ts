@@ -2319,18 +2319,29 @@ export const useEditorStore = create<EditorState>((set, get) => ({
               const serverRecord = serverProject.exports.find(record => record.filename === outputFile)
                 || serverProject.exports[0]
               const fallbackDimensions = editorExportDimensions(project)
+              const fallbackUpscaleScale = project.export.spatial_upsampling === 'flashvsr3'
+                ? 3
+                : project.export.spatial_upsampling === 'flashvsr4'
+                  || project.export.spatial_upsampling === 'flashvsr2pass4'
+                  ? 4
+                  : project.export.spatial_upsampling
+                    ? 2
+                    : 1
               const fallbackRecord: EditorExportRecord | null = outputFile ? {
                 id: `export-${result.job_id}`,
                 filename: outputFile,
                 workspace: project.workspace,
                 created_at: Date.now() / 1000,
                 duration: projectDuration(project),
-                width: fallbackDimensions.width,
-                height: fallbackDimensions.height,
+                width: fallbackDimensions.width * fallbackUpscaleScale,
+                height: fallbackDimensions.height * fallbackUpscaleScale,
                 fps: editorExportFps(project),
                 codec: project.export.codec,
                 quality: project.export.quality,
                 encoder: project.export.encoder,
+                spatial_upsampling: project.export.spatial_upsampling,
+                film_grain_intensity: project.export.film_grain_intensity,
+                film_grain_saturation: project.export.film_grain_saturation,
               } : null
               const record = serverRecord || fallbackRecord
               if (record) {

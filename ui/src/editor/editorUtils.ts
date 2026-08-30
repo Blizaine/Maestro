@@ -109,6 +109,40 @@ export function activeEditorItems(project: EditorProject, time: number): Array<{
     .sort((left, right) => left.track.z_index - right.track.z_index)
 }
 
+/**
+ * Keep the active media plus the next clip on every media track mounted.
+ *
+ * Mounting a video only after the playhead crosses an edit makes the browser
+ * open, seek, and warm a decoder at the exact moment the new frame is needed.
+ * Preparing one clip ahead lets the preview preserve that media element across
+ * the cut without asking the browser to decode the entire timeline at once.
+ */
+export function preparedEditorMediaItems(project: EditorProject, time: number): Array<{
+  track: EditorTrack
+  item: EditorTimelineItem
+}> {
+  const prepared = activeEditorItems(project, time)
+    .filter(({ track }) => track.type === 'video' || track.type === 'audio')
+  const preparedIds = new Set(prepared.map(({ item }) => item.id))
+
+  project.tracks
+    .filter(track => !track.muted && (track.type === 'video' || track.type === 'audio'))
+    .forEach(track => {
+      const next = track.items
+        .filter(item => !item.disabled && item.start > time + EDITOR_TIME_EPSILON)
+        .sort((left, right) => left.start - right.start)[0]
+      if (next && !preparedIds.has(next.id)) {
+        prepared.push({ track, item: next })
+        preparedIds.add(next.id)
+      }
+    })
+
+  return prepared.sort((left, right) => (
+    left.track.z_index - right.track.z_index
+    || left.item.start - right.item.start
+  ))
+}
+
 export function editorProjectDuration(project: EditorProject | null): number {
   if (!project) return 0
   return project.tracks.reduce((maximum, track) => (

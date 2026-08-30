@@ -7,6 +7,7 @@ import { GlobalQueuePopover } from '../GlobalQueuePopover'
 import { useStore } from '../../stores/useStore'
 import { useIsMobile } from '../../lib/useIsMobile'
 import { formatEstimatedClock, formatEtaDuration } from '../../lib/format'
+import { PROMPT_ENHANCEMENT_ACTIVITY } from '../../lib/promptEnhancementActivity'
 import type { GenerationJob } from '../../types'
 
 function WorkspaceSelector() {
@@ -185,11 +186,12 @@ function stripTimeSuffix(msg: string): string {
   return msg.replace(/\s*\|\s*\d+:\d+.*$/, '').trim()
 }
 
-function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop: () => void; onDismiss: () => void }) {
+function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop?: () => void; onDismiss: () => void }) {
   const hasSteps = job.totalSteps > 0
   const progressPct = hasSteps ? (job.step / job.totalSteps) * 100 : job.progress * 100
   const phase = stripTimeSuffix(job.phase || job.message)
   const isFailed = job.status === 'failed' || job.status === 'cancelled'
+  const isPromptPlanning = job.kind === 'prompt_enhancement'
   const errorText = job.error || job.message || (job.status === 'cancelled' ? 'Cancelled' : 'Generation failed')
   const h3PlanSignature = job.h3WindowPlan?.signature
   const [h3PromptDisclosure, setH3PromptDisclosure] = useState({
@@ -232,7 +234,13 @@ function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop
 
           <div className="text-center w-full">
             <p className={`text-sm font-medium ${isFailed ? 'text-red-400' : 'text-text-secondary'}`}>
-              {isFailed ? (job.status === 'cancelled' ? 'Cancelled' : 'Generation Failed') : job.status === 'queued' ? 'Queued...' : 'Generating...'}
+              {isFailed
+                ? (job.status === 'cancelled' ? 'Cancelled' : 'Generation Failed')
+                : isPromptPlanning
+                  ? 'Planning with AI...'
+                  : job.status === 'queued'
+                    ? 'Queued...'
+                    : 'Generating...'}
             </p>
             {!isFailed && phase && (
               <p className="text-xs mt-1 truncate">{phase}</p>
@@ -343,7 +351,7 @@ function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop
         <div className="text-[11px] text-text-muted truncate flex-1">
           {isFailed ? 'Click × to dismiss — the tile stays so you can see what failed' : phase || 'Preparing...'}
         </div>
-        {!isFailed && (
+        {!isFailed && onStop && (
           <button
             onClick={onStop}
             className="flex items-center gap-1 text-xs text-red-400 hover:text-red-300 transition-colors shrink-0 ml-2"
@@ -454,27 +462,145 @@ export function MainContent() {
   const outputsTotal = useStore(s => s.outputsTotal)
   const outputsLoading = useStore(s => s.outputsLoading)
   const jobs = useStore(s => s.jobs)
+  const isEnhancing = useStore(s => s.isEnhancing)
   const generationMode = useStore(s => s.generationMode)
   const stopGeneration = useStore(s => s.stopGeneration)
   const dismissJob = useStore(s => s.dismissJob)
+  const activeIndex = useStore(s => s.selectedOutput)
   const setSelectedOutput = useStore(s => s.setSelectedOutput)
   // Waiting work now lives in the universal top-bar queue. Keep the gallery
   // focused on media plus useful live/error cards instead of large blank
   // placeholders for every job that has not started yet.
   const galleryJobs = useMemo(
-    () => jobs.filter(job => job.status !== 'held' && job.status !== 'queued'),
-    [jobs],
+    () => {
+      const visibleJobs = jobs.filter(job => (
+        job.status !== 'held'
+        && (job.status !== 'queued' || job.showInGallery === true)
+      ))
+      return isEnhancing ? [PROMPT_ENHANCEMENT_ACTIVITY, ...visibleJobs] : visibleJobs
+    },
+    [isEnhancing, jobs],
   )
 
   const feedRef = useRef<HTMLDivElement>(null)
-  const [activeIndex, setActiveIndex] = useState(0)
-  const isUserScrolling = useRef(false)
   const scrollTargetIndex = useRef<number | null>(null)
+  const centerSelectionFrame = useRef<number | null>(null)
+
+  const activateIndex = useCallback((index: number) => {
+    if (index < 0 || index >= useStore.getState().filteredOutputs().length) return
+    // Avoid re-fetching the same output metadata on every scroll event.
+    if (useStore.getState().selectedOutput !== index) {
+      setSelectedOutput(index)
+    }
+  }, [setSelectedOutput])
+
+  const selectViewportCenteredItem = useCallback(() => {
+    centerSelectionFrame.current = null
+    if (scrollTargetIndex.current !== null) return
+
+    const feedEl = feedRef.current
+    if (!feedEl) return
+    const viewport = feedEl.getBoundingClientRect()
+    const viewportCenterY = viewport.top + viewport.height / 2
+
+    // Playback is a stronger intent signal than passive scrolling. Keep a
+    // currently playing, still-visible clip selected so a pending scroll frame
+    // cannot immediately mute/pause the item the user just started.
+    const playingMedia = Array.from(
+      feedEl.querySelectorAll<HTMLMediaElement>('[data-gallery-media="true"]'),
+    ).find(media => !media.paused && !media.ended)
+    const playingItem = playingMedia?.closest<HTMLElement>('[data-feed-index]')
+    if (playingItem) {
+      const rect = playingItem.getBoundingClientRect()
+      if (Math.min(rect.bottom, viewport.bottom) > Math.max(rect.top, viewport.top)) {
+        const index = Number(playingItem.dataset.feedIndex)
+        if (Number.isInteger(index)) {
+          activateIndex(index)
+          return
+        }
+      }
+    }
+
+    // The viewport center sits below the first card when the gallery is at its
+    // hard top (especially on phones with a tall viewport), so center-based
+    // selection alone can incorrectly highlight card two. At either scroll
+    // boundary, prefer the first/last actually visible output. Direct playback
+    // remains stronger intent and is handled above.
+    const visibleItems = Array.from(
+      feedEl.querySelectorAll<HTMLElement>('[data-feed-index]'),
+    ).filter((item) => {
+      const rect = item.getBoundingClientRect()
+      return Math.min(rect.bottom, viewport.bottom) > Math.max(rect.top, viewport.top)
+    })
+    const boundaryTolerance = 3
+    if (feedEl.scrollTop <= boundaryTolerance && visibleItems.length > 0) {
+      const firstIndex = Math.min(...visibleItems.map(item => Number(item.dataset.feedIndex)))
+      if (Number.isInteger(firstIndex)) {
+        activateIndex(firstIndex)
+        return
+      }
+    }
+    if (
+      feedEl.scrollHeight - feedEl.scrollTop - feedEl.clientHeight <= boundaryTolerance
+      && visibleItems.length > 0
+    ) {
+      const lastIndex = Math.max(...visibleItems.map(item => Number(item.dataset.feedIndex)))
+      if (Number.isInteger(lastIndex)) {
+        activateIndex(lastIndex)
+        return
+      }
+    }
+
+    let bestIndex: number | null = null
+    let bestEdgeDistance = Number.POSITIVE_INFINITY
+    let bestCenterDistance = Number.POSITIVE_INFINITY
+
+    feedEl.querySelectorAll<HTMLElement>('[data-feed-index]').forEach((item) => {
+      const index = Number(item.dataset.feedIndex)
+      if (!Number.isInteger(index)) return
+      const rect = item.getBoundingClientRect()
+      const visibleTop = Math.max(rect.top, viewport.top)
+      const visibleBottom = Math.min(rect.bottom, viewport.bottom)
+      if (visibleBottom <= visibleTop) return
+
+      // Prefer the card intersected by the viewport's horizontal center line.
+      // The item-center distance breaks ties for unusually tall/overlapping
+      // layouts and keeps the behavior intuitive during responsive resizing.
+      const edgeDistance = viewportCenterY < rect.top
+        ? rect.top - viewportCenterY
+        : viewportCenterY > rect.bottom
+          ? viewportCenterY - rect.bottom
+          : 0
+      const centerDistance = Math.abs((rect.top + rect.bottom) / 2 - viewportCenterY)
+      if (
+        edgeDistance < bestEdgeDistance
+        || (edgeDistance === bestEdgeDistance && centerDistance < bestCenterDistance)
+      ) {
+        bestIndex = index
+        bestEdgeDistance = edgeDistance
+        bestCenterDistance = centerDistance
+      }
+    })
+
+    if (bestIndex !== null) activateIndex(bestIndex)
+  }, [activateIndex])
+
+  const scheduleCenteredSelection = useCallback(() => {
+    if (centerSelectionFrame.current !== null) return
+    centerSelectionFrame.current = requestAnimationFrame(selectViewportCenteredItem)
+  }, [selectViewportCenteredItem])
+
+  useEffect(() => () => {
+    if (centerSelectionFrame.current !== null) {
+      cancelAnimationFrame(centerSelectionFrame.current)
+    }
+  }, [])
 
   // Virtualization state
   const [scrollTop, setScrollTop] = useState(0)
   const [containerHeight, setContainerHeight] = useState(800)
   const [containerWidth, setContainerWidth] = useState(800)
+  const [measureEpoch, setMeasureEpoch] = useState(0)
   const measuredHeights = useRef<Map<number, number>>(new Map())
 
   // Dynamic estimated item height based on actual container width
@@ -499,10 +625,11 @@ export function MainContent() {
         measuredHeights.current.clear()
       }
       prevWidth = newWidth
+      scheduleCenteredSelection()
     })
     ro.observe(el)
     return () => ro.disconnect()
-  }, [])
+  }, [scheduleCenteredSelection])
 
   const getItemHeight = useCallback((index: number) => {
     return measuredHeights.current.get(index) ?? estimatedItemHeight
@@ -538,30 +665,32 @@ export function MainContent() {
       totalHeight: Math.max(total, placeholderTotalHeight),
       itemOffsets: offsets,
     }
-  }, [outputs.length, scrollTop, containerHeight, getItemHeight, placeholderTotalHeight, estimatedItemHeight])
+  }, [outputs.length, scrollTop, containerHeight, getItemHeight, placeholderTotalHeight, estimatedItemHeight, measureEpoch])
 
-  const [, setMeasureEpoch] = useState(0)
   const handleItemMeasured = useCallback((index: number, height: number) => {
     const prev = measuredHeights.current.get(index)
     if (prev !== height) {
       measuredHeights.current.set(index, height)
       setMeasureEpoch(e => e + 1)
+      scheduleCenteredSelection()
     }
-  }, [])
+  }, [scheduleCenteredSelection])
 
-  const handleItemVisible = useCallback((index: number) => {
-    if (scrollTargetIndex.current !== null) return
-    setActiveIndex(index)
-    if (isUserScrolling.current) {
-      setSelectedOutput(index)
-    }
-  }, [setSelectedOutput])
+  const handlePlaybackStart = useCallback((index: number, media: HTMLMediaElement) => {
+    activateIndex(index)
+    // One audible gallery player at a time. This avoids the only meaningful
+    // downside of auto-unmuting: two clips talking over one another.
+    feedRef.current?.querySelectorAll<HTMLMediaElement>('[data-gallery-media="true"]').forEach((candidate) => {
+      if (candidate === media) return
+      candidate.pause()
+      candidate.muted = true
+    })
+    media.muted = false
+  }, [activateIndex])
 
   const handleThumbnailClick = useCallback((index: number) => {
     setSelectedOutput(index)
-    setActiveIndex(index)
     scrollTargetIndex.current = index
-    isUserScrolling.current = false
     const feedEl = feedRef.current
     if (!feedEl) return
 
@@ -591,9 +720,9 @@ export function MainContent() {
     //            By the time the element exists, its height has been
     //            measured, so this final align is accurate.
     //   Guard:   scrollTargetIndex.current is held until phase 2
-    //            finishes (not a fixed timeout). handleItemVisible
-    //            ignores intersection events while this is non-null,
-    //            so no wrong-active leak through.
+    //            finishes (not a fixed timeout). The gallery-level center
+    //            selector ignores scroll events while this is non-null,
+    //            so no wrong-active selection can leak through.
     //   Re-entrancy: a stale align loop checks scrollTargetIndex
     //            against its captured target on every frame and bails
     //            if a newer click overrode it.
@@ -617,6 +746,7 @@ export function MainContent() {
         requestAnimationFrame(() => {
           if (scrollTargetIndex.current === targetIndexAtStart) {
             scrollTargetIndex.current = null
+            scheduleCenteredSelection()
           }
         })
       } else if (attempts < MAX_ATTEMPTS) {
@@ -627,11 +757,12 @@ export function MainContent() {
         // mid-flight or the index is out of range.
         if (scrollTargetIndex.current === targetIndexAtStart) {
           scrollTargetIndex.current = null
+          scheduleCenteredSelection()
         }
       }
     }
     requestAnimationFrame(align)
-  }, [setSelectedOutput, getItemHeight, placeholderTotalHeight])
+  }, [setSelectedOutput, getItemHeight, placeholderTotalHeight, scheduleCenteredSelection])
 
   // Infinite scroll: load more when near the bottom
   const loadingMore = useRef(false)
@@ -639,9 +770,7 @@ export function MainContent() {
     const el = feedRef.current
     if (!el) return
     setScrollTop(el.scrollTop)
-    if (scrollTargetIndex.current === null) {
-      isUserScrolling.current = true
-    }
+    scheduleCenteredSelection()
     // Trigger load-more when within 2 screens of the bottom
     const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
     if (distanceToBottom < el.clientHeight * 2 && !loadingMore.current) {
@@ -651,11 +780,12 @@ export function MainContent() {
         store.loadMoreOutputs().finally(() => { loadingMore.current = false })
       }
     }
-  }, [])
+  }, [scheduleCenteredSelection])
 
   useEffect(() => {
     measuredHeights.current.clear()
-  }, [outputs.length])
+    scheduleCenteredSelection()
+  }, [outputs.length, scheduleCenteredSelection])
 
   const visibleItems = useMemo(() => {
     const items: JSX.Element[] = []
@@ -668,7 +798,8 @@ export function MainContent() {
           file={file}
           index={i}
           isActive={activeIndex === i}
-          onVisible={handleItemVisible}
+          onActivate={activateIndex}
+          onPlaybackStart={handlePlaybackStart}
           onMeasured={handleItemMeasured}
           style={{
             position: 'absolute',
@@ -680,7 +811,7 @@ export function MainContent() {
       )
     }
     return items
-  }, [startIndex, endIndex, outputs, activeIndex, handleItemVisible, handleItemMeasured, itemOffsets])
+  }, [startIndex, endIndex, outputs, activeIndex, activateIndex, handlePlaybackStart, handleItemMeasured, itemOffsets])
 
   return (
     <main className="flex-1 flex flex-col h-full overflow-hidden">
@@ -713,7 +844,7 @@ export function MainContent() {
               <JobPlaceholder
                 key={j.id || `pending-${i}`}
                 job={j}
-                onStop={() => stopGeneration(j.id)}
+                onStop={j.kind === 'prompt_enhancement' ? undefined : () => stopGeneration(j.id)}
                 onDismiss={() => dismissJob(j.id)}
               />
             ))}

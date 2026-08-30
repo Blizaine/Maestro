@@ -1,6 +1,10 @@
 import { useState } from 'react'
 import { AlertTriangle, ListPlus, Loader2, Play } from 'lucide-react'
-import { modelSupportsImageWorkflow, useStore } from '../../stores/useStore'
+import {
+  modelSupportsImageWorkflow,
+  modelSupportsStudioVideoMediaIntent,
+  useStore,
+} from '../../stores/useStore'
 
 export function GenerateButton() {
   const startGeneration = useStore(s => s.startGeneration)
@@ -11,17 +15,69 @@ export function GenerateButton() {
   // sub-modes supply their own source media (Recast runs the i2v-only
   // SCAIL-2 against a source video + reference image, no start image).
   const generationMode = useStore(s => s.generationMode)
-  const isI2vOnly = useStore(s => s.modelOptions?.i2v_class && !s.modelOptions?.t2v_class)
-  const isOmniReference = useStore(s => s.modelOptions?.omni_reference === true)
-  const hasOmniVisualReference = useStore(s =>
-    s.params.minimax_h3_references?.some(
-      reference => reference.type === 'image' || reference.type === 'video',
-    ) === true,
+  const studioVideoWorkflow = useStore(s => s.studioVideoWorkflow)
+  const studioVideoEffectiveCreateRoute = useStore(s => s.studioVideoEffectiveCreateRoute)
+  const currentModel = useStore(s => s.models.find(model => model.model_type === s.params.model_type))
+  const modelOptions = useStore(s => s.modelOptions)
+  const imageMode = useStore(s => Number(s.params.image_mode || 0))
+  const isPrimaryCreate = generationMode === 'video'
+    && studioVideoWorkflow === 'frames'
+    && imageMode === 0
+  const modelIsOmniReference = Boolean(
+    currentModel?.omni_reference
+    || currentModel?.director?.video_strategy === 'omni_reference'
+    || currentModel?.model_type.toLowerCase().startsWith('minimax_h3_ref2va'),
   )
+  const isOmniReference = modelIsOmniReference
+  const isI2vOnly = currentModel
+    ? currentModel.is_i2v && !currentModel.is_t2v
+    : Boolean(modelOptions?.i2v_class && !modelOptions?.t2v_class)
+  const hasOmniReferences = useStore(s => (
+    (s.params.minimax_h3_references?.length ?? 0) > 0
+  ))
+  const hasFlexibleOmniReferences = useStore(s => (
+    s.params.minimax_h3_references?.some(reference => !(
+      reference.type === 'audio' && reference.audio_intent === 'drive'
+    )) === true
+  ))
+  const hasAudioDrive = useStore(s => Boolean(
+    s.params.audio_guide
+    || s.params.minimax_h3_references?.some(reference => (
+      reference.type === 'audio' && reference.audio_intent === 'drive'
+    )),
+  ))
+  const hasGuidedInput = useStore(s => Boolean(
+    s.startImage
+    || s.endImage
+    || s.params.image_start
+    || s.params.image_end
+    || s.imageRefs.length
+    || (
+      Array.isArray(s.params.image_refs)
+      && s.params.image_refs.length
+      && s.params.frames_positions
+    ),
+  ))
   const hasStartImage = useStore(s => !!(s.startImage || s.params.image_start))
-  const needsImage = generationMode === 'video' && isI2vOnly && !isOmniReference && !hasStartImage
+  const studioMediaIntent = {
+    hasFrameGuidance: hasGuidedInput,
+    hasOmniReferences: hasFlexibleOmniReferences,
+    hasAudioDrive,
+  }
+  const routeModelCompatible = !isPrimaryCreate
+    || modelSupportsStudioVideoMediaIntent(currentModel, studioMediaIntent)
+  const needsCreateModel = isPrimaryCreate && !routeModelCompatible
+  const needsGuidance = isPrimaryCreate
+    && studioVideoEffectiveCreateRoute === 'guided'
+    && !hasGuidedInput
+  const needsImage = generationMode === 'video'
+    && !isPrimaryCreate
+    && isI2vOnly
+    && !isOmniReference
+    && !hasStartImage
   const needsReference = generationMode === 'video' && isOmniReference
-    && !hasOmniVisualReference
+    && !hasOmniReferences
+    && !hasAudioDrive
   const editSubMode = useStore(s => s.editSubMode)
   const editVideoPath = useStore(s => s.editVideoPath)
   const outpaintVideoBox = useStore(s => s.outpaintVideoBox)
@@ -39,7 +95,6 @@ export function GenerateButton() {
   const imageMaskPath = useStore(s => s.imageWorkflowMaskPath)
   const imageRefs = useStore(s => s.imageRefs)
   const imagePadding = useStore(s => s.imageOutpaintPadding)
-  const currentModel = useStore(s => s.models.find(model => model.model_type === s.params.model_type))
   const needsImageEditSource = generationMode === 'image'
     && imageWorkflow === 'edit'
     && imageRefs.length === 0
@@ -54,10 +109,9 @@ export function GenerateButton() {
     && Object.values(imagePadding).every(value => value === 0)
   const incompatibleImageModel = generationMode === 'image'
     && !modelSupportsImageWorkflow(currentModel, imageWorkflow)
-  const blocked = needsImage || needsReference || needsOutpaintSource || needsOutpaintArea
+  const blocked = needsCreateModel || needsGuidance || needsImage || needsReference || needsOutpaintSource || needsOutpaintArea
     || needsImageEditSource || needsImageWorkflowSource || needsImageMask
     || needsImageOutpaintArea || incompatibleImageModel
-  const imageMode = useStore(s => Number(s.params.image_mode || 0))
   const queueSupported = generationMode !== 'avatar'
     && !(generationMode === 'video' && imageMode === 4)
 
@@ -73,7 +127,11 @@ export function GenerateButton() {
   }
 
   if (blocked) {
-    const label = needsImage
+    const label = needsCreateModel
+      ? 'Need model'
+      : needsGuidance
+        ? 'Need frame'
+      : needsImage
       ? 'Need image'
       : needsReference
         ? 'Need reference'
@@ -90,8 +148,14 @@ export function GenerateButton() {
         : 'Choose canvas'
     const title = needsOutpaintArea
       ? 'Choose a larger output aspect or resize the source to create an area for Outpaint to generate.'
+      : needsCreateModel
+        ? hasGuidedInput && hasFlexibleOmniReferences
+          ? 'Fixed start/end/keyframes cannot be combined with Omni references. Remove one of those input roles.'
+          : `Enable or select a video model compatible with the current ${studioVideoEffectiveCreateRoute === 'omni' ? 'reference' : studioVideoEffectiveCreateRoute === 'guided' ? 'frame-guided' : studioVideoEffectiveCreateRoute === 'audio' ? 'audio-driven' : 'text'} inputs.`
+        : needsGuidance
+          ? 'Add a start frame, end frame, or timed frame.'
       : needsReference
-        ? 'Add at least one image or video reference. Audio cannot be the only reference.'
+        ? 'Add at least one character, image, video, or audio reference.'
         : incompatibleImageModel
           ? 'Enable or select a model compatible with this Image workflow.'
         : needsImageMask

@@ -49,6 +49,8 @@ export interface ModelDef {
   supports_audio_input?: boolean
   generates_audio?: boolean
   supports_ref_images?: boolean
+  /** Native MiniMax H3 Ref2VA/Omni reference workflow. */
+  omni_reference?: boolean
   /** Image-suite capability flags published by the model definition. */
   supports_image_edit?: boolean
   requires_image_reference?: boolean
@@ -346,6 +348,8 @@ export interface OomInfo {
 
 export interface GenerationJob {
   id: string
+  /** Direct submissions stay visible while the backend is queued/planning. */
+  showInGallery?: boolean
   kind?: 'generation' | 'editor_export' | string
   status: 'held' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
   progress: number
@@ -522,6 +526,14 @@ export interface EditorCanvas {
   background: string
 }
 
+export type EditorUpscaleMethod =
+  | ''
+  | 'flashvsr2'
+  | 'flashvsr3'
+  | 'flashvsr4'
+  | 'flashvsr2pass2'
+  | 'flashvsr2pass4'
+
 export interface EditorExportSettings {
   quality: 'draft' | 'balanced' | 'high'
   codec: 'h264' | 'h265'
@@ -530,6 +542,9 @@ export interface EditorExportSettings {
   resolution: 'canvas' | '2160p' | '1080p' | '720p' | '480p'
   frame_rate: 'project' | 24 | 30 | 60
   filename: string
+  spatial_upsampling: EditorUpscaleMethod
+  film_grain_intensity: number
+  film_grain_saturation: number
 }
 
 export interface EditorExportRecord {
@@ -544,6 +559,9 @@ export interface EditorExportRecord {
   codec: EditorExportSettings['codec']
   quality: EditorExportSettings['quality']
   encoder?: EditorExportSettings['encoder']
+  spatial_upsampling?: EditorUpscaleMethod
+  film_grain_intensity?: number
+  film_grain_saturation?: number
 }
 
 export interface EditorProject {
@@ -632,6 +650,14 @@ export type StudioVideoWorkflow =
   | 'recast'
   | 'upscale'
   | 'film_grain'
+/**
+ * Internal media intent inside Studio Video's primary Generate workflow.
+ * There is deliberately no user-facing mode selector: Maestro derives this
+ * from the roles of the attached frames, references, characters, and audio.
+ */
+export type StudioVideoEffectiveCreateRoute = 'generate' | 'guided' | 'audio' | 'omni'
+/** Backward-compatible persisted shape; new sessions always use Auto. */
+export type StudioVideoCreateRoute = 'auto' | StudioVideoEffectiveCreateRoute
 /** User-facing Studio Image workflow. */
 export type StudioImageWorkflow =
   | 'new'

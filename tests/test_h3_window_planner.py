@@ -800,7 +800,7 @@ class H3WindowPlannerTests(unittest.TestCase):
         self.assertEqual(generate.call_count, 6)
         self.assertEqual(result["planned_by"], "llm")
         repair_prompt = generate.call_args_list[1].kwargs["prompt"]
-        self.assertIn("PREVIOUS REJECTED CONTEXT JSON", repair_prompt)
+        self.assertIn("PREVIOUS REJECTED STORY-SCHEDULE JSON", repair_prompt)
         self.assertIn("golden energy", repair_prompt)
         joined = " ".join(result["window_prompts"])
         self.assertNotIn("golden energy", joined)

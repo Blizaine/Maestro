@@ -59,6 +59,10 @@ export interface ApiOutput {
 
 export interface ApiJobStatus {
   job_id: string
+  /** Stable browser-generated identity used to recover an accepted submit. */
+  client_submission_id?: string | null
+  /** Direct submits remain visible while queued for deferred AI planning. */
+  show_in_gallery?: boolean
   kind?: 'generation' | 'editor_export' | string
   status: 'held' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
   progress: number
@@ -86,6 +90,9 @@ export interface ApiJobStatus {
   project_completion_at?: number | null
   eta_confidence?: 'calibrating' | 'low' | 'medium' | 'high'
   eta_basis?: 'waiting-for-first-clip' | 'live-adaptive' | 'live-cache-aware'
+  /** Produced after a queued automatic planner obtains the generation slot. */
+  h3_window_plan?: H3WindowPlan | null
+  ltx_window_plan?: LTXWindowPlan | null
 }
 
 // --- Models & Families ---
@@ -595,6 +602,8 @@ export async function startStudioQueue(): Promise<{
 
 export async function fetchActiveJobs(): Promise<{ jobs: Array<ApiJobStatus & {
   created_at: number
+  client_submission_id?: string | null
+  show_in_gallery?: boolean
   h3_window_plan?: H3WindowPlan | null
 }> }> {
   const res = await fetch(`${BASE}/api/v1/jobs`)

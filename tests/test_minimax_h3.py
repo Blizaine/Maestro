@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 from contextlib import nullcontext
 import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import struct
 import sys
 import tempfile
@@ -54,6 +56,9 @@ _H3_MULTI_WINDOW_CONTROLS_PATH = (
     _ROOT / "ui" / "src" / "components" / "Sidebar" / "H3MultiWindowControls.tsx"
 )
 _GENERATE_BUTTON_PATH = _ROOT / "ui" / "src" / "components" / "Sidebar" / "GenerateButton.tsx"
+_GLOBAL_QUEUE_PATH = _ROOT / "ui" / "src" / "components" / "GlobalQueuePopover.tsx"
+_MAIN_CONTENT_PATH = _ROOT / "ui" / "src" / "components" / "MainContent" / "MainContent.tsx"
+_PROMPT_ACTIVITY_PATH = _ROOT / "ui" / "src" / "lib" / "promptEnhancementActivity.ts"
 _RESOLUTION_PRESETS_PATH = _ROOT / "ui" / "src" / "components" / "Sidebar" / "ResolutionPresets.tsx"
 _DIRECTOR_CHAT_PATH = _ROOT / "ui" / "src" / "components" / "Sidebar" / "DirectorChat.tsx"
 _ASPECT_RATIO_GRID_PATH = _ROOT / "ui" / "src" / "components" / "Sidebar" / "AspectRatioGrid.tsx"
@@ -218,12 +223,15 @@ def _load_turbo_helpers():
 
 
 def _load_llm_enhance_helpers():
+    from services.h3_story_ledger import normalize_h3_dialogue_tags
+
     tree = ast.parse(_read(_LLM_SERVICE_PATH), filename=str(_LLM_SERVICE_PATH))
     helper_names = {
         "_canonical_h3_language_tag",
         "_detect_h3_dialogue_language",
         "_h3_quote_is_visible_text",
         "_extract_h3_source_dialogue_entries",
+        "_h3_ref2va_subject_speaker_map",
         "_extract_h3_quoted_dialogue",
         "_h3_requests_speech",
         "_extract_h3_dialogue_blocks",
@@ -270,6 +278,7 @@ def _load_llm_enhance_helpers():
     namespace = {
         "Optional": typing.Optional,
         "repair_text": lambda value: str(value or ""),
+        "normalize_h3_dialogue_tags": normalize_h3_dialogue_tags,
     }
     module = ast.Module(body=selected, type_ignores=[])
     exec(compile(ast.fix_missing_locations(module), str(_LLM_SERVICE_PATH), "exec"), namespace)
@@ -1494,6 +1503,8 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         client = _read(_ROOT / "ui" / "src" / "api" / "client.ts")
 
         self.assertIn("Multi-window sequence", controls)
+        self.assertIn("Prompt writing", controls)
+        self.assertIn("Auto enhance (AI)", controls)
         self.assertIn("minimax_h3_multi_window", controls)
         self.assertIn("minimax_h3_reference_sequence", controls)
         self.assertIn("Window prompts", controls)
@@ -1508,6 +1519,284 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn('@api.get("/api/v1/h3-window-overrides")', launch)
         self.assertIn('@api.put("/api/v1/h3-window-overrides")', launch)
         self.assertIn("updateH3WindowOverrides", client)
+
+    def test_single_window_h3_auto_enhance_defers_while_generation_is_busy(self):
+        controls = _read(_H3_MULTI_WINDOW_CONTROLS_PATH)
+        store = _read(_STORE_PATH)
+        launch = _read(_LAUNCH_PATH)
+
+        self.assertIn("enabled ? 'auto' : 'manual'", controls)
+        self.assertIn("promptMode === 'auto'", store)
+        self.assertIn("!usesMultiplePasses", store)
+        self.assertIn("await state.enhancePrompt()", store)
+        self.assertIn("typeof state.params._h3_original_prompt", store)
+        self.assertIn("const deferAutoEnhance", store)
+        self.assertIn("submissionMode === 'queue' || generationWorkInFlight", store)
+        self.assertIn("const active = await api.fetchActiveJobs()", store)
+        self.assertIn("params._deferred_prompt_enhance", store)
+        self.assertIn("Ready - AI planning will run when queue starts", store)
+        activity = _read(_PROMPT_ACTIVITY_PATH)
+        queue = _read(_GLOBAL_QUEUE_PATH)
+        gallery = _read(_MAIN_CONTENT_PATH)
+        self.assertIn("PROMPT_ENHANCEMENT_ACTIVITY", activity)
+        self.assertIn("Enhancing prompt with AI...", activity)
+        self.assertIn("isEnhancing ? [PROMPT_ENHANCEMENT_ACTIVITY", queue)
+        self.assertIn("Studio · AI planning", queue)
+        self.assertIn("!isPromptPlanning &&", queue)
+        self.assertIn("isEnhancing ? [PROMPT_ENHANCEMENT_ACTIVITY", gallery)
+        self.assertIn("Planning with AI...", gallery)
+        self.assertIn("j.kind === 'prompt_enhancement' ? undefined", gallery)
+        self.assertIn("async def _llm_enhance_prompt_payload(body: dict):", launch)
+        self.assertIn("def _apply_deferred_prompt_enhancement", launch)
+        worker_start = launch.index("def _run_generation(")
+        worker = launch[worker_start:]
+        self.assertLess(
+            worker.index("with generation_slot(_gen_lock, job) as acquired:"),
+            worker.index("_apply_deferred_prompt_enhancement(job, raw_params)"),
+        )
+        self.assertLess(
+            worker.index("_apply_deferred_prompt_enhancement(job, raw_params)"),
+            worker.index("_apply_per_job_coefficient(job)"),
+        )
+
+    def test_automatic_multi_window_planners_share_the_generation_lock(self):
+        detector = _load_source_function(
+            _LAUNCH_PATH,
+            "_generation_request_uses_serial_auto_planner",
+        )
+        model_defs = {
+            "h3_fl": {
+                "architecture": "minimax_h3",
+                "omni_reference": False,
+            },
+            "h3_omni": {
+                "architecture": "minimax_h3",
+                "omni_reference": True,
+            },
+            "ltx": {
+                "architecture": "ltx2",
+                "multi_window_sequence_controls": True,
+            },
+        }
+        detector.__globals__["wgp"] = types.SimpleNamespace(
+            get_model_def=lambda model_type: model_defs.get(model_type)
+        )
+
+        self.assertTrue(detector({
+            "model_type": "h3_fl",
+            "minimax_h3_multi_window": True,
+            "minimax_h3_window_storyboard": True,
+        }))
+        self.assertFalse(detector({
+            "model_type": "h3_fl",
+            "minimax_h3_multi_window": True,
+            "minimax_h3_window_storyboard": False,
+        }))
+        self.assertTrue(detector({
+            "model_type": "h3_omni",
+            "minimax_h3_reference_sequence": True,
+            "minimax_h3_sequence_prompt_mode": "auto",
+        }))
+        self.assertFalse(detector({
+            "model_type": "h3_omni",
+            "minimax_h3_reference_sequence": True,
+            "minimax_h3_sequence_prompt_mode": "manual",
+        }))
+        self.assertTrue(detector({
+            "model_type": "ltx",
+            "ltx_multi_window": True,
+            "ltx_window_prompt_mode": "auto",
+        }))
+        self.assertFalse(detector({
+            "model_type": "ltx",
+            "ltx_multi_window": True,
+            "ltx_window_prompt_mode": "manual",
+        }))
+
+        launch = _read(_LAUNCH_PATH)
+        endpoint = launch[
+            launch.index('@api.post("/api/v1/generate")'):
+            launch.index('@api.post("/api/v1/retake")')
+        ]
+        self.assertIn(
+            "return _enqueue_deferred_generation_preparation(body)",
+            endpoint,
+        )
+        worker = launch[launch.index("def _run_generation("):]
+        self.assertLess(
+            worker.index("with generation_slot(_gen_lock, job) as acquired:"),
+            worker.index("_apply_deferred_generation_preparation(job)"),
+        )
+        self.assertIn(
+            "_prepare_generation_submission(request_body, prepare_only=True)",
+            launch,
+        )
+        self.assertIn("Planning window prompts with AI…", launch)
+        self.assertIn('"h3_window_plan": j.get("h3_window_plan")', launch)
+
+        store = _read(_STORE_PATH)
+        self.assertIn(
+            "Prompt Enhance was not started. Add this setup to the queue",
+            store,
+        )
+        self.assertIn(
+            "h3WindowPlan: status.h3_window_plan ?? j.h3WindowPlan ?? null",
+            store,
+        )
+
+    def test_deferred_multi_window_preparation_replaces_frozen_params(self):
+        apply_deferred = _load_source_function(
+            _LAUNCH_PATH,
+            "_apply_deferred_generation_preparation",
+        )
+        captured = {}
+        updates = []
+
+        async def fake_prepare(body, *, prepare_only=False):
+            captured.update(body)
+            captured["prepare_only"] = prepare_only
+            return {
+                "params": {
+                    "model_type": "minimax_h3_ref2va",
+                    "prompt": "Window one\nWindow two",
+                    "h3_window_plan": {"signature": "planned"},
+                },
+                "workspace": "Test",
+                "out_dir": "outputs/Test",
+                "h3_window_plan": {"signature": "planned"},
+                "ltx_window_plan": None,
+            }
+
+        def fake_update(job, **fields):
+            updates.append(fields)
+            job.update(fields)
+            return True
+
+        fake_llm = types.SimpleNamespace(
+            is_loaded=lambda: True,
+            get_status=lambda: {"provider": "local"},
+            unload_model=mock.Mock(),
+        )
+        services_module = types.ModuleType("services")
+        services_module.llm_service = fake_llm
+        apply_deferred.__globals__.update({
+            "asyncio": asyncio,
+            "_prepare_generation_submission": fake_prepare,
+            "update_job": fake_update,
+        })
+        job = {
+            "id": "planned-1",
+            "status": "running",
+            "workspace": "Old",
+            "out_dir": "outputs/Old",
+            "params": {
+                "model_type": "minimax_h3_ref2va",
+                "prompt": "Raw story",
+                "_queue_mode": "held",
+                "_deferred_generation_prepare": True,
+            },
+        }
+
+        with mock.patch.dict(sys.modules, {"services": services_module}):
+            apply_deferred(job)
+
+        self.assertTrue(captured["prepare_only"])
+        self.assertNotIn("_deferred_generation_prepare", captured)
+        self.assertEqual(job["workspace"], "Test")
+        self.assertEqual(job["out_dir"], "outputs/Test")
+        self.assertEqual(job["params"]["prompt"], "Window one\nWindow two")
+        self.assertEqual(job["h3_window_plan"]["signature"], "planned")
+        self.assertEqual(updates[0]["phase"], "Prompt planning")
+        self.assertEqual(updates[-1]["message"], "Preparing…")
+        fake_llm.unload_model.assert_called_once_with()
+
+    def test_interactive_prompt_planner_refuses_to_overlap_generation(self):
+        guard = _load_source_function(
+            _LAUNCH_PATH,
+            "_guard_interactive_llm_against_generation",
+        )
+
+        class FakeHttpError(Exception):
+            def __init__(self, *, status_code, detail):
+                super().__init__(detail)
+                self.status_code = status_code
+                self.detail = detail
+
+        guard.__globals__.update({
+            "_gen_lock": types.SimpleNamespace(locked=lambda: False),
+            "_jobs": {"busy": {"status": "running"}},
+            "snapshot_job": lambda job: dict(job),
+            "HTTPException": FakeHttpError,
+        })
+        with self.assertRaises(FakeHttpError) as raised:
+            guard()
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIn("AI prompt planning has not started", raised.exception.detail)
+
+        guard.__globals__["_jobs"] = {"held": {"status": "held"}}
+        guard()
+
+    def test_deferred_prompt_enhancement_updates_frozen_job_and_unloads_llm(self):
+        apply_deferred = _load_source_function(
+            _LAUNCH_PATH,
+            "_apply_deferred_prompt_enhancement",
+        )
+        captured = {}
+        updates = []
+
+        enhanced_prompt = (
+            "subject_definitions: <Subject 1> is Blaine.\n"
+            "summary: Blaine speaks with Yoda.\n"
+            "detailed_description: <Subject 1> (S1) says "
+            "<d>[English] Hello.</d>"
+        )
+
+        async def fake_enhance(payload):
+            captured.update(payload)
+            return {"original": payload["prompt"], "enhanced": enhanced_prompt}
+
+        fake_llm = types.SimpleNamespace(
+            is_loaded=lambda: True,
+            unload_model=mock.Mock(),
+        )
+        services_module = types.ModuleType("services")
+        services_module.llm_service = fake_llm
+        apply_deferred.__globals__.update({
+            "asyncio": asyncio,
+            "_llm_enhance_prompt_payload": fake_enhance,
+            "update_job": lambda job, **fields: updates.append(fields),
+        })
+        job = {
+            "id": "queued-1",
+            "params": {
+                "model_type": "minimax_h3_ref2va",
+                "prompt": "Raw idea",
+                "multi_prompts_gen_type": 0,
+                "_deferred_prompt_enhance": {
+                    "prompt": "Raw idea",
+                    "mode": "video",
+                    "model_type": "minimax_h3_ref2va",
+                    "window_count": 1,
+                },
+            },
+        }
+        raw_params = dict(job["params"])
+
+        with mock.patch.dict(sys.modules, {"services": services_module}):
+            apply_deferred(job, raw_params)
+
+        self.assertEqual(captured["prompt"], "Raw idea")
+        self.assertNotIn("_deferred_prompt_enhance", raw_params)
+        self.assertNotIn("_deferred_prompt_enhance", job["params"])
+        self.assertEqual(raw_params["prompt"], enhanced_prompt)
+        self.assertEqual(job["params"]["prompt"], enhanced_prompt)
+        self.assertEqual(raw_params["multi_prompts_gen_type"], 2)
+        self.assertEqual(job["params"]["multi_prompts_gen_type"], 2)
+        self.assertEqual(raw_params["_h3_original_prompt"], "Raw idea")
+        self.assertEqual(job["params"]["_h3_original_prompt"], "Raw idea")
+        fake_llm.unload_model.assert_called_once_with()
+        self.assertEqual(updates[0]["phase"], "Prompt enhancement")
+        self.assertEqual(updates[-1]["message"], "Preparing…")
 
     def test_h3_selector_names_and_audio_badges_are_user_facing(self):
         expected_names = {
@@ -1683,19 +1972,16 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("<d>[English] Exact words.</d>", dialect_guide)
         self.assertIn("Never invent extra speech", dialect_guide)
         self.assertIn("proper names", dialect_guide)
-        self.assertIn("Maestro maps the exact per-shot", ref2va_dialect_guide)
-        self.assertIn("Do not guess reference numbers", ref2va_dialect_guide)
+        self.assertIn("ordered reference inventory as authoritative", ref2va_dialect_guide)
+        self.assertIn("Never invent or renumber", ref2va_dialect_guide)
         self.assertIn("subject_definitions, summary, retention_analysis", ref2va_dialect_guide)
-        self.assertIn("proper names", ref2va_dialect_guide)
+        self.assertIn("Subject IDs and speaker IDs are independent", ref2va_dialect_guide)
         for official_rule in (
-            "350-500 English words",
-            "one or two English sentences",
             "At MM:SS.mmm",
-            "(S1,S2)",
             "says in an off-screen voiceover",
-            "<scenetrans>",
-            "<cutoff>",
-            "visible text",
+            "voice-timbre reference",
+            "roughly two words per second",
+            "do not inflate it to a word quota",
         ):
             self.assertIn(official_rule, _read(_H3_REF2VA_GUIDE_PATH))
         self.assertIn("At MM:SS.mmm", enhance_guide)
@@ -1731,8 +2017,8 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             "detailed_description:",
             "overall_soundscape:",
             "non_diegetic_music:",
-            "TIMED SILENCE AROUND DIALOGUE",
-            "do not authorize",
+            "Subject IDs and speaker IDs are separate",
+            "Prefer positive, performable prose",
         ):
             self.assertIn(required, guide)
 
@@ -1767,6 +2053,10 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("Voice reference", section)
         self.assertIn("Music / performance timeline", section)
         self.assertIn("Music / sound style only", section)
+        self.assertIn("groupActiveReferences", section)
+        self.assertIn("Bound together as one H3 subject", section)
+        self.assertIn("Saved character audio is automatically bound as a Voice Reference", section)
+        self.assertIn("audio_intent: 'voice' as const", section)
         self.assertIn("preserves the exact soundtrack and advances through it", section)
         self.assertIn("timeline_start_frame=window_start_frame_no", main)
         self.assertNotIn('accept="image/*,video/*,audio/*', section)
@@ -1776,8 +2066,40 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("scope?: 'studio' | 'director'", section)
         self.assertIn('scope="director"', director)
         self.assertIn("directorH3References", store)
+
+    def test_studio_video_create_intent_routing_is_role_driven_and_submit_safe(self):
+        launch = _read(_LAUNCH_PATH)
+        store = _read(_STORE_PATH)
+        sidebar = _read(_SIDEBAR_PATH)
+        model_selector = _read(_MODEL_SELECTOR_PATH)
+        generate_button = _read(_GENERATE_BUTTON_PATH)
+
+        self.assertIn('"omni_reference": bool(md.get("omni_reference", False))', launch)
+        self.assertIn("StudioVideoEffectiveCreateRoute = 'generate' | 'guided' | 'audio' | 'omni'", _read(_TYPES_PATH))
+        self.assertIn("function _studioCreateInputState", store)
+        self.assertIn("function _isStudioLtxVideoModel", store)
+        self.assertIn("function _isH3FirstLastVideoModel", store)
+        self.assertIn("modelSupportsStudioVideoMediaIntent", store)
+        self.assertIn("reference.audio_intent === 'drive'", store)
+        self.assertIn("if (intent.hasFrameGuidance && intent.hasOmniReferences) return false", store)
+        self.assertIn("if (intent.hasOmniReferences) return isOmni", store)
+        self.assertIn("if (intent.hasFrameGuidance && intent.hasAudioDrive) return isLtx", store)
+        self.assertIn("if (intent.hasFrameGuidance) return isFirstLast || isLtx", store)
+        self.assertIn("if (intent.hasAudioDrive) return isOmni || isLtx", store)
+        self.assertIn("return isFirstLast || isLtx", store)
+        self.assertIn("useStudioFrameInputs", store)
+        self.assertIn("delete params.minimax_h3_references", store)
+        self.assertIn("delete params.image_refs", store)
+        self.assertIn("replace(/KFI/g, '')", store)
+        self.assertNotIn("VideoCreateRouteSelector", sidebar)
+        self.assertIn("<InputsPanel />", sidebar)
+        self.assertIn("<OmniReferenceSection />", sidebar)
+        self.assertIn("modelSupportsStudioVideoMediaIntent", model_selector)
+        self.assertIn("No compatible model", model_selector)
+        self.assertIn("needsGuidance", generate_button)
+        self.assertIn("routeModelCompatible", generate_button)
         self.assertIn("minimax_h3_reference_detail: state.directorH3ReferenceDetail", store)
-        self.assertIn("const hasOmniVisualReference = useStore(s =>", generate_button)
+        self.assertIn("const hasFlexibleOmniReferences = useStore(s =>", generate_button)
         self.assertNotIn(
             "useStore(s => s.params.minimax_h3_references ?? [])",
             generate_button,
@@ -1820,6 +2142,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
     def test_single_pass_omni_multiline_prompt_stays_one_prompt(self):
         store = _read(_STORE_PATH)
         launch = _read(_LAUNCH_PATH)
+        wgp = _read(_WGP_PATH)
 
         self.assertIn("const h3WindowPromptRoutingEnabled = !isH3Model", store)
         self.assertIn("&& h3WindowPromptRoutingEnabled", store)
@@ -1835,6 +2158,10 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             'and body.get("multi_prompts_gen_type") in (None, 0, 1, "0", "1")',
             launch,
         )
+        self.assertIn("if (isH3Model && !usesMultiplePasses)", store)
+        self.assertIn("_h3_omni_context_ir", wgp)
+        self.assertIn("Preserving one structured Context-IR", wgp)
+        self.assertIn("prompt instead of splitting its sections", wgp)
 
     def test_ref2va_enhance_cleanup_preserves_structured_reference_reuse(self):
         helpers = _load_llm_enhance_helpers()
@@ -2005,10 +2332,13 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             prompt, references
         )
         self.assertEqual(
-            [(entry["speaker_id"], entry["words"]) for entry in source_dialogue],
             [
-                (2, "Master Yoda, how powerful is Maestro?"),
-                (1, "Powerful, it has become."),
+                (entry["subject_id"], entry["speaker_id"], entry["words"])
+                for entry in source_dialogue
+            ],
+            [
+                (2, 1, "Master Yoda, how powerful is Maestro?"),
+                (1, 2, "Powerful, it has become."),
             ],
         )
 
@@ -2019,10 +2349,14 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertNotIn("<Subject 3>", fallback)
         self.assertNotIn("<Subject 4>", fallback)
         self.assertIn(
-            "(S2) <d>[English] Master Yoda, how powerful is Maestro?</d>",
+            "(S1) <d>[English] Master Yoda, how powerful is Maestro?</d>",
             fallback,
         )
-        self.assertIn("(S1) <d>[English] Powerful, it has become.</d>", fallback)
+        self.assertIn("(S2) <d>[English] Powerful, it has become.</d>", fallback)
+        self.assertIn('<Subject 1> (S2) is the stable character "Yoda"', fallback)
+        self.assertIn('<Subject 2> (S1) is the stable character "Blaine"', fallback)
+        self.assertIn("reject source room tone, reverberation, echo", fallback)
+        self.assertIn("no other subject repeats, echoes, mouths, or paraphrases", fallback)
         self.assertTrue(
             helpers["_h3_ref2va_reference_contract_satisfied"](
                 fallback, references
@@ -2035,11 +2369,11 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         )
 
         bad = fallback.replace(
-            "(S2) <d>[English] Master Yoda, how powerful is Maestro?</d>",
             "(S1) <d>[English] Master Yoda, how powerful is Maestro?</d>",
+            "(S2) <d>[English] Master Yoda, how powerful is Maestro?</d>",
         ).replace(
-            "(S1) <d>[English] Powerful, it has become.</d>",
             "(S2) <d>[English] Powerful, it has become.</d>",
+            "(S1) <d>[English] Powerful, it has become.</d>",
         )
         self.assertFalse(
             helpers["_h3_ref2va_dialogue_binding_contract_satisfied"](
@@ -3164,21 +3498,19 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
         self.assertIn("<Picture 1>", voice)
         self.assertIn("<Audio 1>", voice)
         self.assertIn("voice-timbre", voice)
-        self.assertIn("do not copy its source words", voice)
-        self.assertIn("begin at the first frame", voice)
+        self.assertIn("without reusing the recording's words or timing", voice)
+        self.assertIn("Scene-appropriate stereo ambience", voice)
         self.assertIn("subject_definitions:", voice)
         self.assertIn("detailed_description:", voice)
         self.assertIn("<d>[English] Snap this.</d>", voice)
         self.assertNotIn('"Snap this."', voice)
-        self.assertIn("source location, background, composition, framing, or pose", voice)
+        self.assertIn("source background, framing, composition, and pose", voice)
         self.assertIn(
             "detailed_description: The target video maintains the requested visual style",
             voice,
         )
-        self.assertIn("[Shot 1] <Subject 1>", voice)
-        self.assertIn("only spoken words", voice)
-        self.assertIn("From 0.00 to 2.00 seconds", voice)
-        self.assertIn("From 3.00 to 10.00 seconds", voice)
+        self.assertIn("<Subject 1> (S1) in the voice referenced from <Audio 1>", voice)
+        self.assertIn("fit naturally within the 10.00-second scene", voice)
 
         visible_text = ensure_ref2va_prompt_relationships(
             'A neon sign reading "OPEN ALL NIGHT" glows behind Blaine.',
@@ -3240,18 +3572,232 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
                 },
             ],
         )
-        self.assertIn("identity, appearance, and characteristic motion come from <Video 1>", saved_video_character)
-        self.assertIn("voice-timbre, emotion, and delivery reference for <Subject 1>", saved_video_character)
-        self.assertIn("not as the target opening frame, source location", saved_video_character)
+        self.assertIn("<Subject 1> is Blaine from <Video 1>", saved_video_character)
+        self.assertIn("<Audio 1> is the voice-timbre reference for <Subject 1>", saved_video_character)
+        self.assertIn("newly described target scene and action", saved_video_character)
 
         tagged = "<Picture 1> defines <Subject 1>."
-        self.assertEqual(
-            ensure_ref2va_prompt_relationships(
-                tagged,
-                [{"type": "image", "path": "singer.png"}],
-            ),
+        tagged_compiled = ensure_ref2va_prompt_relationships(
             tagged,
+            [{"type": "image", "path": "singer.png"}],
         )
+        self.assertTrue(tagged_compiled.startswith(tagged))
+        self.assertIn("Identity references define subject appearance", tagged_compiled)
+
+    def test_ref2va_scopes_saved_voices_to_each_window(self):
+        from models.minimax_h3.ref2va import (
+            ensure_ref2va_prompt_relationships,
+            select_ref2va_window_voice_references,
+        )
+
+        references = []
+        for name in ("Thanos", "Yoda", "Blaine"):
+            key = name.casefold()
+            references.extend(
+                [
+                    {
+                        "type": "image",
+                        "path": f"{key}.png",
+                        "role": name,
+                        "image_intent": "identity",
+                        "library_character_id": f"saved-{key}",
+                        "character_name": name,
+                    },
+                    {
+                        "type": "audio",
+                        "path": f"{key}.wav",
+                        "role": f"{name} voice",
+                        "audio_intent": "voice",
+                        "library_character_id": f"saved-{key}",
+                        "character_name": name,
+                    },
+                ]
+            )
+        structured = (
+            "subject_definitions: <Subject 1> is Thanos, defined by <Picture 1>; "
+            "<Audio 1> is Thanos voice. <Subject 2> is Yoda, defined by <Picture 2>; "
+            "<Audio 2> is Yoda voice. <Subject 3> is Blaine, defined by <Picture 3>; "
+            "<Audio 3> is Blaine voice.\n"
+            "summary: A conversation.\n"
+            "retention_analysis: <Audio 1>: reference. <Audio 2>: reference. "
+            "<Audio 3>: reference.\n"
+            "detailed_description: Thanos (S1) says <d>[English] Kneel.</d> "
+            "Yoda (S2) replies <d>[English] No.</d>\n"
+            "overall_soundscape: Swamp ambience.\nnon_diegetic_music: N/A"
+        )
+
+        scoped_prompt, scoped_refs, diagnostics = select_ref2va_window_voice_references(
+            structured,
+            references,
+        )
+        self.assertEqual(diagnostics["kept_roles"], ["Thanos", "Yoda"])
+        self.assertEqual(diagnostics["omitted_roles"], ["Blaine"])
+        self.assertEqual(len([item for item in scoped_refs if item["type"] == "image"]), 3)
+        self.assertEqual(len([item for item in scoped_refs if item["type"] == "audio"]), 2)
+        self.assertNotIn("<Audio 3>", scoped_prompt)
+        for header in (
+            "subject_definitions",
+            "summary",
+            "retention_analysis",
+            "detailed_description",
+            "overall_soundscape",
+            "non_diegetic_music",
+        ):
+            self.assertRegex(scoped_prompt, rf"(?m)^{header}:")
+        compiled = ensure_ref2va_prompt_relationships(scoped_prompt, scoped_refs)
+        self.assertIn("Identity references define subject appearance", compiled)
+        for header in (
+            "subject_definitions",
+            "summary",
+            "retention_analysis",
+            "detailed_description",
+            "overall_soundscape",
+            "non_diegetic_music",
+        ):
+            self.assertRegex(compiled, rf"(?m)^{header}:")
+
+        blaine_window = structured.replace(
+            "Thanos (S1) says <d>[English] Kneel.</d> Yoda (S2) replies <d>[English] No.</d>",
+            "Blaine (S1) says <d>[English] Maestro is ready.</d>",
+        )
+        blaine_prompt, blaine_refs, blaine_diagnostics = (
+            select_ref2va_window_voice_references(blaine_window, references)
+        )
+        self.assertEqual(blaine_diagnostics["kept_roles"], ["Blaine"])
+        self.assertEqual(len([item for item in blaine_refs if item["type"] == "audio"]), 1)
+        self.assertIn("<Audio 1> is Blaine voice", blaine_prompt)
+        self.assertNotIn("<Audio 2>", blaine_prompt)
+        self.assertNotIn("<Audio 3>", blaine_prompt)
+
+        silent_prompt, silent_refs, silent_diagnostics = (
+            select_ref2va_window_voice_references(
+                "Yoda and Blaine silently cross the swamp with their mouths closed.",
+                references,
+            )
+        )
+        self.assertEqual(silent_diagnostics["voice_kept"], 0)
+        self.assertEqual(len([item for item in silent_refs if item["type"] == "audio"]), 0)
+        self.assertNotIn("<Audio", silent_prompt)
+
+    def test_ref2va_repairs_legacy_collapsed_context_ir_boundaries(self):
+        from models.minimax_h3.ref2va import ensure_ref2va_prompt_relationships
+
+        references = [
+            {
+                "type": "image",
+                "path": "thanos.png",
+                "role": "Thanos",
+                "image_intent": "identity",
+                "library_character_id": "saved-thanos",
+                "character_name": "Thanos",
+            },
+            {
+                "type": "audio",
+                "path": "thanos.wav",
+                "role": "Thanos voice",
+                "audio_intent": "voice",
+                "library_character_id": "saved-thanos",
+                "character_name": "Thanos",
+            },
+        ]
+        collapsed = (
+            "subject_definitions: <Subject 1> is Thanos, whose identity comes "
+            "from <Picture 1>. summary: Thanos speaks in a swamp.\n\n"
+            "retention_analysis: <Picture 1>: fully_preserved; <Audio 1>: "
+            "reference. detailed_description: Thanos (S1) speaks: "
+            "<d>[English] Tell me what you know.</d>\n\n"
+            "overall_soundscape: Swamp ambience.\n\n"
+            "non_diegetic_music: N/A"
+        )
+
+        compiled = ensure_ref2va_prompt_relationships(collapsed, references)
+
+        offsets = []
+        for header in (
+            "subject_definitions",
+            "summary",
+            "retention_analysis",
+            "detailed_description",
+            "overall_soundscape",
+            "non_diegetic_music",
+        ):
+            match = re.search(rf"(?m)^{header}:", compiled)
+            self.assertIsNotNone(match)
+            offsets.append(match.start())
+        self.assertEqual(offsets, sorted(offsets))
+        self.assertNotIn(". summary:", compiled)
+        self.assertNotIn(". detailed_description:", compiled)
+
+    def test_ref2va_strips_legacy_narration_controls_at_runtime(self):
+        from models.minimax_h3.ref2va import ensure_ref2va_prompt_relationships
+
+        references = [
+            {
+                "type": "image",
+                "path": "thanos.png",
+                "role": "Thanos",
+                "image_intent": "identity",
+                "library_character_id": "saved-thanos",
+                "character_name": "Thanos",
+            },
+            {
+                "type": "image",
+                "path": "blaine.png",
+                "role": "Blaine",
+                "image_intent": "identity",
+                "library_character_id": "saved-blaine",
+                "character_name": "Blaine",
+            },
+            {
+                "type": "audio",
+                "path": "thanos.wav",
+                "role": "Thanos",
+                "audio_intent": "voice",
+                "library_character_id": "saved-thanos",
+                "character_name": "Thanos",
+            },
+            {
+                "type": "audio",
+                "path": "blaine.wav",
+                "role": "Blaine",
+                "audio_intent": "voice",
+                "library_character_id": "saved-blaine",
+                "character_name": "Blaine",
+            },
+        ]
+        legacy = (
+            "subject_definitions: Thanos wears armor. Blaine wears a black shirt "
+            "<Subject 1> is Thanos from <Picture 1>. "
+            "<Audio 1> is the voice-timbre reference for <Subject 1>. "
+            "<Subject 2> is Blaine from <Picture 2>. "
+            "<Audio 2> is the voice-timbre reference for <Subject 2>.\n\n"
+            "summary: Thanos visibly delivers the assigned dialogue line. Then Blaine waves.\n\n"
+            "retention_analysis: <Picture 1>: fully_preserved; <Picture 2>: fully_preserved.\n\n"
+            "detailed_description: Visual direction only, never spoken narration: "
+            "The scene is a swamp. Thanos (S1) speaks, only Thanos's mouth moves "
+            "while every other visible mouth stays closed: "
+            "<d>[English] Tell me what you know.</d>. Immediately after the line, "
+            "the speaker closes their mouth. Blaine (S2) replies, only Blaine's "
+            "mouth moves while every other visible mouth stays closed: "
+            "<d>[English] I created Maestro.</d>. Only the tagged words are spoken "
+            "once in order. Outside those lines, there are no additional spoken "
+            "words, muttering, or gibberish.\n\n"
+            "overall_soundscape: Swamp ambience.\n\nnon_diegetic_music: N/A"
+        )
+
+        compiled = ensure_ref2va_prompt_relationships(legacy, references)
+
+        subject_block = compiled.split("\n\nsummary:", 1)[0]
+        self.assertNotIn("Thanos wears armor", subject_block)
+        self.assertTrue(subject_block.startswith("subject_definitions: <Subject 1>"))
+        self.assertNotIn("never spoken narration", compiled)
+        self.assertNotIn("only Thanos's mouth moves", compiled)
+        self.assertNotIn("every other visible mouth", compiled)
+        self.assertNotIn("visibly delivers the assigned dialogue line", compiled)
+        self.assertIn("<Subject 1> (S1)", compiled)
+        self.assertIn("<Subject 2> (S2)", compiled)
+        self.assertIn("<Audio 1>", compiled)
+        self.assertIn("<Audio 2>", compiled)
 
     def test_ref2va_manual_dialogue_follows_saved_character_names_not_quote_order(self):
         from models.minimax_h3.ref2va import ensure_ref2va_prompt_relationships
@@ -3296,22 +3842,41 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
 
         self.assertIn("<Subject 1> is Blaine", compiled)
         self.assertIn("<Subject 2> is Yoda", compiled)
-        self.assertIn("<Audio 1> is a voice-timbre, emotion, and delivery reference for <Subject 1> (S1)", compiled)
-        self.assertIn("<Audio 2> is a voice-timbre, emotion, and delivery reference for <Subject 2> (S2)", compiled)
-        self.assertIn("Yoda says, (S2) <d>[English] Do or do not.</d>", compiled)
-        self.assertIn("Blaine replies, (S1) <d>[English] I understand.</d>", compiled)
+        self.assertIn("<Audio 1> is the voice-timbre reference for <Subject 1>", compiled)
+        self.assertIn("<Audio 2> is the voice-timbre reference for <Subject 2>", compiled)
+        self.assertIn(
+            "Yoda says, <Subject 2> (S1) in the voice referenced from <Audio 2>, "
+            "<d>[English] Do or do not.</d>",
+            compiled,
+        )
+        self.assertIn(
+            "Blaine replies, <Subject 1> (S2) in the voice referenced from <Audio 1>, "
+            "<d>[English] I understand.</d>",
+            compiled,
+        )
+        self.assertNotIn("No other subject repeats, echoes, mouths, or paraphrases", compiled)
+        self.assertIn("target environment", compiled)
 
         object_cue = ensure_ref2va_prompt_relationships(
             'Blaine turns to Yoda and says, "Stay behind me."',
             references,
         )
-        self.assertIn("(S1) <d>[English] Stay behind me.</d>", object_cue)
+        self.assertIn(
+            "Blaine turns to Yoda and says, <Subject 1> (S1) "
+            "in the voice referenced from <Audio 1>, "
+            "<d>[English] Stay behind me.</d>",
+            object_cue,
+        )
 
         postposed = ensure_ref2va_prompt_relationships(
             '"Patience," replies Yoda.',
             references,
         )
-        self.assertIn("(S2) <d>[English] Patience,</d> replies Yoda", postposed)
+        self.assertIn(
+            "<Subject 2> (S1) in the voice referenced from <Audio 2>, "
+            "<d>[English] Patience,</d> replies Yoda",
+            postposed,
+        )
 
         manually_tagged = ensure_ref2va_prompt_relationships(
             "Blaine shows Maestro to Yoda. Yoda nods thoughtfully. "
@@ -3320,7 +3885,8 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
             references,
         )
         self.assertIn(
-            "Yoda nods thoughtfully. (S2) <d>Saved characters",
+            "Yoda nods thoughtfully. <Subject 2> (S1) in the voice referenced "
+            "from <Audio 2>, <d>Saved characters",
             manually_tagged,
         )
 
@@ -3329,7 +3895,11 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
             "<d>Useful, this will be.</d>",
             references,
         )
-        self.assertIn("(S2) <d>Useful, this will be.</d>", pronoun_continuation)
+        self.assertIn(
+            "<Subject 2> (S1) in the voice referenced from <Audio 2>, "
+            "<d>Useful, this will be.</d>",
+            pronoun_continuation,
+        )
 
     def test_ref2va_runtime_repairs_structured_speakers_and_rejects_ambiguity(self):
         from models.minimax_h3.ref2va import ensure_ref2va_prompt_relationships
@@ -3358,14 +3928,91 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
             "<d>[English] Ready.</d>"
         )
         repaired = ensure_ref2va_prompt_relationships(structured, references)
-        self.assertIn("Yoda (S2) speaks", repaired)
-        self.assertIn("Blaine (S1) replies", repaired)
+        self.assertIn("Yoda <Subject 2> (S1) speaks", repaired)
+        self.assertIn("Blaine <Subject 1> (S2) replies", repaired)
 
         with self.assertRaisesRegex(ValueError, "could not determine which referenced character"):
             ensure_ref2va_prompt_relationships(
                 'Someone says, "Hello there."',
                 references,
             )
+
+    def test_ref2va_keeps_structured_reference_ordinals_stable(self):
+        from models.minimax_h3.ref2va import (
+            align_ref2va_voice_reference_order,
+            ensure_ref2va_prompt_relationships,
+        )
+
+        references = [
+            {
+                "type": "image",
+                "path": "yoda.png",
+                "role": "Yoda",
+                "library_character_id": "saved-yoda",
+                "character_name": "Yoda",
+            },
+            {
+                "type": "audio",
+                "path": "yoda.wav",
+                "role": "Yoda",
+                "audio_intent": "voice",
+                "library_character_id": "saved-yoda",
+                "character_name": "Yoda",
+            },
+            {
+                "type": "image",
+                "path": "blaine.png",
+                "role": "Blaine",
+                "library_character_id": "saved-blaine",
+                "character_name": "Blaine",
+            },
+            {
+                "type": "audio",
+                "path": "blaine.wav",
+                "role": "Blaine",
+                "audio_intent": "voice",
+                "library_character_id": "saved-blaine",
+                "character_name": "Blaine",
+            },
+        ]
+        structured = (
+            'subject_definitions: <Subject 1> (S2) is the stable character "Yoda". '
+            '<Picture 1> defines this Subject. <Audio 1> is Yoda voice. '
+            '<Subject 2> (S1) is the stable character "Blaine". '
+            '<Picture 2> defines this Subject. <Audio 2> is Blaine voice.\n'
+            'summary: A conversation.\n'
+            'retention_analysis: <Audio 1>: reference. <Audio 2>: reference.\n'
+            'detailed_description: Blaine says, (S1) '
+            '<d>[English] Master Yoda, how powerful is Maestro?</d> '
+            'Yoda replies, (S2) <d>[English] Powerful, it has become.</d>\n'
+            'overall_soundscape: Swamp ambience.\nnon_diegetic_music: N/A'
+        )
+
+        aligned_prompt, aligned_references, remap = (
+            align_ref2va_voice_reference_order(structured, references)
+        )
+
+        self.assertEqual(remap, {})
+        self.assertEqual(aligned_prompt, structured)
+        self.assertEqual(
+            [entry["character_name"] for entry in aligned_references],
+            ["Yoda", "Blaine", "Yoda", "Blaine"],
+        )
+
+        compiled = ensure_ref2va_prompt_relationships(
+            aligned_prompt,
+            aligned_references,
+        )
+        self.assertIn(
+            "Blaine says, <Subject 2> (S1) in the voice referenced from <Audio 2>, "
+            "<d>[English] Master Yoda, how powerful is Maestro?</d>",
+            compiled,
+        )
+        self.assertIn(
+            "Yoda replies, <Subject 1> (S2) in the voice referenced from <Audio 1>, "
+            "<d>[English] Powerful, it has become.</d>",
+            compiled,
+        )
 
         with self.assertRaisesRegex(ValueError, "could not determine which referenced character"):
             ensure_ref2va_prompt_relationships(
@@ -3388,6 +4035,88 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
                 "<d>[English] Hello there.</d>",
                 references,
             )
+
+    def test_ref2va_manual_tagged_dialogue_aligns_the_addressed_character_correctly(self):
+        from models.minimax_h3.ref2va import (
+            align_ref2va_voice_reference_order,
+            ensure_ref2va_prompt_relationships,
+        )
+
+        references = [
+            {
+                "type": "image",
+                "path": "yoda.png",
+                "role": "Yoda",
+                "library_character_id": "saved-yoda",
+                "character_name": "Yoda",
+            },
+            {
+                "type": "audio",
+                "path": "yoda.wav",
+                "role": "Yoda",
+                "audio_intent": "voice",
+                "library_character_id": "saved-yoda",
+                "character_name": "Yoda",
+            },
+            {
+                "type": "image",
+                "path": "thanos.png",
+                "role": "Thanos",
+                "library_character_id": "saved-thanos",
+                "character_name": "Thanos",
+            },
+            {
+                "type": "audio",
+                "path": "thanos.wav",
+                "role": "Thanos",
+                "audio_intent": "voice",
+                "library_character_id": "saved-thanos",
+                "character_name": "Thanos",
+            },
+        ]
+        manual_prompt = (
+            "Yoda is in Dagobah, a remote swamp-covered planet. "
+            "Thanos is standing in the swamp and says to Yoda, "
+            "<d>small green creature, tell me about Maestro version two.</d>"
+            "Yoda waves his hand slowly while saying, "
+            "<d>Powerful, Maestro has become.</d> "
+            "Thanos responds <d>as all things should be.</d>"
+        )
+
+        aligned_prompt, aligned_references, remap = (
+            align_ref2va_voice_reference_order(manual_prompt, references)
+        )
+
+        self.assertEqual(remap, {})
+        self.assertEqual(
+            [entry["character_name"] for entry in aligned_references],
+            ["Yoda", "Thanos", "Yoda", "Thanos"],
+        )
+
+        compiled = ensure_ref2va_prompt_relationships(
+            aligned_prompt,
+            aligned_references,
+            duration_seconds=14.38,
+        )
+        self.assertIn("<Subject 1> is Yoda", compiled)
+        self.assertIn("<Subject 2> is Thanos", compiled)
+        self.assertIn(
+            "Thanos is standing in the swamp and says to Yoda, "
+            "<Subject 2> (S1) in the voice referenced from <Audio 2>, "
+            "<d>small green creature, tell me about Maestro version two.</d>",
+            compiled,
+        )
+        self.assertIn(
+            "Yoda waves his hand slowly while saying, <Subject 1> (S2) "
+            "in the voice referenced from <Audio 1>, "
+            "<d>Powerful, Maestro has become.</d>",
+            compiled,
+        )
+        self.assertIn(
+            "Thanos responds <Subject 2> (S1) in the voice referenced from <Audio 2>, "
+            "<d>as all things should be.</d>",
+            compiled,
+        )
 
     def test_ref2va_reference_detail_policy_is_bounded_and_grid_aligned(self):
         from models.minimax_h3.ref2va import (

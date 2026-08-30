@@ -615,6 +615,9 @@ class TestEditorProjects(unittest.TestCase):
             "resolution": "720p",
             "frame_rate": 24,
             "filename": "My Final / unsafe.mp4",
+            "spatial_upsampling": "flashvsr2",
+            "film_grain_intensity": 1.5,
+            "film_grain_saturation": -0.25,
         }
         project["exports"] = [{
             "id": "past-export",
@@ -632,6 +635,9 @@ class TestEditorProjects(unittest.TestCase):
         normalized = normalize_editor_project(project)
         self.assertEqual(normalized["schema_version"], 5)
         self.assertEqual(normalized["export"]["encoder"], "auto")
+        self.assertEqual(normalized["export"]["spatial_upsampling"], "flashvsr2")
+        self.assertEqual(normalized["export"]["film_grain_intensity"], 1.0)
+        self.assertEqual(normalized["export"]["film_grain_saturation"], 0.0)
         self.assertEqual(normalized["exports"][0]["filename"], "past.mp4")
         self.assertEqual(editor_export_dimensions(normalized), (720, 1280, 24.0))
 
@@ -724,8 +730,9 @@ class TestEditorProjects(unittest.TestCase):
             command for command in commands
             if str(command[-1]).endswith(".part.mp4")
         )
-        self.assertIn("fps=30", proxy_command[proxy_command.index("-vf") + 1])
-        self.assertIn("scale=960:540", proxy_command[proxy_command.index("-vf") + 1])
+        mobile_filter = proxy_command[proxy_command.index("-vf") + 1]
+        self.assertNotIn("fps=", mobile_filter)
+        self.assertIn("scale=854:480", mobile_filter)
         self.assertIn("main", proxy_command)
         proxy_path = resolve_editor_media_cache_file(
             self.save_root,
@@ -734,6 +741,59 @@ class TestEditorProjects(unittest.TestCase):
             "proxy-mobile",
         )
         self.assertTrue(os.path.isfile(proxy_path))
+
+    def test_mobile_editor_keeps_gallery_video_decoders_out_of_playback(self):
+        root = os.path.abspath(os.path.join(_HERE, ".."))
+        with open(
+            os.path.join(root, "ui", "src", "editor", "EditorMediaBin.tsx"),
+            encoding="utf-8",
+        ) as handle:
+            media_bin = handle.read()
+        with open(
+            os.path.join(root, "ui", "src", "editor", "EditorPreview.tsx"),
+            encoding="utf-8",
+        ) as handle:
+            preview = handle.read()
+        with open(
+            os.path.join(root, "ui", "src", "editor", "editorUtils.ts"),
+            encoding="utf-8",
+        ) as handle:
+            editor_utils = handle.read()
+        with open(os.path.join(root, "app", "launch.py"), encoding="utf-8") as handle:
+            launch_source = handle.read()
+
+        self.assertIn("LazyVideoThumbnail", media_bin)
+        self.assertIn("useEditorMediaPreview", media_bin)
+        self.assertNotIn('<video src={asset.url}', media_bin)
+        self.assertIn("isMobile ? 10 : 30", preview)
+        self.assertIn("playbackDriftTolerance", preview)
+        self.assertIn("preparedEditorMediaItems", preview)
+        self.assertIn("data-editor-media-active", preview)
+        self.assertIn("data-editor-master-clock", preview)
+        self.assertIn("mediaTimelineTime", preview)
+        self.assertIn("mediaTime ?? latestPlayhead", preview)
+        self.assertIn("mobilePlayback && playing", preview)
+        self.assertIn("waitingForMobileProxy", preview)
+        self.assertIn("src={sourceUrl || undefined}", preview)
+        self.assertIn("Boolean(sourceState.url)", preview)
+        self.assertIn("video-deck-${trackItemIndex % 2}", preview)
+        self.assertIn("audio-deck-${trackItemIndex % 2}", preview)
+        self.assertIn("video[data-editor-media-active]", preview)
+        self.assertIn("Prime both alternating decks", preview)
+        self.assertIn("playbackBoundaries", preview)
+        self.assertIn("crossedBoundary || now - lastPublishedAt", preview)
+        self.assertIn("playheadRef.current = next", preview)
+        self.assertIn("Promote the already-buffered deck without an unconditional seek", preview)
+        self.assertIn("promotionSyncPendingRef", preview)
+        self.assertIn("onPlaying={() =>", preview)
+        self.assertIn("syncActiveVideo(true)", preview)
+        self.assertIn("native media clocks run continuously", preview)
+        self.assertIn("onCanPlay={() => syncActiveVideo(false)}", preview)
+        self.assertIn("Keep the active media plus the next clip", editor_utils)
+        self.assertIn(
+            'headers={"Cache-Control": "public, max-age=86400, immutable"}',
+            launch_source,
+        )
 
     def test_director_gallery_thumbnail_uses_first_clip_and_cache(self):
         pipeline_id = "thumbnail-test"

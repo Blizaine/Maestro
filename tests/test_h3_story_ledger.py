@@ -108,6 +108,35 @@ class H3StoryLedgerTests(unittest.TestCase):
             ],
         )
 
+    def test_spaced_h3_tags_lock_speakers_and_leave_only_visual_events(self):
+        prompt = (
+            "Yoda waits in the Dagobah swamp. Thanos says to Yoda, "
+            "< d>First line. Second sentence.</d>"
+            "Yoda waves his hand while saying, <d>Powerful, it is.</d> "
+            "Thanos responds <d>As all things should be.</d>. "
+            "Atmospheric ambiance. Character voices sound natural in the environment. "
+            "Camera pans to Blaine, who waves and says "
+            "<d>Hey guys, check out Maestro.</d>. "
+            "Thanos snaps his fingers. Blaine turns to dust."
+        )
+        locked = extract_locked_dialogue(prompt)
+        self.assertEqual(
+            [(item["speaker"], item["text"]) for item in locked],
+            [
+                ("Thanos", "First line. Second sentence."),
+                ("Yoda", "Powerful, it is."),
+                ("Thanos", "As all things should be."),
+                ("Blaine", "Hey guys, check out Maestro."),
+            ],
+        )
+        events = " | ".join(item["text"] for item in extract_source_events(prompt))
+        for spoken in ("First line", "Powerful", "all things", "Hey guys"):
+            self.assertNotIn(spoken, events)
+        self.assertNotIn("Atmospheric ambiance", events)
+        self.assertNotIn("Character voices sound natural", events)
+        self.assertIn("Thanos snaps his fingers", events)
+        self.assertIn("Blaine turns to dust", events)
+
     def test_quoted_title_is_not_misclassified_as_spoken_dialogue(self):
         prompt = 'A sitcom episode titled "The One With the Broken Robot" follows Alex repairing it.'
         self.assertEqual(extract_locked_dialogue(prompt), [])
@@ -154,6 +183,30 @@ class H3StoryLedgerTests(unittest.TestCase):
         self.assertNotIn("Dark Cinematic", rendered)
         self.assertNotIn("Sniderverse style", rendered)
         self.assertNotIn("rated-r", rendered)
+
+    def test_source_events_drop_orphaned_character_name_from_compound_action(self):
+        prompt = (
+            "Blaine waves. Thanos, while standing in the swamp near Yoda, "
+            "snaps his fingers. Blaine turns to dust."
+        )
+        events = extract_source_events(prompt)
+        rendered = [item["text"] for item in events]
+        self.assertNotIn("Thanos", rendered)
+        self.assertTrue(any("Thanos keeps standing" in item for item in rendered))
+
+    def test_locked_dialogue_counts_toward_each_segment_timing_budget(self):
+        ledger = _ledger()
+        ledger["beats"][0]["dialogue_ids"] = ["D1", "D2"]
+        ledger["beats"][1]["dialogue_ids"] = []
+        violations = ledger_violations(
+            self.prompt,
+            ledger,
+            segment_count=2,
+            locked_dialogue=self.locked,
+            expect_dialogue=True,
+            segment_durations=[4.0, 16.0],
+        )
+        self.assertTrue(any("segment 1 dialogue uses" in item for item in violations))
 
     def test_segment_rejects_tiny_tail_and_repeated_or_foreign_beats(self):
         segment = _segment(1)
@@ -224,7 +277,7 @@ class H3StoryLedgerTests(unittest.TestCase):
             "Thanos holds the raised gauntlet toward Superman",
         )
 
-    def test_llm_cannot_corrupt_maestros_canonical_story_schedule(self):
+    def test_invalid_llm_schedule_gets_one_focused_semantic_repair(self):
         candidate = _ledger()
         candidate["beats"] = [{
             "beat_id": "B99",
@@ -237,6 +290,7 @@ class H3StoryLedgerTests(unittest.TestCase):
         }]
         responses = iter([
             json.dumps(candidate),
+            json.dumps(_ledger()),
             json.dumps(_segment(1)),
             json.dumps(_segment(2)),
         ])
@@ -257,14 +311,15 @@ class H3StoryLedgerTests(unittest.TestCase):
 
         self.assertEqual(result["planned_by"], "llm")
         self.assertEqual(result["planning_warnings"], [])
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 4)
+        self.assertIn("REPAIR THE COMPLETE STORY SCHEDULE", calls[1]["prompt"])
         referenced = [
             event_id
             for beat in result["ledger"]["beats"]
             for event_id in beat["source_event_ids"]
         ]
         self.assertEqual(referenced, [item["event_id"] for item in extract_source_events(self.prompt)])
-        self.assertNotIn("beats", calls[0]["json_schema"]["properties"])
+        self.assertIn("beats", calls[0]["json_schema"]["properties"])
 
     def test_generated_dialogue_selects_a_segment_without_owning_story_ids(self):
         prompt = "Clark saves Lana from danger, and Lana reacts in disbelief."
@@ -277,6 +332,22 @@ class H3StoryLedgerTests(unittest.TestCase):
             "ambient_audio": "Quiet nonverbal small-town ambience",
             "music": "N/A",
             "required_final_outcome": "Lana reacts after Clark saves her",
+            "beats": [
+                {
+                    "segment": 1,
+                    "source_event_ids": ["E1"],
+                    "dialogue_ids": [],
+                    "state_after": "Clark has moved Lana out of danger",
+                    "sound_effects": "A fast rush of air and footsteps",
+                },
+                {
+                    "segment": 2,
+                    "source_event_ids": ["E2"],
+                    "dialogue_ids": [],
+                    "state_after": "Lana stares at Clark in disbelief",
+                    "sound_effects": "Quiet small-town ambience",
+                },
+            ],
             "generated_dialogue": [{
                 "speaker": "Lana",
                 "language": "English",
@@ -320,6 +391,13 @@ class H3StoryLedgerTests(unittest.TestCase):
             "ambient_audio": "Quiet nonverbal room tone",
             "music": "N/A",
             "required_final_outcome": "Alex holds the red book",
+            "beats": [{
+                "segment": 1,
+                "source_event_ids": ["E1", "E2", "E3"],
+                "dialogue_ids": [],
+                "state_after": "Alex holds the red book inside the room",
+                "sound_effects": "Door creak, footsteps, and the book lifting",
+            }],
             "generated_dialogue": [],
         }
         camera_plan = _segment(1, duration=12.0)
@@ -347,6 +425,218 @@ class H3StoryLedgerTests(unittest.TestCase):
         self.assertIn("opens the wooden door", action)
         self.assertIn("crosses the dark room", action)
         self.assertIn("picks up the red book", action)
+
+    def test_coarse_dialogue_beat_binds_each_line_to_its_matching_camera_phase(self):
+        prompt = (
+            "Yoda is in Dagobah. "
+            "Thanos stands in the swamp and says <d>Tell me what you know.</d> "
+            "Yoda waves slowly while saying <d>Powerful, it has become.</d> "
+            "Thanos responds <d>As all things should be.</d>"
+        )
+        ledger = {
+            "subject_continuity": "Thanos and Yoda retain their requested identities",
+            "setting_continuity": "The same misty Dagobah swamp",
+            "visual_continuity": "Grounded cinematic live-action realism",
+            "editing_style": "Motivated speaker coverage",
+            "initial_state": "Yoda and Thanos face each other in the swamp",
+            "ambient_audio": "Wetland insects, water, and foliage",
+            "music": "N/A",
+            "required_final_outcome": "Thanos finishes his response",
+            # This deliberately reproduces the coarse semantic beat from the
+            # reported run: three speakers/turns are grouped under one beat.
+            "beats": [{
+                "segment": 1,
+                "source_event_ids": ["E1", "E2", "E3", "E4"],
+                "dialogue_ids": ["D1", "D2", "D3"],
+                "state_after": "Thanos has finished responding to Yoda",
+                "sound_effects": "Natural swamp movement",
+            }],
+            "generated_dialogue": [],
+        }
+        camera_plan = {
+            "segment": 1,
+            "title": "Dagobah exchange",
+            "opening_state": "The supplied opening state",
+            "coverage": "multi_shot",
+            "pacing": "natural real-time pacing",
+            "shots": [
+                {
+                    "shot": 1,
+                    "start_seconds": 0.0,
+                    "end_seconds": 3.0,
+                    "transition": "opening composition",
+                    "framing": "wide establishing shot",
+                    "camera": "locked camera",
+                    "action": "Yoda and Thanos stand in the swamp",
+                    "sound_effects": "Swamp ambience",
+                },
+                {
+                    "shot": 2,
+                    "start_seconds": 3.0,
+                    "end_seconds": 6.5,
+                    "transition": "hard cut",
+                    "framing": "Thanos close-up",
+                    "camera": "slow push in",
+                    "action": "Thanos raises his chin and speaks with a deep voice",
+                    "sound_effects": "Thanos's deep voice and swamp ambience",
+                },
+                {
+                    "shot": 3,
+                    "start_seconds": 6.5,
+                    "end_seconds": 10.0,
+                    "transition": "hard cut",
+                    "framing": "Yoda close-up",
+                    "camera": "locked camera",
+                    "action": "Yoda waves slowly as he speaks",
+                    "sound_effects": "Yoda's raspy voice",
+                },
+                {
+                    "shot": 4,
+                    "start_seconds": 10.0,
+                    "end_seconds": 13.667,
+                    "transition": "hard cut",
+                    # Deliberately give the camera planner the exact visual
+                    # contradiction seen in the reported run: the transcript
+                    # and Audio reference belong to Thanos, but the proposed
+                    # close-up/action still favor Yoda.
+                    "framing": "Yoda close-up",
+                    "camera": "subtle push in on Yoda",
+                    "action": "Yoda gestures while Thanos speaks a short phrase",
+                    "sound_effects": "Yoda's robe and Thanos's voice",
+                },
+            ],
+            "closing_state": "The supplied closing state",
+        }
+        responses = iter([json.dumps(ledger), json.dumps(camera_plan)])
+
+        result = plan_h3_story_segments(
+            prompt,
+            segment_durations=[13.667],
+            mode="reference_sequence_continuation",
+            camera_coverage="multi_shot",
+            expect_dialogue=True,
+            llm_generate=lambda **_kwargs: next(responses),
+        )
+
+        self.assertEqual(result["planned_by"], "llm")
+        shots = result["segments"][0]["shots"]
+        self.assertEqual(
+            [[line["speaker"] for line in shot["dialogue"]] for shot in shots],
+            [[], ["Thanos"], ["Yoda"], ["Thanos"]],
+        )
+        self.assertEqual(
+            [[line["text"] for line in shot["dialogue"]] for shot in shots],
+            [
+                [],
+                ["Tell me what you know."],
+                ["Powerful, it has become."],
+                ["As all things should be."],
+            ],
+        )
+        self.assertNotIn(
+            "Stable speaking identities",
+            result["ledger"]["subject_continuity"],
+        )
+        for shot in shots:
+            self.assertNotRegex(shot["action"], r"(?i)\b(?:speaks?|says?|responds?)\b")
+            self.assertNotRegex(shot["sound_effects"], r"(?i)\bvoice\b")
+        final_shot = shots[-1]
+        self.assertIn("established target setting", final_shot["framing"])
+        self.assertNotIn("Yoda", final_shot["framing"])
+        self.assertIn("target-scene camera coverage", final_shot["camera"])
+        self.assertNotIn("Yoda", final_shot["camera"])
+        self.assertIn("only Thanos's mouth moves", final_shot["dialogue"][0]["action"])
+        self.assertIn("every other visible mouth stays closed", final_shot["dialogue"][0]["action"])
+        self.assertLessEqual(len(final_shot["dialogue"][0]["action"]), 120)
+        self.assertNotIn(";", final_shot["dialogue"][0]["action"])
+        self.assertNotIn("speaker-focused", final_shot["framing"])
+        self.assertNotIn("hold Thanos's visible face", final_shot["camera"])
+        self.assertNotIn("Yoda", final_shot["action"])
+
+    def test_action_only_shots_cannot_become_narration_or_repeat_planner_prose(self):
+        prompt = (
+            "Blaine waves and says <d>Hello from Maestro.</d> "
+            "Thanos snaps his fingers. "
+            "Blaine turns to dust and blows away."
+        )
+        ledger = {
+            "subject_continuity": "Blaine and Thanos retain their identities",
+            "setting_continuity": "The same misty swamp",
+            "visual_continuity": "Grounded cinematic live action",
+            "editing_style": "Motivated three-shot coverage",
+            "initial_state": "Blaine and Thanos face each other",
+            "ambient_audio": "Quiet swamp ambience",
+            "music": "N/A",
+            "required_final_outcome": "Blaine turns to dust and blows away",
+            "beats": [{
+                "segment": 1,
+                "source_event_ids": ["E1", "E2", "E3"],
+                "dialogue_ids": ["D1"],
+                "state_after": "Only Thanos remains after the dust disperses",
+                "sound_effects": "A finger snap and wind through dust",
+            }],
+            "generated_dialogue": [],
+        }
+        camera_plan = {
+            "segment": 1,
+            "title": "The snap",
+            "opening_state": "Blaine and Thanos face each other",
+            "coverage": "multi_shot",
+            "pacing": "natural real-time pacing",
+            "shots": [
+                {
+                    "shot": 1,
+                    "start_seconds": 0.0,
+                    "end_seconds": 4.0,
+                    "transition": "opening composition",
+                    "framing": "medium shot",
+                    "camera": "pan toward Blaine",
+                    "action": "Blaine repeats his introduction twice",
+                    "sound_effects": "Blaine's voice",
+                },
+                {
+                    "shot": 2,
+                    "start_seconds": 4.0,
+                    "end_seconds": 7.0,
+                    "transition": "hard cut",
+                    "framing": "Thanos close-up",
+                    "camera": "hold on the gauntlet",
+                    "action": "Blaine repeats his line while Thanos waits",
+                    "sound_effects": "Finger snap",
+                },
+                {
+                    "shot": 3,
+                    "start_seconds": 7.0,
+                    "end_seconds": 10.0,
+                    "transition": "hard cut",
+                    "framing": "medium wide",
+                    "camera": "track the drifting dust",
+                    "action": "Blaine says turns to blows while disappearing",
+                    "sound_effects": "Wind",
+                },
+            ],
+            "closing_state": "Only Thanos remains",
+        }
+        responses = iter([json.dumps(ledger), json.dumps(camera_plan)])
+
+        result = plan_h3_story_segments(
+            prompt,
+            segment_durations=[10.0],
+            mode="reference_sequence_continuation",
+            camera_coverage="multi_shot",
+            expect_dialogue=True,
+            llm_generate=lambda **_kwargs: next(responses),
+        )
+
+        shots = result["segments"][0]["shots"]
+        combined = " ".join(shot["action"] for shot in shots)
+        self.assertNotIn("repeats", combined)
+        self.assertNotIn("turns to blows", combined)
+        self.assertEqual([len(shot["dialogue"]) for shot in shots], [1, 0, 0])
+        self.assertTrue(shots[1]["action"].startswith("Silent visual action"))
+        self.assertTrue(shots[2]["action"].startswith("Silent visual action"))
+        self.assertIn("No words are spoken or mouthed", shots[2]["action"])
+        self.assertIn("Blaine turns to dust and blows away", shots[2]["action"])
 
     def test_compiler_neutralizes_braces_and_nested_context_labels(self):
         spans = compute_h3_window_boundaries(480, 240, fps=24, overlap_frames=0)

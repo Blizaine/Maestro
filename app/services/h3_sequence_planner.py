@@ -24,16 +24,20 @@ from services.h3_window_planner import (
     _UNREQUESTED_SPECTACLE_PATTERNS,
     _compact,
     _fallback_plan,
+    _h3_shot_timestamp,
     _infer_camera_coverage,
     _narrative_dialogue_expected,
     _normalized_window_shots,
-    _shot_prompt_sentence,
     compute_h3_window_boundaries,
     normalize_h3_camera_coverage,
 )
 
 
-_H3_SEQUENCE_PLANNER_VERSION = 4 + H3_STORY_LEDGER_VERSION
+# Increment whenever the compiled Context-IR contract changes.  The signature
+# is persisted with reviewed/generated window prompts, so this prevents a run
+# restored from gallery metadata from silently reusing pre-fix dialogue and
+# reference bindings.
+_H3_SEQUENCE_PLANNER_VERSION = 5 + H3_STORY_LEDGER_VERSION
 _H3_CLIP_BOUNDARY = "\n---CLIP_BOUNDARY---\n"
 
 
@@ -400,6 +404,7 @@ def build_manual_h3_reference_sequence_plan(
 def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]:
     """Return relationship, retention, and official task-type summaries."""
 
+    from models.minimax_h3.ref2va import canonicalize_ref2va_reference_order
     from models.minimax_h3.reference_manifest import validate_reference_manifest
 
     # Enhancement is useful before the generation manifest is complete. The
@@ -411,6 +416,7 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
         require_visual=False,
         allow_empty=True,
     )
+    _prompt, items, _order_remap = canonicalize_ref2va_reference_order("", items)
     picture = video = audio = subject = 0
     relationships: list[str] = []
     retention: list[str] = []
@@ -457,9 +463,9 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
                 if character_key:
                     character_subjects[character_key] = subject
                 relationships.append(
-                    f"<Subject {subject}> is {role}, whose identity and appearance "
-                    f"come from <Picture {picture}>; reject the picture's source "
-                    "background, framing, composition, and pose."
+                    f"<Subject {subject}> is {role} from <Picture {picture}>, preserving "
+                    "identity and visible appearance; the source background, framing, "
+                    "composition, and pose do not define the target scene."
                 )
                 retention.append(
                     f"<Subject {subject}>: fully_preserved - preserve the identity "
@@ -475,9 +481,9 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
                 if character_key:
                     character_subjects[character_key] = subject
                 relationships.append(
-                    f"<Subject {subject}> is {role}, whose identity, appearance, and characteristic "
-                    f"motion come from <Video {video}>; reject its source background, framing, camera, "
-                    "edit rhythm, opening frame, and action."
+                    f"<Subject {subject}> is {role} from <Video {video}>, preserving identity, "
+                    "appearance, and characteristic motion while using the newly described target "
+                    "scene and action."
                 )
                 retention.append(
                     f"<Subject {subject}>: fully_preserved - preserve the identity and appearance "
@@ -538,8 +544,8 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
                     if mapped_subject else str(role)
                 )
                 relationships.append(
-                    f"<Audio {audio}> supplies voice timbre, emotion, and delivery "
-                    f"for {target}, without copying its words or timing."
+                    f"<Audio {audio}> is the voice-timbre reference for {target}, guiding "
+                    "emotion and delivery without reusing the source words or timing."
                 )
                 retention.append(f"<Audio {audio}>: reference")
                 if "audio reference" not in task_types:
@@ -552,13 +558,13 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
         )
         target = f"<Subject {mapped_subject}>" if mapped_subject else str(role)
         relationships.append(
-            f"<Audio {audio_index}> supplies voice timbre, emotion, and delivery "
-            f"for {target}, without copying its words or timing."
+            f"<Audio {audio_index}> is the voice-timbre reference for {target}, guiding "
+            "emotion and delivery without reusing the source words or timing."
         )
         retention.append(f"<Audio {audio_index}>: reference")
         if "audio reference" not in task_types:
             task_types.append("audio reference")
-    return " ".join(relationships), "; ".join(retention), " + ".join(task_types)
+    return "\n".join(relationships), "\n".join(retention), " + ".join(task_types)
 
 
 def _ref2va_style_opening(style: str) -> str:
@@ -578,16 +584,28 @@ def _ref2va_style_opening(style: str) -> str:
 def _officialize_subject_definitions(value: str) -> str:
     """Promote simple planner speaker mappings to official Subject labels."""
 
-    text = deduped = str(value or "").strip()
-    if not text or re.search(r"<Subject\s+\d+>", text, re.IGNORECASE):
+    text = str(value or "").strip()
+    if not text:
         return text
     pairs = re.findall(
         r"\b(S\d+)\s+is\s+([^;,.]+)",
         text,
         flags=re.IGNORECASE,
     )
+    # Speaker IDs are ordered by the first vocal event in *this generation
+    # pass*. They are not stable character IDs and must never survive beside
+    # the canonical Subject/Picture/Audio map across continuation windows.
+    # Keep the names for legacy promotion only when no Subject map exists.
+    deduped = re.sub(
+        r"(?i)\bstable\s+speaking\s+identit(?:y|ies)\s*:\s*"
+        r"S\d+\s+is\s+[^.;<]+(?:\s*;\s*S\d+\s+is\s+[^.;<]+)*\s*\.?",
+        "",
+        text,
+    ).strip(" ;,.")
+    if re.search(r"<Subject\s+\d+>", text, re.IGNORECASE):
+        return deduped
     if not pairs:
-        return text
+        return deduped
     definitions = [
         f"<Subject {index}> is {name.strip()} ({speaker.upper()})."
         for index, (speaker, name) in enumerate(pairs, start=1)
@@ -611,7 +629,13 @@ def _label_ref2va_subjects_in_description(
     description: str,
     subject_definitions: str,
 ) -> str:
-    """Place each reusable Subject label at its first clear visible use."""
+    """Label a reusable Subject only where that character actually appears.
+
+    Every reference remains declared in ``subject_definitions`` and is still
+    supplied to Ref2VA.  A character absent from the current story window must
+    not be invented in its opening composition merely to mention its Subject
+    token; doing so made future entrants appear early and destabilized staging.
+    """
 
     result = str(description or "")
     bindings: list[tuple[str, str]] = []
@@ -629,7 +653,6 @@ def _label_ref2va_subjects_in_description(
             continue
         bindings.append((label, name))
 
-    missing: list[str] = []
     for label, name in bindings:
         if label in result:
             continue
@@ -637,19 +660,261 @@ def _label_ref2va_subjects_in_description(
             rf"(?<![\w>]){re.escape(name)}(?![\w<])",
             flags=re.IGNORECASE,
         )
-        result, count = pattern.subn(f"{label} ({name})", result, count=1)
-        if not count:
-            missing.append(f"{label} ({name}) is visible in the opening composition.")
-    if missing:
-        shot = re.search(r"\[Shot\s+1\]", result, flags=re.IGNORECASE)
-        if shot:
-            result = (
-                f"{result[:shot.end()]} {' '.join(missing)} "
-                f"{result[shot.end():].lstrip()}"
-            )
-        else:
-            result = f"{' '.join(missing)} {result}".strip()
+        result = pattern.sub(f"{label} ({name})", result, count=1)
     return result
+
+
+def _ref2va_prompt_bindings(
+    subject_definitions: str,
+) -> tuple[dict[str, int], dict[int, int]]:
+    """Read immutable character and voice bindings from canonical Context-IR."""
+
+    aliases: dict[str, int] = {}
+    for match in re.finditer(
+        r"<Subject\s+(\d+)>\s+is\s+(.+?)"
+        r"(?=\s+from\s+<(?:Picture|Video)\s+\d+>|"
+        r",\s+(?:whose|with|defined|from|preserving)\b|[;.\r\n]|$)",
+        str(subject_definitions or ""),
+        flags=re.IGNORECASE,
+    ):
+        subject = int(match.group(1))
+        name = re.sub(r"\s+", " ", match.group(2)).strip(" ,;:.-")
+        if name:
+            aliases[name.casefold()] = subject
+
+    audio_by_subject: dict[int, int] = {}
+    for match in re.finditer(
+        r"<Audio\s+(\d+)>[^.\r\n]{0,240}?"
+        r"(?:for|to|of)\s+<Subject\s+(\d+)>",
+        str(subject_definitions or ""),
+        flags=re.IGNORECASE,
+    ):
+        audio_by_subject.setdefault(int(match.group(2)), int(match.group(1)))
+    return aliases, audio_by_subject
+
+
+def _ref2va_bind_audio_speakers(
+    subject_definitions: str,
+    subject_speakers: dict[int, str],
+) -> str:
+    """Bind voice Audio, visual Subject, and local speaker ID together."""
+
+    result = str(subject_definitions or "")
+    for subject, speaker in subject_speakers.items():
+        result = re.sub(
+            rf"(<Audio\s+\d+>[^.\r\n]{{0,260}}?"
+            rf"(?:for|to|of)\s+<Subject\s+{subject}>)"
+            r"(?:\s*\(S\d+\))?",
+            rf"\1 ({speaker})",
+            result,
+            flags=re.IGNORECASE,
+        )
+    return result
+
+
+def _replace_ref2va_names_with_subjects(
+    value: str,
+    aliases: dict[str, int],
+) -> str:
+    """Use MiniMax's stable Subject labels instead of ambiguous bare names."""
+
+    result = str(value or "")
+    for alias, subject in sorted(aliases.items(), key=lambda row: -len(row[0])):
+        pattern = re.compile(
+            rf"(?<![\w>]){re.escape(alias)}(?![\w<])",
+            flags=re.IGNORECASE,
+        )
+        result = pattern.sub(f"<Subject {subject}>", result)
+    return result
+
+
+def _clean_ref2va_action(
+    value: str,
+    *,
+    setting: str = "",
+    opening: str = "",
+) -> str:
+    """Remove compiler/meta prose that H3 can mistakenly perform as speech."""
+
+    text = re.sub(
+        r"(?i)^\s*(?:visual direction only|silent visual action)\s*,?\s*"
+        r"never spoken narration\s*:\s*",
+        "",
+        str(value or "").strip(),
+    )
+    text = re.sub(
+        r"(?i)\s*\.?(?:\s+No words are spoken or mouthed in this shot;.*)$",
+        "",
+        text,
+    ).strip(" .")
+    clauses = [
+        clause.strip(" .")
+        for clause in re.split(
+            r"(?i)(?:\.\s+Then\s+|\s+Then\s+|\.\s+)",
+            text,
+        )
+        if clause.strip(" .")
+    ]
+    context_tokens = set(re.findall(
+        r"[a-z0-9]+",
+        f"{setting} {opening}".casefold(),
+    ))
+    cleaned: list[str] = []
+    for clause in clauses:
+        if re.search(
+            r"(?i)\b(?:visibly\s+)?(?:delivers?|performs?|speaks?|says?)\b"
+            r"[^.]{0,80}\b(?:assigned\s+)?dialogue\b",
+            clause,
+        ):
+            continue
+        clause_tokens = set(re.findall(r"[a-z0-9]+", clause.casefold()))
+        overlap = (
+            len(clause_tokens & context_tokens) / max(1, len(clause_tokens))
+            if context_tokens else 0.0
+        )
+        # Pure scene-establishing prose is already expressed by the setting
+        # and opening state. Repeating it inside the timed action is what made
+        # H3 audibly narrate phrases such as "Yoda is in Dagobah."
+        if overlap >= 0.72 and not re.search(
+            r"(?i)\b(?:walk|run|turn|wave|raise|lower|pick|drop|fight|hit|"
+            r"punch|snap|fall|move|look|nod|sit|stand\s+up|enter|exit)\w*\b",
+            clause,
+        ):
+            continue
+        cleaned.append(clause)
+    return ". Then ".join(cleaned).strip(" .")
+
+
+def _clean_ref2va_state(value: str) -> str:
+    """Keep a handoff state visual instead of re-triggering prior speech."""
+
+    text = str(value or "").strip()
+    text = re.sub(
+        r"(?i)^the immediate visible state is the result of this event:\s*",
+        "",
+        text,
+    )
+    text = re.sub(
+        r"(?i)\s+while\s+(?:saying|speaking|delivering|performing)\b"
+        r"[^,.!?;]*",
+        "",
+        text,
+    )
+    text = re.sub(
+        r"(?i)\b(?:visibly\s+)?delivers?\s+the\s+(?:assigned\s+)?dialogue\s+line\b",
+        "holds the described expression",
+        text,
+    )
+    return re.sub(r"\s{2,}", " ", text).strip(" .")
+
+
+def _ref2va_dialogue_sentence(
+    item: Any,
+    *,
+    speaker_ids: dict[str, str],
+    subject_aliases: dict[str, int],
+    audio_by_subject: dict[int, int],
+) -> str:
+    """Render one line in MiniMax's documented Subject/Speaker syntax."""
+
+    if not isinstance(item, dict):
+        return ""
+    words = " ".join(str(item.get("text") or "").split()).strip()
+    if not words:
+        return ""
+    speaker = _compact(item.get("speaker") or "Speaker", 80)
+    key = speaker.casefold()
+    stable_id = speaker_ids.get(key)
+    if not stable_id:
+        stable_id = f"S{len(speaker_ids) + 1}"
+        speaker_ids[key] = stable_id
+    language = _compact(item.get("language") or "English", 30)
+    subject = subject_aliases.get(key)
+    if subject is None:
+        # Preserve advanced/unreferenced speakers through the base H3 syntax.
+        from services.h3_window_planner import _dialogue_sentence
+
+        return _dialogue_sentence(item, speaker_ids)
+    audio = audio_by_subject.get(subject)
+    delivery = _compact(item.get("delivery") or "speaks naturally", 100)
+    action = _compact(item.get("action") or "", 120)
+    if re.search(
+        r"(?i)\b(?:only\s+.+?mouth|every\s+other\s+visible\s+mouth|"
+        r"established\s+target\s+scene)\b",
+        action,
+    ):
+        action = ""
+    is_voiceover = bool(re.search(
+        r"(?i)\b(?:off[- ]camera|off[- ]screen|voice[- ]?over|unseen)\b",
+        f"{delivery} {action}",
+    ))
+    if is_voiceover:
+        lead = f"<Subject {subject}> ({stable_id}) says in an off-screen voiceover"
+    else:
+        lead = f"<Subject {subject}> ({stable_id})"
+        if action:
+            lead += f" {action.strip()} and"
+        lead += " says"
+    if audio is not None:
+        lead += f" in the voice referenced from <Audio {audio}>"
+    if delivery and delivery.casefold() not in {"speaks naturally", "says naturally"}:
+        delivery = re.sub(r"(?i)^\s*(?:speaks?|says?)\s+(?:with|in)?\s*", "", delivery)
+        if delivery:
+            lead += f" with {delivery.strip()} delivery"
+    return f"{lead}, <d>[{language}] {words}</d>."
+
+
+def _ref2va_shot_prompt_sentence(
+    shot: dict[str, Any],
+    *,
+    speaker_ids: dict[str, str],
+    subject_aliases: dict[str, int],
+    audio_by_subject: dict[int, int],
+    preamble: str = "",
+    setting: str = "",
+    opening: str = "",
+) -> str:
+    number = int(shot["shot"])
+    start = float(shot["start_seconds"])
+    end = float(shot["end_seconds"])
+    transition = _compact(shot.get("transition"), 70)
+    framing = _compact(shot.get("framing"), 130)
+    camera = _compact(shot.get("camera"), 170)
+    action = _clean_ref2va_action(
+        shot.get("action") or "",
+        setting=setting,
+        opening=opening,
+    )
+    action = _replace_ref2va_names_with_subjects(action, subject_aliases)
+    if number == 1:
+        lead = f"[Shot 1] {preamble} From {start:.2f} to {end:.2f} seconds, {framing}".strip()
+    elif transition.casefold().startswith(("continuous", "without a cut", "reframe")):
+        lead = (
+            f"[Shot {number}] At {_h3_shot_timestamp(start)}, without a cut, "
+            f"reframe to {framing}; continue through {_h3_shot_timestamp(end)}"
+        )
+    else:
+        lead = (
+            f"[Shot {number}] At {_h3_shot_timestamp(start)}, "
+            f"{transition or 'hard cut'} to {framing}; continue through "
+            f"{_h3_shot_timestamp(end)}"
+        )
+    details = "; ".join(part for part in (camera, action) if part)
+    sentence = f"{lead}; {details}." if details else f"{lead}."
+    dialogue = " ".join(
+        value
+        for value in (
+            _ref2va_dialogue_sentence(
+                line,
+                speaker_ids=speaker_ids,
+                subject_aliases=subject_aliases,
+                audio_by_subject=audio_by_subject,
+            )
+            for line in (shot.get("dialogue") or [])
+        )
+        if value
+    )
+    return f"{sentence} {dialogue}".strip()
 
 
 def _schema(clip_count: int) -> dict[str, Any]:
@@ -795,31 +1060,18 @@ def compile_h3_reference_sequence_prompts(
                 seen.add(key)
         return " ".join(kept)
 
-    # The model may echo Maestro's canonical Picture/Video/Audio contracts,
-    # sometimes twice and sometimes with subtly different wording. Treat
-    # those contracts as application-owned data: retain only the model's
-    # subject/voice identity mapping, then append the canonical relationships
-    # exactly once. This is structural rather than wording-based deduplication.
+    # Reference labels are application-owned.  Mixing model-authored wardrobe
+    # prose into this block previously produced malformed definitions such as
+    # ``black t-shirt <Subject 1> is ...``.  Use the canonical manifest by
+    # itself; visual prose belongs in the chronological shot description.
     raw_subjects = str(plan.get("subject_definitions") or "").strip()
-    subject_identity_clauses: list[str] = []
-    for clause in re.split(r"(?<=[.!?])\s+", raw_subjects):
-        match = reference_slot_pattern.search(clause)
-        if match and not re.search(r"<Subject\s+\d+>", clause, re.IGNORECASE):
-            prefix = clause[:match.start()].strip(" ;,.-")
-            if prefix:
-                subject_identity_clauses.append(prefix + ".")
-            continue
-        if clause.strip():
-            subject_identity_clauses.append(clause.strip())
-    subjects = _officialize_subject_definitions(_compact(
-        dedupe_sentences(" ".join(
-            part for part in (
-                " ".join(subject_identity_clauses),
-                dedupe_sentences(reference_relationships),
-            ) if part
-        )),
-        1100,
-    ))
+    canonical_subjects = str(reference_relationships or "").strip()
+    subjects = (
+        canonical_subjects
+        if canonical_subjects
+        else _officialize_subject_definitions(dedupe_sentences(raw_subjects))
+    )
+    subject_aliases, audio_by_subject = _ref2va_prompt_bindings(subjects)
 
     # Reference retention is likewise owned by the manifest. Keep any
     # non-reference analysis the planner supplied, then add each canonical
@@ -830,18 +1082,19 @@ def compile_h3_reference_sequence_prompts(
         for clause in re.split(r"\s*;\s*", raw_plan_retention)
         if clause.strip() and not reference_slot_pattern.search(clause)
     )
-    raw_retention = "; ".join(
-        part for part in (non_reference_retention, str(default_retention or "").strip())
-        if part
+    optional_retention = _compact(non_reference_retention, 240)
+    canonical_retention = str(default_retention or "").strip()
+    raw_retention = "\n".join(
+        part for part in (optional_retention, canonical_retention) if part
     )
     retention_clauses: list[str] = []
     seen_retention: set[str] = set()
-    for clause in re.split(r"\s*;\s*", raw_retention):
+    for clause in re.split(r"\s*(?:;|\r?\n)\s*", raw_retention):
         key = re.sub(r"[^a-z0-9<>]+", " ", clause.casefold()).strip()
         if clause and key not in seen_retention:
             retention_clauses.append(clause.strip())
             seen_retention.add(key)
-    retention = _compact("; ".join(retention_clauses), 600)
+    retention = "\n".join(retention_clauses)
     setting = _compact(plan.get("setting_continuity"), 260)
     style = _compact(plan.get("visual_style"), 220)
     ambient = _compact(plan.get("ambient_audio") or "Natural location ambience", 190)
@@ -856,7 +1109,6 @@ def compile_h3_reference_sequence_prompts(
         or source_intent.get("requested_nonverbal_vocals"),
         180,
     )
-    speaker_ids: dict[str, str] = {}
     compiled: list[dict[str, Any]] = []
 
     for geometry, item in zip(clips, planned_clips):
@@ -866,10 +1118,49 @@ def compile_h3_reference_sequence_prompts(
         shots = _normalized_window_shots(item, duration)
         if not shots:
             raise ValueError(f"H3 Omni sequence clip {geometry['index']} has no shots.")
+        # MiniMax speaker IDs are scoped to one generated clip/window and are
+        # assigned by first vocal-event order. Subject IDs remain stable across
+        # the whole project. Reusing the semantic ledger's global S-labels made
+        # a later window's sole speaker (for example Subject 3) collide with the
+        # character who happened to be S1 in the first window.
+        speaker_ids: dict[str, str] = {}
+        for shot in shots:
+            local_dialogue: list[Any] = []
+            for raw_line in shot.get("dialogue") or []:
+                if not isinstance(raw_line, dict):
+                    local_dialogue.append(raw_line)
+                    continue
+                line = dict(raw_line)
+                speaker = _compact(line.get("speaker") or "Speaker", 80)
+                key = speaker.casefold()
+                if key not in speaker_ids:
+                    speaker_ids[key] = f"S{len(speaker_ids) + 1}"
+                line["speaker_id"] = speaker_ids[key]
+                local_dialogue.append(line)
+            shot["dialogue"] = local_dialogue
+        subject_speakers = {
+            subject_aliases[alias]: speaker
+            for alias, speaker in speaker_ids.items()
+            if alias in subject_aliases
+        }
+        window_subjects = _ref2va_bind_audio_speakers(
+            subjects,
+            subject_speakers,
+        )
         coverage = _compact(item.get("coverage") or "cinematic editorial coverage", 90)
         pacing = _compact(item.get("pacing") or "natural real-time pacing", 180)
-        opening = _compact(item.get("opening_state") or "The scene begins in a clear composition", 210)
-        closing = _compact(item.get("closing_state") or "The beat settles in a clear final composition", 210)
+        opening = _compact(
+            _clean_ref2va_state(
+                item.get("opening_state") or "The scene begins in a clear composition"
+            ),
+            210,
+        )
+        closing = _compact(
+            _clean_ref2va_state(
+                item.get("closing_state") or "The beat settles in a clear final composition"
+            ),
+            210,
+        )
         pacing_sentence = f"Coverage is {coverage}; pacing is {pacing}."
         if "slow motion" not in pacing.casefold():
             pacing_sentence += " Slow motion occurs only when explicitly requested."
@@ -878,16 +1169,21 @@ def compile_h3_reference_sequence_prompts(
             f"Opening state: {opening}.",
             pacing_sentence,
         ) if part)
+        preamble = _replace_ref2va_names_with_subjects(preamble, subject_aliases)
         shot_timeline = " ".join(
-            _shot_prompt_sentence(
+            _ref2va_shot_prompt_sentence(
                 shot,
                 speaker_ids=speaker_ids,
+                subject_aliases=subject_aliases,
+                audio_by_subject=audio_by_subject,
                 preamble=preamble if shot_index == 0 else "",
+                setting=setting,
+                opening=opening,
             )
             for shot_index, shot in enumerate(shots)
         )
         detailed = f"{_ref2va_style_opening(style)} {shot_timeline}".strip()
-        detailed = _label_ref2va_subjects_in_description(detailed, subjects)
+        detailed = _replace_ref2va_names_with_subjects(detailed, subject_aliases)
         has_dialogue = any(
             isinstance(line, dict) and str(line.get("text") or "").strip()
             for shot in shots for line in (shot.get("dialogue") or [])
@@ -912,15 +1208,15 @@ def compile_h3_reference_sequence_prompts(
             else ""
         )
         nonverbal_clause = f" {local_nonverbal}." if local_nonverbal else ""
+        if has_dialogue:
+            detailed += " The tagged dialogue is performed once in the listed order."
+        elif not local_nonverbal:
+            detailed += " The characters remain silent during this clip."
+        detailed += nonverbal_clause
         detailed += (
-            " Only the tagged words are spoken once in order. Outside those lines, "
-            "there are no additional spoken words, muttering, or gibberish."
-            + nonverbal_clause
-            if has_dialogue
-            else " No spoken words, muttering, or gibberish occur in this clip."
-            + nonverbal_clause
+            " The final composition is "
+            f"{_replace_ref2va_names_with_subjects(closing, subject_aliases)}."
         )
-        detailed += f" The final composition is {closing}."
         unique_effects: list[str] = []
         seen_effects: set[str] = set()
         for shot in shots:
@@ -938,11 +1234,19 @@ def compile_h3_reference_sequence_prompts(
             ]
         effects = "; ".join(unique_effects)
         soundscape = ambient + (f". Synchronized effects: {effects}" if effects else "")
-        summary = _compact(item.get("summary") or item.get("title") or "The requested story advances", 240)
+        summary = _clean_ref2va_action(
+            item.get("summary") or item.get("title") or "The requested story advances",
+            setting=setting,
+            opening=opening,
+        ) or _compact(item.get("title") or "The requested story advances", 180)
+        summary = _compact(
+            _replace_ref2va_names_with_subjects(summary, subject_aliases),
+            240,
+        )
         if not summary.startswith("["):
             summary = f"[{task_types}] {summary}"
         prompt = "\n\n".join([
-            f"subject_definitions: {subjects}",
+            f"subject_definitions: {window_subjects}",
             f"summary: {summary}",
             f"retention_analysis: {retention}",
             f"detailed_description: {detailed}",
@@ -1026,7 +1330,7 @@ def plan_h3_reference_sequence(
     raw_prompt = str(prompt or "").strip()
     prompt = recover_h3_plain_story(raw_prompt)
     source_intent = extract_h3_source_intent(prompt)
-    if prompt != raw_prompt:
+    if prompt != raw_prompt and "subject_definitions:" in raw_prompt.casefold():
         print(
             "[MiniMax H3 Omni] Recovered the original story from an existing "
             "single-clip Context-IR prompt before sequence planning."

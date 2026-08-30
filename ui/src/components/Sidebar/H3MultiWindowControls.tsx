@@ -24,15 +24,24 @@ export function H3MultiWindowControls() {
     : isOmni
       ? params.minimax_h3_reference_sequence === true
       : params.minimax_h3_multi_window === true
+  const explicitPromptMode = isLtx
+    ? params.ltx_window_prompt_mode
+    : params.minimax_h3_sequence_prompt_mode
   const promptMode = isLtx
-    ? (params.ltx_window_prompt_mode === 'manual' ? 'manual' : 'auto')
+    ? (explicitPromptMode === 'auto' || explicitPromptMode === 'manual'
+        ? explicitPromptMode
+        : enabled ? 'auto' : 'manual')
     : isOmni
-      ? (params.minimax_h3_sequence_prompt_mode === 'manual' ? 'manual' : 'auto')
-      : params.minimax_h3_sequence_prompt_mode === 'manual'
+      ? (explicitPromptMode === 'auto' || explicitPromptMode === 'manual'
+          ? explicitPromptMode
+          : enabled ? 'auto' : 'manual')
+      : explicitPromptMode === 'manual'
         ? 'manual'
-        : params.minimax_h3_sequence_prompt_mode === 'auto'
+        : explicitPromptMode === 'auto'
           ? 'auto'
-          : (params.minimax_h3_window_storyboard === false ? 'manual' : 'auto')
+          : enabled
+            ? (params.minimax_h3_window_storyboard === false ? 'manual' : 'auto')
+            : 'manual'
 
   const setEnabled = (checked: boolean) => {
     if (isLtx) {
@@ -84,31 +93,37 @@ export function H3MultiWindowControls() {
         </span>
       </label>
 
-      {enabled && (
-        <>
-          <label className="flex items-center justify-between gap-2 text-[9px] text-text-muted">
-            <span className="flex items-center gap-1">
-              Window prompts
-              <span
-                title="Auto plan expands one overall idea with Maestro's LLM. Manual uses each non-empty line in the prompt box for the matching window."
-                className="text-text-muted cursor-help"
-              >
-                <Info size={10} />
-              </span>
-            </span>
-            <select
-              value={promptMode}
-              onChange={event => setPromptMode(
-                event.target.value === 'manual' ? 'manual' : 'auto',
-              )}
-              className="min-w-[138px] rounded border border-border bg-bg-secondary px-2 py-1 text-[9px] text-text-secondary focus:outline-none focus:border-accent-blue"
-            >
-              <option value="auto">Auto plan (AI)</option>
-              <option value="manual">Manual - one per line</option>
-            </select>
-          </label>
+      <label className="flex items-center justify-between gap-2 text-[9px] text-text-muted">
+        <span className="flex items-center gap-1">
+          {enabled ? 'Window prompts' : 'Prompt writing'}
+          <span
+            title={enabled
+              ? "Auto plan expands one overall idea with Maestro's LLM. Manual uses each non-empty line in the prompt box for the matching window."
+              : "Auto enhance runs Maestro's model-aware prompt enhancer when Generate or Add to Queue is pressed. Manual sends the visible prompt as written."}
+            className="text-text-muted cursor-help"
+          >
+            <Info size={10} />
+          </span>
+        </span>
+        <select
+          value={promptMode}
+          onChange={event => setPromptMode(
+            event.target.value === 'manual' ? 'manual' : 'auto',
+          )}
+          className="min-w-[138px] rounded border border-border bg-bg-secondary px-2 py-1 text-[9px] text-text-secondary focus:outline-none focus:border-accent-blue"
+        >
+          <option value="auto">{enabled ? 'Auto plan (AI)' : 'Auto enhance (AI)'}</option>
+          <option value="manual">{enabled ? 'Manual - one per line' : 'Manual'}</option>
+        </select>
+      </label>
 
-          {isOmni && (
+      {!enabled && promptMode === 'auto' && (
+        <p className="text-[8px] leading-relaxed text-text-muted">
+          Maestro enhances this prompt automatically. Queued prompts wait for their own turn so the LLM never competes with an active generation. Use the sparkle button first only when you want to review the result.
+        </p>
+      )}
+
+      {enabled && isOmni && (
             <label className="flex items-start gap-2 text-[9px] text-text-muted cursor-pointer">
               <input
                 type="checkbox"
@@ -123,8 +138,6 @@ export function H3MultiWindowControls() {
                 </span>
               </span>
             </label>
-          )}
-        </>
       )}
     </div>
   )

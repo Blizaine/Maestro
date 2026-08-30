@@ -1,6 +1,12 @@
 import { ChevronDown, Check, Plus } from 'lucide-react'
 import { useState, useRef, useEffect } from 'react'
-import { useStore, getFamiliesForMode, getModelsForFamily, modelSupportsImageWorkflow } from '../../stores/useStore'
+import {
+  useStore,
+  getFamiliesForMode,
+  getModelsForFamily,
+  modelSupportsImageWorkflow,
+  modelSupportsStudioVideoMediaIntent,
+} from '../../stores/useStore'
 import { InfoTooltip } from './InfoTooltip'
 
 export function ModelSelector() {
@@ -10,8 +16,34 @@ export function ModelSelector() {
   const generationMode = useStore(s => s.generationMode)
   const editSubMode = useStore(s => s.editSubMode)
   const imageWorkflow = useStore(s => s.studioImageWorkflow)
+  const studioVideoWorkflow = useStore(s => s.studioVideoWorkflow)
+  const videoImageMode = useStore(s => Number(s.params.image_mode || 0))
+  const hasFrameGuidance = useStore(s => Boolean(
+    s.startImage
+    || s.endImage
+    || s.params.image_start
+    || s.params.image_end
+    || s.imageRefs.length
+    || (
+      Array.isArray(s.params.image_refs)
+      && s.params.image_refs.length
+      && s.params.frames_positions
+    ),
+  ))
+  const hasOmniReferences = useStore(s => (
+    s.params.minimax_h3_references?.some(reference => !(
+      reference.type === 'audio' && reference.audio_intent === 'drive'
+    )) === true
+  ))
+  const hasAudioDrive = useStore(s => Boolean(
+    s.params.audio_guide
+    || s.params.minimax_h3_references?.some(reference => (
+      reference.type === 'audio' && reference.audio_intent === 'drive'
+    )),
+  ))
   const currentModelType = useStore(s => s.params.model_type)
   const selectModel = useStore(s => s.selectModel)
+  const selectStudioVideoModel = useStore(s => s.selectStudioVideoModel)
   const openModelVisibility = useStore(s => s.openModelVisibility)
   // Mature Mode gate: models with nsfw_only flag are hidden from the
   // selector unless servicesConfig.nsfw_mode is enabled. Backend always
@@ -37,6 +69,24 @@ export function ModelSelector() {
   const audioSubMode = useStore(s => s.audioSubMode)
 
   const currentModel = models.find(m => m.model_type === currentModelType)
+  const isPrimaryStudioCreate = generationMode === 'video'
+    && studioVideoWorkflow === 'frames'
+    && videoImageMode === 0
+  const studioMediaIntent = { hasFrameGuidance, hasOmniReferences, hasAudioDrive }
+  const currentModelCompatible = !isPrimaryStudioCreate
+    || modelSupportsStudioVideoMediaIntent(currentModel, studioMediaIntent)
+  const mediaConflict = hasFrameGuidance && hasOmniReferences
+  const compatibilityDescription = mediaConflict
+    ? 'Fixed start/end/keyframes cannot be combined with Omni references. Remove one of those input roles.'
+    : hasOmniReferences
+      ? 'Add or enable an H3 Omni model for these references or characters.'
+      : hasFrameGuidance && hasAudioDrive
+        ? 'LTX is required when fixed frames and an exact audio timeline are both active.'
+        : hasFrameGuidance
+          ? 'Add or enable an H3 First / Last or LTX model for these frame inputs.'
+          : hasAudioDrive
+            ? 'Add or enable an H3 Omni or LTX model for this audio timeline.'
+            : 'Add or enable an H3 First / Last or LTX model for text generation.'
   const effectiveSubMode = generationMode === 'avatar' ? editSubMode : undefined
   const effectiveAudioSubMode = generationMode === 'audio' ? audioSubMode : undefined
   const modeFamilies = getFamiliesForMode(generationMode, families, effectiveSubMode, effectiveAudioSubMode)
@@ -44,8 +94,13 @@ export function ModelSelector() {
   // Build grouped model list, filtered by:
   //   1. enabledModels (Settings → System → Model Visibility),
   //   2. nsfw_only gate (Mature Mode must be on for those to appear).
-  const workflowFilter = (model: typeof models[number]) => generationMode !== 'image'
-    || modelSupportsImageWorkflow(model, imageWorkflow)
+  const workflowFilter = (model: typeof models[number]) => (
+    (generationMode !== 'image' || modelSupportsImageWorkflow(model, imageWorkflow))
+    && (
+      !isPrimaryStudioCreate
+      || modelSupportsStudioVideoMediaIntent(model, studioMediaIntent)
+    )
+  )
   const groups = modeFamilies.map(family => ({
     family,
     models: getModelsForFamily(family.id, models, generationMode, effectiveSubMode)
@@ -68,11 +123,13 @@ export function ModelSelector() {
       {/* Trigger button */}
       <button
         onClick={() => setOpen(!open)}
-        title={currentModel?.selector_help || currentModel?.description}
+        title={currentModelCompatible
+          ? currentModel?.selector_help || currentModel?.description
+          : compatibilityDescription}
         className="w-full flex items-center gap-1.5 bg-bg-tertiary border border-border rounded-lg px-2.5 py-2 text-left hover:border-border-light transition-colors"
       >
         <span className="flex-1 min-w-0 truncate text-xs text-text-primary">
-          {currentModel?.name ?? 'Select model'}
+          {currentModelCompatible ? (currentModel?.name ?? 'Select model') : 'No compatible model'}
         </span>
         <ChevronDown size={14} className={`shrink-0 text-text-muted transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
@@ -93,6 +150,11 @@ export function ModelSelector() {
             </button>
           )}
           <div className="max-h-[360px] overflow-y-auto py-1">
+            {groups.length === 0 && (
+              <p className="px-3 py-3 text-[10px] leading-relaxed text-text-muted">
+                {compatibilityDescription}
+              </p>
+            )}
             {groups.map(({ family, models: famModels }) => (
               <div key={family.id}>
                 {/* Family header */}
@@ -114,7 +176,12 @@ export function ModelSelector() {
                     >
                       <button
                         onClick={() => {
-                          selectModel(model.model_type)
+                          if (
+                            generationMode === 'video'
+                            && studioVideoWorkflow === 'frames'
+                            && videoImageMode === 0
+                          ) selectStudioVideoModel(model.model_type)
+                          else selectModel(model.model_type)
                           setOpen(false)
                         }}
                         className="min-w-0 flex-1 px-3 py-1.5 flex items-center gap-2 text-left"

@@ -45,6 +45,7 @@ export function Sidebar() {
   const sidebarMode = useStore(s => s.sidebarMode)
   const editSubMode = useStore(s => s.editSubMode)
   const modelType = useStore(s => s.params.model_type)
+  const selectedModel = useStore(s => s.models.find(model => model.model_type === s.params.model_type))
   const openLoraBrowser = useStore(s => s.setLoraBrowserOpen)
   const isMobile = useIsMobile()
 
@@ -72,7 +73,12 @@ export function Sidebar() {
   const isOutpaint = isEdit && editSubMode === 'outpaint'
   const isEditAnything = isEdit && editSubMode === 'edit_anything'
   const isRecast = isEdit && editSubMode === 'recast'
-  const isOmniReference = isVideo && modelOptions?.omni_reference === true
+  const isOmniReference = isVideo && Boolean(
+    selectedModel?.omni_reference
+    || selectedModel?.director?.video_strategy === 'omni_reference'
+    || selectedModel?.model_type.toLowerCase().startsWith('minimax_h3_ref2va'),
+  )
+  const isPrimaryCreate = isVideo && Number(imageMode) === 0
   const isMultiClip = isVideo && !isOmniReference && imageMode === 2
   const isContinue = isVideo && !isOmniReference && imageMode === 3
   const isBlend = isVideo && !isOmniReference && imageMode === 4
@@ -159,7 +165,7 @@ export function Sidebar() {
         {/* Frames (image_mode 0) AND Extend (image_mode 3) both use the unified
             InputsPanel. In Extend mode its first tile is the source video to
             continue from; otherwise it's the start frame. */}
-        {isVideo && !isOmniReference && !isMultiClip && !isBlend && (
+        {isVideo && !isMultiClip && !isBlend && (isPrimaryCreate || !isOmniReference) && (
           <div>
             {isI2vOnly && !isContinue && (
               <div className="text-[10px] text-indicator-warning bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-1.5 mb-2">
@@ -169,7 +175,7 @@ export function Sidebar() {
             <InputsPanel />
           </div>
         )}
-        {isOmniReference && <OmniReferenceSection />}
+        {(isPrimaryCreate || isOmniReference) && <OmniReferenceSection />}
         {isVideo && <MiniMaxH3Optimizations />}
         {isVideo && <H3MultiWindowControls />}
         {isBlend && <BlendControls />}

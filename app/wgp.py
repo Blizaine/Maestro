@@ -7963,11 +7963,29 @@ def generate_video(
                 f"[MiniMax H3] Using {len(prompts)} explicit "
                 "window-local prompts."
             )
-    elif multi_prompts_gen_type == 2:
-        prompts = [prompt]
     else:
-        prompts = prompt.split("\n")
-        prompts = [part.strip() for part in prompts if len(part.strip())>0]
+        # Ref2VA's enhanced prompt is one Context-IR document. Its canonical
+        # section headers are separated by newlines, but those lines are not
+        # rolling-window prompts. Keep a final engine-level guard so cached
+        # clients, deferred enhancement, and direct callers cannot feed H3
+        # only the subject-definition fragment.
+        _h3_omni_context_ir = (
+            bool(model_def.get("omni_reference"))
+            and not h3_window_prompts
+            and multi_prompts_gen_type in (None, 0, 1, "0", "1")
+            and "subject_definitions:" in str(prompt)
+            and "detailed_description:" in str(prompt)
+        )
+        if multi_prompts_gen_type == 2 or _h3_omni_context_ir:
+            prompts = [prompt]
+            if _h3_omni_context_ir:
+                print(
+                    "[MiniMax H3 Ref2VA] Preserving one structured Context-IR "
+                    "prompt instead of splitting its sections."
+                )
+        else:
+            prompts = prompt.split("\n")
+            prompts = [part.strip() for part in prompts if len(part.strip())>0]
     if len(prompts) > 1:
         print(f"[Prompt Split] {len(prompts)} prompts from multi-line input (multi_prompts_gen_type={multi_prompts_gen_type})")
     parsed_keep_frames_video_source= max_source_video_frames if len(keep_frames_video_source) ==0 else int(keep_frames_video_source) 

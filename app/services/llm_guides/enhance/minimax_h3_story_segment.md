@@ -6,6 +6,8 @@ LOCAL SEGMENT CONTRACT
 
 - Depict every immutable chronological event exactly once and in the supplied order. Maestro owns event mapping; do not output bookkeeping IDs.
 - Design natural visible or off-camera performance around every supplied dialogue line. Maestro inserts the exact locked words after planning; do not reproduce dialogue text or output dialogue IDs.
+- Treat each supplied event that owns dialogue as one inseparable audiovisual phase: the named speaker's visible/off-camera performance, the camera angle that shows or intentionally hides that speaker, and the eventual locked line must all occur in that same shot. Never describe that character speaking in a different shot.
+- Dialogue is application-owned. In shot action and sound_effects, do not write that anyone speaks, says, replies, responds, asks, or delivers a voice line; describe only visible performance, reactions, ambience, and nonverbal physical sound. Maestro adds the exact vocal event to the correct shot after planning.
 - Never repeat, recap, preview, or complete a beat assigned to another segment.
 - The shot clock is local. It begins at exactly 0.000 seconds, has no gaps or overlaps, and ends exactly at the supplied duration.
 - Use one to four useful shots. Do not create a tiny tail shot. Every shot must have visible, specific action.

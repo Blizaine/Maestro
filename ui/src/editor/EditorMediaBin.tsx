@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   AudioLines,
   Clapperboard,
@@ -14,17 +14,70 @@ import {
   Upload,
 } from 'lucide-react'
 import type { EditorAsset, EditorMediaType, PipelineListItem } from '../types'
+import { useEditorMediaPreview } from './editorMediaPreview'
 import { useEditorStore } from './useEditorStore'
 
 type Filter = 'all' | 'favorites' | 'director' | EditorMediaType
 const MEDIA_BATCH_SIZE = 80
 
-function MediaPreview({ asset }: { asset: EditorAsset }) {
+function VideoThumbnail({ asset, workspace }: { asset: EditorAsset; workspace: string }) {
+  const preview = useEditorMediaPreview(asset, workspace)
+  if (preview.data?.thumbnail_url) {
+    return (
+      <span
+        className="block h-full w-full bg-cover bg-left bg-no-repeat"
+        style={{
+          backgroundImage: `url(${preview.data.thumbnail_url})`,
+          // The cached thumbnail is an eight-frame horizontal contact sheet.
+          // Show its first frame without creating another video decoder.
+          backgroundSize: '800% 100%',
+        }}
+      />
+    )
+  }
+  return (
+    <span className="grid h-full w-full place-items-center bg-gradient-to-br from-accent-blue/15 to-bg-tertiary">
+      {preview.loading
+        ? <Loader2 size={15} className="animate-spin text-text-muted" />
+        : <Film size={16} className="text-text-muted" />}
+    </span>
+  )
+}
+
+function LazyVideoThumbnail({ asset, workspace }: { asset: EditorAsset; workspace: string }) {
+  const rootRef = useRef<HTMLSpanElement>(null)
+  const [visible, setVisible] = useState(false)
+  useEffect(() => {
+    const root = rootRef.current
+    if (!root || visible) return
+    if (typeof IntersectionObserver === 'undefined') {
+      setVisible(true)
+      return
+    }
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) {
+        setVisible(true)
+        observer.disconnect()
+      }
+    }, { rootMargin: '160px' })
+    observer.observe(root)
+    return () => observer.disconnect()
+  }, [visible])
+  return (
+    <span ref={rootRef} className="block h-full w-full">
+      {visible
+        ? <VideoThumbnail asset={asset} workspace={workspace} />
+        : <span className="grid h-full w-full place-items-center bg-bg-tertiary"><Film size={16} className="text-text-muted/70" /></span>}
+    </span>
+  )
+}
+
+function MediaPreview({ asset, workspace }: { asset: EditorAsset; workspace: string }) {
   if (asset.type === 'image') {
     return <img src={asset.url} alt="" className="h-full w-full object-cover" loading="lazy" />
   }
   if (asset.type === 'video') {
-    return <video src={asset.url} className="h-full w-full object-cover" muted preload="metadata" />
+    return <LazyVideoThumbnail asset={asset} workspace={workspace} />
   }
   return (
     <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-accent-blue/20 to-accent-cool-to/10">
@@ -66,6 +119,7 @@ export function EditorMediaBin({ compact = false }: { compact?: boolean }) {
   const [visibleLimit, setVisibleLimit] = useState(MEDIA_BATCH_SIZE)
   const [uploading, setUploading] = useState(false)
   const library = useEditorStore(state => state.library)
+  const projectWorkspace = useEditorStore(state => state.project?.workspace || 'default')
   const libraryWorkspaces = useEditorStore(state => state.libraryWorkspaces)
   const directorRuns = useEditorStore(state => state.directorRuns)
   const directorImportingId = useEditorStore(state => state.directorImportingId)
@@ -253,7 +307,7 @@ export function EditorMediaBin({ compact = false }: { compact?: boolean }) {
             className={`group overflow-hidden rounded-xl border border-border bg-bg-tertiary transition-all hover:border-border-light hover:bg-bg-hover ${compact ? 'shadow-sm' : 'flex items-center gap-2 p-1.5'}`}
           >
             <div className={`relative shrink-0 overflow-hidden bg-media-canvas ${compact ? 'aspect-video w-full' : 'h-12 w-16 rounded-md'}`}>
-              <MediaPreview asset={asset} />
+              <MediaPreview asset={asset} workspace={projectWorkspace} />
               <span className="absolute bottom-1 left-1 max-w-[80%] truncate rounded bg-black/65 px-1 py-0.5 text-[7px] text-white/80" title={asset.workspace || asset.origin}>
                 {asset.workspace === '__uploads__' ? 'Uploads' : asset.workspace || asset.origin}
               </span>

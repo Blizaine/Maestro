@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, StudioVideoWorkflow, StudioImageWorkflow, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, DirectorShotImageGuidance, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineClipState, PipelineRepairState, SavedPipelineState, DirectorQueueState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping, H3WindowPlan, MiniMaxH3Reference, AppMode } from '../types'
+import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, StudioVideoWorkflow, StudioVideoCreateRoute, StudioVideoEffectiveCreateRoute, StudioImageWorkflow, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, DirectorShotImageGuidance, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineClipState, PipelineRepairState, SavedPipelineState, DirectorQueueState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping, H3WindowPlan, MiniMaxH3Reference, AppMode } from '../types'
 import * as api from '../api/client'
 import { applyThemePrefs, getStoredPrefs, type FamilyId, type ThemeMode, type ThemePrefs } from '../lib/theme'
 import {
@@ -32,6 +32,34 @@ let _dashboardPipelineLoadToken = 0
 let _dashboardPipelineListLoadToken = 0
 let _h3WindowOverridesHydrated = false
 let _h3WindowOverrideSaveTask: Promise<void> = Promise.resolve()
+const STUDIO_VIDEO_CREATE_ROUTE_KEY = 'maestro_studio_video_create_route_v1'
+
+type StudioVideoRoutePreferences = {
+  route: StudioVideoCreateRoute
+  models: Partial<Record<StudioVideoEffectiveCreateRoute, string>>
+}
+
+function _loadStudioVideoRoutePreferences(): StudioVideoRoutePreferences {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(STUDIO_VIDEO_CREATE_ROUTE_KEY) || '{}')
+    return {
+      // Creation-path controls were removed in v2. Media roles always own
+      // routing now, so ignore any pinned route saved by an older UI.
+      route: 'auto',
+      models: parsed.models && typeof parsed.models === 'object' ? parsed.models : {},
+    }
+  } catch {
+    return { route: 'auto', models: {} }
+  }
+}
+
+function _saveStudioVideoRoutePreferences(preferences: StudioVideoRoutePreferences) {
+  try {
+    localStorage.setItem(STUDIO_VIDEO_CREATE_ROUTE_KEY, JSON.stringify(preferences))
+  } catch { /* private browsing or blocked storage */ }
+}
+
+const _initialStudioVideoRoutePreferences = _loadStudioVideoRoutePreferences()
 
 function _adaptiveEtaJobFields(status: api.ApiJobStatus): Partial<GenerationJob> {
   return {
@@ -118,6 +146,76 @@ function _stringArray(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === 'string' && item.length > 0)
     : []
+}
+
+function _omniEnhanceInventory(references: MiniMaxH3Reference[]): {
+  imagePaths: string[]
+  referenceContext?: string
+} {
+  let pictureIndex = 0
+  let videoIndex = 0
+  let audioIndex = 0
+  const imagePaths: string[] = []
+  const labelLines: string[] = []
+  const savedCharacterMedia = new Map<string, { name: string; labels: string[] }>()
+  const bindSavedCharacter = (reference: MiniMaxH3Reference, label: string) => {
+    if (!reference.library_character_id) return
+    const name = (reference.character_name || reference.role || 'Saved character').trim()
+    const binding = savedCharacterMedia.get(reference.library_character_id) ?? { name, labels: [] }
+    binding.labels.push(label)
+    savedCharacterMedia.set(reference.library_character_id, binding)
+  }
+
+  for (const reference of references) {
+    const note = (reference.role || reference.filename || 'reference').trim()
+    if (reference.type === 'audio') {
+      const intent = reference.audio_intent ?? 'voice'
+      if (intent === 'drive') {
+        labelLines.push(`Exact target soundtrack: ${note}; intent=AUDIO REUSE / PERFORMANCE DRIVER; retention=fully_preserved; preserve its waveform and audible timeline exactly and synchronize visible action and lip movement to it; this is target conditioning rather than a numbered Omni audio reference`)
+      } else if (intent === 'style') {
+        const label = `<Audio ${++audioIndex}>`
+        labelLines.push(`${label}: ${note}; intent=AUDIO REFERENCE; retention=weak_reference; borrow only rhythm/style/texture and do not copy the source signal or words`)
+      } else {
+        const label = `<Audio ${++audioIndex}>`
+        labelLines.push(`${label}: ${note}; intent=VOICE REFERENCE; retention=reference; use vocal identity/timbre/emotion/delivery for new scripted dialogue without copying source words, timing, waveform, room tone, reverberation, echo, background noise, microphone coloration, or source spatial acoustics; render the voice acoustically inside the target environment`)
+        bindSavedCharacter(reference, label)
+      }
+    } else if (reference.type === 'image') {
+      const label = `<Picture ${++pictureIndex}>`
+      labelLines.push(`${label}: visual identity/appearance reference for ${note}; retention=reference for identity only; do not reproduce its background, framing, composition, or pose`)
+      bindSavedCharacter(reference, label)
+      if (reference.path) imagePaths.push(reference.path)
+    } else {
+      const nextVideoIndex = videoIndex + 1
+      if ((reference.has_audio || reference.audio_path) && reference.include_audio !== false) {
+        labelLines.push(`<Audio ${++audioIndex}>: soundtrack paired with <Video ${nextVideoIndex}>; intent=AUDIO REUSE / PERFORMANCE DRIVER; retention=partially_copy; preserve its audible timeline and synchronize action to it`)
+      }
+      videoIndex = nextVideoIndex
+      const label = `<Video ${videoIndex}>`
+      if (reference.video_intent === 'character') {
+        labelLines.push(`${label}: identity, appearance, and characteristic-motion evidence for ${note}; compile it into that character's Subject; reject its source background, framing, camera, edit rhythm, opening frame, and action`)
+        bindSavedCharacter(reference, label)
+      } else if (reference.video_intent === 'scene') {
+        labelLines.push(`${label}: environment, lighting, and scene-continuity reference for ${note}; do not copy incidental people as target identities`)
+      } else {
+        labelLines.push(`${label}: motion/camera/scene/timing reference for ${note}`)
+      }
+    }
+  }
+
+  const savedCharacterLines = Array.from(savedCharacterMedia.values()).map((binding, index) => {
+    const subjectLabel = `<Subject ${index + 1}>`
+    return (
+      `Saved character "${binding.name}" is exactly ${subjectLabel}: `
+      + `${binding.labels.join(' + ')} all define this one stable character. `
+      + `Whenever the user names ${binding.name}, use ${subjectLabel}. Subject numbering follows `
+      + `this reference inventory, while speaker IDs are assigned independently in first-vocal-event order. `
+      + `Bind every listed voice Audio to this Subject and its event-ordered speaker ID. Do not create another Subject for `
+      + 'a repeated media label, do not renumber this mapping, and do not emit an @ token.'
+    )
+  })
+  const referenceContext = [...savedCharacterLines, ...labelLines].join('\n')
+  return { imagePaths, referenceContext: referenceContext || undefined }
 }
 
 function _directorLoraState(value: unknown) {
@@ -1020,6 +1118,22 @@ interface AppState {
   studioVideoWorkflow: StudioVideoWorkflow
   /** Route a Studio workflow to its legacy video/avatar/tools engine. */
   setStudioVideoWorkflow: (workflow: StudioVideoWorkflow) => void
+  /** Compatibility field for saved state; Studio Generate is always automatic. */
+  studioVideoCreateRoute: StudioVideoCreateRoute
+  studioVideoEffectiveCreateRoute: StudioVideoEffectiveCreateRoute
+  studioVideoModelPerCreateRoute: Partial<Record<StudioVideoEffectiveCreateRoute, string>>
+  studioVideoRouteNotice: {
+    message: string
+    previousRoute: StudioVideoEffectiveCreateRoute
+    previousModel: string
+    undoable?: boolean
+  } | null
+  setStudioVideoCreateRoute: (route: StudioVideoCreateRoute) => void
+  reconcileStudioVideoCreateRoute: (reason?: string) => void
+  undoStudioVideoRoute: () => void
+  clearStudioVideoRouteNotice: () => void
+  /** Remember an explicit compatible model without changing media intent. */
+  selectStudioVideoModel: (modelType: string) => void
   /** Last workflow selected inside Studio's Image tab. */
   studioImageWorkflow: StudioImageWorkflow
   /** Route an Image workflow to native generation or standalone upscale. */
@@ -2396,10 +2510,246 @@ function _directorUsesGeneratedShotImages(state: AppState): boolean {
   )
 }
 
+function _isOmniVideoModel(model: ModelDef | undefined): boolean {
+  return Boolean(
+    model?.omni_reference
+    || model?.director?.video_strategy === 'omni_reference'
+    || model?.model_type.toLowerCase().startsWith('minimax_h3_ref2va'),
+  )
+}
+
+function _isStudioLtxVideoModel(model: ModelDef | undefined): boolean {
+  const family = String(model?.family || '').toLowerCase()
+  const architecture = String(model?.architecture || '').toLowerCase()
+  return family === 'ltx2' || family === 'ltx25' || architecture.startsWith('ltx2')
+}
+
+function _isH3FirstLastVideoModel(model: ModelDef | undefined): boolean {
+  const architecture = String(model?.architecture || '').toLowerCase()
+  return architecture.startsWith('minimax_h3') && !_isOmniVideoModel(model)
+}
+
+export interface StudioVideoMediaIntent {
+  hasFrameGuidance: boolean
+  hasOmniReferences: boolean
+  hasAudioDrive: boolean
+}
+
+/**
+ * Primary Studio Generate intentionally exposes only the engines that can
+ * honor every assigned media role. Model metadata's legacy is_i2v/is_t2v
+ * flags are not useful for LTX-2 (both are false), so identify the native
+ * LTX and H3 architectures directly.
+ */
+export function modelSupportsStudioVideoMediaIntent(
+  model: ModelDef | undefined,
+  intent: StudioVideoMediaIntent,
+): boolean {
+  if (!model) return false
+  const isOmni = _isOmniVideoModel(model)
+  const isLtx = _isStudioLtxVideoModel(model)
+  const isFirstLast = _isH3FirstLastVideoModel(model)
+  if (!isOmni && !isLtx && !isFirstLast) return false
+
+  // Fixed frames and flexible Omni references are different conditioning
+  // contracts. Never silently discard one to make the other model fit.
+  if (intent.hasFrameGuidance && intent.hasOmniReferences) return false
+  if (intent.hasOmniReferences) return isOmni
+  if (intent.hasFrameGuidance && intent.hasAudioDrive) return isLtx
+  if (intent.hasFrameGuidance) return isFirstLast || isLtx
+  if (intent.hasAudioDrive) return isOmni || isLtx
+  return isFirstLast || isLtx
+}
+
+function _pairedH3CreateModel(
+  modelType: string,
+  route: StudioVideoEffectiveCreateRoute,
+): string | null {
+  const pairs: Record<string, { firstLast: string; omni: string }> = {
+    minimax_h3: { firstLast: 'minimax_h3', omni: 'minimax_h3_ref2va' },
+    minimax_h3_ref2va: { firstLast: 'minimax_h3', omni: 'minimax_h3_ref2va' },
+    minimax_h3_full: { firstLast: 'minimax_h3_full', omni: 'minimax_h3_ref2va_full' },
+    minimax_h3_ref2va_full: { firstLast: 'minimax_h3_full', omni: 'minimax_h3_ref2va_full' },
+  }
+  const pair = pairs[modelType]
+  if (!pair) return null
+  return route === 'omni' || route === 'audio' ? pair.omni : pair.firstLast
+}
+
+function _resolveStudioCreateModel(
+  state: AppState,
+  inputState: StudioVideoMediaIntent & { desired: StudioVideoEffectiveCreateRoute },
+): string {
+  const route = inputState.desired
+  const currentType = String(state.params.model_type || state.selectedModelPerMode.video || '')
+  const current = state.models.find(model => model.model_type === currentType)
+  if (modelSupportsStudioVideoMediaIntent(current, inputState)) return currentType
+
+  const rememberedType = state.studioVideoModelPerCreateRoute[route]
+  const remembered = state.models.find(model => model.model_type === rememberedType)
+  if (
+    rememberedType
+    && state.enabledModels.has(rememberedType)
+    && modelSupportsStudioVideoMediaIntent(remembered, inputState)
+  ) return rememberedType
+
+  const pairedType = _pairedH3CreateModel(currentType, route)
+  const paired = state.models.find(model => model.model_type === pairedType)
+  if (
+    pairedType
+    && state.enabledModels.has(pairedType)
+    && modelSupportsStudioVideoMediaIntent(paired, inputState)
+  ) return pairedType
+
+  const candidates = state.models.filter(model => (
+    state.enabledModels.has(model.model_type)
+    && modelSupportsStudioVideoMediaIntent(model, inputState)
+  ))
+  if (route === 'omni' || route === 'audio') {
+    const prunedH3 = candidates.find(model => model.model_type === 'minimax_h3_ref2va')
+    if (prunedH3) return prunedH3.model_type
+  }
+  return candidates[0]?.model_type || currentType
+}
+
+function _studioCreateInputState(state: AppState): {
+  desired: StudioVideoEffectiveCreateRoute
+  conflict: boolean
+} & StudioVideoMediaIntent {
+  const references = state.params.minimax_h3_references ?? []
+  // An exact music/performance timeline is accepted by LTX or H3 Omni.
+  // Every identity/scene/motion/voice/style reference is native Ref2VA intent.
+  const hasOmniReferences = references.some(reference => !(
+    reference.type === 'audio' && reference.audio_intent === 'drive'
+  ))
+  const hasAudioDrive = Boolean(
+    state.params.audio_guide
+    || references.some(reference => (
+      reference.type === 'audio' && reference.audio_intent === 'drive'
+    ))
+  )
+  const hasFrameGuidance = Boolean(
+    state.startImage
+    || state.endImage
+    || state.params.image_start
+    || state.params.image_end
+    || state.imageRefs.length
+    || (
+      Array.isArray(state.params.image_refs)
+      && state.params.image_refs.length
+      && state.params.frames_positions
+    )
+  )
+  return {
+    desired: hasOmniReferences
+      ? 'omni'
+      : hasFrameGuidance
+        ? 'guided'
+        : hasAudioDrive
+          ? 'audio'
+          : 'generate',
+    conflict: hasOmniReferences && hasFrameGuidance,
+    hasFrameGuidance,
+    hasOmniReferences,
+    hasAudioDrive,
+  }
+}
+
 export const useStore = create<AppState>((set, get) => ({
   // Generation mode
   generationMode: 'video',
   studioVideoWorkflow: 'frames' as StudioVideoWorkflow,
+  studioVideoCreateRoute: 'auto',
+  studioVideoEffectiveCreateRoute: 'generate',
+  studioVideoModelPerCreateRoute: _initialStudioVideoRoutePreferences.models,
+  studioVideoRouteNotice: null,
+  setStudioVideoCreateRoute: () => {
+    const before = get()
+    const previousRoute = before.studioVideoEffectiveCreateRoute
+    const previousModel = String(before.params.model_type || '')
+    const modelPreferences = {
+      ...before.studioVideoModelPerCreateRoute,
+      ...(previousModel ? { [previousRoute]: previousModel } : {}),
+    }
+    set({
+      studioVideoCreateRoute: 'auto',
+      studioVideoModelPerCreateRoute: modelPreferences,
+      studioVideoRouteNotice: null,
+    })
+    _saveStudioVideoRoutePreferences({ route: 'auto', models: modelPreferences })
+    get().reconcileStudioVideoCreateRoute('Inputs changed')
+  },
+  reconcileStudioVideoCreateRoute: (reason = 'Inputs changed') => {
+    const state = get()
+    if (
+      state.generationMode !== 'video'
+      || state.studioVideoWorkflow !== 'frames'
+      || Number(state.params.image_mode) !== 0
+    ) return
+    const inputState = _studioCreateInputState(state)
+    const previousRoute = state.studioVideoEffectiveCreateRoute
+    const previousModel = String(state.params.model_type || '')
+    const routeChanged = inputState.desired !== previousRoute
+    const modelPreferences = {
+      ...state.studioVideoModelPerCreateRoute,
+      ...(routeChanged && previousModel ? { [previousRoute]: previousModel } : {}),
+    }
+    set({
+      studioVideoCreateRoute: 'auto',
+      studioVideoEffectiveCreateRoute: inputState.desired,
+      studioVideoModelPerCreateRoute: modelPreferences,
+      studioVideoRouteNotice: inputState.conflict ? {
+        message: `${reason}: fixed frame guidance and flexible references cannot be used in one generation. Remove one of those input roles to continue.`,
+        previousRoute,
+        previousModel,
+        undoable: false,
+      } : null,
+    })
+    _saveStudioVideoRoutePreferences({ route: 'auto', models: modelPreferences })
+    const targetModel = _resolveStudioCreateModel(get(), inputState)
+    if (targetModel && targetModel !== previousModel) get().selectModel(targetModel)
+  },
+  undoStudioVideoRoute: () => {
+    const notice = get().studioVideoRouteNotice
+    if (!notice) return
+    const modelPreferences = {
+      ...get().studioVideoModelPerCreateRoute,
+      [notice.previousRoute]: notice.previousModel,
+    }
+    set({
+      studioVideoCreateRoute: 'auto',
+      studioVideoEffectiveCreateRoute: notice.previousRoute,
+      studioVideoModelPerCreateRoute: modelPreferences,
+      studioVideoRouteNotice: null,
+    })
+    _saveStudioVideoRoutePreferences({ route: 'auto', models: modelPreferences })
+    if (
+      notice.previousModel
+      && get().enabledModels.has(notice.previousModel)
+      && notice.previousModel !== get().params.model_type
+    ) get().selectModel(notice.previousModel)
+    get().reconcileStudioVideoCreateRoute('Inputs changed')
+  },
+  clearStudioVideoRouteNotice: () => set({ studioVideoRouteNotice: null }),
+  selectStudioVideoModel: (modelType) => {
+    const state = get()
+    const model = state.models.find(candidate => candidate.model_type === modelType)
+    const inputState = _studioCreateInputState(state)
+    if (!modelSupportsStudioVideoMediaIntent(model, inputState)) return
+    const route = inputState.desired
+    const modelPreferences = {
+      ...state.studioVideoModelPerCreateRoute,
+      [route]: modelType,
+    }
+    set({
+      studioVideoCreateRoute: 'auto',
+      studioVideoEffectiveCreateRoute: route,
+      studioVideoModelPerCreateRoute: modelPreferences,
+      studioVideoRouteNotice: null,
+    })
+    _saveStudioVideoRoutePreferences({ route: 'auto', models: modelPreferences })
+    get().selectModel(modelType)
+  },
   setStudioVideoWorkflow: (workflow) => {
     set({ studioVideoWorkflow: workflow })
 
@@ -2409,6 +2759,7 @@ export const useStore = create<AppState>((set, get) => ({
       if (Number(get().params.image_mode) !== imageMode) {
         get().setParam('image_mode', imageMode)
       }
+      if (workflow === 'frames') get().reconcileStudioVideoCreateRoute('Create workflow opened')
       return
     }
 
@@ -3042,6 +3393,9 @@ export const useStore = create<AppState>((set, get) => ({
       // for the field list and rationale.
       _applyModelDefaults(get, set, newModelType)
     }
+    if (mode === 'video' && get().studioVideoWorkflow === 'frames') {
+      get().setStudioVideoCreateRoute(get().studioVideoCreateRoute)
+    }
     // Persist to localStorage
     _saveSettings({
       generationMode: mode,
@@ -3206,6 +3560,17 @@ export const useStore = create<AppState>((set, get) => ({
         },
       }
       set({ savedParamsPerMode: updatedSavedParams })
+    }
+    if (
+      key === 'minimax_h3_references'
+      || key === 'image_start'
+      || key === 'image_end'
+      || key === 'image_refs'
+      || key === 'frames_positions'
+      || key === 'audio_guide'
+      || key === 'audio_prompt_type'
+    ) {
+      get().reconcileStudioVideoCreateRoute('Inputs changed')
     }
   },
   setParams: (partial) => {
@@ -4247,6 +4612,9 @@ export const useStore = create<AppState>((set, get) => ({
         get().loadModelOptions(mt)
         _applyModelDefaults(get, set, mt)
       }
+      if (mode === 'video' && get().studioVideoWorkflow === 'frames') {
+        get().setStudioVideoCreateRoute(get().studioVideoCreateRoute)
+      }
       // Refresh the lora_id ↔ filename map from /installed and reconcile
       // any filename renames since save (LoRA version updates land here
       // transparently — saved weights/activations carry over to the new
@@ -4503,16 +4871,22 @@ export const useStore = create<AppState>((set, get) => ({
 
   startImage: null,
   endImage: null,
-  setStartImage: (f) => set(s => ({
-    startImage: f,
-    params: f === null ? { ...s.params, image_start: undefined } : s.params,
-    h3WindowPlan: null,
-  })),
-  setEndImage: (f) => set(s => ({
-    endImage: f,
-    params: f === null ? { ...s.params, image_end: undefined } : s.params,
-    h3WindowPlan: null,
-  })),
+  setStartImage: (f) => {
+    set(s => ({
+      startImage: f,
+      params: f === null ? { ...s.params, image_start: undefined } : s.params,
+      h3WindowPlan: null,
+    }))
+    get().reconcileStudioVideoCreateRoute(f ? 'Start frame added' : 'Start frame removed')
+  },
+  setEndImage: (f) => {
+    set(s => ({
+      endImage: f,
+      params: f === null ? { ...s.params, image_end: undefined } : s.params,
+      h3WindowPlan: null,
+    }))
+    get().reconcileStudioVideoCreateRoute(f ? 'End frame added' : 'End frame removed')
+  },
 
   imageWorkflowSourceFile: null,
   imageWorkflowSourcePath: '',
@@ -4551,14 +4925,20 @@ export const useStore = create<AppState>((set, get) => ({
   imageRefs: [],
   imageRefType: '',
   removeBackgroundRefs: false,
-  addImageRef: (file) => set(s => ({ imageRefs: [...s.imageRefs, file] })),
-  removeImageRef: (index) => set(s => {
-    const updated = s.imageRefs.filter((_, i) => i !== index)
-    return {
-      imageRefs: updated,
-      params: updated.length === 0 ? { ...s.params, image_refs: undefined } : s.params,
-    }
-  }),
+  addImageRef: (file) => {
+    set(s => ({ imageRefs: [...s.imageRefs, file] }))
+    get().reconcileStudioVideoCreateRoute('Frame reference added')
+  },
+  removeImageRef: (index) => {
+    set(s => {
+      const updated = s.imageRefs.filter((_, i) => i !== index)
+      return {
+        imageRefs: updated,
+        params: updated.length === 0 ? { ...s.params, image_refs: undefined } : s.params,
+      }
+    })
+    get().reconcileStudioVideoCreateRoute('Frame reference removed')
+  },
   reorderImageRefs: (from, to) => set(s => {
     const refs = [...s.imageRefs]
     const [moved] = refs.splice(from, 1)
@@ -5009,9 +5389,158 @@ export const useStore = create<AppState>((set, get) => ({
   isGenerating: false,
 
   startGeneration: async (submissionMode = 'now') => {
+    let state = get()
+    const primaryStudioCreate = (
+      state.generationMode === 'video'
+      && state.studioVideoWorkflow === 'frames'
+      && Number(state.params.image_mode) === 0
+    )
+    if (primaryStudioCreate) {
+      state.reconcileStudioVideoCreateRoute('Inputs changed')
+      state = get()
+    }
+
+    // Auto routing changes model_type synchronously, while its model-options
+    // request completes in the background. If Generate is clicked immediately
+    // after adding a frame or character, wait for the matching options instead
+    // of submitting the new model with the previous model's frame/VRAM rules.
+    const selectedModelType = String(state.params.model_type || '')
+    if (
+      selectedModelType
+      && state.modelOptions?.model_type !== selectedModelType
+      && !sfxModelTypes.has(selectedModelType)
+    ) {
+      await state.loadModelOptions(selectedModelType)
+      state = get()
+      if (state.modelOptions?.model_type !== selectedModelType) {
+        set({ promptEnhanceError: 'The selected video model is still loading. Try Generate again in a moment.' })
+        return
+      }
+    }
+
+    const selectedModelDefinition = state.models.find(
+      model => model.model_type === state.params.model_type,
+    )
+    const activeCreateInput = primaryStudioCreate
+      ? _studioCreateInputState(state)
+      : null
+    const activeCreateRoute = primaryStudioCreate
+      ? state.studioVideoEffectiveCreateRoute
+      : null
+    if (
+      activeCreateInput
+      && !modelSupportsStudioVideoMediaIntent(selectedModelDefinition, activeCreateInput)
+    ) {
+      set({
+        promptEnhanceError: activeCreateInput.conflict
+          ? 'Fixed start/end/keyframes cannot be combined with Omni references. Remove one of those input roles to continue.'
+          : `No enabled model can use the current ${activeCreateRoute === 'omni' ? 'reference' : activeCreateRoute === 'guided' ? 'frame-guided' : activeCreateRoute === 'audio' ? 'audio-driven' : 'text'} inputs.`,
+      })
+      return
+    }
+
+    const hasGuidedCreateInput = Boolean(
+      state.startImage
+      || state.endImage
+      || state.params.image_start
+      || state.params.image_end
+      || state.imageRefs.length
+      || (
+        Array.isArray(state.params.image_refs)
+        && state.params.image_refs.length
+        && state.params.frames_positions
+      )
+    )
+    if (activeCreateRoute === 'guided' && !hasGuidedCreateInput) {
+      set({ promptEnhanceError: 'Guided video needs a start frame, end frame, or timed frame.' })
+      return
+    }
+    const omniReferences = state.params.minimax_h3_references ?? []
+    if (
+      activeCreateRoute === 'omni'
+      && omniReferences.length === 0
+    ) {
+      set({ promptEnhanceError: 'Omni needs at least one character, image, video, or audio reference.' })
+      return
+    }
+
+    const selectedModelIsOmni = _isOmniVideoModel(selectedModelDefinition)
+    const architecture = String(
+      state.modelOptions?.architecture
+      || selectedModelDefinition?.architecture
+      || '',
+    )
+    const isH3PromptModel = architecture.startsWith('minimax_h3')
+    const isLtxPromptModel = state.modelOptions?.multi_window_sequence_controls === true
+    const isOmniPromptModel = isH3PromptModel && (
+      activeCreateRoute === 'omni'
+      || state.modelOptions?.omni_reference === true
+      || selectedModelIsOmni
+    )
+    const promptMode = isLtxPromptModel
+      ? state.params.ltx_window_prompt_mode
+      : state.params.minimax_h3_sequence_prompt_mode
+    const multiWindowEnabled = isLtxPromptModel
+      ? state.params.ltx_multi_window === true
+      : isOmniPromptModel
+        ? state.params.minimax_h3_reference_sequence === true
+        : state.params.minimax_h3_multi_window === true
+    const usesMultiplePasses = (
+      multiWindowEnabled
+      && state.durationSeconds > state.slidingWindowSeconds + 0.01
+    )
+    const alreadyEnhanced = isLtxPromptModel
+      ? Boolean(
+          typeof state.params._ltx_original_prompt === 'string'
+          && state.params._ltx_original_prompt.trim(),
+        )
+      : Boolean(
+          typeof state.params._h3_original_prompt === 'string'
+          && state.params._h3_original_prompt.trim(),
+        )
+
+    const automaticSinglePromptEnhance = (
+      state.generationMode === 'video'
+      && (isH3PromptModel || isLtxPromptModel)
+      && promptMode === 'auto'
+      && !usesMultiplePasses
+      && !alreadyEnhanced
+      && String(state.params.prompt || '').trim()
+    )
+    let generationWorkInFlight = (
+      state.isGenerating
+      || state.jobs.some(job => job.status === 'running' || job.status === 'queued')
+    )
+    if (
+      automaticSinglePromptEnhance
+      && submissionMode !== 'queue'
+      && !generationWorkInFlight
+    ) {
+      try {
+        const active = await api.fetchActiveJobs()
+        generationWorkInFlight = active.jobs.some(job => (
+          job.status === 'running' || job.status === 'queued'
+        ))
+      } catch { /* reconnect polling remains the normal source of truth */ }
+    }
+    const deferAutoEnhance = Boolean(
+      automaticSinglePromptEnhance
+      && (submissionMode === 'queue' || generationWorkInFlight)
+    )
+
+    // Interactive Generate on an idle GPU still enhances first so the result
+    // is visible in Studio. Held queue entries, and Generate clicks made while
+    // another render is active, freeze the raw idea now and carry an enhancer
+    // request inside the job instead. The backend executes it only after that
+    // job owns the generation lock, avoiding an LLM/diffusion VRAM collision.
+    if (automaticSinglePromptEnhance && !deferAutoEnhance) {
+      await state.enhancePrompt()
+      state = get()
+      if (state.isEnhancing || state.promptEnhanceError) return
+    }
+
     // Freeze the Studio configuration at click time. This matters for the
     // split Add to Queue action: later UI edits must belong to a new job.
-    const state = get()
     const holdForQueue = submissionMode === 'queue'
     const queueSupported = (
       state.generationMode !== 'avatar'
@@ -5039,9 +5568,11 @@ export const useStore = create<AppState>((set, get) => ({
     // Edit sub-modes supply their own source media and validate in their
     // own branches (Recast runs the i2v-only SCAIL-2 against a source
     // video + reference image; this guard silently ate its clicks).
-    const isI2vOnly = state.modelOptions?.i2v_class && !state.modelOptions?.t2v_class
-    const isOmniReference = state.modelOptions?.omni_reference === true
-    const isH3Model = String(state.modelOptions?.architecture || '').startsWith('minimax_h3')
+    const isI2vOnly = selectedModelDefinition
+      ? selectedModelDefinition.is_i2v && !selectedModelDefinition.is_t2v
+      : state.modelOptions?.i2v_class && !state.modelOptions?.t2v_class
+    const isOmniReference = isOmniPromptModel
+    const isH3Model = architecture.startsWith('minimax_h3')
     const isLtxSequenceModel = state.modelOptions?.multi_window_sequence_controls === true
     const hasStartImage = state.startImage || state.params.image_start
     const hasMultiClipImages = state.clips.some(c => c.startImage || c.startImagePath)
@@ -5050,7 +5581,6 @@ export const useStore = create<AppState>((set, get) => ({
       // Could show a toast/notification here in the future
       return
     }
-    const omniReferences = state.params.minimax_h3_references ?? []
     if (
       state.generationMode === 'video'
       && isOmniReference
@@ -5658,6 +6188,35 @@ export const useStore = create<AppState>((set, get) => ({
     }
 
     const params: Record<string, unknown> = { ...state.params, generation_mode: state.generationMode, workspace: state.activeWorkspace }
+    const manifestAudioDriver = (
+      (state.params.minimax_h3_references ?? []).find(reference => (
+        reference.type === 'audio' && reference.audio_intent === 'drive'
+      ))
+    )
+    if (isLtxSequenceModel && manifestAudioDriver?.path) {
+      // The reference panel is model-neutral in Studio. H3 Omni consumes its
+      // ordered manifest directly; LTX consumes the same user-selected Music /
+      // Performance role through its generic soundtrack input.
+      params.audio_guide = manifestAudioDriver.path
+      const audioPromptType = String(params.audio_prompt_type || '')
+      if (![...'AK2'].some(letter => audioPromptType.includes(letter))) {
+        params.audio_prompt_type = `A${audioPromptType}`
+      }
+    }
+    const useStudioFrameInputs = !primaryStudioCreate || activeCreateRoute === 'guided'
+    if (primaryStudioCreate && activeCreateRoute === 'generate') {
+      // Generate is deliberately text-only. Preserve any hidden Guided inputs
+      // in Studio state so switching back restores them, but never let those
+      // paths or their letter flags leak into this submission.
+      params.image_prompt_type = ''
+      delete params.image_start
+      delete params.image_end
+      delete params.image_refs
+      delete params.frames_positions
+      const videoPromptType = String(params.video_prompt_type || '').replace(/KFI/g, '')
+      if (videoPromptType) params.video_prompt_type = videoPromptType
+      else delete params.video_prompt_type
+    }
     // This is an ephemeral submit contract, never durable Studio state. It is
     // set again below only when the exact visible H3 window plan is included
     // in this submission.
@@ -5928,7 +6487,12 @@ export const useStore = create<AppState>((set, get) => ({
       params.image_prompt_type = ''
       delete params.image_start
       delete params.image_end
+      delete params.image_refs
+      delete params.frames_positions
       delete params.video_source
+      const videoPromptType = String(params.video_prompt_type || '').replace(/KFI/g, '')
+      if (videoPromptType) params.video_prompt_type = videoPromptType
+      else delete params.video_prompt_type
     } else {
       // Keep Omni references in the model's in-memory working set, but do not
       // leak them into unrelated model requests or their saved sidecars.
@@ -6386,7 +6950,7 @@ export const useStore = create<AppState>((set, get) => ({
     }
     // Single I2V path: Upload images if present (new File upload takes priority)
     // Skip in image mode — startImage is for video I2V, not image generation
-    else if (!isOmniReference && state.startImage && state.generationMode !== 'image') {
+    else if (!isOmniReference && useStudioFrameInputs && state.startImage && state.generationMode !== 'image') {
       try {
         const result = await api.uploadImage(state.startImage)
         params.image_start = result.path
@@ -6397,14 +6961,14 @@ export const useStore = create<AppState>((set, get) => ({
       } catch (e) {
         console.error('Failed to upload start image:', e)
       }
-    } else if (!isOmniReference && params.image_start && state.generationMode !== 'image') {
+    } else if (!isOmniReference && useStudioFrameInputs && params.image_start && state.generationMode !== 'image') {
       // Re-roll case: image_start is already an absolute path from sidecar metadata
       params.image_mode = 0
       const ipt = (params.image_prompt_type as string) || ''
       if (!ipt.includes('S')) params.image_prompt_type = 'S' + ipt
       if (params.input_video_strength == null) params.input_video_strength = _defaultIVS
     }
-    if (!isOmniReference && state.endImage) {
+    if (!isOmniReference && useStudioFrameInputs && state.endImage) {
       try {
         const result = await api.uploadImage(state.endImage)
         params.image_end = result.path
@@ -6413,7 +6977,7 @@ export const useStore = create<AppState>((set, get) => ({
       } catch (e) {
         console.error('Failed to upload end image:', e)
       }
-    } else if (params.image_end) {
+    } else if (!isOmniReference && useStudioFrameInputs && params.image_end) {
       const ipt = (params.image_prompt_type as string) || ''
       if (!ipt.includes('E')) params.image_prompt_type = ipt + 'E'
     }
@@ -6467,8 +7031,13 @@ export const useStore = create<AppState>((set, get) => ({
     }
 
     // Image references (from ImageRefSection)
-    const imageReferenceWorkflowActive = state.generationMode !== 'image'
+    const imageReferenceWorkflowActive = (
+      state.generationMode !== 'video'
+      || useStudioFrameInputs
+    ) && (
+      state.generationMode !== 'image'
       || state.studioImageWorkflow === 'edit'
+    )
     if (imageReferenceWorkflowActive && state.imageRefType && state.imageRefs.length > 0) {
       const refPaths: string[] = []
       for (const file of state.imageRefs) {
@@ -6489,7 +7058,7 @@ export const useStore = create<AppState>((set, get) => ({
         }
         params.video_prompt_type = vpt
       }
-    } else if (params.image_refs && (params.image_refs as string[]).length > 0) {
+    } else if (useStudioFrameInputs && params.image_refs && (params.image_refs as string[]).length > 0) {
       // Re-roll case: image_refs already populated from sidecar metadata
       params.remove_background_images_ref = params.remove_background_images_ref ?? 0
     } else {
@@ -6536,6 +7105,93 @@ export const useStore = create<AppState>((set, get) => ({
       if (vrPath) {
         params.voice_reference = vrPath
         params.identity_guidance_scale = state.directorIdentityGuidanceScale
+      }
+    }
+
+    if (deferAutoEnhance) {
+      // Deferred H3 enhancement replaces this one-line idea with one
+      // multiline Context-IR document. Mark it atomic before submission too;
+      // the backend repeats this normalization after enhancement for cached
+      // web assets and direct API callers.
+      if (isH3Model && !usesMultiplePasses) {
+        params.multi_prompts_gen_type = 2
+      }
+      let deferredImagePaths: string[] = []
+      let deferredReferenceContext: string | undefined
+      if (isOmniReference) {
+        const inventory = _omniEnhanceInventory(
+          (params.minimax_h3_references as MiniMaxH3Reference[] | undefined) ?? [],
+        )
+        deferredImagePaths = inventory.imagePaths
+        deferredReferenceContext = inventory.referenceContext
+      } else {
+        const appendPaths = (value: unknown) => {
+          if (typeof value === 'string' && value.trim()) deferredImagePaths.push(value)
+          else if (Array.isArray(value)) {
+            deferredImagePaths.push(...value.filter(
+              (item): item is string => typeof item === 'string' && Boolean(item.trim()),
+            ))
+          }
+        }
+        appendPaths(params.image_start)
+
+        if (isH3Model) {
+          const hasStart = deferredImagePaths.length > 0
+          const beforeEnd = deferredImagePaths.length
+          appendPaths(params.image_end)
+          const hasEnd = deferredImagePaths.length > beforeEnd
+          const injectedPositions = String(params.frames_positions || '')
+            .split(/[\s,]+/)
+            .filter(Boolean)
+          const injectedPaths = (
+            String(params.video_prompt_type || '').includes('KFI')
+            && Array.isArray(params.image_refs)
+          ) ? (params.image_refs as unknown[])
+              .map((path, index) => ({
+                path: typeof path === 'string' ? path : '',
+                position: injectedPositions[index] || '',
+              }))
+              .filter(item => Boolean(item.path && item.position))
+            : []
+          deferredImagePaths.push(...injectedPaths.map(item => item.path))
+
+          let pictureIndex = 0
+          const alignmentLines: string[] = []
+          const fps = state.modelOptions?.fps ?? 24
+          const duration = Number(params.video_length || 0) / fps
+          if (hasStart) {
+            alignmentLines.push(`For the target video, at 0.00 seconds into the target video, <Picture ${++pictureIndex}> (from [Shot 1]) is fully referenced.`)
+          }
+          if (hasEnd) {
+            alignmentLines.push(`At ${duration.toFixed(2)} seconds, <Picture ${++pictureIndex}> is the required final-frame destination.`)
+          }
+          for (const keyframe of injectedPaths) {
+            const match = /^W1:(\d{1,3})$/i.exec(keyframe.position)
+            let localSeconds: number | null = null
+            if (match) localSeconds = duration * Math.min(100, Number(match[1])) / 100
+            else if (/^\d+$/.test(keyframe.position)) localSeconds = Math.max(0, Number(keyframe.position) - 1) / fps
+            else if (/^l$/i.test(keyframe.position)) localSeconds = duration
+            const timing = localSeconds == null
+              ? `at timeline position ${keyframe.position}`
+              : `at ${localSeconds.toFixed(2)} seconds into the target video`
+            alignmentLines.push(`${timing}, <Picture ${++pictureIndex}> is fully referenced as an exact injected frame; reach it naturally and continue from it.`)
+          }
+          deferredReferenceContext = alignmentLines.join('\n') || undefined
+        }
+      }
+
+      params._deferred_prompt_enhance = {
+        prompt: String(params.prompt || ''),
+        mode: state.generationMode,
+        model_type: String(params.model_type || ''),
+        image_paths: deferredImagePaths.length > 0 ? deferredImagePaths : undefined,
+        duration_seconds: state.durationSeconds,
+        window_count: 1,
+        window_size_seconds: state.slidingWindowSeconds,
+        activated_loras: Array.isArray(params.activated_loras) && params.activated_loras.length > 0
+          ? params.activated_loras
+          : undefined,
+        reference_context: deferredReferenceContext,
       }
     }
 
@@ -6625,8 +7281,12 @@ export const useStore = create<AppState>((set, get) => ({
       delete params.h3_window_plan
     }
 
+    const clientSubmissionId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    const pendingJobId = `pending-${clientSubmissionId}`
+    params._client_submission_id = clientSubmissionId
     const newJob: GenerationJob = {
-      id: '',
+      id: pendingJobId,
+      showInGallery: !holdForQueue,
       status: holdForQueue ? 'held' : 'queued',
       progress: 0,
       step: 0,
@@ -6696,13 +7356,17 @@ export const useStore = create<AppState>((set, get) => ({
 
       // Update the job with its server-assigned ID
       set(s => ({
-        jobs: s.jobs.map(j => j === newJob ? {
+        jobs: s.jobs.map(j => j.id === pendingJobId ? {
           ...j,
           id: job_id,
           status: submittedStatus,
           message: submittedStatus === 'held'
-            ? 'Ready - waiting for Start Queue'
-            : 'Queued...',
+            ? (deferAutoEnhance || h3PlanActive || ltxAutoPlanActive
+                ? 'Ready - AI planning will run when queue starts'
+                : 'Ready - waiting for Start Queue')
+            : (h3PlanActive || ltxAutoPlanActive
+                ? 'Queued - AI planning waits for generation resources'
+                : 'Queued...'),
           h3WindowPlan: h3_window_plan ?? null,
         } : j),
       }))
@@ -6730,6 +7394,7 @@ export const useStore = create<AppState>((set, get) => ({
               outputFiles: status.output_files,
               error: status.error,
               oomInfo: status.oom_info ?? null,
+              h3WindowPlan: status.h3_window_plan ?? j.h3WindowPlan ?? null,
               ..._adaptiveEtaJobFields(status),
             }),
           }))
@@ -6766,12 +7431,40 @@ export const useStore = create<AppState>((set, get) => ({
 
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Generation failed'
+      // A mobile/Tailscale connection can drop after the backend accepted
+      // the request but before fetch receives its small JSON response. Recover
+      // that exact job by the browser-generated submission ID instead of
+      // showing a false failure while the real generation continues.
+      set(s => ({
+        jobs: s.jobs.map(job => job.id === pendingJobId ? {
+          ...job,
+          message: 'Connection interrupted - checking whether Maestro accepted the job...',
+        } : job),
+      }))
+      for (const delayMs of [0, 400, 800, 1600]) {
+        if (delayMs > 0) {
+          await new Promise(resolve => window.setTimeout(resolve, delayMs))
+        }
+        try {
+          const active = await api.fetchActiveJobs()
+          const accepted = active.jobs.find(job => (
+            job.client_submission_id === clientSubmissionId
+          ))
+          if (accepted) {
+            set(s => ({
+              jobs: s.jobs.filter(job => job.id !== pendingJobId),
+            }))
+            await get().reconnectJobs()
+            return
+          }
+        } catch { /* retry transient browser/Tailscale disconnects */ }
+      }
       // Submit itself failed (pre-queue). Convert the placeholder to a failed
       // state in place so the user sees what happened, rather than making the
       // tile disappear and leaving them to wonder.
       set(s => ({
-        jobs: s.jobs.map(j => j === newJob ? { ...j, id: j.id || `submit-fail-${Date.now()}`, status: 'failed', message: msg, error: msg } : j),
-        isGenerating: s.jobs.some(j => j !== newJob && (j.status === 'running' || j.status === 'queued')),
+        jobs: s.jobs.map(j => j.id === pendingJobId ? { ...j, status: 'failed', message: msg, error: msg } : j),
+        isGenerating: s.jobs.some(j => j.id !== pendingJobId && (j.status === 'running' || j.status === 'queued')),
       }))
     }
   },
@@ -6837,6 +7530,7 @@ export const useStore = create<AppState>((set, get) => ({
           .filter(j => !existingIds.has(j.job_id))
           .map(j => ({
             id: j.job_id,
+            showInGallery: j.show_in_gallery === true,
             kind: j.kind || 'generation',
             status: j.status as GenerationJob['status'],
             progress: j.progress / 100,
@@ -6865,6 +7559,7 @@ export const useStore = create<AppState>((set, get) => ({
                 set(s => ({
                   jobs: s.jobs.map(j => j.id !== job.id ? j : {
                     ...j,
+                    showInGallery: status.show_in_gallery ?? j.showInGallery,
                     kind: status.kind || j.kind,
                     status: status.status,
                     progress: status.progress / 100,
@@ -6875,6 +7570,7 @@ export const useStore = create<AppState>((set, get) => ({
                     outputFiles: status.output_files,
                     error: status.error,
                     oomInfo: status.oom_info ?? null,
+                    h3WindowPlan: status.h3_window_plan ?? j.h3WindowPlan ?? null,
                     ..._adaptiveEtaJobFields(status),
                   }),
                 }))
@@ -7759,9 +8455,70 @@ export const useStore = create<AppState>((set, get) => ({
   }),
   clearH3WindowPlan: () => set({ h3WindowPlan: null }),
   enhancePrompt: async (ttsMode?: string) => {
-    const state = get()
+    let state = get()
+    const primaryStudioCreate = (
+      state.generationMode === 'video'
+      && state.studioVideoWorkflow === 'frames'
+      && Number(state.params.image_mode) === 0
+    )
+    if (primaryStudioCreate) {
+      state.reconcileStudioVideoCreateRoute('Inputs changed')
+      state = get()
+    }
+    const selectedModelType = String(state.params.model_type || '')
+    if (
+      selectedModelType
+      && state.modelOptions?.model_type !== selectedModelType
+      && !sfxModelTypes.has(selectedModelType)
+    ) {
+      await state.loadModelOptions(selectedModelType)
+      state = get()
+      if (state.modelOptions?.model_type !== selectedModelType) {
+        set({ promptEnhanceError: 'The selected video model is still loading. Try Prompt Enhance again in a moment.' })
+        return
+      }
+    }
+    const selectedModelDefinition = state.models.find(
+      model => model.model_type === state.params.model_type,
+    )
+    const activeCreateInput = primaryStudioCreate
+      ? _studioCreateInputState(state)
+      : null
+    const activeCreateRoute = primaryStudioCreate
+      ? state.studioVideoEffectiveCreateRoute
+      : null
+    if (
+      activeCreateInput
+      && !modelSupportsStudioVideoMediaIntent(selectedModelDefinition, activeCreateInput)
+    ) {
+      set({
+        promptEnhanceError: activeCreateInput.conflict
+          ? 'Fixed start/end/keyframes cannot be combined with Omni references. Remove one of those input roles to continue.'
+          : `No enabled model can use the current ${activeCreateRoute === 'omni' ? 'reference' : activeCreateRoute === 'guided' ? 'frame-guided' : activeCreateRoute === 'audio' ? 'audio-driven' : 'text'} inputs.`,
+      })
+      return
+    }
     const { params, generationMode, startImage, endImage, imageRefs } = state
     if (!params.prompt.trim()) return
+    let generationWorkInFlight = (
+      state.isGenerating
+      || state.jobs.some(job => job.status === 'running' || job.status === 'queued')
+    )
+    if (!generationWorkInFlight) {
+      try {
+        const active = await api.fetchActiveJobs()
+        generationWorkInFlight = active.jobs.some(job => (
+          job.status === 'running' || job.status === 'queued'
+        ))
+      } catch { /* backend guard remains authoritative */ }
+    }
+    if (generationWorkInFlight) {
+      set({
+        isEnhancing: false,
+        promptEnhanceError: 'A generation is already using or waiting for the GPU. Prompt Enhance was not started. Add this setup to the queue and Maestro will run AI planning safely when its turn begins.',
+      })
+      return
+    }
     if (
       state.modelOptions?.omni_reference === true
       && params.minimax_h3_reference_sequence === true
@@ -7798,14 +8555,26 @@ export const useStore = create<AppState>((set, get) => ({
       // Collect images relevant to the CURRENT mode only
       const imagePaths: string[] = []
       let referenceContext: string | undefined
-      const isOmniReference = state.modelOptions?.omni_reference === true
+      const isOmniReference = primaryStudioCreate
+        ? activeCreateRoute === 'omni'
+        : Boolean(
+            state.modelOptions?.omni_reference === true
+            || _isOmniVideoModel(selectedModelDefinition)
+          )
+      const useStudioFrameInputs = !primaryStudioCreate || activeCreateRoute === 'guided'
       const isH3FirstLast = (
-        state.modelOptions?.architecture?.startsWith('minimax_h3') === true
+        String(
+          state.modelOptions?.architecture
+          || selectedModelDefinition?.architecture
+          || '',
+        ).startsWith('minimax_h3')
         && !isOmniReference
       )
       const isLtxSequence = state.modelOptions?.multi_window_sequence_controls === true
       const injectedPositions = String(params.frames_positions || '').split(/[\s,]+/).filter(Boolean)
       const injectedKeyframes = (
+        useStudioFrameInputs
+        &&
         isH3FirstLast
         && String(params.video_prompt_type || '').includes('KFI')
         && Array.isArray(params.image_refs)
@@ -7838,7 +8607,7 @@ export const useStore = create<AppState>((set, get) => ({
               labelLines.push(`${label}: ${note}; intent=AUDIO REFERENCE; retention=weak_reference; borrow only rhythm/style/texture and do not copy the source signal or words`)
             } else {
               const label = `<Audio ${++audioIndex}>`
-              labelLines.push(`${label}: ${note}; intent=VOICE REFERENCE; retention=reference; use timbre/emotion/delivery for new scripted dialogue without copying source words, timing, or waveform`)
+              labelLines.push(`${label}: ${note}; intent=VOICE REFERENCE; retention=reference; use vocal identity/timbre/emotion/delivery for new scripted dialogue without copying source words, timing, waveform, room tone, reverberation, echo, background noise, microphone coloration, or source spatial acoustics; render the voice acoustically inside the target environment`)
               bindSavedCharacter(reference, label)
             }
           } else if (reference.type === 'image') {
@@ -7866,12 +8635,12 @@ export const useStore = create<AppState>((set, get) => ({
         const savedCharacterLines = Array.from(savedCharacterMedia.values()).map((binding, index) => {
           const subjectNumber = index + 1
           const subjectLabel = `<Subject ${subjectNumber}>`
-          const speakerLabel = `(S${subjectNumber})`
           return (
-            `Saved character "${binding.name}" is exactly ${subjectLabel} ${speakerLabel}: `
+            `Saved character "${binding.name}" is exactly ${subjectLabel}: `
             + `${binding.labels.join(' + ')} all define this one stable character. `
-            + `Whenever the user names ${binding.name}, use ${subjectLabel} and ${speakerLabel}; `
-            + `bind every listed voice Audio to that same speaker. Do not create another Subject for `
+            + `Whenever the user names ${binding.name}, use ${subjectLabel}. Subject numbering follows `
+            + `this reference inventory, while speaker IDs are assigned independently in first-vocal-event order. `
+            + `Bind every listed voice Audio to this Subject and its event-ordered speaker ID. Do not create another Subject for `
             + 'a repeated media label, do not renumber this mapping, and do not emit an @ token.'
           )
         })
@@ -7899,28 +8668,28 @@ export const useStore = create<AppState>((set, get) => ({
         // the runtime's Qwen conditioner will number them.
         let h3HasStartAttachment = false
         let h3HasEndAttachment = false
-        if (startImage) {
+        if (useStudioFrameInputs && startImage) {
           try {
             const uploaded = await api.uploadImage(startImage)
             imagePaths.push(uploaded.path)
             h3HasStartAttachment = true
           } catch { /* best effort */ }
-        } else if (params.image_start && typeof params.image_start === 'string') {
+        } else if (useStudioFrameInputs && params.image_start && typeof params.image_start === 'string') {
           imagePaths.push(params.image_start as string)
           h3HasStartAttachment = true
         }
         if (isH3FirstLast) {
-          if (endImage) {
+          if (useStudioFrameInputs && endImage) {
             try {
               const uploaded = await api.uploadImage(endImage)
               imagePaths.push(uploaded.path)
               h3HasEndAttachment = true
             } catch { /* best effort */ }
-          } else if (params.image_end && typeof params.image_end === 'string') {
+          } else if (useStudioFrameInputs && params.image_end && typeof params.image_end === 'string') {
             imagePaths.push(params.image_end)
             h3HasEndAttachment = true
           }
-          for (const keyframe of injectedKeyframes) {
+          for (const keyframe of useStudioFrameInputs ? injectedKeyframes : []) {
             // Reusing the same file at two positions still creates two Qwen
             // picture slots, so preserve duplicates and their ordering.
             imagePaths.push(keyframe.path)
@@ -8122,13 +8891,14 @@ export const useStore = create<AppState>((set, get) => ({
         && enhancedLtxLines.length === windowCount
       )
       const ltxSourcePrompt = ltxEnhanceSource
+      const preserveLtxSource = generationMode === 'video' && isLtxSequence
       set(s => ({
         params: {
           ...s.params,
           prompt: preserveLtxPlan ? enhancedLtxLines.join('\n') : result.enhanced,
           ...(preserveH3Source ? { _h3_original_prompt: preserveH3Source } : {}),
+          ...(preserveLtxSource ? { _ltx_original_prompt: ltxSourcePrompt } : {}),
           ...(preserveLtxPlan ? {
-            _ltx_original_prompt: ltxSourcePrompt,
             ltx_window_prompts: enhancedLtxLines,
           } : {}),
         },

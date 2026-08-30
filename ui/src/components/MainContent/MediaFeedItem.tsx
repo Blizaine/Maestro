@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, type CSSProperties } from 'react'
-import { Play, Pencil, RefreshCw, Copy, Trash2, Check, Combine, Loader2, Heart, ArrowLeftToLine, Download, FolderInput, Scissors, FastForward, BookMarked } from 'lucide-react'
+import { Play, Pencil, RefreshCw, Copy, Trash2, Check, Combine, Loader2, Heart, ArrowLeftToLine, Download, FolderInput, Scissors, FastForward, BookMarked, Info, ChevronDown, ChevronUp, MoreHorizontal } from 'lucide-react'
 import { SaveRecipeDialog } from '../Recipes/SaveRecipeDialog'
 import { useStore } from '../../stores/useStore'
 import { getUploadUrl, fetchOutputMetadata, getFileUrl, moveOutput, uploadImage } from '../../api/client'
@@ -11,7 +11,8 @@ interface Props {
   file: OutputFile
   index: number
   isActive: boolean
-  onVisible: (index: number) => void
+  onActivate: (index: number) => void
+  onPlaybackStart: (index: number, media: HTMLMediaElement) => void
   onMeasured: (index: number, height: number) => void
   style?: CSSProperties
 }
@@ -68,7 +69,7 @@ function RetryImage({ url, alt }: { url: string; alt: string }) {
   )
 }
 
-export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, style }: Props) {
+export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackStart, onMeasured, style }: Props) {
   const setSelectedOutput = useStore(s => s.setSelectedOutput)
   const loadSettingsFromOutput = useStore(s => s.loadSettingsFromOutput)
   const rerollGeneration = useStore(s => s.rerollGeneration)
@@ -106,9 +107,12 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
   const [copied, setCopied] = useState(false)
   const [rejoining, setRejoining] = useState(false)
   const [sentToInput, setSentToInput] = useState(false)
+  const [showActionMenu, setShowActionMenu] = useState(false)
+  const [actionMenuOpensDown, setActionMenuOpensDown] = useState(false)
   const [showMoveMenu, setShowMoveMenu] = useState(false)
+  const [showDetails, setShowDetails] = useState(false)
   const [moving, setMoving] = useState(false)
-  const moveRef = useRef<HTMLDivElement>(null)
+  const actionMenuRef = useRef<HTMLDivElement>(null)
   const itemRef = useRef<HTMLDivElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
 
@@ -123,22 +127,6 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
     ro.observe(el)
     return () => ro.disconnect()
   }, [index, onMeasured])
-
-  // IntersectionObserver to detect visibility (for active tracking)
-  useEffect(() => {
-    const el = itemRef.current
-    if (!el) return
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0].isIntersecting) {
-          onVisible(index)
-        }
-      },
-      { threshold: 0.5 }
-    )
-    observer.observe(el)
-    return () => observer.disconnect()
-  }, [index, onVisible])
 
   // Lazy load metadata when first visible
   useEffect(() => {
@@ -170,12 +158,61 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
   const uploadFilenames = meta?.upload_filenames as Record<string, string> | undefined
 
   const prompt = (params?._tts_original_prompt as string) || (params?.prompt as string) || ''
+  const originalPrompt = (params?._h3_original_prompt as string) || ''
+  const h3WindowPlan = (
+    params?.h3_window_plan && typeof params.h3_window_plan === 'object'
+      ? params.h3_window_plan as Record<string, unknown>
+      : null
+  )
+  const effectiveWindowPrompts = (() => {
+    const direct = params?.h3_window_prompts
+    if (Array.isArray(direct)) {
+      return direct.map(value => String(value || '').trim()).filter(Boolean)
+    }
+    const planned = h3WindowPlan?.window_prompts
+    if (Array.isArray(planned)) {
+      return planned.map(value => String(value || '').trim()).filter(Boolean)
+    }
+    return []
+  })()
+  const h3PlanningWarnings = Array.isArray(h3WindowPlan?.planning_warnings)
+    ? h3WindowPlan.planning_warnings.map(value => String(value || '').trim()).filter(Boolean)
+    : []
   const modelType = (params?.model_type as string) || ''
   const modelLabel = modelDisplayName(modelType, models)
   const isAudio = file.type === 'audio'
   const resolution = isAudio ? '' : ((params?.resolution as string) || '')
   const seed = params?.seed as number | undefined
   const generationTime = meta?.generation_time
+  const inferenceSteps = params?.num_inference_steps as number | undefined
+  const guidanceScale = params?.guidance_scale as number | undefined
+  const activeLoras = (() => {
+    const value = params?.activated_loras
+    if (Array.isArray(value)) return value.map(item => String(item)).filter(Boolean)
+    return typeof value === 'string' && value ? [value] : []
+  })()
+  const loraWeights = (() => {
+    const value = params?.loras_multipliers
+    if (Array.isArray(value)) return value.map(item => String(item))
+    if (typeof value === 'string' && value) return value.split(/[;,]/).map(item => item.trim())
+    return []
+  })()
+  const turboEnabled = params?.minimax_h3_turbo_mode === true
+  const turboPreset = String(params?.minimax_h3_turbo_preset || '')
+  const pddEnabled = turboEnabled && (
+    turboPreset.toLowerCase().includes('pdd')
+    || activeLoras.some(item => item.toLowerCase().includes('pdd') || item.toLowerCase().includes('-acc-'))
+  )
+  const firstBlockEnabled = params?.skip_steps_cache_type === 'first_block'
+  const solEnabled = String(params?.override_attention || '').toLowerCase() === 'sol'
+  const h3Workflow = modelType.includes('minimax_h3')
+    ? (modelType.includes('ref2va') ? 'Omni / Ref2VA' : 'First / Last / FL2VA')
+    : ''
+  const optimizationLabels = [
+    ...(pddEnabled ? ['PDD'] : turboEnabled ? ['Turbo'] : []),
+    ...(solEnabled ? ['Sol Engine'] : []),
+    ...(firstBlockEnabled ? ['First Block Cache'] : []),
+  ]
 
   const multiClipInfo = params?.multi_clip_info as { group_id: string; index: number; total: number } | undefined
   const groupId = multiClipInfo?.group_id
@@ -188,8 +225,16 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
   const imageEndFile = Array.isArray(rawEnd) ? (rawEnd.find((f: string) => f) || null) : rawEnd
 
   const handleSelect = useCallback(() => {
-    setSelectedOutput(index)
-  }, [index, setSelectedOutput])
+    onActivate(index)
+  }, [index, onActivate])
+
+  const handlePlaybackStart = useCallback((event: React.SyntheticEvent<HTMLMediaElement>) => {
+    // A direct Play action is the strongest possible selection signal. Unmute
+    // immediately (before React's active-card rerender) so native controls and
+    // fullscreen playback both begin with sound.
+    event.currentTarget.muted = false
+    onPlaybackStart(index, event.currentTarget)
+  }, [index, onPlaybackStart])
 
   const handleLoadSettings = useCallback(() => {
     setSelectedOutput(index)
@@ -270,15 +315,19 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
     }
   }
 
-  // Close move menu on outside click
+  // Keep the labeled action popover transient. Workspace choices live inside
+  // the same popover, so one outside-click boundary handles both levels.
   useEffect(() => {
-    if (!showMoveMenu) return
+    if (!showActionMenu) return
     const handler = (e: MouseEvent) => {
-      if (moveRef.current && !moveRef.current.contains(e.target as Node)) setShowMoveMenu(false)
+      if (actionMenuRef.current && !actionMenuRef.current.contains(e.target as Node)) {
+        setShowActionMenu(false)
+        setShowMoveMenu(false)
+      }
     }
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
-  }, [showMoveMenu])
+  }, [showActionMenu])
 
   const handleMove = async (targetWs: string) => {
     setMoving(true)
@@ -289,6 +338,7 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
       const store = useStore.getState()
       const filtered = store.outputs.filter(o => o.name !== file.name)
       useStore.setState({ outputs: filtered, selectedOutput: Math.min(store.selectedOutput, Math.max(0, filtered.length - 1)) })
+      setShowActionMenu(false)
     } catch (e) {
       console.error('Move failed:', e)
     } finally {
@@ -374,12 +424,21 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
     }
   }
 
+  const handleDownload = () => {
+    const link = document.createElement('a')
+    link.href = getFileUrl(file.name)
+    link.download = file.name
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+  }
+
   return (
     <div
       ref={itemRef}
       data-feed-index={index}
       style={style}
-      className={`rounded-xl border-2 overflow-hidden transition-colors ${
+      className={`rounded-xl border-2 overflow-visible transition-colors ${showActionMenu ? 'z-40' : 'z-0'} ${
         // Active frame: theme-aware bezel via frame-active-gradient.
         //
         // Default theme: linear gradient with both stops set to
@@ -404,7 +463,7 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
       onClick={handleSelect}
     >
       {/* Media player — bg-media-canvas keeps the letterbox dark even on light themes */}
-      <div className="w-full aspect-video flex items-center justify-center bg-media-canvas relative">
+      <div className="relative flex aspect-video w-full items-center justify-center overflow-hidden rounded-t-[10px] bg-media-canvas">
         {file.type === 'video' ? (
           <video
             ref={videoRef}
@@ -412,8 +471,11 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
             src={file.url}
             controls
             loop
+            playsInline
             className="w-full h-full object-contain"
             muted={!isActive}
+            data-gallery-media="true"
+            onPlay={handlePlaybackStart}
           />
         ) : file.type === 'audio' ? (
           <div className="flex flex-col items-center gap-4">
@@ -421,7 +483,14 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
               <Play size={24} className="text-text-muted" />
             </div>
             <p className="text-xs text-text-muted mb-2">{file.name}</p>
-            <audio key={file.url} src={file.url} controls className="w-64" />
+            <audio
+              key={file.url}
+              src={file.url}
+              controls
+              className="w-64"
+              data-gallery-media="true"
+              onPlay={handlePlaybackStart}
+            />
           </div>
         ) : (
           <RetryImage key={file.url} url={file.url} alt={file.name} />
@@ -481,174 +550,422 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
           )}
         </div>
 
-        {/* Action buttons */}
-        <div className="flex items-center gap-0.5 shrink-0" onClick={e => e.stopPropagation()}>
+        {/* Four persistent controls; secondary actions are labeled in More. */}
+        <div ref={actionMenuRef} className="relative flex shrink-0 items-center gap-0.5" onClick={e => e.stopPropagation()}>
           {params && (
-            <>
-              <button
-                onClick={(e) => { e.stopPropagation(); setShowSaveRecipe(true) }}
-                className="p-1.5 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-accent-blue transition-colors"
-                title="Save as Recipe — reuse this look with one click"
-              >
-                <BookMarked size={13} />
-              </button>
-              <button
-                onClick={handleLoadSettings}
-                className="p-1.5 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors"
-                title="Load settings"
-              >
-                <Pencil size={13} />
-              </button>
-              <button
-                onClick={handleReroll}
-                className="p-1.5 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors"
-                title="Re-generate with same settings"
-              >
-                <RefreshCw size={13} />
-              </button>
-              {file.type === 'video' && (
-                <>
-                  <button
-                    onClick={() => openRetakeDialog(file.name)}
-                    className="p-1.5 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-indicator-warning transition-colors"
-                    title="Retake — regenerate a time region"
-                  >
-                    <Scissors size={13} />
-                  </button>
-                  <button
-                    onClick={handleContinueFrom}
-                    className="p-1.5 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-accent-blue transition-colors"
-                    title="Extend this video with new content"
-                  >
-                    <FastForward size={13} />
-                  </button>
-                </>
+            <button
+              onClick={() => {
+                onActivate(index)
+                setShowDetails(value => !value)
+                setShowActionMenu(false)
+                setShowMoveMenu(false)
+              }}
+              className={`rounded-lg p-1.5 transition-colors ${
+                showDetails
+                  ? 'bg-bg-active text-accent-blue'
+                  : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
+              }`}
+              title={showDetails ? 'Hide generation details' : 'Show generation details'}
+              aria-label={showDetails ? 'Hide generation details' : 'Show generation details'}
+              aria-expanded={showDetails}
+            >
+              <span className="flex items-center gap-0.5">
+                <Info size={14} />
+                {showDetails ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+              </span>
+            </button>
+          )}
+          {params && (
+            <button
+              onClick={() => {
+                setShowActionMenu(false)
+                setShowMoveMenu(false)
+                handleLoadSettings()
+              }}
+              className="rounded-lg p-1.5 text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
+              title="Load settings"
+              aria-label="Load settings"
+            >
+              <Pencil size={14} />
+            </button>
+          )}
+          {!browsingUploads && (
+            <button
+              onClick={() => toggleFavorite(file.name)}
+              className={`rounded-lg p-1.5 transition-colors ${
+                file.favorite
+                  ? 'text-red-400 hover:text-red-300'
+                  : 'text-text-secondary hover:bg-bg-hover hover:text-red-400'
+              }`}
+              title={file.favorite ? 'Remove from favorites' : 'Add to favorites'}
+              aria-label={file.favorite ? 'Remove from favorites' : 'Add to favorites'}
+            >
+              <Heart size={14} fill={file.favorite ? 'currentColor' : 'none'} />
+            </button>
+          )}
+          <button
+            onClick={() => {
+              onActivate(index)
+              const rect = actionMenuRef.current?.getBoundingClientRect()
+              if (rect) {
+                const spaceAbove = rect.top - 8
+                const spaceBelow = window.innerHeight - rect.bottom - 8
+                setActionMenuOpensDown(spaceBelow > spaceAbove)
+              }
+              setShowActionMenu(value => !value)
+              setShowMoveMenu(false)
+            }}
+            className={`rounded-lg p-1.5 transition-colors ${
+              showActionMenu
+                ? 'bg-bg-active text-accent-blue'
+                : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
+            }`}
+            title="More clip actions"
+            aria-label="More clip actions"
+            aria-haspopup="menu"
+            aria-expanded={showActionMenu}
+          >
+            <MoreHorizontal size={15} />
+          </button>
+
+          {showActionMenu && (
+            <div
+              role="menu"
+              aria-label="Clip actions"
+              className={`absolute right-0 z-50 max-h-[min(420px,65vh)] w-64 max-w-[calc(100vw-2rem)] overflow-y-auto rounded-xl border border-border bg-bg-secondary p-1.5 shadow-2xl ${
+                actionMenuOpensDown ? 'top-full mt-2' : 'bottom-full mb-2'
+              }`}
+            >
+              <div className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
+                Clip actions
+              </div>
+              {params && (
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    setShowActionMenu(false)
+                    setShowSaveRecipe(true)
+                  }}
+                  className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
+                >
+                  <BookMarked size={14} className="text-accent-blue" />
+                  <span>Save as Recipe</span>
+                </button>
+              )}
+              {params && (
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    setShowActionMenu(false)
+                    handleReroll()
+                  }}
+                  className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
+                >
+                  <RefreshCw size={14} />
+                  <span>Regenerate with same settings</span>
+                </button>
+              )}
+              {params && file.type === 'video' && (
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    setShowActionMenu(false)
+                    openRetakeDialog(file.name)
+                  }}
+                  className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs text-text-secondary transition-colors hover:bg-bg-hover hover:text-indicator-warning"
+                >
+                  <Scissors size={14} />
+                  <span>Retake a time region</span>
+                </button>
+              )}
+              {params && file.type === 'video' && (
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    setShowActionMenu(false)
+                    handleContinueFrom()
+                  }}
+                  className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs text-text-secondary transition-colors hover:bg-bg-hover hover:text-accent-blue"
+                >
+                  <FastForward size={14} />
+                  <span>Extend this video</span>
+                </button>
               )}
               {groupId && (
                 <button
-                  onClick={handleRejoin}
+                  role="menuitem"
+                  onClick={async () => {
+                    await handleRejoin()
+                    setShowActionMenu(false)
+                  }}
                   disabled={rejoining}
-                  className="p-1.5 rounded-lg hover:bg-bg-hover text-accent-blue hover:text-accent-blue-hover transition-colors disabled:opacity-50"
-                  title={`Rejoin all ${clipTotal} clips in this group`}
+                  className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs text-accent-blue transition-colors hover:bg-bg-hover disabled:opacity-50"
                 >
-                  {rejoining ? <Loader2 size={13} className="animate-spin" /> : <Combine size={13} />}
+                  {rejoining ? <Loader2 size={14} className="animate-spin" /> : <Combine size={14} />}
+                  <span>Rejoin all {clipTotal} clips</span>
+                </button>
+              )}
+              {params && prompt && (
+                <button
+                  role="menuitem"
+                  onClick={handleCopyPrompt}
+                  className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
+                >
+                  {copied ? <Check size={14} className="text-accent-green" /> : <Copy size={14} />}
+                  <span>{copied ? 'Prompt copied' : 'Copy prompt'}</span>
+                </button>
+              )}
+              {file.type === 'image' && (
+                <button
+                  role="menuitem"
+                  onClick={handleSendToInput}
+                  className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs text-text-secondary transition-colors hover:bg-bg-hover hover:text-accent-blue"
+                >
+                  {sentToInput ? <Check size={14} className="text-accent-green" /> : <ArrowLeftToLine size={14} />}
+                  <span>{generationMode === 'image' ? 'Use as input image' : 'Use as start frame'}</span>
+                </button>
+              )}
+              {file.type === 'video' && (
+                <button
+                  role="menuitem"
+                  onClick={handleSendFrameToRefs}
+                  className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs text-text-secondary transition-colors hover:bg-bg-hover hover:text-accent-blue"
+                >
+                  {sentToInput ? <Check size={14} className="text-accent-green" /> : <ArrowLeftToLine size={14} />}
+                  <span>Use current frame as reference</span>
                 </button>
               )}
               <button
-                onClick={handleCopyPrompt}
-                className="p-1.5 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors"
-                title="Copy prompt"
+                role="menuitem"
+                onClick={() => {
+                  handleDownload()
+                  setShowActionMenu(false)
+                }}
+                className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
               >
-                {copied ? <Check size={13} className="text-accent-green" /> : <Copy size={13} />}
+                <Download size={14} />
+                <span>Download</span>
               </button>
-            </>
-          )}
-          {file.type === 'image' && (
-            <button
-              onClick={(e) => { e.stopPropagation(); handleSendToInput() }}
-              className={`p-1.5 rounded-lg transition-colors ${
-                sentToInput
-                  ? 'text-accent-green'
-                  : 'hover:bg-bg-hover text-text-secondary hover:text-accent-blue'
-              }`}
-              title={generationMode === 'image' ? 'Use as input image' : 'Use as start frame'}
-            >
-              {sentToInput ? <Check size={13} /> : <ArrowLeftToLine size={13} />}
-            </button>
-          )}
-          {file.type === 'video' && (
-            <button
-              onClick={(e) => { e.stopPropagation(); handleSendFrameToRefs() }}
-              className={`p-1.5 rounded-lg transition-colors ${
-                sentToInput
-                  ? 'text-accent-green'
-                  : 'hover:bg-bg-hover text-text-secondary hover:text-accent-blue'
-              }`}
-              title="Use current frame as reference image"
-            >
-              {sentToInput ? <Check size={13} /> : <ArrowLeftToLine size={13} />}
-            </button>
-          )}
-          <button
-            onClick={(e) => {
-              e.stopPropagation()
-              const link = document.createElement('a')
-              link.href = getFileUrl(file.name)
-              link.download = file.name
-              document.body.appendChild(link)
-              link.click()
-              document.body.removeChild(link)
-            }}
-            className="p-1.5 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors"
-            title="Download"
-          >
-            <Download size={13} />
-          </button>
-          {/* Move to workspace */}
-          {!browsingUploads && (
-          <div className="relative" ref={moveRef}>
-            <button
-              onClick={(e) => { e.stopPropagation(); setShowMoveMenu(!showMoveMenu) }}
-              disabled={moving}
-              className={`p-1.5 rounded-lg transition-colors ${
-                moving ? 'text-accent-blue animate-pulse' : 'hover:bg-bg-hover text-text-secondary hover:text-text-primary'
-              }`}
-              title="Move to workspace"
-            >
-              <FolderInput size={13} />
-            </button>
-            {showMoveMenu && (
-              <div className="absolute right-0 bottom-full mb-1 w-40 bg-bg-secondary border border-border rounded-lg shadow-lg z-50 overflow-hidden" onClick={e => e.stopPropagation()}>
-                <div className="px-2 py-1 border-b border-border">
-                  <span className="text-[9px] text-text-muted uppercase tracking-wider">Move to</span>
-                </div>
-                <div className="max-h-[150px] overflow-y-auto">
-                  {workspaces.filter(ws => ws.name !== activeWorkspace).map(ws => (
-                    <button
-                      key={ws.name}
-                      onClick={() => handleMove(ws.name)}
-                      className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors"
-                    >
-                      {ws.name}
-                    </button>
-                  ))}
-                  {workspaces.filter(ws => ws.name !== activeWorkspace).length === 0 && (
-                    <div className="px-3 py-2 text-[10px] text-text-muted">No other workspaces</div>
+              {!browsingUploads && (
+                <>
+                  <button
+                    role="menuitem"
+                    onClick={() => setShowMoveMenu(value => !value)}
+                    disabled={moving}
+                    className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary disabled:opacity-50"
+                    aria-expanded={showMoveMenu}
+                  >
+                    {moving ? <Loader2 size={14} className="animate-spin text-accent-blue" /> : <FolderInput size={14} />}
+                    <span className="flex-1">Move to workspace</span>
+                    {showMoveMenu ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                  </button>
+                  {showMoveMenu && (
+                    <div className="mx-2 mb-1 overflow-hidden rounded-lg border border-border bg-bg-tertiary">
+                      {workspaces.filter(ws => ws.name !== activeWorkspace).map(ws => (
+                        <button
+                          key={ws.name}
+                          role="menuitem"
+                          onClick={() => handleMove(ws.name)}
+                          className="w-full px-3 py-2 text-left text-[11px] text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
+                        >
+                          {ws.name}
+                        </button>
+                      ))}
+                      {workspaces.filter(ws => ws.name !== activeWorkspace).length === 0 && (
+                        <div className="px-3 py-2 text-[10px] text-text-muted">No other workspaces</div>
+                      )}
+                    </div>
                   )}
-                </div>
-              </div>
-            )}
-          </div>
-          )}
-          {!browsingUploads && (
-          <button
-            onClick={(e) => { e.stopPropagation(); toggleFavorite(file.name) }}
-            className={`p-1.5 rounded-lg transition-colors ${
-              file.favorite
-                ? 'text-red-400 hover:text-red-300'
-                : 'hover:bg-bg-hover text-text-secondary hover:text-red-400'
-            }`}
-            title={file.favorite ? 'Remove from favorites' : 'Add to favorites'}
-          >
-            <Heart size={13} fill={file.favorite ? 'currentColor' : 'none'} />
-          </button>
-          )}
-          {!browsingUploads && (
-          <button
-            onClick={handleDelete}
-            className={`p-1.5 rounded-lg transition-colors flex items-center gap-1 ${
-              confirmDelete
-                ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30'
-                : 'hover:bg-bg-hover text-text-secondary hover:text-red-400'
-            }`}
-            title={confirmDelete ? 'Click again to confirm delete' : 'Delete output'}
-          >
-            <Trash2 size={13} />
-            {confirmDelete && <span className="text-[11px] font-medium">Delete?</span>}
-          </button>
+                </>
+              )}
+              {!browsingUploads && (
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    const alreadyConfirmed = confirmRef.current
+                    handleDelete()
+                    if (alreadyConfirmed) setShowActionMenu(false)
+                  }}
+                  className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs transition-colors ${
+                    confirmDelete
+                      ? 'bg-red-500/15 text-red-400 hover:bg-red-500/25'
+                      : 'text-text-secondary hover:bg-bg-hover hover:text-red-400'
+                  }`}
+                >
+                  <Trash2 size={14} />
+                  <span>{confirmDelete ? 'Click again to delete' : 'Delete output'}</span>
+                </button>
+              )}
+            </div>
           )}
         </div>
       </div>
+      {showDetails && params && (
+        <div
+          className="rounded-b-[10px] border-t border-border bg-bg-secondary/70 px-3 py-3"
+          onClick={event => event.stopPropagation()}
+        >
+          <div className="flex flex-wrap gap-1.5 mb-3">
+            {h3Workflow && (
+              <span className="rounded-full border border-border bg-bg-tertiary px-2 py-0.5 text-[10px] text-text-secondary">
+                {h3Workflow}
+              </span>
+            )}
+            {resolution && (
+              <span className="rounded-full border border-border bg-bg-tertiary px-2 py-0.5 text-[10px] text-text-secondary">
+                {resolution}
+              </span>
+            )}
+            {inferenceSteps != null && (
+              <span className="rounded-full border border-border bg-bg-tertiary px-2 py-0.5 text-[10px] text-text-secondary">
+                {inferenceSteps} steps
+              </span>
+            )}
+            {optimizationLabels.map(label => (
+              <span
+                key={label}
+                className="rounded-full border border-accent-blue/30 bg-accent-blue/10 px-2 py-0.5 text-[10px] text-accent-blue"
+              >
+                {label}
+              </span>
+            ))}
+          </div>
+
+          <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-[11px]">
+            <dt className="text-text-muted">Model</dt>
+            <dd className="text-text-secondary break-words">{modelLabel || modelType || 'Unknown'}</dd>
+            {h3Workflow && (
+              <>
+                <dt className="text-text-muted">Workflow</dt>
+                <dd className="text-text-secondary">{h3Workflow}</dd>
+              </>
+            )}
+            {resolution && (
+              <>
+                <dt className="text-text-muted">Resolution</dt>
+                <dd className="text-text-secondary">{resolution}</dd>
+              </>
+            )}
+            {inferenceSteps != null && (
+              <>
+                <dt className="text-text-muted">Sampling</dt>
+                <dd className="text-text-secondary">
+                  {inferenceSteps} steps{guidanceScale != null ? ` · guidance ${guidanceScale}` : ''}
+                </dd>
+              </>
+            )}
+            {seed != null && seed >= 0 && (
+              <>
+                <dt className="text-text-muted">Seed</dt>
+                <dd className="text-text-secondary">{seed}</dd>
+              </>
+            )}
+            {optimizationLabels.length > 0 && (
+              <>
+                <dt className="text-text-muted">Optimizations</dt>
+                <dd className="text-text-secondary">{optimizationLabels.join(' · ')}</dd>
+              </>
+            )}
+            {turboEnabled && turboPreset && (
+              <>
+                <dt className="text-text-muted">Turbo preset</dt>
+                <dd className="break-words text-text-secondary">{turboPreset}</dd>
+              </>
+            )}
+            {firstBlockEnabled && (
+              <>
+                <dt className="text-text-muted">Cache tuning</dt>
+                <dd className="text-text-secondary">
+                  threshold {String(params.skip_steps_multiplier ?? 'default')}
+                  {params.skip_steps_start_step_perc != null
+                    ? ` · starts at ${String(params.skip_steps_start_step_perc)}%`
+                    : ''}
+                </dd>
+              </>
+            )}
+          </dl>
+
+          {activeLoras.length > 0 && (
+            <div className="mt-3">
+              <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-text-muted">Active LoRAs</div>
+              <div className="space-y-1">
+                {activeLoras.map((lora, loraIndex) => (
+                  <div key={`${lora}-${loraIndex}`} className="flex gap-2 text-[11px]">
+                    <span className="min-w-0 flex-1 break-all text-text-secondary">{lora}</span>
+                    {loraWeights[loraIndex] && (
+                      <span className="shrink-0 text-text-muted">{loraWeights[loraIndex]}x</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {prompt && (
+            <div className="mt-3">
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <span className="text-[10px] font-medium uppercase tracking-wide text-text-muted">
+                  {effectiveWindowPrompts.length > 0 ? 'Source prompt' : 'Prompt'}
+                </span>
+                <button
+                  type="button"
+                  onClick={handleCopyPrompt}
+                  className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-text-muted hover:bg-bg-hover hover:text-text-primary"
+                >
+                  {copied ? <Check size={10} className="text-accent-green" /> : <Copy size={10} />}
+                  {copied ? 'Copied' : 'Copy'}
+                </button>
+              </div>
+              <div className="max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-lg border border-border bg-bg-tertiary p-2 text-[11px] leading-relaxed text-text-secondary">
+                {prompt}
+              </div>
+            </div>
+          )}
+          {originalPrompt && originalPrompt.trim() !== prompt.trim() && (
+            <div className="mt-3">
+              <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-text-muted">Original prompt</div>
+              <div className="max-h-28 overflow-y-auto whitespace-pre-wrap break-words rounded-lg border border-border bg-bg-tertiary p-2 text-[11px] leading-relaxed text-text-secondary">
+                {originalPrompt}
+              </div>
+            </div>
+          )}
+          {effectiveWindowPrompts.length > 0 && (
+            <div className="mt-3">
+              <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-text-muted">
+                Effective window prompts ({effectiveWindowPrompts.length})
+              </div>
+              <div className="space-y-2">
+                {effectiveWindowPrompts.map((windowPrompt, windowIndex) => (
+                  <details
+                    key={`effective-window-${windowIndex}`}
+                    className="overflow-hidden rounded-lg border border-border bg-bg-tertiary"
+                    open={effectiveWindowPrompts.length <= 2}
+                  >
+                    <summary className="cursor-pointer select-none px-2 py-1.5 text-[11px] font-medium text-text-secondary hover:bg-bg-hover">
+                      Window {windowIndex + 1}
+                    </summary>
+                    <div className="whitespace-pre-wrap break-words border-t border-border px-2 py-2 text-[11px] leading-relaxed text-text-secondary">
+                      {windowPrompt}
+                    </div>
+                  </details>
+                ))}
+              </div>
+            </div>
+          )}
+          {h3PlanningWarnings.length > 0 && (
+            <div className="mt-3 rounded-lg border border-amber-500/25 bg-amber-500/10 p-2">
+              <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-amber-300">
+                Planning notes
+              </div>
+              {h3PlanningWarnings.map((warning, warningIndex) => (
+                <div key={`h3-planning-warning-${warningIndex}`} className="text-[11px] leading-relaxed text-text-secondary">
+                  {warning}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
       {showSaveRecipe && (
         <SaveRecipeDialog
           defaultNsfw={nsfwMode}

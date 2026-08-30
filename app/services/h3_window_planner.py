@@ -1198,7 +1198,7 @@ def plan_h3_sliding_windows(
     raw_prompt = str(prompt or "").strip()
     prompt = recover_h3_plain_story(raw_prompt)
     source_intent = extract_h3_source_intent(prompt)
-    if prompt != raw_prompt:
+    if prompt != raw_prompt and "subject_definitions:" in raw_prompt.casefold():
         print(
             "[MiniMax H3] Recovered the original story from an existing "
             "single-clip Context-IR prompt before sliding-window planning."

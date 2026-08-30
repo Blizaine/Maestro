@@ -2,7 +2,13 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Maximize2, Pause, Play, RotateCcw, SkipBack, SkipForward } from 'lucide-react'
 import type { EditorAsset, EditorTimelineItem, EditorTrack, EditorTransform } from '../types'
 import { useIsMobile } from '../lib/useIsMobile'
-import { activeEditorItems, editorProjectDuration, fitEditorCanvasToViewport, formatEditorTime } from './editorUtils'
+import {
+  activeEditorItems,
+  editorProjectDuration,
+  fitEditorCanvasToViewport,
+  formatEditorTime,
+  preparedEditorMediaItems,
+} from './editorUtils'
 import { DEFAULT_EDITOR_FONT, editorFontStack } from './editorFonts'
 import { useEditorMediaPreview } from './editorMediaPreview'
 import { useEditorStore } from './useEditorStore'
@@ -153,12 +159,15 @@ function syncMediaElement(
   playhead: number,
   playing: boolean,
   volume: number,
+  driftTolerance = 0.2,
+  forceSeek = false,
 ): void {
   const wantedTime = Math.max(0, item.source_in + (playhead - item.start) * item.speed)
+  const seekTolerance = playing ? driftTolerance : 0.045
   if (Number.isFinite(element.duration)) {
     const bounded = Math.min(Math.max(0, element.duration - 0.03), wantedTime)
-    if (Math.abs(element.currentTime - bounded) > (playing ? 0.2 : 0.045)) element.currentTime = bounded
-  } else if (Math.abs(element.currentTime - wantedTime) > 0.045) {
+    if (forceSeek || Math.abs(element.currentTime - bounded) > seekTolerance) element.currentTime = bounded
+  } else if (forceSeek || Math.abs(element.currentTime - wantedTime) > seekTolerance) {
     element.currentTime = wantedTime
   }
   element.playbackRate = Math.max(0.1, Math.min(8, item.speed))
@@ -168,6 +177,36 @@ function syncMediaElement(
   } else if (!element.paused) {
     element.pause()
   }
+}
+
+/**
+ * Convert a playing media element's source time back into Editor timeline time.
+ *
+ * Mobile Safari can leave the previous source in `currentSrc` for a moment after
+ * React assigns the next clip. Treating that stale decoder as the new clock can
+ * skip an entire edit, so the clock waits until the declared source is current.
+ */
+function mediaTimelineTime(element: HTMLMediaElement): number | null {
+  if (element.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return null
+  const declaredSource = element.getAttribute('src')
+  if (declaredSource && element.currentSrc) {
+    try {
+      if (new URL(declaredSource, document.baseURI).href !== element.currentSrc) return null
+    } catch {
+      return null
+    }
+  }
+
+  const start = Number(element.dataset.editorItemStart)
+  const duration = Number(element.dataset.editorItemDuration)
+  const sourceIn = Number(element.dataset.editorSourceIn)
+  const speed = Number(element.dataset.editorSpeed)
+  if (![start, duration, sourceIn, speed].every(Number.isFinite) || speed <= 0) return null
+
+  const sourceEnd = sourceIn + duration * speed
+  if (element.ended || element.currentTime >= sourceEnd - 0.035) return start + duration
+  if (element.currentTime < sourceIn - 0.05) return null
+  return Math.max(start, Math.min(start + duration, start + (element.currentTime - sourceIn) / speed))
 }
 
 function PreviewVisual({
@@ -182,6 +221,9 @@ function PreviewVisual({
   locked,
   workspace,
   mobilePlayback,
+  masterClock,
+  active,
+  timelineTimeRef,
   previewTransform,
   onTransformStart,
 }: {
@@ -196,6 +238,9 @@ function PreviewVisual({
   locked: boolean
   workspace: string
   mobilePlayback: boolean
+  masterClock: boolean
+  active: boolean
+  timelineTimeRef: { current: number }
   previewTransform?: EditorTransform
   onTransformStart: (
     event: React.PointerEvent<HTMLElement>,
@@ -211,7 +256,27 @@ function PreviewVisual({
     true,
     mobilePlayback ? 'mobile' : 'auto',
   )
-  const sourceUrl = mediaPreview.data?.proxy_url || asset.url
+  const waitingForMobileProxy = (
+    mobilePlayback
+    && asset.type === 'video'
+    && mediaPreview.loading
+  )
+  // On iPhone, starting against the original generation while FFmpeg builds
+  // the lightweight proxy locks Safari onto the large source for the rest of
+  // that clip. Wait briefly for the proxy instead; fall back to the original
+  // only when preview preparation actually fails or returns no proxy.
+  const resolvedSourceUrl = mediaPreview.data?.proxy_url
+    || (waitingForMobileProxy ? '' : asset.url)
+  const [sourceState, setSourceState] = useState({ assetId: asset.id, url: resolvedSourceUrl })
+  const sourceAssetChanged = sourceState.assetId !== asset.id
+  const sourceUrl = sourceAssetChanged ? resolvedSourceUrl : sourceState.url
+  const keepPlaybackSourceStable = (
+    active
+    && playing
+    && Boolean(sourceState.url)
+    && !sourceAssetChanged
+  )
+  const promotionSyncPendingRef = useRef(false)
   const transform = previewTransform || item.transform
   const sourceWidth = Math.max(1, asset.width || canvasWidth)
   const sourceHeight = Math.max(1, asset.height || canvasHeight)
@@ -230,32 +295,95 @@ function PreviewVisual({
   const inverseHandleScale = 1 / scale
   const envelope = clipEnvelope(item, playhead)
   const fadeThroughBlack = usesBlackTransition(item, playhead)
+  const wasActiveRef = useRef(active)
+
+  useEffect(() => {
+    // A mobile proxy may finish building after playback has started. Changing
+    // `src` on the active deck resets Safari's decoder. Standby decks can adopt
+    // the proxy immediately, so it is already warm when its edit arrives.
+    if (keepPlaybackSourceStable || (
+      sourceState.assetId === asset.id && sourceState.url === resolvedSourceUrl
+    )) return
+    const frame = requestAnimationFrame(() => setSourceState({
+      assetId: asset.id,
+      url: resolvedSourceUrl,
+    }))
+    return () => cancelAnimationFrame(frame)
+  }, [asset.id, keepPlaybackSourceStable, resolvedSourceUrl, sourceState])
 
   useEffect(() => {
     const video = videoRef.current
-    if (!video || asset.type !== 'video') return
+    if (!video || asset.type !== 'video' || active) return
+    promotionSyncPendingRef.current = false
+    video.muted = true
+    video.volume = 0
+    if (!video.paused) video.pause()
+    const seekToSourceIn = () => {
+      const target = Math.max(0, item.source_in)
+      const bounded = Number.isFinite(video.duration)
+        ? Math.min(Math.max(0, video.duration - 0.03), target)
+        : target
+      if (Math.abs(video.currentTime - bounded) > 0.045) video.currentTime = bounded
+    }
+    if (video.readyState >= HTMLMediaElement.HAVE_METADATA) seekToSourceIn()
+    else video.addEventListener('loadedmetadata', seekToSourceIn, { once: true })
+    return () => video.removeEventListener('loadedmetadata', seekToSourceIn)
+  }, [active, asset.type, item.source_in, sourceUrl])
+
+  const syncActiveVideo = (forceSeek = false) => {
+    const video = videoRef.current
+    if (!video || asset.type !== 'video' || !active) return
+    const timelineTime = mobilePlayback && playing
+      ? timelineTimeRef.current
+      : playhead
+    const playbackDriftTolerance = mobilePlayback && playing
+      ? Number.POSITIVE_INFINITY
+      : mobilePlayback
+        ? 0.08
+        : 0.2
     // Preview the same mix FFmpeg exports: an added music/voice track does not
     // implicitly silence audio embedded in visible video clips.
     video.muted = Boolean(item.muted) || track.muted
     syncMediaElement(
       video,
       item,
-      playhead,
+      timelineTime,
       playing,
-      item.volume * (track.volume ?? 1) * clipEnvelope(item, playhead),
+      item.volume * (track.volume ?? 1) * clipEnvelope(item, timelineTime),
+      playbackDriftTolerance,
+      forceSeek,
     )
-  }, [asset.type, item, playhead, playing, sourceUrl, track.muted, track.volume])
+  }
+
+  useEffect(() => {
+    const promoted = active && !wasActiveRef.current
+    wasActiveRef.current = active
+    // Promote the already-buffered deck without an unconditional seek: even a
+    // tiny currentTime assignment makes Safari drop HAVE_FUTURE_DATA and can
+    // introduce the visible pause we are trying to avoid. While playing on
+    // mobile, native media clocks run continuously; timeline publications must
+    // never turn into ten seek operations per second.
+    if (promoted && playing) promotionSyncPendingRef.current = true
+    syncActiveVideo(false)
+    // `syncActiveVideo` intentionally follows every playback prop. Keeping
+    // the dependencies explicit avoids turning a media event callback into a
+    // second timeline clock.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, asset.type, item, mobilePlayback, playhead, playing, sourceUrl, track.muted, track.volume])
 
   return (
     <div
       data-editor-canvas-item-id={item.id}
       className={`group absolute touch-none ${locked ? 'cursor-not-allowed' : 'cursor-move'}`}
       style={{
+        pointerEvents: active ? undefined : 'none',
         left: `calc(50% + ${(transform?.x || 0) / Math.max(1, canvasWidth) * 100}%)`,
         top: `calc(50% + ${(transform?.y || 0) / Math.max(1, canvasHeight) * 100}%)`,
         width: `${frameWidth}%`,
         height: `${frameHeight}%`,
-        opacity: item.opacity * (fadeThroughBlack ? 1 : envelope),
+        opacity: active
+          ? item.opacity * (fadeThroughBlack ? 1 : envelope)
+          : 0,
         filter: fadeThroughBlack ? `brightness(${envelope})` : undefined,
         transform: `translate(-50%, -50%) scale(${scale}) rotate(${transform?.rotation || 0}deg)`,
         transformOrigin: 'center',
@@ -267,14 +395,35 @@ function PreviewVisual({
       ) : asset.missing ? (
         <div className="grid h-full w-full place-items-center bg-red-950/70 text-[10px] font-semibold uppercase tracking-wider text-red-100">Media offline</div>
       ) : (
-        <video
-          ref={videoRef}
-          src={sourceUrl}
-          className="pointer-events-none h-full w-full"
-          style={{ objectFit: item.fit }}
-          playsInline
-          preload="auto"
-        />
+        <>
+          <video
+            ref={videoRef}
+            src={sourceUrl || undefined}
+            className="pointer-events-none h-full w-full"
+            style={{ objectFit: item.fit }}
+            playsInline
+            preload="auto"
+            data-editor-media-active={active ? 'true' : 'false'}
+            data-editor-master-clock={masterClock ? 'true' : 'false'}
+            data-editor-item-id={item.id}
+            data-editor-item-start={item.start}
+            data-editor-item-duration={item.duration}
+            data-editor-source-in={item.source_in}
+            data-editor-speed={item.speed}
+            onLoadedMetadata={() => syncActiveVideo(true)}
+            onCanPlay={() => syncActiveVideo(false)}
+            onPlaying={() => {
+              if (!promotionSyncPendingRef.current) return
+              promotionSyncPendingRef.current = false
+              syncActiveVideo(false)
+            }}
+          />
+          {!sourceUrl && waitingForMobileProxy && (
+            <div className="pointer-events-none absolute inset-0 grid place-items-center bg-black/75 px-4 text-center text-[10px] font-semibold uppercase tracking-[0.16em] text-white/70">
+              Preparing smooth mobile preview…
+            </div>
+          )}
+        </>
       )}
       {selected && (
         <div className={`pointer-events-none absolute inset-0 border ${locked ? 'border-dashed border-white/65' : 'border-accent-warm'} shadow-[0_0_0_1px_rgba(0,0,0,0.45)]`}>
@@ -305,20 +454,80 @@ function PreviewAudio({
   track,
   playhead,
   playing,
+  active,
+  masterClock,
+  timelineTimeRef,
 }: {
   asset: EditorAsset
   item: EditorTimelineItem
   track: EditorTrack
   playhead: number
   playing: boolean
+  active: boolean
+  masterClock: boolean
+  timelineTimeRef: { current: number }
 }) {
   const ref = useRef<HTMLAudioElement>(null)
+  const wasActiveRef = useRef(active)
+  const promotionSyncPendingRef = useRef(false)
+  const syncActiveAudio = (forceSeek = false) => {
+    if (!ref.current || !active) return
+    const timelineTime = playing ? timelineTimeRef.current : playhead
+    ref.current.muted = Boolean(item.muted) || track.muted
+    const level = item.muted ? 0 : item.volume * (track.volume ?? 1) * clipEnvelope(item, timelineTime)
+    syncMediaElement(
+      ref.current,
+      item,
+      timelineTime,
+      playing,
+      level,
+      masterClock && playing ? Number.POSITIVE_INFINITY : 0.65,
+      forceSeek,
+    )
+  }
   useEffect(() => {
     if (!ref.current) return
-    const level = item.muted ? 0 : item.volume * (track.volume ?? 1) * clipEnvelope(item, playhead)
-    syncMediaElement(ref.current, item, playhead, playing, level)
-  }, [item, playhead, playing, track.volume])
-  return <audio ref={ref} src={asset.url} preload="auto" />
+    if (!active) {
+      wasActiveRef.current = false
+      promotionSyncPendingRef.current = false
+      ref.current.muted = true
+      ref.current.volume = 0
+      if (!ref.current.paused) ref.current.pause()
+      const target = Math.max(0, item.source_in)
+      if (ref.current.readyState >= HTMLMediaElement.HAVE_METADATA
+        && Math.abs(ref.current.currentTime - target) > 0.045) {
+        ref.current.currentTime = target
+      }
+      return
+    }
+    const promoted = active && !wasActiveRef.current
+    wasActiveRef.current = active
+    if (promoted && playing) promotionSyncPendingRef.current = true
+    syncActiveAudio(false)
+    // `syncActiveAudio` follows every playback prop, as does the video deck.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, item, masterClock, playhead, playing, track.muted, track.volume])
+  return (
+    <audio
+      ref={ref}
+      src={asset.url}
+      preload="auto"
+      data-editor-media-active={active ? 'true' : 'false'}
+      data-editor-master-clock={masterClock ? 'true' : 'false'}
+      data-editor-item-id={item.id}
+      data-editor-item-start={item.start}
+      data-editor-item-duration={item.duration}
+      data-editor-source-in={item.source_in}
+      data-editor-speed={item.speed}
+      onLoadedMetadata={() => syncActiveAudio(false)}
+      onCanPlay={() => syncActiveAudio(false)}
+      onPlaying={() => {
+        if (!promotionSyncPendingRef.current) return
+        promotionSyncPendingRef.current = false
+        syncActiveAudio(false)
+      }}
+    />
+  )
 }
 
 export function EditorPreview() {
@@ -348,9 +557,38 @@ export function EditorPreview() {
     () => project ? activeEditorItems(project, playhead) : [],
     [playhead, project],
   )
+  const preparedMedia = useMemo(
+    () => project ? preparedEditorMediaItems(project, playhead) : [],
+    [playhead, project],
+  )
   const activeAudio = active.filter(entry => entry.track.type === 'audio')
   const activeVisual = active.filter(entry => entry.track.type === 'video')
   const activeText = active.filter(entry => entry.track.type === 'text')
+  const activeMediaIds = useMemo(
+    () => new Set([...activeAudio, ...activeVisual].map(({ item }) => item.id)),
+    [activeAudio, activeVisual],
+  )
+  const preparedAudio = preparedMedia.filter(entry => entry.track.type === 'audio')
+  const preparedVisual = preparedMedia.filter(entry => entry.track.type === 'video')
+  const audioMasterItemId = activeAudio.find(({ item, track }) => (
+    !item.muted && item.volume > 0 && (track.volume ?? 1) > 0
+  ))?.item.id || null
+  const videoMasterItemId = audioMasterItemId
+    ? null
+    : activeVisual.find(({ item }) => (
+      item.asset_id && project?.assets[item.asset_id]?.type === 'video'
+    ))?.item.id || null
+  const playbackBoundaries = useMemo(() => {
+    if (!project) return []
+    const values = project.tracks
+      .filter(track => !track.muted && (track.type === 'video' || track.type === 'audio'))
+      .flatMap(track => track.items
+        .filter(item => !item.disabled)
+        .flatMap(item => [item.start, item.start + item.duration]))
+      .filter(value => Number.isFinite(value) && value > 0)
+      .map(value => Math.round(value * 1000) / 1000)
+    return [...new Set(values)].sort((left, right) => left - right)
+  }, [project])
 
   useEffect(() => {
     playheadRef.current = playhead
@@ -389,25 +627,63 @@ export function EditorPreview() {
     if (!playing || !project) return
     const startedAt = performance.now()
     const originalPlayhead = playheadRef.current
-    // The iOS fallback must publish at the same rate as Maestro's mobile
-    // proxy. If Safari declines a delayed play() call, timeline-driven seeks
-    // still present a real 30 fps preview instead of a 15 fps slideshow.
-    const publishInterval = 1000 / 30
+    // Video and audio elements render at their native frame/sample rates. The
+    // shared Zustand playhead only needs to keep the timeline, labels, clip
+    // boundaries, and drift correction current. Publishing that global state
+    // at 30 Hz made every Editor panel re-render 30 times per second on iOS.
+    // Ten UI updates per second keeps controls responsive while Safari's media
+    // decoder continues smooth native playback between updates.
+    const publishInterval = 1000 / (isMobile ? 10 : 30)
     let latestPlayhead = originalPlayhead
     let lastPublishedAt = startedAt - publishInterval
+    let lastTickAt = startedAt
+    let nextBoundaryIndex = playbackBoundaries.findIndex(
+      boundary => boundary > originalPlayhead + 0.001,
+    )
+    if (nextBoundaryIndex < 0) nextBoundaryIndex = playbackBoundaries.length
     let frame = 0
     const tick = (now: number) => {
-      const next = originalPlayhead + (now - startedAt) / 1000
+      const elapsed = Math.max(0, (now - lastTickAt) / 1000)
+      lastTickAt = now
+      const previous = latestPlayhead
+      let next: number
+      if (isMobile) {
+        const master = canvasRef.current?.querySelector<HTMLMediaElement>(
+          '[data-editor-media-active="true"][data-editor-master-clock="true"]',
+        ) || null
+        const mediaTime = master ? mediaTimelineTime(master) : null
+        // A real media clock keeps soundtrack samples and video frames stable.
+        // If Safari is changing sources or buffering, hold here until playback
+        // resumes instead of advancing and repeatedly seeking the decoder.
+        next = master ? (mediaTime ?? latestPlayhead) : latestPlayhead + elapsed
+      } else {
+        next = originalPlayhead + (now - startedAt) / 1000
+      }
+      next = Math.max(0, Math.min(duration, next))
       latestPlayhead = next
+      // Keep the live media clock available to event handlers without making
+      // the whole Editor rerender at 60 Hz.
+      playheadRef.current = next
       if (next >= duration) {
         setPlayhead(duration)
         setPlaying(false)
         return
       }
-      // Media elements render natively between clock publications. Keeping the
-      // global timeline aligned to the 30 fps mobile proxy avoids visible
-      // stepping when Safari falls back to timeline-driven seeking.
-      if (now - lastPublishedAt >= publishInterval) {
+      let crossedBoundary = false
+      while (
+        nextBoundaryIndex < playbackBoundaries.length
+        && playbackBoundaries[nextBoundaryIndex] <= next + 0.001
+      ) {
+        if (playbackBoundaries[nextBoundaryIndex] > previous + 0.001) {
+          crossedBoundary = true
+        }
+        nextBoundaryIndex += 1
+      }
+      // Media elements render natively between ordinary UI publications, but
+      // clip boundaries are published on the audio-clock frame that crosses
+      // them. This promotes the warmed deck immediately instead of up to
+      // 100 ms later on mobile.
+      if (crossedBoundary || now - lastPublishedAt >= publishInterval) {
         setPlayhead(next)
         lastPublishedAt = now
       }
@@ -418,19 +694,49 @@ export function EditorPreview() {
       cancelAnimationFrame(frame)
       if (latestPlayhead < duration) setPlayhead(latestPlayhead)
     }
-  }, [duration, isMobile, playing, project, setPlayhead, setPlaying])
+  }, [duration, isMobile, playbackBoundaries, playing, project, setPlayhead, setPlaying])
 
   if (!project) return <div className="flex min-h-0 flex-1 items-center justify-center text-xs text-text-muted">Opening Editor…</div>
 
-  const seek = (value: number) => setPlayhead(Math.max(0, Math.min(duration, value)))
+  const seek = (value: number) => {
+    // A deliberate scrub is the one time every deck should seek exactly. Stop
+    // playback first so the active media clock cannot race the user's gesture.
+    if (playing) setPlaying(false)
+    setPlayhead(Math.max(0, Math.min(duration, value)))
+  }
   const frameDuration = 1 / project.canvas.fps
   const startPlaybackFromGesture = () => {
     // iOS Safari requires unmuted media playback to begin inside the original
-    // tap handler. Calling play() only from PreviewVisual's React effect can
-    // be rejected, after which the old 15 Hz playhead sync looked like slow
-    // playback. Unlock every currently visible media element synchronously.
-    canvasRef.current?.querySelectorAll<HTMLMediaElement>('video, audio').forEach(element => {
-      void element.play().catch(() => {})
+    // tap handler. Prime both alternating decks while that gesture is still
+    // active. The standby deck is muted, decoded, paused, and rewound; when the
+    // edit arrives React promotes that exact media element instead of changing
+    // the active player's source and making the soundtrack run ahead.
+    canvasRef.current?.querySelectorAll<HTMLMediaElement>(
+      'video[data-editor-media-active], audio[data-editor-media-active]',
+    ).forEach(element => {
+      const activeElement = element.dataset.editorMediaActive === 'true'
+      if (!activeElement) {
+        element.muted = true
+        element.volume = 0
+      }
+      const playAttempt = element.play()
+      if (!activeElement) {
+        void playAttempt.then(() => {
+          requestAnimationFrame(() => {
+            if (element.dataset.editorMediaActive === 'true') return
+            element.pause()
+            const sourceIn = Number(element.dataset.editorSourceIn)
+            if (Number.isFinite(sourceIn) && element.readyState >= HTMLMediaElement.HAVE_METADATA) {
+              const target = Number.isFinite(element.duration)
+                ? Math.min(Math.max(0, element.duration - 0.03), Math.max(0, sourceIn))
+                : Math.max(0, sourceIn)
+              if (Math.abs(element.currentTime - target) > 0.025) element.currentTime = target
+            }
+          })
+        }).catch(() => {})
+      } else {
+        void playAttempt.catch(() => {})
+      }
     })
     setPlaying(true)
   }
@@ -727,11 +1033,13 @@ export function EditorPreview() {
             setCanvasGuides({ x: [], y: [] })
           }}
         >
-          {activeVisual.map(({ item, track }) => {
+          {preparedVisual.map(({ item, track }) => {
             const asset = item.asset_id ? project.assets[item.asset_id] : null
+            const itemActive = activeMediaIds.has(item.id)
+            const trackItemIndex = Math.max(0, track.items.findIndex(candidate => candidate.id === item.id))
             return asset ? (
               <PreviewVisual
-                key={item.id}
+                key={isMobile ? `${track.id}-video-deck-${trackItemIndex % 2}` : item.id}
                 asset={asset}
                 item={item}
                 track={track}
@@ -743,6 +1051,9 @@ export function EditorPreview() {
                 locked={track.locked}
                 workspace={project.workspace}
                 mobilePlayback={isMobile}
+                masterClock={isMobile && item.id === videoMasterItemId}
+                active={itemActive}
+                timelineTimeRef={playheadRef}
                 previewTransform={canvasPinch?.itemId === item.id
                   ? canvasPinch.previewTransform
                   : canvasInteraction?.itemId === item.id
@@ -785,9 +1096,23 @@ export function EditorPreview() {
               </div>
             )
           })}
-          {activeAudio.map(({ item, track }) => {
+          {preparedAudio.map(({ item, track }) => {
             const asset = item.asset_id ? project.assets[item.asset_id] : null
-            return asset ? <PreviewAudio key={item.id} asset={asset} item={item} track={track} playhead={playhead} playing={playing} /> : null
+            const itemActive = activeMediaIds.has(item.id)
+            const trackItemIndex = Math.max(0, track.items.findIndex(candidate => candidate.id === item.id))
+            return asset ? (
+              <PreviewAudio
+                key={isMobile ? `${track.id}-audio-deck-${trackItemIndex % 2}` : item.id}
+                asset={asset}
+                item={item}
+                track={track}
+                playhead={playhead}
+                playing={playing}
+                active={itemActive}
+                masterClock={isMobile && item.id === audioMasterItemId}
+                timelineTimeRef={playheadRef}
+              />
+            ) : null
           })}
           {canvasGuides.x.map(value => (
             <div
