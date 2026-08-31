@@ -242,6 +242,27 @@ def try_start(job: MutableMapping[str, Any], **updates: Any) -> bool:
         return True
 
 
+def release_held(job: MutableMapping[str, Any], **updates: Any) -> bool:
+    """Atomically release a user-held job into the runnable queue.
+
+    Studio's explicit queue action captures a complete request without
+    starting a worker.  Only the queue dispatcher may perform this
+    ``held`` -> ``queued`` transition, and cancellation always wins.
+    """
+    if "status" in updates:
+        raise ValueError("status must be changed through a lifecycle transition")
+    with _lifecycle_lock:
+        if is_cancel_requested(job):
+            job["status"] = "cancelled"
+            job["message"] = "Cancelled"
+            return False
+        if job.get("status") != "held":
+            return False
+        job.update(updates)
+        job["status"] = "queued"
+        return True
+
+
 def try_requeue(job: MutableMapping[str, Any], **updates: Any) -> bool:
     """Return a multi-phase job to queued unless cancellation won first."""
     if "status" in updates:

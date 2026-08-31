@@ -291,7 +291,19 @@ class LTX25HandlerTests(unittest.TestCase):
         self.assertIn("infer_audio_prompt_from_guide === true", store)
         self.assertIn("params.audio_scale ?? 1.0", panel)
         self.assertIn("setParam('audio_scale'", panel)
+        self.assertIn("Isolate vocals for better lip sync", panel)
         self.assertNotIn("modality_scale", panel)
+
+    def test_preseparated_vocals_can_condition_without_replacing_soundtrack(self):
+        wgp = WGP_PATH.read_text(encoding="utf-8")
+        self.assertIn("audio_conditioning_guide=None", wgp)
+        self.assertIn('"audio_conditioning_guide", "audio_source"', wgp)
+        self.assertIn("original_audio_guide = audio_guide", wgp)
+        self.assertIn("audio_guide = str(audio_conditioning_guide)", wgp)
+        self.assertIn(
+            "preserving the original soundtrack for output",
+            wgp,
+        )
 
     def test_component_downloads_use_native_wangp_stack(self):
         definitions = self.handler_module.family_handler.query_model_files(

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+import types
 import unittest
 
 
@@ -199,6 +200,67 @@ class TestDedicatedScail2Model(unittest.TestCase):
             "legacy CLIP/VAE identity reinforcement",
             source,
         )
+
+    def test_dedicated_attention_uses_shared_backend_contract(self):
+        from models.wan.modules import scail2_attention
+
+        torch = self.torch
+        captured = {}
+
+        def pay_attention(qkv_list, **kwargs):
+            captured["qkv"] = list(qkv_list)
+            captured["kwargs"] = kwargs
+            return torch.ones_like(qkv_list[0])
+
+        dispatcher = (
+            pay_attention,
+            lambda: "sdpa",
+            types.SimpleNamespace(shared_state={}),
+        )
+        query = torch.ones((1, 2, 1, 4), dtype=torch.float32)
+        result = scail2_attention._shared_attention(
+            dispatcher,
+            query,
+            query,
+            query,
+            q_lens=None,
+            k_lens=None,
+            dropout_p=0.0,
+            softmax_scale=None,
+            q_scale=2.0,
+            causal=False,
+            window_size=(-1, -1),
+            deterministic=False,
+            dtype=torch.bfloat16,
+            fa_version=None,
+        )
+
+        self.assertEqual(result.dtype, torch.float32)
+        self.assertEqual(captured["qkv"][0].dtype, torch.bfloat16)
+        self.assertTrue(
+            torch.equal(
+                captured["qkv"][0],
+                torch.full_like(captured["qkv"][0], 2.0),
+            )
+        )
+        self.assertEqual(captured["kwargs"]["force_attention"], "sdpa")
+
+    def test_scail2_flash_imports_handle_binary_load_failures(self):
+        path = os.path.join(
+            _APP,
+            "models",
+            "wan",
+            "modules",
+            "scail2_attention.py",
+        )
+        with open(path, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertGreaterEqual(
+            source.count("except (ImportError, OSError):"),
+            2,
+        )
+        self.assertIn("return _shared_attention(", source)
 
 
 if __name__ == "__main__":

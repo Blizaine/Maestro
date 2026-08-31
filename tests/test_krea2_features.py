@@ -95,7 +95,7 @@ def _load_model_download_check(*, vision_exists: bool):
         "os": os,
         "wgp": fake_wgp,
         "_model_weight_groups": lambda _model_type: [["transformer.safetensors"]],
-        "_variant_group_downloaded": lambda _group: True,
+        "_variant_group_downloaded": lambda _group, model_type=None: True,
     }
     module = ast.Module(body=[function], type_ignores=[])
     exec(compile(ast.fix_missing_locations(module), str(_LAUNCH_PATH), "exec"), namespace)

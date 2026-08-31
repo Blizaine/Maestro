@@ -14,6 +14,27 @@ const placeholders: Record<string, string> = {
   avatar: 'Describe your avatar animation...',
 }
 
+function useAutoGrowingTextarea(value: string) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  const fitToContent = () => {
+    const textarea = textareaRef.current
+    if (!textarea) return
+    textarea.style.height = 'auto'
+    // scrollHeight includes padding but not the two one-pixel borders used
+    // by these border-box textareas. Include them so the final line is visible.
+    textarea.style.height = `${textarea.scrollHeight + 2}px`
+  }
+
+  useLayoutEffect(fitToContent, [value])
+  useEffect(() => {
+    window.addEventListener('resize', fitToContent)
+    return () => window.removeEventListener('resize', fitToContent)
+  }, [])
+
+  return textareaRef
+}
+
 function H3WindowPromptTextarea({
   value,
   onChange,
@@ -27,22 +48,7 @@ function H3WindowPromptTextarea({
   title: string
   active: boolean
 }) {
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
-
-  const fitToContent = () => {
-    const textarea = textareaRef.current
-    if (!textarea) return
-    textarea.style.height = 'auto'
-    // scrollHeight includes padding but not the two one-pixel borders used
-    // by this border-box textarea. Include them so the final line never clips.
-    textarea.style.height = `${textarea.scrollHeight + 2}px`
-  }
-
-  useLayoutEffect(fitToContent, [value])
-  useEffect(() => {
-    window.addEventListener('resize', fitToContent)
-    return () => window.removeEventListener('resize', fitToContent)
-  }, [])
+  const textareaRef = useAutoGrowingTextarea(value)
 
   return (
     <textarea
@@ -114,6 +120,7 @@ function useEnhanceStatus(isEnhancing: boolean) {
 
 export function PromptInput() {
   const prompt = useStore(s => s.params.prompt)
+  const promptTextareaRef = useAutoGrowingTextarea(prompt)
   const setParam = useStore(s => s.setParam)
   const generationMode = useStore(s => s.generationMode)
   const editSubMode = useStore(s => s.editSubMode)
@@ -306,10 +313,9 @@ export function PromptInput() {
     }
   }, [usesH3Plan, h3WindowPlan?.signature])
 
-  // grow shrink-0: fill spare vertical space when the sidebar is roomy, but
-  // never shrink below the textarea's min-height. Dropping the old
-  // `flex-1 min-h-0` stops the wrapper from collapsing under the textarea
-  // (which made it overflow and overlap the section below).
+  // Keep the prompt area at the bottom when the sidebar has spare room. The
+  // textarea itself grows to its complete content height, and the sidebar's
+  // outer scroller handles prompts taller than the viewport.
   return (
     <div className="relative grow shrink-0 flex flex-col">
       {/* Enhance status indicator */}
@@ -410,22 +416,24 @@ export function PromptInput() {
           </span>
         </div>
       )}
-      <textarea
-        value={prompt}
-        onChange={e => setParam('prompt', e.target.value)}
-        placeholder={usesManualWindowPrompts
-          ? `Line 1 = ${manualPromptUnit} 1, line 2 = ${manualPromptUnit} 2... (${manualPromptCount} total)`
-          : usesH3Plan
-          ? `Describe the complete video idea—Maestro will plan ${expectedPlanCount} H3 ${usesH3SequencePlanner ? 'reference clips' : 'windows'}.`
-          : usesWindows
-            ? (isLtxSequence
-                ? `Describe the complete video idea - Maestro will plan ${windowCount} LTX windows.`
-                : `Line 1 = window 1, line 2 = window 2... (${windowCount} windows)`)
-          : modePlaceholder}
-        className="w-full flex-1 bg-bg-tertiary border border-border rounded-lg px-3 py-2 pr-10 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue transition-colors"
-        style={{ resize: 'none', minHeight: 112 }}
-      />
-      {prompt.trim() && !usesManualWindowPrompts && (
+      <div className="relative mt-auto">
+        <textarea
+          ref={promptTextareaRef}
+          rows={1}
+          value={prompt}
+          onChange={e => setParam('prompt', e.target.value)}
+          placeholder={usesManualWindowPrompts
+            ? `Line 1 = ${manualPromptUnit} 1, line 2 = ${manualPromptUnit} 2... (${manualPromptCount} total)`
+            : usesH3Plan
+            ? `Describe the complete video idea—Maestro will plan ${expectedPlanCount} H3 ${usesH3SequencePlanner ? 'reference clips' : 'windows'}.`
+            : usesWindows
+              ? (isLtxSequence
+                  ? `Describe the complete video idea - Maestro will plan ${windowCount} LTX windows.`
+                  : `Line 1 = window 1, line 2 = window 2... (${windowCount} windows)`)
+            : modePlaceholder}
+          className="block w-full min-h-[112px] resize-none overflow-hidden bg-bg-tertiary border border-border rounded-lg px-3 py-2 pr-10 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue transition-colors"
+        />
+        {prompt.trim() && !usesManualWindowPrompts && (
         isAudioOnly ? (
           /* TTS: mode-aware split button. Main button uses default mode based
              on voice-slot count; dropdown exposes both Speech and Dialogue
@@ -506,7 +514,8 @@ export function PromptInput() {
             )}
           </button>
         )
-      )}
+        )}
+      </div>
     </div>
   )
 }

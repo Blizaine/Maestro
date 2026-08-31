@@ -82,6 +82,113 @@ class TestJobLifecycleWiring(unittest.TestCase):
             for node in ast.walk(cancel)
         ))
 
+    def test_studio_queue_uses_explicit_held_lifecycle(self):
+        generate = _function(self.launch, "generate")
+        generate_constants = {
+            node.value
+            for node in ast.walk(generate)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        }
+        self.assertIn("_queue_mode", generate_constants)
+        self.assertIn("held", generate_constants)
+        self.assertTrue(any(
+            isinstance(node, ast.If)
+            and isinstance(node.test, ast.UnaryOp)
+            and isinstance(node.test.op, ast.Not)
+            and isinstance(node.test.operand, ast.Name)
+            and node.test.operand.id == "hold_for_queue"
+            and any(
+                isinstance(child, ast.Name)
+                and child.id == "_run_generation"
+                for child in ast.walk(node)
+            )
+            for node in ast.walk(generate)
+        ))
+
+        release_queue = _function(self.launch, "_start_held_studio_queue")
+        self.assertIn("release_held", _called_names(release_queue))
+
+        dispatcher = _function(self.launch, "_run_held_studio_jobs")
+        self.assertIn("_run_generation", _called_names(dispatcher))
+
+        endpoint = _function(self.launch, "start_studio_queue")
+        self.assertIn("_start_held_studio_queue", _called_names(endpoint))
+
+        list_jobs = _function(self.launch, "list_jobs")
+        list_constants = {
+            node.value
+            for node in ast.walk(list_jobs)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        }
+        self.assertIn("held", list_constants)
+
+    def test_studio_queue_release_preserves_submission_order(self):
+        started_threads = []
+
+        class FakeThread:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                started_threads.append(self)
+
+            def start(self):
+                self.started = True
+
+        jobs = {
+            "later": {"status": "held", "created_at": 20},
+            "active": {"status": "running", "created_at": 5},
+            "earlier": {"status": "held", "created_at": 10},
+        }
+
+        def release(job, **updates):
+            if job.get("status") != "held":
+                return False
+            job.update(updates)
+            job["status"] = "queued"
+            return True
+
+        start_queue = _load_isolated_function(
+            "app/launch.py",
+            "_start_held_studio_queue",
+            {
+                "_jobs": jobs,
+                "snapshot_job": lambda job: dict(job),
+                "release_held": release,
+                "threading": SimpleNamespace(Thread=FakeThread),
+                "_run_held_studio_jobs": object(),
+            },
+        )
+
+        self.assertEqual(start_queue(), ["earlier", "later"])
+        self.assertEqual(jobs["earlier"]["status"], "queued")
+        self.assertEqual(jobs["later"]["status"], "queued")
+        self.assertEqual(jobs["active"]["status"], "running")
+        self.assertEqual(len(started_threads), 1)
+        self.assertEqual(
+            started_threads[0].kwargs["args"],
+            (["earlier", "later"],),
+        )
+        self.assertTrue(started_threads[0].started)
+
+    def test_director_music_progress_validation_imports_regex_module(self):
+        imported_modules = {
+            alias.asname or alias.name.split(".", 1)[0]
+            for node in self.launch.body
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        }
+        generate_music = _function(self.launch, "director_generate_music")
+        uses_re_fullmatch = any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "fullmatch"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "re"
+            for node in ast.walk(generate_music)
+        )
+
+        self.assertTrue(uses_re_fullmatch)
+        self.assertIn("re", imported_modules)
+
     def test_director_dashboard_mutations_run_off_the_event_loop(self):
         expected = {
             "rerun_pipeline_clip_image": "rerun_clip_image",
@@ -411,6 +518,19 @@ class TestJobLifecycleWiring(unittest.TestCase):
         self.assertGreaterEqual(source.count(
             '"audio_start_sec": multi_clip_audio_start_sec'
         ), 2)
+
+    def test_director_multiclip_dispatch_uses_explicit_prompt_modes(self):
+        generation = _function(self.launch, "_run_generation")
+        with open(
+            os.path.join(_ROOT, "app", "launch.py"), "r", encoding="utf-8",
+        ) as handle:
+            source = ast.get_source_segment(handle.read(), generation)
+        self.assertIn('raw_params.pop(\n                    "per_clip_prompt_modes"', source)
+        self.assertIn("explicit_prompt_mode", source)
+        self.assertIn(
+            'else (1 if "\\n" in clip_prompt else 0)',
+            source,
+        )
 
     def test_failed_audio_mux_removes_partial_output(self):
         combine = _load_isolated_function(

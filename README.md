@@ -77,6 +77,75 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v1.9.1 (2026-08-25)
+
+**Local LLM hotfix**
+- Fixed prompt enhancement failing with an HTTP 404 on fresh Windows installations after llama.cpp changed its latest-release packaging.
+- Maestro now follows llama.cpp's official nightly-build pointer, verifies the required Windows CUDA archives before downloading, and safely falls back to a known-good binary build.
+- Existing cached llama-server installations continue to be reused without another download.
+
+### v1.9.0 (2026-08-19)
+
+**Universal queue and Director recovery**
+- Added one global Studio + Director queue with a compact top-bar popover, live count badge, ordering controls, removal, pause, and start controls.
+- Studio's split Generate button can now hold complete jobs without starting them, so several prompts can be prepared before the GPU begins working.
+- Director projects are checkpointed before rendering and can be restored through Load Settings with their models, references, prompts, plans, and generation options intact.
+- Added a persistent Director render queue that survives restarts, owns copies of its input assets, and runs complete projects sequentially without colliding with Studio work.
+- Improved cancellation and GPU coordination across held, queued, running, and resumed jobs.
+- Removed queued jobs from the main gallery so unfinished work no longer appears as large blank generation cards.
+
+**Director, dialogue, and Music3 reliability**
+- Added live progress while Director generates a MiniMax-Music3 soundtrack instead of leaving the interface apparently idle.
+- Improved MiniMax-Music3 speed and memory use with an optimized Qwen semantic engine, reusable KV caches, accelerated RVQ decoding, and safe GPU fallbacks.
+- Reworked Music3 prompting around its official bare section tags and duration-aware song structure, preventing stage directions from being sung and reducing truncated songs.
+- Added automatic UTF-8 repair throughout Director planning and saved projects while preserving valid international text.
+- Improved MiniMax H3 prompt enhancement so requested dialogue languages and attached-frame visual details are retained.
+- Fixed duplicate or malformed nested H3 dialogue fields causing valid Director projects to fail canonical prompt validation.
+
+**Model, LLM, and GPU compatibility**
+- CivitAI checkpoint imports now map only to verified compatible Maestro architectures, validate tensor layouts before publishing, and hide unsafe legacy registrations without deleting their weights.
+- Remote OpenAI-compatible LLM providers now support their own API key, standards-compliant request payloads, multimodal prompts, model selection, and useful endpoint error details.
+- Fixed llama.cpp binaries and CUDA support archives being downloaded repeatedly; valid local runtimes are now detected and reused.
+- Prevented harmless Gemma 4 template compatibility notices from being presented as the cause of a Director crash, and continuously drain local LLM logs to avoid long-run pipe stalls.
+- SCAIL-2 now honors Maestro's shared attention backend and safely falls back when an installed FlashAttention wheel lacks kernels for the active GPU.
+
+**Studio and interface improvements**
+- Moved LoRA selection near the top of Advanced settings and fixed LoRA update tracking when several variants exist on the same CivitAI release.
+- The main prompt editor now grows with its content, browser spellcheck is enabled, and prompt enhancement remains attached to the editor.
+- Made the gallery filter bar responsive with compact labels, horizontal navigation, and an accessible search overlay on narrow screens.
+- Simplified the Studio footer with an icon-only Advanced control and separate Generate / Add to Queue actions.
+- Cleaned up fresh-install model defaults so unavailable and mature-only models are not selected or exposed incorrectly.
+- Stopped disconnected media requests promptly, eliminating repeated `socket.send()` console noise after a browser closes or changes pages.
+
+### v1.8.7.1 (2026-08-17)
+
+**MiniMax Music3 GPU compatibility**
+- Fixed MiniMax Music3 crashing on Windows GPUs when FlashAttention imported successfully but its wheel did not contain a CUDA kernel for that GPU architecture.
+- Music3 now validates the bundled FlashAttention wheel against the active GPU before selecting it and automatically falls back to SDPA when necessary.
+- Update removes the incompatible architecture-specific FlashAttention package from affected legacy Windows runtimes while preserving acceleration on supported GPUs.
+
+### v1.8.7 (2026-08-16)
+
+**MiniMax H3 audio, continuation, and shared models**
+- Music / Performance timeline audio in H3 Omni is now preserved as the exact target soundtrack and advances through long multi-window sequences instead of behaving like a reusable style reference.
+- Selecting a performance timeline automatically adopts the audio duration and enables multi-window generation when necessary, while Voice and Style references keep their existing behavior.
+- H3 Video Extend now keeps the complete source clip and uses its audiovisual tail for native same-shot continuation instead of creating an unrelated replacement clip.
+- Added consistent WanGP INT8 ConvRot and BF16 selection for all Pruned and Full First / Last and Omni variants, including linked-model readiness and storage accounting.
+- H3 startup diagnostics now identify where every component was loaded from and report whether the transformer is INT8 ConvRot, BF16, or legacy scaled FP8.
+
+**LTX music-video timing**
+- LTX-2.5 Director vocal performances are planned as native independent shots, with the correct source-song segment and lip-sync instructions applied to every generated window.
+- When available, Audio Analysis' separated vocal stem improves mouth-motion conditioning while the untouched original song remains in the final video.
+- Dashboard regeneration follows the same LTX-2.5 soundtrack and vocal-conditioning path as the initial Director run.
+- Fixed LTX-2.3 losing its audio-driven mode after model changes or restored settings even though the soundtrack remained selected.
+
+### v1.8.6 (2026-08-15)
+
+**Director music-video reliability**
+- Long MiniMax H3 Omni Director projects no longer stop merely because the full batch has run for two hours. The timeout now measures stalled progress, allowing large shot counts and long soundtracks to keep generating while work is advancing.
+- Improved LTX-2.5 music-video lip sync by explicitly locking visible vocal performances to each exact source-soundtrack segment.
+- Applied the LTX-2.5 sync contract to standard, Seamless, and Dashboard-regenerated clips while leaving the proven LTX-2.3 workflow unchanged.
+
 ### v1.8.5.1 (2026-08-15)
 
 **Linux performance runtime**

@@ -58,7 +58,7 @@ export interface ApiOutput {
 
 export interface ApiJobStatus {
   job_id: string
-  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+  status: 'held' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
   progress: number
   step: number
   total_steps: number
@@ -153,11 +153,22 @@ export async function fetchDefaults(modelType: string): Promise<Record<string, u
 
 // --- Generation ---
 
-export async function submitGeneration(params: Record<string, unknown>): Promise<{ job_id: string; h3_window_plan?: H3WindowPlan; ltx_window_plan?: LTXWindowPlan }> {
+export async function submitGeneration(
+  params: Record<string, unknown>,
+  holdForQueue = false,
+): Promise<{
+  job_id: string
+  status: ApiJobStatus['status']
+  h3_window_plan?: H3WindowPlan
+  ltx_window_plan?: LTXWindowPlan
+}> {
   const res = await fetch(`${BASE}/api/v1/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
+    body: JSON.stringify({
+      ...params,
+      _queue_mode: holdForQueue ? 'held' : 'now',
+    }),
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Generation failed' }))
@@ -280,7 +291,8 @@ export async function generateMusic(params: {
   model_type?: string
   seed?: number
   workspace?: string
-}): Promise<{ audio_path: string; filename: string; style: string; lyrics: string }> {
+  progress_id?: string
+}): Promise<{ audio_path: string; filename: string; style: string; lyrics: string; job_id?: string | null }> {
   const res = await fetch(`${BASE}/api/v1/director/generate-music`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -384,8 +396,18 @@ export async function cancelJob(jobId: string): Promise<void> {
   if (!res.ok) throw new Error('Failed to cancel job')
 }
 
+export async function startStudioQueue(): Promise<{
+  status: 'started' | 'idle'
+  job_ids: string[]
+  released: number
+}> {
+  const res = await fetch(`${BASE}/api/v1/jobs/queue/start`, { method: 'POST' })
+  if (!res.ok) throw new Error('Failed to start Studio queue')
+  return res.json()
+}
+
 export async function fetchActiveJobs(): Promise<{ jobs: Array<{
-  job_id: string; status: string; progress: number; step: number;
+  job_id: string; status: ApiJobStatus['status']; progress: number; step: number;
   total_steps: number; phase: string; message: string; output_files: string[];
   error: string | null; created_at: number; h3_window_plan?: H3WindowPlan | null;
 }> }> {
@@ -435,7 +457,17 @@ export async function fetchOutputs(limit = 0, offset = 0, opts?: { favoritesOnly
 }
 
 export function getFileUrl(filename: string): string {
-  return `${BASE}/api/v1/file/${encodeURIComponent(filename)}`
+  // Preserve path separators for Director-owned assets such as
+  // `_director_assets/<project>/<file>`. Encoding the entire value turns `/`
+  // into `%2F`, which some ASGI/proxy combinations reject before FastAPI's
+  // `{filename:path}` route can see it.
+  const safePath = filename
+    .replace(/\\/g, '/')
+    .split('/')
+    .filter(part => part.length > 0)
+    .map(part => encodeURIComponent(part))
+    .join('/')
+  return `${BASE}/api/v1/file/${safePath}`
 }
 
 export function getUploadUrl(filename: string): string {
@@ -558,6 +590,87 @@ export async function stopPipeline(pid: string): Promise<void> {
     method: 'POST',
   })
   if (!res.ok) throw new Error('Failed to stop pipeline')
+}
+
+export async function fetchDirectorQueue(): Promise<import('../types').DirectorQueueState> {
+  const res = await fetch(`${BASE}/api/v1/director/queue`, { cache: 'no-store' })
+  if (!res.ok) throw new Error('Failed to load Director queue')
+  return res.json()
+}
+
+export async function enqueueDirectorPipeline(
+  params: Record<string, unknown>,
+): Promise<import('../types').DirectorQueueState> {
+  const res = await fetch(`${BASE}/api/v1/director/queue`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ params }),
+  })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: 'Failed to queue Director project' }))
+    throw new Error(body.detail || 'Failed to queue Director project')
+  }
+  return res.json()
+}
+
+export async function startDirectorQueue(): Promise<import('../types').DirectorQueueState> {
+  const res = await fetch(`${BASE}/api/v1/director/queue/start`, { method: 'POST' })
+  if (!res.ok) throw new Error('Failed to start Director queue')
+  return res.json()
+}
+
+export async function pauseDirectorQueue(): Promise<import('../types').DirectorQueueState> {
+  const res = await fetch(`${BASE}/api/v1/director/queue/pause`, { method: 'POST' })
+  if (!res.ok) throw new Error('Failed to pause Director queue')
+  return res.json()
+}
+
+export async function fetchDirectorQueueEntry(
+  entryId: string,
+): Promise<import('../types').DirectorQueueEntryDetail> {
+  const res = await fetch(`${BASE}/api/v1/director/queue/${encodeURIComponent(entryId)}`, {
+    cache: 'no-store',
+  })
+  if (!res.ok) throw new Error('Director queue entry not found')
+  return res.json()
+}
+
+export async function updateDirectorQueueEntry(
+  entryId: string,
+  params: Record<string, unknown>,
+): Promise<import('../types').DirectorQueueState> {
+  const res = await fetch(`${BASE}/api/v1/director/queue/${encodeURIComponent(entryId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ params }),
+  })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: 'Failed to update queued project' }))
+    throw new Error(body.detail || 'Failed to update queued project')
+  }
+  return res.json()
+}
+
+export async function deleteDirectorQueueEntry(entryId: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/v1/director/queue/${encodeURIComponent(entryId)}`, {
+    method: 'DELETE',
+  })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: 'Failed to remove queue entry' }))
+    throw new Error(body.detail || 'Failed to remove queue entry')
+  }
+}
+
+export async function reorderDirectorQueue(
+  entryIds: string[],
+): Promise<import('../types').DirectorQueueState> {
+  const res = await fetch(`${BASE}/api/v1/director/queue/reorder`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ entry_ids: entryIds }),
+  })
+  if (!res.ok) throw new Error('Failed to reorder Director queue')
+  return res.json()
 }
 
 export async function resumePipeline(pid: string): Promise<void> {
@@ -1777,12 +1890,16 @@ export interface CheckpointArchitecture {
   template_model_type: string
 }
 
-// List the architectures a full checkpoint can be imported as (video/image
-// models we already support) + a best-guess default for the given CivitAI
-// baseModel so the picker can pre-select it.
+// List only architectures verified for the exact CivitAI baseModel, plus an
+// unambiguous default and a user-facing reason when import is unsupported.
 export async function fetchCheckpointArchitectures(
   baseModel?: string
-): Promise<{ architectures: CheckpointArchitecture[]; suggested_architecture: string | null }> {
+): Promise<{
+  architectures: CheckpointArchitecture[]
+  suggested_architecture: string | null
+  supported: boolean
+  unsupported_reason: string | null
+}> {
   const qs = baseModel ? `?base_model=${encodeURIComponent(baseModel)}` : ''
   const res = await fetch(`${BASE}/api/v1/civitai/checkpoint-architectures${qs}`)
   if (!res.ok) throw new Error('Failed to fetch checkpoint architectures')

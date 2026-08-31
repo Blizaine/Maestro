@@ -290,17 +290,22 @@ export function AdvancedSettings() {
     <>
       {/* Trigger button */}
       <button
+        type="button"
         onClick={() => setOpen(!open)}
-        className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs transition-colors border ${
+        title={advancedCount > 0
+          ? `Advanced settings (${advancedCount} active)\n${advancedItems.join('\n')}`
+          : 'Advanced settings'}
+        aria-label={`Advanced settings${advancedCount > 0 ? `, ${advancedCount} active` : ''}`}
+        aria-expanded={open}
+        className={`relative flex shrink-0 items-center justify-center rounded-lg border p-2 transition-colors ${
           open ? 'border-accent-blue text-accent-blue' : 'border-border text-text-secondary hover:text-text-primary hover:border-border-light'
         }`}
       >
-        <SlidersHorizontal size={13} />
-        <span className="hidden md:inline">Advanced</span>
+        <SlidersHorizontal size={14} />
         {advancedCount > 0 && (
           <span
             title={advancedItems.join('\n')}
-            className="min-w-[16px] h-4 rounded-full bg-accent-blue text-white text-[9px] font-bold flex items-center justify-center px-1"
+            className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-accent-blue px-0.5 text-[8px] font-bold leading-none text-white shadow-sm"
           >
             {advancedCount}
           </span>
@@ -345,6 +350,11 @@ export function AdvancedSettings() {
                   {!isAvatar && <AspectRatioGrid />}
                 </>
               )}
+
+              {/* Keep creative adapters near the top so users can choose them
+                  before working through the lower-level tuning controls.
+                  Official Outpaint owns its stage-one-only IC-LoRA schedule. */}
+              {!isOutpaint && <LoraSelector />}
 
               {/* The Qwen conditioner is shared by every H3 transformer.
                   Expose it once here instead of multiplying model entries. */}
@@ -1074,9 +1084,6 @@ export function AdvancedSettings() {
 
               {/* Presets */}
               <PresetManager />
-
-              {/* Official Outpaint owns its stage-one-only IC-LoRA schedule. */}
-              {!isOutpaint && <LoraSelector />}
 
               {/* Dedicated SCAIL edit endpoints own their source video,
                   edited/reference frames, masks, and process selection. */}

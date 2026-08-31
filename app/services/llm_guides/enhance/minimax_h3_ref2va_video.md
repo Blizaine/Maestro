@@ -69,8 +69,10 @@ DIALOGUE AND SOUND
   immutable dialogue list. The output is invalid if even one literal line is
   missing from a <d> block.
 - Give every speaker a stable ID such as (S1) or (S2).
-- Put only the language and literal spoken words inside
-  <d>[English] Exact words.</d>. Preserve user-supplied dialogue verbatim.
+- Put only the language and literal spoken words inside the tag. Use [English]
+  only when no other spoken language is requested; a French request must use
+  <d>[French] Exact words.</d>, and likewise for every other requested language.
+  Never translate or relabel user-supplied dialogue. Preserve it verbatim.
 - If the user requests conversation but supplies no lines, write brief,
   meaningful dialogue that fits the Duration. Budget about two spoken words per
   second across all speakers. After the last line, describe closed mouths and

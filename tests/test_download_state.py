@@ -244,6 +244,40 @@ class TestDownloadState(unittest.TestCase):
         self.assertIn("os.path.basename", civitai_worker)
         self.assertIn("_is_safe_path_component(remote_filename)", civitai_worker)
 
+    def test_checkpoint_import_is_fail_closed_before_atomic_publish(self):
+        endpoint = _source_segment(
+            self.tree, self.source, "civitai_download",
+        )
+        worker = _source_segment(
+            self.tree, self.source, "_run_civitai_download",
+        )
+        architecture_endpoint = _source_segment(
+            self.tree, self.source, "civitai_checkpoint_architectures",
+        )
+        with open(_MODEL_DETAIL_PATH, "r", encoding="utf-8") as handle:
+            detail_source = handle.read()
+
+        self.assertIn(
+            "ensure_allowed_checkpoint_target(base_model, target_architecture)",
+            endpoint,
+        )
+        self.assertIn(
+            "_list_checkpoint_architectures(base_model)", endpoint,
+        )
+        self.assertIn(
+            "unsupported_checkpoint_reason(base_model)",
+            architecture_endpoint,
+        )
+        validate_at = worker.index("validate_checkpoint_file(")
+        publish_at = worker.index("os.replace(partial_path, save_path)")
+        self.assertLess(validate_at, publish_at)
+        self.assertNotIn(
+            "r.suggested_architecture || prev ||",
+            detail_source,
+        )
+        self.assertIn("setTargetArchitecture('')", detail_source)
+        self.assertIn("checkpointSupportReason", detail_source)
+
     def test_target_reservation_is_normalized_and_single_flight(self):
         helpers = _load_helpers(
             self.tree,

@@ -19,7 +19,10 @@ from services.runtime_compat import (  # noqa: E402
     version_tuple,
 )
 from services.perf_recommend import recommend_h3_reserved_ram_fraction  # noqa: E402
-from services.optional_acceleration import prepare_optional_flash_attention  # noqa: E402
+from services.optional_acceleration import (  # noqa: E402
+    flash_attention_wheel_compatibility,
+    prepare_optional_flash_attention,
+)
 from scripts.install_gguf_kernels import _pick_wheel_url  # noqa: E402
 
 
@@ -89,6 +92,66 @@ class TestRuntimeCompatibility(unittest.TestCase):
 
 
 class TestOptionalAccelerationCompatibility(unittest.TestCase):
+    def test_known_windows_flash_wheels_gate_cuda_architecture(self):
+        compatible, detail = flash_attention_wheel_compatibility(
+            platform_name="win32",
+            package_version="2.7.4.post1",
+            cuda_capability=(8, 9),
+        )
+        self.assertTrue(compatible)
+        self.assertIsNone(detail)
+
+        compatible, detail = flash_attention_wheel_compatibility(
+            platform_name="win32",
+            package_version="2.7.4.post1",
+            cuda_capability=(8, 6),
+        )
+        self.assertFalse(compatible)
+        self.assertIn("sm_89", detail)
+        self.assertIn("sm_86", detail)
+
+        # The CUDA 13 wheel includes an sm_80 cubin, which CUDA can execute
+        # across the Ampere/Ada compute-capability family.
+        compatible, detail = flash_attention_wheel_compatibility(
+            platform_name="win32",
+            package_version="2.8.3",
+            cuda_capability=(8, 9),
+        )
+        self.assertTrue(compatible)
+        self.assertIsNone(detail)
+
+    def test_importable_but_incompatible_flash_attention_falls_back(self):
+        flash = SimpleNamespace(
+            flash_attn_func=object(),
+            flash_attn_varlen_func=object(),
+        )
+        diffusers_imports = SimpleNamespace(_flash_attn_available=True)
+        messages = []
+
+        def fake_import(name):
+            if name == "flash_attn":
+                return flash
+            if name == "diffusers.utils.import_utils":
+                return diffusers_imports
+            raise AssertionError(f"unexpected import: {name}")
+
+        with patch.dict(sys.modules, {}, clear=False):
+            self.assertFalse(
+                prepare_optional_flash_attention(
+                    import_module=fake_import,
+                    emit=messages.append,
+                    platform_name="win32",
+                    package_version="2.7.4.post1",
+                    cuda_capability=(8, 6),
+                )
+            )
+            self.assertIsNone(sys.modules.get("flash_attn"))
+
+        self.assertFalse(diffusers_imports._flash_attn_available)
+        self.assertEqual(len(messages), 1)
+        self.assertIn("sm_86", messages[0])
+        self.assertIn("continuing with SageAttention/SDPA", messages[0])
+
     def test_working_flash_attention_remains_available(self):
         flash = SimpleNamespace(
             flash_attn_func=object(),

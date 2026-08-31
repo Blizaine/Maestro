@@ -344,22 +344,40 @@ export function ServicesSettingsPanel() {
 
         {/* Remote URL (for remote/openai providers) */}
         {(isRemote || isOpenAI) && (
-          <div>
-            <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">
-              {isRemote ? 'Server URL' : 'API Base URL'}
-            </label>
-            <input
-              type="text"
-              value={servicesConfig.llm_remote_url}
-              onChange={e => updateConfig({ llm_remote_url: e.target.value })}
-              placeholder={isRemote ? 'http://192.168.1.100:1234' : 'https://api.openai.com'}
-              className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
-            />
-            <p className="text-[10px] text-text-muted mt-1">
-              {isRemote
-                ? 'URL of your LM Studio, Ollama, or other OpenAI-compatible server'
-                : 'Leave blank for default OpenAI endpoint'}
-            </p>
+          <div className="space-y-3">
+            <div>
+              <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">
+                {isRemote ? 'Server URL' : 'API Base URL'}
+              </label>
+              <input
+                type="text"
+                value={servicesConfig.llm_remote_url}
+                onChange={e => updateConfig({ llm_remote_url: e.target.value })}
+                placeholder={isRemote ? 'http://192.168.1.100:1234' : 'https://api.openai.com'}
+                className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
+              />
+              <p className="text-[10px] text-text-muted mt-1">
+                {isRemote
+                  ? 'URL of your LM Studio, Ollama, or other OpenAI-compatible server'
+                  : 'Leave blank for default OpenAI endpoint'}
+              </p>
+            </div>
+
+            {isRemote && (
+              <div>
+                <ApiKeyField
+                  label="Server API Key"
+                  maskedValue={servicesConfig.llm_remote_api_key}
+                  isSet={servicesConfig.llm_remote_api_key_set}
+                  onSave={value => {
+                    void updateConfig({ llm_remote_api_key: value }).then(() => loadLlmModels())
+                  }}
+                />
+                <p className="text-[10px] text-text-muted mt-1">
+                  Optional. Sent only to this self-hosted OpenAI-compatible server.
+                </p>
+              </div>
+            )}
           </div>
         )}
 

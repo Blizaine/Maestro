@@ -49,6 +49,13 @@ _OPEN_ENDED_MOTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+_VOCAL_PERFORMANCE_RE = re.compile(
+    r"\b(?:lip[-\s]?sync(?:s|ing|ed)?|sing(?:s|ing|er|ers)?|"
+    r"rap(?:s|ping|per|pers)?|vocalist(?:s)?|perform(?:s|ing)\s+"
+    r"(?:the\s+)?(?:song|lyrics|verse|chorus))\b",
+    re.IGNORECASE,
+)
+
 
 def requests_open_ended_ltx_motion(prompt: str) -> bool:
     """Whether the requested sequence must remain active beyond its last pass."""
@@ -194,6 +201,16 @@ def extract_ltx_global_invariants(prompt: str) -> list[str]:
         add("no spoken dialogue")
     if re.search(r"\b(?:no music|without music)\b", lowered):
         add("no non-diegetic music")
+
+    # Each rolling pass receives only a little audiovisual history and no
+    # previous prompt text. Repeat the source-audio performance contract in
+    # every pass so later windows do not turn "singing" into unrelated mouth
+    # motion while the correct soundtrack continues underneath them.
+    if _VOCAL_PERFORMANCE_RE.search(source):
+        add(
+            "every visible singer or rapper lip-syncing each vocal syllable "
+            "to the supplied source soundtrack with exact timing"
+        )
 
     return invariants
 

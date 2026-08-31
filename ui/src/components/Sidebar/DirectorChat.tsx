@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from 'react'
-import { Upload, Loader2, Music, RotateCcw, Check, X, ChevronRight, ChevronDown, ImageIcon, Play, Film, Mic, Sparkles, Send, Users, FileText, Clock } from 'lucide-react'
+import { Upload, Loader2, Music, RotateCcw, Check, X, ChevronRight, ChevronDown, ImageIcon, Play, Film, Mic, Sparkles, Send, Users, FileText, Clock, ListVideo } from 'lucide-react'
 import { useStore, directorModelUsesFixedMediaStrength, getFamiliesForMode, getModelsForFamily, resolveResolution } from '../../stores/useStore'
 import { fetchModelOptions, getFileUrl } from '../../api/client'
 import { DirectorLoraSelector } from '../SettingsDrawer/DirectorLoraSelector'
@@ -437,7 +437,14 @@ export function DirectorChat() {
   const shortFilmNarrative = useStore(s => s.shortFilmNarrative)
   const shortFilmSetNarrative = useStore(s => s.shortFilmSetNarrative)
   const startDirectorPipeline = useStore(s => s.startDirectorPipeline)
-  const pipelinePhase = useStore(s => s.pipelineStatus?.phase)
+  const pipelineStatus = useStore(s => s.pipelineStatus)
+  const pipelinePhase = pipelineStatus?.phase
+  const pipelineActive = Boolean(
+    pipelineStatus && !['completed', 'failed', 'cancelled'].includes(pipelineStatus.status),
+  )
+  const directorQueue = useStore(s => s.directorQueue)
+  const directorQueueEditingEntryId = useStore(s => s.directorQueueEditingEntryId)
+  const queueCurrentDirectorPipeline = useStore(s => s.queueCurrentDirectorPipeline)
   const usesShotImages = directorWillGenerateShotImages(
     selectedDirectorShotImageSupport,
     directorShotImageGuidance,
@@ -490,7 +497,11 @@ export function DirectorChat() {
   const pastStep = (s: DirectorStep) => currentIndex > STEP_ORDER.indexOf(s)
   const atStep = (s: DirectorStep) => step === s
   const directorPathReady = Boolean(skill && (!isShortFilm || shortFilmPath))
+  // Once prompts exist, controls reopen as the settings for the next immutable
+  // revision. The active renderer keeps its frozen request, so adjusting a
+  // LoRA/model while it runs can never mutate work already in flight.
   const directorSetupLocked = currentIndex >= STEP_ORDER.indexOf('plan')
+    && step !== 'review_video'
 
   const handleFile = useCallback((file: File) => {
     // Accept audio/* MIME OR video/* MIME (backend extracts the audio
@@ -677,6 +688,12 @@ export function DirectorChat() {
           <SystemBubble>
             <DirectorSetupPanel locked={directorSetupLocked} />
           </SystemBubble>
+        )}
+
+        {pipelineActive && step === 'review_video' && (
+          <div className="rounded-lg border border-accent-blue/25 bg-accent-blue/10 px-3 py-2 text-[10px] leading-relaxed text-text-secondary">
+            The current render is frozen. Changes here apply to a new revision; Generate will add it to the held queue.
+          </div>
         )}
 
         {skill && (!isShortFilm || shortFilmPath === 'audio') && (atStep('upload') || atStep('analyze') || pastStep('analyze')) && (
@@ -1029,19 +1046,15 @@ export function DirectorChat() {
               editClipPlan={editClipPlan}
               planVideoPrompts={isShortFilm ? shortFilmPlanVideoPrompts : planVideoPrompts}
               directorGenerate={directorGenerate}
+              queueCurrent={queueCurrentDirectorPipeline}
               applyToClips={applyToClips}
               loading={loading}
               isShortFilm={isShortFilm}
-              // "Generating" is true if EITHER a manual job is running
-              // (isGenerating) OR an auto-mode pipeline is actively
-              // running. Auto mode doesn't push jobs into the same job
-              // queue — it has its own pipelineStatus state machine —
-              // so without the OR the button looks pressable during
-              // auto generation. The label flips to "Auto Generating…"
-              // when the pipeline is what's running, so it's clear
-              // *why* the button is disabled.
-              isGenerating={isGenerating || pipelinePhase !== undefined}
-              isAutoGenerating={autoMode && pipelinePhase !== undefined}
+              // Any active render changes Generate into an immutable queued
+              // variant instead of trying to mutate or parallelize that run.
+              isGenerating={isGenerating || pipelineActive || Boolean(directorQueue?.running)}
+              isAutoGenerating={autoMode && pipelineActive}
+              editingQueueEntryId={directorQueueEditingEntryId}
             />
           </SystemBubble>
         )}
@@ -2931,8 +2944,8 @@ function ImageGenView({
 function VideoPromptsReview({
   clipPlans, plannedClips, clipImages, setClipImage, allowSceneImageUploads,
   speakerMappings, editClipPlan,
-  planVideoPrompts, directorGenerate, applyToClips, loading, isShortFilm,
-  isGenerating, isAutoGenerating,
+  planVideoPrompts, directorGenerate, queueCurrent, applyToClips, loading, isShortFilm,
+  isGenerating, isAutoGenerating, editingQueueEntryId,
 }: {
   clipPlans: ReturnType<typeof useStore.getState>['directorClipPlans']
   plannedClips: ReturnType<typeof useStore.getState>['directorPlannedClips']
@@ -2943,21 +2956,44 @@ function VideoPromptsReview({
   editClipPlan: (index: number, field: 'video_prompt' | 'image_prompt', value: string) => void
   planVideoPrompts: () => Promise<void>
   directorGenerate: () => void
+  queueCurrent: () => Promise<void>
   applyToClips: () => void
   loading: boolean
   isShortFilm?: boolean
-  /** True when ANY generation job is currently running. The Generate
-   *  button needs this so it can show a disabled "Generating..."
-   *  state instead of looking pressable — important in auto mode
-   *  where the system auto-triggers Generate after planning, and as
-   *  a double-click guard in manual mode. */
+  /** True when any render is active. Generate remains available, but saves
+   *  the edited state as a held/queued immutable revision. */
   isGenerating?: boolean
-  /** True specifically when auto-mode pipeline is the thing running.
-   *  Used only to swap the button label to "Auto Generating..." so
-   *  the user knows the system is driving itself, not waiting on
-   *  them to click. */
+  /** True specifically when an auto-mode pipeline is active. */
   isAutoGenerating?: boolean
+  editingQueueEntryId?: string | null
 }) {
+  const queueBusy = useStore(s => s.directorQueueLoading)
+  const [queueConfirmation, setQueueConfirmation] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!queueConfirmation) return
+    const timer = window.setTimeout(() => setQueueConfirmation(null), 5000)
+    return () => window.clearTimeout(timer)
+  }, [queueConfirmation])
+
+  const handleAddToQueue = async () => {
+    setQueueConfirmation(null)
+    const beforeIds = new Set(
+      (useStore.getState().directorQueue?.entries || []).map(entry => entry.id),
+    )
+    await queueCurrent()
+    const state = useStore.getState()
+    const queue = state.directorQueue
+    const added = queue?.entries.find(entry => !beforeIds.has(entry.id))
+    if (!queue || !added || state.directorError) return
+    const heldCount = queue.entries.filter(
+      entry => ['held', 'queued', 'running'].includes(entry.status),
+    ).length
+    setQueueConfirmation(
+      `Added to Queue · ${heldCount} Director ${heldCount === 1 ? 'project' : 'projects'} waiting. Open the queue in the top bar when ready.`,
+    )
+  }
+
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
@@ -3071,41 +3107,53 @@ function VideoPromptsReview({
       </div>
 
       <div className="space-y-2">
-        {/* Generate button has two render modes:
-            - Idle (no jobs running): bright green CTA, click triggers
-              directorGenerate. Applies in manual mode where the user
-              actively kicks off generation from this review screen.
-            - Generating (any job in flight): muted disabled state with
-              spinner + "Generating..." label. Applies in BOTH:
-                * Auto mode, where directorGenerate auto-triggers right
-                  after the chat reaches review_video — without this
-                  guard, the button looked pressable while generation
-                  was already running, confusing the user.
-                * Manual mode after the user clicked Generate — guards
-                  against double-submission. */}
-        {isGenerating ? (
-          // Muted disabled state. opacity-60 dims the whole control
-          // (including the spinner) so it reads as "not interactive"
-          // even against the bright accent backgrounds Golden Hour and
-          // similar themes use. Border is dropped to a subtler tone so
-          // it doesn't compete with the active CTA color elsewhere on
-          // screen. Label switches to "Auto Generating…" when the
-          // system is driving the pipeline by itself, so the user
-          // understands they're not waiting on a click.
-          <button
-            disabled
-            className="w-full py-2.5 rounded-lg bg-bg-tertiary border border-border/40 text-text-muted text-sm font-medium flex items-center justify-center gap-1.5 cursor-not-allowed opacity-60"
-          >
-            <Loader2 size={14} className="animate-spin" />
-            {isAutoGenerating ? 'Auto Generating...' : 'Generating...'}
-          </button>
-        ) : (
-          <button
-            onClick={directorGenerate}
-            className="w-full py-2.5 rounded-lg bg-accent-green hover:bg-accent-green-hover text-white text-sm font-semibold transition-colors flex items-center justify-center gap-1.5"
-          >
-            <Play size={14} fill="white" /> Generate
-          </button>
+        <button
+          onClick={directorGenerate}
+          disabled={(loading && !isGenerating) || queueBusy}
+          className="w-full py-2.5 rounded-lg bg-accent-green hover:bg-accent-green-hover text-white text-sm font-semibold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50"
+          title={isGenerating
+            ? 'Freeze these edited settings as a queued revision; the active run is unchanged'
+            : editingQueueEntryId
+              ? 'Replace the held queue entry with these edited settings'
+              : 'Render this Director project as a new revision'}
+        >
+          {isGenerating || editingQueueEntryId
+            ? <ListVideo size={14} /> : <Play size={14} fill="white" />}
+          {editingQueueEntryId
+            ? 'Save Queue Changes'
+            : isGenerating
+            ? (isAutoGenerating ? 'Queue Edited Variant' : 'Add Variant to Queue')
+            : 'Generate'}
+        </button>
+        {!isGenerating && !editingQueueEntryId && (
+          <>
+            <button
+              onClick={() => void handleAddToQueue()}
+              disabled={loading || queueBusy || Boolean(queueConfirmation)}
+              className={`w-full py-2 rounded-lg border text-xs font-medium transition-colors flex items-center justify-center gap-1.5 disabled:opacity-70 ${
+                queueConfirmation
+                  ? 'border-green-500/30 bg-green-500/10 text-indicator-success'
+                  : 'border-accent-blue/30 bg-accent-blue/5 text-accent-blue hover:bg-accent-blue/10'
+              }`}
+              title="Hold this complete project in the persistent queue without starting it"
+            >
+              {queueBusy
+                ? <Loader2 size={12} className="animate-spin" />
+                : queueConfirmation
+                  ? <Check size={12} />
+                  : <ListVideo size={12} />}
+              {queueBusy ? 'Adding…' : queueConfirmation ? 'Added to Queue' : 'Add to Queue'}
+            </button>
+            {queueConfirmation && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="rounded-md border border-green-500/20 bg-green-500/5 px-2.5 py-2 text-[10px] leading-relaxed text-indicator-success"
+              >
+                {queueConfirmation}
+              </div>
+            )}
+          </>
         )}
         <button
           onClick={applyToClips}

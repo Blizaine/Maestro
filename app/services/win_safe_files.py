@@ -34,6 +34,7 @@ since POSIX file semantics already give us this behavior for free.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import time
@@ -195,6 +196,50 @@ class ShareDeleteFileResponse(Response):
             self.headers.setdefault("content-disposition", content_disposition)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Stream until completion or until the client leaves.
+
+        Browsers routinely cancel speculative and superseded media range
+        requests while scrubbing galleries.  Continuing to write those files
+        makes asyncio print one ``socket.send() raised exception`` line per
+        chunk.  Watching the ASGI receive channel lets us cancel the file
+        stream immediately and close its share-delete handle.
+        """
+
+        stream_task = asyncio.create_task(self._stream_response(scope, send))
+        disconnect_task = asyncio.create_task(self._listen_for_disconnect(receive))
+        try:
+            done, pending = await asyncio.wait(
+                {stream_task, disconnect_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+            if disconnect_task in done:
+                await disconnect_task
+            if stream_task in done:
+                try:
+                    await stream_task
+                except OSError:
+                    # ASGI 2.4 servers may report a disconnected client from
+                    # send() instead of (or just before) http.disconnect.
+                    return
+        finally:
+            for task in (stream_task, disconnect_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(stream_task, disconnect_task, return_exceptions=True)
+
+    @staticmethod
+    async def _listen_for_disconnect(receive: Receive) -> None:
+        while True:
+            message = await receive()
+            if message.get("type") == "http.disconnect":
+                return
+
+    async def _stream_response(self, scope: Scope, send: Send) -> None:
         # Look for Range header — required for video seeking in <video>.
         range_header: Optional[str] = None
         for name, value in scope.get("headers", []):
@@ -253,6 +298,10 @@ class ShareDeleteFileResponse(Response):
                 "status": status,
                 "headers": self.raw_headers,
             })
+            # Uvicorn's send coroutine may return synchronously while its
+            # transport buffer is healthy. Yield explicitly so the parallel
+            # disconnect listener can run even during a fast local stream.
+            await asyncio.sleep(0)
 
             if self.send_header_only:
                 await send({"type": "http.response.body", "body": b"", "more_body": False})
@@ -272,6 +321,7 @@ class ShareDeleteFileResponse(Response):
                     "body": chunk,
                     "more_body": remaining > 0,
                 })
+                await asyncio.sleep(0)
             # Defense-in-depth: if we hit EOF before remaining was satisfied
             # (file was truncated AFTER we opened it — possible on Windows
             # with the FILE_SHARE_WRITE flag used by _open_share_delete),
@@ -290,6 +340,7 @@ class ShareDeleteFileResponse(Response):
                         "body": pad,
                         "more_body": remaining > 0,
                     })
+                    await asyncio.sleep(0)
         finally:
             f.close()
 

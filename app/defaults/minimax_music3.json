@@ -2,23 +2,30 @@
     "model": {
         "name": "MiniMax-Music3",
         "architecture": "minimax_music3",
-        "description": "MiniMax-Music3 creates complete stereo songs from lyrics and a detailed music caption, with expressive vocals, evolving arrangements, and long-form structure up to five minutes. The official converted components require about 28 GB of storage and are streamed through Maestro's single-GPU memory manager.",
-        "selector_help": "Best for full songs with detailed lyric sections and arrangement control. First use downloads about 28 GB. Model weights use the MiniMax-Music3 Community License.",
+        "description": "MiniMax-Music3 creates complete stereo songs from lyrics and a detailed music caption, with expressive vocals, evolving arrangements, and long-form structure up to five minutes. Maestro uses WanGP's optimized ConvRot checkpoints with CUDA-graph or vLLM semantic decoding when supported.",
+        "selector_help": "Best for full songs with detailed lyric sections and arrangement control. The default optimized download is about 15 GB. On 16 GB+ GPUs, Audio Memory Profile 3/3+ enables the accelerated CUDA-graph planner; compatible FlashAttention systems add the vLLM kernels automatically. Model weights use the MiniMax-Music3 Community License.",
         "URLs": [
-            "https://huggingface.co/MiniMaxAI/MiniMax-Music3/resolve/bd348f9c49ea3c1b39f33ace3436f8fad435f24e/modular_model_index.json"
+            "https://huggingface.co/DeepBeepMeep/TTS/resolve/d31b4665414200fcab779ced520b01bd9f5e07ba/MiniMax_Music3_transformer_bf16.safetensors",
+            "https://huggingface.co/DeepBeepMeep/TTS/resolve/d31b4665414200fcab779ced520b01bd9f5e07ba/MiniMax_Music3_transformer_int8_convrot.safetensors"
         ],
         "source_repo": "https://huggingface.co/MiniMaxAI/MiniMax-Music3",
+        "optimized_weights_repo": "https://huggingface.co/DeepBeepMeep/TTS",
         "license_name": "MiniMax-Music3 Community License",
         "license_url": "https://huggingface.co/MiniMaxAI/MiniMax-Music3/blob/main/LICENSE",
-        "model_size_gb": 28,
+        "model_size_gb": 15,
         "required_model_assets": [
-            "minimax_music3/LICENSE",
-            "minimax_music3/tokenizer/tokenizer.json",
-            "minimax_music3/language_model/model-00004-of-00004.safetensors",
-            "minimax_music3/rvq_depth_decoder/diffusion_pytorch_model.safetensors",
-            "minimax_music3/condition_encoder/diffusion_pytorch_model.safetensors",
-            "minimax_music3/transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
-            "minimax_music3/vocoder/diffusion_pytorch_model.safetensors"
+            "MiniMax-Music3/LICENSE",
+            "MiniMax-Music3/rvq_depth_decoder_config.json",
+            "MiniMax-Music3/rvq_depth_decoder_bf16.safetensors",
+            "MiniMax-Music3/rvq_depth_decoder_int8_convrot.safetensors",
+            "MiniMax-Music3/condition_encoder_config.json",
+            "MiniMax-Music3/condition_encoder_fp32.safetensors",
+            "MiniMax-Music3/vocoder_config.json",
+            "MiniMax-Music3/vocoder_fp32.safetensors",
+            "MiniMax-Music3/scheduler_config.json",
+            "MiniMaxMusic3-Qwen3/tokenizer.json",
+            "MiniMaxMusic3-Qwen3/tokenizer_config.json",
+            "MiniMaxMusic3-Qwen3/chat_template.jinja"
         ]
     },
     "prompt": "[Verse]\nMorning light filters through the pines\nEvery quiet road is yours and mine\n[Chorus]\nSoftly the whole world starts to breathe\nStay for one more song with me\n[Outro]",

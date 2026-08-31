@@ -3,7 +3,9 @@ import { Film, Play, Square, FolderOpen, Plus, Check, Loader2, X, BookMarked, Up
 import { TabFilter } from './TabFilter'
 import { ThumbnailGallery } from './ThumbnailGallery'
 import { MediaFeedItem } from './MediaFeedItem'
+import { GlobalQueuePopover } from '../GlobalQueuePopover'
 import { useStore } from '../../stores/useStore'
+import { useIsMobile } from '../../lib/useIsMobile'
 import type { GenerationJob } from '../../types'
 
 function WorkspaceSelector() {
@@ -387,6 +389,7 @@ function PipelinePlaceholder() {
 }
 
 export function MainContent() {
+  const isMobile = useIsMobile()
   const outputs = useStore(s => s.filteredOutputs())
   const outputsTotal = useStore(s => s.outputsTotal)
   const outputsLoading = useStore(s => s.outputsLoading)
@@ -395,6 +398,13 @@ export function MainContent() {
   const stopGeneration = useStore(s => s.stopGeneration)
   const dismissJob = useStore(s => s.dismissJob)
   const setSelectedOutput = useStore(s => s.setSelectedOutput)
+  // Waiting work now lives in the universal top-bar queue. Keep the gallery
+  // focused on media plus useful live/error cards instead of large blank
+  // placeholders for every job that has not started yet.
+  const galleryJobs = useMemo(
+    () => jobs.filter(job => job.status !== 'held' && job.status !== 'queued'),
+    [jobs],
+  )
 
   const feedRef = useRef<HTMLDivElement>(null)
   const [activeIndex, setActiveIndex] = useState(0)
@@ -411,8 +421,8 @@ export function MainContent() {
   const estimatedItemHeight = Math.round(containerWidth * ASPECT_RATIO) + INFO_BAR_HEIGHT
 
   // Total height of all job placeholders at top
-  const placeholderTotalHeight = jobs.length > 0
-    ? jobs.length * estimatedItemHeight + (jobs.length - 1) * GAP + GAP
+  const placeholderTotalHeight = galleryJobs.length > 0
+    ? galleryJobs.length * estimatedItemHeight + (galleryJobs.length - 1) * GAP + GAP
     : 0
 
   // Measure container on mount and resize; clear stale heights on width change
@@ -618,12 +628,13 @@ export function MainContent() {
       <div className="px-2 md:px-6 py-2 md:py-3 border-b border-border flex items-center justify-between gap-2">
         <TabFilter />
         <div className="flex items-center gap-2 shrink-0">
-          <div className="text-[10px] md:text-xs text-text-muted hidden md:block">
+          <div className="hidden text-xs text-text-muted xl:block">
             {outputsTotal > outputs.length
               ? `${outputs.length} / ${outputsTotal} items`
               : `${outputs.length} ${outputs.length === 1 ? 'item' : 'items'}`}
           </div>
           <WorkspaceSelector />
+          {!isMobile && <GlobalQueuePopover />}
         </div>
       </div>
 
@@ -638,7 +649,7 @@ export function MainContent() {
           {/* Pipeline + Job placeholders at top (not virtualized — small count) */}
           <div className="space-y-3 mb-3">
             <PipelinePlaceholder />
-            {jobs.map((j, i) => (
+            {galleryJobs.map((j, i) => (
               <JobPlaceholder
                 key={j.id || `pending-${i}`}
                 job={j}

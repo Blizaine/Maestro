@@ -151,6 +151,22 @@ class LtxWindowPlannerTests(unittest.TestCase):
         )
         self.assertNotIn("1990s visual design", invariants)
 
+    def test_vocal_performance_contract_reaches_every_ltx_window(self):
+        source = (
+            "A rapper rides a horse and raps directly to the supplied song."
+        )
+        prompts = reinforce_ltx_window_invariants(
+            [
+                "The rapper begins the verse while riding toward camera.",
+                "The rapper continues through the chorus on the same road.",
+            ],
+            source,
+        )
+        self.assertEqual(2, len(prompts))
+        for prompt in prompts:
+            self.assertIn("lip-syncing each vocal syllable", prompt)
+            self.assertIn("supplied source soundtrack", prompt)
+
     def test_explicit_camera_and_speed_changes_are_not_forced_globally(self):
         invariants = extract_ltx_global_invariants(
             "Begin with handheld footage during a very fast fall, then stop "
@@ -196,6 +212,12 @@ class LtxMultiWindowWiringTests(unittest.TestCase):
         ):
             source = (ROOT / relative).read_text(encoding="utf-8")
             self.assertIn('"multi_window_sequence_controls"', source, relative)
+
+    def test_ltx23_repairs_a_visible_soundtrack_missing_its_hidden_mode(self):
+        handler = (
+            ROOT / "app/models/ltx2/ltx2_handler.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"infer_audio_prompt_from_guide": True', handler)
 
     def test_api_and_backend_publish_the_sequence_contract(self):
         launch = (APP / "launch.py").read_text(encoding="utf-8")

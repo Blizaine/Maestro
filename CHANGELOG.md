@@ -5,6 +5,105 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-08-25
+
+Local LLM hotfix: fixed fresh Windows installations failing prompt enhancement
+when llama.cpp's latest semantic release contains a `nightly-tag.txt` pointer
+instead of platform binaries. Maestro now follows that pointer to the referenced
+binary nightly, verifies the required llama-server and CUDA runtime archives,
+and falls back to a known-good binary build if current-release resolution is
+unavailable. Existing cached llama-server installations remain untouched.
+
+## [1.9.0] - 2026-08-19
+
+Universal queue and Director recovery: Studio and Director now share a compact
+top-bar queue with a live count, ordering, removal, pause, and start controls.
+Studio's split Generate control can freeze a complete job in a held state
+without immediately starting the GPU. Director saves a complete project
+revision before rendering, restores it through Load Settings, and can place it
+in a persistent asset-owning queue that survives restarts and executes projects
+sequentially. Held, queued, running, cancelled, and resumed work use one
+lifecycle contract, and queued work no longer creates blank gallery cards.
+
+Director and MiniMax-Music3 reliability: soundtrack creation now reports live
+progress inside Director. Music3 uses an optimized Qwen semantic path, reusable
+non-growing KV caches, accelerated RVQ depth decoding, and capability-aware GPU
+fallbacks. Its song writer follows the checkpoint's canonical bare section-tag
+format and adapts lyric density and arrangement to the requested duration.
+Director recursively repairs legacy mojibake while preserving valid Unicode;
+MiniMax H3 enhancement retains requested spoken languages and grounds prompts
+in attached frames. Duplicate nested H3 dialogue fields are normalized before
+canonical validation instead of rejecting an otherwise valid project.
+
+Checkpoint, LLM, and GPU compatibility: CivitAI checkpoint downloads are now
+restricted to explicit supported base-model/architecture mappings and their
+safetensors tensor layouts are verified before a model definition is
+published. Existing incompatible registrations are quarantined without
+deleting weights. Remote OpenAI-compatible LLMs have a separate credential,
+receive standards-compliant model-aware payloads, preserve multimodal content,
+and surface the endpoint's rejection detail. Cached llama.cpp runtimes remain
+installed even when a binary reports build zero, preventing repeated llama and
+CUDA archive downloads. The local server's output pipe is continuously drained
+and its non-fatal Gemma 4 compatibility warning is not reported as a crash.
+SCAIL-2 now uses Maestro's shared attention dispatcher, validates kernel
+support at runtime, and falls back safely when a FlashAttention wheel does not
+cover the active GPU.
+
+Studio and interface polish: LoRA selection moved near the top of Advanced and
+the CivitAI update tracker now follows the installed variant rather than the
+first item in a release. The prompt editor grows with its content and supports
+browser spellcheck. The gallery toolbar compacts and scrolls cleanly on narrow
+screens. The footer uses an icon-only Advanced control plus separate Generate
+and Queue actions. Fresh defaults exclude unreachable and mature-only models,
+and disconnected file streams stop immediately instead of flooding the console
+with repeated socket-send exceptions.
+
+## [1.8.7.1] - 2026-08-17
+
+MiniMax-Music3 GPU compatibility: Windows runtimes now probe whether an
+importable FlashAttention wheel actually includes a kernel for the active GPU
+before selecting it. Unsupported architectures automatically use SDPA instead,
+and Update removes the known incompatible architecture-specific package from
+affected legacy runtimes without disabling acceleration on supported cards.
+
+## [1.8.7] - 2026-08-16
+
+MiniMax H3 soundtrack workflows: Studio Omni now treats Music / Performance
+timeline audio as an exact target soundtrack instead of a generative reference,
+preserving its waveform while advancing the correct segment through every
+sequence window. Selecting that intent adopts the source duration and enables
+multi-window generation when needed without changing Voice or Style references.
+Prompt-reference numbering is repaired after the target soundtrack is routed
+out of the Omni manifest, and runtime logs show the exact audio window in use.
+
+H3 continuation and model sharing: Studio Video Extend now preserves the
+original clip, uses its audiovisual tail as native continuation context, and
+generates the requested amount of new material instead of starting an unrelated
+shot. All four Pruned and Full First / Last and Omni variants now select WanGP's
+INT8 ConvRot or BF16 checkpoints consistently. Linked checkpoint aliases and
+Qwen encoder layouts participate in readiness, download, storage, and deletion
+accounting, while startup diagnostics report each component's source and the
+transformer's actual quantization format.
+
+Music-video synchronization: vocal-performance LTX-2.5 Director plans are
+divided into native independent shots before prompt generation, and every
+window receives its exact soundtrack segment and lip-sync contract. When Audio
+Analysis provides a separated vocal stem, Maestro uses it only to condition
+mouth motion while retaining the untouched song in the published video; the
+same behavior applies to Dashboard regeneration. LTX-2.3 also restores its
+audio-driven mode when a soundtrack survives a model switch or saved-settings
+load, preventing it from silently generating unrelated audio.
+
+## [1.8.6] - 2026-08-15
+
+Director music-video reliability: MiniMax H3 Omni batches now use a
+no-progress timeout instead of a fixed total-runtime limit, allowing long
+soundtracks and large shot counts to continue as long as generation is still
+advancing. LTX-2.5 music-video prompts now explicitly bind visible vocal
+performance to the exact supplied soundtrack segment, including normal,
+Seamless, and Dashboard-regenerated clips, improving lyric and mouth timing
+without changing the proven LTX-2.3 path.
+
 ## [1.8.5.1] - 2026-08-15
 
 Linux performance runtime: fixed the H3 high-performance upgrade repeatedly

@@ -1,12 +1,11 @@
-import { useState, useEffect } from 'react'
-import { Play, AlertTriangle } from 'lucide-react'
+import { useState } from 'react'
+import { AlertTriangle, ListPlus, Loader2, Play } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 
 export function GenerateButton() {
-  const jobs = useStore(s => s.jobs)
   const startGeneration = useStore(s => s.startGeneration)
   const setSidebarOpen = useStore(s => s.setSidebarOpen)
-  const [cooldown, setCooldown] = useState(false)
+  const [pendingAction, setPendingAction] = useState<'generate' | 'queue' | null>(null)
 
   // Check if i2v-only model needs a start image. Video mode only: edit
   // sub-modes supply their own source media (Recast runs the i2v-only
@@ -36,22 +35,20 @@ export function GenerateButton() {
   )
   const needsOutpaintArea = isOutpaint && !!editVideoPath && !hasOutpaintArea
   const blocked = needsImage || needsReference || needsOutpaintSource || needsOutpaintArea
+  const imageMode = useStore(s => Number(s.params.image_mode || 0))
+  const queueSupported = generationMode !== 'avatar'
+    && !(generationMode === 'video' && imageMode === 4)
 
-  // Brief gray flash after clicking
-  useEffect(() => {
-    if (!cooldown) return
-    const timer = setTimeout(() => setCooldown(false), 1000)
-    return () => clearTimeout(timer)
-  }, [cooldown])
-
-  const handleClick = () => {
-    if (blocked) return
-    setCooldown(true)
-    startGeneration()
-    setSidebarOpen(false)
+  const submit = async (action: 'generate' | 'queue') => {
+    if (blocked || pendingAction || (action === 'queue' && !queueSupported)) return
+    setPendingAction(action)
+    if (action === 'generate') setSidebarOpen(false)
+    try {
+      await startGeneration(action === 'queue' ? 'queue' : 'now')
+    } finally {
+      setPendingAction(null)
+    }
   }
-
-  const queueCount = jobs.length
 
   if (blocked) {
     const label = needsImage
@@ -67,33 +64,61 @@ export function GenerateButton() {
         ? 'Add at least one image or video reference. Audio cannot be the only reference.'
         : undefined
     return (
-      <button
-        disabled
-        title={title}
-        className="px-4 py-2 rounded-lg flex items-center gap-1.5 bg-amber-500/20 text-indicator-warning cursor-not-allowed text-xs font-medium whitespace-nowrap"
-      >
-        <AlertTriangle size={13} />
-        {label}
-      </button>
+      <div className="grid w-[132px] shrink-0 grid-cols-[2fr_1fr] overflow-hidden rounded-lg bg-amber-500/20 text-indicator-warning">
+        <button
+          type="button"
+          disabled
+          title={title}
+          className="flex cursor-not-allowed items-center justify-center gap-1.5 whitespace-nowrap px-2 py-2 text-xs font-medium"
+        >
+          <AlertTriangle size={13} />
+          {label}
+        </button>
+        <button
+          type="button"
+          disabled
+          title={title || `${label} before adding this generation to the queue.`}
+          aria-label="Add to queue unavailable"
+          className="flex cursor-not-allowed items-center justify-center border-l border-current/15"
+        >
+          <ListPlus size={14} />
+        </button>
+      </div>
     )
   }
 
+  const pending = pendingAction !== null
+
   return (
-    <button
-      onClick={handleClick}
-      disabled={cooldown}
-      className={`px-4 py-2 rounded-lg flex items-center gap-1.5 font-medium text-xs transition-all whitespace-nowrap ${
-        cooldown
-          ? 'bg-bg-active text-text-muted cursor-not-allowed'
-          // Default theme: bg-cta resolves to a flat accent-blue (both
-          // gradient stops point at --color-accent-blue). Golden Hour:
-          // resolves to a red→orange sunset gradient. shadow-accent-glow
-          // is empty in default and a warm bloom in Golden Hour.
-          : 'bg-cta hover:brightness-110 shadow-accent-glow text-white'
-      }`}
-    >
-      <Play size={13} fill={cooldown ? 'currentColor' : 'white'} />
-      {cooldown ? 'Queued' : queueCount > 0 ? `Go (${queueCount})` : 'Generate'}
-    </button>
+    <div className={`grid w-[132px] shrink-0 grid-cols-[2fr_1fr] overflow-hidden rounded-lg font-medium text-white shadow-accent-glow transition-all ${
+      pending ? 'bg-bg-active text-text-muted' : 'bg-cta'
+    }`}>
+      <button
+        type="button"
+        onClick={() => void submit('generate')}
+        disabled={pending}
+        title="Generate now"
+        className="flex items-center justify-center gap-1.5 whitespace-nowrap px-2 py-2 text-xs transition-colors hover:bg-white/10 disabled:cursor-wait disabled:hover:bg-transparent"
+      >
+        {pendingAction === 'generate'
+          ? <Loader2 size={13} className="animate-spin" />
+          : <Play size={13} fill="currentColor" />}
+        Generate
+      </button>
+      <button
+        type="button"
+        onClick={() => void submit('queue')}
+        disabled={pending || !queueSupported}
+        title={queueSupported
+          ? 'Hold current Studio settings in the queue without starting generation'
+          : 'Add to Queue is not available for specialized Edit and Blend workflows yet'}
+        aria-label="Add current Studio settings to the queue"
+        className="flex items-center justify-center border-l border-white/20 transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:border-text-muted/20 disabled:opacity-40 disabled:hover:bg-transparent"
+      >
+        {pendingAction === 'queue'
+          ? <Loader2 size={14} className="animate-spin" />
+          : <ListPlus size={14} />}
+      </button>
+    </div>
   )
 }

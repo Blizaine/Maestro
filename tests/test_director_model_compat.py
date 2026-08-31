@@ -95,6 +95,7 @@ class TestDirectorModelAssessment(unittest.TestCase):
         self.assertEqual(len(contexts), 1)
         self.assertNotIn("beep", contexts[0].lower())
         self.assertIn("mapped source audio drives this interval", contexts[0])
+        self.assertIn("explicitly lip-syncs every syllable", contexts[0])
         self.assertIn(
             "without quoting, transcribing, or inventing words",
             contexts[0],

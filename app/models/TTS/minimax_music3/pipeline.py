@@ -24,6 +24,8 @@ from diffusers import FlowMatchEulerDiscreteScheduler
 from transformers import Qwen2TokenizerFast, Qwen3Config, Qwen3ForCausalLM
 from transformers.cache_utils import Cache, CacheLayerMixin
 
+from services.optional_acceleration import optional_flash_attention_available
+
 from .condition_encoder import MiniMaxMusic3ConditionEncoder
 from .rvq_depth_decoder import MiniMaxMusic3RVQDepthDecoder
 from .transformer import MiniMaxMusic3Transformer1DModel
@@ -162,14 +164,14 @@ class Music3PreallocatedCache(Cache):
 
 
 def _music3_attention_backend() -> str:
-    try:
-        import flash_attn
-
-        getattr(flash_attn, "flash_attn_func")
-        getattr(flash_attn, "flash_attn_varlen_func")
-        return "flash_attention_2"
-    except Exception:
-        return "sdpa"
+    # A Windows wheel can import successfully while containing no cubin for
+    # the active GPU. The shared startup guard validates both ABI loading and
+    # Maestro's known wheel architecture manifest before Music3 opts into FA2.
+    return (
+        "flash_attention_2"
+        if optional_flash_attention_available()
+        else "sdpa"
+    )
 
 
 def normalize_music3_qwen_config(config):

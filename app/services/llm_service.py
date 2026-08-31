@@ -14,6 +14,8 @@ import logging
 import requests
 from typing import Optional
 
+from services.text_integrity import repair_text
+
 logger = logging.getLogger(__name__)
 
 # Singleton state
@@ -33,6 +35,14 @@ _vision_available: bool = False
 import collections as _collections
 _server_log: "_collections.deque[str]" = _collections.deque(maxlen=200)
 _log_reader: Optional[threading.Thread] = None
+
+_GEMMA_TEMPLATE_COMPAT_MARKER = "detected an outdated gemma4 chat template"
+
+
+def _is_benign_gemma_template_warning(line: str) -> bool:
+    """Identify llama.cpp's non-fatal Gemma 4 compatibility notice."""
+
+    return _GEMMA_TEMPLATE_COMPAT_MARKER in str(line or "").lower()
 
 # Provider state: "local" | "remote" | "openai" | "anthropic"
 _provider: str = "local"
@@ -554,7 +564,8 @@ def get_available_models(provider: str = "local", remote_url: str = "", api_key:
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
             url = remote_url.rstrip("/")
-            resp = requests.get(f"{url}/v1/models", headers=headers, timeout=10)
+            models_url = f"{url}/models" if url.endswith("/v1") else f"{url}/v1/models"
+            resp = requests.get(models_url, headers=headers, timeout=10)
             if resp.ok:
                 data = resp.json()
                 for m in data.get("data", []):
@@ -592,10 +603,96 @@ def get_model_dir() -> str:
     return d
 
 
+PROVIDER_API_KEY_SETTING = {
+    "remote": "llm_remote_api_key",
+    "openai": "openai_api_key",
+    "anthropic": "anthropic_api_key",
+}
+
+
+def provider_api_key(provider: str, services: dict) -> str:
+    """Return only the credential owned by the selected LLM provider."""
+
+    setting = PROVIDER_API_KEY_SETTING.get(str(provider or "").lower())
+    if not setting or not isinstance(services, dict):
+        return ""
+    return str(services.get(setting, "") or "")
+
+
+_OPENAI_CHAT_FIELDS = frozenset({
+    "messages",
+    "model",
+    "max_tokens",
+    "max_completion_tokens",
+    "temperature",
+    "top_p",
+    "n",
+    "stream",
+    "stream_options",
+    "stop",
+    "presence_penalty",
+    "frequency_penalty",
+    "logit_bias",
+    "logprobs",
+    "top_logprobs",
+    "seed",
+    "response_format",
+    "tools",
+    "tool_choice",
+    "user",
+})
+
+
+def _finalize_payload(payload: dict) -> dict:
+    """Translate Maestro's llama.cpp request into OpenAI-compatible form.
+
+    Local llama-server accepts additional sampler controls and serves only one
+    model, so its native payload remains untouched. Hosted and third-party
+    OpenAI-compatible gateways usually require ``model`` and often reject
+    llama.cpp-only fields such as ``cache_prompt`` and ``min_p``.
+    """
+
+    if _provider not in ("remote", "openai"):
+        return payload
+    prepared = {
+        key: value
+        for key, value in payload.items()
+        if key in _OPENAI_CHAT_FIELDS
+    }
+    dropped = sorted(set(payload) - set(prepared))
+    if dropped:
+        print(
+            f"[LLM] Dropped {len(dropped)} llama.cpp-only field(s) not "
+            f"accepted by provider={_provider}: {', '.join(dropped)}"
+        )
+    prepared["model"] = _model_id
+    return prepared
+
+
 def _server_url() -> str:
     if _provider in ("remote", "openai") and _remote_url:
         return _remote_url.rstrip("/")
+    if _provider == "openai" and not _remote_url:
+        # The Settings UI allows a blank base URL for the OpenAI provider
+        # ("Leave blank for default OpenAI endpoint"). Default to the
+        # official OpenAI API root instead of silently falling back to the
+        # local llama-server socket.
+        return "https://api.openai.com/v1"
     return f"http://127.0.0.1:{_server_port}"
+
+
+def _chat_completions_url() -> str:
+    """OpenAI-compatible chat endpoint for the active provider.
+
+    OpenAI/xAI document their base URL with a trailing ``/v1``
+    (``https://api.x.ai/v1``), while the local llama-server socket has no
+    path prefix. Build the endpoint without doubling ``/v1`` when the user
+    pasted a ``.../v1`` base URL.
+    """
+    base = _server_url()
+    if base.endswith("/v1"):
+        return f"{base}/chat/completions"
+    return f"{base}/v1/chat/completions"
 
 
 def _api_headers() -> dict:
@@ -857,6 +954,130 @@ def _download_gguf(repo_id: str, filename: str, cache_dir: str) -> str:
 # 'blk.N.ssm_conv1d.weight'". Verified b9632 loads it; b9048 does not. Bump
 # this (and FALLBACK_TAG below) when a newer model needs a newer runtime.
 MIN_LLAMA_BUILD = 9632
+FALLBACK_LLAMA_TAG = "b9632"
+
+_LLAMA_RUNTIME_RECEIPT = ".maestro_llama_runtime.json"
+_WINDOWS_LLAMA_CUDA_FILES = (
+    "cudart64_12.dll",
+    "cublas64_12.dll",
+    "cublasLt64_12.dll",
+)
+
+
+def _positive_llama_build(value: str):
+    """Extract a meaningful llama.cpp build number from text.
+
+    Some official release binaries report ``version: 0 (unknown)`` even
+    though the archive itself is tagged with a current ``bNNNN`` release.
+    Build zero is missing metadata, not evidence that the binary predates
+    every real llama.cpp release.
+    """
+
+    import re
+
+    match = re.search(r"version:\s*b?(\d+)\b", str(value or ""), re.IGNORECASE)
+    if not match:
+        return None
+    build = int(match.group(1))
+    return build if build > 0 else None
+
+
+def _llama_release_build(tag: str):
+    """Return the numeric build encoded by a llama.cpp release tag."""
+
+    import re
+
+    match = re.fullmatch(r"b?(\d+)", str(tag or "").strip(), re.IGNORECASE)
+    if not match:
+        return None
+    build = int(match.group(1))
+    return build if build > 0 else None
+
+
+def _llama_release_has_assets(release_info: dict, asset_specs) -> bool:
+    """Return whether a release is a compatible binary ``bNNNN`` build.
+
+    llama.cpp's semantic releases are lightweight version releases whose
+    platform archives remain attached to the referenced nightly build. Treating
+    tags such as ``v0.3.0`` as binary releases makes Maestro invent archive URLs
+    that do not exist.
+    """
+
+    if not isinstance(release_info, dict):
+        return False
+    build = _llama_release_build(release_info.get("tag_name", ""))
+    if build is None or build < MIN_LLAMA_BUILD:
+        return False
+
+    assets = release_info.get("assets", [])
+    if not isinstance(assets, list):
+        return False
+    for prefix, contains in asset_specs:
+        if not any(
+            str(asset.get("name", "")).startswith(prefix)
+            and contains in str(asset.get("name", ""))
+            and bool(asset.get("browser_download_url"))
+            for asset in assets
+            if isinstance(asset, dict)
+        ):
+            return False
+    return True
+
+
+def _llama_nightly_pointer_url(release_info: dict):
+    """Return the official nightly-build pointer from a semantic release."""
+
+    if not isinstance(release_info, dict):
+        return None
+    assets = release_info.get("assets", [])
+    if not isinstance(assets, list):
+        return None
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        if str(asset.get("name", "")).lower() == "nightly-tag.txt":
+            return asset.get("browser_download_url") or None
+    return None
+
+
+def _llama_runtime_receipt_path(bin_dir: str) -> str:
+    return os.path.join(bin_dir, _LLAMA_RUNTIME_RECEIPT)
+
+
+def _read_llama_runtime_receipt(bin_dir: str) -> dict:
+    import json
+
+    try:
+        with open(_llama_runtime_receipt_path(bin_dir), "r", encoding="utf-8") as handle:
+            receipt = json.load(handle)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+    return receipt if isinstance(receipt, dict) else {}
+
+
+def _write_llama_runtime_receipt(bin_dir: str, *, tag: str, build) -> None:
+    """Atomically record which release supplied the installed executable."""
+
+    import json
+
+    path = _llama_runtime_receipt_path(bin_dir)
+    temporary = f"{path}.{os.getpid()}.tmp"
+    receipt = {
+        "schema_version": 1,
+        "release_tag": str(tag or ""),
+        "build": int(build) if build else None,
+        "installed_at": int(time.time()),
+    }
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(receipt, handle, indent=2)
+        os.replace(temporary, path)
+    finally:
+        if os.path.isfile(temporary):
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
 
 
 def _llama_server_build(exe_path: str):
@@ -864,16 +1085,13 @@ def _llama_server_build(exe_path: str):
     it can't be determined (e.g. unexpected --version format)."""
     try:
         import subprocess
-        import re
         kwargs = {}
         if os.name == "nt":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         out = subprocess.run(
             [exe_path, "--version"], capture_output=True, text=True, timeout=20, **kwargs
         )
-        m = re.search(r"version:\s*(\d+)", (out.stdout or "") + (out.stderr or ""))
-        if m:
-            return int(m.group(1))
+        return _positive_llama_build((out.stdout or "") + (out.stderr or ""))
     except Exception:
         pass
     return None
@@ -889,10 +1107,9 @@ def _ensure_llama_server(bin_dir: str) -> None:
         but if someone gets here, raise with a clear message.
 
     Uses urllib + zipfile/tarfile from the stdlib so no extra deps needed.
-    Queries the GitHub releases API for the latest tag rather than
-    hardcoding a version that goes stale within a week. Falls back to a
-    known-good pinned tag if the API is unreachable (rate-limited,
-    offline, etc.) so this still works on locked-down networks.
+    Resolves GitHub's current semantic release to its referenced binary
+    nightly when necessary. Falls back to a known-good pinned nightly if the
+    API is unreachable or the referenced release is incomplete.
 
     Side effect: writes binaries to bin_dir/. Idempotent — exits early
     if a new-enough exe already exists; re-downloads the latest if the
@@ -903,6 +1120,7 @@ def _ensure_llama_server(bin_dir: str) -> None:
     import zipfile
     import tarfile
     import shutil
+    from urllib.parse import quote
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
@@ -910,16 +1128,40 @@ def _ensure_llama_server(bin_dir: str) -> None:
     is_linux = sys.platform.startswith("linux")
     exe_name = "llama-server.exe" if is_windows else "llama-server"
     exe_path = os.path.join(bin_dir, exe_name)
-    if os.path.isfile(exe_path):
-        build = _llama_server_build(exe_path)
-        # Keep the existing binary if it's new enough — or if its version is
-        # unparseable (don't risk a re-download loop on an unknown build).
-        # Only a KNOWN-too-old build triggers an upgrade.
-        if build is None or build >= MIN_LLAMA_BUILD:
-            return
-        print(f"[LLM] llama-server build {build} < required {MIN_LLAMA_BUILD}; "
-              "upgrading to the latest llama.cpp release.")
-        # fall through to re-download (extractall below overwrites in place)
+    exe_exists = os.path.isfile(exe_path)
+    reported_build = _llama_server_build(exe_path) if exe_exists else None
+    receipt = _read_llama_runtime_receipt(bin_dir)
+    receipt_build = _llama_release_build(receipt.get("release_tag", ""))
+    if receipt_build is None:
+        try:
+            stored_build = int(receipt.get("build") or 0)
+        except (TypeError, ValueError):
+            stored_build = 0
+        receipt_build = stored_build if stored_build > 0 else None
+
+    known_build = reported_build or receipt_build
+    needs_executable = not exe_exists
+    if exe_exists and known_build is not None and known_build < MIN_LLAMA_BUILD:
+        needs_executable = True
+        print(
+            f"[LLM] llama-server build {known_build} < required {MIN_LLAMA_BUILD}; "
+            "upgrading to the latest llama.cpp release."
+        )
+
+    missing_cuda_files = []
+    if is_windows:
+        missing_cuda_files = [
+            filename
+            for filename in _WINDOWS_LLAMA_CUDA_FILES
+            if not os.path.isfile(os.path.join(bin_dir, filename))
+        ]
+    needs_cudart = bool(missing_cuda_files)
+
+    # Unknown/zero version metadata is deliberately accepted. Official
+    # llama.cpp archives have occasionally shipped that way; repeatedly
+    # replacing the same binary cannot make its embedded metadata improve.
+    if not needs_executable and not needs_cudart:
+        return
 
     if not (is_windows or is_linux):
         raise RuntimeError(
@@ -952,36 +1194,97 @@ def _ensure_llama_server(bin_dir: str) -> None:
     # (both contain "bin-win-cuda-12.4-x64.zip" and we must download
     # the right one — and on Windows, both).
     if is_windows:
-        asset_specs = [
-            ("llama-",  "bin-win-cuda-12.4-x64.zip"),
-            ("cudart-", "bin-win-cuda-12.4-x64.zip"),
-        ]
+        asset_specs = []
+        if needs_executable:
+            asset_specs.append(("llama-", "bin-win-cuda-12.4-x64.zip"))
+        if needs_cudart:
+            asset_specs.append(("cudart-", "bin-win-cuda-12.4-x64.zip"))
         archive_ext = ".zip"
     else:  # linux
-        asset_specs = [
-            ("llama-", "bin-ubuntu-x64.tar.gz"),
-        ]
+        asset_specs = [("llama-", "bin-ubuntu-x64.tar.gz")]
         archive_ext = ".tar.gz"
 
-    # Query GitHub for the latest release. If the API call fails (rate
-    # limit, offline), fall back to a pinned known-good tag so we still
-    # have a chance of downloading. Update the fallback tag occasionally
-    # if a critical fix lands in newer builds.
-    FALLBACK_TAG = "b9632"
-    print("[LLM] llama-server not found, fetching llama.cpp latest release info...")
-    release_info = None
-    tag = None
-    try:
-        req = Request(
-            "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest",
-            headers={"Accept": "application/vnd.github+json"},
+    # llama.cpp semantic releases contain a nightly-tag.txt pointer; the real
+    # platform archives are attached to the referenced bNNNN release. Older
+    # GitHub layouts exposed the binary nightly directly, so support both.
+    if needs_executable and not exe_exists:
+        print("[LLM] llama-server not found; resolving a llama.cpp release...")
+    elif needs_cudart and not needs_executable:
+        print(
+            "[LLM] llama.cpp CUDA runtime is incomplete "
+            f"(missing {', '.join(missing_cuda_files)}); repairing it..."
         )
-        with urlopen(req, timeout=15) as r:
-            release_info = json.load(r)
-        tag = release_info.get("tag_name", FALLBACK_TAG)
-    except (URLError, HTTPError, json.JSONDecodeError, TimeoutError) as e:
-        print(f"[LLM] GitHub API unavailable ({e}); falling back to pinned tag {FALLBACK_TAG}")
-        tag = FALLBACK_TAG
+    else:
+        print("[LLM] Resolving the latest compatible llama.cpp release...")
+    release_info = None
+    tag = FALLBACK_LLAMA_TAG
+
+    def _github_json(url: str) -> dict:
+        request = Request(
+            url,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "Maestro-llama-runtime",
+            },
+        )
+        with urlopen(request, timeout=15) as response:
+            payload = json.load(response)
+        return payload if isinstance(payload, dict) else {}
+
+    try:
+        latest_release = _github_json(
+            "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest",
+        )
+        if _llama_release_has_assets(latest_release, asset_specs):
+            release_info = latest_release
+            tag = str(release_info.get("tag_name", FALLBACK_LLAMA_TAG))
+        else:
+            pointer_url = _llama_nightly_pointer_url(latest_release)
+            if not pointer_url:
+                raise RuntimeError(
+                    "latest release has neither compatible binaries nor a nightly tag pointer"
+                )
+            pointer_request = Request(
+                pointer_url,
+                headers={"User-Agent": "Maestro-llama-runtime"},
+            )
+            with urlopen(pointer_request, timeout=15) as response:
+                nightly_tag = response.read(64).decode(
+                    "utf-8", errors="replace"
+                ).strip()
+            nightly_build = _llama_release_build(nightly_tag)
+            if nightly_build is None or nightly_build < MIN_LLAMA_BUILD:
+                raise RuntimeError(
+                    f"nightly pointer returned incompatible tag {nightly_tag!r}"
+                )
+            candidate = _github_json(
+                "https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/"
+                f"{quote(nightly_tag, safe='')}"
+            )
+            if not _llama_release_has_assets(candidate, asset_specs):
+                raise RuntimeError(
+                    f"nightly release {nightly_tag} lacks the required platform assets"
+                )
+            release_info = candidate
+            tag = nightly_tag
+            print(
+                f"[LLM] llama.cpp stable release points to binary nightly {tag}; "
+                "using its platform archives."
+            )
+    except (
+        URLError,
+        HTTPError,
+        json.JSONDecodeError,
+        TimeoutError,
+        UnicodeDecodeError,
+        RuntimeError,
+    ) as error:
+        print(
+            f"[LLM] Could not resolve a compatible current llama.cpp binary ({error}); "
+            f"falling back to pinned tag {FALLBACK_LLAMA_TAG}"
+        )
+        tag = FALLBACK_LLAMA_TAG
+        release_info = None
 
     # Resolve each asset spec to a download URL — prefer GitHub API
     # (handles tag drift gracefully) but fall back to a constructed URL.
@@ -1076,6 +1379,13 @@ def _ensure_llama_server(bin_dir: str) -> None:
             f"Downloaded llama.cpp release but {exe_name} not found in {bin_dir} "
             f"after extraction. Tried: {asset_urls}"
         )
+    if needs_executable:
+        installed_build = _llama_server_build(exe_path) or _llama_release_build(tag)
+        _write_llama_runtime_receipt(
+            bin_dir,
+            tag=tag,
+            build=installed_build,
+        )
     print(f"[LLM] llama-server installed to {exe_path}")
 
 
@@ -1119,7 +1429,14 @@ def load_model(
     # Handle remote/API providers — no subprocess needed
     if provider in ("remote", "openai", "anthropic"):
         with _lock:
-            if is_loaded() and _model_id == model_id and _provider == provider and not force_reload:
+            if (
+                is_loaded()
+                and _model_id == model_id
+                and _provider == provider
+                and _remote_url == remote_url
+                and _api_key == api_key
+                and not force_reload
+            ):
                 return
             if _process is not None:
                 _unload_inner()
@@ -1358,6 +1675,7 @@ def _start_log_reader(proc: subprocess.Popen) -> None:
 
     def _drain():
         log_file = None
+        gemma_compat_noted = False
         if log_path:
             try:
                 log_file = open(log_path, "w", encoding="utf-8", errors="replace")
@@ -1366,6 +1684,17 @@ def _start_log_reader(proc: subprocess.Popen) -> None:
         try:
             for raw in iter(proc.stdout.readline, b""):
                 line = raw.decode(errors="replace").rstrip("\n")
+                if _is_benign_gemma_template_warning(line):
+                    # llama.cpp applies its compatibility workaround and keeps
+                    # serving. Recording the raw line as a WARNING made users
+                    # and crash-tail diagnostics mistake it for the failure.
+                    if gemma_compat_noted:
+                        continue
+                    line = (
+                        "[LLM] Gemma 4 embedded chat template is older; "
+                        "llama.cpp compatibility mode is active (non-fatal)."
+                    )
+                    gemma_compat_noted = True
                 _server_log.append(line)
                 if log_file:
                     try:
@@ -1387,7 +1716,12 @@ def _start_log_reader(proc: subprocess.Popen) -> None:
 
 
 def _server_log_tail(n: int = 20) -> str:
-    lines = list(_server_log)[-n:]
+    # Be defensive with logs captured before the reader learned to normalize
+    # this warning. It is not evidence of the subsequent request failure.
+    lines = [
+        line for line in list(_server_log)
+        if not _is_benign_gemma_template_warning(line)
+    ][-n:]
     return "\n".join(lines) if lines else "(no server output captured)"
 
 
@@ -1441,8 +1775,22 @@ def _diagnose_llm_request_failure(exc: Exception) -> "RuntimeError":
         return RuntimeError(
             f"LLM request failed: {exc}\nRecent llama-server output:\n{tail}"
         )
-    # Remote provider — a real network/timeout issue.
-    return RuntimeError(f"LLM request failed: {exc}")
+    # Remote provider — include the endpoint's explanation. requests'
+    # HTTPError string normally contains only the status line, while strict
+    # gateways put the actionable "unknown field" / "model not found" detail
+    # in their response body.
+    detail = ""
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            body = (response.text or "").strip()
+        except Exception:
+            body = ""
+        if body:
+            if len(body) > 800:
+                body = body[:800] + "... (truncated)"
+            detail = f"\nEndpoint response: {body}"
+    return RuntimeError(f"LLM request failed: {exc}{detail}")
 
 
 def _unload_inner():
@@ -1591,10 +1939,14 @@ def generate(
     payload["temperature"] = max(temperature, 0.01)
     payload["top_p"] = top_p
 
-    if frequency_penalty > 0:
-        payload["frequency_penalty"] = frequency_penalty
-    if presence_penalty > 0:
-        payload["presence_penalty"] = presence_penalty
+    # Penalty params are optional sampling knobs that some remote endpoints
+    # reject (xAI Grok rejects presence_penalty; some OpenAI-compatible
+    # servers reject both). Only forward them to the local llama-server.
+    if _provider == "local":
+        if frequency_penalty > 0:
+            payload["frequency_penalty"] = frequency_penalty
+        if presence_penalty > 0:
+            payload["presence_penalty"] = presence_penalty
     if seed is not None and seed >= 0:
         payload["seed"] = seed
     # Qwen thinking mode via chat template kwargs (Gemma handled by _prepare_thinking)
@@ -1637,8 +1989,8 @@ def generate(
 
     try:
         resp = requests.post(
-            f"{_server_url()}/v1/chat/completions",
-            json=payload,
+            _chat_completions_url(),
+            json=_finalize_payload(payload),
             headers=_api_headers(),
             # (connect, read): fail fast if the server socket is gone;
             # allow a long read for actual generation.
@@ -1769,10 +2121,14 @@ def generate_streaming(
     # (Gemma 4 → no penalty; Qwen 3.x → penalty stays as caller suggested).
     payload["temperature"] = max(temperature, 0.01)
     payload["top_p"] = top_p
-    if frequency_penalty > 0:
-        payload["frequency_penalty"] = frequency_penalty
-    if presence_penalty > 0:
-        payload["presence_penalty"] = presence_penalty
+    # Penalty params are optional sampling knobs that some remote endpoints
+    # reject (xAI Grok rejects presence_penalty; some OpenAI-compatible
+    # servers reject both). Only forward them to the local llama-server.
+    if _provider == "local":
+        if frequency_penalty > 0:
+            payload["frequency_penalty"] = frequency_penalty
+        if presence_penalty > 0:
+            payload["presence_penalty"] = presence_penalty
     # Per-model sampling defaults — registry wins over caller for any
     # field it specifies. Models without sampling_defaults (e.g. Qwen
     # 3.x) pass through unchanged. See _apply_model_defaults().
@@ -1846,8 +2202,8 @@ def generate_streaming(
     in_reasoning = False
     try:
         resp = requests.post(
-            f"{_server_url()}/v1/chat/completions",
-            json=payload,
+            _chat_completions_url(),
+            json=_finalize_payload(payload),
             headers=_api_headers(),
             timeout=(10, 600),
             stream=True,
@@ -2146,6 +2502,12 @@ def enhance_prompt(
     raw_enhancer_mode: bool = False,
     reference_context: Optional[str] = None,
 ) -> str:
+    # Repair legacy Windows/code-page damage before model-specific parsers
+    # copy user-authored international text into an immutable prompt contract.
+    prompt = repair_text(prompt)
+    system_override = repair_text(system_override) if system_override else system_override
+    reference_context = repair_text(reference_context) if reference_context else reference_context
+    lora_system_hint = repair_text(lora_system_hint)
     is_h3_ref2va = (
         mode in ("video", "avatar")
         and (model_type or "").lower().startswith("minimax_h3_ref2va")
@@ -2194,15 +2556,20 @@ def enhance_prompt(
         # ~1 token), and the user gets the unmodified Pass-2 prompt. Better
         # than the previous behavior of burning 26k+ tokens producing nothing.
         prompt_with_marker = f"/no_think\n\n{prompt}" if prompt else "/no_think"
+        # The `stop` thinking-marker list is a llama-server-only safety net
+        # (see the comment above). Grok and other OpenAI-compatible endpoints
+        # reject the `stop` parameter ("Model ... does not support parameter
+        # stop"), so only forward it to the local llama-server.
+        stop_tokens = ["<think>", "<thinking>"] if _provider == "local" else None
         result = generate(
             prompt=prompt_with_marker,
             system_prompt=system,
             max_new_tokens=max(max_new_tokens, 1024),
             temperature=temperature,
             enable_thinking=False,
-            stop=["<think>", "<thinking>"],
+            stop=stop_tokens,
         )
-        return result.strip() if result else prompt
+        return repair_text(result).strip() if result else prompt
 
     # Dedicated per-model enhancer (e.g. Sulphur's uncensored enhancer): the
     # model is trained to enhance directly. Send the user's prompt (+ optional
@@ -2236,7 +2603,7 @@ def enhance_prompt(
                 r = _clean_enhancer_output(r)
                 r = " ".join(r.split()) if r else ln  # collapse to one paragraph
                 outs.append(r or ln)
-            return "\n".join(outs)
+            return repair_text("\n".join(outs))
         # Single call: 1-line "expand into N windows", or a line/window
         # mismatch. Falls back to the explicit-count instruction.
         raw_prompt = _build_enhance_user_prompt(
@@ -2249,7 +2616,7 @@ def enhance_prompt(
         )
         print(f"[Enhance] Raw enhancer ({model_type}, images={bool(image_paths)}, windows={window_count})")
         result = generate(prompt=raw_prompt, image_paths=image_paths, **gen_kw)
-        return _clean_enhancer_output(result) or prompt
+        return repair_text(_clean_enhancer_output(result) or prompt)
 
     # Try to load a model-specific guide
     system = None
@@ -2506,6 +2873,7 @@ def enhance_prompt(
         frequency_penalty=0.3,  # prevent repetition loops
         presence_penalty=0.1,   # encourage variety
     )
+    result = repair_text(result)
 
     # Post-process ordinary prose aggressively, but preserve H3's required field
     # labels and media tags. The old substring-loop cleaner could truncate a
@@ -2570,6 +2938,7 @@ def enhance_prompt(
             frequency_penalty=0.6,
             presence_penalty=0.15,
         )
+        retry = repair_text(retry)
         retry = _clean_enhance_output(retry, preserve_structure=True) if retry else ""
         retry_structure_is_valid = (
             _has_complete_h3_ref2va_structure(retry)
@@ -2624,6 +2993,7 @@ def enhance_prompt(
         and not _h3_dialogue_contract_satisfied(prompt, result)
     ):
         word_budget = max(4, int(duration_seconds or 8))
+        dialogue_language = _detect_h3_dialogue_language(prompt)
         print("[Enhance] H3 discussion still has no dialogue; generating a focused exchange.")
         dialogue_fragment = generate(
             prompt=(
@@ -2632,7 +3002,7 @@ def enhance_prompt(
             ),
             system_prompt=(
                 "Write only the concise dialogue requested by the user. Output one to three lines in "
-                "the exact form 'Speaker description (S1): <d>[English] Literal words.</d>', using "
+                f"the exact form 'Speaker description (S1): <d>[{dialogue_language}] Literal words.</d>', using "
                 "stable sequential speaker IDs. Communicate the requested topic. No narration, "
                 "markdown, quotation marks, headings, or dialogue beyond the word budget."
             ),
@@ -2644,6 +3014,7 @@ def enhance_prompt(
             frequency_penalty=0.4,
             presence_penalty=0.1,
         )
+        dialogue_fragment = repair_text(dialogue_fragment)
         dialogue_fragment = (
             _clean_enhance_output(dialogue_fragment, preserve_structure=True)
             if dialogue_fragment
@@ -2666,7 +3037,14 @@ def enhance_prompt(
         result = _strip_h3_untagged_dialogue_duplicates(result, prompt)
         result = _enforce_h3_soundscape_silence(result, prompt)
         result = _enforce_h3_music_request(result, prompt, reference_context)
-    return result
+    if is_h3_context_ir and image_paths:
+        result = _ensure_h3_visual_grounding(
+            result,
+            prompt,
+            image_paths,
+            generate_fn=generate,
+        )
+    return repair_text(result)
 
 
 _H3_REF2VA_FIELDS = (
@@ -2682,6 +3060,85 @@ _H3_CONTEXT_FIELDS = (
     "overall_soundscape",
     "non_diegetic_music",
 )
+
+_H3_LANGUAGE_ALIASES = (
+    ("mandarin chinese", "Mandarin Chinese"),
+    ("mandarin", "Mandarin Chinese"),
+    ("cantonese", "Cantonese"),
+    ("brazilian portuguese", "Brazilian Portuguese"),
+    ("portuguese", "Portuguese"),
+    ("french", "French"),
+    ("spanish", "Spanish"),
+    ("german", "German"),
+    ("italian", "Italian"),
+    ("japanese", "Japanese"),
+    ("korean", "Korean"),
+    ("chinese", "Chinese"),
+    ("hindi", "Hindi"),
+    ("arabic", "Arabic"),
+    ("russian", "Russian"),
+    ("dutch", "Dutch"),
+    ("polish", "Polish"),
+    ("turkish", "Turkish"),
+    ("swedish", "Swedish"),
+    ("norwegian", "Norwegian"),
+    ("danish", "Danish"),
+    ("finnish", "Finnish"),
+    ("greek", "Greek"),
+    ("hebrew", "Hebrew"),
+    ("ukrainian", "Ukrainian"),
+    ("czech", "Czech"),
+    ("romanian", "Romanian"),
+    ("hungarian", "Hungarian"),
+    ("thai", "Thai"),
+    ("vietnamese", "Vietnamese"),
+    ("indonesian", "Indonesian"),
+    ("filipino", "Filipino"),
+    ("tagalog", "Tagalog"),
+    ("english", "English"),
+)
+
+
+def _canonical_h3_language_tag(value: str) -> str:
+    normalized = " ".join(str(value or "").strip().casefold().split())
+    for alias, canonical in _H3_LANGUAGE_ALIASES:
+        if normalized == alias or normalized == canonical.casefold():
+            return canonical
+    return str(value or "").strip()
+
+
+def _detect_h3_dialogue_language(prompt: str) -> str:
+    """Return the explicitly requested H3 speech language, else English.
+
+    A language word only counts near speech/language wording, so a setting
+    such as "a French restaurant" does not accidentally change the dialogue.
+    Existing ``<d>[Language]`` syntax is authoritative.
+    """
+
+    import re
+
+    text = repair_text(prompt)
+    explicit = re.search(r"<d>\s*\[([^\]\r\n]+)\]", text, flags=re.IGNORECASE)
+    if explicit:
+        return _canonical_h3_language_tag(explicit.group(1)) or "English"
+
+    context_word = re.compile(
+        r"\b(?:in|speak|speaks|speaking|spoken|say|says|saying|talk|talks|"
+        r"talking|dialogue|sentence|line|words?|language|speech|voice|voiced)\b",
+        flags=re.IGNORECASE,
+    )
+    suffix_word = re.compile(
+        r"\b(?:dialogue|language|sentence|line|words?|speech|voice|speaking|spoken)\b",
+        flags=re.IGNORECASE,
+    )
+    lowered = text.casefold()
+    for alias, canonical in _H3_LANGUAGE_ALIASES:
+        for match in re.finditer(rf"\b{re.escape(alias)}\b", lowered):
+            before = lowered[max(0, match.start() - 60):match.start()]
+            after = lowered[match.end():match.end() + 40]
+            if context_word.search(before) or suffix_word.search(after):
+                return canonical
+    return "English"
 
 
 def _extract_h3_quoted_dialogue(text: str) -> list[str]:
@@ -2719,6 +3176,19 @@ def _extract_h3_dialogue_blocks(text: str) -> list[str]:
             flags=re.DOTALL,
         )
         if match.strip()
+    ]
+
+
+def _extract_h3_dialogue_entries(text: str) -> list[tuple[str, str]]:
+    import re
+    return [
+        (_canonical_h3_language_tag(language), words.strip())
+        for language, words in re.findall(
+            r"<d>\s*\[([^\]]+)\]\s*(.*?)\s*</d>",
+            str(text or ""),
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        if words.strip()
     ]
 
 
@@ -2760,10 +3230,11 @@ def _build_h3_dialogue_requirement(
     duration_seconds: Optional[float] = None,
 ) -> str:
     quotes = _extract_h3_quoted_dialogue(prompt)
+    language = _detect_h3_dialogue_language(prompt)
     timed_clause = _build_h3_timed_silence_clause(prompt, duration_seconds)
     if quotes:
         required = "\n".join(
-            f"- REQUIRED VERBATIM: <d>[English] {line}</d>" for line in quotes
+            f"- REQUIRED VERBATIM: <d>[{language}] {line}</d>" for line in quotes
         )
         return (
             "IMMUTABLE H3 DIALOGUE CONTRACT: The user supplied the spoken lines below. "
@@ -2776,7 +3247,7 @@ def _build_h3_dialogue_requirement(
         return (
             "MANDATORY H3 DIALOGUE CONTRACT: The user explicitly requests speech but supplied no "
             "script. Write concise, meaningful dialogue that communicates the requested subject, "
-            "using stable speaker IDs and one or more <d>[English] literal words</d> blocks. "
+            f"using stable speaker IDs and one or more <d>[{language}] literal words</d> blocks. "
             "Writing only 'speaks', 'talks', or 'they discuss' makes the output invalid. "
             f"{timed_clause}"
         )
@@ -2787,12 +3258,141 @@ def _h3_dialogue_contract_satisfied(prompt: str, result: str) -> bool:
     import re
     quotes = _extract_h3_quoted_dialogue(prompt)
     blocks = _extract_h3_dialogue_blocks(result)
+    entries = _extract_h3_dialogue_entries(result)
+    language = _detect_h3_dialogue_language(prompt)
     has_speaker_id = bool(re.search(r"\(S\d+\)", str(result or "")))
     if quotes:
-        return has_speaker_id and all(line in blocks for line in quotes)
+        return has_speaker_id and all(
+            any(entry_language == language and words == line for entry_language, words in entries)
+            for line in quotes
+        )
     if _h3_requests_speech(prompt):
-        return has_speaker_id and bool(blocks)
+        return has_speaker_id and bool(blocks) and all(
+            entry_language == language for entry_language, _words in entries
+        )
     return True
+
+
+_H3_VISUAL_CATEGORY_PATTERNS = (
+    r"\b(?:camera|shot|frame|framing|foreground|midground|background|screen[- ](?:left|right)|"
+    r"close[- ]?up|medium[- ]?shot|wide[- ]?shot|angle|lens|composition)\b",
+    r"\b(?:woman|man|person|people|child|face|hair|eyes?|build|silhouette|subject|character)\b",
+    r"\b(?:wearing|dressed|wardrobe|shirt|jacket|coat|dress|suit|trousers|pants|skirt|shoes?|hat)\b",
+    r"\b(?:interior|exterior|room|street|kitchen|office|building|wall|window|door|furniture|"
+    r"table|desk|landscape|environment|setting)\b",
+    r"\b(?:light|lighting|lit|shadow|sunlight|neon|warm|cool|bright|dim|color|palette|contrast)\b",
+)
+
+
+def _h3_visual_category_count(text: str) -> int:
+    import re
+    return sum(
+        1 for pattern in _H3_VISUAL_CATEGORY_PATTERNS
+        if re.search(pattern, str(text or ""), flags=re.IGNORECASE)
+    )
+
+
+def _h3_visual_grounding_contract_satisfied(prompt: str, result: str) -> bool:
+    """Reject H3 start-frame rewrites that merely repackage user prose."""
+
+    import re
+    match = re.search(
+        r"(?ms)^\s*integrated_multimodal_description\s*:(.*?)"
+        r"(?=^\s*overall_soundscape\s*:)",
+        str(result or ""),
+    )
+    if not match:
+        return False
+    description = match.group(1)
+    category_count = _h3_visual_category_count(description)
+    if category_count < 3:
+        return False
+
+    source_words = {
+        word for word in re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ]{4,}", str(prompt or "").casefold())
+    }
+    description_words = {
+        word for word in re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ]{4,}", description.casefold())
+    }
+    novel_words = description_words - source_words - {
+        "shot", "video", "seconds", "target", "picture", "requested",
+        "scene", "shows", "visible", "camera", "final", "frame",
+    }
+    # A user's already-rich prompt needs less invention; otherwise require
+    # enough genuinely new visual vocabulary to show that the image was used.
+    return len(novel_words) >= 8 or _h3_visual_category_count(prompt) >= 3
+
+
+def _inject_h3_visual_anchor(result: str, anchor: str) -> str:
+    """Insert a compact observed-frame description into the H3 visual field."""
+
+    import re
+    anchor = repair_text(anchor)
+    # A vision-only repair is never allowed to introduce extra speech.
+    anchor = re.sub(r"(?is)<\s*d\s*>.*?<\s*/\s*d\s*>", "", anchor)
+    anchor = re.sub(r"(?is)<\s*/?\s*d\s*>", "", anchor)
+    anchor = re.sub(r"(?m)^\s*(?:#{1,4}\s*)?(?:visual anchor|description)\s*:\s*", "", anchor)
+    anchor = " ".join(anchor.replace("**", "").split()).strip()
+    if not anchor or _h3_visual_category_count(anchor) < 3:
+        return result
+    anchor = anchor[:1800].rstrip()
+
+    match = re.search(
+        r"(?mi)^\s*integrated_multimodal_description\s*:\s*",
+        str(result or ""),
+    )
+    if not match:
+        return result
+    insert_at = match.end()
+    remainder = result[insert_at:]
+    shot = re.match(r"\[Shot\s+1\]\s*", remainder, flags=re.IGNORECASE)
+    if shot:
+        insert_at += shot.end()
+    prefix = "Attached-frame visual evidence in supplied timeline order: "
+    return result[:insert_at] + prefix + anchor + ". " + result[insert_at:]
+
+
+def _ensure_h3_visual_grounding(
+    result: str,
+    prompt: str,
+    image_paths: Optional[list],
+    *,
+    generate_fn,
+) -> str:
+    """Run one focused vision pass when the main H3 rewrite ignored images."""
+
+    if not image_paths or _h3_visual_grounding_contract_satisfied(prompt, result):
+        return result
+    print("[Enhance] H3 rewrite lacked concrete frame evidence; grounding from attached image(s).")
+    try:
+        anchor = generate_fn(
+            prompt=(
+                f"There are {len(image_paths)} attached target-frame image(s), in order. "
+                "Describe only concrete visible facts needed to preserve them in a generated video. "
+                f"The separate action request is: {prompt}"
+            ),
+            system_prompt=(
+                "Act as a visual continuity observer. Return one compact factual paragraph. "
+                "For every attached image, describe visible subject count and appearance, wardrobe, "
+                "screen position and composition, setting and important objects, lighting and color, "
+                "and camera framing. Do not invent identity, dialogue, action, emotion, or unseen facts. "
+                "Do not output markdown, field labels, quotation marks, or model instructions."
+            ),
+            max_new_tokens=max(240, min(700, len(image_paths) * 220)),
+            temperature=0.15,
+            image_paths=image_paths,
+            enable_thinking=False,
+            thinking_budget=2048,
+            frequency_penalty=0.2,
+            presence_penalty=0.0,
+        )
+    except Exception as exc:
+        print(f"[Enhance] Focused H3 visual grounding was unavailable: {exc}")
+        return result
+    grounded = _inject_h3_visual_anchor(result, repair_text(anchor))
+    if grounded == result:
+        print("[Enhance] Focused H3 visual pass returned no usable grounding details.")
+    return grounded
 
 
 def _h3_timed_silence_contract_satisfied(
@@ -2872,12 +3472,13 @@ def _compile_h3_explicit_dialogue(prompt: str) -> str:
     """Replace user quotation marks with literal H3 dialogue blocks."""
     import re
     counter = 0
+    language = _detect_h3_dialogue_language(prompt)
 
     def replace(match):
         nonlocal counter
         counter += 1
         value = (match.group(1) or match.group(2) or "").strip()
-        return f"(S{counter}) <d>[English] {value}</d>"
+        return f"(S{counter}) <d>[{language}] {value}</d>"
 
     return re.sub(
         r'"([^"\r\n]{1,500})"|“([^”\r\n]{1,500})”',
@@ -2895,8 +3496,9 @@ def _inject_missing_h3_dialogue(result: str, prompt: str, *, ref2va: bool) -> st
     missing = [line for line in quotes if line not in existing]
     if not missing:
         return result
+    language = _detect_h3_dialogue_language(prompt)
     additions = " ".join(
-        f"The intended speaker (S{index}) says exactly once: <d>[English] {line}</d>."
+        f"The intended speaker (S{index}) says exactly once: <d>[{language}] {line}</d>."
         for index, line in enumerate(missing, start=1)
     )
     additions += (

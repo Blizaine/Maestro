@@ -23,6 +23,7 @@ from services.job_lifecycle import (  # noqa: E402
     finish_job,
     record_job_outputs,
     register_abort_state,
+    release_held,
     request_cancel,
     snapshot_job,
     try_requeue,
@@ -166,6 +167,26 @@ class TestJobLifecycle(unittest.TestCase):
         self.assertFalse(result.was_running)
         self.assertFalse(try_start(job))
         self.assertEqual(job["status"], "cancelled")
+
+    def test_held_job_only_runs_after_explicit_release(self):
+        job = {"id": "held-1", "status": "held", "message": "Ready"}
+        self.assertFalse(try_start(job))
+        self.assertTrue(release_held(job, message="Queued"))
+        self.assertEqual(job["status"], "queued")
+        self.assertTrue(try_start(job, message="Starting"))
+        self.assertEqual(job["status"], "running")
+
+    def test_held_job_release_is_single_use_and_cancel_safe(self):
+        job = {"id": "held-1", "status": "held", "message": "Ready"}
+        self.assertTrue(release_held(job, message="Queued"))
+        self.assertFalse(release_held(job, message="Queued twice"))
+
+        cancelled = {"id": "held-2", "status": "held", "message": "Ready"}
+        result = request_cancel(cancelled)
+        self.assertTrue(result.changed)
+        self.assertFalse(result.was_running)
+        self.assertFalse(release_held(cancelled, message="Too late"))
+        self.assertEqual(cancelled["status"], "cancelled")
 
     def test_cancel_running_signals_abort_and_model_once(self):
         job = _job()

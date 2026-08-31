@@ -195,6 +195,58 @@ def sdpa_wrapper(
     return o
 
 
+_flash_attn_kernels = None
+
+
+def flash_attn_kernels_available():
+    """Return whether the imported FlashAttention wheel runs on this GPU.
+
+    Importing the Python extension only validates its ABI. Architecture-
+    specific wheels can still import on a GPU for which they contain no CUDA
+    kernel, failing later with ``no kernel image is available``. Probe one
+    minimal varlen call and cache the result so every model path shares the
+    same runtime verdict.
+    """
+
+    global _flash_attn_kernels
+    if _flash_attn_kernels is not None:
+        return _flash_attn_kernels
+    if flash_attn is None or not torch.cuda.is_available():
+        _flash_attn_kernels = False
+        return False
+    try:
+        probe = torch.zeros(
+            1,
+            1,
+            32,
+            dtype=torch.float16,
+            device="cuda",
+        )
+        cu_seqlens = torch.tensor(
+            [0, 1],
+            dtype=torch.int32,
+            device="cuda",
+        )
+        flash_attn.flash_attn_varlen_func(
+            probe,
+            probe,
+            probe,
+            cu_seqlens,
+            cu_seqlens,
+            1,
+            1,
+        )
+        torch.cuda.synchronize()
+        _flash_attn_kernels = True
+    except Exception as exc:
+        _flash_attn_kernels = False
+        print(
+            "[Runtime] FlashAttention imports but has no usable kernel for "
+            f"this GPU; using SageAttention/SDPA instead ({exc})."
+        )
+    return _flash_attn_kernels
+
+
 def get_attention_modes():
     ret = ["sdpa", "auto"]
     if flash_attn != None:
@@ -229,6 +281,9 @@ def get_supported_attention_modes():
     if major < 7 or not triton_installed:
         if "sage" in ret:
             ret.remove("sage")
+
+    if "flash" in ret and not flash_attn_kernels_available():
+        ret.remove("flash")
 
     return ret
 

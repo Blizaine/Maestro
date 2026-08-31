@@ -4,6 +4,8 @@
         "architecture": "minimax_h3",
         "description": "Recommended lighter MiniMax H3 First / Last model. Creates video from text, first/last/timed frames, an uploaded soundtrack, or a Control Video soundtrack, with synchronized stereo audio. It can also preserve a Control Video's pictures while generating a new soundtrack. Longer Studio clips carry motion and matching audio through native 14.4-second windows. Voice references belong in H3 Omni. H3 LoRAs, including Turbo, are converted automatically when needed.",
         "URLs": [
+            "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/fec7846aef352e58a1cfb699455e3d104281e68b/MiniMax-H3-FL2VA-pruned_rank8_bf16.safetensors",
+            "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/fec7846aef352e58a1cfb699455e3d104281e68b/MiniMax-H3-FL2VA-pruned_rank8_int8_convrot.safetensors",
             "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/0543966fbdce5ba05709a8f2031c94bdba629b4a/diffusion_models/minimax_h3_fl2va_pruned_fp8_scaled.safetensors"
         ]
     },
