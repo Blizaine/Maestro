@@ -242,6 +242,7 @@ export interface MiniMaxH3Reference {
   role?: string
   audio_intent?: MiniMaxH3AudioIntent
   image_intent?: 'identity' | 'scene' | 'style' | 'composition'
+  remove_background?: boolean
   video_intent?: 'character' | 'motion' | 'scene'
   library_character_id?: string
   character_name?: string

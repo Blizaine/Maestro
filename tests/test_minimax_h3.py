@@ -3332,6 +3332,7 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
         self.assertEqual([item["type"] for item in manifest], ["image", "audio", "video"])
         self.assertEqual(manifest[0]["role"], "Lead actor")
         self.assertEqual(manifest[0]["image_intent"], "identity")
+        self.assertFalse(manifest[0]["remove_background"])
         self.assertEqual(manifest[1]["audio_intent"], "voice")
         self.assertTrue(manifest[2]["include_audio"])
         self.assertEqual(manifest[2]["audio_path"], "replacement-voice.wav")
@@ -3361,6 +3362,37 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
                         "type": "image",
                         "path": "portrait.png",
                         "image_intent": "mystery",
+                    },
+                ],
+                require_files=False,
+            )
+
+        isolated_character = validate_reference_manifest(
+            [
+                {
+                    "type": "image",
+                    "path": "portrait.png",
+                    "image_intent": "identity",
+                    "library_character_id": "saved-lead",
+                },
+                {
+                    "type": "image",
+                    "path": "room.png",
+                    "image_intent": "scene",
+                    "remove_background": True,
+                },
+            ],
+            require_files=False,
+        )
+        self.assertTrue(isolated_character[0]["remove_background"])
+        self.assertFalse(isolated_character[1]["remove_background"])
+        with self.assertRaisesRegex(ValueError, "remove_background must be true or false"):
+            validate_reference_manifest(
+                [
+                    {
+                        "type": "image",
+                        "path": "portrait.png",
+                        "remove_background": "yes",
                     },
                 ],
                 require_files=False,
@@ -3404,6 +3436,58 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
         self.assertNotIn("<Audio 2> drives", repaired)
         self.assertIn("<Audio 2> defines the voice", repaired)
         self.assertIn("non_diegetic_music: the exact target soundtrack", repaired)
+
+    def test_ref2va_isolates_only_opted_in_identity_portraits(self):
+        from PIL import Image
+
+        from models.minimax_h3.ref2va import prepare_references
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = []
+            for name, color in (
+                ("character.png", "red"),
+                ("plain.png", "green"),
+                ("scene.png", "blue"),
+            ):
+                path = root / name
+                Image.new("RGB", (32, 32), color).save(path)
+                paths.append(path)
+
+            isolated = Image.new("RGB", (32, 32), "white")
+            with mock.patch(
+                "models.minimax_h3.ref2va.isolate_reference_image_background",
+                return_value=isolated,
+            ) as isolate:
+                references = prepare_references(
+                    [
+                        {
+                            "type": "image",
+                            "path": str(paths[0]),
+                            "image_intent": "identity",
+                            "remove_background": True,
+                        },
+                        {
+                            "type": "image",
+                            "path": str(paths[1]),
+                            "image_intent": "identity",
+                        },
+                        {
+                            "type": "image",
+                            "path": str(paths[2]),
+                            "image_intent": "scene",
+                            "remove_background": True,
+                        },
+                    ],
+                    num_frames=24,
+                    target_height=32,
+                    target_width=32,
+                )
+
+        isolate.assert_called_once_with(str(paths[0]))
+        self.assertEqual(references[0].image.getpixel((0, 0)), (255, 255, 255))
+        self.assertEqual(references[1].image.getpixel((0, 0)), (0, 128, 0))
+        self.assertEqual(references[2].image.getpixel((0, 0)), (0, 0, 255))
 
     def test_ref2va_music_references_advance_while_voice_reuses_its_start(self):
         from PIL import Image

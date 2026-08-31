@@ -10,6 +10,8 @@ from __future__ import annotations
 import math
 import os
 import re
+import threading
+from functools import lru_cache
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -78,6 +80,10 @@ _REF2VA_IDENTITY_ISOLATION_CONTRACT = (
     "Identity references define subject appearance; the target uses the newly described setting, "
     "composition, pose, camera view, and natural motion."
 )
+
+_REFERENCE_BACKGROUND_SESSION = None
+_REFERENCE_BACKGROUND_SESSION_LOCK = threading.Lock()
+_REFERENCE_BACKGROUND_RUN_LOCK = threading.Lock()
 
 _REF2VA_CONTEXT_IR_HEADERS = (
     "subject_definitions",
@@ -1535,6 +1541,101 @@ def prepare_reference_image(image: Image.Image, height: int, width: int) -> Imag
     return image.resize((width, height), Image.Resampling.LANCZOS)
 
 
+def _get_reference_background_session():
+    """Load Maestro's existing U2Net remover once, explicitly on CPU.
+
+    H3 references are prepared after the diffusion model has been loaded.  A
+    default ONNX Runtime CUDA provider would therefore consume generation
+    VRAM and can also be binary-incompatible with PyTorch's CUDA runtime.  The
+    short device override mirrors Recast's proven CPU-only session setup.
+    """
+
+    global _REFERENCE_BACKGROUND_SESSION
+    if _REFERENCE_BACKGROUND_SESSION is not None:
+        return _REFERENCE_BACKGROUND_SESSION
+    with _REFERENCE_BACKGROUND_SESSION_LOCK:
+        if _REFERENCE_BACKGROUND_SESSION is None:
+            model_home = os.path.abspath(os.path.join("ckpts", "rembg"))
+            os.makedirs(model_home, exist_ok=True)
+            os.environ.setdefault("U2NET_HOME", model_home)
+            import onnxruntime as ort
+            from rembg import new_session
+
+            original_get_device = ort.get_device
+            try:
+                ort.get_device = lambda: "CPU"
+                _REFERENCE_BACKGROUND_SESSION = new_session("u2net")
+            finally:
+                ort.get_device = original_get_device
+    return _REFERENCE_BACKGROUND_SESSION
+
+
+def _composite_authored_alpha_on_white(image: Image.Image) -> Image.Image | None:
+    """Preserve a user's authored cutout instead of re-segmenting it."""
+
+    if image.mode not in {"RGBA", "LA"} and "transparency" not in image.info:
+        return None
+    rgba = image.convert("RGBA")
+    alpha = rgba.getchannel("A")
+    minimum, _maximum = alpha.getextrema()
+    if minimum >= 255:
+        return None
+    canvas = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+    canvas.alpha_composite(rgba)
+    return canvas.convert("RGB")
+
+
+@lru_cache(maxsize=32)
+def _isolate_reference_image_background_cached(
+    normalized_path: str,
+    modified_ns: int,
+    file_size: int,
+) -> Image.Image:
+    """Return a cached white-background identity portrait.
+
+    The stat values intentionally participate in the cache key so replacing a
+    file at the same path cannot reuse an obsolete cutout.
+    """
+
+    del modified_ns, file_size
+    with Image.open(normalized_path) as source:
+        oriented = ImageOps.exif_transpose(source)
+        authored_cutout = _composite_authored_alpha_on_white(oriented)
+        if authored_cutout is not None:
+            return authored_cutout
+        source_rgb = oriented.convert("RGB")
+
+    from rembg import remove
+
+    with _REFERENCE_BACKGROUND_RUN_LOCK:
+        cutout = remove(
+            source_rgb,
+            session=_get_reference_background_session(),
+            alpha_matting=True,
+            alpha_matting_erode_size=1,
+            bgcolor=(255, 255, 255, 0),
+        )
+    if not isinstance(cutout, Image.Image):
+        raise ValueError("U2Net returned an unsupported character cutout.")
+    print(
+        "[MiniMax H3 Ref2VA] Isolated character background: "
+        f"{os.path.basename(normalized_path)}."
+    )
+    return cutout.convert("RGB")
+
+
+def isolate_reference_image_background(path: str) -> Image.Image:
+    """Remove one identity portrait's source background without changing it."""
+
+    normalized_path = os.path.normcase(os.path.realpath(path))
+    stat = os.stat(normalized_path)
+    return _isolate_reference_image_background_cached(
+        normalized_path,
+        int(stat.st_mtime_ns),
+        int(stat.st_size),
+    ).copy()
+
+
 def resample_reference_frames(frames: np.ndarray, fps: float) -> np.ndarray:
     if fps <= 0:
         raise ValueError(f"A reference video must have a positive frame rate, got {fps}.")
@@ -1682,15 +1783,29 @@ def prepare_references(
         )
 
         if kind == "image":
-            with Image.open(item["path"]) as source:
-                image = ImageOps.exif_transpose(source).convert("RGB")
-                height, width = resolve_reference_image_size(
-                    *image.size,
-                    detail=detail,
-                    target_height=target_height,
-                    target_width=target_width,
-                )
-                reference.image = prepare_reference_image(image, height, width).copy()
+            if item.get("remove_background"):
+                try:
+                    image = isolate_reference_image_background(item["path"])
+                except Exception as error:
+                    # Background isolation improves identity cleanliness but
+                    # must never turn a valid reference into a failed render.
+                    print(
+                        "[MiniMax H3 Ref2VA] Character background isolation "
+                        f"failed for {os.path.basename(item['path'])}; using the "
+                        f"original image ({error})."
+                    )
+                    with Image.open(item["path"]) as source:
+                        image = ImageOps.exif_transpose(source).convert("RGB")
+            else:
+                with Image.open(item["path"]) as source:
+                    image = ImageOps.exif_transpose(source).convert("RGB")
+            height, width = resolve_reference_image_size(
+                *image.size,
+                detail=detail,
+                target_height=target_height,
+                target_width=target_width,
+            )
+            reference.image = prepare_reference_image(image, height, width).copy()
         elif kind == "video":
             wants_embedded_audio = bool(item.get("include_audio", True)) and not item.get("audio_path")
             if item.get("has_audio") is False:

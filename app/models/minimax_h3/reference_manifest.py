@@ -95,6 +95,22 @@ def validate_reference_manifest(
                     f"{image_intent!r}; expected one of: {choices}."
                 )
             item["image_intent"] = image_intent
+            remove_background = raw.get("remove_background")
+            if remove_background is None:
+                # Saved character portraits are identity assets, not scene
+                # references.  Isolate them by default so an old library card
+                # receives the safer behavior without needing to be re-saved.
+                remove_background = bool(library_character_id and image_intent == "identity")
+            elif not isinstance(remove_background, bool):
+                raise ValueError(
+                    f"Reference {index + 1} remove_background must be true or false."
+                )
+            # Background removal is intentionally unavailable to locations,
+            # styles, and composition references: their surroundings are the
+            # information the model is meant to retain.
+            item["remove_background"] = bool(
+                remove_background and image_intent == "identity"
+            )
         if kind == "audio":
             audio_intent = str(raw.get("audio_intent") or "voice").strip().lower()
             if audio_intent not in _AUDIO_INTENTS:

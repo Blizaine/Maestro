@@ -231,6 +231,7 @@ export function OmniReferenceSection({
       character_name: character.name,
       library_character_id: character.id,
       image_intent: character.visual.type === 'image' ? 'identity' : undefined,
+      remove_background: character.visual.type === 'image' ? true : undefined,
       video_intent: character.visual.type === 'video' ? 'character' : undefined,
       duration_seconds: character.visual.duration_seconds ?? null,
       has_audio: character.visual.type === 'video' ? Boolean(character.visual.has_audio) : undefined,
@@ -658,6 +659,21 @@ export function OmniReferenceSection({
                     <p className="text-[8px] text-text-muted truncate" title={item.entries.map(entry => labels[entry.index]).join(' + ')}>
                       {item.entries.map(entry => labels[entry.index]).join(' + ')} · Bound together as one H3 subject
                     </p>
+                    {visualEntry?.reference.type === 'image' && (
+                      <label
+                        className="flex items-center gap-1.5 text-[9px] text-text-secondary cursor-pointer"
+                        title="Remove the portrait's source background on CPU and place the character on neutral white before H3 sees it. This helps prevent the reference location or color from leaking into the generated scene."
+                      >
+                        <input
+                          type="checkbox"
+                          disabled={disabled}
+                          checked={visualEntry.reference.remove_background !== false}
+                          onChange={event => patchReference(visualEntry.index, { remove_background: event.target.checked })}
+                          className="w-3 h-3 accent-accent-blue"
+                        />
+                        Isolate portrait background
+                      </label>
+                    )}
                   </div>
                   <button
                     disabled={disabled}
@@ -727,6 +743,21 @@ export function OmniReferenceSection({
                       <option value="drive">Music / performance timeline</option>
                       <option value="style">Music / sound style only</option>
                     </select>
+                  )}
+                  {reference.type === 'image' && (reference.image_intent ?? 'identity') === 'identity' && (
+                    <label
+                      className="flex items-center gap-1.5 text-[9px] text-text-secondary cursor-pointer"
+                      title="Remove this identity portrait's source background on CPU before H3 sees it. Scene, style, and composition references are never altered."
+                    >
+                      <input
+                        type="checkbox"
+                        disabled={disabled}
+                        checked={reference.remove_background === true}
+                        onChange={event => patchReference(index, { remove_background: event.target.checked })}
+                        className="w-3 h-3 accent-accent-blue"
+                      />
+                      Isolate subject background
+                    </label>
                   )}
                   {reference.type === 'video' && (
                     <div className="flex items-center gap-1.5 text-[9px] text-text-secondary">
