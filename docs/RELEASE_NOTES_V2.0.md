@@ -46,9 +46,36 @@ Studio workflows have been reorganized around what creators want to do:
 - **Image:** new image, edit, upscale, and outpaint.
 - **Audio:** music, speech, sound effects, and revoice.
 
+Video generation is now split cleanly between **Frames** and **References**.
+Frames covers text generation, first/last and injected frames, control video,
+and soundtrack-driven workflows using compatible H3 FL2VA and LTX models.
+References contains H3 Omni and its character, image, video, and audio
+conditioning tools. Image generation similarly uses Generate, Transform, and
+Finish, with model choices narrowing automatically from the supplied media.
+
 The old Studio Edit and Tools categories no longer compete with the new Editor
 name. Reusable processing such as Film Grain now lives under Finish, where it
 can be applied to any video—including a clip selected in Editor.
+
+## Long-form creation without duration guesswork
+
+- Choose one native window, a 30-second through 60-minute duration preset, an
+  exact timecode, or a direct number of generation windows.
+- Maestro translates friendly duration labels through the active model's real
+  window, overlap, and discard geometry and always shows the resulting runtime
+  and window count.
+- **Auto** follows a soundtrack or other timed source exactly, honors explicit
+  durations, and otherwise estimates a bounded runtime from visible story
+  beats and exact dialogue.
+- **AI — Faithful** preserves the user's ordered events and dialogue across the
+  selected windows. **AI — Creative** can develop a concept with additional
+  action and dialogue while keeping identity and continuity constraints.
+- Compatible long-form audio workflows use the same duration language; native
+  music-generator limits remain visible and enforced.
+
+Frequently reused Studio choices now survive browser refreshes and Maestro
+restarts, including media mode, workflow, model, prompt-planning mode, H3
+optimizations, and the open/closed Characters and H3 Optimizations panels.
 
 ## MiniMax H3 upgrades
 
@@ -60,6 +87,9 @@ can be applied to any video—including a clip selected in Editor.
   interpreted as the opening frame.
 - Added a reusable named character library. Save an image and voice reference,
   or save a character video, then recall it in later Omni generations.
+- Added optional per-character background removal to reduce color and scene
+  leakage from identity photos while leaving the original reference available
+  for cases where its lighting and context are useful.
 - Locked every named character to one immutable Subject/Speaker ID and its own
   pictures, videos, and voice references. The enhancer rejects `<Subject N>`,
   unexpected Subject 3/4 entries, and cross-wired dialogue rather than passing
@@ -109,8 +139,10 @@ Maestro can now report completed, failed, and queued work through:
 Optional Tailscale integration gives Maestro a private HTTPS address in the
 user's own Tailscale network. It does not create a Maestro account, join a
 Maestro-owned network, or expose Tailscale Funnel publicly. The one-time setup
-remembers the selected backend port so the same saved address normally survives
-Maestro restarts. See [Use Maestro Remotely with Tailscale](TAILSCALE_REMOTE_ACCESS.md).
+remembers the selected backend port so the same saved address survives Maestro
+restarts. Windows setup now installs a fixed on-demand restore helper, allowing
+later Maestro starts to repair the private route without another UAC prompt.
+See [Use Maestro Remotely with Tailscale](TAILSCALE_REMOTE_ACCESS.md).
 
 ## Interface and quality-of-life improvements
 
@@ -118,7 +150,15 @@ Maestro restarts. See [Use Maestro Remotely with Tailscale](TAILSCALE_REMOTE_ACC
 - Consistent responsive Director / Studio / Editor navigation, icon placement,
   and version display on desktop and mobile.
 - Per-clip, multi-window, and complete Director ETA estimates, with observed
-  First Block Cache acceleration reflected as generation progresses.
+  First Block Cache acceleration reflected as generation progresses. A local
+  timing history learns from comparable completed runs to improve later
+  estimates without recording prompts or media paths.
+- Expandable gallery details show generation model, resolution, LoRAs, H3
+  optimization chips, effective prompts, scene/window timing, and per-window
+  completion times. Gallery search can filter on those values, including terms
+  such as Omni, Turbo, PDD, Sol, First Block, and LoRA names.
+- Gallery activation follows the item being viewed or played; playback also
+  activates and unmutes that media so Studio actions target the expected clip.
 - Cleaner Pinokio Start and LoRA-folder menus without normal Classic UI links.
 - Dynamic Pinokio ports remain the default unless a user explicitly enables
   persistent Tailscale access.
@@ -140,4 +180,4 @@ select **Secure Remote Access (Tailscale)**.
 The v2.0 release candidate passes the production React build, the complete
 frontend ESLint policy, launcher syntax checks, JSON grammar regression runner,
 clean-repository boundary guard, first-party Python compile checks, and the
-complete 1,081-test Python suite.
+complete 1,160-test Python suite.

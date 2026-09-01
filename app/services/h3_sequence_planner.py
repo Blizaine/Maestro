@@ -15,8 +15,14 @@ import re
 from typing import Any
 
 from services.h3_story_ledger import (
+    H3DialogueTimingError,
     H3_STORY_LEDGER_VERSION,
+    _active_h3_cast_names,
+    _merge_h3_cast_names,
+    _same_h3_cast_identity,
+    _source_requests_multiple_cast_instances,
     extract_h3_source_intent,
+    normalize_h3_planning_style,
     plan_h3_story_segments,
     recover_h3_plain_story,
 )
@@ -26,7 +32,7 @@ from services.h3_window_planner import (
     _fallback_plan,
     _h3_shot_timestamp,
     _infer_camera_coverage,
-    _narrative_dialogue_expected,
+    _creative_dialogue_expected,
     _normalized_window_shots,
     compute_h3_window_boundaries,
     normalize_h3_camera_coverage,
@@ -37,7 +43,7 @@ from services.h3_window_planner import (
 # is persisted with reviewed/generated window prompts, so this prevents a run
 # restored from gallery metadata from silently reusing pre-fix dialogue and
 # reference bindings.
-_H3_SEQUENCE_PLANNER_VERSION = 5 + H3_STORY_LEDGER_VERSION
+_H3_SEQUENCE_PLANNER_VERSION = 6 + H3_STORY_LEDGER_VERSION
 _H3_CLIP_BOUNDARY = "\n---CLIP_BOUNDARY---\n"
 
 
@@ -176,6 +182,7 @@ def h3_sequence_plan_signature(
     camera_coverage: str = "auto",
     overlap_frames: int = 0,
     native_continuation: bool = False,
+    planning_style: str = "faithful",
 ) -> str:
     reference_contract = [
         {
@@ -204,6 +211,7 @@ def h3_sequence_plan_signature(
         "camera_coverage": normalize_h3_camera_coverage(camera_coverage),
         "overlap_frames": int(overlap_frames),
         "native_continuation": bool(native_continuation),
+        "planning_style": normalize_h3_planning_style(planning_style),
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:24]
@@ -221,6 +229,7 @@ def reviewed_h3_sequence_plan_matches(
     camera_coverage: str,
     overlap_frames: int,
     native_continuation: bool,
+    planning_style: str = "faithful",
 ) -> bool:
     """Return whether a visible Omni sequence plan still fits this request."""
 
@@ -251,6 +260,8 @@ def reviewed_h3_sequence_plan_matches(
     if bool(plan.get("native_continuation")) != bool(native_continuation):
         return False
     if int(plan.get("overlap_frames") or 0) != int(overlap_frames):
+        return False
+    if normalize_h3_planning_style(plan.get("planning_style")) != normalize_h3_planning_style(planning_style):
         return False
     if [int(value) for value in (plan.get("per_clip_frames") or [])] != [
         int(item.get("frames") or 0) for item in geometry
@@ -728,6 +739,172 @@ def _replace_ref2va_names_with_subjects(
     return result
 
 
+def _h3_plan_dialogue_speakers(plan: dict[str, Any]) -> list[str]:
+    speakers: list[str] = []
+    for clip in plan.get("clips") or []:
+        if not isinstance(clip, dict):
+            continue
+        for shot in clip.get("shots") or []:
+            if not isinstance(shot, dict):
+                continue
+            for line in shot.get("dialogue") or []:
+                if not isinstance(line, dict):
+                    continue
+                speaker = _compact(line.get("speaker"), 80)
+                if speaker and speaker.casefold() != "speaker" and speaker not in speakers:
+                    speakers.append(speaker)
+    return speakers
+
+
+def _h3_plan_cast_names(
+    plan: dict[str, Any],
+    subject_aliases: dict[str, int],
+) -> list[str]:
+    """Return one project-wide cast inventory without treating places as cast."""
+
+    source_intent = (
+        plan.get("source_intent")
+        if isinstance(plan.get("source_intent"), dict)
+        else {}
+    )
+    intent_names = [
+        _compact(value, 100)
+        for value in (source_intent.get("cast_names") or [])
+        if _compact(value, 100)
+    ]
+    reference_names = [
+        alias for alias, _subject in sorted(
+            subject_aliases.items(),
+            key=lambda item: item[1],
+        )
+    ]
+    dialogue_names = _h3_plan_dialogue_speakers(plan)
+    return _merge_h3_cast_names(intent_names, reference_names, dialogue_names)
+
+
+def _h3_cast_display(
+    name: str,
+    subject_aliases: dict[str, int],
+) -> str:
+    for alias, subject in subject_aliases.items():
+        if _same_h3_cast_identity(name, alias):
+            return f"<Subject {subject}>"
+    return name
+
+
+def _h3_native_cast_definition(
+    cast_names: list[str],
+    subject_aliases: dict[str, int],
+) -> str:
+    native = [
+        name for name in cast_names
+        if not any(_same_h3_cast_identity(name, alias) for alias in subject_aliases)
+    ]
+    if not native:
+        return ""
+    if len(native) == 1:
+        return (
+            f"{native[0]} is a named prompt-native recurring character without a media-reference binding; "
+            "keep this identity and appearance stable across shots and clips."
+        )
+    return (
+        f"{', '.join(native)} are named prompt-native recurring characters without media-reference bindings; "
+        "keep each identity and appearance stable across shots and clips."
+    )
+
+
+def _h3_active_cast_for_clip(
+    cast_names: list[str],
+    item: dict[str, Any],
+    subject_aliases: dict[str, int],
+) -> list[str]:
+    clip_text = json.dumps(item, ensure_ascii=False)
+    active = _active_h3_cast_names(cast_names, clip_text)
+    for name in cast_names:
+        label = _h3_cast_display(name, subject_aliases)
+        match = re.search(r"<Subject\s+(\d+)>", label, flags=re.IGNORECASE)
+        if match and re.search(
+            rf"<Subject\s+{match.group(1)}>",
+            clip_text,
+            flags=re.IGNORECASE,
+        ) and name not in active:
+            active.append(name)
+    # A generic one-character camera plan still unambiguously belongs to the
+    # sole saved principal. Larger casts must be named locally so future
+    # entrants are not forced into an earlier clip.
+    if not active and len(cast_names) == 1:
+        active = list(cast_names)
+    return active
+
+
+def _h3_window_cast_contract(
+    active_cast: list[str],
+    *,
+    source_prompt: str,
+    subject_aliases: dict[str, int],
+) -> str:
+    if not active_cast:
+        return ""
+    exact: list[str] = []
+    multiples: list[str] = []
+    for name in active_cast:
+        display = _h3_cast_display(name, subject_aliases)
+        target = multiples if _source_requests_multiple_cast_instances(source_prompt, name) else exact
+        target.append(display)
+    clauses: list[str] = []
+    if exact:
+        clauses.append(
+            "Principal cast in this clip: exactly one " + ", exactly one ".join(exact)
+        )
+    if multiples:
+        clauses.append(
+            "Preserve the explicitly requested number of " + ", ".join(multiples)
+        )
+    clauses.append(
+        "Keep every principal identity distinct and preserve these counts through every cut"
+    )
+    clauses.append(
+        "Any already-established background extras remain anonymous and visually distinct from the principals"
+    )
+    if len(active_cast) > 4:
+        clauses.append(
+            "Establish the full group once, then use smaller motivated coverage without duplicating anyone"
+        )
+    return ". ".join(clauses)
+
+
+_RESTARTED_BLOCKING_RE = re.compile(
+    r"\b(?:approach(?:es|ed|ing)?|arriv(?:e|es|ed|ing)|enter(?:s|ed|ing)?|"
+    r"reach(?:es|ed|ing)?|walk(?:s|ed|ing)?|sit(?:s|ting)?\s+down|takes?\s+(?:his|her|their|the)\s+seat)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _stabilize_ref2va_hold_shots(shots: list[dict[str, Any]]) -> None:
+    """Remove camera prose that restarts a beat already completed on screen."""
+
+    for shot in shots[1:]:
+        action = str(shot.get("action") or "")
+        if not action.startswith("The immediate result of the preceding assigned event"):
+            continue
+        framing = str(shot.get("framing") or "")
+        if _RESTARTED_BLOCKING_RE.search(framing):
+            size = re.search(
+                r"\b(?:extreme\s+close-up|close-up|medium\s+close-up|medium-wide|medium|wide)\b",
+                framing,
+                flags=re.IGNORECASE,
+            )
+            prefix = size.group(0) if size else "reaction"
+            shot["framing"] = (
+                f"{prefix} reaction composition preserving the already-established blocking"
+            )
+        camera = str(shot.get("camera") or "")
+        if _RESTARTED_BLOCKING_RE.search(camera):
+            shot["camera"] = (
+                "a motivated static hold or subtle reaction reframe preserving the established geography"
+            )
+
+
 def _clean_ref2va_action(
     value: str,
     *,
@@ -777,7 +954,8 @@ def _clean_ref2va_action(
         # H3 audibly narrate phrases such as "Yoda is in Dagobah."
         if overlap >= 0.72 and not re.search(
             r"(?i)\b(?:walk|run|turn|wave|raise|lower|pick|drop|fight|hit|"
-            r"punch|snap|fall|move|look|nod|sit|stand\s+up|enter|exit)\w*\b",
+            r"punch|snap|fall|move|look|nod|sit|stand\s+up|enter|exit|"
+            r"breathe|sigh)\w*\b",
             clause,
         ):
             continue
@@ -1038,6 +1216,7 @@ def compile_h3_reference_sequence_prompts(
     reference_relationships: str,
     default_retention: str,
     task_types: str,
+    source_prompt: str = "",
 ) -> list[dict[str, Any]]:
     planned_clips = plan.get("clips") if isinstance(plan, dict) else None
     if not isinstance(planned_clips, list) or len(planned_clips) != len(clips):
@@ -1072,6 +1251,17 @@ def compile_h3_reference_sequence_prompts(
         else _officialize_subject_definitions(dedupe_sentences(raw_subjects))
     )
     subject_aliases, audio_by_subject = _ref2va_prompt_bindings(subjects)
+    cast_names = _h3_plan_cast_names(plan, subject_aliases)
+    native_cast_definition = _h3_native_cast_definition(
+        cast_names,
+        subject_aliases,
+    )
+    subjects = "\n".join(
+        part for part in (subjects, native_cast_definition) if part
+    )
+    source_prompt = str(
+        source_prompt or plan.get("source_prompt") or ""
+    ).strip()
 
     # Reference retention is likewise owned by the manifest. Keep any
     # non-reference analysis the planner supplied, then add each canonical
@@ -1118,6 +1308,7 @@ def compile_h3_reference_sequence_prompts(
         shots = _normalized_window_shots(item, duration)
         if not shots:
             raise ValueError(f"H3 Omni sequence clip {geometry['index']} has no shots.")
+        _stabilize_ref2va_hold_shots(shots)
         # MiniMax speaker IDs are scoped to one generated clip/window and are
         # assigned by first vocal-event order. Subject IDs remain stable across
         # the whole project. Reusing the semantic ledger's global S-labels made
@@ -1147,6 +1338,31 @@ def compile_h3_reference_sequence_prompts(
             subjects,
             subject_speakers,
         )
+        active_cast = _h3_active_cast_for_clip(
+            cast_names,
+            item,
+            subject_aliases,
+        )
+        cast_contract = _h3_window_cast_contract(
+            active_cast,
+            source_prompt=source_prompt,
+            subject_aliases=subject_aliases,
+        )
+        source_intent = (
+            plan.get("source_intent")
+            if isinstance(plan.get("source_intent"), dict)
+            else {}
+        )
+        blocking_contract = _compact(
+            source_intent.get("blocking_contract"),
+            360,
+        )
+        blocking_names = _active_h3_cast_names(cast_names, blocking_contract)
+        if blocking_names and not all(
+            any(_same_h3_cast_identity(name, active) for active in active_cast)
+            for name in blocking_names
+        ):
+            blocking_contract = ""
         coverage = _compact(item.get("coverage") or "cinematic editorial coverage", 90)
         pacing = _compact(item.get("pacing") or "natural real-time pacing", 180)
         opening = _compact(
@@ -1166,6 +1382,8 @@ def compile_h3_reference_sequence_prompts(
             pacing_sentence += " Slow motion occurs only when explicitly requested."
         preamble = " ".join(part for part in (
             f"{setting}." if setting else "",
+            f"Cast contract: {cast_contract}." if cast_contract else "",
+            f"Blocking contract: {blocking_contract}." if blocking_contract else "",
             f"Opening state: {opening}.",
             pacing_sentence,
         ) if part)
@@ -1260,6 +1478,9 @@ def compile_h3_reference_sequence_prompts(
             "closing_state": closing,
             "coverage": coverage,
             "pacing": pacing,
+            "active_cast": active_cast,
+            "cast_contract": cast_contract,
+            "blocking_contract": blocking_contract,
             "shot_count": len(shots),
             "shots": shots,
             "prompt": prompt,
@@ -1324,6 +1545,7 @@ def plan_h3_reference_sequence(
     nsfw: bool = False,
     overlap_frames: int = 0,
     native_continuation: bool = False,
+    planning_style: str = "faithful",
 ) -> dict[str, Any]:
     """Plan H3 Omni windows that share canonical references."""
 
@@ -1337,6 +1559,7 @@ def plan_h3_reference_sequence(
         )
 
     camera_coverage = normalize_h3_camera_coverage(camera_coverage)
+    planning_style = normalize_h3_planning_style(planning_style)
     if native_continuation:
         clips = compute_h3_native_sequence_windows(
             total_frames,
@@ -1367,6 +1590,7 @@ def plan_h3_reference_sequence(
         camera_coverage=camera_coverage,
         overlap_frames=overlap_frames,
         native_continuation=native_continuation,
+        planning_style=planning_style,
     )
     if len(clips) <= 1:
         return {
@@ -1375,6 +1599,7 @@ def plan_h3_reference_sequence(
             "planned_by": "not_needed",
             "plan_kind": "reference_sequence",
             "camera_coverage": camera_coverage,
+            "planning_style": planning_style,
             "total_frames": int(total_frames),
             "window_frames": int(max_clip_frames),
             "window_count": 1,
@@ -1386,10 +1611,17 @@ def plan_h3_reference_sequence(
             "window_prompts": [],
         }
 
-    expect_dialogue = _narrative_dialogue_expected(prompt, len(clips))
+    expect_dialogue = (
+        _creative_dialogue_expected(prompt, len(clips))
+        if planning_style == "creative"
+        else bool(re.search(r"[\"“][^\"”]+[\"”]", prompt))
+    )
     resolved_coverage = _infer_camera_coverage(prompt, camera_coverage)
     story_ledger: dict[str, Any] | None = None
     planning_warnings: list[str] = []
+    planning_diagnostics: list[str] = []
+    planning_notes: list[str] = []
+    dialogue_fragments: list[dict[str, Any]] = []
     try:
         staged = plan_h3_story_segments(
             prompt,
@@ -1405,11 +1637,15 @@ def plan_h3_reference_sequence(
             # fully_preserved/reference list twice.
             reference_context=relationships,
             expect_dialogue=expect_dialogue,
+            planning_style=planning_style,
             image_paths=image_paths,
             nsfw=nsfw,
         )
         planned_by = staged["planned_by"]
         planning_warnings = list(staged.get("planning_warnings") or [])
+        planning_diagnostics = list(staged.get("planning_diagnostics") or [])
+        planning_notes = list(staged.get("planning_notes") or [])
+        dialogue_fragments = list(staged.get("dialogue_fragments") or [])
         source_intent = staged.get("source_intent") or source_intent
         story_ledger = staged["ledger"]
         planned_clips = []
@@ -1419,6 +1655,7 @@ def plan_h3_reference_sequence(
                 "clip": index + 1,
             })
         plan = {
+            "source_prompt": prompt,
             "subject_definitions": story_ledger.get("subject_continuity", ""),
             "retention_analysis": default_retention,
             "setting_continuity": story_ledger.get("setting_continuity", ""),
@@ -1439,6 +1676,8 @@ def plan_h3_reference_sequence(
             default_retention=default_retention,
             task_types=task_types,
         )
+    except H3DialogueTimingError:
+        raise
     except Exception as error:
         print(f"[MiniMax H3 Omni] Sequence planner fallback: {error}")
         planned_by = "deterministic_fallback"
@@ -1453,6 +1692,7 @@ def plan_h3_reference_sequence(
             default_retention=default_retention,
             camera_coverage=camera_coverage,
         )
+        plan["source_prompt"] = prompt
         plan["source_intent"] = source_intent
         plan["requested_nonverbal_vocals"] = source_intent.get(
             "requested_nonverbal_vocals", ""
@@ -1470,8 +1710,11 @@ def plan_h3_reference_sequence(
         "signature": signature,
         "planned_by": planned_by,
         "planning_warnings": list(dict.fromkeys(planning_warnings)),
+        "planning_diagnostics": list(dict.fromkeys(planning_diagnostics)),
+        "planning_notes": list(dict.fromkeys(planning_notes)),
         "plan_kind": "reference_sequence",
         "camera_coverage": camera_coverage,
+        "planning_style": planning_style,
         "total_frames": int(total_frames),
         "window_frames": int(max_clip_frames),
         "window_count": len(compiled),
@@ -1484,6 +1727,7 @@ def plan_h3_reference_sequence(
         "subject_continuity": plan.get("subject_definitions", ""),
         "setting_continuity": plan.get("setting_continuity", ""),
         "story_ledger": story_ledger,
+        "dialogue_fragments": dialogue_fragments,
         "source_intent": source_intent,
         "windows": compiled,
         "window_prompts": [item["prompt"] for item in compiled],

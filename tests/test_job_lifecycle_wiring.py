@@ -374,6 +374,9 @@ class TestJobLifecycleWiring(unittest.TestCase):
         self.assertIsNotNone(source)
         self.assertIn('cmd == "generation_time"', source)
         self.assertIn("active_generation_seconds_by_output", source)
+        self.assertIn("multi_window_timing_by_output", source)
+        self.assertIn('"window_generation_seconds"', source)
+        self.assertIn('"scene_duration_seconds"', source)
         self.assertIn('"job_elapsed_time":', source)
         self.assertNotIn(
             '"generation_time": round(time.time() - start_time)',
@@ -388,6 +391,8 @@ class TestJobLifecycleWiring(unittest.TestCase):
         wgp_body = ast.get_source_segment(wgp_source, generate_video)
         self.assertIsNotNone(wgp_body)
         self.assertIn('"generation_time",', wgp_body)
+        self.assertIn('"window_seconds": window_elapsed_seconds', wgp_body)
+        self.assertIn('"total_windows":', wgp_body)
         self.assertIn('configs["generation_time_basis"] = "active"', wgp_body)
 
     def test_generation_duration_is_minutes_and_seconds(self):

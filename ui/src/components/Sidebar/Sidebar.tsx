@@ -12,6 +12,7 @@ import { AudioSubModeToggle } from './AudioSubModeToggle'
 import { SfxControls } from './SfxControls'
 import { MixerControls } from './MixerControls'
 import { DurationSlider } from './DurationSlider'
+import { AudioDurationControl } from './AudioDurationControl'
 import { AdvancedSettings } from './AdvancedSettings'
 import { GenerateButton } from './GenerateButton'
 import { ModelSelector } from './ModelSelector'
@@ -57,6 +58,7 @@ export function Sidebar() {
   const isTools = generationMode === 'tools'
   const toolsTool = useStore(s => s.toolsTool)
   const toolsUpscaleMedia = useStore(s => s.toolsUpscaleMedia)
+  const videoWorkflow = useStore(s => s.studioVideoWorkflow)
   const imageWorkflow = useStore(s => s.studioImageWorkflow)
   const isUpscale = isTools && toolsTool === 'upscale'
   const isImageUpscale = isUpscale && toolsUpscaleMedia === 'image'
@@ -78,10 +80,11 @@ export function Sidebar() {
     || selectedModel?.director?.video_strategy === 'omni_reference'
     || selectedModel?.model_type.toLowerCase().startsWith('minimax_h3_ref2va'),
   )
-  const isPrimaryCreate = isVideo && Number(imageMode) === 0
-  const isMultiClip = isVideo && !isOmniReference && imageMode === 2
-  const isContinue = isVideo && !isOmniReference && imageMode === 3
-  const isBlend = isVideo && !isOmniReference && imageMode === 4
+  const isFramesWorkflow = isVideo && Number(imageMode) === 0 && videoWorkflow === 'frames'
+  const isReferencesWorkflow = isVideo && Number(imageMode) === 0 && videoWorkflow === 'references'
+  const isMultiClip = isVideo && imageMode === 2
+  const isContinue = isVideo && imageMode === 3
+  const isBlend = isVideo && imageMode === 4
   const isDirector = sidebarMode === 'director'
   const isI2vOnly = modelOptions?.i2v_class && !modelOptions?.t2v_class
 
@@ -147,6 +150,10 @@ export function Sidebar() {
         {isImageWorkspace && <ImageWorkflowSelector />}
         {isAudioWorkspace && <AudioSubModeToggle />}
 
+        {isAudio && audioSubMode !== 'sfx' && audioSubMode !== 'mixer' && audioSubMode !== 'revoice' && (
+          <AudioDurationControl />
+        )}
+
         {isUpscale ? (
           <ToolsPanel forcedTool="upscale" mediaKind={toolsUpscaleMedia} embedded />
         ) : isFilmGrain ? (
@@ -165,7 +172,7 @@ export function Sidebar() {
         {/* Frames (image_mode 0) AND Extend (image_mode 3) both use the unified
             InputsPanel. In Extend mode its first tile is the source video to
             continue from; otherwise it's the start frame. */}
-        {isVideo && !isMultiClip && !isBlend && (isPrimaryCreate || !isOmniReference) && (
+        {isVideo && !isMultiClip && !isBlend && (isFramesWorkflow || isContinue) && (
           <div>
             {isI2vOnly && !isContinue && (
               <div className="text-[10px] text-indicator-warning bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-1.5 mb-2">
@@ -175,14 +182,14 @@ export function Sidebar() {
             <InputsPanel />
           </div>
         )}
-        {(isPrimaryCreate || isOmniReference) && <OmniReferenceSection />}
+        {isReferencesWorkflow && <OmniReferenceSection />}
         {isVideo && <MiniMaxH3Optimizations />}
         {isVideo && <H3MultiWindowControls />}
         {isBlend && <BlendControls />}
 
         {/* Image workflows expose only the inputs their native pipeline uses. */}
         {isImage && <ImageWorkflowControls />}
-        {isImage && imageWorkflow === 'edit' && modelOptions?.image_ref_choices && <ImageRefSection />}
+        {isImage && imageWorkflow === 'generate' && <ImageRefSection />}
 
         {/* Video/Image mode: audio controls (soundtrack, control video, etc.).
             In Frames mode (video, image_mode 0) the unified InputsPanel routes
@@ -203,12 +210,8 @@ export function Sidebar() {
             renders them as ordered tiles instead. */}
         {isVideo && !isOmniReference && imageMode !== 0 && imageMode !== 3 && modelOptions?.image_ref_choices && <ImageRefSection />}
 
-        {/* Voice Reference (ID-LoRA) — gated by Settings → Services
-            toggle (`voice_reference_enabled`). VoiceRefSection internally
-            no-ops when the toggle is off. We render it for Studio Video
-            mode (basic, multi-clip, continue, blend) — it's the same
-            generation path that consumes `directorVoiceRef` server-side.
-            Director mode renders its own copy in DirectorChat. */}
+        {/* LTX Voice Reference (ID-LoRA) — gated by Video Frames →
+            Advanced. VoiceRefSection also verifies the active LTX model. */}
         {isVideo && !isDirector && !isOmniReference && imageMode !== 0 && imageMode !== 3 && <VoiceRefSection />}
         </>
         )}

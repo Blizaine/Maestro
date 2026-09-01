@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from 'react'
-import { Upload, Loader2, Music, RotateCcw, Check, X, ChevronRight, ChevronDown, ImageIcon, Play, Film, Mic, Sparkles, Send, Users, FileText, Clock, ListVideo } from 'lucide-react'
+import { Upload, Loader2, Music, RotateCcw, Check, X, ChevronRight, ChevronDown, ImageIcon, Play, Film, Mic, Sparkles, Send, Users, FileText, ListVideo } from 'lucide-react'
 import { useStore, directorModelUsesFixedMediaStrength, getFamiliesForMode, getModelsForFamily, resolveResolution } from '../../stores/useStore'
 import { fetchModelOptions, getFileUrl } from '../../api/client'
 import { DirectorLoraSelector } from '../SettingsDrawer/DirectorLoraSelector'
@@ -8,6 +8,8 @@ import { DirectorH3Optimizations } from './DirectorH3Optimizations'
 import { OmniReferenceSection } from './OmniReferenceSection'
 import { InfoTooltip } from './InfoTooltip'
 import { formatSeconds, recommendedWindowProfile } from './DurationSlider'
+import { DurationPresetControl } from './DurationPresetControl'
+import { LONG_FORM_MAX_SECONDS, formatDuration } from '../../lib/durationPlanning'
 import { formatEstimatedClock, formatEtaDuration } from '../../lib/format'
 import type { DirectorPipelineType, DirectorShotImageGuidance, DirectorSkill, ModelOptions, ShortFilmCharacter, ShortFilmPath } from '../../types'
 
@@ -19,6 +21,66 @@ import type { DirectorPipelineType, DirectorShotImageGuidance, DirectorSkill, Mo
 const AUDIO_ACCEPT = '.wav,.mp3,.flac,.ogg,.m4a,.mp4,.mov,.mkv,.webm,.avi,.m4v'
 const IMAGE_ACCEPT = '.png,.jpg,.jpeg,.webp,.bmp'
 const DIRECTOR_IMAGE_MODEL_NONE = '__none__'
+
+function DirectorTargetDurationControl() {
+  const duration = useStore(s => s.shortFilmTargetDuration)
+  const setDuration = useStore(s => s.shortFilmSetTargetDuration)
+  const prompt = useStore(s => s.directorSceneDescription)
+  const references = useStore(s => s.directorH3References)
+  const videoModel = useStore(s => s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1')
+  const resolution = useStore(s => s.directorResolution)
+  const aspectRatio = useStore(s => s.directorAspectRatio)
+  const totalVramGb = useStore(s => s.systemStats?.gpu.vram_total_gb ?? 0)
+  const [options, setOptions] = useState<ModelOptions | null>(null)
+  const [planningMode, setPlanningMode] = useState<'duration' | 'windows' | 'auto'>('duration')
+
+  useEffect(() => {
+    let cancelled = false
+    fetchModelOptions(videoModel)
+      .then(value => { if (!cancelled) setOptions(value) })
+      .catch(() => { if (!cancelled) setOptions(null) })
+    return () => { cancelled = true }
+  }, [videoModel])
+
+  const fps = options?.fps || 24
+  const resolvedResolution = resolveResolution(options, resolution, aspectRatio)
+  const recommendation = recommendedWindowProfile(
+    options?.director_memory_policy || options?.sliding_window_memory_policy,
+    resolvedResolution,
+    totalVramGb,
+  )
+  const defaults = options?.sliding_window_defaults
+  const windowFrames = recommendation?.frames
+    || defaults?.window_max
+    || options?.frames_maximum
+    || Math.round(14.4 * fps)
+  const windowSeconds = Math.max(1, windowFrames / fps)
+  const driveReference = references.find(reference => (
+    reference.type === 'audio' && reference.audio_intent === 'drive'
+  ))
+  const driveDuration = Number(driveReference?.duration_seconds)
+
+  return (
+    <DurationPresetControl
+      label="Target duration"
+      value={duration}
+      onChange={setDuration}
+      minSeconds={10}
+      maxSeconds={LONG_FORM_MAX_SECONDS}
+      windowSeconds={windowSeconds}
+      overlapSeconds={(defaults?.overlap_default || 0) / fps}
+      discardSeconds={(defaults?.discard_last_frames || 0) / fps}
+      enablePlanningModes
+      planningMode={planningMode}
+      onPlanningModeChange={setPlanningMode}
+      autoPrompt={prompt}
+      autoPlanningStyle="creative"
+      autoSourceSeconds={Number.isFinite(driveDuration) && driveDuration > 0 ? driveDuration : null}
+      autoSourceLabel="music / performance timeline"
+      modelLimitLabel={`Director plans ${formatDuration(duration, true)} as restart-safe scenes; current automatic shot target is ${formatDuration(windowSeconds, true)}.`}
+    />
+  )
+}
 
 function directorWillGenerateShotImages(
   support: 'required' | 'optional' | 'direct_references' | undefined,
@@ -449,7 +511,6 @@ export function DirectorChat() {
   const shortFilmSetPath = useStore(s => s.shortFilmSetPath)
   const shortFilmPlanFromStory = useStore(s => s.shortFilmPlanFromStory)
   const shortFilmTargetDuration = useStore(s => s.shortFilmTargetDuration)
-  const shortFilmSetTargetDuration = useStore(s => s.shortFilmSetTargetDuration)
   const shortFilmNarrative = useStore(s => s.shortFilmNarrative)
   const shortFilmSetNarrative = useStore(s => s.shortFilmSetNarrative)
   const startDirectorPipeline = useStore(s => s.startDirectorPipeline)
@@ -782,6 +843,11 @@ export function DirectorChat() {
                 {pipelineStatus.progress.eta_confidence === 'calibrating' && (
                   <span className="text-text-muted">Calibrating ETA…</span>
                 )}
+                {(pipelineStatus.progress.eta_history_samples ?? 0) > 0 && (
+                  <span className="text-text-muted">
+                    Based on {pipelineStatus.progress.eta_history_samples} {pipelineStatus.progress.eta_history_match === 'exact' ? 'matching' : 'related'} local render{pipelineStatus.progress.eta_history_samples === 1 ? '' : 's'}
+                  </span>
+                )}
               </div>
             )}
           </div>
@@ -988,27 +1054,7 @@ export function DirectorChat() {
                       setCharacters={shortFilmSetCharacters}
                     />
                   )}
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-[10px] text-text-muted flex items-center gap-1">
-                        <Clock size={10} /> Target Duration
-                      </span>
-                      <span className="text-[10px] text-text-primary font-medium">{shortFilmTargetDuration}s</span>
-                    </div>
-                    <input
-                      type="range"
-                      min={10}
-                      max={300}
-                      step={5}
-                      value={shortFilmTargetDuration}
-                      onChange={e => shortFilmSetTargetDuration(Number(e.target.value))}
-                      className="w-full h-1 bg-bg-hover rounded-lg appearance-none cursor-pointer accent-accent-blue"
-                    />
-                    <div className="flex justify-between text-[9px] text-text-muted mt-0.5">
-                      <span>10s</span>
-                      <span>5m</span>
-                    </div>
-                  </div>
+                  <DirectorTargetDurationControl />
                   <label className="flex items-center gap-2 cursor-pointer group">
                     <input
                       type="checkbox"

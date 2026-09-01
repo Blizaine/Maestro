@@ -27,10 +27,20 @@ def _load_module(name: str, path: Path):
 
 
 class ManagedTurboAssetTests(unittest.TestCase):
-    def test_manifest_promotes_v4_default_and_keeps_legacy_rollback(self):
+    def test_manifest_promotes_pdd_defaults_and_keeps_standard_rollbacks(self):
         manifest = json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))
         presets = {preset["id"]: preset for preset in manifest["presets"]}
-        self.assertEqual(manifest["default_preset_id"], "v4-step600-ema")
+        self.assertEqual(
+            manifest["default_preset_id"],
+            "alibaba-pai-fl2va-pdd-8step",
+        )
+        self.assertEqual(
+            manifest["workflow_default_preset_ids"],
+            {
+                "fl2va": "alibaba-pai-fl2va-pdd-8step",
+                "ref2va": "alibaba-pai-ref2va-pdd-8step",
+            },
+        )
         self.assertEqual(presets["v1-ckpt500"]["status"], "legacy")
         current = presets["v4-step600-ema"]
         self.assertEqual(current["status"], "validated")

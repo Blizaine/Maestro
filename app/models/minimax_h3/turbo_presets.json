@@ -1,7 +1,11 @@
 {
   "schema_version": 1,
   "repo_id": "larryvrh/MiniMax-H3-Turbo-Lora",
-  "default_preset_id": "v4-step600-ema",
+  "default_preset_id": "alibaba-pai-fl2va-pdd-8step",
+  "workflow_default_preset_ids": {
+    "fl2va": "alibaba-pai-fl2va-pdd-8step",
+    "ref2va": "alibaba-pai-ref2va-pdd-8step"
+  },
   "upstream_watch": {
     "observed_main_revision": "43a74557ac3f6539db8e0f2a959d03feb7a81480",
     "observed_last_modified": "2026-08-08T20:07:30Z",
@@ -42,7 +46,7 @@
       "released_at": "2026-08-07T22:46:18Z",
       "workflow": "all",
       "runtime": "standard_lora",
-      "description": "Maestro's current default and the upstream-recommended EMA checkpoint. It targets stronger faces, fingers, fine texture, and static or small-motion detail, using six evaluations at strength 1.0 by default."
+      "description": "Maestro's previous standard-LoRA default and the upstream-recommended EMA checkpoint. It remains available for comparisons and targets stronger faces, fingers, fine texture, and static or small-motion detail using six evaluations at strength 1.0."
     },
     {
       "id": "alibaba-pai-fl2va-pdd-8step",
@@ -62,7 +66,7 @@
       "released_at": "2026-08-26T11:56:08Z",
       "workflow": "fl2va",
       "runtime": "pdd",
-      "description": "Alibaba PAI's official FL2VA Parallel Decoding Distillation adapter. Maestro applies its required 32-interval, four-at-a-time head fusion and eight model evaluations at strength 1.0."
+      "description": "Maestro's default FL2VA Turbo recipe and Alibaba PAI's official Parallel Decoding Distillation adapter. Maestro applies its required 32-interval, four-at-a-time head fusion and eight model evaluations at strength 1.0."
     },
     {
       "id": "alibaba-pai-ref2va-pdd-8step",
@@ -83,7 +87,7 @@
       "workflow": "ref2va",
       "runtime": "pdd",
       "reference_detail": "max",
-      "description": "Alibaba PAI's official Ref2VA Parallel Decoding Distillation adapter for H3 Omni. Maestro applies its required 32-interval, four-at-a-time head fusion and eight model evaluations at strength 1.0. The official recipe recommends 2048px-short-edge references; Match output remains available as a faster no-upscale option. Published Ref2VA PDD examples currently cover clips through 10.13 seconds, so longer accelerated clips remain experimental."
+      "description": "Maestro's default Ref2VA Turbo recipe and Alibaba PAI's official Parallel Decoding Distillation adapter for H3 Omni. Maestro applies its required 32-interval, four-at-a-time head fusion and eight model evaluations at strength 1.0. The official recipe recommends 2048px-short-edge references; Match output remains available as a faster no-upscale option. Published Ref2VA PDD examples currently cover clips through 10.13 seconds, so longer accelerated clips remain experimental."
     }
   ]
 }

@@ -31,7 +31,7 @@ export function ImageWorkflowControls() {
   const [uploading, setUploading] = useState<SourceKind | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  if (workflow === 'new' || workflow === 'edit' || workflow === 'upscale') return null
+  if (workflow === 'generate' || workflow === 'upscale') return null
 
   const upload = async (kind: SourceKind, file: File) => {
     setUploading(kind)

@@ -8671,6 +8671,12 @@ def generate_video(
                 break
             window_no += 1
             gen["window_no"] = window_no
+            # Gallery metadata needs the real wall-clock cost of each native
+            # window, including conditioning, denoising, VAE decode, and the
+            # cumulative save.  Start the window timer before any of that
+            # work begins; the completion event below is emitted only after
+            # the media artifact has been written successfully.
+            window_started_at = time.time()
             return_latent_slice = None 
             frames_relative_positions_list = []
             frames_to_inject_for_model = None
@@ -9960,6 +9966,10 @@ def generate_video(
                     0,
                     int(round(end_time - start_time)),
                 )
+                window_elapsed_seconds = max(
+                    0,
+                    int(round(end_time - window_started_at)),
+                )
                 # The API worker starts its own job timer before queue wait and
                 # model loading. Send WGP's narrower timer alongside the exact
                 # artifacts it produced so gallery sidecars can display real
@@ -9968,6 +9978,9 @@ def generate_video(
                     "generation_time",
                     {
                         "seconds": generation_elapsed_seconds,
+                        "window_seconds": window_elapsed_seconds,
+                        "window": int(window_no),
+                        "total_windows": int(gen.get("total_windows", 1) or 1),
                         "outputs": list(saved_artifacts),
                     },
                 )

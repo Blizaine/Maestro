@@ -97,10 +97,11 @@ def validate_reference_manifest(
             item["image_intent"] = image_intent
             remove_background = raw.get("remove_background")
             if remove_background is None:
-                # Saved character portraits are identity assets, not scene
-                # references.  Isolate them by default so an old library card
-                # receives the safer behavior without needing to be re-saved.
-                remove_background = bool(library_character_id and image_intent == "identity")
+                # Preserve the original image and its lighting by default.
+                # Isolation is useful when a source background leaks into the
+                # target, but it can make the result look composited, so it is
+                # always an explicit per-reference choice.
+                remove_background = False
             elif not isinstance(remove_background, bool):
                 raise ValueError(
                     f"Reference {index + 1} remove_background must be true or false."

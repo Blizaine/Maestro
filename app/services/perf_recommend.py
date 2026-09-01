@@ -448,6 +448,37 @@ def _parse_resolution(resolution) -> Optional[tuple]:
         return None
 
 
+def _resolve_h3_budget_pixels(
+    resolution,
+    auto_resolution_pixels: Optional[dict] = None,
+) -> int:
+    """Resolve the canvas area H3 will actually use for memory planning.
+
+    H3's UI can submit symbolic presets such as ``auto_720p``. The model
+    handler resolves those presets only after the residency coefficient has
+    already been selected, so treating an unparseable preset as the 540p
+    baseline underestimates activation memory. Consume the model's own
+    preset-to-pixel map here so Auto and explicit canvases receive identical
+    budgets before any transformer weights are loaded.
+    """
+
+    parsed = _parse_resolution(resolution)
+    if parsed:
+        width, height = parsed
+        return max(1, width * height)
+
+    if isinstance(resolution, str) and isinstance(auto_resolution_pixels, dict):
+        preset = resolution.strip().lower()
+        try:
+            declared_pixels = int(auto_resolution_pixels.get(preset, 0) or 0)
+        except (TypeError, ValueError):
+            declared_pixels = 0
+        if declared_pixels > 0:
+            return declared_pixels
+
+    return _H3_BASELINE_PIXELS
+
+
 def compute_h3_weight_budget(
     total_vram_gb: float,
     resolution: Optional[str],
@@ -455,6 +486,7 @@ def compute_h3_weight_budget(
     video_reference_count: int = 0,
     runtime_workspace_gb: float = 0.0,
     additional_reserve_gb: float = 0.0,
+    auto_resolution_pixels: Optional[dict] = None,
 ) -> dict:
     """Reserve packed-sequence activation memory for a MiniMax H3 job.
 
@@ -475,9 +507,15 @@ def compute_h3_weight_budget(
     residency; experimental large canvases retain the stricter measured
     scaling that prevents the observed 1080p OOM.
 
+    ``auto_resolution_pixels`` is the selected model's authoritative mapping
+    for symbolic Auto presets. It must be applied here, before model loading,
+    because the H3 handler resolves final aspect-aligned dimensions later.
+
     Returns the maximum resident-weight budget and the activation reserve
-    used to derive it.  MMGP streams weights that do not fit the budget.
+    used to derive it. MMGP streams weights that do not fit the budget.
     """
+
+    pixels = _resolve_h3_budget_pixels(resolution, auto_resolution_pixels)
 
     try:
         total_vram_gb = float(total_vram_gb)
@@ -494,14 +532,9 @@ def compute_h3_weight_budget(
             "runtime_scaling_active": False,
             "runtime_safety_margin_gb": 0.0,
             "additional_reserve_gb": 0.0,
+            "resolution_pixels": pixels,
         }
 
-    parsed = _parse_resolution(resolution)
-    if parsed:
-        width, height = parsed
-        pixels = max(1, width * height)
-    else:
-        pixels = _H3_BASELINE_PIXELS
     try:
         frames = max(1, int(video_length_frames or _H3_BASELINE_FRAMES))
     except (TypeError, ValueError):
@@ -601,6 +634,7 @@ def compute_h3_weight_budget(
         "runtime_scaling_active": runtime_scaling_active,
         "runtime_safety_margin_gb": runtime_safety_margin_gb,
         "additional_reserve_gb": additional_reserve_gb,
+        "resolution_pixels": pixels,
     }
 
 

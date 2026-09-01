@@ -194,6 +194,31 @@ class TestTailscaleManager(unittest.TestCase):
 
             enable.assert_not_called()
 
+    def test_in_app_toggle_preserves_windows_restore_helper_marker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            preference = {
+                "version": 3,
+                "enabled": True,
+                "target_port": 42123,
+                "pinokio_port_lock": True,
+                "windows_restore_task": True,
+                "windows_restore_task_name": "Maestro Tailscale Serve",
+            }
+            path = Path(directory, "remote_access.json")
+            path.write_text(json.dumps(preference), encoding="utf-8")
+            manager = TailscaleManager(directory, 42123)
+
+            manager._save_preference(False)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+
+            self.assertEqual(saved["version"], 3)
+            self.assertFalse(saved["enabled"])
+            self.assertTrue(saved["windows_restore_task"])
+            self.assertEqual(
+                saved["windows_restore_task_name"],
+                "Maestro Tailscale Serve",
+            )
+
     def test_enable_preserves_an_unrelated_existing_serve_route(self):
         with tempfile.TemporaryDirectory() as directory:
             manager = TailscaleManager(directory, 42123)
@@ -238,10 +263,14 @@ class TestRemoteNotificationWiring(unittest.TestCase):
 
     def test_launcher_never_uses_public_tailscale_funnel(self):
         source = Path(_ROOT, "tailscale_setup.js").read_text(encoding="utf-8")
-        self.assertIn(
-            "serve --bg --yes --https=443 http://127.0.0.1:{{args.port}}",
-            source,
-        )
+        for token in (
+            '"serve"',
+            '"--bg"',
+            '"--yes"',
+            '"--https=443"',
+            '"http://127.0.0.1:{{args.port}}"',
+        ):
+            self.assertIn(token, source)
         self.assertNotIn(" tailscale funnel ", source.lower())
 
     def test_tailscale_setup_uses_one_noninteractive_elevated_command(self):
@@ -252,6 +281,25 @@ class TestRemoteNotificationWiring(unittest.TestCase):
         self.assertNotIn("serve status", source)
         self.assertIn('"app/settings/remote_access.json"', source)
         self.assertIn("pinokio_port_lock: true", source)
+        self.assertIn("scripts/tailscale_windows_setup.ps1", source)
+        self.assertIn("windows_restore_task: isWindows", source)
+
+    def test_windows_setup_installs_a_fixed_on_demand_restore_task(self):
+        source = Path(
+            _ROOT,
+            "scripts",
+            "tailscale_windows_setup.ps1",
+        ).read_text(encoding="utf-8")
+        self.assertIn('$taskName = "Maestro Tailscale Serve"', source)
+        self.assertIn("New-ScheduledTaskAction", source)
+        self.assertIn("-Execute $TailscalePath", source)
+        self.assertIn("-RunLevel Highest", source)
+        self.assertIn("Register-ScheduledTask", source)
+        self.assertIn("Start-ScheduledTask", source)
+        self.assertIn("-RestartCount 3", source)
+        self.assertIn('http://127.0.0.1:$Port', source)
+        self.assertNotIn("New-ScheduledTaskTrigger", source)
+        self.assertNotIn("funnel", source.lower())
 
     def test_launchers_reuse_the_opted_in_tailscale_port(self):
         for filename in ("start.js", "start_sol.js"):
@@ -259,6 +307,14 @@ class TestRemoteNotificationWiring(unittest.TestCase):
             self.assertIn('method: "json.get"', source)
             self.assertIn("local.remote_access.pinokio_port_lock", source)
             self.assertIn("local.remote_access.target_port", source)
+
+    def test_launchers_dispatch_windows_restore_without_elevation(self):
+        for filename in ("start.js", "start_sol.js"):
+            source = Path(_ROOT, filename).read_text(encoding="utf-8")
+            self.assertIn("local.remote_access.windows_restore_task", source)
+            self.assertIn('"schtasks.exe"', source)
+            self.assertIn('"Maestro Tailscale Serve"', source)
+            self.assertNotIn("sudo: true", source)
 
     def test_noop_update_still_repairs_web_push_runtime(self):
         source = Path(_ROOT, "update.js").read_text(encoding="utf-8")

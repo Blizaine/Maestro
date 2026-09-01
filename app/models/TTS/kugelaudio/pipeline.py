@@ -233,11 +233,15 @@ class KugelAudioPipeline:
 
     def _resolve_auto_split_seconds(self, kwargs: dict) -> Optional[float]:
         custom_settings = kwargs.get("custom_settings", None)
-        if not isinstance(custom_settings, dict):
-            return None
-        raw_value = custom_settings.get(KUGELAUDIO_AUTO_SPLIT_SETTING_ID, None)
+        raw_value = (
+            custom_settings.get(KUGELAUDIO_AUTO_SPLIT_SETTING_ID, None)
+            if isinstance(custom_settings, dict) else None
+        )
         if raw_value is None:
-            return None
+            try:
+                return 45.0 if float(kwargs.get("duration_seconds") or 0) > 90 else None
+            except (TypeError, ValueError):
+                return None
         if isinstance(raw_value, str):
             raw_value = raw_value.strip()
             if len(raw_value) == 0:

@@ -62,7 +62,7 @@ from services.checkpoint_compatibility import (
     unsupported_checkpoint_reason,
     validate_checkpoint_file,
 )
-from services.generation_eta import AdaptiveGenerationEta
+from services.generation_eta import AdaptiveGenerationEta, GenerationEtaHistory
 from services.remote_access import TailscaleManager
 from services.web_push import WebPushService, WebPushUnavailable
 from services.editor_projects import (
@@ -738,6 +738,112 @@ def list_models():
 _MODEL_VISIBILITY_CONFIG_KEY = "maestro_model_visibility"
 _MODEL_VISIBILITY_WRITE_LOCK = threading.RLock()
 _H3_WINDOW_OVERRIDES_CONFIG_KEY = "maestro_h3_window_overrides"
+_STUDIO_PREFERENCES_CONFIG_KEY = "maestro_studio_preferences"
+
+
+def _normalize_studio_model_map(values, *, field_name):
+    if values is None:
+        return {}
+    if not isinstance(values, dict):
+        raise ValueError(f"{field_name} must be an object.")
+    normalized = {}
+    for raw_key, raw_model in values.items():
+        if not isinstance(raw_key, str) or not isinstance(raw_model, str):
+            raise ValueError(f"{field_name} entries must be strings.")
+        key = raw_key.strip()
+        model = raw_model.strip()
+        if not key or len(key) > 50 or len(model) > 200:
+            raise ValueError(f"A {field_name} entry is invalid.")
+        if model:
+            normalized[key] = model
+    if len(normalized) > 20:
+        raise ValueError(f"Too many {field_name} entries.")
+    return normalized
+
+
+def _normalize_studio_preferences(values, current=None):
+    """Validate the small, non-project Studio state that survives restarts.
+
+    Prompt text, seeds, LoRAs, uploaded paths, and other job inputs are
+    intentionally excluded. This record only remembers navigation/model
+    choices and the two opt-in H3 acceleration switches.
+    """
+    if values is None:
+        values = {}
+    if not isinstance(values, dict):
+        raise ValueError("Studio preferences must be an object.")
+    normalized = dict(current or {})
+
+    choices = {
+        "generation_mode": {"image", "video", "audio", "avatar"},
+        "studio_video_workflow": {
+            "frames", "references", "extend", "blend", "retake",
+            "prompt_edit", "outpaint", "repaint", "recast", "upscale",
+            "film_grain",
+        },
+        "studio_image_workflow": {
+            "generate", "inpaint", "outpaint", "upscale",
+        },
+        "audio_sub_mode": {"speech", "music", "sfx", "mixer", "revoice"},
+    }
+    for key, allowed in choices.items():
+        if key not in values:
+            continue
+        value = values.get(key)
+        if not isinstance(value, str) or value not in allowed:
+            raise ValueError(f"{key} is invalid.")
+        normalized[key] = value
+
+    for key in ("selected_model_per_mode", "selected_model_per_audio_sub_mode"):
+        if key in values:
+            normalized[key] = _normalize_studio_model_map(
+                values.get(key), field_name=key,
+            )
+
+    if "h3_optimizations" in values:
+        raw_h3 = values.get("h3_optimizations")
+        if not isinstance(raw_h3, dict):
+            raise ValueError("h3_optimizations must be an object.")
+        override_attention = raw_h3.get("override_attention", "")
+        cache_type = raw_h3.get("skip_steps_cache_type", "")
+        if override_attention not in ("", "sol"):
+            raise ValueError("override_attention is invalid.")
+        if cache_type not in ("", "first_block"):
+            raise ValueError("skip_steps_cache_type is invalid.")
+        h3 = {
+            "override_attention": override_attention,
+            "skip_steps_cache_type": cache_type,
+        }
+        if "skip_steps_multiplier" in raw_h3:
+            try:
+                multiplier = float(raw_h3["skip_steps_multiplier"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("skip_steps_multiplier must be numeric.") from error
+            if not 0 <= multiplier <= 1:
+                raise ValueError("skip_steps_multiplier must be between 0 and 1.")
+            h3["skip_steps_multiplier"] = multiplier
+        if "skip_steps_start_step_perc" in raw_h3:
+            try:
+                warmup = float(raw_h3["skip_steps_start_step_perc"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("skip_steps_start_step_perc must be numeric.") from error
+            if not 0 <= warmup <= 100:
+                raise ValueError("skip_steps_start_step_perc must be between 0 and 100.")
+            h3["skip_steps_start_step_perc"] = warmup
+        normalized["h3_optimizations"] = h3
+
+    return normalized
+
+
+def _studio_preferences_response():
+    raw = wgp.server_config.get(_STUDIO_PREFERENCES_CONFIG_KEY)
+    configured = isinstance(raw, dict) and bool(raw)
+    try:
+        preferences = _normalize_studio_preferences(raw or {})
+    except ValueError:
+        configured = False
+        preferences = {}
+    return {"configured": configured, **preferences}
 
 
 def _persist_model_visibility_config():
@@ -921,6 +1027,32 @@ async def update_h3_window_overrides(request: Request):
         wgp.server_config[_H3_WINDOW_OVERRIDES_CONFIG_KEY] = overrides
         _persist_server_config()
         return _h3_window_overrides_response()
+
+
+@api.get("/api/v1/studio-preferences")
+def get_studio_preferences():
+    """Return workflow preferences that should survive Maestro restarts."""
+    return _studio_preferences_response()
+
+
+@api.put("/api/v1/studio-preferences")
+async def update_studio_preferences(request: Request):
+    """Merge and persist non-project Studio preferences across web origins."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="Studio preferences payload must be an object.",
+        )
+    current = wgp.server_config.get(_STUDIO_PREFERENCES_CONFIG_KEY, {})
+    try:
+        preferences = _normalize_studio_preferences(body, current=current)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    with _MODEL_VISIBILITY_WRITE_LOCK:
+        wgp.server_config[_STUDIO_PREFERENCES_CONFIG_KEY] = preferences
+        _persist_server_config()
+        return _studio_preferences_response()
 
 
 @api.get("/api/v1/models/{model_type}/debug")
@@ -1957,7 +2089,6 @@ def _minimax_h3_turbo_option(model_def: dict) -> dict | None:
         return None
 
     from models.minimax_h3.turbo import (
-        MINIMAX_H3_TURBO_DEFAULT_PRESET_ID,
         MINIMAX_H3_TURBO_MANIFEST,
         minimax_h3_turbo_preset,
         minimax_h3_turbo_presets_for_workflow,
@@ -1998,7 +2129,7 @@ def _minimax_h3_turbo_option(model_def: dict) -> dict | None:
         "filename": str(default_preset["filename"]),
         "label": "Turbo mode",
         "experimental": True,
-        "preset_id": MINIMAX_H3_TURBO_DEFAULT_PRESET_ID,
+        "preset_id": str(default_preset["id"]),
         "version_label": str(default_preset["label"]),
         "steps": int(default_preset["steps"]),
         "weight": float(default_preset["weight"]),
@@ -6883,10 +7014,9 @@ def get_services_config():
         "director_prompt_polish": services.get("director_prompt_polish", "third_pass"),
         "civitai_api_key": _mask_key(services.get("civitai_api_key", "")),
         "civitai_api_key_set": bool(services.get("civitai_api_key", "")),
-        # Voice Reference is a stable, user-facing capability now. Fresh
-        # installs expose its controls by default, while an explicitly saved
-        # False value remains respected.
-        "voice_reference_enabled": services.get("voice_reference_enabled", True),
+        # Optional LTX ID-LoRA conditioning. The control lives in Studio
+        # Video -> Frames -> Advanced and starts off for fresh installs.
+        "voice_reference_enabled": services.get("voice_reference_enabled", False),
         "ltx_progressive_pipeline": services.get("ltx_progressive_pipeline", False),
         # Master gate for experimental features. When False (default for
         # fresh installs and a sane "ship-ready" baseline), the Services
@@ -8070,6 +8200,7 @@ async def llm_plan_h3_windows(request: Request):
             injected_keyframes=injected_keyframes or None,
             nsfw=bool(nsfw),
             camera_coverage=str(body.get("camera_coverage") or "auto"),
+            planning_style=str(body.get("planning_style") or "faithful"),
         )
         result["effective_window_frames"] = window_frames
         return result
@@ -8192,6 +8323,7 @@ async def llm_plan_h3_sequence(request: Request):
             nsfw=bool(nsfw),
             overlap_frames=overlap_frames,
             native_continuation=native_continuation,
+            planning_style=str(body.get("planning_style") or "faithful"),
         )
         result["effective_window_frames"] = effective_clip_frames
         if sequence_adjustment:
@@ -8392,6 +8524,7 @@ async def _llm_enhance_prompt_payload(body: dict):
             tts_voice_count=body.get("tts_voice_count", 2),
             raw_enhancer_mode=raw_enhancer_mode,
             reference_context=body.get("reference_context"),
+            planning_style=str(body.get("planning_style") or "faithful"),
         )
         if needs_ltx_window_plan:
             from services.ltx_window_planner import (
@@ -10097,10 +10230,13 @@ async def _prepare_generation_submission(
                 "[MiniMax H3 Omni] Preserving the complete multiline "
                 "prompt for one native pass."
             )
-        h3_sequence_prompt_mode = (
-            "manual"
-            if body.get("minimax_h3_sequence_prompt_mode") == "manual"
-            else "auto"
+        h3_sequence_prompt_mode = str(
+            body.get("minimax_h3_sequence_prompt_mode") or "auto"
+        ).strip().casefold()
+        if h3_sequence_prompt_mode not in {"auto", "creative", "manual"}:
+            h3_sequence_prompt_mode = "auto"
+        h3_sequence_planning_style = (
+            "creative" if h3_sequence_prompt_mode == "creative" else "faithful"
         )
         h3_manual_sequence = (
             h3_sequence_enabled and h3_sequence_prompt_mode == "manual"
@@ -10230,6 +10366,7 @@ async def _prepare_generation_submission(
                 ),
                 overlap_frames=h3_sequence_overlap,
                 native_continuation=h3_native_sequence,
+                planning_style=h3_sequence_planning_style,
             )
             if h3_native_sequence:
                 h3_sequence_geometry = compute_h3_native_sequence_windows(
@@ -10283,6 +10420,7 @@ async def _prepare_generation_submission(
                     ),
                     overlap_frames=h3_sequence_overlap,
                     native_continuation=h3_native_sequence,
+                    planning_style=h3_sequence_planning_style,
                 )
             )
             if (
@@ -10395,6 +10533,7 @@ async def _prepare_generation_submission(
                     nsfw=bool(nsfw),
                     overlap_frames=h3_sequence_overlap,
                     native_continuation=h3_native_sequence,
+                    planning_style=h3_sequence_planning_style,
                 )
                 cached_prompts = h3_window_plan_response["window_prompts"]
                 if not llm_was_loaded and llm_service.is_loaded():
@@ -10504,7 +10643,21 @@ async def _prepare_generation_submission(
         # (and prematurely perform) every later action.  Plan after the VRAM
         # policy has finalized the real pass length, then pass an explicit
         # prompt array to wgp's existing per-window selector.
-        h3_storyboard_enabled = body.get("minimax_h3_window_storyboard", True) is not False
+        h3_first_last_prompt_mode = str(
+            body.get("minimax_h3_sequence_prompt_mode") or ""
+        ).strip().casefold()
+        if h3_first_last_prompt_mode not in {"auto", "creative", "manual"}:
+            h3_first_last_prompt_mode = (
+                "manual"
+                if body.get("minimax_h3_window_storyboard", True) is False
+                else "auto"
+            )
+        h3_first_last_planning_style = (
+            "creative"
+            if h3_first_last_prompt_mode == "creative"
+            else "faithful"
+        )
+        h3_storyboard_enabled = h3_first_last_prompt_mode != "manual"
         h3_multi_window_enabled = body.get("minimax_h3_multi_window", False) is True
         h3_is_multi_clip = int(body.get("multi_prompts_gen_type") or 0) == 3
         try:
@@ -10593,6 +10746,7 @@ async def _prepare_generation_submission(
                 camera_coverage=str(
                     body.get("minimax_h3_camera_coverage") or "auto"
                 ),
+                planning_style=h3_first_last_planning_style,
                 injected_keyframes=h3_injected_keyframes or None,
             )
             h3_expected_boundaries = compute_h3_window_boundaries(
@@ -10624,6 +10778,7 @@ async def _prepare_generation_submission(
                     camera_coverage=str(
                         body.get("minimax_h3_camera_coverage") or "auto"
                     ),
+                    planning_style=h3_first_last_planning_style,
                 )
             )
             if preserve_reviewed_h3_plan and not reviewed_cache_is_valid:
@@ -10703,6 +10858,7 @@ async def _prepare_generation_submission(
                     camera_coverage=str(
                         body.get("minimax_h3_camera_coverage") or "auto"
                     ),
+                    planning_style=h3_first_last_planning_style,
                 )
                 cached_prompts = h3_window_plan_response["window_prompts"]
                 # A planner loaded only for this request should not compete
@@ -10770,10 +10926,13 @@ async def _prepare_generation_submission(
             ) from error
 
         ltx_sequence_enabled = body.get("ltx_multi_window") is True
-        ltx_prompt_mode = (
-            "manual"
-            if body.get("ltx_window_prompt_mode") == "manual"
-            else "auto"
+        ltx_prompt_mode = str(
+            body.get("ltx_window_prompt_mode") or "auto"
+        ).strip().casefold()
+        if ltx_prompt_mode not in {"auto", "creative", "manual"}:
+            ltx_prompt_mode = "auto"
+        ltx_planning_style = (
+            "creative" if ltx_prompt_mode == "creative" else "faithful"
         )
         if not ltx_sequence_enabled:
             if ltx_total_frames > ltx_window_frames:
@@ -10811,6 +10970,7 @@ async def _prepare_generation_submission(
                     "window_count": ltx_window_count,
                     "window_prompts": ltx_prompts,
                     "planned_by": "manual",
+                    "planning_style": "faithful",
                     "planning_error": None,
                 }
                 body.pop("_ltx_original_prompt", None)
@@ -10851,6 +11011,7 @@ async def _prepare_generation_submission(
                         "window_count": ltx_window_count,
                         "window_prompts": ltx_prompts,
                         "planned_by": "reviewed",
+                        "planning_style": ltx_planning_style,
                         "planning_error": None,
                     }
                     print(
@@ -10902,6 +11063,7 @@ async def _prepare_generation_submission(
                         window_size_seconds=ltx_window_frames / ltx_fps,
                         image_paths=ltx_images,
                         nsfw=bool(nsfw),
+                        planning_style=ltx_planning_style,
                     )
                     ltx_prompts = list(
                         ltx_window_plan_response["window_prompts"]
@@ -21828,6 +21990,7 @@ def _apply_film_grain_to_file_impl(video_path: str, intensity: float, saturation
 # answer doesn't change at runtime and detect_hardware() touches torch
 # which we'd rather not call per-job.
 _cached_hardware: dict | None = None
+_generation_eta_history: GenerationEtaHistory | None = None
 
 
 def _get_cached_hardware() -> dict:
@@ -21840,6 +22003,22 @@ def _get_cached_hardware() -> dict:
             print(f"[VRAM] hardware probe failed ({e}); per-job adjustment disabled")
             _cached_hardware = {"gpu_vram_gb": 0.0}
     return _cached_hardware
+
+
+def _get_generation_eta_history() -> GenerationEtaHistory | None:
+    """Return the process-wide, hardware-scoped local ETA learner."""
+
+    global _generation_eta_history
+    if _generation_eta_history is None:
+        try:
+            _generation_eta_history = GenerationEtaHistory(
+                hardware=_get_cached_hardware(),
+            )
+        except Exception as exc:
+            # ETA history is an optimization, never a generation dependency.
+            print(f"[ETA] Could not initialize local timing history ({exc}).")
+            return None
+    return _generation_eta_history
 
 
 def _stage_count_from_params(params: dict) -> int:
@@ -22111,6 +22290,12 @@ def _apply_per_job_coefficient(job: dict) -> None:
                 # coefficient can be superseded by H3's stricter absolute
                 # cap, so carry the bytes into this budget explicitly.
                 additional_reserve_gb=adjustment.get("lora_total_gb", 0.0),
+                # Auto presets are symbolic at this point. Pass the model's
+                # authoritative pixel budget so residency is calculated for
+                # the same canvas H3 resolves immediately before generation.
+                auto_resolution_pixels=_job_model_def.get(
+                    "auto_resolution_budgets"
+                ),
             )
             h3_weight_budget_gb = h3_budget["weight_budget_gb"]
             h3_coefficient_cap = h3_weight_budget_gb / total_vram_gb
@@ -22127,9 +22312,25 @@ def _apply_per_job_coefficient(job: dict) -> None:
                 "activation_reserve_gb"
             ]
             adjustment["h3_runtime_workspace_gb"] = h3_runtime_workspace_gb
+            adjustment["h3_resolution_pixels"] = h3_budget[
+                "resolution_pixels"
+            ]
             adjustment["h3_scaled_runtime_workspace_gb"] = h3_budget[
                 "scaled_runtime_workspace_gb"
             ]
+            _h3_auto_resolution_budgets = _job_model_def.get(
+                "auto_resolution_budgets"
+            )
+            if (
+                isinstance(resolution, str)
+                and isinstance(_h3_auto_resolution_budgets, dict)
+                and resolution.strip().lower() in _h3_auto_resolution_budgets
+            ):
+                adjustment["reasons"].append(
+                    f"- H3 Auto canvas {resolution.strip()} resolved to "
+                    f"{h3_budget['resolution_pixels']:,} pixels before "
+                    "transformer residency was calculated"
+                )
             if h3_budget["runtime_scaling_active"]:
                 adjustment["reasons"].append(
                     f"- H3's {h3_runtime_workspace_gb:.1f} GB runtime "
@@ -24227,6 +24428,8 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
             join_output_file = None
             active_generation_seconds_by_output: dict[str, int] = {}
             active_generation_seconds_by_task: dict[int, int] = {}
+            multi_window_timing_by_output: dict[str, dict] = {}
+            multi_window_timing_by_task: dict[int, dict] = {}
 
             # Video renders can contain differently-sized tasks and internal
             # sliding windows. Learn their timing from the live sampler
@@ -24235,7 +24438,26 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
             # steps and automatically observes the real Sol/model/LoRA speed.
             generation_eta = None
             if str(gen_mode or "").lower() == "video":
-                generation_eta = AdaptiveGenerationEta(queue)
+                eta_history = _get_generation_eta_history()
+                imported_eta_samples = 0
+                if eta_history is not None:
+                    imported_eta_samples = eta_history.bootstrap_from_sidecars(
+                        out_dir,
+                    )
+                generation_eta = AdaptiveGenerationEta(
+                    queue,
+                    history_store=eta_history,
+                )
+                learned_samples = generation_eta.history_sample_count
+                if learned_samples:
+                    import_note = (
+                        f", {imported_eta_samples} newly imported"
+                        if imported_eta_samples else ""
+                    )
+                    print(
+                        f"[ETA] Starting with {learned_samples} matching "
+                        f"local timing sample(s){import_note}."
+                    )
 
             def _eta_job_updates(snapshot):
                 if not snapshot:
@@ -24269,6 +24491,72 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                         wall_now + project_eta
                         if isinstance(project_eta, (int, float)) else None
                     ),
+                }
+
+            def _scene_duration_seconds(source_params):
+                """Return the requested output-timeline duration for metadata."""
+
+                if not isinstance(source_params, dict):
+                    return None
+                try:
+                    frames = int(source_params.get("video_length") or 0)
+                except (TypeError, ValueError):
+                    frames = 0
+                if frames > 0:
+                    try:
+                        fps = float(source_params.get("fps") or 0)
+                    except (TypeError, ValueError):
+                        fps = 0.0
+                    if not math.isfinite(fps) or fps <= 0:
+                        try:
+                            fps = float(wgp.get_model_fps(
+                                str(source_params.get("model_type") or ""),
+                            ))
+                        except (TypeError, ValueError):
+                            fps = 0.0
+                    if math.isfinite(fps) and fps > 0:
+                        return round(frames / fps, 3)
+                for key in ("duration_seconds", "audio_duration_seconds"):
+                    try:
+                        direct = float(source_params.get(key))
+                    except (TypeError, ValueError):
+                        direct = 0.0
+                    if math.isfinite(direct) and direct > 0:
+                        return round(direct, 3)
+                return None
+
+            def _aggregate_task_window_timing():
+                """Flatten completed task/clip timings for a joined sequence."""
+
+                if not multi_window_timing_by_task:
+                    return None
+                window_seconds = []
+                total_generation_seconds = 0
+                expected_windows = 0
+                for timing_task_index in sorted(multi_window_timing_by_task):
+                    timing = multi_window_timing_by_task[timing_task_index]
+                    values = timing.get("window_generation_seconds") or []
+                    if not values:
+                        continue
+                    window_seconds.extend(values)
+                    expected_windows += max(
+                        len(values),
+                        int(timing.get("window_count") or 0),
+                    )
+                    total_generation_seconds += max(
+                        0,
+                        int(timing.get("total_generation_seconds") or 0),
+                    )
+                if len(window_seconds) <= 1:
+                    return None
+                return {
+                    "window_count": max(len(window_seconds), expected_windows),
+                    "completed_windows": len(window_seconds),
+                    "scene_duration_seconds": _scene_duration_seconds(
+                        job.get("params") or {},
+                    ),
+                    "window_generation_seconds": window_seconds,
+                    "total_generation_seconds": total_generation_seconds,
                 }
 
             def _write_output_sidecars(file_names):
@@ -24352,17 +24640,18 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     meta_path = os.path.join(
                         out_dir, os.path.splitext(fname)[0] + ".meta.json",
                     )
+                    existing_sidecar = None
                     active_seconds = active_generation_seconds_by_output.get(
                         os.path.basename(fname)
                     )
-                    if active_seconds is None and os.path.isfile(meta_path):
+                    if os.path.isfile(meta_path):
                         # Sidecars are refreshed after optional post-processing.
-                        # Preserve the first write's active duration when a
+                        # Preserve timing captured by the first write when a
                         # final filename was not part of WGP's artifact event.
                         try:
                             with open(meta_path, "r", encoding="utf-8") as f:
                                 existing_sidecar = json.load(f)
-                            if (
+                            if active_seconds is None and (
                                 existing_sidecar.get("generation_time_basis")
                                 == "active"
                             ):
@@ -24392,6 +24681,76 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                             int(round(active_seconds)),
                         )
                         file_sidecar["generation_time_basis"] = "active"
+
+                    output_basename = os.path.basename(fname)
+                    timing_summary = multi_window_timing_by_output.get(
+                        output_basename
+                    )
+                    if timing_summary is None and fname == join_output_file:
+                        timing_summary = _aggregate_task_window_timing()
+                    if (
+                        timing_summary is None
+                        and total_tasks == 1
+                    ):
+                        timing_summary = multi_window_timing_by_task.get(0)
+                    if (
+                        timing_summary is None
+                        and isinstance(existing_sidecar, dict)
+                    ):
+                        timing_summary = existing_sidecar.get(
+                            "multi_window_timing"
+                        )
+                    if isinstance(timing_summary, dict):
+                        timing_values = []
+                        for timing_value in (
+                            timing_summary.get(
+                                "window_generation_seconds"
+                            )
+                            or []
+                        ):
+                            try:
+                                timing_values.append(max(
+                                    0,
+                                    int(round(float(timing_value))),
+                                ))
+                            except (TypeError, ValueError):
+                                continue
+                        try:
+                            timing_window_count = max(
+                                len(timing_values),
+                                int(timing_summary.get("window_count") or 0),
+                            )
+                        except (TypeError, ValueError):
+                            timing_window_count = len(timing_values)
+                        if timing_window_count > 1:
+                            scene_duration = timing_summary.get(
+                                "scene_duration_seconds"
+                            )
+                            if scene_duration is None:
+                                scene_duration = _scene_duration_seconds(
+                                    sidecar_params
+                                )
+                            try:
+                                timing_total_seconds = max(
+                                    0,
+                                    int(round(float(
+                                        timing_summary.get(
+                                            "total_generation_seconds"
+                                        )
+                                        or sum(timing_values)
+                                    ))),
+                                )
+                            except (TypeError, ValueError):
+                                timing_total_seconds = sum(timing_values)
+                            file_sidecar["multi_window_timing"] = {
+                                "window_count": timing_window_count,
+                                "completed_windows": len(timing_values),
+                                "scene_duration_seconds": scene_duration,
+                                "window_generation_seconds": timing_values,
+                                "total_generation_seconds": (
+                                    timing_total_seconds
+                                ),
+                            }
                     try:
                         with open(meta_path, "w", encoding="utf-8") as f:
                             json.dump(file_sidecar, f, indent=2)
@@ -24473,6 +24832,9 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                 # Process stream — update job dict with live progress
                 task_error = False
                 task_generation_time = None
+                task_window_generation_seconds: list[int] = []
+                task_window_total = 1
+                task_last_cumulative_generation_seconds = 0
                 last_msg_len = 0
                 in_status_line = False
                 while True:
@@ -24604,23 +24966,94 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                         in_status_line = False
                     elif cmd == "generation_time":
                         try:
+                            timing_window_seconds = None
+                            timing_window = 1
+                            timing_total_windows = 1
                             if isinstance(data, dict):
                                 task_generation_time = max(
                                     0,
                                     int(round(float(data.get("seconds", 0)))),
                                 )
                                 timing_outputs = data.get("outputs") or []
+                                if data.get("window_seconds") is not None:
+                                    timing_window_seconds = max(
+                                        0,
+                                        int(round(float(
+                                            data.get("window_seconds")
+                                        ))),
+                                    )
+                                timing_window = max(
+                                    1,
+                                    int(data.get("window") or 1),
+                                )
+                                timing_total_windows = max(
+                                    timing_window,
+                                    int(data.get("total_windows") or 1),
+                                )
                             else:
                                 task_generation_time = max(
                                     0,
                                     int(round(float(data))),
                                 )
                                 timing_outputs = []
+
+                            # A task can request more than one repeated sample.
+                            # Each sample restarts its native window counter, so
+                            # keep the gallery timing attached to the currently
+                            # completing output rather than merging two videos.
+                            if timing_window == 1 and task_window_generation_seconds:
+                                task_window_generation_seconds = []
+                                task_window_total = 1
+
+                            if timing_window_seconds is None:
+                                timing_window_seconds = max(
+                                    0,
+                                    task_generation_time
+                                    - task_last_cumulative_generation_seconds,
+                                )
+                            while len(task_window_generation_seconds) < timing_window:
+                                task_window_generation_seconds.append(0)
+                            task_window_generation_seconds[
+                                timing_window - 1
+                            ] = timing_window_seconds
+                            task_window_total = max(
+                                task_window_total,
+                                timing_total_windows,
+                            )
+                            task_last_cumulative_generation_seconds = (
+                                task_generation_time
+                            )
+                            timing_summary = {
+                                "window_count": max(
+                                    task_window_total,
+                                    len(task_window_generation_seconds),
+                                ),
+                                "completed_windows": len(
+                                    task_window_generation_seconds
+                                ),
+                                "scene_duration_seconds": (
+                                    _scene_duration_seconds(
+                                        task.get("params") or {},
+                                    )
+                                ),
+                                "window_generation_seconds": list(
+                                    task_window_generation_seconds
+                                ),
+                                "total_generation_seconds": sum(
+                                    task_window_generation_seconds
+                                ),
+                            }
                             for output_path in timing_outputs:
                                 if isinstance(output_path, str) and output_path:
+                                    output_basename = os.path.basename(
+                                        output_path
+                                    )
                                     active_generation_seconds_by_output[
-                                        os.path.basename(output_path)
+                                        output_basename
                                     ] = task_generation_time
+                                    multi_window_timing_by_output[
+                                        output_basename
+                                    ] = dict(timing_summary)
                         except (TypeError, ValueError):
                             task_generation_time = None
 
@@ -24644,6 +25077,25 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                                 os.path.basename(output_path),
                                 task_generation_time,
                             )
+                if task_window_generation_seconds:
+                    multi_window_timing_by_task[task_idx] = {
+                        "window_count": max(
+                            task_window_total,
+                            len(task_window_generation_seconds),
+                        ),
+                        "completed_windows": len(
+                            task_window_generation_seconds
+                        ),
+                        "scene_duration_seconds": _scene_duration_seconds(
+                            task.get("params") or {},
+                        ),
+                        "window_generation_seconds": list(
+                            task_window_generation_seconds
+                        ),
+                        "total_generation_seconds": sum(
+                            task_window_generation_seconds
+                        ),
+                    }
                 clip_info = (task.get("params") or {}).get("multi_clip_info")
                 if isinstance(clip_info, dict) and "index" in clip_info:
                     latest_clip_file = None
@@ -24673,11 +25125,19 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
 
                 if not task_error:
                     if generation_eta is not None:
+                        task_eta_finished_at = time.monotonic()
                         eta_snapshot = generation_eta.complete_task(
                             task_generation_time
                             if task_generation_time is not None
-                            else time.monotonic() - task_eta_started_at,
-                            now=time.monotonic(),
+                            else task_eta_finished_at - task_eta_started_at,
+                            wall_seconds=(
+                                task_eta_finished_at - task_eta_started_at
+                            ),
+                            window_seconds=task_window_generation_seconds,
+                            source_key=(
+                                f"job:{job_id}:task:{task_idx}"
+                            ),
+                            now=task_eta_finished_at,
                         )
                         update_job(
                             job,
@@ -26280,6 +26740,8 @@ _JOB_ETA_IDENTITY_FIELDS = (
     "total_windows",
     "eta_confidence",
     "eta_basis",
+    "eta_history_samples",
+    "eta_history_match",
     "clip_estimates",
     "eta_updated_at",
 )

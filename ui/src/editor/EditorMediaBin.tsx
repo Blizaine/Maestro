@@ -46,14 +46,11 @@ function VideoThumbnail({ asset, workspace }: { asset: EditorAsset; workspace: s
 
 function LazyVideoThumbnail({ asset, workspace }: { asset: EditorAsset; workspace: string }) {
   const rootRef = useRef<HTMLSpanElement>(null)
-  const [visible, setVisible] = useState(false)
+  const [visible, setVisible] = useState(() => typeof IntersectionObserver === 'undefined')
   useEffect(() => {
     const root = rootRef.current
     if (!root || visible) return
-    if (typeof IntersectionObserver === 'undefined') {
-      setVisible(true)
-      return
-    }
+    if (typeof IntersectionObserver === 'undefined') return
     const observer = new IntersectionObserver(entries => {
       if (entries.some(entry => entry.isIntersecting)) {
         setVisible(true)

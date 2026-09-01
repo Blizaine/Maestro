@@ -74,14 +74,20 @@ export function DirectorH3Optimizations() {
           revision: '',
         }]
       : []
-  const selectedTurboPreset = (
-    turboPresets.find(preset => preset.id === turboPresetByModel[videoModel])
-    || turboPresets.find(preset => preset.id === turboOption?.preset_id)
+  const turboRequested = turboModeByModel[videoModel] === true
+  const defaultTurboPreset = (
+    turboPresets.find(preset => preset.id === turboOption?.preset_id)
     || turboPresets[0]
   )
+  const configuredTurboPreset = turboPresets.find(
+    preset => preset.id === turboPresetByModel[videoModel],
+  )
+  const selectedTurboPreset = turboRequested
+    ? (configuredTurboPreset || defaultTurboPreset)
+    : defaultTurboPreset
   const turboSelected = Boolean(
     turboOption && selectedTurboPreset
-    && turboModeByModel[videoModel] === true
+    && turboRequested
     && savedVideoLoras?.activated_loras?.includes(selectedTurboPreset.filename)
   )
   const solStatus = modelOptions?.sol_attention_status

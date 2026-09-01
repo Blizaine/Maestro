@@ -89,7 +89,9 @@ export interface ApiJobStatus {
   generation_completion_at?: number | null
   project_completion_at?: number | null
   eta_confidence?: 'calibrating' | 'low' | 'medium' | 'high'
-  eta_basis?: 'waiting-for-first-clip' | 'live-adaptive' | 'live-cache-aware'
+  eta_basis?: 'waiting-for-first-clip' | 'historical' | 'historical-adaptive' | 'live-adaptive' | 'live-cache-aware'
+  eta_history_samples?: number
+  eta_history_match?: 'exact' | 'family' | null
   /** Produced after a queued automatic planner obtains the generation slot. */
   h3_window_plan?: H3WindowPlan | null
   ltx_window_plan?: LTXWindowPlan | null
@@ -215,6 +217,7 @@ export async function planH3Windows(params: {
   image_paths?: string[]
   injected_keyframes?: Array<{ path: string; position: string }>
   camera_coverage?: 'auto' | 'continuous' | 'multi_shot'
+  planning_style?: 'faithful' | 'creative'
 }): Promise<H3WindowPlan> {
   const res = await fetch(`${BASE}/api/v1/llm/plan-h3-windows`, {
     method: 'POST',
@@ -250,6 +253,42 @@ export async function updateH3WindowOverrides(
   return res.json()
 }
 
+export interface StudioPreferenceSettings {
+  configured: boolean
+  generation_mode?: 'image' | 'video' | 'audio' | 'avatar'
+  studio_video_workflow?: string
+  studio_image_workflow?: string
+  audio_sub_mode?: 'speech' | 'music' | 'sfx' | 'mixer' | 'revoice'
+  selected_model_per_mode?: Record<string, string>
+  selected_model_per_audio_sub_mode?: Record<string, string>
+  h3_optimizations?: {
+    override_attention?: '' | 'sol'
+    skip_steps_cache_type?: '' | 'first_block'
+    skip_steps_multiplier?: number
+    skip_steps_start_step_perc?: number
+  }
+}
+
+export type StudioPreferenceUpdate = Omit<StudioPreferenceSettings, 'configured'>
+
+export async function fetchStudioPreferences(): Promise<StudioPreferenceSettings> {
+  const res = await fetch(`${BASE}/api/v1/studio-preferences`)
+  if (!res.ok) throw new Error('Failed to fetch Studio preferences')
+  return res.json()
+}
+
+export async function updateStudioPreferences(
+  preferences: StudioPreferenceUpdate,
+): Promise<StudioPreferenceSettings> {
+  const res = await fetch(`${BASE}/api/v1/studio-preferences`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(preferences),
+  })
+  if (!res.ok) throw new Error('Failed to save Studio preferences')
+  return res.json()
+}
+
 export async function planH3Sequence(params: {
   prompt: string
   model_type: string
@@ -261,6 +300,7 @@ export async function planH3Sequence(params: {
   overlap_frames?: number
   sequence_continuity?: boolean
   camera_coverage?: 'auto' | 'continuous' | 'multi_shot'
+  planning_style?: 'faithful' | 'creative'
 }): Promise<H3WindowPlan> {
   const res = await fetch(`${BASE}/api/v1/llm/plan-h3-sequence`, {
     method: 'POST',
@@ -746,7 +786,9 @@ export interface PipelineStatus {
     clip_completion_at?: number | null
     project_completion_at?: number | null
     eta_confidence?: 'calibrating' | 'low' | 'medium' | 'high'
-    eta_basis?: 'waiting-for-first-clip' | 'live-adaptive' | 'live-cache-aware'
+    eta_basis?: 'waiting-for-first-clip' | 'historical' | 'historical-adaptive' | 'live-adaptive' | 'live-cache-aware'
+    eta_history_samples?: number
+    eta_history_match?: 'exact' | 'family' | null
     clip_estimates?: Array<{
       clip: number
       status: 'completed' | 'current' | 'pending'
@@ -1939,6 +1981,7 @@ export async function llmEnhancePrompt(params: {
   tts_voice_count?: number
   max_new_tokens?: number
   reference_context?: string
+  planning_style?: 'faithful' | 'creative'
 }): Promise<{
   original: string
   enhanced: string

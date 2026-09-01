@@ -68,6 +68,15 @@ _SPEECH_VERB_RE = re.compile(
     r"warn|warns|warned|demand|demands|demanded|tell|tells|told)\b",
     re.IGNORECASE,
 )
+_DIALOGUE_OWNER_NAME_RE = re.compile(
+    r"(?<!\w)([A-Z][A-Za-z0-9_'’-]*(?:\s+[A-Z][A-Za-z0-9_'’-]*){0,3})(?!\w)"
+)
+_DIALOGUE_OWNER_LEADING_WORDS = {
+    "a", "after", "an", "and", "as", "at", "both", "during", "from",
+    "he", "her", "his", "immediately", "in", "inside", "it", "later",
+    "next", "only", "outside", "she", "the", "their", "then", "they",
+    "this", "while", "with",
+}
 
 _REF2VA_DIALOGUE_OWNERSHIP_CONTRACT = (
     "Each tagged line is performed once by its adjacent <Subject N> (Sx) speaker."
@@ -458,15 +467,6 @@ def _ref2va_dialogue_subject_order(
 
     source = str(text or "")
     valid_subjects = set(range(1, character_subject_count + 1))
-    declared_speaker_subjects = {
-        int(speaker): int(subject)
-        for subject, speaker in re.findall(
-            r"<Subject\s+(\d+)>\s*\(S(\d+)\)",
-            source,
-            flags=re.IGNORECASE,
-        )
-        if int(subject) in valid_subjects
-    }
     events = list(_DIALOGUE_TAG_RE.finditer(source))
     if not events:
         events.extend(
@@ -475,9 +475,7 @@ def _ref2va_dialogue_subject_order(
     events.sort(key=lambda match: match.start())
 
     order: list[int] = []
-    previous_dialogue_end = 0
     for match in events:
-        prefix = source[max(previous_dialogue_end, match.start() - 220):match.start()]
         subject = _resolve_ref2va_dialogue_speaker(
             source,
             match.start(),
@@ -485,13 +483,8 @@ def _ref2va_dialogue_subject_order(
             speaker_aliases,
             valid_subjects,
         )
-        if subject is None:
-            markers = re.findall(r"\(S(\d+)\)", prefix[-100:], flags=re.IGNORECASE)
-            if markers:
-                subject = declared_speaker_subjects.get(int(markers[-1]))
         if subject in valid_subjects and subject not in order:
             order.append(subject)
-        previous_dialogue_end = match.end()
     return order
 
 
@@ -724,6 +717,111 @@ def _ref2va_alias_occurrences(source: str, aliases: dict[str, int]):
     return sorted(occurrences, key=lambda row: (row[0], -(row[1] - row[0])))
 
 
+def _clean_ref2va_dialogue_owner_name(value: str) -> str:
+    """Return a human speaker label without sentence-leading glue words."""
+
+    words = re.sub(r"\s+", " ", str(value or "")).strip(" \t\r\n,;:-")
+    parts = words.split()
+    while len(parts) > 1 and parts[0].casefold() in _DIALOGUE_OWNER_LEADING_WORDS:
+        parts.pop(0)
+    candidate = " ".join(parts).strip()
+    if not candidate or candidate.casefold() in _DIALOGUE_OWNER_LEADING_WORDS:
+        return ""
+    return candidate
+
+
+def _resolve_ref2va_dialogue_owner_name(
+    source: str,
+    dialogue_start: int,
+    dialogue_end: int,
+) -> str:
+    """Resolve an explicitly named speaker, including non-reference actors.
+
+    Ref2VA's ``(Sx)`` marker identifies first-vocal-event order. It does not
+    identify ``<Subject x>``.  Detecting the grammatical speaker separately is
+    what lets a saved Blaine character share a scene with unreferenced Rachel
+    and Ross without either guest inheriting Blaine's portrait or voice.
+    """
+
+    before = source[max(0, dialogue_start - 420):dialogue_start]
+    after = source[dialogue_end:dialogue_end + 180]
+    clause_start = max(
+        before.rfind("."),
+        before.rfind("!"),
+        before.rfind("?"),
+        before.rfind(";"),
+        before.rfind("\n"),
+    ) + 1
+    clause = before[clause_start:]
+
+    def occurrences(value: str):
+        return [
+            (match.start(), match.end(), _clean_ref2va_dialogue_owner_name(match.group(1)))
+            for match in _DIALOGUE_OWNER_NAME_RE.finditer(value)
+            if _clean_ref2va_dialogue_owner_name(match.group(1))
+        ]
+
+    # Direct screenplay syntax: ``Rachel: <d>...</d>``.
+    for start, end, name in reversed(occurrences(clause)):
+        tail = clause[end:]
+        leading = clause[:start]
+        if (
+            re.fullmatch(r"\s*(?:'s\s+voice\s*)?[:,\-–—]\s*", tail, re.IGNORECASE)
+            and not _SPEECH_VERB_RE.search(leading)
+        ):
+            return name
+
+    # Postposed attribution: ``<d>...</d>, replies Rachel``.
+    after_verb = re.match(
+        rf"\s*[,;:\-–—]?\s*({_SPEECH_VERB_RE.pattern})",
+        after,
+        re.IGNORECASE,
+    )
+    if after_verb:
+        candidates = [
+            (start - after_verb.end(), -(end - start), name)
+            for start, end, name in occurrences(after)
+            if start >= after_verb.end()
+        ]
+        if candidates:
+            return min(candidates)[-1]
+
+    # Natural prose: ``Blaine turns to Yoda and says, ...``. The last name
+    # before the speech verb is not necessarily the speaker, so reject names
+    # introduced by object prepositions such as ``to`` or ``at``.
+    verbs = list(_SPEECH_VERB_RE.finditer(clause))
+    if verbs:
+        verb = verbs[-1]
+        candidates = []
+        for start, end, name in occurrences(clause):
+            if end > verb.start():
+                continue
+            leading = clause[max(0, start - 32):start]
+            is_object = bool(re.search(
+                r"(?:\bto|\bat|\btoward|\btowards|\bwith|\bbeside|\bnear|\bbehind)\s+$",
+                leading,
+                re.IGNORECASE,
+            ))
+            candidates.append((is_object, verb.start() - end, -(end - start), name))
+        non_objects = [candidate for candidate in candidates if not candidate[0]]
+        if non_objects:
+            return min(non_objects)[-1]
+        if candidates:
+            return min(candidates)[-1]
+
+    # Finished Context-IR often writes ``Rachel (S1) ...`` beside the tag
+    # without repeating a speech verb. This marker can confirm the nearby
+    # name, but it still never maps the name to Subject 1.
+    marked = list(re.finditer(
+        r"([A-Z][A-Za-z0-9_'’-]*(?:\s+[A-Z][A-Za-z0-9_'’-]*){0,3})"
+        r"\s*\(S\d+\)",
+        clause,
+    ))
+    if marked:
+        return _clean_ref2va_dialogue_owner_name(marked[-1].group(1))
+    return ""
+
+
 def _resolve_ref2va_dialogue_speaker(
     source: str,
     dialogue_start: int,
@@ -806,13 +904,6 @@ def _resolve_ref2va_dialogue_speaker(
         if candidates:
             return min(candidates)[-1]
 
-    # An explicit valid marker is still accepted for advanced manual prompts.
-    markers = list(_SPEAKER_MARKER_RE.finditer(before[-140:]))
-    if markers:
-        subject = int(markers[-1].group(1))
-        if subject in valid_subjects:
-            return subject
-
     # A manually authored Context-IR prompt may put the <d> tag in the sentence
     # after the named performance cue, for example: ``Yoda nods. He answers.
     # <d>...</d>``. Follow that short discourse chain, but only when the latest
@@ -822,6 +913,17 @@ def _resolve_ref2va_dialogue_speaker(
     for previous_match in _DIALOGUE_TAG_RE.finditer(source, 0, dialogue_start):
         preceding_dialogue_end = previous_match.end()
     discourse_start = max(preceding_dialogue_end, dialogue_start - 720)
+    # Context-IR fields are independent contracts. Never reach backward from
+    # detailed_description into subject_definitions/retention_analysis and use
+    # a saved character named there as the grammatical speaker of a guest's
+    # line. The latest field header is the hard discourse boundary.
+    field_headers = list(re.finditer(
+        r"(?im)^\s*(?:subject_definitions|summary|retention_analysis|"
+        r"detailed_description|overall_soundscape|non_diegetic_music)\s*:\s*",
+        source[discourse_start:dialogue_start],
+    ))
+    if field_headers:
+        discourse_start += field_headers[-1].end()
     discourse = source[discourse_start:dialogue_start]
     segments = [
         segment.strip()
@@ -856,7 +958,8 @@ def _ambiguous_ref2va_dialogue_error(words: str) -> ValueError:
     return ValueError(
         "MiniMax H3 Omni could not determine which referenced character speaks "
         f"{excerpt!r}. Name the speaker beside the line (for example, Yoda says, "
-        '"Do or do not.") or use that character\'s explicit (S#) marker.'
+        '"Do or do not.") or place that character\'s explicit <Subject N> tag '
+        "beside the line. (Sx) labels only identify vocal-event order."
     )
 
 
@@ -880,7 +983,7 @@ def _canonicalize_ref2va_tagged_dialogue(
     if not matches:
         return text
     edits: list[tuple[int, int, str]] = []
-    subject_speakers: dict[int, int] = {}
+    vocal_speakers: dict[tuple[str, Any], int] = {}
     previous_dialogue_end = 0
     for match in matches:
         words = match.group(1).strip()
@@ -891,25 +994,31 @@ def _canonicalize_ref2va_tagged_dialogue(
             speaker_aliases,
             valid_subjects,
         )
+        explicit_owner = _resolve_ref2va_dialogue_owner_name(
+            text,
+            match.start(),
+            match.end(),
+        )
         context_start = max(previous_dialogue_end, match.start() - 240)
         markers = list(_SPEAKER_MARKER_RE.finditer(text, context_start, match.start()))
         marker = markers[-1] if markers else None
-        if marker is not None and int(marker.group(1)) not in valid_subjects:
-            marked_subject = int(marker.group(1))
-            raise ValueError(
-                f"MiniMax H3 Omni dialogue uses (S{marked_subject}), but the reference "
-                f"manifest defines only {character_subject_count} speaking character(s)."
-            )
         # ``(Sx)`` is vocal-event order, not a Subject identifier.  It can
         # validate a resolved speaker but must never select a face by itself.
         # The old fallback silently mapped S1 to Subject 1, which is exactly
         # how a correct voice could be lip-synced by the wrong character.
-        if subject is None and character_subject_count == 1:
+        if subject is None and character_subject_count == 1 and not explicit_owner:
             subject = 1
-        if subject is None and character_subject_count > 1:
+        if subject is None and character_subject_count > 1 and not explicit_owner:
             raise _ambiguous_ref2va_dialogue_error(words)
-        if subject is not None:
-            speaker = subject_speakers.setdefault(subject, len(subject_speakers) + 1)
+        speaker_key: tuple[str, Any] = (
+            ("subject", subject)
+            if subject is not None else
+            ("name", explicit_owner.casefold())
+            if explicit_owner else
+            ("event", len(vocal_speakers) + 1)
+        )
+        speaker = vocal_speakers.setdefault(speaker_key, len(vocal_speakers) + 1)
+        if subject is not None or explicit_owner:
             owner_context = text[max(previous_dialogue_end, match.start() - 180):match.start()]
             owner_clause_start = max(
                 owner_context.rfind("."),
@@ -918,20 +1027,28 @@ def _canonicalize_ref2va_tagged_dialogue(
                 owner_context.rfind(";"),
                 owner_context.rfind("\n"),
             ) + 1
-            nearby_subject = bool(re.search(
-                rf"<Subject\s+{subject}>",
-                owner_context[owner_clause_start:],
-                flags=re.IGNORECASE,
-            ))
-            owner = "" if nearby_subject else f"<Subject {subject}> "
-            nearby_audio = bool(re.search(
-                rf"<Audio\s+{audio_by_subject.get(subject, -1)}>",
-                owner_context[owner_clause_start:],
-                flags=re.IGNORECASE,
-            ))
+            nearby_subject = bool(
+                subject is not None
+                and re.search(
+                    rf"<Subject\s+{subject}>",
+                    owner_context[owner_clause_start:],
+                    flags=re.IGNORECASE,
+                )
+            )
+            owner = (
+                "" if subject is None or nearby_subject else f"<Subject {subject}> "
+            )
+            nearby_audio = bool(
+                subject is not None
+                and re.search(
+                    rf"<Audio\s+{audio_by_subject.get(subject, -1)}>",
+                    owner_context[owner_clause_start:],
+                    flags=re.IGNORECASE,
+                )
+            )
             voice = (
                 f" in the voice referenced from <Audio {audio_by_subject[subject]}>,"
-                if subject in audio_by_subject and not nearby_audio
+                if subject is not None and subject in audio_by_subject and not nearby_audio
                 else ""
             )
             if marker is not None:
@@ -964,7 +1081,9 @@ def _canonicalize_ref2va_tagged_dialogue(
             definitions.group(1),
             flags=re.IGNORECASE,
         )
-        for subject, speaker in subject_speakers.items():
+        for (speaker_kind, subject), speaker in vocal_speakers.items():
+            if speaker_kind != "subject":
+                continue
             body = re.sub(
                 rf"(<Audio\s+\d+>[^.\r\n]{{0,260}}?"
                 rf"(?:for|to|of)\s+<Subject\s+{subject}>)"
@@ -1246,9 +1365,6 @@ def ensure_ref2va_prompt_relationships(
 
     dialogue_counter = 0
     dialogue_word_count = 0
-    unnamed_dialogue_subject = 0
-    valid_speaking_subjects = set(range(1, character_subject_count + 1))
-
     def is_visible_text_quote(match) -> bool:
         before = text[max(0, match.start() - 150):match.start()]
         after = text[match.end():match.end() + 100]
@@ -1277,27 +1393,17 @@ def ensure_ref2va_prompt_relationships(
         ))
 
     def compile_dialogue(match):
-        nonlocal dialogue_counter, dialogue_word_count, unnamed_dialogue_subject
+        nonlocal dialogue_counter, dialogue_word_count
         if is_visible_text_quote(match):
             return match.group(0)
         dialogue_counter += 1
         words = (match.group(1) or match.group(2) or "").strip()
         dialogue_word_count += len(words.split())
-        speaking_subject = _resolve_ref2va_dialogue_speaker(
-            text,
-            match.start(),
-            match.end(),
-            speaker_aliases,
-            valid_speaking_subjects,
-        )
-        if speaking_subject is None and character_subject_count == 1:
-            speaking_subject = 1
-        if speaking_subject is None and character_subject_count > 1:
-            raise _ambiguous_ref2va_dialogue_error(words)
-        if speaking_subject is None:
-            unnamed_dialogue_subject += 1
-            speaking_subject = unnamed_dialogue_subject
-        return f"(S{speaking_subject}) <d>[English] {words}</d>"
+        # Speaker/Subject ownership is compiled in one place below. Inserting
+        # ``(S{subject})`` here used the immutable Subject number as if it were
+        # event order and could silently bind an unreferenced actor to the only
+        # saved character.
+        return f"<d>[English] {words}</d>"
 
     compiled_target = re.sub(
         r'"([^"\r\n]{1,500})"|“([^”\r\n]{1,500})”',

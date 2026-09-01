@@ -9,14 +9,69 @@ and its tests can feed it ordinary progress observations.
 from __future__ import annotations
 
 import math
+import hashlib
+import json
+import os
 import re
+import sqlite3
 import statistics
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Sequence
 
 
 _WINDOW_RE = re.compile(r"(?:sliding\s+)?window\s+(\d+)\s*/\s*(\d+)", re.I)
+_HISTORY_SCHEMA_VERSION = 1
+_DEFAULT_HISTORY_FILENAME = "generation_eta_history.sqlite3"
+
+
+def _task_params(task: Mapping[str, Any]) -> Mapping[str, Any]:
+    params = task.get("params") if isinstance(task, Mapping) else None
+    return params if isinstance(params, Mapping) else {}
+
+
+def _resolution_pixels(params: Mapping[str, Any]) -> int:
+    resolution = str(params.get("resolution") or "832x480").lower()
+    match = re.search(r"(\d+)\s*x\s*(\d+)", resolution)
+    if not match:
+        return 832 * 480
+    return max(1, int(match.group(1)) * int(match.group(2)))
+
+
+def _window_geometry(task: Mapping[str, Any]) -> tuple[int, int, int, int]:
+    """Return ``(total_frames, window_frames, overlap, window_count)``.
+
+    Sliding-window pipelines repeatedly render the native window size; they do
+    not run attention across the full final sequence at once.  Treating a
+    four-window sequence as one 1,300-frame context made duration scaling far
+    too pessimistic and prevented a completed sequence from teaching a later
+    run with a different number of windows.
+    """
+
+    params = _task_params(task)
+    total_frames = _positive_int(
+        params.get("video_length", task.get("video_length", 1)),
+        1,
+    )
+    raw_window = params.get("sliding_window_size")
+    try:
+        window_frames = int(raw_window)
+    except (TypeError, ValueError):
+        window_frames = total_frames
+    if window_frames <= 0:
+        window_frames = total_frames
+    window_frames = min(total_frames, window_frames)
+    try:
+        overlap = max(0, int(params.get("sliding_window_overlap") or 0))
+    except (TypeError, ValueError):
+        overlap = 0
+    overlap = min(overlap, max(0, window_frames - 1))
+    if total_frames <= window_frames:
+        return total_frames, window_frames, overlap, 1
+    stride = max(1, window_frames - overlap)
+    window_count = 1 + int(math.ceil((total_frames - window_frames) / stride))
+    return total_frames, window_frames, overlap, max(1, window_count)
 
 
 def _positive_float(value: Any, default: float) -> float:
@@ -44,22 +99,16 @@ def task_workload(task: Mapping[str, Any]) -> float:
     per frame rule, while the other factors keep mixed task manifests sane.
     """
 
-    params = task.get("params") if isinstance(task, Mapping) else None
-    if not isinstance(params, Mapping):
-        params = {}
-    frames = _positive_int(
-        params.get("video_length", task.get("video_length", 1)),
-        1,
-    )
+    params = _task_params(task)
+    frames, window_frames, _overlap, window_count = _window_geometry(task)
     steps = _positive_int(params.get("num_inference_steps", 1), 1)
-    resolution = str(params.get("resolution") or "832x480").lower()
-    match = re.search(r"(\d+)\s*x\s*(\d+)", resolution)
-    if match:
-        pixels = max(1, int(match.group(1)) * int(match.group(2)))
-    else:
-        pixels = 832 * 480
+    pixels = _resolution_pixels(params)
     pixel_factor = (pixels / float(832 * 480)) ** 0.85
-    return max(1.0, (frames ** 1.15) * steps * pixel_factor)
+    if window_count > 1 and window_frames < frames:
+        frame_work = window_count * (window_frames ** 1.15)
+    else:
+        frame_work = frames ** 1.15
+    return max(1.0, frame_work * steps * pixel_factor)
 
 
 def task_cache_start_percent(task: Mapping[str, Any]) -> Optional[float]:
@@ -144,6 +193,564 @@ def _adaptive_rate(samples: Sequence[tuple[float, int]]) -> Optional[float]:
     return 0.55 * mean + 0.45 * ewma
 
 
+def _media_count(value: Any) -> int:
+    if value in (None, "", False):
+        return 0
+    if isinstance(value, (list, tuple, set)):
+        return len([item for item in value if item not in (None, "", False)])
+    return 1
+
+
+def _stable_digest(value: Mapping[str, Any]) -> str:
+    payload = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class _TaskProfile:
+    exact_key: str
+    family_key: str
+    workload: float
+    window_count: int
+    details: dict[str, Any]
+
+
+def _task_profile(task: Mapping[str, Any]) -> _TaskProfile:
+    params = _task_params(task)
+    total_frames, window_frames, overlap, window_count = _window_geometry(task)
+    try:
+        window_discard = max(
+            0,
+            int(params.get("sliding_window_discard_last_frames") or 0),
+        )
+    except (TypeError, ValueError):
+        window_discard = 0
+    loras = params.get("activated_loras") or []
+    if not isinstance(loras, (list, tuple)):
+        loras = [loras]
+    lora_names = sorted(
+        os.path.basename(str(item)).lower()
+        for item in loras
+        if str(item or "").strip()
+    )
+    conditioning = {
+        "start_images": _media_count(params.get("image_start")),
+        "end_images": _media_count(params.get("image_end")),
+        "video_guides": _media_count(params.get("video_guide")),
+        "audio_guides": sum(
+            _media_count(params.get(key))
+            for key in (
+                "audio_guide", "audio_guide2", "audio_guide3",
+                "audio_guide4", "audio_guide5", "audio_guide6",
+            )
+        ),
+        "omni_references": _media_count(
+            params.get("minimax_h3_references")
+        ),
+    }
+    optimization = {
+        "attention": str(params.get("override_attention") or "default").lower(),
+        "cache": str(params.get("skip_steps_cache_type") or "off").lower(),
+        "cache_multiplier": str(params.get("skip_steps_multiplier") or ""),
+        "cache_start": str(params.get("skip_steps_start_step_perc") or ""),
+        "turbo": bool(params.get("minimax_h3_turbo_mode")),
+        "turbo_preset": str(params.get("minimax_h3_turbo_preset") or ""),
+        "loras": lora_names,
+        "lora_weights": str(params.get("loras_multipliers") or ""),
+        "pipeline": (
+            "progressive" if params.get("progressive_pipeline")
+            else "single" if params.get("single_stage_pipeline")
+            else "standard"
+        ),
+        "memory_profile": str(
+            params.get("profile") or params.get("mmgp_profile") or ""
+        ),
+        "vram_coefficient": str(
+            params.get("vram_safety_coefficient") or ""
+        ),
+        "attention_mode": str(params.get("attention_mode") or ""),
+        "compile": bool(
+            params.get("compile") or params.get("compile_modules")
+        ),
+    }
+    details = {
+        "schema": _HISTORY_SCHEMA_VERSION,
+        "model_type": str(
+            params.get("model_type")
+            or task.get("model_type")
+            or "unknown"
+        ).lower(),
+        "resolution": str(params.get("resolution") or "832x480").lower(),
+        "steps": _positive_int(params.get("num_inference_steps"), 1),
+        "window_frames": window_frames,
+        "window_overlap": overlap,
+        "window_discard": window_discard,
+        "text_encoder": str(params.get("minimax_h3_text_encoder") or ""),
+        "transformer_quantization": str(
+            params.get("transformer_quantization") or ""
+        ),
+        "conditioning": conditioning,
+        "optimization": optimization,
+    }
+    family = {
+        "schema": details["schema"],
+        "model_type": details["model_type"],
+        "resolution": details["resolution"],
+        "text_encoder": details["text_encoder"],
+        "transformer_quantization": details["transformer_quantization"],
+        "conditioning": conditioning,
+        "optimization": optimization,
+    }
+    return _TaskProfile(
+        exact_key=_stable_digest(details),
+        family_key=_stable_digest(family),
+        workload=task_workload(task),
+        window_count=window_count,
+        details={
+            **details,
+            "total_frames": total_frames,
+            "window_count": window_count,
+        },
+    )
+
+
+def _hardware_history_key(hardware: Optional[Mapping[str, Any]]) -> str:
+    hardware = hardware if isinstance(hardware, Mapping) else {}
+    try:
+        vram = round(float(hardware.get("gpu_vram_gb") or 0.0), 1)
+    except (TypeError, ValueError):
+        vram = 0.0
+    try:
+        ram = round(float(hardware.get("ram_gb") or 0.0) / 8.0) * 8
+    except (TypeError, ValueError):
+        ram = 0
+    signature = {
+        "gpu": re.sub(
+            r"\s+",
+            " ",
+            str(hardware.get("gpu_name") or "unknown").strip().lower(),
+        ),
+        "vram_gb": vram,
+        "capability": str(hardware.get("gpu_capability") or ""),
+        "ram_gb_bucket": ram,
+        "cpu_count": _positive_int(hardware.get("cpu_count"), 1),
+    }
+    return _stable_digest(signature)
+
+
+@dataclass(frozen=True)
+class HistoricalEtaEstimate:
+    active_seconds: float
+    wall_seconds: float
+    window_seconds: Optional[float]
+    non_step_seconds: Optional[float]
+    sample_count: int
+    match: str
+
+
+class GenerationEtaHistory:
+    """Small local timing database used to seed future render ETAs.
+
+    The database contains performance metadata only; prompts and media paths
+    are deliberately excluded.  SQLite gives us atomic cross-thread writes,
+    remains easy to inspect or delete, and is available in Python's standard
+    library on every supported platform.
+    """
+
+    def __init__(
+        self,
+        path: Optional[str] = None,
+        *,
+        hardware: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        if path is None:
+            app_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+            path = os.path.join(app_root, "settings", _DEFAULT_HISTORY_FILENAME)
+        self.path = os.path.abspath(path)
+        self.hardware_key = _hardware_history_key(hardware)
+        self._lock = threading.RLock()
+        self._enabled = True
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            self._initialize()
+        except (OSError, sqlite3.Error) as exc:
+            self._enabled = False
+            print(f"[ETA] Local timing history unavailable ({exc}).")
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.path, timeout=5.0)
+        connection.execute("PRAGMA busy_timeout=5000")
+        return connection
+
+    def _initialize(self) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS eta_samples (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at REAL NOT NULL,
+                    hardware_key TEXT NOT NULL,
+                    exact_key TEXT NOT NULL,
+                    family_key TEXT NOT NULL,
+                    workload REAL NOT NULL,
+                    active_seconds REAL NOT NULL,
+                    wall_seconds REAL NOT NULL,
+                    non_step_seconds REAL,
+                    window_seconds_json TEXT,
+                    source_key TEXT,
+                    profile_json TEXT NOT NULL,
+                    UNIQUE(hardware_key, source_key)
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS eta_samples_exact "
+                "ON eta_samples(hardware_key, exact_key, created_at DESC)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS eta_samples_family "
+                "ON eta_samples(hardware_key, family_key, created_at DESC)"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS eta_import_roots (
+                    root TEXT PRIMARY KEY,
+                    newest_mtime REAL NOT NULL,
+                    scanned_at REAL NOT NULL
+                )
+                """
+            )
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def record(
+        self,
+        task: Mapping[str, Any],
+        active_seconds: float,
+        *,
+        wall_seconds: Optional[float] = None,
+        non_step_seconds: Optional[float] = None,
+        window_seconds: Optional[Sequence[float]] = None,
+        source_key: Optional[str] = None,
+        created_at: Optional[float] = None,
+    ) -> bool:
+        if not self._enabled:
+            return False
+        active = _positive_float(active_seconds, 0.0)
+        if active <= 0:
+            return False
+        wall = _positive_float(wall_seconds, active)
+        wall = max(active, wall)
+        valid_windows = [
+            float(value)
+            for value in (window_seconds or [])
+            if _positive_float(value, 0.0) > 0
+        ]
+        profile = _task_profile(task)
+        try:
+            with self._lock, self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO eta_samples (
+                        created_at, hardware_key, exact_key, family_key,
+                        workload, active_seconds, wall_seconds,
+                        non_step_seconds, window_seconds_json, source_key,
+                        profile_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        float(created_at or time.time()),
+                        self.hardware_key,
+                        profile.exact_key,
+                        profile.family_key,
+                        profile.workload,
+                        active,
+                        wall,
+                        (
+                            max(0.0, float(non_step_seconds))
+                            if non_step_seconds is not None else None
+                        ),
+                        json.dumps(valid_windows),
+                        source_key,
+                        json.dumps(profile.details, sort_keys=True),
+                    ),
+                )
+                inserted = cursor.rowcount > 0
+                if inserted:
+                    connection.execute(
+                        """
+                        DELETE FROM eta_samples
+                        WHERE hardware_key = ? AND exact_key = ? AND id NOT IN (
+                            SELECT id FROM eta_samples
+                            WHERE hardware_key = ? AND exact_key = ?
+                            ORDER BY created_at DESC LIMIT 80
+                        )
+                        """,
+                        (
+                            self.hardware_key, profile.exact_key,
+                            self.hardware_key, profile.exact_key,
+                        ),
+                    )
+                    connection.execute(
+                        """
+                        DELETE FROM eta_samples WHERE id NOT IN (
+                            SELECT id FROM eta_samples
+                            ORDER BY created_at DESC LIMIT 3000
+                        )
+                        """
+                    )
+                return inserted
+        except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+            print(f"[ETA] Could not save local timing sample ({exc}).")
+            return False
+
+    @staticmethod
+    def _decode_windows(value: Any) -> list[float]:
+        try:
+            parsed = json.loads(value or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return []
+        if not isinstance(parsed, list):
+            return []
+        return [
+            float(item)
+            for item in parsed
+            if _positive_float(item, 0.0) > 0
+        ]
+
+    def estimate(self, task: Mapping[str, Any]) -> Optional[HistoricalEtaEstimate]:
+        if not self._enabled:
+            return None
+        profile = _task_profile(task)
+        columns = (
+            "active_seconds, wall_seconds, non_step_seconds, workload, "
+            "window_seconds_json"
+        )
+        try:
+            with self._lock, self._connect() as connection:
+                rows = connection.execute(
+                    f"SELECT {columns} FROM eta_samples "
+                    "WHERE hardware_key = ? AND exact_key = ? "
+                    "ORDER BY created_at DESC LIMIT 40",
+                    (self.hardware_key, profile.exact_key),
+                ).fetchall()
+                match = "exact"
+                if not rows:
+                    rows = connection.execute(
+                        f"SELECT {columns} FROM eta_samples "
+                        "WHERE hardware_key = ? AND family_key = ? "
+                        "ORDER BY created_at DESC LIMIT 40",
+                        (self.hardware_key, profile.family_key),
+                    ).fetchall()
+                    match = "family"
+        except (OSError, sqlite3.Error):
+            return None
+        if not rows:
+            return None
+
+        rates = [
+            float(row[0]) / float(row[3])
+            for row in rows
+            if _positive_float(row[0], 0.0) > 0
+            and _positive_float(row[3], 0.0) > 0
+        ]
+        if not rates:
+            return None
+        active = statistics.median(rates) * profile.workload
+        history_windows: list[float] = []
+        residuals: list[float] = []
+        if match == "exact":
+            for row in rows:
+                decoded = self._decode_windows(row[4])
+                history_windows.extend(decoded)
+                if decoded:
+                    residuals.append(max(0.0, float(row[0]) - sum(decoded)))
+            if history_windows:
+                median_window = statistics.median(history_windows)
+                residual = statistics.median(residuals) if residuals else 0.0
+                active = median_window * profile.window_count + residual
+            else:
+                median_window = None
+        else:
+            median_window = None
+
+        setup_values = [
+            max(0.0, float(row[1]) - float(row[0]))
+            for row in rows
+            if _positive_float(row[1], 0.0) > 0
+            and _positive_float(row[0], 0.0) > 0
+        ]
+        non_step_values = [
+            max(0.0, float(row[2]))
+            for row in rows
+            if row[2] is not None
+        ]
+        setup = statistics.median(setup_values) if setup_values else 0.0
+        return HistoricalEtaEstimate(
+            active_seconds=max(1.0, active),
+            wall_seconds=max(1.0, active + setup),
+            window_seconds=median_window,
+            non_step_seconds=(
+                statistics.median(non_step_values)
+                if non_step_values else None
+            ),
+            sample_count=len(rows),
+            match=match,
+        )
+
+    def bootstrap_from_sidecars(
+        self,
+        root: str,
+        *,
+        max_files: int = 300,
+    ) -> int:
+        """Import recent completed gallery timings once per output folder."""
+
+        if not self._enabled or not root or not os.path.isdir(root):
+            return 0
+        normalized_root = os.path.normcase(os.path.abspath(root))
+        try:
+            with self._lock, self._connect() as connection:
+                row = connection.execute(
+                    "SELECT newest_mtime FROM eta_import_roots WHERE root = ?",
+                    (normalized_root,),
+                ).fetchone()
+                previous_mtime = float(row[0]) if row else 0.0
+        except (OSError, sqlite3.Error, TypeError, ValueError):
+            previous_mtime = 0.0
+
+        candidates: list[tuple[float, str]] = []
+        newest_seen = previous_mtime
+        try:
+            for directory, _subdirs, filenames in os.walk(normalized_root):
+                for filename in filenames:
+                    if not filename.lower().endswith(".meta.json"):
+                        continue
+                    path = os.path.join(directory, filename)
+                    try:
+                        modified = os.path.getmtime(path)
+                    except OSError:
+                        continue
+                    newest_seen = max(newest_seen, modified)
+                    if modified + 1e-6 >= previous_mtime:
+                        candidates.append((modified, path))
+        except OSError:
+            return 0
+        candidates.sort(reverse=True)
+        imported = 0
+        for _modified, path in candidates[:max(1, int(max_files))]:
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    sidecar = json.load(handle)
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            params = sidecar.get("params")
+            if not isinstance(params, Mapping) or not params.get("model_type"):
+                continue
+            mode = str(
+                sidecar.get("generation_mode")
+                or params.get("generation_mode")
+                or "video"
+            ).lower()
+            if mode != "video":
+                continue
+            timing = sidecar.get("multi_window_timing")
+            windows: list[float] = []
+            if isinstance(timing, Mapping):
+                expected = _positive_int(timing.get("window_count"), 1)
+                completed = _positive_int(timing.get("completed_windows"), 0)
+                raw_windows = timing.get("window_generation_seconds") or []
+                if not isinstance(raw_windows, list):
+                    raw_windows = []
+                windows = [
+                    float(value)
+                    for value in raw_windows
+                    if _positive_float(value, 0.0) > 0
+                ]
+                # Intermediate per-window gallery files carry partial timing.
+                # Only the final, complete sequence is a valid training sample.
+                if expected > 1 and (
+                    completed < expected or len(windows) < expected
+                ):
+                    continue
+            active = _positive_float(
+                (
+                    timing.get("total_generation_seconds")
+                    if isinstance(timing, Mapping) else None
+                )
+                or sidecar.get("generation_time"),
+                0.0,
+            )
+            if active <= 0:
+                continue
+            sidecar_job_id = str(sidecar.get("job_id") or "").strip()
+            clip_info = params.get("multi_clip_info")
+            if sidecar_job_id:
+                if isinstance(clip_info, Mapping):
+                    try:
+                        task_index = max(0, int(clip_info.get("index") or 0))
+                    except (TypeError, ValueError):
+                        task_index = 0
+                else:
+                    try:
+                        task_index = max(
+                            0,
+                            int(sidecar.get("director_clip_index") or 0),
+                        )
+                    except (TypeError, ValueError):
+                        task_index = 0
+                # Matches the key written directly by the live job worker,
+                # preventing the later sidecar scan from counting one render
+                # twice.
+                source_key = f"job:{sidecar_job_id}:task:{task_index}"
+            else:
+                source_key = "sidecar:" + hashlib.sha256(
+                    os.path.normcase(os.path.abspath(path)).encode("utf-8")
+                ).hexdigest()
+            if self.record(
+                {"params": dict(params)},
+                active,
+                wall_seconds=(
+                    active
+                    if isinstance(clip_info, Mapping)
+                    else _positive_float(
+                        sidecar.get("job_elapsed_time"), active
+                    )
+                ),
+                window_seconds=windows,
+                source_key=source_key,
+                created_at=_positive_float(
+                    sidecar.get("created_at"), os.path.getmtime(path)
+                ),
+            ):
+                imported += 1
+
+        try:
+            with self._lock, self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO eta_import_roots(root, newest_mtime, scanned_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(root) DO UPDATE SET
+                        newest_mtime = excluded.newest_mtime,
+                        scanned_at = excluded.scanned_at
+                    """,
+                    (normalized_root, newest_seen, time.time()),
+                )
+        except (OSError, sqlite3.Error):
+            pass
+        return imported
+
+
 @dataclass
 class _CompletedTask:
     workload: float
@@ -158,14 +765,22 @@ class AdaptiveGenerationEta:
         self,
         tasks: Sequence[Mapping[str, Any]],
         *,
+        history_store: Optional[GenerationEtaHistory] = None,
         now_fn=time.monotonic,
     ) -> None:
         self._now = now_fn
-        self._workloads = [task_workload(task) for task in tasks] or [1.0]
+        self._tasks = list(tasks) or [{"params": {}}]
+        self._task_profiles = [_task_profile(task) for task in self._tasks]
+        self._workloads = [profile.workload for profile in self._task_profiles]
         self._cache_start_percents = [
-            task_cache_start_percent(task) for task in tasks
-        ] or [None]
-        self._join_overhead = _join_overhead_seconds(tasks)
+            task_cache_start_percent(task) for task in self._tasks
+        ]
+        self._join_overhead = _join_overhead_seconds(self._tasks)
+        self._history_store = history_store
+        self._history_estimates = [
+            history_store.estimate(task) if history_store is not None else None
+            for task in self._tasks
+        ]
         self._completed: list[Optional[_CompletedTask]] = [
             None for _ in self._workloads
         ]
@@ -189,6 +804,17 @@ class AdaptiveGenerationEta:
     def total_tasks(self) -> int:
         return len(self._workloads)
 
+    @property
+    def history_sample_count(self) -> int:
+        return max(
+            (
+                estimate.sample_count
+                for estimate in self._history_estimates
+                if estimate is not None
+            ),
+            default=0,
+        )
+
     def start_task(self, index: int, *, now: Optional[float] = None) -> None:
         now = self._now() if now is None else float(now)
         self._current_index = min(max(0, int(index)), self.total_tasks - 1)
@@ -202,7 +828,7 @@ class AdaptiveGenerationEta:
         self._samples = []
         self._finished_step_seconds = 0.0
         self._window_index = 1
-        self._window_total = 1
+        self._window_total = self._task_profiles[self._current_index].window_count
         self._window_started_at = None
         self._completed_window_seconds = []
         self._last_snapshot = self.snapshot(now=now)
@@ -398,6 +1024,10 @@ class AdaptiveGenerationEta:
             for item in self._completed
             if item is not None and item.non_step_seconds >= 0
         ]
+        if self._current_index is not None:
+            prior = self._history_estimates[self._current_index]
+            if prior is not None and prior.non_step_seconds is not None:
+                values.append(prior.non_step_seconds)
         if values:
             return max(2.0, statistics.median(values))
         return 10.0
@@ -414,6 +1044,15 @@ class AdaptiveGenerationEta:
         rate = self._completed_rate()
         if rate is not None:
             return max(1.0, rate * self._workloads[index])
+        prior = self._history_estimates[index]
+        if prior is not None:
+            # Before the first sampler callback, include the model/setup tail
+            # observed by earlier equivalent jobs. Once rendering begins that
+            # cost has already elapsed, so the active-generation prior is the
+            # correct remaining-time baseline.
+            if index == self._current_index and self._first_progress_at is None:
+                return prior.wall_seconds
+            return prior.active_seconds
         if (
             self._current_index is not None
             and self._first_progress_at is not None
@@ -445,6 +1084,8 @@ class AdaptiveGenerationEta:
                 "project_eta_seconds": None,
                 "eta_confidence": "calibrating",
                 "eta_basis": "waiting-for-first-clip",
+                "eta_history_samples": 0,
+                "eta_history_match": None,
                 "clip_estimates": [],
             }
 
@@ -473,29 +1114,62 @@ class AdaptiveGenerationEta:
             phase_remaining + self._non_step_overhead()
             if phase_remaining is not None else None
         )
-        completed_window_total = (
+        observed_window_total = (
             statistics.median(self._completed_window_seconds)
             if self._completed_window_seconds else None
         )
-        history_window_remaining = (
-            max(0.0, completed_window_total - window_elapsed)
-            if completed_window_total is not None else None
+        current_prior = self._history_estimates[current]
+        prior_window_total = (
+            current_prior.window_seconds
+            if current_prior is not None else None
         )
+        if observed_window_total is not None and prior_window_total is not None:
+            observed_weight = min(
+                0.9,
+                0.45 + 0.18 * len(self._completed_window_seconds),
+            )
+            expected_window_total = (
+                observed_weight * observed_window_total
+                + (1.0 - observed_weight) * prior_window_total
+            )
+        else:
+            expected_window_total = (
+                observed_window_total
+                if observed_window_total is not None
+                else prior_window_total
+            )
+        expected_window_remaining = (
+            max(0.0, expected_window_total - window_elapsed)
+            if expected_window_total is not None else None
+        )
+        if (
+            expected_window_total is not None
+            and expected_window_remaining == 0.0
+            and self._completed[current] is None
+        ):
+            # A decode/save phase can occasionally run past the learned
+            # median. Keep the completion clock ahead of the current time
+            # instead of displaying a stale timestamp in the past while the
+            # next status callback supplies more evidence.
+            expected_window_remaining = max(
+                8.0,
+                min(180.0, expected_window_total * 0.10),
+            )
         sample_steps = sum(weight for _, weight, _ in self._samples)
         if (
             live_window_remaining is not None
-            and history_window_remaining is not None
+            and expected_window_remaining is not None
         ):
             live_weight = min(0.8, 0.35 + 0.05 * sample_steps)
             window_remaining = (
                 live_weight * live_window_remaining
-                + (1.0 - live_weight) * history_window_remaining
+                + (1.0 - live_weight) * expected_window_remaining
             )
         else:
             window_remaining = (
                 live_window_remaining
                 if live_window_remaining is not None
-                else history_window_remaining
+                else expected_window_remaining
             )
 
         live_remaining: Optional[float] = None
@@ -503,8 +1177,8 @@ class AdaptiveGenerationEta:
             live_remaining = window_remaining
             if self._window_total > 1 and self._window_index < self._window_total:
                 completed_window = (
-                    completed_window_total
-                    if completed_window_total is not None
+                    expected_window_total
+                    if expected_window_total is not None
                     else max(1.0, window_elapsed + window_remaining)
                 )
                 live_remaining += (
@@ -529,6 +1203,12 @@ class AdaptiveGenerationEta:
                 if live_remaining is not None
                 else history_remaining
             )
+        if (
+            self._first_progress_at is None
+            and current_prior is not None
+            and history_remaining is not None
+        ):
+            clip_remaining = history_remaining
         if self._completed[current] is not None:
             clip_remaining = 0.0
 
@@ -572,17 +1252,36 @@ class AdaptiveGenerationEta:
             )
 
         completed_count = sum(item is not None for item in self._completed)
+        history_samples = current_prior.sample_count if current_prior else 0
+        history_match = current_prior.match if current_prior else None
         post_cache_steps = sum(
             weight for _, weight, post in self._samples if post
         )
         if sample_steps < 2 and completed_count == 0:
-            confidence = "calibrating"
+            if history_match == "exact" and history_samples >= 3:
+                confidence = "high"
+            elif history_match == "exact" and history_samples >= 1:
+                confidence = "medium"
+            elif history_samples >= 1:
+                confidence = "low"
+            else:
+                confidence = "calibrating"
         elif completed_count >= 2 and (post_cache_steps >= 3 or self._cache_start_step(self._total_steps) is None):
             confidence = "high"
-        elif completed_count >= 1 or sample_steps >= 4:
+        elif completed_count >= 1 or sample_steps >= 4 or history_samples >= 1:
             confidence = "medium"
         else:
             confidence = "low"
+
+        cache_active = self._cache_start_step(self._total_steps) is not None
+        if cache_active and sample_steps > 0:
+            eta_basis = "live-cache-aware"
+        elif history_samples > 0 and sample_steps > 0:
+            eta_basis = "historical-adaptive"
+        elif history_samples > 0:
+            eta_basis = "historical"
+        else:
+            eta_basis = "live-adaptive"
 
         return {
             "current_clip": current + 1,
@@ -609,11 +1308,9 @@ class AdaptiveGenerationEta:
                 if project_remaining is not None else None
             ),
             "eta_confidence": confidence,
-            "eta_basis": (
-                "live-cache-aware"
-                if self._cache_start_step(self._total_steps) is not None
-                else "live-adaptive"
-            ),
+            "eta_basis": eta_basis,
+            "eta_history_samples": history_samples,
+            "eta_history_match": history_match,
             "clip_estimates": clip_estimates,
         }
 
@@ -621,6 +1318,9 @@ class AdaptiveGenerationEta:
         self,
         seconds: Optional[float],
         *,
+        wall_seconds: Optional[float] = None,
+        window_seconds: Optional[Sequence[float]] = None,
+        source_key: Optional[str] = None,
         now: Optional[float] = None,
     ) -> dict[str, Any]:
         now = self._now() if now is None else float(now)
@@ -643,5 +1343,19 @@ class AdaptiveGenerationEta:
             seconds=actual,
             non_step_seconds=non_step,
         )
+        if self._history_store is not None:
+            self._history_store.record(
+                self._tasks[self._current_index],
+                actual,
+                wall_seconds=wall_seconds,
+                non_step_seconds=non_step,
+                window_seconds=window_seconds,
+                source_key=source_key,
+            )
+            self._history_estimates[self._current_index] = (
+                self._history_store.estimate(
+                    self._tasks[self._current_index]
+                )
+            )
         self._last_snapshot = self.snapshot(now=now)
         return dict(self._last_snapshot)

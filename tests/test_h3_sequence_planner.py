@@ -166,6 +166,202 @@ class H3ReferenceSequencePlannerTests(unittest.TestCase):
         self.assertIn("<Subject 1> enters screen-left", detailed)
         self.assertIn("[Shot 2] At 00:04.000, hard cut", detailed)
 
+    def test_compiler_keeps_reference_and_prompt_native_cast_exactly_once(self):
+        source_prompt = (
+            "Make a scene from Friends. Blaine walks into the coffee shop, "
+            "sits on the couch between Ross and Rachel, and breathes a sigh of relief."
+        )
+        clips, _ = compute_h3_sequence_clips(226)
+        relationships, retention, task_types = _reference_context([{
+            "type": "image",
+            "path": "blaine.png",
+            "role": "Blaine",
+            "image_intent": "identity",
+        }])
+        plan = {
+            "source_prompt": source_prompt,
+            "source_intent": {
+                "cast_names": ["Blaine", "Ross", "Rachel"],
+                "blocking_contract": (
+                    "Before Blaine sits, Ross and Rachel occupy opposite seats with one empty place between them while Blaine remains separate. "
+                    "After that sitting beat, preserve the stable screen order Ross - Blaine - Rachel"
+                ),
+            },
+            "subject_definitions": "Blaine, Ross, and Rachel retain their identities",
+            "retention_analysis": retention,
+            "setting_continuity": "The same cozy coffee shop",
+            "visual_style": "warm live-action sitcom coverage",
+            "ambient_audio": "Coffee cups and room tone",
+            "music": "N/A",
+            "clips": [{
+                "clip": 1,
+                "title": "Blaine joins the couch",
+                "summary": "Blaine enters and sits between Ross and Rachel",
+                "opening_state": "Ross and Rachel sit with one empty place while Blaine enters separately",
+                "coverage": "motivated multi-shot coverage",
+                "pacing": "natural real-time pacing",
+                "shots": [{
+                    "shot": 1,
+                    "start_seconds": 0.0,
+                    "end_seconds": 6.0,
+                    "transition": "opening composition",
+                    "framing": "medium-wide view of Blaine, Ross, and Rachel",
+                    "camera": "tracks Blaine toward the couch",
+                    "action": "Blaine walks in and sits between Ross and Rachel",
+                    "dialogue": [],
+                    "sound_effects": "Footsteps and couch cushion movement",
+                }, {
+                    "shot": 2,
+                    "start_seconds": 6.0,
+                    "end_seconds": clips[0]["duration_seconds"],
+                    "transition": "hard cut",
+                    "framing": "medium shot of Blaine as he reaches the couch again",
+                    "camera": "locked reaction coverage",
+                    "action": (
+                        "The immediate result of the preceding assigned event remains "
+                        "visible without repeating, restarting, or adding a story event"
+                    ),
+                    "dialogue": [],
+                    "sound_effects": "Natural coffee shop ambience",
+                }],
+                "closing_state": "Ross, Blaine, and Rachel hold the stable couch order",
+            }],
+        }
+
+        compiled = compile_h3_reference_sequence_prompts(
+            plan,
+            clips,
+            reference_relationships=relationships,
+            default_retention=retention,
+            task_types=task_types,
+        )
+        prompt = compiled[0]["prompt"]
+        subjects = prompt.split("\n\nsummary:", 1)[0]
+        self.assertIn("<Subject 1> is Blaine", subjects)
+        self.assertIn("Ross, Rachel are named prompt-native", subjects)
+        self.assertNotIn("<Subject 2>", subjects)
+        self.assertIn(
+            "Principal cast in this clip: exactly one <Subject 1>, exactly one Ross, exactly one Rachel",
+            prompt,
+        )
+        self.assertIn("Ross - <Subject 1> - Rachel", prompt)
+        self.assertNotIn("as he reaches the couch again", prompt)
+        self.assertEqual(compiled[0]["active_cast"], ["Blaine", "Ross", "Rachel"])
+
+    def test_compiler_supports_several_reference_and_prompt_native_characters(self):
+        clips, _ = compute_h3_sequence_clips(226)
+        references = [
+            {"type": "image", "path": "one.png", "role": "Ava", "image_intent": "identity"},
+            {"type": "image", "path": "two.png", "role": "Ben", "image_intent": "identity"},
+        ]
+        relationships, retention, task_types = _reference_context(references)
+        cast = ["Ava", "Ben", "Clark", "Diana", "Eli"]
+        plan = {
+            "source_prompt": "Ava, Ben, Clark, Diana, and Eli gather around one table.",
+            "source_intent": {"cast_names": cast, "blocking_contract": ""},
+            "subject_definitions": "All five named characters remain stable",
+            "retention_analysis": retention,
+            "setting_continuity": "One conference room",
+            "visual_style": "cinematic realism",
+            "ambient_audio": "Quiet room tone",
+            "music": "N/A",
+            "clips": [{
+                "clip": 1,
+                "title": "The group meets",
+                "summary": "Ava, Ben, Clark, Diana, and Eli gather around one table",
+                "opening_state": "Ava, Ben, Clark, Diana, and Eli occupy distinct seats",
+                "coverage": "master shot followed by smaller group coverage",
+                "pacing": "natural real-time pacing",
+                "shots": [{
+                    "shot": 1,
+                    "start_seconds": 0.0,
+                    "end_seconds": clips[0]["duration_seconds"],
+                    "transition": "opening composition",
+                    "framing": "wide group master",
+                    "camera": "slow motivated push in",
+                    "action": "Ava, Ben, Clark, Diana, and Eli gather around one table",
+                    "dialogue": [],
+                    "sound_effects": "Chairs settle",
+                }],
+                "closing_state": "All five remain in distinct seats",
+            }],
+        }
+        prompt = compile_h3_reference_sequence_prompts(
+            plan,
+            clips,
+            reference_relationships=relationships,
+            default_retention=retention,
+            task_types=task_types,
+        )[0]["prompt"]
+
+        self.assertIn("<Subject 1> is Ava", prompt)
+        self.assertIn("<Subject 2> is Ben", prompt)
+        self.assertIn("Clark, Diana, Eli are named prompt-native", prompt)
+        self.assertIn("exactly one <Subject 1>", prompt)
+        self.assertIn("exactly one <Subject 2>", prompt)
+        self.assertIn("exactly one Clark", prompt)
+        self.assertIn("Establish the full group once", prompt)
+
+    def test_compiler_limits_each_window_contract_to_its_active_cast(self):
+        clips, _ = compute_h3_sequence_clips(500)
+        relationships, retention, task_types = _reference_context([
+            {"type": "image", "path": "ava.png", "role": "Ava", "image_intent": "identity"},
+            {"type": "image", "path": "ben.png", "role": "Ben", "image_intent": "identity"},
+        ])
+
+        def clip(number: int, names: str, duration: float) -> dict:
+            return {
+                "clip": number,
+                "title": f"Beat {number}",
+                "summary": f"{names} complete the assigned beat",
+                "opening_state": f"{names} are present in a clear composition",
+                "coverage": "motivated coverage",
+                "pacing": "natural real-time pacing",
+                "shots": [{
+                    "shot": 1,
+                    "start_seconds": 0.0,
+                    "end_seconds": duration,
+                    "transition": "opening composition",
+                    "framing": f"medium shot of {names}",
+                    "camera": "subtle push in",
+                    "action": f"{names} complete the assigned beat",
+                    "dialogue": [],
+                    "sound_effects": "Natural synchronized effects",
+                }],
+                "closing_state": f"{names} hold the completed state",
+            }
+
+        plan = {
+            "source_prompt": "Ava meets Ben. Later, Cara enters alone.",
+            "source_intent": {
+                "cast_names": ["Ava", "Ben", "Cara"],
+                "blocking_contract": "",
+            },
+            "subject_definitions": "Ava, Ben, and Cara remain stable",
+            "retention_analysis": retention,
+            "setting_continuity": "One connected location",
+            "visual_style": "cinematic realism",
+            "ambient_audio": "Natural room tone",
+            "music": "N/A",
+            "clips": [
+                clip(1, "Ava and Ben", clips[0]["duration_seconds"]),
+                clip(2, "Cara", clips[1]["duration_seconds"]),
+            ],
+        }
+        compiled = compile_h3_reference_sequence_prompts(
+            plan,
+            clips,
+            reference_relationships=relationships,
+            default_retention=retention,
+            task_types=task_types,
+        )
+
+        self.assertEqual(compiled[0]["active_cast"], ["Ava", "Ben"])
+        self.assertEqual(compiled[1]["active_cast"], ["Cara"])
+        self.assertNotIn("Cara", compiled[0]["cast_contract"])
+        self.assertNotIn("<Subject 1>", compiled[1]["cast_contract"])
+        self.assertNotIn("<Subject 2>", compiled[1]["cast_contract"])
+
     def test_manual_native_sequence_preserves_each_prompt_exactly(self):
         source = "First exact window prompt\nSecond exact window prompt\nThird exact window prompt"
         result = build_manual_h3_reference_sequence_plan(

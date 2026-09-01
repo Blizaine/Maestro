@@ -133,6 +133,10 @@ export interface GenerateParams {
   remove_background_images_ref?: number
   /** UI-only workflow marker retained in output sidecars. */
   _studio_image_workflow?: StudioImageWorkflow
+  /** UI-only Video workflow marker retained in output sidecars. */
+  _studio_video_workflow?: StudioVideoWorkflow
+  /** UI-only long-form selector retained for reload/sidecar fidelity. */
+  _duration_planning_mode?: 'duration' | 'windows' | 'auto'
   // TTS-specific
   audio_guide2?: string
   duration_seconds?: number
@@ -187,8 +191,8 @@ export interface GenerateParams {
   minimax_h3_reference_sequence?: boolean
   /** Enable native multi-window continuation for H3 First / Last. Defaults on. */
   minimax_h3_multi_window?: boolean
-  /** Choose AI story planning or one user-authored prompt line per Omni pass. */
-  minimax_h3_sequence_prompt_mode?: 'auto' | 'manual'
+  /** Choose faithful AI planning, creative AI writing, or one exact prompt per pass. */
+  minimax_h3_sequence_prompt_mode?: WindowPromptMode
   /** Native Ref2VA clip ceiling selected by Auto or the Advanced override. */
   minimax_h3_sequence_clip_frames?: number
   /** Honor the user's locked Omni clip length above Auto's recommendation. */
@@ -214,19 +218,23 @@ export interface GenerateParams {
   _h3_original_prompt?: string
   /** Explicitly enable rolling long-form generation for the LTX family. */
   ltx_multi_window?: boolean
-  /** Expand one overall idea with AI, or consume one exact line per window. */
-  ltx_window_prompt_mode?: 'auto' | 'manual'
+  /** Expand one idea faithfully/creatively, or consume one exact line per window. */
+  ltx_window_prompt_mode?: WindowPromptMode
   /** Compiled, single-line prompts consumed by WanGP's native window router. */
   ltx_window_prompts?: string[]
   /** Original overall idea retained while the compiled prompts are visible. */
   _ltx_original_prompt?: string
 }
 
+export type WindowPromptMode = 'auto' | 'creative' | 'manual'
+export type WindowPlanningStyle = 'faithful' | 'creative'
+
 export interface LTXWindowPlan {
   source_prompt: string
   window_count: number
   window_prompts: string[]
   planned_by: 'llm' | 'manual' | 'reviewed' | 'deterministic_fallback' | string
+  planning_style?: WindowPlanningStyle
   planning_error?: string | null
 }
 
@@ -308,8 +316,11 @@ export interface H3WindowPlanWindow {
 export interface H3WindowPlan {
   source_prompt: string
   signature: string
-  planned_by: 'llm' | 'deterministic_fallback' | 'not_needed' | 'manual'
+  planned_by: 'llm' | 'hybrid_repair' | 'deterministic_fallback' | 'not_needed' | 'manual'
   planning_warnings?: string[]
+  planning_diagnostics?: string[]
+  planning_notes?: string[]
+  planning_style?: WindowPlanningStyle
   plan_kind?: 'sliding_window' | 'reference_sequence'
   camera_coverage?: 'auto' | 'continuous' | 'multi_shot'
   total_frames: number
@@ -378,7 +389,9 @@ export interface GenerationJob {
   generationCompletionAt?: number | null
   projectCompletionAt?: number | null
   etaConfidence?: 'calibrating' | 'low' | 'medium' | 'high'
-  etaBasis?: 'waiting-for-first-clip' | 'live-adaptive' | 'live-cache-aware'
+  etaBasis?: 'waiting-for-first-clip' | 'historical' | 'historical-adaptive' | 'live-adaptive' | 'live-cache-aware'
+  etaHistorySamples?: number
+  etaHistoryMatch?: 'exact' | 'family' | null
 }
 
 export interface OutputFile {
@@ -642,6 +655,7 @@ export type GenerationMode = 'image' | 'video' | 'audio' | 'avatar' | 'tools'
  */
 export type StudioVideoWorkflow =
   | 'frames'
+  | 'references'
   | 'extend'
   | 'blend'
   | 'retake'
@@ -652,17 +666,16 @@ export type StudioVideoWorkflow =
   | 'upscale'
   | 'film_grain'
 /**
- * Internal media intent inside Studio Video's primary Generate workflow.
- * There is deliberately no user-facing mode selector: Maestro derives this
- * from the roles of the attached frames, references, characters, and audio.
+ * Internal media intent inside Studio Video's Frames/References workflows.
+ * Frames derives text, fixed-frame, and audio-drive routing from its inputs;
+ * References always resolves to the native H3 Omni route.
  */
 export type StudioVideoEffectiveCreateRoute = 'generate' | 'guided' | 'audio' | 'omni'
 /** Backward-compatible persisted shape; new sessions always use Auto. */
 export type StudioVideoCreateRoute = 'auto' | StudioVideoEffectiveCreateRoute
 /** User-facing Studio Image workflow. */
 export type StudioImageWorkflow =
-  | 'new'
-  | 'edit'
+  | 'generate'
   | 'inpaint'
   | 'outpaint'
   | 'upscale'
@@ -927,6 +940,14 @@ export interface ModelFolderCandidate {
   linked: boolean
 }
 
+export interface MultiWindowTiming {
+  window_count: number
+  completed_windows?: number
+  scene_duration_seconds?: number | null
+  window_generation_seconds: number[]
+  total_generation_seconds: number
+}
+
 export interface OutputMetadata {
   source: 'sidecar' | 'embedded' | 'none'
   params: Record<string, unknown> | null
@@ -944,6 +965,9 @@ export interface OutputMetadata {
   director_clip_index?: number
   generation_time?: number
   generation_time_basis?: 'active' | 'elapsed'
+  /** Exact native-window render timings captured after each successfully
+   *  saved window. Available for new multi-window generations. */
+  multi_window_timing?: MultiWindowTiming
   job_elapsed_time?: number
   created_at?: number
 }
@@ -1012,9 +1036,9 @@ export interface ServicesConfig {
   ltx_progressive_pipeline: boolean
   /** Master gate for experimental / power-user features. When false
    *  (default), the Services panel hides Director v2 engine, Voice
-   *  Reference, external API keys (Google/OpenAI/Anthropic), and the
-   *  Studio prompt enhancer config; the Edit mode picker hides
-   *  Inpaint. Flipping this on surfaces all of them. */
+   *  external API keys (Google/OpenAI/Anthropic), and the Studio prompt
+   *  enhancer config; the Edit mode picker hides Inpaint. LTX Voice
+   *  Reference is a separate opt-in under Video Frames → Advanced. */
   show_experimental: boolean
   /** Storage Manager opt-in: allow removing duplicate files FROM linked
    *  installs (Recycle Bin only). Default off — informed consent. */

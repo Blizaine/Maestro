@@ -272,6 +272,11 @@ function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop
                 ) : job.etaConfidence === 'calibrating' ? (
                   <p>Calibrating ETA…</p>
                 ) : null}
+                {(job.etaHistorySamples ?? 0) > 0 && (
+                  <p>
+                    Learned from {job.etaHistorySamples} {job.etaHistoryMatch === 'exact' ? 'matching' : 'related'} local render{job.etaHistorySamples === 1 ? '' : 's'}
+                  </p>
+                )}
               </div>
             )}
             {isFailed && (
@@ -419,6 +424,11 @@ function PipelinePlaceholder() {
                   <p>
                     Full Director render {projectEta}
                     {projectClock ? ` · around ${projectClock}` : ''}
+                  </p>
+                )}
+                {(progress?.eta_history_samples ?? 0) > 0 && (
+                  <p>
+                    Learned from {progress!.eta_history_samples} {progress!.eta_history_match === 'exact' ? 'matching' : 'related'} local render{progress!.eta_history_samples === 1 ? '' : 's'}
                   </p>
                 )}
               </div>
@@ -636,6 +646,9 @@ export function MainContent() {
   }, [estimatedItemHeight])
 
   const { startIndex, endIndex, totalHeight, itemOffsets } = useMemo(() => {
+    // Measurement changes must invalidate the virtual layout even though the
+    // actual values live in a ref rather than in React state.
+    void measureEpoch
     const count = outputs.length
     const offsets: number[] = new Array(count)
     let cumulative = placeholderTotalHeight

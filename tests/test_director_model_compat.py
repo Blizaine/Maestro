@@ -1332,10 +1332,10 @@ class TestDirectorVideoExecutionProfile(unittest.TestCase):
             pipeline._prepare_director_generation_params(params)
 
         self.assertTrue(params["sliding_window_memory_override"])
-        self.assertEqual(params["num_inference_steps"], 6)
+        self.assertEqual(params["num_inference_steps"], 8)
         self.assertEqual(
             params["activated_loras"],
-            ["minimax_h3_turbo_v4_step600_ema.safetensors"],
+            ["MiniMax-H3-FL2VA-Acc-8Step.safetensors"],
         )
         self.assertEqual(params["loras_multipliers"], "1.00")
 
@@ -2299,6 +2299,8 @@ class TestDirectorUICatalogContract(unittest.TestCase):
         self.assertIn("Maximum planned shot", chat)
         self.assertIn("H3 Optimizations", director_h3_optimizations)
         self.assertIn("Director H3 Turbo", director_h3_optimizations)
+        self.assertIn("const defaultTurboPreset", director_h3_optimizations)
+        self.assertIn("const selectedTurboPreset = turboRequested", director_h3_optimizations)
         self.assertIn("Director H3 Sol Engine", director_h3_optimizations)
         self.assertIn("Director First Block Cache", director_h3_optimizations)
         self.assertIn("setDirectorH3TurboMode", director_h3_optimizations)

@@ -27,6 +27,7 @@ Direct access to every model and every knob:
 - **Image** — create, edit, upscale, or outpaint with Flux 2 Klein 9B, Krea 2 RAW/Turbo and Identity Edit, Qwen Image Edit, and more.
 - **Audio** — generate music with MiniMax-Music3 or ACE-Step, speech with Kugelaudio or Qwen3 TTS, sound effects with MMAudio, and revoice existing clips.
 - **Multi-clip generation** with per-clip prompts, seamless overlapping (sliding window) transitions, and shared LoRAs
+- **Long-form planning up to 60 minutes** with one-window, friendly duration, exact timecode, window-count, and Auto controls; Faithful or Creative AI can plan each independent window
 - **Blend video Mode** Remember Sora 1 blend mode, where you could overlap two videos, and use AI to blend them together? 
 - **Frames Injection (KFI)** for character continuity in long videos
 - **Sliding window** for arbitrarily long generations
@@ -82,12 +83,13 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
-### v2.0.0 (2026-08-29)
+### v2.0.0 (2026-09-01)
 
 **A complete create-to-edit workflow**
 - Added the new full-screen **Editor Mode** with multi-track video, audio, and title editing; 21:9 canvases; canvas transforms and snap guides; transitions, speed, opacity, volume, fonts, undo/redo, project history, and hardware-aware export.
 - Director productions can be opened as editable timelines with separate shot clips and the complete soundtrack, while any timeline clip can make a round trip through Maestro AI and return as a new take.
 - Reorganized Studio into clear Video, Image, and Audio workflows. Video editing tools now live beside generation, Image adds dedicated New/Edit/Upscale/Outpaint modes, Audio includes Revoice, and Finish adds reusable film grain.
+- Added unified long-form planning up to 60 minutes with duration presets, exact timecodes, direct window counts, media/story-aware Auto duration, and Faithful or Creative AI window prompts. Frequently used Studio modes, models, planning choices, and H3 optimizations now survive restarts.
 
 **MiniMax H3, references, and local intelligence**
 - Added H3's native 768p tier, 21:9 canvases, and Regenerate 2K workflow, plus Alibaba PAI FL2VA and Ref2VA acceleration presets with native PDD support.
@@ -96,8 +98,9 @@ The version you are running is shown next to the Maestro title in the UI. To upd
 - Added Qwen3.8 27B Uncensored with creative thinking controls, prompt-enhancement telemetry, and non-thinking structured-output paths.
 
 **Remote workflow and release polish**
-- Added completion alerts, optional chimes, encrypted closed-app Web Push, an installable Maestro web app, and optional private HTTPS access through each user's own Tailscale account.
-- Added per-clip, multi-window, and full Director completion estimates, including cache-aware calibration for First Block Cache.
+- Added completion alerts, optional chimes, encrypted closed-app Web Push, an installable Maestro web app, and optional private HTTPS access through each user's own Tailscale account. Windows restores opted-in Tailscale access after Maestro restarts without repeated approval prompts.
+- Added per-clip, multi-window, and full Director completion estimates, including cache-aware calibration for First Block Cache and private local timing history for more accurate future estimates.
+- Expanded gallery details and search across model, resolution, LoRAs, H3 optimizations, prompts, window counts, and generation timing, while making the viewed or playing clip the reliable active Studio target.
 - Updated Maestro's orange app icon, unified the responsive Director / Studio / Editor header and version display, added Director first-frame thumbnails and full-rate iOS Editor preview playback, simplified the Pinokio menu, and preserved the v1.9.1 llama.cpp nightly-download hotfix.
 
 See the [complete v2.0 release notes](docs/RELEASE_NOTES_V2.0.md) and [Tailscale setup guide](docs/TAILSCALE_REMOTE_ACCESS.md).
@@ -752,7 +755,7 @@ Tailscale is optional. Its Personal plan is suitable for an individual connectin
 3. Scan/copy the private `https://…ts.net` address shown in Maestro's Notifications settings.
 4. On iPhone/iPad, open that address in Safari, use **Share → Add to Home Screen**, open the installed Maestro app, and enable **System notifications**.
 
-The one-time Secure Remote Access action remembers Maestro's actual backend port and reuses it on future starts, so Tailscale's persistent background route remains valid without running setup again. `PINOKIO_SHARE_LOCAL_PORT` controls Pinokio's separate LAN proxy and does not need to be set for Tailscale. If the saved port is occupied and Maestro falls back to another one, run Secure Remote Access once to adopt the new port. Disable it from Notifications settings or run `tailscale serve --https=443 off`. Maestro will refuse to overwrite a different existing Serve route. Web Push signing keys and browser subscriptions live only in `app/settings/web_push.json` (a gitignored local file). Notification payloads travel directly from the local Maestro host to the browser vendor's encrypted Web Push endpoint.
+The one-time Secure Remote Access action remembers Maestro's actual backend port and reuses it on future starts. On Windows it also registers a fixed, on-demand restore helper for that loopback target, so Maestro can repair the private route on later starts without another UAC prompt. Users who enabled an earlier v2 preview should run the action one final time after updating. `PINOKIO_SHARE_LOCAL_PORT` controls Pinokio's separate LAN proxy and does not need to be set for Tailscale. If the saved port is occupied and Maestro falls back to another one, run Secure Remote Access once to adopt the new port. Disable it from Notifications settings or run `tailscale serve --https=443 off`. Maestro will refuse to overwrite a different existing Serve route. Web Push signing keys and browser subscriptions live only in `app/settings/web_push.json` (a gitignored local file). Notification payloads travel directly from the local Maestro host to the browser vendor's encrypted Web Push endpoint.
 
 ### Notification and remote-access API
 

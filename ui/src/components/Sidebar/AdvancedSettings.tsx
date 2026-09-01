@@ -143,6 +143,96 @@ function PresetManager() {
   )
 }
 
+function LtxExperimentalToggle({
+  checked,
+  onChange,
+  label,
+  badge,
+  description,
+}: {
+  checked: boolean
+  onChange: () => void
+  label: string
+  badge?: string
+  description: string
+}) {
+  return (
+    <div className="flex items-start justify-between gap-3">
+      <div className="min-w-0">
+        <div className="text-[11px] text-text-secondary">
+          {label}
+          {badge ? (
+            <span className="ml-1.5 rounded border border-accent-blue/30 px-1 py-0.5 text-[8px] text-accent-blue">
+              {badge}
+            </span>
+          ) : null}
+        </div>
+        <p className="mt-0.5 text-[9px] leading-relaxed text-text-muted">
+          {description}
+        </p>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        aria-label={label}
+        onClick={onChange}
+        className={`relative mt-0.5 h-5 w-9 shrink-0 rounded-full transition-colors ${
+          checked ? 'bg-accent-blue' : 'border border-border bg-bg-tertiary'
+        }`}
+      >
+        <span className={`absolute left-0.5 top-0.5 h-4 w-4 rounded-full border border-border bg-white shadow transition-transform ${
+          checked ? 'translate-x-4' : 'translate-x-0'
+        }`} />
+      </button>
+    </div>
+  )
+}
+
+function LtxFramesExperimentalControls() {
+  const generationMode = useStore(s => s.generationMode)
+  const workflow = useStore(s => s.studioVideoWorkflow)
+  const modelType = useStore(s => s.params.model_type)
+  const model = useStore(s => s.models.find(candidate => candidate.model_type === modelType))
+  const servicesConfig = useStore(s => s.servicesConfig)
+  const updateServicesConfig = useStore(s => s.updateServicesConfig)
+  const family = String(model?.family || '').toLowerCase()
+  const architecture = String(model?.architecture || '').toLowerCase()
+  const isLtx = family === 'ltx2' || family === 'ltx25' || architecture.startsWith('ltx2')
+
+  if (generationMode !== 'video' || workflow !== 'frames' || !isLtx || !servicesConfig) {
+    return null
+  }
+
+  return (
+    <div className="space-y-3 rounded-lg border border-border bg-bg-tertiary/25 p-3">
+      <div>
+        <label className="text-[11px] uppercase tracking-wider text-text-muted">
+          LTX optional conditioning
+        </label>
+        <p className="mt-0.5 text-[9px] text-text-muted">Off by default. Applies only to Video Frames with an LTX model.</p>
+      </div>
+      <LtxExperimentalToggle
+        checked={servicesConfig.voice_reference_enabled === true}
+        onChange={() => updateServicesConfig({
+          voice_reference_enabled: !servicesConfig.voice_reference_enabled,
+        })}
+        label="Voice Reference (ID-LoRA)"
+        description="Adds a voice sample input for speaker identity conditioning with a compatible LTX ID-LoRA."
+      />
+      <LtxExperimentalToggle
+        checked={servicesConfig.director_multishot_lora_mode === true}
+        onChange={() => updateServicesConfig({
+          director_multishot_lora_mode: !servicesConfig.director_multishot_lora_mode,
+        })}
+        label="Multi-Shot LoRA Prompting"
+        badge="Beta"
+        description="Uses storyboard-style shot prompts with compatible LTX multi-shot IC-LoRAs. Enable the matching LoRA separately."
+      />
+    </div>
+  )
+}
+
 /** Active advanced features as human-readable labels. Drives the badge
  *  count AND its hover tooltip, so a surprising number names its source
  *  instead of sending the user hunting through every section. */
@@ -159,6 +249,9 @@ export function useAdvancedActiveItems(): string[] {
   const generationMode = useStore(s => s.generationMode)
   const editSubMode = useStore(s => s.editSubMode)
   const slidingWindowLocked = useStore(s => s.slidingWindowLocked)
+  const servicesConfig = useStore(s => s.servicesConfig)
+  const studioVideoWorkflow = useStore(s => s.studioVideoWorkflow)
+  const selectedModel = useStore(s => s.models.find(model => model.model_type === s.params.model_type))
   const isScailEdit = (
     generationMode === 'avatar'
     && (editSubMode === 'recast' || editSubMode === 'restyle')
@@ -173,6 +266,17 @@ export function useAdvancedActiveItems(): string[] {
     return items
   }
   if (params.seed !== -1) items.push(`Seed ${params.seed}`)
+  const selectedFamily = String(selectedModel?.family || '').toLowerCase()
+  const selectedArchitecture = String(selectedModel?.architecture || '').toLowerCase()
+  const isLtxFrames = generationMode === 'video'
+    && studioVideoWorkflow === 'frames'
+    && (
+      selectedFamily === 'ltx2'
+      || selectedFamily === 'ltx25'
+      || selectedArchitecture.startsWith('ltx2')
+    )
+  if (isLtxFrames && servicesConfig?.voice_reference_enabled) items.push('LTX voice reference')
+  if (isLtxFrames && servicesConfig?.director_multishot_lora_mode) items.push('LTX multi-shot prompting')
   if (
     String(modelOptions?.architecture || '').startsWith('minimax_h3')
     && slidingWindowLocked
@@ -326,8 +430,6 @@ export function AdvancedSettings() {
     const refs = s.params.image_refs
     return refs && refs.length > 0
   })
-  const durationSeconds = useStore(s => s.durationSeconds)
-  const setDurationSeconds = useStore(s => s.setDurationSeconds)
   const panelRef = useRef<HTMLDivElement>(null)
   const advancedItems = useAdvancedActiveItems()
   const advancedCount = advancedItems.length
@@ -413,6 +515,8 @@ export function AdvancedSettings() {
                   before working through the lower-level tuning controls.
                   Official Outpaint owns its stage-one-only IC-LoRA schedule. */}
               {!isOutpaint && <LoraSelector />}
+
+              <LtxFramesExperimentalControls />
 
               {/* The Qwen conditioner is shared by every H3 transformer.
                   Expose it once here instead of multiplying model entries. */}
@@ -584,25 +688,6 @@ export function AdvancedSettings() {
               {/* TTS Settings */}
               {isAudioOnly && (
                 <>
-                  {/* Max Duration */}
-                  {modelOptions?.duration_slider && (
-                    <div>
-                      <div className="flex items-center justify-between mb-1.5">
-                        <label className="text-[11px] text-text-muted uppercase tracking-wider">
-                          {modelOptions.duration_slider.label || 'Max Duration'}
-                        </label>
-                        <span className="text-xs text-text-secondary">{Math.round(durationSeconds)}s</span>
-                      </div>
-                      <input
-                        type="range"
-                        min={modelOptions.duration_slider.min} max={modelOptions.duration_slider.max} step={modelOptions.duration_slider.increment}
-                        value={durationSeconds}
-                        onChange={e => setDurationSeconds(parseFloat(e.target.value))}
-                        className="w-full"
-                      />
-                    </div>
-                  )}
-
                   {/* Speaker Pause */}
                   {modelOptions?.pause_between_sentences && (
                     <div>

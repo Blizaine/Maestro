@@ -6,7 +6,7 @@ const {
 module.exports = {
   version: "8.0",
   title: "Maestro",
-  description: "An all-in-one, 100% local AI video, image & music studio. Its Director mode turns a single prompt into a full music video or short film — LLM-planned, shot by shot. Built on the WanGP pipeline (Wan 2.1/2.2, LTX-2.3, Qwen, Hunyuan Video, Flux). Requires an NVIDIA GPU (6GB+ VRAM).",
+  description: "An all-in-one, 100% local AI creative studio, director, and multi-track editor. Generate with MiniMax H3, LTX-2.5/2.3, Wan, Flux, Qwen, and more; turn an idea or song into a planned production; then finish it on the timeline. Requires an NVIDIA GPU (6GB+ VRAM).",
   icon: "maestro_simplified_icon_alpha.png",
   menu: async (kernel, info) => {
     const runtime = runtimeProfile(kernel)

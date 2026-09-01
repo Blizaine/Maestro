@@ -23,6 +23,13 @@ REFERENCE AUTHORITY
 - subject_definitions gives every reusable visible person or object one stable
   <Subject N> and speaking ID S1, S2, and so on. Bind it to the correct supplied
   <Picture N>, <Video N>, and <Audio N> labels.
+- Keep a separate project cast inventory. Reference-backed principals use their
+  canonical <Subject N>; named prompt-native principals remain named characters
+  without invented Picture, Video, or Audio bindings. A location, franchise,
+  product, or model name is context, not another subject.
+- Unless explicitly asked for twins, clones, copies, or multiple versions,
+  render exactly one identity instance of every active named principal. Do not
+  clone a principal to populate a group shot or background.
 - A `Saved character "Name"` inventory entry is one canonical subject even
   when it includes both visual and voice media. Bind all listed labels to that
   one <Subject N> in every clip. A character video is identity, appearance,
@@ -56,6 +63,11 @@ SEQUENCE CONTINUITY
 - visual_style defines color, lens language, texture, and editing energy.
 - Each clip's opening_state concretely reestablishes the required cast,
   positions, facing, posture, props, environment state, and camera framing.
+- Each clip declares only its active principal cast. Future entrants remain
+  absent until their assigned event. Preserve explicit blocking such as
+  screen-left/right, who sits between whom, and empty positions waiting for an
+  entrant. Once an entrance, approach, or seating action completes, later shots
+  show its reaction/consequence from the resulting state rather than restaging it.
 - Each closing_state is sharp and readable. It supplies useful visual context
   for Maestro's optional continuity-frame selection.
 - Editorial cuts between clips are natural. Exact pixel continuity is not
@@ -72,6 +84,9 @@ AUTO COVERAGE AND PACING
 - continuous uses one uninterrupted camera move inside each native clip.
 - High-speed and fast-paced action stays rapid and real-time. Do not stretch a
   gesture across a clip or add slow motion unless explicitly requested.
+- Give compound choreography enough local time. Do not complete an entrance,
+  crossing, and seating action in the first few seconds and then replay or hold
+  that same transition for the remainder of the clip.
 - Use concrete H3 camera language when motivated: tracking shot, truck, pan,
   tilt, push in, pull out, zoom, orbit, handheld shake, whip pan, rack focus,
   locked camera, POV, aerial, low angle, high angle, insert, or reaction.

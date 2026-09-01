@@ -19,11 +19,14 @@ from services.h3_prompt_budget import (
     fit_h3_base_prompt,
 )
 from services.h3_story_ledger import (
+    H3DialogueTimingError,
     H3_STORY_LEDGER_VERSION,
     UNREQUESTED_SPECTACLE_PATTERNS,
     extract_h3_source_intent,
+    normalize_h3_planning_style,
     plan_h3_story_segments,
     recover_h3_plain_story,
+    sanitize_h3_nonverbal_audio,
     sanitize_h3_prompt_text,
 )
 
@@ -225,6 +228,7 @@ def h3_window_plan_signature(
     has_start_image: bool,
     has_end_image: bool,
     camera_coverage: str = "auto",
+    planning_style: str = "faithful",
     injected_keyframes: list[dict[str, Any]] | None = None,
 ) -> str:
     """Fingerprint every input that can change a window plan."""
@@ -242,6 +246,7 @@ def h3_window_plan_signature(
         "has_start_image": bool(has_start_image),
         "has_end_image": bool(has_end_image),
         "camera_coverage": normalize_h3_camera_coverage(camera_coverage),
+        "planning_style": normalize_h3_planning_style(planning_style),
         "injected_keyframes": [
             {
                 "path": str(item.get("path") or ""),
@@ -265,6 +270,7 @@ def reviewed_h3_window_plan_matches(
     window_frames: int,
     boundaries: Iterable[dict[str, Any]],
     camera_coverage: str = "auto",
+    planning_style: str = "faithful",
 ) -> bool:
     """Validate a user-reviewed H3 plan without trusting a stale signature.
 
@@ -304,6 +310,8 @@ def reviewed_h3_window_plan_matches(
     if int(plan.get("window_frames") or 0) != int(window_frames):
         return False
     if normalize_h3_camera_coverage(plan.get("camera_coverage")) != normalize_h3_camera_coverage(camera_coverage):
+        return False
+    if normalize_h3_planning_style(plan.get("planning_style")) != normalize_h3_planning_style(planning_style):
         return False
 
     for index, (window, boundary, prompt) in enumerate(
@@ -554,8 +562,13 @@ def compile_h3_window_prompts(
     setting = _compact(plan.get("setting_continuity"), 260)
     visual = _compact(plan.get("visual_continuity"), 360)
     initial_state = _compact(plan.get("initial_state"), 320)
-    ambient = _compact(plan.get("ambient_audio") or "Natural location ambience", 260)
-    music = _compact(plan.get("music") or "N/A", 100)
+    ambient = _compact(
+        sanitize_h3_nonverbal_audio(
+            plan.get("ambient_audio") or "Natural location ambience"
+        ),
+        260,
+    )
+    music = _compact(plan.get("music") or "N/A", 180)
     source_intent = (
         plan.get("source_intent")
         if isinstance(plan.get("source_intent"), dict)
@@ -911,8 +924,23 @@ def _narrative_dialogue_expected(prompt: str, window_count: int) -> bool:
         return False
     if re.search(r"\".+?\"", source):
         return True
+    # An explicit verbal action is sufficient on its own. Requiring two
+    # multi-word proper names missed ordinary briefs such as ``George
+    # Costanza starts telling Joey ...`` and caused Creative planning to
+    # compile the entire exchange as silent visual action.
+    if re.search(
+        r"\b(?:talk(?:s|ed|ing)?(?:\s+(?:to|with))?|convers(?:e|es|ed|ing)|"
+        r"chat(?:s|ted|ting)?|tell(?:s|ing)?|told|explain(?:s|ed|ing)?|"
+        r"inform(?:s|ed|ing)?|announce(?:s|d|ing)?|describe(?:s|d|ing)?|"
+        r"present(?:s|ed|ing)?|say(?:s|ing)?|said|speak(?:s|ing)?|spoke|"
+        r"ask(?:s|ed|ing)?|answer(?:s|ed|ing)?|repl(?:y|ies|ied|ying)|"
+        r"respond(?:s|ed|ing)?|discuss(?:es|ed|ing)?|debate(?:s|d|ing)?|"
+        r"argu(?:e|es|ed|ing)|jok(?:e|es|ed|ing)|banter(?:s|ed|ing)?)\b",
+        lowered,
+    ):
+        return True
     interaction = re.search(
-        r"\b(?:talk|speak|say|ask|answer|discuss|argue|confront|attack|"
+        r"\b(?:confront|attack|"
         r"threaten|rescue|save|protect|warn|interview|can't believe|"
         r"cannot believe|disbelie|astonish|surpris)\w*\b",
         lowered,
@@ -927,6 +955,26 @@ def _narrative_dialogue_expected(prompt: str, window_count: int) -> bool:
         )
     }
     return bool(interaction and len(names) >= 2)
+
+
+def _creative_dialogue_expected(prompt: str, window_count: int) -> bool:
+    """Let Creative write dialogue for character scenes, never silent briefs."""
+
+    source = " ".join(str(prompt or "").split())
+    lowered = source.casefold()
+    if int(window_count) < 2 or re.search(
+        r"\b(?:silent|silently|no dialogue|without dialogue|nonverbal|"
+        r"music video|montage|instrumental|landscape|establishing shot)\b",
+        lowered,
+    ):
+        return False
+    if _narrative_dialogue_expected(source, window_count):
+        return True
+    return bool(re.search(
+        r"\b(?:these|the)\s+(?:two|three|four|five|\d+)\s+characters?\b|"
+        r"\bcharacters?\s+(?:meet|interact|debate|joke|banter|converse)\b",
+        lowered,
+    ))
 
 
 def _plan_contract_violations(
@@ -1192,6 +1240,7 @@ def plan_h3_sliding_windows(
     injected_keyframes: list[dict[str, Any]] | None = None,
     nsfw: bool = False,
     camera_coverage: str = "auto",
+    planning_style: str = "faithful",
 ) -> dict[str, Any]:
     """Use Maestro's configured LLM to create and compile an H3 window plan."""
 
@@ -1212,6 +1261,7 @@ def plan_h3_sliding_windows(
         discard_frames=discard_frames,
     )
     camera_coverage = normalize_h3_camera_coverage(camera_coverage)
+    planning_style = normalize_h3_planning_style(planning_style)
     normalized_keyframes = normalize_h3_injected_keyframes(
         injected_keyframes,
         boundaries,
@@ -1229,6 +1279,7 @@ def plan_h3_sliding_windows(
         has_start_image=has_start_image,
         has_end_image=has_end_image,
         camera_coverage=camera_coverage,
+        planning_style=planning_style,
         injected_keyframes=injected_keyframes,
     )
     if len(boundaries) <= 1:
@@ -1241,6 +1292,7 @@ def plan_h3_sliding_windows(
             "window_count": 1,
             "plan_kind": "sliding_window",
             "camera_coverage": camera_coverage,
+            "planning_style": planning_style,
             "injected_keyframes": normalized_keyframes,
             "windows": [],
             "window_prompts": [],
@@ -1260,10 +1312,17 @@ def plan_h3_sliding_windows(
             f"anchor at {keyframe['global_seconds']:.3f}s on the full timeline "
             f"(window {keyframe['window']}, {keyframe['local_seconds']:.3f}s local)."
         )
-    expect_dialogue = _narrative_dialogue_expected(prompt, len(boundaries))
+    expect_dialogue = (
+        _creative_dialogue_expected(prompt, len(boundaries))
+        if planning_style == "creative"
+        else bool(re.search(r"[\"“][^\"”]+[\"”]", prompt))
+    )
     resolved_coverage = _infer_camera_coverage(prompt, camera_coverage)
     story_ledger: dict[str, Any] | None = None
     planning_warnings: list[str] = []
+    planning_diagnostics: list[str] = []
+    planning_notes: list[str] = []
+    dialogue_fragments: list[dict[str, Any]] = []
     try:
         staged = plan_h3_story_segments(
             prompt,
@@ -1275,11 +1334,15 @@ def plan_h3_sliding_windows(
             camera_coverage=resolved_coverage,
             reference_context=" ".join(media_context),
             expect_dialogue=expect_dialogue,
+            planning_style=planning_style,
             image_paths=image_paths,
             nsfw=nsfw,
         )
         planned_by = staged["planned_by"]
         planning_warnings = list(staged.get("planning_warnings") or [])
+        planning_diagnostics = list(staged.get("planning_diagnostics") or [])
+        planning_notes = list(staged.get("planning_notes") or [])
+        dialogue_fragments = list(staged.get("dialogue_fragments") or [])
         source_intent = staged.get("source_intent") or source_intent
         story_ledger = staged["ledger"]
         windows = []
@@ -1314,6 +1377,8 @@ def plan_h3_sliding_windows(
             has_end_image=has_end_image,
             injected_keyframes=normalized_keyframes,
         )
+    except H3DialogueTimingError:
+        raise
     except Exception as error:
         print(f"[MiniMax H3] Window planner fallback: {error}")
         planned_by = "deterministic_fallback"
@@ -1350,11 +1415,14 @@ def plan_h3_sliding_windows(
         "signature": signature,
         "planned_by": planned_by,
         "planning_warnings": list(dict.fromkeys(planning_warnings)),
+        "planning_diagnostics": list(dict.fromkeys(planning_diagnostics)),
+        "planning_notes": list(dict.fromkeys(planning_notes)),
         "total_frames": int(total_frames),
         "window_frames": int(window_frames),
         "window_count": len(compiled),
         "plan_kind": "sliding_window",
         "camera_coverage": camera_coverage,
+        "planning_style": planning_style,
         "resolution": str(resolution or ""),
         "model_type": str(model_type or ""),
         "injected_keyframes": normalized_keyframes,
@@ -1362,6 +1430,7 @@ def plan_h3_sliding_windows(
         "setting_continuity": plan.get("setting_continuity", ""),
         "editing_style": plan.get("editing_style", ""),
         "story_ledger": story_ledger,
+        "dialogue_fragments": dialogue_fragments,
         "source_intent": source_intent,
         "windows": compiled,
         "window_prompts": [item["prompt"] for item in compiled],

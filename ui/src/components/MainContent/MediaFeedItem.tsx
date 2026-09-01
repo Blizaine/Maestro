@@ -5,6 +5,7 @@ import { useStore } from '../../stores/useStore'
 import { getUploadUrl, fetchOutputMetadata, getFileUrl, moveOutput, uploadImage } from '../../api/client'
 import type { OutputFile, OutputMetadata } from '../../types'
 import { formatGenerationDuration } from '../../lib/format'
+import { formatDuration } from '../../lib/durationPlanning'
 import { modelDisplayName } from '../../lib/modelDisplay'
 
 interface Props {
@@ -164,19 +165,52 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
       ? params.h3_window_plan as Record<string, unknown>
       : null
   )
+  const ltxWindowPlan = (
+    params?.ltx_window_plan && typeof params.ltx_window_plan === 'object'
+      ? params.ltx_window_plan as Record<string, unknown>
+      : null
+  )
   const effectiveWindowPrompts = (() => {
-    const direct = params?.h3_window_prompts
-    if (Array.isArray(direct)) {
-      return direct.map(value => String(value || '').trim()).filter(Boolean)
+    for (const direct of [params?.h3_window_prompts, params?.ltx_window_prompts]) {
+      if (Array.isArray(direct)) {
+        const prompts = direct.map(value => String(value || '').trim()).filter(Boolean)
+        if (prompts.length > 0) return prompts
+      }
     }
-    const planned = h3WindowPlan?.window_prompts
-    if (Array.isArray(planned)) {
-      return planned.map(value => String(value || '').trim()).filter(Boolean)
+    for (const planned of [h3WindowPlan?.window_prompts, ltxWindowPlan?.window_prompts]) {
+      if (Array.isArray(planned)) {
+        const prompts = planned.map(value => String(value || '').trim()).filter(Boolean)
+        if (prompts.length > 0) return prompts
+      }
     }
     return []
   })()
+  const effectivePromptPlan = h3WindowPlan || ltxWindowPlan
+  const effectivePromptPlannedBy = String(
+    effectivePromptPlan?.planned_by || '',
+  ).trim().toLowerCase()
+  const effectivePromptMode = String(
+    params?.minimax_h3_sequence_prompt_mode
+      || params?.ltx_window_prompt_mode
+      || '',
+  ).trim().toLowerCase()
+  const generatedWindowPrompts = (
+    effectiveWindowPrompts.length > 0
+    && effectivePromptPlannedBy !== 'manual'
+    && effectivePromptMode !== 'manual'
+  )
+  const cardPrompt = effectiveWindowPrompts[0] || prompt
+  const windowPromptsHeading = generatedWindowPrompts
+    ? 'Generated window prompts'
+    : 'Effective window prompts'
   const h3PlanningWarnings = Array.isArray(h3WindowPlan?.planning_warnings)
     ? h3WindowPlan.planning_warnings.map(value => String(value || '').trim()).filter(Boolean)
+    : []
+  const h3PlanningDiagnostics = Array.isArray(h3WindowPlan?.planning_diagnostics)
+    ? h3WindowPlan.planning_diagnostics.map(value => String(value || '').trim()).filter(Boolean)
+    : []
+  const h3PlanningNotes = Array.isArray(h3WindowPlan?.planning_notes)
+    ? h3WindowPlan.planning_notes.map(value => String(value || '').trim()).filter(Boolean)
     : []
   const modelType = (params?.model_type as string) || ''
   const modelLabel = modelDisplayName(modelType, models)
@@ -209,10 +243,53 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     ? (modelType.includes('ref2va') ? 'Omni / Ref2VA' : 'First / Last / FL2VA')
     : ''
   const optimizationLabels = [
-    ...(pddEnabled ? ['PDD'] : turboEnabled ? ['Turbo'] : []),
+    ...(turboEnabled ? ['Turbo'] : []),
+    ...(pddEnabled ? ['PDD'] : []),
     ...(solEnabled ? ['Sol Engine'] : []),
     ...(firstBlockEnabled ? ['First Block Cache'] : []),
   ]
+
+  const timedWindowSeconds = Array.isArray(meta?.multi_window_timing?.window_generation_seconds)
+    ? meta.multi_window_timing.window_generation_seconds
+      .map(value => Number(value))
+      .filter(value => Number.isFinite(value) && value >= 0)
+    : []
+  const numberValue = (value: unknown) => {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0
+  }
+  const windowCount = Math.max(
+    1,
+    Math.round(numberValue(meta?.multi_window_timing?.window_count)),
+    Math.round(numberValue(h3WindowPlan?.window_count)),
+    Math.round(numberValue(ltxWindowPlan?.window_count)),
+    effectiveWindowPrompts.length,
+  )
+  const isMultiWindow = windowCount > 1
+  const explicitSceneDuration = numberValue(meta?.multi_window_timing?.scene_duration_seconds)
+    || numberValue(params?.duration_seconds)
+    || numberValue(params?.audio_duration_seconds)
+  const frameCount = numberValue(params?.video_length)
+  const explicitFps = numberValue(params?.fps)
+  const inferredFps = explicitFps || (
+    modelType.includes('ltx') ? 25 : modelType.includes('minimax_h3') ? 24 : 0
+  )
+  const frameSceneDuration = (
+    frameCount > 0 && inferredFps > 0 ? frameCount / inferredFps : 0
+  )
+  const sceneDurationSeconds = (
+    file.type === 'video' ? frameSceneDuration : explicitSceneDuration
+  ) || explicitSceneDuration || frameSceneDuration
+  const totalWindowGenerationSeconds = numberValue(
+    meta?.multi_window_timing?.total_generation_seconds,
+  ) || (isMultiWindow ? numberValue(generationTime) : 0)
+  const completedWindowCount = Math.min(
+    windowCount,
+    Math.max(
+      timedWindowSeconds.length,
+      Math.round(numberValue(meta?.multi_window_timing?.completed_windows)),
+    ),
+  )
 
   const multiClipInfo = params?.multi_clip_info as { group_id: string; index: number; total: number } | undefined
   const groupId = multiClipInfo?.group_id
@@ -537,9 +614,14 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
                   <span className="text-accent-blue"> &middot; clip {clipIndex + 1}/{clipTotal}</span>
                 )}
               </div>
-              {prompt && (
-                <div className="text-[11px] text-text-muted truncate mt-0.5" title={prompt}>
-                  {prompt}
+              {cardPrompt && (
+                <div className="text-[11px] text-text-muted truncate mt-0.5" title={cardPrompt}>
+                  {effectiveWindowPrompts.length > 0 && (
+                    <span className="text-accent-blue">
+                      {generatedWindowPrompts ? 'AI window 1' : 'Window 1'} &middot;{' '}
+                    </span>
+                  )}
+                  {cardPrompt}
                 </div>
               )}
             </>
@@ -821,6 +903,16 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
                 {inferenceSteps} steps
               </span>
             )}
+            {isMultiWindow && (
+              <span className="rounded-full border border-border bg-bg-tertiary px-2 py-0.5 text-[10px] text-text-secondary">
+                {windowCount} windows
+              </span>
+            )}
+            {isMultiWindow && sceneDurationSeconds > 0 && (
+              <span className="rounded-full border border-border bg-bg-tertiary px-2 py-0.5 text-[10px] text-text-secondary">
+                {formatDuration(sceneDurationSeconds, true)} scene
+              </span>
+            )}
             {optimizationLabels.map(label => (
               <span
                 key={label}
@@ -854,6 +946,33 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
                 </dd>
               </>
             )}
+            {isMultiWindow && (
+              <>
+                <dt className="text-text-muted">Sequence</dt>
+                <dd className="text-text-secondary">
+                  {windowCount} windows
+                  {completedWindowCount > 0 && completedWindowCount < windowCount
+                    ? ` · ${completedWindowCount} completed`
+                    : ''}
+                </dd>
+              </>
+            )}
+            {isMultiWindow && sceneDurationSeconds > 0 && (
+              <>
+                <dt className="text-text-muted">Scene duration</dt>
+                <dd className="text-text-secondary">
+                  {formatDuration(sceneDurationSeconds, true)}
+                </dd>
+              </>
+            )}
+            {isMultiWindow && totalWindowGenerationSeconds > 0 && (
+              <>
+                <dt className="text-text-muted">Total render</dt>
+                <dd className="text-text-secondary">
+                  {formatGenerationDuration(totalWindowGenerationSeconds)}
+                </dd>
+              </>
+            )}
             {seed != null && seed >= 0 && (
               <>
                 <dt className="text-text-muted">Seed</dt>
@@ -884,6 +1003,44 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
               </>
             )}
           </dl>
+
+          {isMultiWindow && (
+            <div className="mt-3 rounded-lg border border-border bg-bg-tertiary/70 p-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-[10px] font-medium uppercase tracking-wide text-text-muted">
+                  Window timing
+                </div>
+                <div className="text-[10px] text-text-muted">
+                  {windowCount} windows
+                  {sceneDurationSeconds > 0
+                    ? ` · ${formatDuration(sceneDurationSeconds, true)} scene`
+                    : ''}
+                  {totalWindowGenerationSeconds > 0
+                    ? ` · ${formatGenerationDuration(totalWindowGenerationSeconds)} render`
+                    : ''}
+                </div>
+              </div>
+              {timedWindowSeconds.length > 0 ? (
+                <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-3">
+                  {timedWindowSeconds.map((seconds, windowIndex) => (
+                    <div
+                      key={`window-timing-${windowIndex}`}
+                      className="flex items-center justify-between gap-2 rounded-md border border-border/70 bg-bg-secondary px-2 py-1.5 text-[10px]"
+                    >
+                      <span className="text-text-muted">Window {windowIndex + 1}</span>
+                      <span className="font-medium text-text-secondary">
+                        {formatGenerationDuration(seconds)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-2 text-[10px] leading-relaxed text-text-muted">
+                  Per-window completion times are recorded for new multi-window generations.
+                </div>
+              )}
+            </div>
+          )}
 
           {activeLoras.length > 0 && (
             <div className="mt-3">
@@ -932,7 +1089,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
           {effectiveWindowPrompts.length > 0 && (
             <div className="mt-3">
               <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-text-muted">
-                Effective window prompts ({effectiveWindowPrompts.length})
+                {windowPromptsHeading} ({effectiveWindowPrompts.length})
               </div>
               <div className="space-y-2">
                 {effectiveWindowPrompts.map((windowPrompt, windowIndex) => (
@@ -960,6 +1117,28 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
               {h3PlanningWarnings.map((warning, warningIndex) => (
                 <div key={`h3-planning-warning-${warningIndex}`} className="text-[11px] leading-relaxed text-text-secondary">
                   {warning}
+                </div>
+              ))}
+              {h3PlanningDiagnostics.length > 0 && (
+                <details className="mt-1 text-[10px] text-text-muted">
+                  <summary className="cursor-pointer select-none">Why repair was needed</summary>
+                  <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                    {h3PlanningDiagnostics.map((diagnostic, diagnosticIndex) => (
+                      <li key={`h3-planning-diagnostic-${diagnosticIndex}`}>{diagnostic}</li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+            </div>
+          )}
+          {h3PlanningNotes.length > 0 && (
+            <div className="mt-3 rounded-lg border border-border bg-bg-tertiary p-2">
+              <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-text-muted">
+                H3 timing notes
+              </div>
+              {h3PlanningNotes.map((note, noteIndex) => (
+                <div key={`h3-planning-note-${noteIndex}`} className="text-[11px] leading-relaxed text-text-secondary">
+                  {note}
                 </div>
               ))}
             </div>

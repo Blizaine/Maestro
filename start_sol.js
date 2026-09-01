@@ -29,6 +29,24 @@ module.exports = async (kernel) => {
         remote_access: "app/settings/remote_access.json",
       },
     }, {
+      when: "{{platform === 'win32' && local.remote_access && local.remote_access.enabled && local.remote_access.windows_restore_task}}",
+      method: "shell.run",
+      params: {
+        path: ".",
+        message: {
+          _: [
+            "schtasks.exe",
+            "/Run",
+            "/TN",
+            "Maestro Tailscale Serve",
+          ],
+        },
+        on: [{
+          event: "/ERROR:/i",
+          break: false,
+        }],
+      },
+    }, {
       method: "shell.run",
       params: {
         venv: runtime.env,

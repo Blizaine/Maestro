@@ -376,8 +376,10 @@ export function PromptInput() {
               {h3PlanIsStale && (
                 <span className="text-[9px] text-amber-400">Needs update</span>
               )}
-              {h3WindowPlan.planned_by === 'deterministic_fallback' && (
-                <span className="text-[9px] text-amber-400">Fallback</span>
+              {(h3WindowPlan.planned_by === 'deterministic_fallback' || h3WindowPlan.planned_by === 'hybrid_repair') && (
+                <span className="text-[9px] text-amber-400">
+                  {h3WindowPlan.planned_by === 'hybrid_repair' ? 'Repaired' : 'Fallback'}
+                </span>
               )}
             </button>
             <button
@@ -401,9 +403,32 @@ export function PromptInput() {
                   {warning}
                 </div>
               ))}
+              {!!h3WindowPlan.planning_diagnostics?.length && (
+                <details className="mt-1 text-text-muted">
+                  <summary className="cursor-pointer select-none">Why repair was needed</summary>
+                  <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                    {h3WindowPlan.planning_diagnostics.map((diagnostic, index) => (
+                      <li key={`${index}-${diagnostic}`}>{diagnostic}</li>
+                    ))}
+                  </ul>
+                </details>
+              )}
               <div className="mt-1 text-text-muted">
                 Review the exact window prompts below or press refresh to try the AI planner again.
               </div>
+            </div>
+          )}
+          {!!h3WindowPlan.planning_notes?.length && (
+            <div
+              role="status"
+              className="mt-1.5 rounded-lg border border-border bg-bg-tertiary/70 px-2.5 py-2 text-[10px] leading-relaxed text-text-muted"
+            >
+              <div className="font-medium text-text-secondary">H3 timing note</div>
+              {h3WindowPlan.planning_notes.map((note, index) => (
+                <div key={`${index}-${note}`} className="mt-0.5">
+                  {note}
+                </div>
+              ))}
             </div>
           )}
           {windowPlanOpen && (

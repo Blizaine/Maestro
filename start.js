@@ -51,6 +51,29 @@ module.exports = async (kernel) => {
           remote_access: "app/settings/remote_access.json",
         },
       },
+      {
+        when: "{{platform === 'win32' && local.remote_access && local.remote_access.enabled && local.remote_access.windows_restore_task}}",
+        method: "shell.run",
+        params: {
+          path: ".",
+          // Tailscale Serve configuration requires elevation on Windows. The
+          // user's one-time setup created this fixed on-demand task with their
+          // approval, so later starts can restore the private route without a
+          // new UAC prompt. A missing/deleted helper never blocks local start.
+          message: {
+            _: [
+              "schtasks.exe",
+              "/Run",
+              "/TN",
+              "Maestro Tailscale Serve",
+            ],
+          },
+          on: [{
+            event: "/ERROR:/i",
+            break: false,
+          }],
+        },
+      },
       ...(hasRecoveryRuntime ? [{
         when: `{{!exists('${runtime.marker}')}}`,
         method: "log",

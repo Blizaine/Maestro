@@ -694,6 +694,99 @@ class TestH3DirectorDialogueCompiler(unittest.TestCase):
             plans[1]["_director_speaker_registry"],
         )
 
+    def test_project_compiler_restores_full_names_and_world_in_every_clip(self):
+        project = (
+            "George Costanza enters the coffee shop on the TV show Friends "
+            "and tells Joey about Maestro."
+        )
+        environment = (
+            "Friends, Central Perk Coffee Shop, bright warm daytime interior"
+        )
+        plans = [{
+            "video_prompt": "George approaches Joey. overall_soundscape: Room tone.",
+            "_director_project_context": project,
+            "_director_environment": environment,
+            "_director_subjects_on_screen": [{
+                "character_id": "char_0",
+                "speaker_name": "George",
+                "visual_description": "A balding man in a blazer",
+            }, {
+                "character_id": "char_1",
+                "speaker_name": "Joey",
+                "visual_description": "A relaxed man in a faded shirt",
+            }],
+            "_director_dialogue_beats": [{
+                "speaker_id": "char_0",
+                "spoken_text": "You have to see this.",
+            }],
+        }, {
+            "video_prompt": "Joey stares back. overall_soundscape: Room tone.",
+            "_director_project_context": project,
+            "_director_environment": environment,
+            "_director_subjects_on_screen": [{
+                "character_id": "char_0",
+                "speaker_name": "George",
+                "visual_description": "George Costanza (balding man in a blazer)",
+            }, {
+                "character_id": "char_1",
+                "speaker_name": "Joey",
+                "visual_description": "Joey Tribbiani (relaxed man in a faded shirt)",
+            }],
+            "_director_dialogue_beats": [{
+                "speaker_id": "char_1",
+                "spoken_text": "Who are you?",
+            }],
+        }]
+
+        compile_h3_clip_plans(plans)
+
+        for plan in plans:
+            names = [
+                subject["speaker_name"]
+                for subject in plan["_director_subjects_on_screen"]
+            ]
+            self.assertEqual(names, ["George Costanza", "Joey Tribbiani"])
+            self.assertIn("George Costanza", plan["video_prompt"])
+            self.assertIn("Joey Tribbiani", plan["video_prompt"])
+            self.assertIn(environment, plan["video_prompt"])
+            self.assertEqual(
+                validate_h3_prompt_contract(
+                    plan["video_prompt"],
+                    plan["_director_dialogue_beats"],
+                    subjects=plan["_director_subjects_on_screen"],
+                    context_anchors=plan["_director_required_context_anchors"],
+                ),
+                [],
+            )
+
+    def test_prompt_contract_reports_missing_canonical_world_ledger(self):
+        prompt, _ = compile_h3_official_prompt(
+            "A man enters a cafe. overall_soundscape: Room tone.",
+            [{"character_id": "george", "speaker_name": "George Costanza"}],
+            [],
+            context_anchors=["Friends, Central Perk Coffee Shop"],
+        )
+        degraded = prompt.replace("George Costanza", "George")
+        degraded = degraded.replace("Friends, Central Perk Coffee Shop", "a cafe")
+
+        errors = validate_h3_prompt_contract(
+            degraded,
+            subjects=[{
+                "character_id": "george",
+                "speaker_name": "George Costanza",
+            }],
+            context_anchors=["Friends, Central Perk Coffee Shop"],
+        )
+
+        self.assertIn(
+            "missing canonical identity/world context: George Costanza",
+            errors,
+        )
+        self.assertIn(
+            "missing canonical identity/world context: Friends, Central Perk Coffee Shop",
+            errors,
+        )
+
     def test_reviewed_prompt_edit_becomes_the_new_source_before_generation(self):
         plans = [{
             "video_prompt": "A wide office shot. overall_soundscape: Office hum.",
@@ -1044,6 +1137,62 @@ They exchange a reluctant grin as the rain eases.
         self.assertIn(4, metrics["problem_turns"])
         self.assertGreater(metrics["cross_speaker_duplicates"], 0)
 
+    def test_dialogue_quality_flags_only_generated_overlong_turn(self):
+        locked_line = " ".join(f"locked{index}" for index in range(35))
+        generated_line = " ".join(f"generated{index}" for index in range(35))
+        manifest = [{
+            "speaker_name": "George Costanza",
+            "spoken_text": locked_line,
+        }, {
+            "speaker_name": "Joey Tribbiani",
+            "spoken_text": generated_line,
+        }]
+
+        metrics = _h3_dialogue_quality_metrics(
+            manifest,
+            story_description=f'George Costanza says, "{locked_line}"',
+            maximum_line_words=28,
+        )
+
+        self.assertEqual(metrics["overlong_turns"], 1)
+        self.assertNotIn(1, metrics["problem_turns"])
+        self.assertIn(2, metrics["problem_turns"])
+        self.assertIn("must be shortened rather than split", metrics["issues"][0])
+
+    def test_table_read_requires_generated_overlong_turn_to_fit_one_clip(self):
+        original = " ".join(f"word{index}" for index in range(35))
+        manifest = [{
+            "speaker_name": "George Costanza",
+            "spoken_text": original,
+        }]
+        valid_rows = [{
+            "turn": 1,
+            "speaker_name": "George Costanza",
+            "original_text": original,
+            "revised_text": "Maestro version two is open source, and it finally makes this easy.",
+            "delivery": "excited, fast, and character-specific",
+        }]
+
+        revised, changed = _apply_h3_character_table_read(
+            manifest,
+            valid_rows,
+            story_description="George excitedly explains Maestro.",
+            max_spoken_words=50,
+            maximum_line_words=28,
+        )
+        self.assertEqual(changed, 1)
+        self.assertLessEqual(len(revised[0]["spoken_text"].split()), 28)
+
+        invalid_rows = [dict(valid_rows[0], revised_text=original)]
+        with self.assertRaisesRegex(ValueError, "did not shorten generated turn"):
+            _apply_h3_character_table_read(
+                manifest,
+                invalid_rows,
+                story_description="George excitedly explains Maestro.",
+                max_spoken_words=50,
+                maximum_line_words=28,
+            )
+
     def test_table_read_revises_generated_line_but_locks_user_quote(self):
         manifest = [{
             "speaker_name": "Monica",
@@ -1343,6 +1492,61 @@ They exchange a reluctant grin as the rain eases.
             "medium close-up of Ross",
             shots[0]["camera_plan"]["framing"],
         )
+
+    def test_speaker_visual_contract_canonicalizes_cast_and_removes_cameo(self):
+        shots = [{
+            "scene_goal": "George tells Joey about Maestro",
+            "environment": "Friends, Central Perk Coffee Shop",
+            "spatial_setup": (
+                "George stands left, Joey sits center, and Chandler reads "
+                "screen-right."
+            ),
+            "subjects_on_screen": [{
+                "character_id": "char_0",
+                "speaker_name": "George",
+                "visual_description": "George Costanza (man in a blazer)",
+            }, {
+                "character_id": "char_1",
+                "speaker_name": "Joey",
+                "visual_description": "Joey Tribbiani (man in a faded shirt)",
+            }, {
+                "character_id": "char_2",
+                "speaker_name": "Chandler",
+                "visual_description": "Chandler Bing (man reading a paperback)",
+            }],
+            "action_beats": ["Chandler glances up as George leans toward Joey"],
+            "dialogue_beats": [{
+                "speaker_id": "char_0",
+                "spoken_text": "Maestro version two just dropped.",
+            }],
+            "camera_plan": {"framing": "medium three-shot"},
+            "audio_plan": {"mode": "dialogue_driven"},
+        }]
+        bible = [{
+            "character_name": "George Costanza",
+            "performance_direction": "fast, aggrieved comic urgency",
+        }, {
+            "character_name": "Joey Tribbiani",
+            "performance_direction": "warm, confused, and literal",
+        }]
+
+        _enforce_h3_speaker_visual_contract(
+            shots,
+            bible,
+            project_context=(
+                "George Costanza enters the Friends coffee shop and tells Joey "
+                "about Maestro."
+            ),
+        )
+
+        names = [
+            subject["speaker_name"]
+            for subject in shots[0]["subjects_on_screen"]
+        ]
+        self.assertEqual(names, ["George Costanza", "Joey Tribbiani"])
+        serialized = json.dumps(shots[0], ensure_ascii=False)
+        self.assertNotIn("Chandler", serialized)
+        self.assertIn("silent background patron", serialized)
 
     def test_speaker_visual_contract_builds_ordered_dialogue_coverage(self):
         shots = [{

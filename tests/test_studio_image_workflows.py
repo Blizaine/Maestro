@@ -48,9 +48,12 @@ def _load_launch_function(name: str, namespace: dict):
 class StudioImageWorkflowUiTests(unittest.TestCase):
     def test_compact_image_workflow_suite_is_exposed(self):
         selector = _read(SELECTOR_PATH)
-        for value in ("new", "edit", "inpaint", "outpaint", "upscale"):
+        for value in ("generate", "inpaint", "outpaint", "upscale"):
             self.assertIn(f"value: '{value}'", selector)
+        self.assertNotIn("value: 'new'", selector)
+        self.assertNotIn("value: 'edit'", selector)
         self.assertIn("modelSupportsImageWorkflow", selector)
+        self.assertIn("hasReferenceImages", selector)
 
     def test_inpaint_and_outpaint_have_distinct_native_inputs(self):
         controls = _read(CONTROLS_PATH)

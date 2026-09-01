@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { Crop, ImagePlus, Paintbrush, Scan, Sparkles } from 'lucide-react'
+import { Crop, ImagePlus, Scan, Sparkles } from 'lucide-react'
 import { modelSupportsImageWorkflow, useStore } from '../../stores/useStore'
 import type { StudioImageWorkflow } from '../../types'
 import {
@@ -12,13 +12,12 @@ const IMAGE_WORKFLOW_GROUPS: StudioWorkflowGroup<StudioImageWorkflow>[] = [
   {
     label: 'Create',
     options: [
-      { value: 'new', label: 'New', description: 'Create an image from a prompt', icon: ImagePlus },
+      { value: 'generate', label: 'Generate', description: 'Create from text or edit supplied images', icon: ImagePlus },
     ],
   },
   {
     label: 'Transform',
     options: [
-      { value: 'edit', label: 'Edit', description: 'Change one or more reference images', icon: Paintbrush },
       { value: 'inpaint', label: 'Inpaint', description: 'Regenerate only a masked area', icon: Crop },
       { value: 'outpaint', label: 'Outpaint', description: 'Expand beyond the original canvas', icon: Scan },
     ],
@@ -41,6 +40,7 @@ export function ImageWorkflowSelector() {
   const models = useStore(state => state.models)
   const enabledModels = useStore(state => state.enabledModels)
   const currentModelType = useStore(state => state.params.model_type)
+  const hasReferenceImages = useStore(state => state.imageRefs.length > 0)
   const selectModel = useStore(state => state.selectModel)
   const nsfwMode = useStore(state => state.servicesConfig?.nsfw_mode ?? false)
 
@@ -50,14 +50,14 @@ export function ImageWorkflowSelector() {
   useEffect(() => {
     if (workflow === 'upscale' || models.length === 0) return
     const current = models.find(model => model.model_type === currentModelType)
-    if (modelSupportsImageWorkflow(current, workflow)) return
+    if (modelSupportsImageWorkflow(current, workflow, hasReferenceImages)) return
     const fallback = models.find(model => (
       enabledModels.has(model.model_type)
       && (!model.nsfw_only || nsfwMode)
-      && modelSupportsImageWorkflow(model, workflow)
+      && modelSupportsImageWorkflow(model, workflow, hasReferenceImages)
     ))
     if (fallback) selectModel(fallback.model_type)
-  }, [currentModelType, enabledModels, models, nsfwMode, selectModel, workflow])
+  }, [currentModelType, enabledModels, hasReferenceImages, models, nsfwMode, selectModel, workflow])
 
   return (
     <StudioWorkflowSelect<StudioImageWorkflow>

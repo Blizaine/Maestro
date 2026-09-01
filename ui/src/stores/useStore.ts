@@ -32,6 +32,8 @@ let _dashboardPipelineLoadToken = 0
 let _dashboardPipelineListLoadToken = 0
 let _h3WindowOverridesHydrated = false
 let _h3WindowOverrideSaveTask: Promise<void> = Promise.resolve()
+let _studioPreferencesHydrated = false
+let _studioPreferencesSaveTask: Promise<void> = Promise.resolve()
 const STUDIO_VIDEO_CREATE_ROUTE_KEY = 'maestro_studio_video_create_route_v1'
 
 type StudioVideoRoutePreferences = {
@@ -77,6 +79,8 @@ function _adaptiveEtaJobFields(status: api.ApiJobStatus): Partial<GenerationJob>
     projectCompletionAt: status.project_completion_at,
     etaConfidence: status.eta_confidence,
     etaBasis: status.eta_basis,
+    etaHistorySamples: status.eta_history_samples,
+    etaHistoryMatch: status.eta_history_match,
   }
 }
 
@@ -389,6 +393,18 @@ interface PersistedModeSettings {
    *  NO LONGER rehydrated on boot — a refresh starts with a clean prompt
    *  (see the partial-hydration note in loadModels). */
   savedPromptPerMode?: Partial<Record<GenerationMode, string>>
+  /** Small UI choices that intentionally survive a full restart. Working
+   *  prompts, media, seeds, LoRAs, and general Advanced values do not. */
+  studioVideoWorkflow?: StudioVideoWorkflow
+  studioImageWorkflow?: StudioImageWorkflow
+  audioSubMode?: import('../types').AudioSubMode
+  selectedModelPerAudioSubMode?: Partial<Record<import('../types').AudioSubMode, string>>
+  h3OptimizationPreferences?: {
+    override_attention?: '' | 'sol'
+    skip_steps_cache_type?: '' | 'first_block'
+    skip_steps_multiplier?: number
+    skip_steps_start_step_perc?: number
+  }
   /** Snapshot of lora_id → filename captured at last save. Returned by
    *  `_loadSettings` for use in mid-session reconciliation when the fresh
    *  lora map arrives, so we can rewrite filenames that changed since save. */
@@ -528,6 +544,20 @@ function _saveSettings(
   filenameToLoraId?: Record<string, string>,
 ) {
   try {
+    // Older save call sites intentionally pass only the core per-mode state.
+    // Preserve the explicitly sticky UI fields already on disk so a later
+    // LoRA/model save cannot accidentally erase them.
+    let previous: Partial<PersistedModeSettings> = {}
+    try {
+      previous = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
+    } catch { /* malformed legacy storage is replaced below */ }
+    const sticky = {
+      studioVideoWorkflow: state.studioVideoWorkflow ?? previous.studioVideoWorkflow,
+      studioImageWorkflow: state.studioImageWorkflow ?? previous.studioImageWorkflow,
+      audioSubMode: state.audioSubMode ?? previous.audioSubMode,
+      selectedModelPerAudioSubMode: state.selectedModelPerAudioSubMode ?? previous.selectedModelPerAudioSubMode,
+      h3OptimizationPreferences: state.h3OptimizationPreferences ?? previous.h3OptimizationPreferences,
+    }
     // Strip file-bearing / ephemeral fields BEFORE serializing so they
     // never round-trip through localStorage. The in-memory store keeps
     // them for the current session; only the persisted snapshot is
@@ -551,13 +581,18 @@ function _saveSettings(
         savedParamsPerMode: sanitizedParamsPerMode,
         savedLoraPerMode: translatedPerMode,
         savedPromptPerMode: state.savedPromptPerMode,
+        ...sticky,
       }
       localStorage.setItem(STORAGE_KEY, JSON.stringify(payload))
     } else {
       // No map yet — write legacy filename-keyed shape, no version. Will be
       // upgraded on next save with a populated map. Still apply the ephemeral
       // strip on the way out.
-      const sanitizedState = { ...state, savedParamsPerMode: sanitizedParamsPerMode }
+      const sanitizedState = {
+        ...state,
+        ...sticky,
+        savedParamsPerMode: sanitizedParamsPerMode,
+      }
       localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitizedState))
     }
   } catch { /* quota exceeded or private browsing */ }
@@ -589,6 +624,11 @@ function _loadSettings(): PersistedModeSettings | null {
         savedParamsPerMode: _stripEphemeralParams(parsed.savedParamsPerMode || {}),
         savedLoraPerMode: translated,
         savedPromptPerMode: parsed.savedPromptPerMode || {},
+        studioVideoWorkflow: parsed.studioVideoWorkflow,
+        studioImageWorkflow: parsed.studioImageWorkflow,
+        audioSubMode: parsed.audioSubMode,
+        selectedModelPerAudioSubMode: parsed.selectedModelPerAudioSubMode || {},
+        h3OptimizationPreferences: parsed.h3OptimizationPreferences || {},
         _loraFilenameSnapshot: snapshot,
       }
     }
@@ -700,7 +740,7 @@ function _applyModelDefaults(
     const overrides: Record<string, unknown> = {}
     for (const field of _PRIMARY_MODEL_DEFAULT_FIELDS) {
       // A one-click Full -> Pruned Turbo recommendation switches models and
-      // then restores the managed 6-step preset. Do not let the asynchronous
+      // then restores the managed low-step preset. Do not let the asynchronous
       // base-model defaults response race in afterward and put it back at
       // 20 steps. loadModelOptions applies the same Turbo contract.
       if (
@@ -1053,13 +1093,45 @@ export function getModelsForFamily(familyId: string, allModels: ModelDef[], mode
 export function modelSupportsImageWorkflow(
   model: ModelDef | undefined,
   workflow: StudioImageWorkflow,
+  hasReferenceImages = false,
 ): boolean {
   if (!model || getModelMode(model.model_type, model.family) !== 'image') return false
   if (workflow === 'upscale') return true
-  if (workflow === 'edit') return model.supports_image_edit === true
   if (workflow === 'inpaint') return model.supports_image_inpaint === true
   if (workflow === 'outpaint') return model.supports_image_outpaint === true
-  return model.requires_image_reference !== true
+  // Generate is one adaptive surface. With no source images it presents both
+  // T2I and I2I models; once an image is attached, only native edit/I2I
+  // models remain eligible. An I2I-only model can therefore be selected
+  // before adding its required source, and GenerateButton will request it.
+  if (hasReferenceImages) return model.supports_image_edit === true
+  return model.requires_image_reference !== true || model.supports_image_edit === true
+}
+
+function _normalizeStudioImageWorkflow(value: unknown): StudioImageWorkflow | null {
+  if (value === 'new' || value === 'edit' || value === 'generate') return 'generate'
+  if (value === 'inpaint' || value === 'outpaint' || value === 'upscale') return value
+  return null
+}
+
+function _normalizeStudioVideoWorkflow(
+  value: unknown,
+  model?: ModelDef,
+): StudioVideoWorkflow | null {
+  if (value === 'generate') return 'frames'
+  if (
+    value === 'frames'
+    || value === 'references'
+    || value === 'extend'
+    || value === 'blend'
+    || value === 'retake'
+    || value === 'prompt_edit'
+    || value === 'outpaint'
+    || value === 'repaint'
+    || value === 'recast'
+    || value === 'upscale'
+    || value === 'film_grain'
+  ) return value
+  return _isOmniVideoModel(model) ? 'references' : null
 }
 
 /** Get the display family ID for a model (handles audio sub-families) */
@@ -1369,6 +1441,14 @@ interface AppState {
   musicInstrumental: boolean
   setMusicInstrumental: (b: boolean) => void
   selectedModelPerAudioSubMode: Partial<Record<import('../types').AudioSubMode, string>>
+  /** H3 accelerations live outside per-mode params so visiting Audio/Image
+   *  cannot erase the user's Video optimization choices. */
+  h3OptimizationPreferences: {
+    override_attention: '' | 'sol'
+    skip_steps_cache_type: '' | 'first_block'
+    skip_steps_multiplier?: number
+    skip_steps_start_step_perc?: number
+  }
   selectedModelPerMode: Partial<Record<GenerationMode, string>>
   savedLoraPerMode: Partial<Record<GenerationMode, { activated_loras: string[]; loras_multipliers: string; loraWeights: Record<string, number[]>; availableLoras: string[] }>>
   savedParamsPerMode: Partial<Record<GenerationMode, SavedModeParams>>
@@ -2530,16 +2610,17 @@ function _isH3FirstLastVideoModel(model: ModelDef | undefined): boolean {
 }
 
 export interface StudioVideoMediaIntent {
+  workflow: 'frames' | 'references'
   hasFrameGuidance: boolean
   hasOmniReferences: boolean
   hasAudioDrive: boolean
 }
 
 /**
- * Primary Studio Generate intentionally exposes only the engines that can
- * honor every assigned media role. Model metadata's legacy is_i2v/is_t2v
- * flags are not useful for LTX-2 (both are false), so identify the native
- * LTX and H3 architectures directly.
+ * Studio Frames exposes regular T2V/I2V engines while filtering them against
+ * the attached fixed-frame and audio roles. LTX/H3 need architecture fallbacks
+ * because some upstream definitions do not populate the legacy flags. Studio
+ * References is a separate contract and exposes only H3 Omni.
  */
 export function modelSupportsStudioVideoMediaIntent(
   model: ModelDef | undefined,
@@ -2549,16 +2630,27 @@ export function modelSupportsStudioVideoMediaIntent(
   const isOmni = _isOmniVideoModel(model)
   const isLtx = _isStudioLtxVideoModel(model)
   const isFirstLast = _isH3FirstLastVideoModel(model)
-  if (!isOmni && !isLtx && !isFirstLast) return false
+  const supportsTextGeneration = model.is_t2v || isLtx || isFirstLast
+  const supportsFrameGeneration = model.is_i2v || isLtx || isFirstLast
+  if (!isOmni && !supportsTextGeneration && !supportsFrameGeneration) return false
 
-  // Fixed frames and flexible Omni references are different conditioning
-  // contracts. Never silently discard one to make the other model fit.
-  if (intent.hasFrameGuidance && intent.hasOmniReferences) return false
-  if (intent.hasOmniReferences) return isOmni
-  if (intent.hasFrameGuidance && intent.hasAudioDrive) return isLtx
-  if (intent.hasFrameGuidance) return isFirstLast || isLtx
-  if (intent.hasAudioDrive) return isOmni || isLtx
-  return isFirstLast || isLtx
+  // Frames and References are intentionally separate conditioning
+  // contracts. References exposes only H3 Omni. Frames exposes LTX and H3
+  // First / Last and never lets a hidden reference manifest switch engines.
+  if (intent.workflow === 'references') return isOmni
+  if (isOmni) return false
+
+  if (intent.hasOmniReferences) return false
+  if (intent.hasFrameGuidance && intent.hasAudioDrive) {
+    return supportsFrameGeneration && model.supports_audio_input === true
+  }
+  if (intent.hasFrameGuidance) return supportsFrameGeneration
+  if (intent.hasAudioDrive) {
+    return (supportsTextGeneration || supportsFrameGeneration) && model.supports_audio_input === true
+  }
+  // With no media attached, show both T2V and I2V choices. Selecting an
+  // I2V-only model leaves Generate disabled until the user adds a frame.
+  return supportsTextGeneration || supportsFrameGeneration
 }
 
 function _pairedH3CreateModel(
@@ -2573,7 +2665,7 @@ function _pairedH3CreateModel(
   }
   const pair = pairs[modelType]
   if (!pair) return null
-  return route === 'omni' || route === 'audio' ? pair.omni : pair.firstLast
+  return route === 'omni' ? pair.omni : pair.firstLast
 }
 
 function _resolveStudioCreateModel(
@@ -2605,7 +2697,7 @@ function _resolveStudioCreateModel(
     state.enabledModels.has(model.model_type)
     && modelSupportsStudioVideoMediaIntent(model, inputState)
   ))
-  if (route === 'omni' || route === 'audio') {
+  if (route === 'omni') {
     const prunedH3 = candidates.find(model => model.model_type === 'minimax_h3_ref2va')
     if (prunedH3) return prunedH3.model_type
   }
@@ -2616,19 +2708,21 @@ function _studioCreateInputState(state: AppState): {
   desired: StudioVideoEffectiveCreateRoute
   conflict: boolean
 } & StudioVideoMediaIntent {
+  const workflow = state.studioVideoWorkflow === 'references' ? 'references' : 'frames'
   const references = state.params.minimax_h3_references ?? []
   // An exact music/performance timeline is accepted by LTX or H3 Omni.
   // Every identity/scene/motion/voice/style reference is native Ref2VA intent.
-  const hasOmniReferences = references.some(reference => !(
+  const hasOmniReferences = workflow === 'references' && references.some(reference => !(
     reference.type === 'audio' && reference.audio_intent === 'drive'
   ))
   const hasAudioDrive = Boolean(
-    state.params.audio_guide
-    || references.some(reference => (
+    workflow === 'frames'
+      ? state.params.audio_guide
+      : references.some(reference => (
       reference.type === 'audio' && reference.audio_intent === 'drive'
-    ))
+      ))
   )
-  const hasFrameGuidance = Boolean(
+  const hasFrameGuidance = workflow === 'frames' && Boolean(
     state.startImage
     || state.endImage
     || state.params.image_start
@@ -2641,18 +2735,72 @@ function _studioCreateInputState(state: AppState): {
     )
   )
   return {
-    desired: hasOmniReferences
+    workflow,
+    desired: workflow === 'references'
       ? 'omni'
       : hasFrameGuidance
         ? 'guided'
         : hasAudioDrive
           ? 'audio'
           : 'generate',
-    conflict: hasOmniReferences && hasFrameGuidance,
+    conflict: false,
     hasFrameGuidance,
     hasOmniReferences,
     hasAudioDrive,
   }
+}
+
+function _audioSubModeForModel(modelType: string): import('../types').AudioSubMode {
+  if (sfxModelTypes.has(modelType)) return 'sfx'
+  if (isMusicModelType(modelType)) return 'music'
+  return 'speech'
+}
+
+/** Persist only navigation/model choices and H3 acceleration preferences.
+ *  This deliberately does not restore project state, prompts, uploads,
+ *  seeds, LoRAs, or general Advanced controls. The server mirror makes the
+ *  choices survive Pinokio assigning a different browser origin/port. */
+function _persistStickyStudioPreferences(state: AppState) {
+  const durableGenerationMode: Exclude<GenerationMode, 'tools'> = (
+    state.generationMode === 'tools'
+      ? state.toolsUpscaleMedia === 'image' ? 'image' : 'video'
+      : state.generationMode
+  )
+  const h3OptimizationPreferences = state.h3OptimizationPreferences
+  _saveSettings({
+    generationMode: durableGenerationMode,
+    selectedModelPerMode: state.selectedModelPerMode,
+    savedParamsPerMode: state.savedParamsPerMode,
+    savedLoraPerMode: state.savedLoraPerMode,
+    savedPromptPerMode: state.savedPromptPerMode,
+    studioVideoWorkflow: state.studioVideoWorkflow,
+    studioImageWorkflow: state.studioImageWorkflow,
+    audioSubMode: state.audioSubMode,
+    selectedModelPerAudioSubMode: state.selectedModelPerAudioSubMode,
+    h3OptimizationPreferences,
+  }, state.loraIdByFilename)
+
+  const update: api.StudioPreferenceUpdate = {
+    generation_mode: durableGenerationMode,
+    studio_video_workflow: state.studioVideoWorkflow,
+    studio_image_workflow: state.studioImageWorkflow,
+    audio_sub_mode: state.audioSubMode,
+    selected_model_per_mode: Object.fromEntries(
+      Object.entries(state.selectedModelPerMode).filter(([, model]) => Boolean(model)),
+    ),
+    selected_model_per_audio_sub_mode: Object.fromEntries(
+      Object.entries(state.selectedModelPerAudioSubMode).filter(([, model]) => Boolean(model)),
+    ),
+    h3_optimizations: h3OptimizationPreferences,
+  }
+  _studioPreferencesSaveTask = _studioPreferencesSaveTask
+    .catch(() => { /* a later preference save should still run */ })
+    .then(async () => {
+      await api.updateStudioPreferences(update)
+    })
+    .catch(error => {
+      console.warn('Failed to save Studio preferences:', error)
+    })
 }
 
 export const useStore = create<AppState>((set, get) => ({
@@ -2683,7 +2831,7 @@ export const useStore = create<AppState>((set, get) => ({
     const state = get()
     if (
       state.generationMode !== 'video'
-      || state.studioVideoWorkflow !== 'frames'
+      || (state.studioVideoWorkflow !== 'frames' && state.studioVideoWorkflow !== 'references')
       || Number(state.params.image_mode) !== 0
     ) return
     const inputState = _studioCreateInputState(state)
@@ -2752,14 +2900,25 @@ export const useStore = create<AppState>((set, get) => ({
   },
   setStudioVideoWorkflow: (workflow) => {
     set({ studioVideoWorkflow: workflow })
+    const persist = () => _persistStickyStudioPreferences(get())
 
-    if (workflow === 'frames' || workflow === 'extend' || workflow === 'blend') {
+    if (workflow === 'frames' || workflow === 'references' || workflow === 'extend' || workflow === 'blend') {
       if (get().generationMode !== 'video') get().setGenerationMode('video')
       const imageMode = workflow === 'extend' ? 3 : workflow === 'blend' ? 4 : 0
       if (Number(get().params.image_mode) !== imageMode) {
         get().setParam('image_mode', imageMode)
       }
-      if (workflow === 'frames') get().reconcileStudioVideoCreateRoute('Create workflow opened')
+      set(state => ({
+        studioVideoWorkflow: workflow,
+        params: {
+          ...state.params,
+          _studio_video_workflow: workflow,
+        },
+      }))
+      if (workflow === 'frames' || workflow === 'references') {
+        get().reconcileStudioVideoCreateRoute(`${workflow === 'references' ? 'References' : 'Frames'} workflow opened`)
+      }
+      persist()
       return
     }
 
@@ -2772,6 +2931,7 @@ export const useStore = create<AppState>((set, get) => ({
         } : {}),
       }))
       if (get().generationMode !== 'tools') get().setGenerationMode('tools')
+      persist()
       return
     }
 
@@ -2787,6 +2947,7 @@ export const useStore = create<AppState>((set, get) => ({
         } : {}),
       }))
       if (get().generationMode !== 'tools') get().setGenerationMode('tools')
+      persist()
       return
     }
 
@@ -2797,8 +2958,9 @@ export const useStore = create<AppState>((set, get) => ({
         : workflow
     if (get().generationMode !== 'avatar') get().setGenerationMode('avatar')
     get().setEditSubMode(editMode)
+    persist()
   },
-  studioImageWorkflow: 'new' as StudioImageWorkflow,
+  studioImageWorkflow: 'generate' as StudioImageWorkflow,
   setStudioImageWorkflow: (workflow) => {
     if (workflow === 'upscale') {
       set(state => ({
@@ -2810,6 +2972,7 @@ export const useStore = create<AppState>((set, get) => ({
         } : {}),
       }))
       if (get().generationMode !== 'tools') get().setGenerationMode('tools')
+      _persistStickyStudioPreferences(get())
       return
     }
 
@@ -2822,6 +2985,7 @@ export const useStore = create<AppState>((set, get) => ({
         _studio_image_workflow: workflow,
       },
     }))
+    _persistStickyStudioPreferences(get())
   },
   editSubMode: 'retake' as import('../types').EditSubMode,
   setEditSubMode: (mode: import('../types').EditSubMode) => {
@@ -3211,6 +3375,10 @@ export const useStore = create<AppState>((set, get) => ({
   setMusicInstrumental: (b) => set({ musicInstrumental: b }),
   audioSubMode: 'speech' as import('../types').AudioSubMode,
   selectedModelPerAudioSubMode: {} as Partial<Record<import('../types').AudioSubMode, string>>,
+  h3OptimizationPreferences: {
+    override_attention: '',
+    skip_steps_cache_type: '',
+  },
   setAudioSubMode: (subMode) => {
     const { audioSubMode: prevSub, params, models } = get()
     if (subMode === prevSub) return
@@ -3234,6 +3402,7 @@ export const useStore = create<AppState>((set, get) => ({
     if (targetModel && models.some(m => m.model_type === targetModel)) {
       get().selectModel(targetModel)
     }
+    _persistStickyStudioPreferences(get())
   },
   selectedModelPerMode: {},
   savedLoraPerMode: {},
@@ -3270,6 +3439,7 @@ export const useStore = create<AppState>((set, get) => ({
         savedPromptPerMode: savedPrompts,
       })
       _saveSettings({ generationMode: prev, selectedModelPerMode: savedModels, savedParamsPerMode: savedParams, savedLoraPerMode: savedLoras, savedPromptPerMode: savedPrompts }, s.loraIdByFilename)
+      _persistStickyStudioPreferences(get())
       return
     }
     const { families, models, enabledModels, generationMode: prevMode, params, selectedModelPerMode, savedLoraPerMode, savedParamsPerMode, loraWeights, availableLoras, savedPromptPerMode } = get()
@@ -3340,12 +3510,14 @@ export const useStore = create<AppState>((set, get) => ({
     const restoredParams = _restoreModeParams(restoredSnapshot)
     // Restore saved prompt for target mode (or empty for first visit)
     const restoredPrompt = savedPrompts[mode] ?? ''
-    const restoredImageWorkflow = (
-      restoredParams._studio_image_workflow === 'edit'
-      || restoredParams._studio_image_workflow === 'inpaint'
-      || restoredParams._studio_image_workflow === 'outpaint'
-      || restoredParams._studio_image_workflow === 'new'
-    ) ? restoredParams._studio_image_workflow : get().studioImageWorkflow
+    const restoredImageWorkflow = _normalizeStudioImageWorkflow(
+      restoredParams._studio_image_workflow,
+    ) ?? get().studioImageWorkflow
+    const restoredVideoModel = get().models.find(model => model.model_type === newModelType)
+    const restoredVideoWorkflow = _normalizeStudioVideoWorkflow(
+      restoredParams._studio_video_workflow,
+      restoredVideoModel,
+    ) ?? get().studioVideoWorkflow
 
     set(() => ({
       generationMode: mode,
@@ -3356,6 +3528,7 @@ export const useStore = create<AppState>((set, get) => ({
       // Default to Auto resolution + aspect in image mode (matches reference image)
       ...(mode === 'image' ? { resolutionPreset: 'auto' as ResolutionPreset, aspectRatio: 'auto' as AspectRatio } : {}),
       ...(mode === 'image' ? { studioImageWorkflow: restoredImageWorkflow } : {}),
+      ...(mode === 'video' ? { studioVideoWorkflow: restoredVideoWorkflow } : {}),
       ...restoredFilmGrain,
       durationSeconds: restoredDuration,
       // Build params from defaults + restored snapshot. We deliberately
@@ -3368,12 +3541,17 @@ export const useStore = create<AppState>((set, get) => ({
       params: {
         ...defaultParams,
         ...restoredParams,
+        // Sol / First Block are durable Video preferences, not project
+        // inputs. Reapply them when returning from Audio/Image after a
+        // restart even though general Advanced state starts clean.
+        ...(mode === 'video' ? get().h3OptimizationPreferences : {}),
         model_type: newModelType,
         prompt: restoredPrompt,
         image_mode: mode === 'image'
           ? (restoredImageWorkflow === 'inpaint' || restoredImageWorkflow === 'outpaint' ? 2 : 1)
           : (restoredParams.image_mode ?? 0),
         ...(mode === 'image' ? { _studio_image_workflow: restoredImageWorkflow } : {}),
+        ...(mode === 'video' ? { _studio_video_workflow: restoredVideoWorkflow } : {}),
         activated_loras: sameModel ? restoredLora.activated_loras : [],
         loras_multipliers: sameModel ? restoredLora.loras_multipliers : '',
       },
@@ -3393,7 +3571,10 @@ export const useStore = create<AppState>((set, get) => ({
       // for the field list and rationale.
       _applyModelDefaults(get, set, newModelType)
     }
-    if (mode === 'video' && get().studioVideoWorkflow === 'frames') {
+    if (
+      mode === 'video'
+      && (get().studioVideoWorkflow === 'frames' || get().studioVideoWorkflow === 'references')
+    ) {
       get().setStudioVideoCreateRoute(get().studioVideoCreateRoute)
     }
     // Persist to localStorage
@@ -3404,6 +3585,7 @@ export const useStore = create<AppState>((set, get) => ({
       savedLoraPerMode: savedLoras,
       savedPromptPerMode: savedPrompts,
     }, get().loraIdByFilename)
+    _persistStickyStudioPreferences(get())
   },
 
   params: { ...defaultParams },
@@ -3571,6 +3753,31 @@ export const useStore = create<AppState>((set, get) => ({
       || key === 'audio_prompt_type'
     ) {
       get().reconcileStudioVideoCreateRoute('Inputs changed')
+    }
+    if (
+      key === 'override_attention'
+      || key === 'skip_steps_cache_type'
+      || key === 'skip_steps_multiplier'
+      || key === 'skip_steps_start_step_perc'
+    ) {
+      set(s => ({
+        h3OptimizationPreferences: {
+          ...s.h3OptimizationPreferences,
+          ...(key === 'override_attention' ? {
+            override_attention: value === 'sol' ? 'sol' as const : '' as const,
+          } : {}),
+          ...(key === 'skip_steps_cache_type' ? {
+            skip_steps_cache_type: value === 'first_block' ? 'first_block' as const : '' as const,
+          } : {}),
+          ...(key === 'skip_steps_multiplier' && typeof value === 'number' ? {
+            skip_steps_multiplier: value,
+          } : {}),
+          ...(key === 'skip_steps_start_step_perc' && typeof value === 'number' ? {
+            skip_steps_start_step_perc: value,
+          } : {}),
+        },
+      }))
+      _persistStickyStudioPreferences(get())
     }
   },
   setParams: (partial) => {
@@ -4407,7 +4614,8 @@ export const useStore = create<AppState>((set, get) => ({
     try {
       const shouldHydrateVisibility = !_modelVisibilityHydrated
       const shouldHydrateH3WindowOverrides = !_h3WindowOverridesHydrated
-      const [data, visibility, h3WindowPreferences] = await Promise.all([
+      const shouldHydrateStudioPreferences = !_studioPreferencesHydrated
+      const [data, visibility, h3WindowPreferences, studioPreferences] = await Promise.all([
         api.fetchModels(),
         shouldHydrateVisibility
           ? api.fetchModelVisibility().catch(error => {
@@ -4418,6 +4626,12 @@ export const useStore = create<AppState>((set, get) => ({
         shouldHydrateH3WindowOverrides
           ? api.fetchH3WindowOverrides().catch(error => {
               console.warn('Failed to load H3 window overrides:', error)
+              return null
+            })
+          : Promise.resolve(null),
+        shouldHydrateStudioPreferences
+          ? api.fetchStudioPreferences().catch(error => {
+              console.warn('Failed to load Studio preferences:', error)
               return null
             })
           : Promise.resolve(null),
@@ -4440,6 +4654,9 @@ export const useStore = create<AppState>((set, get) => ({
       if (shouldHydrateH3WindowOverrides && h3WindowPreferences) {
         _h3WindowOverridesHydrated = true
         set({ h3WindowOverrides: h3WindowPreferences.overrides || {} })
+      }
+      if (shouldHydrateStudioPreferences && studioPreferences) {
+        _studioPreferencesHydrated = true
       }
 
       // Pinokio can assign a different web-server port on every launch.
@@ -4519,8 +4736,8 @@ export const useStore = create<AppState>((set, get) => ({
 
       // Hydrate persisted per-mode settings from localStorage.
       //
-      // Deliberately PARTIAL: only the last generation mode and the
-      // per-mode model selections survive a page refresh. The working
+      // Deliberately PARTIAL: only navigation, per-mode model selections,
+      // and H3 Sol/First Block preferences survive a page refresh. The working
       // state — prompt text and Advanced settings (seed, steps, LoRA
       // selection, …) — starts fresh from the model's defaults on every
       // load. The per-mode snapshots (savedParamsPerMode /
@@ -4529,23 +4746,82 @@ export const useStore = create<AppState>((set, get) => ({
       // them here on refresh; stale text/seeds/LoRAs re-appearing after
       // a reload felt wrong, so a refresh is a clean slate again.
       const saved = _loadSettings()
+      const durableConfigured = studioPreferences?.configured === true
+      let selectedModelPerMode: Partial<Record<GenerationMode, string>> = {
+        ...(saved?.selectedModelPerMode || {}),
+        ...(durableConfigured
+          ? studioPreferences.selected_model_per_mode as Partial<Record<GenerationMode, string>>
+          : {}),
+      }
+      let selectedModelPerAudioSubMode: Partial<Record<import('../types').AudioSubMode, string>> = {
+        ...(saved?.selectedModelPerAudioSubMode || {}),
+        ...(durableConfigured
+          ? studioPreferences.selected_model_per_audio_sub_mode as Partial<Record<import('../types').AudioSubMode, string>>
+          : {}),
+      }
+      const rememberedAudioModel = selectedModelPerMode.audio || ''
+      const requestedAudioSubMode = durableConfigured
+        ? studioPreferences.audio_sub_mode
+        : saved?.audioSubMode
+      const restoredAudioSubMode: import('../types').AudioSubMode = (
+        requestedAudioSubMode === 'speech'
+        || requestedAudioSubMode === 'music'
+        || requestedAudioSubMode === 'sfx'
+        || requestedAudioSubMode === 'mixer'
+        || requestedAudioSubMode === 'revoice'
+      ) ? requestedAudioSubMode : _audioSubModeForModel(rememberedAudioModel)
+      const requestedVideoWorkflow = durableConfigured
+        ? studioPreferences.studio_video_workflow
+        : saved?.studioVideoWorkflow
+      const requestedImageWorkflow = durableConfigured
+        ? studioPreferences.studio_image_workflow
+        : saved?.studioImageWorkflow
+      const restoredImageWorkflow = _normalizeStudioImageWorkflow(requestedImageWorkflow)
+        ?? get().studioImageWorkflow
+      const h3Preferences = durableConfigured
+        ? studioPreferences.h3_optimizations
+        : saved?.h3OptimizationPreferences
+      const restoredH3OptimizationPreferences = {
+        override_attention: h3Preferences?.override_attention === 'sol' ? 'sol' as const : '' as const,
+        skip_steps_cache_type: h3Preferences?.skip_steps_cache_type === 'first_block'
+          ? 'first_block' as const
+          : '' as const,
+        ...(typeof h3Preferences?.skip_steps_multiplier === 'number'
+          ? { skip_steps_multiplier: h3Preferences.skip_steps_multiplier }
+          : {}),
+        ...(typeof h3Preferences?.skip_steps_start_step_perc === 'number'
+          ? { skip_steps_start_step_perc: h3Preferences.skip_steps_start_step_perc }
+          : {}),
+      }
       // v2 migration: users whose saved audio model IS the old music
       // default follow it to the new default (see NEW_MUSIC_DEFAULT).
       // (The old-model-params concern the migration used to handle is
       // gone: saved params no longer rehydrate, and the defaults
       // hydration below runs on every boot.)
-      if (migrateMusicDefault && saved?.selectedModelPerMode?.audio === OLD_MUSIC_DEFAULT
+      if (migrateMusicDefault && selectedModelPerMode.audio === OLD_MUSIC_DEFAULT
           && models.some(m => m.model_type === NEW_MUSIC_DEFAULT)) {
-        saved.selectedModelPerMode = { ...saved.selectedModelPerMode, audio: NEW_MUSIC_DEFAULT }
+        selectedModelPerMode = { ...selectedModelPerMode, audio: NEW_MUSIC_DEFAULT }
+        if (selectedModelPerAudioSubMode.music === OLD_MUSIC_DEFAULT) {
+          selectedModelPerAudioSubMode = {
+            ...selectedModelPerAudioSubMode,
+            music: NEW_MUSIC_DEFAULT,
+          }
+        }
       }
       let mode = get().generationMode
       let initialModelType: string
 
-      if (saved) {
+      if (saved || durableConfigured) {
         // Restore saved generation mode
-        mode = saved.generationMode || mode
+        mode = (
+          durableConfigured
+            ? studioPreferences.generation_mode
+            : saved?.generationMode
+        ) || mode
         // Validate saved model for this mode still exists
-        const savedModel = saved.selectedModelPerMode?.[mode]
+        const savedModel = mode === 'audio'
+          ? selectedModelPerAudioSubMode[restoredAudioSubMode] || selectedModelPerMode.audio
+          : selectedModelPerMode[mode]
         initialModelType = savedModel
           && get().enabledModels.has(savedModel)
           && models.some(m => m.model_type === savedModel)
@@ -4555,6 +4831,11 @@ export const useStore = create<AppState>((set, get) => ({
           && (initialModelType === 'scail2_14B_recast_fast' || initialModelType === 'scail2_14B')
         const bootedIntoRepaint = mode === 'avatar'
           && initialModelType === 'scail2_14B_fast'
+        const initialModel = models.find(model => model.model_type === initialModelType)
+        const restoredVideoWorkflow = _normalizeStudioVideoWorkflow(
+          requestedVideoWorkflow,
+          initialModel,
+        ) ?? (_isOmniVideoModel(initialModel) ? 'references' : get().studioVideoWorkflow)
 
         set(s => ({
           families,
@@ -4569,7 +4850,12 @@ export const useStore = create<AppState>((set, get) => ({
           // Seed the VALIDATED boot model into the map (the saved entry
           // may point at a removed model) — _applyModelDefaults' race
           // guard compares against selectedModelPerMode[mode].
-          selectedModelPerMode: { ...(saved.selectedModelPerMode || {}), [mode]: initialModelType },
+          selectedModelPerMode: { ...selectedModelPerMode, [mode]: initialModelType },
+          selectedModelPerAudioSubMode,
+          studioVideoWorkflow: restoredVideoWorkflow,
+          studioImageWorkflow: restoredImageWorkflow,
+          audioSubMode: restoredAudioSubMode,
+          h3OptimizationPreferences: restoredH3OptimizationPreferences,
           // Mode-shaping mirrored from setGenerationMode: booting into
           // image mode needs image_mode 1 + Auto resolution. These used
           // to arrive via the restored params snapshot.
@@ -4577,7 +4863,15 @@ export const useStore = create<AppState>((set, get) => ({
           params: {
             ...s.params,
             model_type: initialModelType || s.params.model_type,
-            ...(mode === 'image' ? { image_mode: 1 } : {}),
+            ...(mode === 'image' ? {
+              image_mode: restoredImageWorkflow === 'inpaint' || restoredImageWorkflow === 'outpaint' ? 2 : 1,
+              _studio_image_workflow: restoredImageWorkflow,
+            } : {}),
+            ...(mode === 'video' ? {
+              image_mode: restoredVideoWorkflow === 'extend' ? 3 : restoredVideoWorkflow === 'blend' ? 4 : 0,
+              _studio_video_workflow: restoredVideoWorkflow,
+            } : {}),
+            ...restoredH3OptimizationPreferences,
           },
         }))
       } else {
@@ -4612,9 +4906,15 @@ export const useStore = create<AppState>((set, get) => ({
         get().loadModelOptions(mt)
         _applyModelDefaults(get, set, mt)
       }
-      if (mode === 'video' && get().studioVideoWorkflow === 'frames') {
+      if (
+        mode === 'video'
+        && (get().studioVideoWorkflow === 'frames' || get().studioVideoWorkflow === 'references')
+      ) {
         get().setStudioVideoCreateRoute(get().studioVideoCreateRoute)
       }
+      // Migrate browser-only preferences to the durable server record and
+      // refresh its validated model selections after defaults/fallbacks.
+      _persistStickyStudioPreferences(get())
       // Refresh the lora_id ↔ filename map from /installed and reconcile
       // any filename renames since save (LoRA version updates land here
       // transparently — saved weights/activations carry over to the new
@@ -4671,37 +4971,29 @@ export const useStore = create<AppState>((set, get) => ({
     const nativeMaximum = options?.frames_maximum
       ? options.frames_maximum / fps
       : null
-    const h3ReferenceSequence = (
-      options?.omni_reference === true
-      && get().params.minimax_h3_reference_sequence === true
-    )
     const isH3 = String(options?.architecture || '').startsWith('minimax_h3')
     const isLtxSequence = options?.multi_window_sequence_controls === true
-    const ltxMultiWindow = (
-      isLtxSequence
-      && get().params.ltx_multi_window === true
-    )
     const ltxWindowDefaults = options?.sliding_window_defaults
     const ltxSinglePassMaximum = isLtxSequence
       ? (ltxWindowDefaults?.window_max ?? Math.round(20 * fps)) / fps
       : null
-    const h3FirstLastMultiWindow = (
-      isH3
-      && options?.omni_reference !== true
-      && get().params.minimax_h3_multi_window === true
-    )
+    const currentWindow = Math.max(minimum, get().slidingWindowSeconds)
+    const sequenceCapable = isH3 || isLtxSequence
+    const wantsSequence = sequenceCapable && s > currentWindow + 0.05
+    const h3ReferenceSequence = isH3 && options?.omni_reference === true && wantsSequence
+    const h3FirstLastMultiWindow = isH3 && options?.omni_reference !== true && wantsSequence
+    const ltxMultiWindow = isLtxSequence && wantsSequence
     const h3SingleNativePass = (
       isH3
-      && !h3ReferenceSequence
-      && (options?.omni_reference === true || !h3FirstLastMultiWindow)
+      && !wantsSequence
     )
     const maximum = isH3
       ? (h3ReferenceSequence || h3FirstLastMultiWindow
-          ? Number.POSITIVE_INFINITY
+          ? 60 * 60
           : (nativeMaximum ?? Number.POSITIVE_INFINITY))
       : isLtxSequence
         ? (ltxMultiWindow
-            ? Number.POSITIVE_INFINITY
+            ? 60 * 60
             : (ltxSinglePassMaximum ?? Number.POSITIVE_INFINITY))
       : (options?.sliding_window || nativeMaximum == null
           ? Number.POSITIVE_INFINITY
@@ -4730,6 +5022,13 @@ export const useStore = create<AppState>((set, get) => ({
       const nextParams = {
         ...state.params,
         video_length: frames,
+        ...(isLtxSequence ? { ltx_multi_window: ltxMultiWindow } : {}),
+        ...(isH3 && options?.omni_reference === true
+          ? { minimax_h3_reference_sequence: h3ReferenceSequence }
+          : {}),
+        ...(isH3 && options?.omni_reference !== true
+          ? { minimax_h3_multi_window: h3FirstLastMultiWindow }
+          : {}),
         ...(expandNativeWindow
           ? {
               sliding_window_size: frames,
@@ -5392,7 +5691,7 @@ export const useStore = create<AppState>((set, get) => ({
     let state = get()
     const primaryStudioCreate = (
       state.generationMode === 'video'
-      && state.studioVideoWorkflow === 'frames'
+      && (state.studioVideoWorkflow === 'frames' || state.studioVideoWorkflow === 'references')
       && Number(state.params.image_mode) === 0
     )
     if (primaryStudioCreate) {
@@ -5502,7 +5801,7 @@ export const useStore = create<AppState>((set, get) => ({
     const automaticSinglePromptEnhance = (
       state.generationMode === 'video'
       && (isH3PromptModel || isLtxPromptModel)
-      && promptMode === 'auto'
+      && (promptMode === 'auto' || promptMode === 'creative')
       && !usesMultiplePasses
       && !alreadyEnhanced
       && String(state.params.prompt || '').trim()
@@ -6188,20 +6487,8 @@ export const useStore = create<AppState>((set, get) => ({
     }
 
     const params: Record<string, unknown> = { ...state.params, generation_mode: state.generationMode, workspace: state.activeWorkspace }
-    const manifestAudioDriver = (
-      (state.params.minimax_h3_references ?? []).find(reference => (
-        reference.type === 'audio' && reference.audio_intent === 'drive'
-      ))
-    )
-    if (isLtxSequenceModel && manifestAudioDriver?.path) {
-      // The reference panel is model-neutral in Studio. H3 Omni consumes its
-      // ordered manifest directly; LTX consumes the same user-selected Music /
-      // Performance role through its generic soundtrack input.
-      params.audio_guide = manifestAudioDriver.path
-      const audioPromptType = String(params.audio_prompt_type || '')
-      if (![...'AK2'].some(letter => audioPromptType.includes(letter))) {
-        params.audio_prompt_type = `A${audioPromptType}`
-      }
+    if (state.generationMode === 'video') {
+      params._studio_video_workflow = state.studioVideoWorkflow
     }
     const useStudioFrameInputs = !primaryStudioCreate || activeCreateRoute === 'guided'
     if (primaryStudioCreate && activeCreateRoute === 'generate') {
@@ -6708,7 +6995,7 @@ export const useStore = create<AppState>((set, get) => ({
     if (state.generationMode === 'image') {
       params.video_length = 1
       const workflow = state.studioImageWorkflow === 'upscale'
-        ? 'new'
+        ? 'generate'
         : state.studioImageWorkflow
       params._studio_image_workflow = workflow
       params.image_mode = workflow === 'inpaint' || workflow === 'outpaint' ? 2 : 1
@@ -6733,7 +7020,7 @@ export const useStore = create<AppState>((set, get) => ({
         delete params.image_guide
         delete params.image_mask
         delete params.video_guide_outpainting
-        if (workflow === 'new') {
+        if (workflow === 'generate' && state.imageRefs.length === 0) {
           delete params.image_refs
           params.remove_background_images_ref = 0
           params.video_prompt_type = ''
@@ -7036,9 +7323,17 @@ export const useStore = create<AppState>((set, get) => ({
       || useStudioFrameInputs
     ) && (
       state.generationMode !== 'image'
-      || state.studioImageWorkflow === 'edit'
+      || state.studioImageWorkflow === 'generate'
     )
-    if (imageReferenceWorkflowActive && state.imageRefType && state.imageRefs.length > 0) {
+    const imageReferenceChoices = state.modelOptions?.image_ref_choices?.choices ?? []
+    const effectiveImageRefType = state.imageRefType || (
+      imageReferenceChoices.some(([, value]) => value.includes('K'))
+        ? 'KI'
+        : imageReferenceChoices.some(([, value]) => value === 'I')
+          ? 'I'
+          : imageReferenceChoices[0]?.[1] || ''
+    )
+    if (imageReferenceWorkflowActive && effectiveImageRefType && state.imageRefs.length > 0) {
       const refPaths: string[] = []
       for (const file of state.imageRefs) {
         try {
@@ -7053,7 +7348,7 @@ export const useStore = create<AppState>((set, get) => ({
         params.remove_background_images_ref = state.removeBackgroundRefs ? 1 : 0
         // Merge image ref letter codes into video_prompt_type
         let vpt = (params.video_prompt_type as string) || ''
-        for (const letter of state.imageRefType) {
+        for (const letter of effectiveImageRefType) {
           if (!vpt.includes(letter)) vpt += letter
         }
         params.video_prompt_type = vpt
@@ -7092,8 +7387,16 @@ export const useStore = create<AppState>((set, get) => ({
       }
     }
 
-    // Voice reference (ID-LoRA) — upload if present, add to params
-    if (state.directorVoiceRef) {
+    // Optional LTX ID-LoRA voice reference. H3 Omni audio references use
+    // their native References manifest and must never leak through here.
+    const selectedStudioModel = state.models.find(
+      model => model.model_type === state.params.model_type,
+    )
+    const useLtxVoiceReference = useStudioFrameInputs
+      && state.studioVideoWorkflow === 'frames'
+      && _isStudioLtxVideoModel(selectedStudioModel)
+      && state.servicesConfig?.voice_reference_enabled === true
+    if (useLtxVoiceReference && state.directorVoiceRef) {
       let vrPath = state.directorVoiceRefPath
       if (!vrPath) {
         try {
@@ -7106,6 +7409,9 @@ export const useStore = create<AppState>((set, get) => ({
         params.voice_reference = vrPath
         params.identity_guidance_scale = state.directorIdentityGuidanceScale
       }
+    } else {
+      delete params.voice_reference
+      delete params.identity_guidance_scale
     }
 
     if (deferAutoEnhance) {
@@ -8229,7 +8535,7 @@ export const useStore = create<AppState>((set, get) => ({
         paramUpdates.minimax_h3_turbo_preset = selectedPreset.id
         // A restored Turbo preset always displays the same step count the
         // backend will enforce. This also closes a race where model defaults
-        // (20 steps) arrive after the user checks Turbo (6 steps).
+        // (20 steps) arrive after the user checks Turbo (currently 8-step PDD).
         if (get().params.minimax_h3_turbo_mode === true) {
           paramUpdates.num_inference_steps = selectedPreset.steps
         }
@@ -8458,7 +8764,7 @@ export const useStore = create<AppState>((set, get) => ({
     let state = get()
     const primaryStudioCreate = (
       state.generationMode === 'video'
-      && state.studioVideoWorkflow === 'frames'
+      && (state.studioVideoWorkflow === 'frames' || state.studioVideoWorkflow === 'references')
       && Number(state.params.image_mode) === 0
     )
     if (primaryStudioCreate) {
@@ -8525,7 +8831,7 @@ export const useStore = create<AppState>((set, get) => ({
       && params.minimax_h3_sequence_prompt_mode === 'manual'
     ) {
       set({
-        promptEnhanceError: 'Manual Omni sequence mode uses each prompt line exactly as written. Switch Window prompts to Auto plan to use the LLM planner.',
+        promptEnhanceError: 'Manual Omni sequence mode uses each prompt line exactly as written. Switch Window prompts to AI - Faithful or AI - Creative to use the LLM planner.',
       })
       return
     }
@@ -8546,7 +8852,7 @@ export const useStore = create<AppState>((set, get) => ({
       && params.ltx_window_prompt_mode === 'manual'
     ) {
       set({
-        promptEnhanceError: 'Manual LTX multi-window mode uses each prompt line exactly as written. Switch Window prompts to Auto plan to use the LLM planner.',
+        promptEnhanceError: 'Manual LTX multi-window mode uses each prompt line exactly as written. Switch Window prompts to AI - Faithful or AI - Creative to use the LLM planner.',
       })
       return
     }
@@ -8654,7 +8960,7 @@ export const useStore = create<AppState>((set, get) => ({
           referenceContext = state.studioImageWorkflow === 'inpaint'
             ? 'Picture 1 is the source image. Preserve everything outside the supplied edit mask; describe the finished image, not mask instructions.'
             : 'Picture 1 is the protected source image. Extend its scene naturally beyond the existing canvas; describe the complete finished image.'
-        } else if (state.studioImageWorkflow === 'edit') {
+        } else if (state.studioImageWorkflow === 'generate') {
           for (const ref of imageRefs) {
             try {
               const uploaded = await api.uploadImage(ref)
@@ -8766,6 +9072,9 @@ export const useStore = create<AppState>((set, get) => ({
       ) || params.prompt
 
       if (shouldPlanH3Sequence) {
+        const planningStyle = params.minimax_h3_sequence_prompt_mode === 'creative'
+          ? 'creative'
+          : 'faithful'
         const plan = await api.planH3Sequence({
           prompt: h3PlanningSource,
           model_type: params.model_type,
@@ -8777,6 +9086,7 @@ export const useStore = create<AppState>((set, get) => ({
           overlap_frames: state.slidingWindowOverlap,
           sequence_continuity: params.minimax_h3_sequence_continuity !== false,
           camera_coverage: params.minimax_h3_camera_coverage || 'auto',
+          planning_style: planningStyle,
         })
         const effectiveClipFrames = plan.effective_window_frames
           || plan.window_frames
@@ -8808,6 +9118,9 @@ export const useStore = create<AppState>((set, get) => ({
         // Multi-window H3 instead needs a structured storyboard whose prompts
         // contain only their own local actions. Endpoint and injected images
         // were collected above in the runtime's stable presentation order.
+        const planningStyle = params.minimax_h3_sequence_prompt_mode === 'creative'
+          ? 'creative'
+          : 'faithful'
         const plan = await api.planH3Windows({
           prompt: h3PlanningSource,
           model_type: params.model_type,
@@ -8822,6 +9135,7 @@ export const useStore = create<AppState>((set, get) => ({
           image_paths: imagePaths.length > 0 ? imagePaths : undefined,
           injected_keyframes: injectedKeyframes.length > 0 ? injectedKeyframes : undefined,
           camera_coverage: params.minimax_h3_camera_coverage || 'auto',
+          planning_style: planningStyle,
         })
         const effectiveWindowFrames = plan.effective_window_frames || plan.window_frames
         set(s => ({
@@ -8869,6 +9183,14 @@ export const useStore = create<AppState>((set, get) => ({
         tts_enhance_mode: ttsMode || undefined,
         tts_voice_count: state.ttsVoiceCount || undefined,
         reference_context: referenceContext,
+        planning_style: (
+          generationMode === 'video'
+          && (
+            isLtxSequence
+              ? params.ltx_window_prompt_mode === 'creative'
+              : params.minimax_h3_sequence_prompt_mode === 'creative'
+          )
+        ) ? 'creative' : 'faithful',
       })
       const preserveH3Source = (
         generationMode === 'video'
@@ -9316,6 +9638,9 @@ export const useStore = create<AppState>((set, get) => ({
         lyrics_hint: opts?.lyricsHint || undefined,
       })
       stopAnalyzePolling()
+      if (Number(analysis.duration || 0) > 60 * 60 + 0.5) {
+        throw new Error('Director supports source timelines up to 60 minutes. Trim this audio to one hour or less and try again.')
+      }
 
       // Try LLM-based section classification (falls back to heuristic)
       if (analysis.lyrics && analysis.lyrics.length > 0) {
@@ -9976,7 +10301,10 @@ export const useStore = create<AppState>((set, get) => ({
     const isH3Video = videoModel.startsWith('minimax_h3')
     const fps = isH3Video ? (directorVideoOptions?.fps ?? 24) : (directorVideoOptions?.fps ?? 16)
     const totalDuration = directorAnalysis?.duration ?? 180
-    const totalDurationCapped = Math.min(totalDuration, 300)
+    // Director can now build restart-safe long-form projects up to one hour.
+    // Uploaded soundtracks retain their exact duration; generated music is
+    // still bounded earlier by the selected music model's native limit.
+    const totalDurationCapped = Math.min(totalDuration, 60 * 60)
 
     // Build clips with per-clip durations and images
     const clips: MultiClip[] = directorClipPlans.map((plan, i) => {
@@ -10108,7 +10436,9 @@ export const useStore = create<AppState>((set, get) => ({
 
   shortFilmSetCharacters: (characters) => set({ shortFilmCharacters: characters }),
   shortFilmSetPath: (path) => set({ shortFilmPath: path }),
-  shortFilmSetTargetDuration: (duration) => set({ shortFilmTargetDuration: duration }),
+  shortFilmSetTargetDuration: (duration) => set({
+    shortFilmTargetDuration: Math.min(60 * 60, Math.max(10, duration)),
+  }),
   shortFilmSetNarrative: (v) => set({ shortFilmNarrative: v }),
 
   shortFilmUploadAndAnalyze: async (file) => {
@@ -10148,6 +10478,10 @@ export const useStore = create<AppState>((set, get) => ({
         extract_vocals: true,
       })
       stopAnalyzePolling()
+
+      if (Number(analysis.duration || 0) > 60 * 60 + 0.5) {
+        throw new Error('Director supports source timelines up to 60 minutes. Trim this audio to one hour or less and try again.')
+      }
 
       set({ directorAnalysis: analysis })
 
@@ -10462,6 +10796,12 @@ export const useStore = create<AppState>((set, get) => ({
         minimax_h3_turbo_preset: undefined,
       },
       selectedModelPerMode: { ...s.selectedModelPerMode, [currentMode]: modelType },
+      ...(currentMode === 'audio' ? {
+        selectedModelPerAudioSubMode: {
+          ...s.selectedModelPerAudioSubMode,
+          [s.audioSubMode]: modelType,
+        },
+      } : {}),
       h3WindowPlan: null,
       loraWeights: {},
       availableLoras: [],
@@ -10472,14 +10812,7 @@ export const useStore = create<AppState>((set, get) => ({
       get().loadModelOptions(modelType)
       _applyModelDefaults(get, set, modelType)
     }
-    // Persist to localStorage
-    const s = get()
-    _saveSettings({
-      generationMode: s.generationMode,
-      selectedModelPerMode: s.selectedModelPerMode,
-      savedParamsPerMode: s.savedParamsPerMode,
-      savedLoraPerMode: s.savedLoraPerMode,
-    }, s.loraIdByFilename)
+    _persistStickyStudioPreferences(get())
   },
 
   // Workspaces
@@ -10940,9 +11273,11 @@ export const useStore = create<AppState>((set, get) => ({
     // First / Last sidecars created before the explicit prompt-mode field
     // used minimax_h3_window_storyboard as the UI's Auto/Manual switch.
     // Prefer the explicit field, while keeping those existing clips durable.
-    const restoredH3SequencePromptMode: 'auto' | 'manual' | undefined = (
+    const restoredH3SequencePromptMode: 'auto' | 'creative' | 'manual' | undefined = (
       p.minimax_h3_sequence_prompt_mode === 'manual'
         ? 'manual'
+        : p.minimax_h3_sequence_prompt_mode === 'creative'
+          ? 'creative'
         : p.minimax_h3_sequence_prompt_mode === 'auto'
           ? 'auto'
           : p.minimax_h3_multi_window === true
@@ -11168,6 +11503,8 @@ export const useStore = create<AppState>((set, get) => ({
     newParams.ltx_window_prompt_mode = (
       p.ltx_window_prompt_mode === 'manual'
         ? 'manual'
+        : p.ltx_window_prompt_mode === 'creative'
+          ? 'creative'
         : (p.ltx_window_prompt_mode === 'auto'
             ? 'auto'
             : (legacyLtxLongForm ? 'auto' : undefined))
@@ -11334,22 +11671,24 @@ export const useStore = create<AppState>((set, get) => ({
     const restoredSpatialUpsampling = (p.spatial_upsampling as string) || ''
     const restoredFilmGrainIntensity = (p.film_grain_intensity as number) || 0
     const restoredFilmGrainSaturation = (p.film_grain_saturation as number) || 0.5
-    const restoredImageWorkflow: StudioImageWorkflow = (
-      p._studio_image_workflow === 'edit'
-      || p._studio_image_workflow === 'inpaint'
-      || p._studio_image_workflow === 'outpaint'
-      || p._studio_image_workflow === 'new'
-    ) ? p._studio_image_workflow : (
+    const restoredImageWorkflow: StudioImageWorkflow = _normalizeStudioImageWorkflow(
+      p._studio_image_workflow,
+    ) ?? (
       Number(p.image_mode || 0) === 2
         ? (String(p.video_guide_outpainting || '').replace(/^#/, '').trim()
             ? 'outpaint'
             : 'inpaint')
-        : Array.isArray(p.image_refs) && p.image_refs.length > 0
-          ? 'edit'
-          : 'new'
+        : 'generate'
     )
+    const restoredVideoWorkflow: StudioVideoWorkflow = _normalizeStudioVideoWorkflow(
+      p._studio_video_workflow,
+      model,
+    ) ?? (p.video_source ? 'extend' : _isOmniVideoModel(model) ? 'references' : 'frames')
     if (model && getModelMode(modelType, model.family) === 'image') {
       newParams._studio_image_workflow = restoredImageWorkflow
+    }
+    if (model && getModelMode(modelType, model.family) === 'video') {
+      newParams._studio_video_workflow = restoredVideoWorkflow
     }
     // Restore audio guide filename from upload_filenames. Fall back to
     // deriving basename from params.audio_guide for sidecars that pre-date
@@ -11398,6 +11737,9 @@ export const useStore = create<AppState>((set, get) => ({
         imageWorkflowMaskUrl: restoredImageMask
           ? api.getUploadUrl(restoredImageMask)
           : '',
+      } : {}),
+      ...(model && getModelMode(modelType, model.family) === 'video' ? {
+        studioVideoWorkflow: restoredVideoWorkflow,
       } : {}),
       outputCount: 1,
       ...(restoredDuration > 0 ? { durationSeconds: restoredDuration } : {}),

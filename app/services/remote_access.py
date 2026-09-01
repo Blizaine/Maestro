@@ -118,8 +118,10 @@ class TailscaleManager:
             return {}
 
     def _save_preference(self, enabled: bool) -> None:
+        current = self._read_preference()
+        windows_restore_task = bool(current.get("windows_restore_task", False))
         _atomic_write(self._path, {
-            "version": 2,
+            "version": 3,
             "enabled": bool(enabled),
             "target_port": self._server_port,
             # Pinokio's launcher reads this opt-in flag and reuses the exact
@@ -127,6 +129,18 @@ class TailscaleManager:
             # a separate LAN proxy and cannot keep a Tailscale Serve target
             # stable by itself.
             "pinokio_port_lock": bool(enabled),
+            # Preserve the one-time Windows helper marker when the in-app
+            # toggle disables and later re-enables the route. The task itself
+            # remains inert while `enabled` is false.
+            "windows_restore_task": windows_restore_task,
+            "windows_restore_task_name": (
+                str(
+                    current.get("windows_restore_task_name")
+                    or "Maestro Tailscale Serve"
+                )
+                if windows_restore_task
+                else None
+            ),
         })
 
     def _run(
@@ -289,20 +303,31 @@ class TailscaleManager:
         if not preference.get("enabled"):
             return
 
-        # `tailscale serve --bg` persists across app and machine restarts. If
-        # the launcher reused its saved target port, there is nothing to
-        # refresh. This is especially important on Windows, where probing or
-        # changing Serve from Maestro's non-elevated backend can be denied even
-        # though the already-configured route is healthy.
+        # `tailscale serve --bg` persists across app and machine restarts. The
+        # Windows launcher also dispatches the fixed, user-approved on-demand
+        # restore task before starting this backend. Avoid a second CLI call
+        # here because the backend intentionally runs without elevation.
         try:
             saved_port = int(preference.get("target_port"))
         except (TypeError, ValueError):
             saved_port = None
         if saved_port == self._server_port:
-            print(
-                "[Remote Access] Reusing the saved Maestro port; "
-                "the persistent Tailscale route remains valid."
-            )
+            if os.name == "nt" and preference.get("windows_restore_task"):
+                print(
+                    "[Remote Access] Reusing the saved Maestro port; "
+                    "the Windows Tailscale restore helper was requested."
+                )
+            elif os.name == "nt":
+                print(
+                    "[Remote Access] Reusing the saved Maestro port. Run "
+                    "Secure Remote Access once after updating to install the "
+                    "restart-safe Windows helper."
+                )
+            else:
+                print(
+                    "[Remote Access] Reusing the saved Maestro port; "
+                    "the persistent Tailscale route remains valid."
+                )
             return
 
         def worker() -> None:

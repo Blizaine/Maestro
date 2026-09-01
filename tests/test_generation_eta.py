@@ -1,5 +1,7 @@
 import os
+import json
 import sys
+import tempfile
 import unittest
 
 
@@ -8,7 +10,11 @@ _APP_DIR = os.path.abspath(os.path.join(_HERE, "..", "app"))
 if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
-from services.generation_eta import AdaptiveGenerationEta, task_workload
+from services.generation_eta import (
+    AdaptiveGenerationEta,
+    GenerationEtaHistory,
+    task_workload,
+)
 
 
 def _task(
@@ -172,6 +178,147 @@ class AdaptiveGenerationEtaTests(unittest.TestCase):
             snapshot["generation_eta_seconds"],
             snapshot["window_eta_seconds"],
         )
+
+    def test_persistent_history_seeds_matching_multi_window_render(self):
+        task = _task(frames=400, steps=8, resolution="1280x704")
+        task["params"].update({
+            "model_type": "minimax_h3",
+            "sliding_window_size": 100,
+            "sliding_window_overlap": 0,
+            "override_attention": "sol",
+        })
+        hardware = {
+            "gpu_name": "NVIDIA GeForce RTX 4090",
+            "gpu_vram_gb": 24,
+            "gpu_capability": "sm89",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "eta.sqlite3")
+            store = GenerationEtaHistory(path, hardware=hardware)
+            self.assertTrue(store.record(
+                task,
+                400,
+                wall_seconds=430,
+                non_step_seconds=40,
+                window_seconds=[100, 100, 100, 100],
+                source_key="first-run",
+            ))
+
+            # A fresh store/estimator simulates restarting Maestro.
+            fresh_store = GenerationEtaHistory(path, hardware=hardware)
+            eta = AdaptiveGenerationEta(
+                [task],
+                history_store=fresh_store,
+                now_fn=lambda: 0.0,
+            )
+            eta.start_task(0, now=0)
+            snapshot = eta.snapshot(now=0)
+
+            self.assertEqual(1, snapshot["eta_history_samples"])
+            self.assertEqual("exact", snapshot["eta_history_match"])
+            self.assertEqual("historical", snapshot["eta_basis"])
+            self.assertEqual(4, snapshot["total_windows"])
+            self.assertAlmostEqual(430, snapshot["clip_eta_seconds"], delta=2)
+
+    def test_history_reuses_window_speed_for_a_different_total_duration(self):
+        short = _task(frames=400, steps=8, resolution="1280x704")
+        short["params"].update({
+            "model_type": "minimax_h3",
+            "sliding_window_size": 100,
+            "sliding_window_overlap": 0,
+        })
+        longer = _task(frames=600, steps=8, resolution="1280x704")
+        longer["params"].update({
+            "model_type": "minimax_h3",
+            "sliding_window_size": 100,
+            "sliding_window_overlap": 0,
+        })
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = GenerationEtaHistory(
+                os.path.join(temp_dir, "eta.sqlite3"),
+                hardware={"gpu_name": "test-gpu", "gpu_vram_gb": 24},
+            )
+            store.record(
+                short,
+                400,
+                wall_seconds=420,
+                window_seconds=[100, 100, 100, 100],
+                source_key="four-windows",
+            )
+            prediction = store.estimate(longer)
+
+            self.assertIsNotNone(prediction)
+            self.assertEqual("exact", prediction.match)
+            self.assertAlmostEqual(600, prediction.active_seconds, delta=1)
+            self.assertAlmostEqual(620, prediction.wall_seconds, delta=1)
+
+    def test_history_keeps_different_lora_configs_separate(self):
+        base = _task(frames=100, steps=8)
+        base["params"]["model_type"] = "minimax_h3"
+        lora = _task(frames=100, steps=8)
+        lora["params"].update({
+            "model_type": "minimax_h3",
+            "activated_loras": ["MiniMax-H3-FL2VA-Acc-8Step.safetensors"],
+            "loras_multipliers": "1.0",
+        })
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = GenerationEtaHistory(
+                os.path.join(temp_dir, "eta.sqlite3"),
+                hardware={"gpu_name": "test-gpu", "gpu_vram_gb": 24},
+            )
+            store.record(base, 60, source_key="without-lora")
+            self.assertIsNone(store.estimate(lora))
+
+    def test_sidecar_bootstrap_ignores_partial_multi_window_outputs(self):
+        params = {
+            "model_type": "minimax_h3",
+            "resolution": "1280x704",
+            "video_length": 400,
+            "sliding_window_size": 100,
+            "sliding_window_overlap": 0,
+            "num_inference_steps": 8,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            complete_path = os.path.join(temp_dir, "complete.meta.json")
+            partial_path = os.path.join(temp_dir, "partial.meta.json")
+            with open(complete_path, "w", encoding="utf-8") as handle:
+                json.dump({
+                    "generation_mode": "video",
+                    "params": params,
+                    "generation_time": 400,
+                    "generation_time_basis": "active",
+                    "job_elapsed_time": 430,
+                    "multi_window_timing": {
+                        "window_count": 4,
+                        "completed_windows": 4,
+                        "window_generation_seconds": [100, 100, 100, 100],
+                        "total_generation_seconds": 400,
+                    },
+                }, handle)
+            with open(partial_path, "w", encoding="utf-8") as handle:
+                json.dump({
+                    "generation_mode": "video",
+                    "params": params,
+                    "generation_time": 100,
+                    "multi_window_timing": {
+                        "window_count": 4,
+                        "completed_windows": 1,
+                        "window_generation_seconds": [100],
+                        "total_generation_seconds": 100,
+                    },
+                }, handle)
+
+            store = GenerationEtaHistory(
+                os.path.join(temp_dir, "eta.sqlite3"),
+                hardware={"gpu_name": "test-gpu", "gpu_vram_gb": 24},
+            )
+            imported = store.bootstrap_from_sidecars(temp_dir)
+            estimate = store.estimate({"params": params})
+
+            self.assertEqual(1, imported)
+            self.assertIsNotNone(estimate)
+            self.assertEqual(1, estimate.sample_count)
+            self.assertAlmostEqual(400, estimate.active_seconds, delta=1)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ if str(APP) not in sys.path:
 
 from services.h3_window_planner import (  # noqa: E402
     _compact,
+    _creative_dialogue_expected,
     _dialogue_sentence,
     _fallback_plan,
     _narrative_dialogue_expected,
@@ -560,6 +561,10 @@ class H3WindowPlannerTests(unittest.TestCase):
         self.assertNotEqual(base, h3_window_plan_signature(**{**common, "has_start_image": True}))
         self.assertNotEqual(
             base,
+            h3_window_plan_signature(**common, planning_style="creative"),
+        )
+        self.assertNotEqual(
+            base,
             h3_window_plan_signature(
                 **common,
                 injected_keyframes=[{"path": "anchor.png", "position": "W2:50"}],
@@ -639,6 +644,22 @@ class H3WindowPlannerTests(unittest.TestCase):
         self.assertFalse(
             _narrative_dialogue_expected(
                 prompt + " The entire sequence is silent and nonverbal.",
+                4,
+            )
+        )
+
+    def test_creative_telling_brief_requires_an_authored_script(self):
+        prompt = (
+            "George Costanza walks into the coffee shop on Friends and starts "
+            "excitedly telling Joey that Maestro version two just dropped. "
+            "George explains the new features. Joey has no idea what George "
+            "is talking about. Include audience laughter."
+        )
+        self.assertTrue(_creative_dialogue_expected(prompt, 4))
+        self.assertTrue(_narrative_dialogue_expected(prompt, 4))
+        self.assertFalse(
+            _creative_dialogue_expected(
+                "A hawk silently crosses a mountain landscape without dialogue.",
                 4,
             )
         )
@@ -796,6 +817,7 @@ class H3WindowPlannerTests(unittest.TestCase):
             window_frames=243,
             overlap_frames=0,
             fps=24,
+            planning_style="creative",
         )
         self.assertEqual(generate.call_count, 6)
         self.assertEqual(result["planned_by"], "llm")
@@ -824,6 +846,7 @@ class H3WindowPlannerTests(unittest.TestCase):
         multi_window = (ROOT / "ui" / "src" / "components" / "Sidebar" / "H3MultiWindowControls.tsx").read_text(encoding="utf-8")
         prompt_input = (ROOT / "ui" / "src" / "components" / "Sidebar" / "PromptInput.tsx").read_text(encoding="utf-8")
         main_content = (ROOT / "ui" / "src" / "components" / "MainContent" / "MainContent.tsx").read_text(encoding="utf-8")
+        media_item = (ROOT / "ui" / "src" / "components" / "MainContent" / "MediaFeedItem.tsx").read_text(encoding="utf-8")
         guide = APP / "services" / "llm_guides" / "enhance" / "minimax_h3_sliding_windows.md"
         self.assertIn("h3_window_prompts=None", handler)
         self.assertIn("Using {len(prompts)} explicit", handler)
@@ -837,6 +860,8 @@ class H3WindowPlannerTests(unittest.TestCase):
         self.assertIn("Window prompts", multi_window)
         self.assertIn("Exact H3 prompts", prompt_input)
         self.assertIn("H3WindowPromptTextarea", prompt_input)
+        self.assertIn("Generated window prompts", media_item)
+        self.assertIn("AI window 1", media_item)
         self.assertIn("textarea.scrollHeight", prompt_input)
         self.assertNotIn("max-h-[360px] overflow-y-auto", prompt_input)
         self.assertNotIn("min-h-[118px] resize-y", prompt_input)

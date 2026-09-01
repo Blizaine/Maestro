@@ -5,7 +5,7 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [Unreleased]
 
-## [2.0.0] - 2026-08-29
+## [2.0.0] - 2026-09-01
 
 Editor: added a third top-level Maestro workspace beside Director and Studio.
 The new non-destructive editor supports layered video, audio, and title tracks;
@@ -40,6 +40,27 @@ Effects, and Revoice. Film Grain is available as a reusable Finish workflow for
 any saved video, including Editor clips. The Director / Studio / Editor header,
 version label, app icon, and responsive behavior are now shared consistently.
 
+Long-form planning: Studio and Director now share one-window, Duration,
+Windows, and Auto planning rather than requiring a separate multi-window
+toggle. Duration presets cover 30 seconds through 60 minutes, exact timecodes
+remain editable, and window-count controls expose the frequently used 1/2/3/4
+pass cases directly. Presets are translated through the active model's real
+window, overlap, and discard geometry, so the UI reports both the actual
+runtime and pass count. Auto follows timed source media or explicit requested
+lengths and otherwise estimates a bounded story duration from visible beats
+and exact dialogue. Faithful and Creative AI planning let users either preserve
+their authored event ledger or ask the LLM to expand a concept with new action
+and dialogue. Long-form controls also cover compatible audio generation, while
+individual music-model limits remain enforced.
+
+Studio state now survives refreshes and restarts for the selected media mode,
+workflow, model, prompt-planning mode, H3 optimizations, and Characters/H3
+optimization disclosure panels. Video is explicitly separated into Frames for
+text, first/last, keyframe, control-video, and soundtrack-driven workflows, and
+References for H3 Omni identity/performance conditioning. Image Generate,
+Transform, and Finish similarly narrow their model choices from the media the
+user supplies.
+
 MiniMax H3: added the native 768p tier, 21:9 canvases, and the Regenerate 2K
 workflow. FL2VA and Ref2VA expose their corresponding Alibaba PAI eight-step
 acceleration presets, including native PDD parallel-head loading and sampling.
@@ -58,9 +79,10 @@ and ambiguous or phantom speakers stop with an actionable error instead of
 silently swapping identities or voices. Manually authored Context-IR can also
 place a `<d>...</d>` line after an adjacent, unambiguous named performance cue;
 the runtime follows that short discourse chain without reverting to quote-order
-guessing. Improved memory and reference
-preparation avoids needless high-resolution
-decoding while retaining full-quality identity conditioning.
+guessing. Optional per-character background removal reduces identity-image
+scene leakage without forcing the processed look on every reference. Improved
+memory and reference preparation avoids needless high-resolution decoding
+while retaining full-quality identity conditioning.
 
 H3 planning and Director: long-form plans now use a causal story architecture,
 character voice bibles, dialogue table reads, exact locked dialogue manifests,
@@ -70,7 +92,9 @@ estimates instead of a false 512-token rejection, preserves visible quoted text
 without treating it as speech, and compacts only prose that can be shortened
 without losing dialogue or timing. Director and Studio report per-clip,
 multi-window, and project ETAs with observed cache acceleration folded into
-later estimates.
+later estimates. A private local SQLite timing history learns from completed
+runs with the same hardware, model, resolution, steps, LoRAs, and optimization
+profile, improving future estimates without storing prompts or media paths.
 
 Local LLMs: added Qwen3.8 27B Uncensored Q4_K_M with its vision projector,
 model-aware reasoning tiers, quantized KV planning for 24 GB systems, and
@@ -85,9 +109,19 @@ Notifications and remote access: added in-app completion alerts, optional
 browser and host chimes, event preferences, an installable PWA, and encrypted
 closed-app Web Push. Optional Tailscale Serve integration creates a private
 HTTPS address inside each user's own tailnet, displays a QR code, and remembers
-the selected Maestro backend port across restarts. Dynamic ports remain the
-default for users who never opt in, Maestro never enables public Funnel access,
-and an existing unrelated Serve route is not overwritten.
+the selected Maestro backend port across restarts. Windows setup registers one
+fixed on-demand route-restoration task so later opted-in Maestro starts recover
+remote access without another UAC prompt. Dynamic ports remain the default for
+users who never opt in, Maestro never enables public Funnel access, and an
+existing unrelated Serve route is not overwritten.
+
+Gallery workflow: the active card now follows the media being viewed or played,
+and starting playback activates and unmutes that item. Expandable generation
+details show model, resolution, seed, LoRAs, H3 optimization chips, effective
+prompts, total scene duration, window count, per-window render times, and total
+generation time. Search indexes these generation parameters, making queries
+such as `Omni`, `Turbo`, `PDD`, or a LoRA name useful filters rather than merely
+filename searches.
 
 Launcher and polish: adopted the new orange Maestro icon, simplified Start and
 LoRA-folder actions, removed the normal Classic UI entry points, and kept the

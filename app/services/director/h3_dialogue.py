@@ -641,10 +641,54 @@ def _meaningful_context_present(context: str, body: str) -> bool:
     return len(words & body_words) >= required
 
 
+_H3_GENERIC_IDENTITY_LABELS = {
+    "character", "crowd", "customer", "extra", "listener", "man",
+    "narrator", "patron", "person", "speaker", "subject", "the man",
+    "the woman", "visible speaker", "woman",
+}
+
+
+def _h3_anchor_key(value: Any) -> str:
+    return re.sub(
+        r"[^a-z0-9]+",
+        " ",
+        normalize_h3_text(value).casefold(),
+    ).strip()
+
+
+def _h3_anchor_present(anchor: Any, text: Any) -> bool:
+    wanted = _h3_anchor_key(anchor)
+    return not wanted or wanted in _h3_anchor_key(text)
+
+
+def _h3_context_anchors(values: Iterable[Any]) -> list[str]:
+    anchors: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        anchor = _normalized_space(normalize_h3_text(value)).strip(" .;:-")
+        key = _h3_anchor_key(anchor)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        anchors.append(anchor)
+    return anchors
+
+
+def _ensure_h3_context_anchors(body: str, anchors: Iterable[Any]) -> str:
+    required = _h3_context_anchors(anchors)
+    missing = [anchor for anchor in required if not _h3_anchor_present(anchor, body)]
+    if not missing:
+        return body
+    return _normalized_space(
+        f"Canonical identity and world: {'; '.join(missing)}. {body}"
+    )
+
+
 def _source_prompt_parts(
     prompt: str,
     *,
     project_context: str = "",
+    context_anchors: Sequence[str] | None = None,
     opening_blocking: str = "",
     closing_blocking: str = "",
     audio_plan: Mapping[str, Any] | None = None,
@@ -706,6 +750,7 @@ def _source_prompt_parts(
         if len(context) > 360:
             context = context[:360].rsplit(" ", 1)[0].rstrip(" ,;:-") + "..."
         body = f"Project context: {context}. {body}".strip()
+    body = _ensure_h3_context_anchors(body, context_anchors or [])
 
     opening = _normalized_space(normalize_h3_text(opening_blocking))
     if opening and opening.casefold() not in body.casefold():
@@ -784,6 +829,106 @@ def _subject_name_for_key(subjects: Sequence[Any], key: str) -> str:
     return key or "the visible speaker"
 
 
+def _set_h3_subject_field(subject: Any, key: str, value: Any) -> None:
+    if isinstance(subject, MutableMapping):
+        subject[key] = value
+    elif hasattr(subject, key):
+        setattr(subject, key, value)
+
+
+def _leading_h3_identity(value: Any) -> str:
+    text = _normalized_space(value)
+    match = re.match(
+        r"^([A-Z][A-Za-z0-9'’-]+(?:\s+[A-Z][A-Za-z0-9'’-]+){0,2})"
+        r"(?=\s*(?:\(|,|—|–|-))",
+        text,
+    )
+    if not match:
+        return ""
+    candidate = match.group(1).strip()
+    if candidate.casefold() in _H3_GENERIC_IDENTITY_LABELS:
+        return ""
+    return candidate
+
+
+def _canonicalize_h3_project_subject_names(
+    clip_plans: Sequence[Mapping[str, Any]],
+) -> None:
+    """Keep one most-specific cast name for each stable Director character ID."""
+
+    project_context = " ".join(
+        _normalized_space(plan.get("_director_project_context", ""))
+        for plan in clip_plans
+        if isinstance(plan, Mapping)
+    )
+    candidates: dict[str, list[str]] = {}
+    for plan in clip_plans:
+        for subject in plan.get("_director_subjects_on_screen") or []:
+            character_id = _normalized_space(_field(subject, "character_id", ""))
+            if not character_id:
+                continue
+            key = character_id.casefold()
+            name = _normalized_space(_field(subject, "speaker_name", ""))
+            inferred = _leading_h3_identity(
+                _field(subject, "visual_description", "")
+            )
+            for candidate in (name, inferred):
+                if candidate and candidate not in candidates.setdefault(key, []):
+                    candidates[key].append(candidate)
+
+    def score(name: str) -> tuple[int, int, int, int]:
+        words = re.findall(r"[A-Za-z0-9'’-]+", name)
+        context_key = _h3_anchor_key(project_context)
+        first_token_present = bool(
+            words
+            and re.search(
+                rf"(?:^|\s){re.escape(words[0].casefold())}(?:\s|$)",
+                context_key,
+            )
+        )
+        return (
+            int(_h3_anchor_present(name, project_context) or first_token_present),
+            len(words),
+            int(not name.isupper()),
+            len(name),
+        )
+
+    canonical = {
+        key: max(names, key=score)
+        for key, names in candidates.items()
+        if names
+    }
+    for plan in clip_plans:
+        for subject in plan.get("_director_subjects_on_screen") or []:
+            character_id = _normalized_space(_field(subject, "character_id", ""))
+            name = canonical.get(character_id.casefold())
+            if name:
+                _set_h3_subject_field(subject, "speaker_name", name)
+
+
+def _h3_plan_context_anchors(plan: Mapping[str, Any]) -> list[str]:
+    anchors: list[str] = []
+    for subject in plan.get("_director_subjects_on_screen") or []:
+        name = _normalized_space(
+            _field(subject, "speaker_name", "")
+            or _field(subject, "character_id", "")
+        )
+        folded = name.casefold()
+        if (
+            name
+            and folded not in _H3_GENERIC_IDENTITY_LABELS
+            and not re.fullmatch(r"(?:char|subject|speaker)[_-]?\d+", folded)
+        ):
+            anchors.append(name)
+    environment = _normalized_space(plan.get("_director_environment", ""))
+    if environment:
+        # Environment is already Director's concise, shot-specific world ledger.
+        # Cap pathological legacy values while retaining named franchise/venue data.
+        words = environment.split()
+        anchors.append(" ".join(words[:32]).rstrip(" .;:-"))
+    return _h3_context_anchors(anchors)
+
+
 def _build_stable_speaker_registry(
     clip_plans: Sequence[Mapping[str, Any]],
 ) -> dict[str, dict[str, str]]:
@@ -826,6 +971,16 @@ def _build_stable_speaker_registry(
             }
             used_numbers.add(next_number)
             next_number += 1
+    # Existing saved projects may carry a registry compiled before a later
+    # shot supplied the character's complete canonical name. The project-wide
+    # subject ledger above is authoritative for labels while stable IDs remain.
+    for plan in clip_plans:
+        for subject in plan.get("_director_subjects_on_screen") or []:
+            character_id = _normalized_space(_field(subject, "character_id", ""))
+            speaker_name = _normalized_space(_field(subject, "speaker_name", ""))
+            entry = registry.get(character_id.casefold())
+            if entry is not None and speaker_name:
+                entry["speaker_name"] = speaker_name
     return registry
 
 
@@ -1547,6 +1702,7 @@ def compile_h3_official_prompt(
     references: Sequence[Mapping[str, Any]] | None = None,
     speaker_registry: Mapping[str, Any] | None = None,
     project_context: str = "",
+    context_anchors: Sequence[str] | None = None,
     opening_blocking: str = "",
     closing_blocking: str = "",
     audio_plan: Mapping[str, Any] | None = None,
@@ -1579,6 +1735,7 @@ def compile_h3_official_prompt(
     body, soundscape, music, existing_blocks = _source_prompt_parts(
         prompt,
         project_context=project_context,
+        context_anchors=context_anchors,
         opening_blocking=opening_blocking,
         closing_blocking=closing_blocking,
         audio_plan=audio_plan,
@@ -1649,6 +1806,10 @@ def compile_h3_official_prompt(
                 registry,
                 closing_blocking=closing_blocking,
                 level=level,
+            )
+            compact_body = _ensure_h3_context_anchors(
+                compact_body,
+                context_anchors or [],
             )
             compiled_body, current_contract = _compile_official_dialogue(
                 compact_body,
@@ -1734,6 +1895,8 @@ def validate_h3_prompt_contract(
     *,
     mode: str = "t2va",
     references: Sequence[Mapping[str, Any]] | None = None,
+    subjects: Sequence[Any] | None = None,
+    context_anchors: Sequence[str] | None = None,
 ) -> list[str]:
     """Validate the official field order plus Maestro's exact dialogue data."""
 
@@ -1778,6 +1941,22 @@ def validate_h3_prompt_contract(
         errors.append("legacy Maestro prompt wrapper remains in the H3 payload")
     if any(0x80 <= ord(character) <= 0x9F for character in text):
         errors.append("prompt contains an orphaned C1 control character")
+    required_anchors = list(context_anchors or [])
+    for subject in subjects or []:
+        name = _normalized_space(
+            _field(subject, "speaker_name", "")
+            or _field(subject, "character_id", "")
+        )
+        folded = name.casefold()
+        if (
+            name
+            and folded not in _H3_GENERIC_IDENTITY_LABELS
+            and not re.fullmatch(r"(?:char|subject|speaker)[_-]?\d+", folded)
+        ):
+            required_anchors.append(name)
+    for anchor in _h3_context_anchors(required_anchors):
+        if not _h3_anchor_present(anchor, text):
+            errors.append(f"missing canonical identity/world context: {anchor}")
     if mode == "i2va" and not text.startswith(
         "For the target video, at 0.00 seconds into the target video, <Picture 1>"
     ):
@@ -1853,6 +2032,7 @@ def compile_h3_clip_plans(
     Ref2VA wrapper around a previously compiled prompt.
     """
 
+    _canonicalize_h3_project_subject_names(clip_plans)
     registry = _build_stable_speaker_registry(clip_plans)
     for index, plan in enumerate(clip_plans):
         beats = plan.get("_director_dialogue_beats") or []
@@ -1891,6 +2071,8 @@ def compile_h3_clip_plans(
             if reference_manifests is not None and index < len(reference_manifests)
             else plan.get("_director_h3_reference_manifest") or []
         )
+        context_anchors = _h3_plan_context_anchors(plan)
+        plan["_director_required_context_anchors"] = context_anchors
         prompt, contract = compile_h3_official_prompt(
             source_prompt,
             plan.get("_director_subjects_on_screen") or [],
@@ -1900,6 +2082,7 @@ def compile_h3_clip_plans(
             references=references,
             speaker_registry=registry,
             project_context=plan.get("_director_project_context", ""),
+            context_anchors=context_anchors,
             opening_blocking=plan.get("_director_opening_blocking", ""),
             closing_blocking=plan.get("_director_closing_blocking", ""),
             audio_plan=plan.get("_director_audio_plan") or {},
@@ -1914,6 +2097,8 @@ def compile_h3_clip_plans(
             beats,
             mode=mode,
             references=references,
+            subjects=plan.get("_director_subjects_on_screen") or [],
+            context_anchors=context_anchors,
         )
         if errors:
             raise H3DialogueContractError(

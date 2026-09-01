@@ -2729,12 +2729,18 @@ def _build_enhance_user_prompt(
     window_count,
     window_size_seconds,
     model_type="",
+    planning_style="faithful",
 ):
     """Prefix the user prompt with the app's structural context (duration +
     sliding-window / paragraph count) so the LLM writes one paragraph per
     window. Shared by the guide-based path and the raw per-model-enhancer
     path — the dedicated enhancer gets no system guide, so without this it has
     no idea how many window-paragraphs to produce."""
+    planning_style = (
+        "creative"
+        if str(planning_style or "").strip().casefold() == "creative"
+        else "faithful"
+    )
     if duration_seconds and mode in ("video", "avatar"):
         parts = [f"Duration: {duration_seconds} seconds"]
         if window_count and window_count > 1:
@@ -2747,6 +2753,28 @@ def _build_enhance_user_prompt(
                 "separated by newlines"
             )
         context = f"[{', '.join(parts)}]"
+        if window_count and window_count > 1:
+            if planning_style == "creative":
+                context += (
+                    "\n[CREATIVE MULTI-WINDOW WRITING: Treat the user's text as a "
+                    "brief for one complete full-duration scene. First plan the "
+                    "whole arc, then distribute a clear opening, escalation, and "
+                    "payoff across the exact window count. Invent useful supporting "
+                    "actions, motivated camera coverage, and concise character-specific "
+                    "dialogue. Preserve every explicitly requested event and exact "
+                    "quoted line; quotes are immutable anchors and may have natural "
+                    "dialogue around them unless the user says only those lines. Never "
+                    "repeat, recap, preview, or complete a later window's beat early. "
+                    "If the user explicitly requests silence or no dialogue, write none.]"
+                )
+            else:
+                context += (
+                    "\n[FAITHFUL MULTI-WINDOW PLANNING: Treat every supplied event, "
+                    "outcome, and quoted line as locked source material. Distribute it "
+                    "chronologically across the exact window count without inventing "
+                    "new plot events, outcomes, or dialogue. Never repeat, recap, preview, "
+                    "or complete a later window's beat early.]"
+                )
         if (
             window_count
             and window_count > 1
@@ -2813,6 +2841,7 @@ def enhance_prompt(
     lora_system_hint: str = "",
     raw_enhancer_mode: bool = False,
     reference_context: Optional[str] = None,
+    planning_style: str = "faithful",
 ) -> str:
     # Repair legacy Windows/code-page damage before model-specific parsers
     # copy user-authored international text into an immutable prompt contract.
@@ -2820,6 +2849,11 @@ def enhance_prompt(
     system_override = repair_text(system_override) if system_override else system_override
     reference_context = repair_text(reference_context) if reference_context else reference_context
     lora_system_hint = repair_text(lora_system_hint)
+    planning_style = (
+        "creative"
+        if str(planning_style or "").strip().casefold() == "creative"
+        else "faithful"
+    )
     is_h3_ref2va = (
         mode in ("video", "avatar")
         and (model_type or "").lower().startswith("minimax_h3_ref2va")
@@ -2905,6 +2939,7 @@ def enhance_prompt(
                     1,
                     window_size_seconds,
                     model_type,
+                    planning_style,
                 )
                 r = generate(prompt=w_prompt, image_paths=(image_paths if i == 0 else None), **gen_kw)
                 r = _clean_enhancer_output(r)
@@ -2920,6 +2955,7 @@ def enhance_prompt(
             window_count,
             window_size_seconds,
             model_type,
+            planning_style,
         )
         print(f"[Enhance] Raw enhancer ({model_type}, images={bool(image_paths)}, windows={window_count})")
         result = generate(prompt=raw_prompt, image_paths=image_paths, **gen_kw)
@@ -3070,6 +3106,7 @@ def enhance_prompt(
         window_count,
         window_size_seconds,
         model_type,
+        planning_style,
     )
 
     # Add image context
@@ -3103,6 +3140,17 @@ def enhance_prompt(
     # Inject LoRA hints into system prompt (NOT user prompt) so LLM treats them as instructions
     if lora_system_hint:
         system += f"\n\n{lora_system_hint}"
+
+    if mode in ("video", "avatar") and planning_style == "creative":
+        system += (
+            "\n\nCREATIVE WRITING MODE: The user's prompt is a creative brief. "
+            "Author a compelling causal scene with specific filmable progression, "
+            "motivated camera coverage, and natural character-specific dialogue when "
+            "characters interact. Preserve all requested facts, identities, outcomes, "
+            "and exact quoted lines. Quoted lines are immutable anchors; supporting "
+            "dialogue may surround them unless the user says only those lines. Never "
+            "add speech to an explicitly silent request."
+        )
 
     # Preserve structural elements in image prompts
     if mode == "image":

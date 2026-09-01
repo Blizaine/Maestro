@@ -1466,6 +1466,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         # the same choice from their saved storyboard switch.
         self.assertIn("setParam('minimax_h3_sequence_prompt_mode', mode)", controls)
         self.assertIn("const restoredH3SequencePromptMode", store)
+        self.assertIn("p.minimax_h3_sequence_prompt_mode === 'creative'", store)
         self.assertIn("p.minimax_h3_window_storyboard === false ? 'manual' : 'auto'", store)
         self.assertIn(
             "newParams.minimax_h3_sequence_prompt_mode = restoredH3SequencePromptMode",
@@ -1502,9 +1503,12 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         launch = _read(_LAUNCH_PATH)
         client = _read(_ROOT / "ui" / "src" / "api" / "client.ts")
 
-        self.assertIn("Multi-window sequence", controls)
+        self.assertIn("Long sequence", controls)
+        self.assertIn("automatic", controls)
+        self.assertNotIn("setEnabled", controls)
         self.assertIn("Prompt writing", controls)
-        self.assertIn("Auto enhance (AI)", controls)
+        self.assertIn("AI - Faithful", controls)
+        self.assertIn("AI - Creative story + dialogue", controls)
         self.assertIn("minimax_h3_multi_window", controls)
         self.assertIn("minimax_h3_reference_sequence", controls)
         self.assertIn("Window prompts", controls)
@@ -1597,6 +1601,11 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             "minimax_h3_reference_sequence": True,
             "minimax_h3_sequence_prompt_mode": "auto",
         }))
+        self.assertTrue(detector({
+            "model_type": "h3_omni",
+            "minimax_h3_reference_sequence": True,
+            "minimax_h3_sequence_prompt_mode": "creative",
+        }))
         self.assertFalse(detector({
             "model_type": "h3_omni",
             "minimax_h3_reference_sequence": True,
@@ -1606,6 +1615,11 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             "model_type": "ltx",
             "ltx_multi_window": True,
             "ltx_window_prompt_mode": "auto",
+        }))
+        self.assertTrue(detector({
+            "model_type": "ltx",
+            "ltx_multi_window": True,
+            "ltx_window_prompt_mode": "creative",
         }))
         self.assertFalse(detector({
             "model_type": "ltx",
@@ -1884,22 +1898,15 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("modelOptions?.frames_maximum", duration)
         self.assertIn("const directOmni = isOmniReference && !omniReferenceSequence", duration)
         self.assertIn("const h3MultiWindowEnabled = isOmniReference", duration)
-        self.assertIn(
-            "const h3NativeDurationSlider = isH3 && !h3MultiWindowEnabled",
-            duration,
-        )
+        self.assertIn("LONG_FORM_MAX_SECONDS", duration)
+        self.assertIn("<DurationPresetControl", duration)
         self.assertIn(
             "s.params.minimax_h3_multi_window === true",
             duration,
         )
-        self.assertIn(
-            "const durationSliderMax = h3NativeDurationSlider ? maximumFrames : maxDuration",
-            duration,
-        )
-        self.assertIn(
-            "const durationSliderStep = h3NativeDurationSlider ? frameStep : durationStep",
-            duration,
-        )
+        self.assertIn("const shouldSequence = duration > windowSize + 0.05", duration)
+        self.assertIn("minimax_h3_reference_sequence', shouldSequence", duration)
+        self.assertIn("minimax_h3_multi_window', shouldSequence", duration)
         self.assertIn("setDuration(preferredSeconds)", duration)
         self.assertIn("max={isH3 ? maximumFrames : windowMaxSeconds}", duration)
         self.assertIn("value={isH3 ? currentWindowFrames : windowSize}", duration)
@@ -2067,7 +2074,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn('scope="director"', director)
         self.assertIn("directorH3References", store)
 
-    def test_studio_video_create_intent_routing_is_role_driven_and_submit_safe(self):
+    def test_studio_video_frames_and_references_have_separate_model_contracts(self):
         launch = _read(_LAUNCH_PATH)
         store = _read(_STORE_PATH)
         sidebar = _read(_SIDEBAR_PATH)
@@ -2081,12 +2088,13 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("function _isH3FirstLastVideoModel", store)
         self.assertIn("modelSupportsStudioVideoMediaIntent", store)
         self.assertIn("reference.audio_intent === 'drive'", store)
-        self.assertIn("if (intent.hasFrameGuidance && intent.hasOmniReferences) return false", store)
-        self.assertIn("if (intent.hasOmniReferences) return isOmni", store)
-        self.assertIn("if (intent.hasFrameGuidance && intent.hasAudioDrive) return isLtx", store)
-        self.assertIn("if (intent.hasFrameGuidance) return isFirstLast || isLtx", store)
-        self.assertIn("if (intent.hasAudioDrive) return isOmni || isLtx", store)
-        self.assertIn("return isFirstLast || isLtx", store)
+        self.assertIn("if (intent.workflow === 'references') return isOmni", store)
+        self.assertIn("if (isOmni) return false", store)
+        self.assertIn("if (intent.hasOmniReferences) return false", store)
+        self.assertIn("supportsFrameGeneration && model.supports_audio_input === true", store)
+        self.assertIn("if (intent.hasFrameGuidance) return supportsFrameGeneration", store)
+        self.assertIn("model.supports_audio_input === true", store)
+        self.assertIn("return supportsTextGeneration || supportsFrameGeneration", store)
         self.assertIn("useStudioFrameInputs", store)
         self.assertIn("delete params.minimax_h3_references", store)
         self.assertIn("delete params.image_refs", store)
@@ -2094,6 +2102,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertNotIn("VideoCreateRouteSelector", sidebar)
         self.assertIn("<InputsPanel />", sidebar)
         self.assertIn("<OmniReferenceSection />", sidebar)
+        self.assertIn("isReferencesWorkflow && <OmniReferenceSection />", sidebar)
         self.assertIn("modelSupportsStudioVideoMediaIntent", model_selector)
         self.assertIn("No compatible model", model_selector)
         self.assertIn("needsGuidance", generate_button)
@@ -2611,7 +2620,7 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
             )
             self.assertFalse(turbo.is_minimax_h3_turbo_lora(str(ordinary)))
 
-    def test_managed_turbo_mode_uses_the_pinned_six_step_recipe(self):
+    def test_managed_turbo_mode_defaults_to_the_pinned_pdd_recipe(self):
         turbo = _load_turbo_helpers()
         body = {
             "minimax_h3_turbo_mode": True,
@@ -2630,7 +2639,7 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
                 full_checkpoint=True,
             )
         )
-        self.assertEqual(body["num_inference_steps"], 6)
+        self.assertEqual(body["num_inference_steps"], 8)
         self.assertEqual(
             body["activated_loras"],
             [
@@ -2641,7 +2650,7 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
         self.assertEqual(body["loras_multipliers"], "1.15 1.00")
         self.assertEqual(
             turbo.MINIMAX_H3_TURBO_LORA_SHA256,
-            "5f3a626cd72c93a8b9318d6760c510bc5092d2ab13aaba1f932c5bab07a416d3",
+            "0b29be7042d883970eb0c20774a9ba03d95669ed80a721bb4d21be8ea0d0a196",
         )
 
         candidate = {
@@ -2696,7 +2705,7 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
                 full_checkpoint=False,
             )
         )
-        self.assertEqual(pruned["num_inference_steps"], 6)
+        self.assertEqual(pruned["num_inference_steps"], 8)
         self.assertEqual(pruned["loras_multipliers"], "1.00")
 
     def test_managed_turbo_choice_is_discoverable_for_full_and_pruned(self):
@@ -2721,6 +2730,8 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
         self.assertIn("setParam('num_inference_steps', selectedTurboPreset.steps)", optimizations)
         self.assertIn("handleTurboPresetChange", optimizations)
         self.assertIn("Turbo checkpoint", optimizations)
+        self.assertIn("const defaultTurboPreset", optimizations)
+        self.assertIn("const selectedTurboPreset = turboEnabled", optimizations)
         self.assertIn("selectedTurboPreset.filename", optimizations)
         self.assertIn("selectedTurboPreset.weight", optimizations)
         self.assertIn("Use Pruned Turbo", optimizations)
@@ -2748,24 +2759,30 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
         finally:
             if sys.path and sys.path[0] == str(_APP):
                 sys.path.pop(0)
-        self.assertEqual(pruned["steps"], 6)
+        self.assertEqual(pruned["steps"], 8)
         self.assertEqual(pruned["weight"], 1.0)
-        self.assertEqual(full["steps"], 6)
+        self.assertEqual(full["steps"], 8)
         self.assertEqual(full["weight"], 1.0)
         self.assertTrue(full["experimental"])
-        self.assertEqual(full["preset_id"], "v4-step600-ema")
+        self.assertEqual(
+            full["preset_id"],
+            "alibaba-pai-fl2va-pdd-8step",
+        )
         self.assertEqual(len(full["presets"]), 3)
         current_option = next(
             preset for preset in full["presets"]
-            if preset["id"] == "v4-step600-ema"
+            if preset["id"] == "alibaba-pai-fl2va-pdd-8step"
         )
-        self.assertEqual(current_option["status"], "validated")
+        self.assertEqual(current_option["status"], "official")
         self.assertEqual(current_option["weight"], 1.0)
         manifest = json.loads(_read(_TURBO_MANIFEST_PATH))
-        self.assertEqual(manifest["default_preset_id"], "v4-step600-ema")
+        self.assertEqual(
+            manifest["default_preset_id"],
+            "alibaba-pai-fl2va-pdd-8step",
+        )
         self.assertEqual(
             current_option["revision"],
-            "afc0346516372a17162c14df3c5264de1d9aa1c0",
+            "78db175437ee05df7ec492ee366f01b68b8d20e6",
         )
         fl_pdd = next(
             preset for preset in full["presets"]
@@ -2793,6 +2810,16 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
                 sys.path.pop(0)
         pruned_preset_ids = {preset["id"] for preset in pruned_ref["presets"]}
         full_preset_ids = {preset["id"] for preset in full_ref["presets"]}
+        self.assertEqual(
+            pruned_ref["preset_id"],
+            "alibaba-pai-ref2va-pdd-8step",
+        )
+        self.assertEqual(
+            full_ref["preset_id"],
+            "alibaba-pai-ref2va-pdd-8step",
+        )
+        self.assertEqual(pruned_ref["steps"], 8)
+        self.assertEqual(full_ref["steps"], 8)
         self.assertIn("alibaba-pai-ref2va-pdd-8step", pruned_preset_ids)
         self.assertIn("alibaba-pai-ref2va-pdd-8step", full_preset_ids)
         self.assertNotIn("alibaba-pai-fl2va-pdd-8step", full_preset_ids)
@@ -3384,8 +3411,21 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
             ],
             require_files=False,
         )
-        self.assertTrue(isolated_character[0]["remove_background"])
+        self.assertFalse(isolated_character[0]["remove_background"])
         self.assertFalse(isolated_character[1]["remove_background"])
+        explicitly_isolated = validate_reference_manifest(
+            [
+                {
+                    "type": "image",
+                    "path": "portrait.png",
+                    "image_intent": "identity",
+                    "library_character_id": "saved-lead",
+                    "remove_background": True,
+                },
+            ],
+            require_files=False,
+        )
+        self.assertTrue(explicitly_isolated[0]["remove_background"])
         with self.assertRaisesRegex(ValueError, "remove_background must be true or false"):
             validate_reference_manifest(
                 [
@@ -4015,11 +4055,12 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
         self.assertIn("Yoda <Subject 2> (S1) speaks", repaired)
         self.assertIn("Blaine <Subject 1> (S2) replies", repaired)
 
-        with self.assertRaisesRegex(ValueError, "could not determine which referenced character"):
-            ensure_ref2va_prompt_relationships(
-                'Someone says, "Hello there."',
-                references,
-            )
+        guest = ensure_ref2va_prompt_relationships(
+            'Someone says, "Hello there."',
+            references,
+        )
+        self.assertIn('Someone says, (S1) <d>[English] Hello there.</d>', guest)
+        self.assertNotIn('Someone <Subject', guest)
 
     def test_ref2va_keeps_structured_reference_ordinals_stable(self):
         from models.minimax_h3.ref2va import (
@@ -4105,20 +4146,79 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
                 references,
             )
 
-        with self.assertRaisesRegex(ValueError, "defines only 2 speaking character"):
+        with self.assertRaisesRegex(ValueError, "could not determine which referenced character"):
             ensure_ref2va_prompt_relationships(
                 "subject_definitions: <Picture 1> and <Picture 2>.\n\n"
                 "detailed_description: (S3) <d>[English] Hello there.</d>",
                 references,
             )
 
-        with self.assertRaisesRegex(ValueError, "defines only 2 speaking character"):
-            ensure_ref2va_prompt_relationships(
-                "subject_definitions: <Picture 1> and <Picture 2>.\n\n"
-                "detailed_description: Yoda (S3) speaks: "
-                "<d>[English] Hello there.</d>",
-                references,
-            )
+        repaired_marker = ensure_ref2va_prompt_relationships(
+            "subject_definitions: <Picture 1> and <Picture 2>.\n\n"
+            "detailed_description: Yoda (S3) speaks: "
+            "<d>[English] Hello there.</d>",
+            references,
+        )
+        self.assertIn("Yoda <Subject 1> (S1)", repaired_marker)
+        self.assertNotIn("Yoda (S3)", repaired_marker)
+
+    def test_ref2va_does_not_bind_named_guest_speakers_to_the_only_saved_character(self):
+        from models.minimax_h3.ref2va import (
+            ensure_ref2va_prompt_relationships,
+            select_ref2va_window_voice_references,
+        )
+
+        references = [
+            {
+                "type": "image",
+                "path": "blaine.png",
+                "role": "Blaine",
+                "image_intent": "identity",
+                "library_character_id": "saved-blaine",
+                "character_name": "Blaine",
+            },
+            {
+                "type": "audio",
+                "path": "blaine.wav",
+                "role": "Blaine voice",
+                "audio_intent": "voice",
+                "library_character_id": "saved-blaine",
+                "character_name": "Blaine",
+            },
+        ]
+        guest_window = (
+            "subject_definitions: <Subject 1> is Blaine from <Picture 1>; "
+            "<Audio 1> is Blaine's voice.\n\n"
+            "summary: Rachel questions Blaine.\n\n"
+            "retention_analysis: <Picture 1>: fully_preserved; <Audio 1>: reference.\n\n"
+            "detailed_description: Rachel (S1) asks, "
+            "<d>[English] Uh, can we help you?</d>\n\n"
+            "overall_soundscape: Coffee shop ambience.\n\n"
+            "non_diegetic_music: N/A"
+        )
+
+        scoped_prompt, scoped_refs, diagnostics = select_ref2va_window_voice_references(
+            guest_window,
+            references,
+        )
+
+        self.assertEqual(diagnostics["voice_kept"], 0)
+        self.assertEqual([item["type"] for item in scoped_refs], ["image"])
+        self.assertNotIn("<Audio", scoped_prompt)
+        compiled_guest = ensure_ref2va_prompt_relationships(scoped_prompt, scoped_refs)
+        self.assertIn("Rachel (S1) asks", compiled_guest)
+        self.assertNotIn("Rachel <Subject 1>", compiled_guest)
+
+        mixed = ensure_ref2va_prompt_relationships(
+            'Rachel asks, "Uh, can we help you?" Blaine responds, "Glad you asked."',
+            references,
+        )
+        self.assertIn("Rachel asks, (S1) <d>[English] Uh, can we help you?</d>", mixed)
+        self.assertIn(
+            "Blaine responds, <Subject 1> (S2) in the voice referenced from <Audio 1>, "
+            "<d>[English] Glad you asked.</d>",
+            mixed,
+        )
 
     def test_ref2va_manual_tagged_dialogue_aligns_the_addressed_character_correctly(self):
         from models.minimax_h3.ref2va import (

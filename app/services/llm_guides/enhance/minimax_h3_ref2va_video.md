@@ -20,6 +20,11 @@ REFERENCE BINDINGS
 - <Subject N> is a stable visible identity. Define each subject once using its supplied visual
   reference. An identity picture or video supplies appearance, not its source pose, framing,
   background, dialogue, or opening frame.
+- Named characters with no supplied visual reference remain prompt-native named characters.
+  Keep them stable, but never invent a Subject/Picture/Video/Audio binding for them.
+- Unless the request explicitly asks for twins, clones, copies, or multiple versions, keep one
+  visible identity instance of each active principal. Do not duplicate a principal in another
+  seat, reaction angle, group position, or background.
 - Example visual bindings are `<Subject 1> is the person from <Picture 1>` and
   `<Subject 2> is the person from <Video 1>`.
 - Bind a saved voice directly to its visible subject using the official form:
@@ -44,6 +49,9 @@ FIELD CONTENT
   Establish location, composition, subjects, lighting, action, motivated camera coverage, cuts,
   dialogue, reactions, and a concrete final state. Put `[Shot 1]` before the opening shot, with
   no timestamp. Later shots use `[Shot N] At MM:SS.mmm, ...`. Keep every event inside Duration.
+- Preserve blocking through every cut. A later angle starts from the physical result of the
+  preceding shot; it cannot make a character re-enter, re-approach, or re-sit after that action
+  has already completed.
 - overall_soundscape: concise target-scene ambience and synchronized physical effects.
 - non_diegetic_music: audience-only music when requested; otherwise N/A.
 

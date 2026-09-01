@@ -1,11 +1,16 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { AlertTriangle, ChevronDown, Gauge, Layers, Zap } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { InfoTooltip } from './InfoTooltip'
+import { readPersistentDisclosure, writePersistentDisclosure } from '../../lib/persistentDisclosure'
+
+const H3_OPTIMIZATIONS_EXPANDED_KEY = 'maestro-h3-optimizations-expanded'
 
 /** Main-sidecar controls for H3's independent speed optimizations. */
 export function MiniMaxH3Optimizations() {
-  const [expanded, setExpanded] = useState(true)
+  const [expanded, setExpanded] = useState(() => (
+    readPersistentDisclosure(H3_OPTIMIZATIONS_EXPANDED_KEY, true)
+  ))
   const modelOptions = useStore(s => s.modelOptions)
   const option = useStore(s => s.modelOptions?.minimax_h3_turbo)
   const advisory = useStore(s => s.modelOptions?.minimax_h3_runtime_advisory)
@@ -17,6 +22,10 @@ export function MiniMaxH3Optimizations() {
   const toggleLora = useStore(s => s.toggleLora)
   const setLoraWeight = useStore(s => s.setLoraWeight)
   const selectModel = useStore(s => s.selectModel)
+
+  useEffect(() => {
+    writePersistentDisclosure(H3_OPTIMIZATIONS_EXPANDED_KEY, expanded)
+  }, [expanded])
 
   const turboPresets = option?.presets?.length
     ? option.presets
@@ -34,14 +43,23 @@ export function MiniMaxH3Optimizations() {
           revision: '',
         }]
       : []
-  const selectedTurboPreset = (
-    turboPresets.find(preset => preset.id === params.minimax_h3_turbo_preset)
-    || turboPresets.find(preset => preset.id === option?.preset_id)
+  const turboEnabled = params.minimax_h3_turbo_mode === true
+  const defaultTurboPreset = (
+    turboPresets.find(preset => preset.id === option?.preset_id)
     || turboPresets[0]
   )
+  const configuredTurboPreset = turboPresets.find(
+    preset => preset.id === params.minimax_h3_turbo_preset,
+  )
+  // A disabled recipe starts from Maestro's current recommendation when it
+  // is enabled again. Preserve a user's alternate checkpoint while Turbo is
+  // actively selected, but do not let the former six-step default remain a
+  // hidden default forever in persisted pre-PDD state.
+  const selectedTurboPreset = turboEnabled
+    ? (configuredTurboPreset || defaultTurboPreset)
+    : defaultTurboPreset
   const architecture = String(modelOptions?.architecture || '')
   const isH3 = architecture.startsWith('minimax_h3')
-  const turboEnabled = params.minimax_h3_turbo_mode === true
   const solEnabled = params.override_attention === 'sol'
   const cacheEnabled = params.skip_steps_cache_type === 'first_block'
   const solSupported = modelOptions?.sol_attention_status?.supported === true

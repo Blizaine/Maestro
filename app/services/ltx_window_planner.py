@@ -42,6 +42,10 @@ def _collapse_prompt(value: str) -> str:
     return " ".join(str(value or "").strip().split())
 
 
+def normalize_ltx_planning_style(value: str) -> str:
+    return "creative" if str(value or "").strip().casefold() == "creative" else "faithful"
+
+
 _OPEN_ENDED_MOTION_RE = re.compile(
     r"\b(?:non[-\s]?stop|never[-\s]?ending|endless|perpetual|infinite|"
     r"forever|never\s+(?:slows?|stops?|stopping|ends?|ending)|"
@@ -331,6 +335,7 @@ def plan_ltx_sliding_windows(
     window_size_seconds: float,
     image_paths: Iterable[str] | None = None,
     nsfw: bool = False,
+    planning_style: str = "faithful",
 ) -> dict:
     """Use Maestro's configured enhancer to create exact LTX window prompts.
 
@@ -342,24 +347,117 @@ def plan_ltx_sliding_windows(
 
     count = max(1, int(window_count or 1))
     source = str(prompt or "").strip()
+    planning_style = normalize_ltx_planning_style(planning_style)
     planned_by = "llm"
     error = None
     try:
         from services import llm_service
 
-        enhanced = llm_service.enhance_prompt(
-            source,
-            mode="video",
-            max_new_tokens=max(512, count * 320),
-            temperature=0.45,
-            nsfw=bool(nsfw),
-            model_type=str(model_type or ""),
-            image_paths=list(image_paths or []) or None,
-            duration_seconds=max(1, round(float(duration_seconds), 1)),
-            window_count=count,
-            window_size_seconds=max(1, round(float(window_size_seconds), 1)),
-        )
-        prompts = parse_ltx_window_prompts(enhanced, expected_count=count)
+        # A one-hour sequence can contain hundreds of native windows. Asking a
+        # local LLM for all of them in one response either exceeds context or
+        # produces increasingly repetitive tail prompts. Build a compact
+        # chapter outline first, then expand at most twelve windows per call.
+        # Every batch gets its neighboring chapter summaries so the cut points
+        # remain causal rather than behaving like unrelated prompt requests.
+        chapter_size = 12
+        if count <= chapter_size * 2:
+            enhanced = llm_service.enhance_prompt(
+                source,
+                mode="video",
+                max_new_tokens=max(512, count * 320),
+                temperature=0.62 if planning_style == "creative" else 0.38,
+                nsfw=bool(nsfw),
+                model_type=str(model_type or ""),
+                image_paths=list(image_paths or []) or None,
+                duration_seconds=max(1, round(float(duration_seconds), 1)),
+                window_count=count,
+                window_size_seconds=max(1, round(float(window_size_seconds), 1)),
+                planning_style=planning_style,
+            )
+            prompts = parse_ltx_window_prompts(enhanced, expected_count=count)
+        else:
+            chapter_count = int(math.ceil(count / chapter_size))
+            outline = llm_service.enhance_prompt(
+                (
+                    f"Create a chronological chapter outline for this long-form video. "
+                    f"Each chapter must advance the same continuous project without recap or repetition.\n\n"
+                    f"OVERALL CONCEPT:\n{source}"
+                ),
+                mode="video",
+                max_new_tokens=max(1024, chapter_count * 320),
+                temperature=0.56 if planning_style == "creative" else 0.34,
+                nsfw=bool(nsfw),
+                model_type=str(model_type or ""),
+                image_paths=list(image_paths or []) or None,
+                duration_seconds=max(1, round(float(duration_seconds), 1)),
+                window_count=chapter_count,
+                window_size_seconds=max(
+                    1,
+                    round(float(window_size_seconds) * chapter_size, 1),
+                ),
+                planning_style=planning_style,
+            )
+            chapter_prompts = parse_ltx_window_prompts(
+                outline,
+                expected_count=chapter_count,
+            )
+            prompts = []
+            partial_errors: list[str] = []
+            for chapter_index, chapter_prompt in enumerate(chapter_prompts):
+                start = chapter_index * chapter_size
+                local_count = min(chapter_size, count - start)
+                previous_summary = (
+                    chapter_prompts[chapter_index - 1]
+                    if chapter_index > 0 else "This is the opening chapter."
+                )
+                next_summary = (
+                    chapter_prompts[chapter_index + 1]
+                    if chapter_index + 1 < chapter_count
+                    else "This chapter completes or intentionally sustains the requested outcome."
+                )
+                chapter_source = (
+                    f"OVERALL CONCEPT (global identity, style, camera, audio, and continuity contract):\n{source}\n\n"
+                    f"CHAPTER {chapter_index + 1} OF {chapter_count}:\n{chapter_prompt}\n\n"
+                    f"PREVIOUS CHAPTER OUTCOME (do not recap):\n{previous_summary}\n\n"
+                    f"NEXT CHAPTER DIRECTION (handoff only; do not perform it early):\n{next_summary}\n\n"
+                    f"Write exactly {local_count} chronological native-window prompts for only this chapter. "
+                    "Each prompt must restate global visual/audio invariants but advance a distinct local beat."
+                )
+                try:
+                    expanded = llm_service.enhance_prompt(
+                        chapter_source,
+                        mode="video",
+                        max_new_tokens=max(768, local_count * 320),
+                        temperature=0.6 if planning_style == "creative" else 0.36,
+                        nsfw=bool(nsfw),
+                        model_type=str(model_type or ""),
+                        image_paths=list(image_paths or []) or None,
+                        duration_seconds=max(
+                            1,
+                            round(float(window_size_seconds) * local_count, 1),
+                        ),
+                        window_count=local_count,
+                        window_size_seconds=max(1, round(float(window_size_seconds), 1)),
+                        planning_style=planning_style,
+                    )
+                    prompts.extend(parse_ltx_window_prompts(
+                        expanded,
+                        expected_count=local_count,
+                    ))
+                except Exception as chapter_error:
+                    partial_errors.append(
+                        f"chapter {chapter_index + 1}: {chapter_error}"
+                    )
+                    prompts.extend(deterministic_ltx_window_prompts(
+                        chapter_source,
+                        local_count,
+                    ))
+            planned_by = (
+                "hierarchical_llm"
+                if not partial_errors else "hierarchical_partial_fallback"
+            )
+            if partial_errors:
+                error = "; ".join(partial_errors)
     except Exception as exc:  # LLM is optional; generation itself is not.
         error = str(exc)
         planned_by = "deterministic_fallback"
@@ -372,5 +470,6 @@ def plan_ltx_sliding_windows(
         "window_count": count,
         "window_prompts": prompts,
         "planned_by": planned_by,
+        "planning_style": planning_style,
         "planning_error": error,
     }

@@ -49,6 +49,14 @@ class MiniMaxH3PDDTests(unittest.TestCase):
         self.assertNotIn("alibaba-pai-ref2va-pdd-8step", fl_ids)
         self.assertIn("alibaba-pai-ref2va-pdd-8step", ref_ids)
         self.assertNotIn("alibaba-pai-fl2va-pdd-8step", ref_ids)
+        self.assertEqual(
+            self.turbo.minimax_h3_turbo_preset(workflow="fl2va")["id"],
+            "alibaba-pai-fl2va-pdd-8step",
+        )
+        self.assertEqual(
+            self.turbo.minimax_h3_turbo_preset(workflow="ref2va")["id"],
+            "alibaba-pai-ref2va-pdd-8step",
+        )
 
         pruned_ref_ids = {
             preset["id"]
@@ -84,6 +92,18 @@ class MiniMaxH3PDDTests(unittest.TestCase):
             body["activated_loras"],
             ["MiniMax-H3-FL2VA-Acc-8Step.safetensors"],
         )
+        default_body = {"minimax_h3_turbo_mode": True}
+        self.assertTrue(
+            self.turbo.normalize_minimax_h3_turbo_request(
+                default_body,
+                full_checkpoint=False,
+                workflow="fl2va",
+            )
+        )
+        self.assertEqual(
+            default_body["minimax_h3_turbo_preset"],
+            "alibaba-pai-fl2va-pdd-8step",
+        )
         with self.assertRaisesRegex(ValueError, "FL2VA"):
             self.turbo.normalize_minimax_h3_turbo_request(
                 body,
@@ -104,6 +124,18 @@ class MiniMaxH3PDDTests(unittest.TestCase):
         )
         self.assertEqual(ref_body["num_inference_steps"], 8)
         self.assertEqual(ref_body["minimax_h3_reference_detail"], "max")
+        default_ref_body = {"minimax_h3_turbo_mode": True}
+        self.assertTrue(
+            self.turbo.normalize_minimax_h3_turbo_request(
+                default_ref_body,
+                full_checkpoint=False,
+                workflow="ref2va",
+            )
+        )
+        self.assertEqual(
+            default_ref_body["minimax_h3_turbo_preset"],
+            "alibaba-pai-ref2va-pdd-8step",
+        )
 
     def test_ref2va_pdd_honors_explicit_reference_detail(self):
         for requested_detail in ("match", "max"):

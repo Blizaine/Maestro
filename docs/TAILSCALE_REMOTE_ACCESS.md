@@ -51,9 +51,10 @@ that Tailscale is connected.
 1. Start Maestro in Pinokio and wait for **Open Web UI** to appear.
 2. Return to Maestro's page in Pinokio.
 3. Select **Secure Remote Access (Tailscale)**.
-4. Approve the operating-system permission prompts. Windows can show more than
-   one approval while Tailscale enables its HTTPS certificate and persistent
-   Serve route.
+4. Approve the one-time operating-system permission request. On Windows,
+   Maestro also installs a narrowly scoped on-demand Task Scheduler helper for
+   the selected local port. It lets later Maestro starts restore the same
+   private route without another UAC prompt.
 5. If Tailscale opens a browser page asking to enable HTTPS for the tailnet,
    approve it.
 6. In Maestro, open **Settings → Notifications**.
@@ -77,11 +78,17 @@ address. It is not a public Maestro link.
 4. Connect Tailscale on the remote device.
 5. Open the saved Maestro HTTPS address.
 
-The setup remembers Maestro's selected backend port and normally reuses the
-same private address after app or computer restarts. You do not need to run the
-setup action or scan the QR code every time. If that port is occupied and
-Maestro has to choose another one, run **Secure Remote Access (Tailscale)** once
-more to adopt the new port.
+The setup remembers Maestro's selected backend port and reuses the same private
+address after app or computer restarts. On Windows, the one-time restore helper
+reapplies that route whenever an opted-in Maestro start begins, without another
+approval dialog. You do not need to run the setup action or scan the QR code
+again. If that port is occupied and Maestro has to choose another one, run
+**Secure Remote Access (Tailscale)** once more to adopt the new port and update
+the helper.
+
+Users who enabled an earlier Maestro v2 preview should run **Secure Remote
+Access (Tailscale)** one final time after updating. That single approval
+upgrades the old saved route to restart-safe Windows restoration.
 
 If Maestro is stopped or the host computer is off, the remote page is
 unavailable. It becomes available again when Maestro is running.
@@ -126,6 +133,8 @@ or iPadOS 16.4 or later.
   access**.
 - If the route is missing, run **Secure Remote Access (Tailscale)** from
   Maestro's Pinokio page while Maestro is running.
+- On Windows, if you configured Tailscale with an earlier Maestro v2 preview,
+  run the setup action once after updating so the restart helper is installed.
 
 ### Maestro says Tailscale is unavailable
 
@@ -165,7 +174,9 @@ tailscale serve --https=443 off
 ```
 
 Disabling Tailscale access does not delete Maestro projects, models, outputs,
-or notification preferences.
+or notification preferences. On Windows the fixed on-demand restore task may
+remain registered, but Maestro will not invoke it while private access is
+disabled.
 
 ## Privacy and security
 

@@ -93,7 +93,15 @@ export function InputsPanel() {
   const setAudioGuideFilename = useStore(s => s.setAudioGuideFilename)
   const setDurationSeconds = useStore(s => s.setDurationSeconds)
   const setGuideVideoFps = useStore(s => s.setGuideVideoFps)
-  const voiceRefEnabled = useStore(s => !!s.servicesConfig?.voice_reference_enabled)
+  const voiceRefEnabled = useStore(s => {
+    const model = s.models.find(candidate => candidate.model_type === s.params.model_type)
+    const family = String(model?.family || '').toLowerCase()
+    const architecture = String(model?.architecture || '').toLowerCase()
+    const isLtx = family === 'ltx2' || family === 'ltx25' || architecture.startsWith('ltx2')
+    return s.studioVideoWorkflow === 'frames'
+      && isLtx
+      && s.servicesConfig?.voice_reference_enabled === true
+  })
   const directorVoiceRef = useStore(s => s.directorVoiceRef)
   const setDirectorVoiceRef = useStore(s => s.setDirectorVoiceRef)
   const identityScale = useStore(s => s.directorIdentityGuidanceScale)

@@ -2,12 +2,14 @@ import { useEffect, useRef, useState } from 'react'
 import { BookUser, ChevronDown, FileAudio, GripVertical, Image as ImageIcon, Info, Loader2, Plus, Trash2, UserPlus, Video, X } from 'lucide-react'
 import * as api from '../../api/client'
 import { useStore } from '../../stores/useStore'
+import { readPersistentDisclosure, writePersistentDisclosure } from '../../lib/persistentDisclosure'
 import type { MiniMaxH3AudioIntent, MiniMaxH3Reference, MiniMaxH3ReferenceType, ModelOptions, SavedOmniCharacter } from '../../types'
 
 const IMAGE_RE = /\.(png|jpe?g|webp|bmp|tiff?)$/i
 const VIDEO_RE = /\.(mp4|mov|mkv|webm|avi|m4v)$/i
 const AUDIO_RE = /\.(wav|mp3|flac|ogg|m4a|aac)$/i
 const EMPTY_REFERENCES: MiniMaxH3Reference[] = []
+const CHARACTER_LIBRARY_EXPANDED_KEY = 'maestro-omni-characters-expanded'
 
 function mediaType(file: File): MiniMaxH3ReferenceType | null {
   // Prefer a recognized extension. Some iOS document providers expose M4A
@@ -98,7 +100,9 @@ export function OmniReferenceSection({
   const [dragIndices, setDragIndices] = useState<number[] | null>(null)
   const [directorModelOptions, setDirectorModelOptions] = useState<ModelOptions | null>(null)
   const [characters, setCharacters] = useState<SavedOmniCharacter[]>([])
-  const [libraryOpen, setLibraryOpen] = useState(false)
+  const [libraryOpen, setLibraryOpen] = useState(() => (
+    readPersistentDisclosure(CHARACTER_LIBRARY_EXPANDED_KEY, false)
+  ))
   const [characterFormOpen, setCharacterFormOpen] = useState(false)
   const [characterName, setCharacterName] = useState('')
   const [characterVisual, setCharacterVisual] = useState<File | null>(null)
@@ -127,6 +131,10 @@ export function OmniReferenceSection({
       .catch(() => { if (!cancelled) setCharacters([]) })
     return () => { cancelled = true }
   }, [])
+
+  useEffect(() => {
+    writePersistentDisclosure(CHARACTER_LIBRARY_EXPANDED_KEY, libraryOpen)
+  }, [libraryOpen])
 
   const modelOptions = scope === 'director' ? directorModelOptions : studioModelOptions
   const references = scope === 'director'
@@ -231,7 +239,7 @@ export function OmniReferenceSection({
       character_name: character.name,
       library_character_id: character.id,
       image_intent: character.visual.type === 'image' ? 'identity' : undefined,
-      remove_background: character.visual.type === 'image' ? true : undefined,
+      remove_background: character.visual.type === 'image' ? false : undefined,
       video_intent: character.visual.type === 'video' ? 'character' : undefined,
       duration_seconds: character.visual.duration_seconds ?? null,
       has_audio: character.visual.type === 'video' ? Boolean(character.visual.has_audio) : undefined,
@@ -415,39 +423,13 @@ export function OmniReferenceSection({
           <span
             title={scope === 'director'
               ? 'Order matters. These references are attached to every H3 Omni shot. Picture, Video, and Audio labels are assigned from top to bottom and can be named in the project description. A Music / performance timeline becomes Director’s exact audio driver.'
-              : 'Adding an identity, scene, motion, voice, or style reference automatically limits the model list to H3 Omni. Set audio to Music / performance timeline to use either H3 Omni or LTX instead.'}
+              : 'References is the dedicated H3 Omni workspace. Add people, scenes, motion, voices, styles, or an exact music / performance timeline here; use Frames for LTX audio-driven video.'}
             className="text-text-muted cursor-help"
           >
             <Info size={12} />
           </span>
         </div>
         <span className="text-[9px] text-text-muted">{references.length}/{limits.total}</span>
-      </div>
-
-      <div
-        className={`rounded-lg border border-dashed border-border px-3 py-2.5 flex items-center justify-center gap-2 transition-colors ${disabled ? 'opacity-50 cursor-not-allowed' : 'hover:border-border-light cursor-pointer'}`}
-        onClick={() => { if (!disabled) inputRef.current?.click() }}
-        onDragOver={event => { if (!disabled) event.preventDefault() }}
-        onDrop={event => {
-          event.preventDefault()
-          if (disabled) return
-          void addFiles(Array.from(event.dataTransfer.files))
-        }}
-        aria-disabled={disabled}
-      >
-        {uploading ? <Loader2 size={14} className="animate-spin text-accent-blue" /> : <Plus size={14} className="text-text-muted" />}
-        <span className="text-[10px] text-text-secondary">{uploading ? 'Uploading references…' : 'Add images, videos, or audio'}</span>
-        {/* Do not add a mixed-media `accept` filter here. iOS/WebKit can
-            grey out valid audio files when audio, image, and video types are
-            combined. Maestro validates the selected files in addFiles(). */}
-        <input
-          ref={inputRef}
-          type="file"
-          multiple
-          disabled={disabled}
-          className="hidden"
-          onChange={event => void addFiles(Array.from(event.target.files ?? []))}
-        />
       </div>
 
       <div className="rounded-lg border border-border bg-bg-tertiary/50 overflow-hidden">
@@ -460,7 +442,7 @@ export function OmniReferenceSection({
         >
           <span className="flex items-center gap-1.5 text-[10px] font-medium text-text-primary">
             <BookUser size={13} className="text-accent-blue" />
-            Character library
+            Characters
             <span className="text-[9px] font-normal text-text-muted">{characters.length}</span>
           </span>
           <ChevronDown size={13} className={`text-text-muted transition-transform ${libraryOpen ? 'rotate-180' : ''}`} />
@@ -594,6 +576,32 @@ export function OmniReferenceSection({
         )}
       </div>
 
+      <div
+        className={`rounded-lg border border-dashed border-border px-3 py-2.5 flex items-center justify-center gap-2 transition-colors ${disabled ? 'opacity-50 cursor-not-allowed' : 'hover:border-border-light cursor-pointer'}`}
+        onClick={() => { if (!disabled) inputRef.current?.click() }}
+        onDragOver={event => { if (!disabled) event.preventDefault() }}
+        onDrop={event => {
+          event.preventDefault()
+          if (disabled) return
+          void addFiles(Array.from(event.dataTransfer.files))
+        }}
+        aria-disabled={disabled}
+      >
+        {uploading ? <Loader2 size={14} className="animate-spin text-accent-blue" /> : <Plus size={14} className="text-text-muted" />}
+        <span className="text-[10px] text-text-secondary">{uploading ? 'Uploading references…' : 'Add images, videos, or audio'}</span>
+        {/* Do not add a mixed-media `accept` filter here. iOS/WebKit can
+            grey out valid audio files when audio, image, and video types are
+            combined. Maestro validates the selected files in addFiles(). */}
+        <input
+          ref={inputRef}
+          type="file"
+          multiple
+          disabled={disabled}
+          className="hidden"
+          onChange={event => void addFiles(Array.from(event.target.files ?? []))}
+        />
+      </div>
+
       {references.length > 0 && (
         <div className="space-y-1.5">
           {activeItems.map(item => {
@@ -662,16 +670,16 @@ export function OmniReferenceSection({
                     {visualEntry?.reference.type === 'image' && (
                       <label
                         className="flex items-center gap-1.5 text-[9px] text-text-secondary cursor-pointer"
-                        title="Remove the portrait's source background on CPU and place the character on neutral white before H3 sees it. This helps prevent the reference location or color from leaking into the generated scene."
+                        title="Remove the portrait's source background on CPU and place the character on neutral white before H3 sees it. Enable this when the source background leaks into the scene; leave it off to preserve more natural lighting context."
                       >
                         <input
                           type="checkbox"
                           disabled={disabled}
-                          checked={visualEntry.reference.remove_background !== false}
+                          checked={visualEntry.reference.remove_background === true}
                           onChange={event => patchReference(visualEntry.index, { remove_background: event.target.checked })}
                           className="w-3 h-3 accent-accent-blue"
                         />
-                        Isolate portrait background
+                        Isolate portrait background (optional)
                       </label>
                     )}
                   </div>
@@ -747,7 +755,7 @@ export function OmniReferenceSection({
                   {reference.type === 'image' && (reference.image_intent ?? 'identity') === 'identity' && (
                     <label
                       className="flex items-center gap-1.5 text-[9px] text-text-secondary cursor-pointer"
-                      title="Remove this identity portrait's source background on CPU before H3 sees it. Scene, style, and composition references are never altered."
+                      title="Remove this identity portrait's source background on CPU before H3 sees it. Enable this when the source background leaks into the scene; leave it off to preserve more natural lighting context. Scene, style, and composition references are never altered."
                     >
                       <input
                         type="checkbox"
@@ -756,7 +764,7 @@ export function OmniReferenceSection({
                         onChange={event => patchReference(index, { remove_background: event.target.checked })}
                         className="w-3 h-3 accent-accent-blue"
                       />
-                      Isolate subject background
+                      Isolate subject background (optional)
                     </label>
                   )}
                   {reference.type === 'video' && (

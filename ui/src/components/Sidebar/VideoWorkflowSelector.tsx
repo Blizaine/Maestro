@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import {
   Blend,
   FlaskConical,
+  Images,
   Paintbrush,
   PanelsTopLeft,
   RefreshCw,
@@ -25,7 +26,8 @@ const VIDEO_WORKFLOW_GROUPS: StudioWorkflowGroup<DisplayVideoWorkflow>[] = [
   {
     label: 'Create',
     options: [
-      { value: 'frames', label: 'Generate', description: 'Text, guided-frame, or Omni generation', icon: PanelsTopLeft },
+      { value: 'frames', label: 'Frames', description: 'Text, first / last, injected frames, audio, or control video', icon: PanelsTopLeft },
+      { value: 'references', label: 'References', description: 'Generate with H3 Omni people, scenes, motion, or voices', icon: Images },
       { value: 'extend', label: 'Extend', description: 'Continue an existing clip', icon: StepForward },
       { value: 'blend', label: 'Blend', description: 'Bridge two visual anchors', icon: Blend },
     ],
@@ -72,6 +74,7 @@ function deriveActiveWorkflow(
   imageMode: number,
   editSubMode: string,
   toolsTool: string,
+  rememberedWorkflow: StudioVideoWorkflow,
 ): DisplayVideoWorkflow {
   if (generationMode === 'tools' && toolsTool === 'upscale') return 'upscale'
   if (generationMode === 'tools' && toolsTool === 'film_grain') return 'film_grain'
@@ -86,7 +89,7 @@ function deriveActiveWorkflow(
   if (imageMode === 2) return 'legacy_multishot'
   if (imageMode === 3) return 'extend'
   if (imageMode === 4) return 'blend'
-  return 'frames'
+  return rememberedWorkflow === 'references' ? 'references' : 'frames'
 }
 
 export function VideoWorkflowSelector() {
@@ -102,6 +105,7 @@ export function VideoWorkflowSelector() {
     imageMode,
     editSubMode,
     toolsTool,
+    rememberedWorkflow,
   )
   const activeOption = activeWorkflow === 'legacy_multishot'
     ? LEGACY_MULTISHOT
@@ -127,7 +131,7 @@ export function VideoWorkflowSelector() {
       value={activeWorkflow}
       activeOption={activeOption}
       groups={VIDEO_WORKFLOW_GROUPS}
-      hint="Create · Transform · Finish"
+      hint="Frames · References · Transform · Finish"
       onChange={workflow => {
         if (workflow === 'legacy_multishot' || workflow === 'legacy_inpaint') return
         setWorkflow(workflow)

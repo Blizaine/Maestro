@@ -52,6 +52,21 @@ class GalleryActiveMediaTests(unittest.TestCase):
         self.assertIn("Sol Engine", feed_item)
         self.assertIn("whitespace-pre-wrap", feed_item)
 
+    def test_generation_details_expose_multi_window_summary_and_exact_timings(self):
+        feed_item = (
+            ROOT / "ui" / "src" / "components" / "MainContent" / "MediaFeedItem.tsx"
+        ).read_text(encoding="utf-8")
+        types = (
+            ROOT / "ui" / "src" / "types" / "index.ts"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("multi_window_timing", feed_item)
+        self.assertIn("Window timing", feed_item)
+        self.assertIn("Scene duration", feed_item)
+        self.assertIn("Total render", feed_item)
+        self.assertIn("window_generation_seconds", types)
+        self.assertIn("...(turboEnabled ? ['Turbo'] : [])", feed_item)
+
     def test_clip_footer_uses_compact_persistent_controls_and_labeled_more_menu(self):
         feed_item = (
             ROOT / "ui" / "src" / "components" / "MainContent" / "MediaFeedItem.tsx"

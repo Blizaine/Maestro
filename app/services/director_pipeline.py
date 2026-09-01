@@ -352,8 +352,13 @@ def _create_director_video_execution_profile(
     if profile.get("turbo_mode"):
         from models.minimax_h3.turbo import minimax_h3_turbo_preset
 
+        workflow = "ref2va" if model_def.get("omni_reference") else "fl2va"
         turbo_preset = minimax_h3_turbo_preset(
-            video_params.get("minimax_h3_turbo_preset")
+            video_params.get("minimax_h3_turbo_preset"),
+            workflow=workflow,
+            full_checkpoint=bool(
+                model_def.get("minimax_h3_full_checkpoint", False)
+            ),
         )
         video_params["minimax_h3_turbo_preset"] = turbo_preset["id"]
         video_params["num_inference_steps"] = int(turbo_preset["steps"])
@@ -4570,6 +4575,8 @@ def _submit_and_wait(
                         "total_clips",
                         "eta_confidence",
                         "eta_basis",
+                        "eta_history_samples",
+                        "eta_history_match",
                         "clip_estimates",
                         "clip_completion_at",
                         "project_completion_at",

@@ -180,6 +180,54 @@ class TestPassOverheadResolutionScaling(unittest.TestCase):
 
 
 class TestMiniMaxH3ActivationBudget(unittest.TestCase):
+    def test_auto_presets_match_their_real_h3_canvas_budgets(self):
+        auto_resolution_pixels = {
+            "auto": 1280 * 704,
+            "auto_480p": 864 * 480,
+            "auto_540p": 960 * 544,
+            "auto_720p": 1280 * 704,
+            "auto_768p": 1344 * 768,
+            "auto_1080p": 1920 * 1088,
+        }
+        explicit_resolutions = {
+            "auto": "1280x704",
+            "auto_480p": "864x480",
+            "auto_540p": "960x544",
+            "auto_720p": "1280x704",
+            "auto_768p": "1344x768",
+            "auto_1080p": "1920x1088",
+        }
+
+        for preset, explicit_resolution in explicit_resolutions.items():
+            with self.subTest(preset=preset):
+                automatic = compute_h3_weight_budget(
+                    24.0,
+                    preset,
+                    345,
+                    runtime_workspace_gb=10.0,
+                    auto_resolution_pixels=auto_resolution_pixels,
+                )
+                explicit = compute_h3_weight_budget(
+                    24.0,
+                    explicit_resolution,
+                    345,
+                    runtime_workspace_gb=10.0,
+                )
+                self.assertEqual(automatic, explicit)
+
+    def test_auto_720p_full_window_avoids_the_step_zero_spill_budget(self):
+        budget = compute_h3_weight_budget(
+            24.0,
+            "auto_720p",
+            345,
+            runtime_workspace_gb=10.0,
+            auto_resolution_pixels={"auto_720p": 1280 * 704},
+        )
+        self.assertEqual(budget["resolution_pixels"], 1280 * 704)
+        self.assertGreater(budget["activation_reserve_gb"], 15.5)
+        self.assertGreater(budget["weight_budget_gb"], 7.5)
+        self.assertLess(budget["weight_budget_gb"], 8.5)
+
     def test_long_540p_job_restores_known_good_4090_headroom(self):
         budget = compute_h3_weight_budget(
             24.0,

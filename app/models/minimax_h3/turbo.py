@@ -39,6 +39,21 @@ def _load_turbo_manifest() -> dict:
     }
     if not default_id or default_id not in ids:
         raise RuntimeError("MiniMax H3 Turbo default preset is missing")
+    workflow_defaults = manifest.get("workflow_default_preset_ids") or {}
+    if not isinstance(workflow_defaults, dict):
+        raise RuntimeError(
+            "MiniMax H3 Turbo workflow defaults are malformed"
+        )
+    for workflow, preset_id in workflow_defaults.items():
+        normalized_workflow = str(workflow or "").strip().lower()
+        if normalized_workflow not in {"fl2va", "ref2va"}:
+            raise RuntimeError(
+                f"Unknown MiniMax H3 Turbo default workflow '{workflow}'"
+            )
+        if str(preset_id or "") not in ids:
+            raise RuntimeError(
+                f"MiniMax H3 Turbo default for {normalized_workflow} is missing"
+            )
     return manifest
 
 
@@ -100,7 +115,15 @@ def minimax_h3_turbo_preset(
 ) -> dict:
     """Return a copy of a pinned Turbo preset, defaulting to Maestro's current one."""
 
-    resolved_id = str(preset_id or MINIMAX_H3_TURBO_DEFAULT_PRESET_ID)
+    resolved_workflow = _normalize_workflow(workflow)
+    workflow_defaults = (
+        MINIMAX_H3_TURBO_MANIFEST.get("workflow_default_preset_ids") or {}
+    )
+    resolved_id = str(
+        preset_id
+        or workflow_defaults.get(resolved_workflow)
+        or MINIMAX_H3_TURBO_DEFAULT_PRESET_ID
+    )
     preset = _MINIMAX_H3_TURBO_PRESETS_BY_ID.get(resolved_id)
     if preset is None:
         choices = ", ".join(_MINIMAX_H3_TURBO_PRESETS_BY_ID)
@@ -108,7 +131,6 @@ def minimax_h3_turbo_preset(
             f"Unknown MiniMax H3 Turbo preset '{resolved_id}'. "
             f"Choose one of: {choices}."
         )
-    resolved_workflow = _normalize_workflow(workflow)
     preset_workflow = str(preset.get("workflow") or "all").lower()
     if (
         resolved_workflow is not None
@@ -140,7 +162,10 @@ def minimax_h3_turbo_preset_for_path(path: str) -> dict | None:
 # Backward-compatible constants always describe Maestro's current default.
 _DEFAULT_TURBO_PRESET = minimax_h3_turbo_preset()
 MINIMAX_H3_TURBO_LORA_FILENAME = str(_DEFAULT_TURBO_PRESET["filename"])
-MINIMAX_H3_TURBO_LORA_REPO_ID = str(MINIMAX_H3_TURBO_MANIFEST["repo_id"])
+MINIMAX_H3_TURBO_LORA_REPO_ID = str(
+    _DEFAULT_TURBO_PRESET.get("repo_id")
+    or MINIMAX_H3_TURBO_MANIFEST["repo_id"]
+)
 MINIMAX_H3_TURBO_LORA_REVISION = str(_DEFAULT_TURBO_PRESET["revision"])
 MINIMAX_H3_TURBO_LORA_SHA256 = str(_DEFAULT_TURBO_PRESET["sha256"])
 MINIMAX_H3_TURBO_LORA_SIZE = int(_DEFAULT_TURBO_PRESET["size"])

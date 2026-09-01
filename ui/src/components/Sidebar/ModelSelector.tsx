@@ -16,6 +16,7 @@ export function ModelSelector() {
   const generationMode = useStore(s => s.generationMode)
   const editSubMode = useStore(s => s.editSubMode)
   const imageWorkflow = useStore(s => s.studioImageWorkflow)
+  const hasImageReferences = useStore(s => s.imageRefs.length > 0)
   const studioVideoWorkflow = useStore(s => s.studioVideoWorkflow)
   const videoImageMode = useStore(s => Number(s.params.image_mode || 0))
   const hasFrameGuidance = useStore(s => Boolean(
@@ -35,9 +36,9 @@ export function ModelSelector() {
       reference.type === 'audio' && reference.audio_intent === 'drive'
     )) === true
   ))
-  const hasAudioDrive = useStore(s => Boolean(
-    s.params.audio_guide
-    || s.params.minimax_h3_references?.some(reference => (
+  const hasFrameAudioDrive = useStore(s => Boolean(s.params.audio_guide))
+  const hasReferenceAudioDrive = useStore(s => Boolean(
+    s.params.minimax_h3_references?.some(reference => (
       reference.type === 'audio' && reference.audio_intent === 'drive'
     )),
   ))
@@ -69,24 +70,36 @@ export function ModelSelector() {
   const audioSubMode = useStore(s => s.audioSubMode)
 
   const currentModel = models.find(m => m.model_type === currentModelType)
+  const createWorkflow = studioVideoWorkflow === 'references' ? 'references' : 'frames'
   const isPrimaryStudioCreate = generationMode === 'video'
-    && studioVideoWorkflow === 'frames'
+    && (studioVideoWorkflow === 'frames' || studioVideoWorkflow === 'references')
     && videoImageMode === 0
-  const studioMediaIntent = { hasFrameGuidance, hasOmniReferences, hasAudioDrive }
-  const currentModelCompatible = !isPrimaryStudioCreate
+  const studioMediaIntent = {
+    workflow: createWorkflow,
+    hasFrameGuidance: createWorkflow === 'frames' && hasFrameGuidance,
+    hasOmniReferences: createWorkflow === 'references' && hasOmniReferences,
+    hasAudioDrive: createWorkflow === 'references' ? hasReferenceAudioDrive : hasFrameAudioDrive,
+  } as const
+  const currentModelCompatible = (
+    generationMode !== 'image'
+    || modelSupportsImageWorkflow(currentModel, imageWorkflow, hasImageReferences)
+  ) && (
+    !isPrimaryStudioCreate
     || modelSupportsStudioVideoMediaIntent(currentModel, studioMediaIntent)
-  const mediaConflict = hasFrameGuidance && hasOmniReferences
-  const compatibilityDescription = mediaConflict
-    ? 'Fixed start/end/keyframes cannot be combined with Omni references. Remove one of those input roles.'
-    : hasOmniReferences
+  )
+  const compatibilityDescription = generationMode === 'image'
+    ? imageWorkflow === 'generate' && hasImageReferences
+      ? 'Add or enable an image edit model for the supplied source or reference images.'
+      : `Add or enable an image model compatible with ${imageWorkflow}.`
+    : createWorkflow === 'references'
       ? 'Add or enable an H3 Omni model for these references or characters.'
-      : hasFrameGuidance && hasAudioDrive
-        ? 'LTX is required when fixed frames and an exact audio timeline are both active.'
+      : hasFrameGuidance && hasFrameAudioDrive
+        ? 'Add or enable a frame-capable model that accepts an exact audio timeline.'
         : hasFrameGuidance
-          ? 'Add or enable an H3 First / Last or LTX model for these frame inputs.'
-          : hasAudioDrive
-            ? 'Add or enable an H3 Omni or LTX model for this audio timeline.'
-            : 'Add or enable an H3 First / Last or LTX model for text generation.'
+          ? 'Add or enable an image-to-video model for these frame inputs.'
+          : hasFrameAudioDrive
+            ? 'Add or enable a video model that accepts an audio timeline.'
+            : 'Add or enable a text-to-video or image-to-video model.'
   const effectiveSubMode = generationMode === 'avatar' ? editSubMode : undefined
   const effectiveAudioSubMode = generationMode === 'audio' ? audioSubMode : undefined
   const modeFamilies = getFamiliesForMode(generationMode, families, effectiveSubMode, effectiveAudioSubMode)
@@ -95,7 +108,7 @@ export function ModelSelector() {
   //   1. enabledModels (Settings → System → Model Visibility),
   //   2. nsfw_only gate (Mature Mode must be on for those to appear).
   const workflowFilter = (model: typeof models[number]) => (
-    (generationMode !== 'image' || modelSupportsImageWorkflow(model, imageWorkflow))
+    (generationMode !== 'image' || modelSupportsImageWorkflow(model, imageWorkflow, hasImageReferences))
     && (
       !isPrimaryStudioCreate
       || modelSupportsStudioVideoMediaIntent(model, studioMediaIntent)
@@ -178,7 +191,7 @@ export function ModelSelector() {
                         onClick={() => {
                           if (
                             generationMode === 'video'
-                            && studioVideoWorkflow === 'frames'
+                            && (studioVideoWorkflow === 'frames' || studioVideoWorkflow === 'references')
                             && videoImageMode === 0
                           ) selectStudioVideoModel(model.model_type)
                           else selectModel(model.model_type)

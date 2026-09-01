@@ -21,7 +21,7 @@ export function GenerateButton() {
   const modelOptions = useStore(s => s.modelOptions)
   const imageMode = useStore(s => Number(s.params.image_mode || 0))
   const isPrimaryCreate = generationMode === 'video'
-    && studioVideoWorkflow === 'frames'
+    && (studioVideoWorkflow === 'frames' || studioVideoWorkflow === 'references')
     && imageMode === 0
   const modelIsOmniReference = Boolean(
     currentModel?.omni_reference
@@ -40,9 +40,9 @@ export function GenerateButton() {
       reference.type === 'audio' && reference.audio_intent === 'drive'
     )) === true
   ))
-  const hasAudioDrive = useStore(s => Boolean(
-    s.params.audio_guide
-    || s.params.minimax_h3_references?.some(reference => (
+  const hasFrameAudioDrive = useStore(s => Boolean(s.params.audio_guide))
+  const hasReferenceAudioDrive = useStore(s => Boolean(
+    s.params.minimax_h3_references?.some(reference => (
       reference.type === 'audio' && reference.audio_intent === 'drive'
     )),
   ))
@@ -59,11 +59,13 @@ export function GenerateButton() {
     ),
   ))
   const hasStartImage = useStore(s => !!(s.startImage || s.params.image_start))
+  const createWorkflow = studioVideoWorkflow === 'references' ? 'references' : 'frames'
   const studioMediaIntent = {
-    hasFrameGuidance: hasGuidedInput,
-    hasOmniReferences: hasFlexibleOmniReferences,
-    hasAudioDrive,
-  }
+    workflow: createWorkflow,
+    hasFrameGuidance: createWorkflow === 'frames' && hasGuidedInput,
+    hasOmniReferences: createWorkflow === 'references' && hasFlexibleOmniReferences,
+    hasAudioDrive: createWorkflow === 'references' ? hasReferenceAudioDrive : hasFrameAudioDrive,
+  } as const
   const routeModelCompatible = !isPrimaryCreate
     || modelSupportsStudioVideoMediaIntent(currentModel, studioMediaIntent)
   const needsCreateModel = isPrimaryCreate && !routeModelCompatible
@@ -71,13 +73,15 @@ export function GenerateButton() {
     && studioVideoEffectiveCreateRoute === 'guided'
     && !hasGuidedInput
   const needsImage = generationMode === 'video'
-    && !isPrimaryCreate
     && isI2vOnly
     && !isOmniReference
     && !hasStartImage
-  const needsReference = generationMode === 'video' && isOmniReference
+    && (!isPrimaryCreate || createWorkflow === 'frames')
+  const needsReference = generationMode === 'video'
+    && studioVideoWorkflow === 'references'
+    && isOmniReference
     && !hasOmniReferences
-    && !hasAudioDrive
+    && !hasReferenceAudioDrive
   const editSubMode = useStore(s => s.editSubMode)
   const editVideoPath = useStore(s => s.editVideoPath)
   const outpaintVideoBox = useStore(s => s.outpaintVideoBox)
@@ -95,8 +99,9 @@ export function GenerateButton() {
   const imageMaskPath = useStore(s => s.imageWorkflowMaskPath)
   const imageRefs = useStore(s => s.imageRefs)
   const imagePadding = useStore(s => s.imageOutpaintPadding)
-  const needsImageEditSource = generationMode === 'image'
-    && imageWorkflow === 'edit'
+  const needsImageGenerateSource = generationMode === 'image'
+    && imageWorkflow === 'generate'
+    && currentModel?.requires_image_reference === true
     && imageRefs.length === 0
   const needsImageWorkflowSource = generationMode === 'image'
     && (imageWorkflow === 'inpaint' || imageWorkflow === 'outpaint')
@@ -108,9 +113,9 @@ export function GenerateButton() {
     && imageWorkflow === 'outpaint'
     && Object.values(imagePadding).every(value => value === 0)
   const incompatibleImageModel = generationMode === 'image'
-    && !modelSupportsImageWorkflow(currentModel, imageWorkflow)
+    && !modelSupportsImageWorkflow(currentModel, imageWorkflow, imageRefs.length > 0)
   const blocked = needsCreateModel || needsGuidance || needsImage || needsReference || needsOutpaintSource || needsOutpaintArea
-    || needsImageEditSource || needsImageWorkflowSource || needsImageMask
+    || needsImageGenerateSource || needsImageWorkflowSource || needsImageMask
     || needsImageOutpaintArea || incompatibleImageModel
   const queueSupported = generationMode !== 'avatar'
     && !(generationMode === 'video' && imageMode === 4)
@@ -137,7 +142,7 @@ export function GenerateButton() {
         ? 'Need reference'
       : incompatibleImageModel
         ? 'Need model'
-      : needsImageEditSource || needsImageWorkflowSource
+      : needsImageGenerateSource || needsImageWorkflowSource
         ? 'Need source'
       : needsImageMask
         ? 'Need mask'
@@ -149,9 +154,7 @@ export function GenerateButton() {
     const title = needsOutpaintArea
       ? 'Choose a larger output aspect or resize the source to create an area for Outpaint to generate.'
       : needsCreateModel
-        ? hasGuidedInput && hasFlexibleOmniReferences
-          ? 'Fixed start/end/keyframes cannot be combined with Omni references. Remove one of those input roles.'
-          : `Enable or select a video model compatible with the current ${studioVideoEffectiveCreateRoute === 'omni' ? 'reference' : studioVideoEffectiveCreateRoute === 'guided' ? 'frame-guided' : studioVideoEffectiveCreateRoute === 'audio' ? 'audio-driven' : 'text'} inputs.`
+        ? `Enable or select a video model compatible with the current ${studioVideoEffectiveCreateRoute === 'omni' ? 'reference' : studioVideoEffectiveCreateRoute === 'guided' ? 'frame-guided' : studioVideoEffectiveCreateRoute === 'audio' ? 'audio-driven' : 'text'} inputs.`
         : needsGuidance
           ? 'Add a start frame, end frame, or timed frame.'
       : needsReference

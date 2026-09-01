@@ -14,7 +14,7 @@ import json
 import math
 import os
 import re
-from typing import Optional, Any
+from typing import Optional, Any, Sequence
 
 from ..schema import (
     ProductionPlan, ShotPlan, CharacterProfile, ReferenceAssets,
@@ -757,6 +757,7 @@ def _h3_dialogue_quality_metrics(
     manifest: list[dict[str, Any]],
     *,
     story_description: str = "",
+    maximum_line_words: Optional[int] = None,
 ) -> dict[str, Any]:
     """Measure obvious dialogue-collapse failures without judging prose taste."""
 
@@ -790,6 +791,11 @@ def _h3_dialogue_quality_metrics(
         if len(entries) > 1
         and len({entry["speaker"] for entry in entries}) > 1
     }
+    line_ceiling = max(1, int(maximum_line_words or 0)) if maximum_line_words else 0
+    overlong = [
+        entry for entry in editable
+        if line_ceiling and entry["words"] > line_ceiling
+    ]
 
     micro_pathology = (
         count >= 6
@@ -805,6 +811,7 @@ def _h3_dialogue_quality_metrics(
         )
     for entries in cross_speaker_duplicates.values():
         problem_turns.update(entry["turn"] for entry in entries)
+    problem_turns.update(entry["turn"] for entry in overlong)
 
     issues: list[str] = []
     if micro_pathology:
@@ -824,6 +831,15 @@ def _h3_dialogue_quality_metrics(
             "different characters share interchangeable short replies"
             + (f" ({examples})" if examples else "")
         )
+    if overlong:
+        examples = ", ".join(
+            f"turn {entry['turn']} ({entry['words']}/{line_ceiling} words)"
+            for entry in overlong[:4]
+        )
+        issues.append(
+            "generated dialogue exceeds one native H3 clip and must be "
+            f"shortened rather than split ({examples})"
+        )
 
     micro_ratio = len(micro) / count if count else 0.0
     score = 0.0
@@ -832,11 +848,16 @@ def _h3_dialogue_quality_metrics(
     if count >= 8:
         score += max(0.0, 4.0 - average_words) * 2.0
     score += len(cross_speaker_duplicates) * 2.0
+    score += sum(
+        4.0 + max(0, entry["words"] - line_ceiling) * 0.5
+        for entry in overlong
+    )
     return {
         "editable_turns": count,
         "micro_turns": len(micro),
         "average_words": average_words,
         "cross_speaker_duplicates": len(cross_speaker_duplicates),
+        "overlong_turns": len(overlong),
         "problem_turns": problem_turns,
         "issues": issues,
         "score": score,
@@ -1212,15 +1233,25 @@ def _apply_h3_character_table_read(
         if not candidate:
             raise ValueError(f"table read removed spoken turn {turn}")
         original_fingerprint = _h3_dialogue_word_fingerprint(original_text)
-        if original_fingerprint in locked:
+        user_locked = original_fingerprint in locked
+        if user_locked:
             candidate = locked[original_fingerprint]
 
         # A line must fit the effective native pass selected for this run.
-        # Leave an already-long screenplay line untouched so the established
-        # duration allocator can report/handle it instead of accepting a new
-        # table-read regression.
-        if len(candidate.split()) > max(1, int(maximum_line_words)):
-            candidate = original_text
+        # Generated dialogue must fit one native clip. Splitting one character's
+        # sentence across independent H3 generations produces abrupt partial
+        # performances and weakens identity/context in the second clip. Literal
+        # user-authored lines remain immutable; generated overlong lines must be
+        # shortened by the table-read pass instead of silently restored.
+        line_ceiling = max(1, int(maximum_line_words))
+        if len(candidate.split()) > line_ceiling:
+            if user_locked or len(original_text.split()) <= line_ceiling:
+                candidate = original_text
+            else:
+                raise ValueError(
+                    f"table read did not shorten generated turn {turn} to "
+                    f"{line_ceiling} words"
+                )
         # The roleplay/table-read pass should remove stiff prose, never make a
         # natural line sound like a thesaurus or corporate rewrite. Preserve
         # the screenplay line when the proposed edit introduces multiple new
@@ -2471,25 +2502,17 @@ def _insert_h3_visual_detail(prompt: str, label: str, detail: str) -> str:
 def _enforce_h3_speaker_visual_contract(
     shot_dicts: list[dict],
     voice_bible: Optional[list[dict[str, str]]] = None,
+    *,
+    project_context: str = "",
+    allowed_character_names: Optional[Sequence[str]] = None,
 ) -> list[dict]:
-    """Keep every H3 speaker visible and carry stable performance guidance."""
+    """Keep speakers visible and enforce Director's closed canonical cast."""
 
     profiles = {
         str(row.get("character_name") or "").strip().casefold(): row
         for row in (voice_bible or [])
         if isinstance(row, dict) and row.get("character_name")
     }
-    subject_templates: dict[str, dict] = {}
-    for raw in shot_dicts or []:
-        if not isinstance(raw, dict):
-            continue
-        for subject in raw.get("subjects_on_screen") or []:
-            if not isinstance(subject, dict):
-                continue
-            name = str(subject.get("speaker_name") or "").strip().casefold()
-            if name:
-                subject_templates.setdefault(name, copy.deepcopy(subject))
-
     def profile_for(name: str) -> Optional[dict[str, str]]:
         key = str(name or "").strip().casefold()
         if key in profiles:
@@ -2500,6 +2523,195 @@ def _enforce_h3_speaker_visual_contract(
             if wanted and candidate and wanted[0] == candidate[0]:
                 return profile
         return None
+
+    # First normalize abbreviated labels ("George") to the complete identity
+    # validated by Pass 0 ("George Costanza"). The stable character_id remains
+    # unchanged, so dialogue ownership and reference mapping do not move.
+    for raw in shot_dicts or []:
+        if not isinstance(raw, dict):
+            continue
+        for subject in raw.get("subjects_on_screen") or []:
+            if not isinstance(subject, dict):
+                continue
+            profile = profile_for(subject.get("speaker_name") or "")
+            canonical_name = str(
+                (profile or {}).get("character_name") or ""
+            ).strip()
+            if canonical_name:
+                subject["speaker_name"] = canonical_name
+
+    # H3 may freely populate a scene with unnamed extras, but a named cameo is
+    # a story/cast decision. Remove named silent characters introduced by the
+    # planner when they are absent from the user concept and validated voice
+    # bible. Their blocking can remain as a generic silent background patron.
+    generic_roles = {
+        "barista", "bystander", "cashier", "clerk", "crowd", "customer",
+        "driver", "extra", "guard", "listener", "passerby", "patron",
+        "server", "staff", "waiter", "waitress",
+    }
+    speaking_keys: set[str] = set()
+    allowed_name_tokens = [
+        _h3_speaker_name_tokens(name)
+        for name in (allowed_character_names or [])
+        if _h3_speaker_name_tokens(name)
+    ]
+    for raw in shot_dicts or []:
+        if not isinstance(raw, dict):
+            continue
+        for beat in raw.get("dialogue_beats") or []:
+            if isinstance(beat, dict) and _h3_plain_dialogue_text(
+                beat.get("spoken_text")
+            ):
+                speaking_keys.add(
+                    str(beat.get("speaker_id") or "").strip().casefold()
+                )
+
+    unsupported: dict[str, set[str]] = {}
+    context_folded = str(project_context or "").casefold()
+    if context_folded:
+        for raw in shot_dicts or []:
+            if not isinstance(raw, dict):
+                continue
+            for subject in raw.get("subjects_on_screen") or []:
+                if not isinstance(subject, dict):
+                    continue
+                character_id = str(
+                    subject.get("character_id") or ""
+                ).strip()
+                name = str(
+                    subject.get("speaker_name") or character_id
+                ).strip()
+                name_tokens = _h3_speaker_name_tokens(name)
+                first_name = name_tokens[0] if name_tokens else ""
+                folded_name = name.casefold()
+                is_generic = (
+                    folded_name in generic_roles
+                    or first_name in generic_roles
+                    or folded_name.startswith(("the ", "a ", "an "))
+                )
+                is_spoken = (
+                    character_id.casefold() in speaking_keys
+                    or folded_name in speaking_keys
+                )
+                is_supported = bool(profile_for(name)) or bool(
+                    folded_name and re.search(
+                        rf"(?<![a-z0-9]){re.escape(folded_name)}(?![a-z0-9])",
+                        context_folded,
+                    )
+                ) or bool(
+                    first_name and len(first_name) >= 3 and re.search(
+                        rf"(?<![a-z0-9]){re.escape(first_name)}(?![a-z0-9])",
+                        context_folded,
+                    )
+                ) or any(
+                    name_tokens
+                    and allowed_tokens
+                    and name_tokens[0] == allowed_tokens[0]
+                    for allowed_tokens in allowed_name_tokens
+                )
+                if is_generic or is_spoken or is_supported:
+                    continue
+                identity_key = (character_id or folded_name).casefold()
+                aliases = unsupported.setdefault(identity_key, set())
+                aliases.add(name)
+                visual = str(subject.get("visual_description") or "").strip()
+                visual_name = re.match(
+                    r"^([A-Z][A-Za-z0-9'’-]+(?:\s+[A-Z][A-Za-z0-9'’-]+){0,2})"
+                    r"(?=\s*(?:\(|,|—|–|-))",
+                    visual,
+                )
+                if visual_name:
+                    aliases.add(visual_name.group(1).strip())
+                if character_id:
+                    aliases.add(character_id)
+
+    def neutralize_unrequested(value: Any, aliases: set[str]) -> Any:
+        if isinstance(value, str):
+            result = value
+            character_ids = [
+                alias for alias in aliases
+                if re.fullmatch(r"(?:char|subject|speaker)[_-]?\d+", alias, re.I)
+            ]
+            for alias in character_ids:
+                result = re.sub(
+                    rf"\s*\(\s*{re.escape(alias)}\s*\)",
+                    "",
+                    result,
+                    flags=re.IGNORECASE,
+                )
+            for alias in sorted(aliases - set(character_ids), key=len, reverse=True):
+                if alias:
+                    result = re.sub(
+                        rf"(?<![A-Za-z0-9]){re.escape(alias)}(?![A-Za-z0-9])",
+                        "a silent background patron",
+                        result,
+                        flags=re.IGNORECASE,
+                    )
+            for alias in character_ids:
+                result = re.sub(
+                    rf"(?<![A-Za-z0-9]){re.escape(alias)}(?![A-Za-z0-9])",
+                    "the silent background patron",
+                    result,
+                    flags=re.IGNORECASE,
+                )
+            return re.sub(r"\s+", " ", result).strip()
+        if isinstance(value, list):
+            return [neutralize_unrequested(item, aliases) for item in value]
+        if isinstance(value, dict):
+            return {
+                key: neutralize_unrequested(item, aliases)
+                for key, item in value.items()
+            }
+        return value
+
+    if unsupported:
+        affected_fields = (
+            "title", "narrative_role", "scene_goal", "environment",
+            "visual_style", "spatial_setup", "action_beats", "camera_plan",
+            "lighting", "mood", "ending_beat", "closing_blocking",
+            "causal_handoff", "persistent_story_state", "audio_plan",
+            "video_prompt", "window_prompts",
+        )
+        for raw in shot_dicts or []:
+            if not isinstance(raw, dict):
+                continue
+            raw["subjects_on_screen"] = [
+                subject
+                for subject in (raw.get("subjects_on_screen") or [])
+                if not (
+                    isinstance(subject, dict)
+                    and str(
+                        subject.get("character_id")
+                        or subject.get("speaker_name")
+                        or ""
+                    ).strip().casefold() in unsupported
+                )
+            ]
+            for aliases in unsupported.values():
+                for field in affected_fields:
+                    if field in raw:
+                        raw[field] = neutralize_unrequested(raw[field], aliases)
+        removed = sorted({
+            alias
+            for aliases in unsupported.values()
+            for alias in aliases
+            if not re.fullmatch(r"(?:char|subject|speaker)[_-]?\d+", alias, re.I)
+        })
+        print(
+            "[ShortFilmPlanner] Removed unrequested named H3 cast from the "
+            "shot plan: " + ", ".join(removed)
+        )
+
+    subject_templates: dict[str, dict] = {}
+    for raw in shot_dicts or []:
+        if not isinstance(raw, dict):
+            continue
+        for subject in raw.get("subjects_on_screen") or []:
+            if not isinstance(subject, dict):
+                continue
+            name = str(subject.get("speaker_name") or "").strip().casefold()
+            if name:
+                subject_templates.setdefault(name, copy.deepcopy(subject))
 
     for shot_index, raw in enumerate(shot_dicts or [], start=1):
         if not isinstance(raw, dict):
@@ -3180,6 +3392,23 @@ class ShortFilmPlanner(BasePlanner):
                 nsfw=nsfw,
                 polish_block=polish_block,
             )
+        elif target_duration > 300:
+            shots, title = self._plan_long_story_driven(
+                story_description=story_description,
+                reference_image_path=reference_image_path,
+                char_profiles=char_profiles,
+                has_reference=has_reference,
+                target_duration=target_duration,
+                target_scenes=target_scenes,
+                narrative_mode=narrative_mode,
+                fps=fps,
+                frames_steps=frames_steps,
+                frames_minimum=frames_minimum,
+                frames_maximum=frames_maximum,
+                nsfw=nsfw,
+                polish_block=polish_block,
+                multishot_lora_mode=multishot_lora_mode,
+            )
         else:
             shots, title = self._plan_story_driven(
                 story_description=story_description,
@@ -3214,6 +3443,187 @@ class ShortFilmPlanner(BasePlanner):
                 "Dialogue must appear in video prompts with speaker cues",
             ],
         )
+
+    def _plan_long_story_driven(
+        self,
+        *,
+        story_description: str,
+        reference_image_path: Optional[str],
+        char_profiles: list[CharacterProfile],
+        has_reference: bool,
+        target_duration: int,
+        target_scenes: Optional[int],
+        narrative_mode: bool,
+        fps: int,
+        frames_steps: int,
+        frames_minimum: int,
+        frames_maximum: Optional[int],
+        nsfw: bool,
+        polish_block: str,
+        multishot_lora_mode: bool,
+    ) -> tuple[list[ShotPlan], Optional[str]]:
+        """Plan long Director films as bounded causal chapters.
+
+        Five-minute and shorter projects retain the established single-plan
+        path.  Above that, one monolithic screenplay/shot JSON response becomes
+        unreliable (and native H3 may require hundreds of clips).  A compact
+        outline first locks the complete causal arc, then the existing proven
+        Director pipeline writes and directs each chapter independently with
+        explicit previous/next handoffs.
+        """
+
+        chapter_count = max(2, math.ceil(target_duration / 300))
+        base_duration, remainder = divmod(int(target_duration), chapter_count)
+        chapter_durations = [
+            base_duration + (1 if index < remainder else 0)
+            for index in range(chapter_count)
+        ]
+        chapter_schema = {
+            "type": "array",
+            "minItems": chapter_count,
+            "maxItems": chapter_count,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "chapter": {"type": "integer"},
+                    "title": {"type": "string"},
+                    "objective": {"type": "string"},
+                    "opening_state": {"type": "string"},
+                    "closing_state": {"type": "string"},
+                    "causal_handoff": {"type": "string"},
+                    "persistent_state": {"type": "string"},
+                },
+                "required": [
+                    "chapter", "title", "objective", "opening_state",
+                    "closing_state", "causal_handoff", "persistent_state",
+                ],
+                "additionalProperties": False,
+            },
+        }
+        geometry = "\n".join(
+            f"- Chapter {index + 1}: {duration} seconds"
+            for index, duration in enumerate(chapter_durations)
+        )
+        outline = self._call_llm_json(
+            user_prompt=(
+                f"Design exactly {chapter_count} causal chapters for one "
+                f"{target_duration}-second film.\n\n"
+                f"CHAPTER GEOMETRY:\n{geometry}\n\n"
+                "Every chapter must advance the same story. Never recap, reset, "
+                "or repeat a prior scene. A location change must be motivated by "
+                "the prior chapter's visible decision or consequence. Carry "
+                "objectives, knowledge, relationships, injuries, wardrobe/prop "
+                "state, and unresolved danger forward. Only the final chapter "
+                "resolves the requested outcome. Do not write screenplay dialogue "
+                "here; lock story causality and visible handoffs only.\n\n"
+                f"USER CONCEPT:\n{story_description}"
+            ),
+            system_prompt=(
+                "You are Maestro's long-form story architect. Return only the "
+                "requested JSON array. Build one coherent film in bounded "
+                "chapters, not a collection of unrelated shorts."
+            ),
+            max_tokens=min(5000, 900 + chapter_count * 260),
+            thinking_budget=None,
+            temperature=0.45,
+            image_paths=self._build_all_image_paths(
+                reference_image_path,
+                has_reference,
+            ),
+            json_schema=chapter_schema,
+        )
+        if len(outline) != chapter_count:
+            print(
+                "[ShortFilmPlanner] Long-form chapter outline was incomplete; "
+                "using a deterministic causal scaffold."
+            )
+            outline = [
+                {
+                    "chapter": index + 1,
+                    "title": f"Chapter {index + 1}",
+                    "objective": (
+                        f"Advance the user's story through chapter {index + 1} "
+                        f"of {chapter_count} without replaying earlier events"
+                    ),
+                    "opening_state": (
+                        "Establish the requested opening situation"
+                        if index == 0 else
+                        f"Show the concrete result of chapter {index}'s ending"
+                    ),
+                    "closing_state": (
+                        "Complete the requested outcome"
+                        if index + 1 == chapter_count else
+                        f"Create a visible cause that launches chapter {index + 2}"
+                    ),
+                    "causal_handoff": "Carry the preceding visible consequence forward",
+                    "persistent_state": "Preserve all established character and world state",
+                }
+                for index in range(chapter_count)
+            ]
+
+        all_shots: list[ShotPlan] = []
+        first_title: Optional[str] = None
+        for chapter_index, (chapter, chapter_duration) in enumerate(
+            zip(outline, chapter_durations),
+            start=1,
+        ):
+            previous_chapter = outline[chapter_index - 2] if chapter_index > 1 else None
+            next_chapter = outline[chapter_index] if chapter_index < chapter_count else None
+            chapter_story = (
+                "LONG-FORM PRODUCTION CONTRACT\n"
+                f"This is chapter {chapter_index} of {chapter_count} in one "
+                "continuous film. Write and direct only this chapter. Do not "
+                "restart the premise, recap prior action, resolve a later "
+                "chapter, or turn it into a standalone short.\n\n"
+                f"OVERALL USER CONCEPT:\n{story_description}\n\n"
+                f"THIS CHAPTER — BINDING:\n"
+                f"{json.dumps(chapter, ensure_ascii=False, indent=2)}\n\n"
+                f"PREVIOUS CHAPTER END — OPEN ON ITS RESULT:\n"
+                f"{json.dumps(previous_chapter, ensure_ascii=False, indent=2) if previous_chapter else 'This is the opening chapter.'}\n\n"
+                f"NEXT CHAPTER — END WITH ITS MOTIVATING HANDOFF, DO NOT PREVIEW IT:\n"
+                f"{json.dumps(next_chapter, ensure_ascii=False, indent=2) if next_chapter else 'This is the final chapter; complete the requested outcome.'}"
+            )
+            chapter_target_scenes = None
+            if target_scenes is not None:
+                chapter_target_scenes = max(
+                    2,
+                    int(round(target_scenes * chapter_duration / target_duration)),
+                )
+            chapter_shots, chapter_title = self._plan_story_driven(
+                story_description=chapter_story,
+                reference_image_path=reference_image_path,
+                char_profiles=char_profiles,
+                has_reference=has_reference,
+                target_duration=chapter_duration,
+                target_scenes=chapter_target_scenes,
+                narrative_mode=narrative_mode,
+                fps=fps,
+                frames_steps=frames_steps,
+                frames_minimum=frames_minimum,
+                frames_maximum=frames_maximum,
+                nsfw=nsfw,
+                polish_block=polish_block,
+                multishot_lora_mode=multishot_lora_mode,
+            )
+            if first_title is None:
+                first_title = chapter_title
+            for shot in chapter_shots:
+                global_index = len(all_shots)
+                shot.index = global_index
+                shot.shot_id = self._make_shot_id(global_index, "sf")
+                metadata = dict(shot.metadata or {})
+                metadata.update({
+                    "long_form_chapter": chapter_index,
+                    "long_form_chapter_count": chapter_count,
+                    "long_form_chapter_title": chapter.get("title"),
+                    "long_form_causal_handoff": chapter.get("causal_handoff"),
+                    "long_form_persistent_state": chapter.get("persistent_state"),
+                })
+                shot.metadata = metadata
+                all_shots.append(shot)
+
+        self._last_title = first_title
+        return all_shots, first_title
 
     # ── Helpers ────────────────────────────────────────────────────────
 
@@ -3507,6 +3917,7 @@ delivery is a concise performance direction for that specific line. Describe cad
         initial_metrics = _h3_dialogue_quality_metrics(
             manifest,
             story_description=story_description,
+            maximum_line_words=maximum_line_words,
         )
         if initial_metrics["issues"]:
             print(
@@ -3657,6 +4068,7 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:
         revised_metrics = _h3_dialogue_quality_metrics(
             revised,
             story_description=story_description,
+            maximum_line_words=maximum_line_words,
         )
 
         # One focused retry is allowed only when an objective collapse signal
@@ -3679,6 +4091,7 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:
             retry_metrics = _h3_dialogue_quality_metrics(
                 retry,
                 story_description=story_description,
+                maximum_line_words=maximum_line_words,
             )
             if retry_metrics["score"] < revised_metrics["score"]:
                 revised = retry
@@ -3703,6 +4116,19 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:
                 "budget after batching; locking the original screenplay dialogue."
             )
             return manifest
+
+        if revised_metrics.get("overlong_turns") and successful_batches:
+            raise RuntimeError(
+                "MiniMax H3 character table read could not shorten generated "
+                "dialogue to the native clip limit after its targeted repair. "
+                "No video jobs were queued."
+            )
+        if revised_metrics.get("overlong_turns"):
+            print(
+                "[ShortFilmPlanner] H3 table read was unavailable for an "
+                "overlong generated turn; retaining the established deterministic "
+                "shot allocator as the compatibility fallback."
+            )
 
         changed = sum(
             _h3_dialogue_word_fingerprint(after.get("spoken_text"))
@@ -4167,6 +4593,13 @@ Shots to plan:
         is_h3_native = str(
             getattr(self, "_video_model", "") or ""
         ).lower().startswith("minimax_h3")
+        h3_maximum_line_words = max(
+            1,
+            int(math.floor(
+                (float(frames_maximum or 345) / max(1, fps))
+                * _H3_DIALOGUE_WORDS_PER_SECOND
+            )),
+        )
         uses_generated_images = bool(
             getattr(self, "_uses_generated_shot_images", True)
         )
@@ -4336,7 +4769,7 @@ BINDING STORY-ARCHITECT BLUEPRINT:
                 char_profiles=char_profiles,
             )
             voice_bible_text = _format_h3_voice_bible(h3_voice_bible)
-            h3_character_block = """
+            h3_character_block = f"""
 H3 CHARACTER-AUTHENTICITY RULES:
 - Before drafting, use the binding voice bible below as the cast's dialogue and relationship logic.
 - For an established fictional character named by the user, write fresh dialogue consistent with the character's established personality, vocabulary, syntax, cadence, comic/dramatic mechanism, and relationships. Do not copy famous dialogue or catchphrases.
@@ -4347,6 +4780,8 @@ H3 CHARACTER-AUTHENTICITY RULES:
 - Prefer plain, speakable, situation-specific words. Do not "improve" dialogue with academic, corporate, therapeutic, technical, or thesaurus phrasing that the character would not choose aloud under pressure.
 - Do not reduce a recognizable character to one generic trait. A line that could be reassigned to another cast member without sounding wrong must be rewritten.
 - Preserve every literal line supplied by the user exactly. Character-authentic writing changes generated dialogue, never user-authored dialogue.
+- Treat the named cast as CLOSED: use only people named in the user's concept, supplied character references, and binding voice bible. Unnamed background extras are allowed when the setting needs them, but never add a named cameo, familiar franchise character, friend, relative, or celebrity the user did not request.
+- Every generated spoken turn must be a complete thought of no more than {h3_maximum_line_words} words so it can be performed inside one native H3 clip. Never end a generated turn with a continuation ellipsis and never split one character's sentence across clips; shorten it or turn the next idea into a natural reply from another character.
 - Treat "terse," "direct," and "economical" as style guidance, never as a fixed line-length rule. Use varied line lengths and complete responsive thoughts; do not build an exchange from a chain of one-word or two-word fragments.
 - Every generated reply must respond specifically to the preceding action or line, carry subtext or character intent, and move the relationship or story forward. Prefer substantial back-and-forth over disconnected labels, counters, and generic acknowledgements.
 - Silently conduct a table read before returning the screenplay: remove generic sitcom filler, stiff exposition, invented gimmicks, and words the named speaker would not naturally choose.
@@ -4560,13 +4995,7 @@ H3 SCREENPLAY RECOVERY — FINAL ANSWER REQUIRED:
                         manifest=screenplay_dialogue_manifest,
                         voice_bible=h3_voice_bible,
                         max_spoken_words=max_spoken_words,
-                        maximum_line_words=max(
-                            1,
-                            int(math.floor(
-                                (float(frames_maximum or 345) / max(1, fps))
-                                * _H3_DIALOGUE_WORDS_PER_SECOND
-                            )),
-                        ),
+                        maximum_line_words=h3_maximum_line_words,
                     )
                 )
                 assert_no_minor_content(
@@ -6274,6 +6703,7 @@ H3 NATIVE SHOT CONTRACT — NON-NEGOTIABLE:
 - DIALOGUE MUST NOT LIVE ONLY IN dialogue_beats. Every dialogue_beats[].spoken_text must also appear exactly once in the same shot's video_prompt as <d>[English] Exact words</d>, with the speaker ID/name, delivery, and physical cue outside the tag. If dialogue_beats is empty, explicitly state that no one speaks, mouths remain closed, and no muttering, gibberish, or speech-like vocalization occurs.
 - SPEAKER VISIBILITY IS REQUIRED: every person who delivers a line must have a complete subjects_on_screen entry and remain visibly framed with an unobstructed face and mouth for the full line. Reframe to the current speaker before speech; reaction framing may follow only after the spoken line is complete.
 - CAST LIST CONSISTENCY IS REQUIRED: every person mentioned in spatial_setup, action_beats, dialogue_beats, ending_beat, closing_blocking, or video_prompt must appear in subjects_on_screen. Do not mention a bystander in blocking while omitting that person from the visible cast.
+- NAMED CAST IS CLOSED: subjects_on_screen may contain only named people present in the user concept, supplied character references, binding voice bible, or locked screenplay dialogue. Setting-appropriate silent extras may appear only as generic roles such as "barista" or "background patron". Never add a named cameo or another familiar character from the franchise.
 - A shot may follow another in the finished edit, but its prompt must describe its own opening state instead of saying "continue", "as before", "the push-in continues", or similar.
 - multishot is always false because this is not the LTX Multi-Shot LoRA format. That field does NOT prohibit H3 from making speaker-motivated internal cuts, reframes, and reaction coverage inside its one bounded generation.
 
@@ -6998,6 +7428,15 @@ repeating that prose across every metadata field."""
         shot_dicts = _enforce_h3_speaker_visual_contract(
             shot_dicts,
             character_voice_bible,
+            project_context=story_description,
+            allowed_character_names=[
+                str(
+                    getattr(profile, "display_name", "")
+                    or getattr(profile, "id", "")
+                    or ""
+                ).strip()
+                for profile in (char_profiles or [])
+            ],
         )
         shot_dicts = _prepare_h3_prompt_only_continuity(shot_dicts)
 
