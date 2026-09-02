@@ -939,6 +939,53 @@ class H3WindowPlannerTests(unittest.TestCase):
         for item in compiled:
             self.assertNotRegex(item["prompt"], r"(?i)\bwindow\b")
 
+    @patch("services.llm_service.generate", side_effect=RuntimeError("offline"))
+    def test_studio_faithful_eight_window_screenplay_keeps_cast_and_dialogue(self, _generate):
+        prompt = (
+            "George Costanza walks into the coffee shop on the TV show Friends. "
+            "Starts passionately talking to Joey.\n\n"
+            "Joey sits on the couch eating a muffin. George Costanza bursts "
+            "through the door, frantic, wearing a dark brown sport coat.\n\n"
+            "GEORGE: Joey! Maestro 2.0! It's here!\n"
+            "JOEY: Do I know you?\n"
+            "GEORGE: Forget who I am! There's an Editor now!\n"
+            "JOEY: Are you selling me cable?\n"
+            "GEORGE: No! You can open the whole production in Editor!\n"
+            "JOEY: So, like editing?\n"
+            "GEORGE: Yes, Joey! Editing, but with AI!\n"
+            "JOEY: Okay, seriously, who are you?"
+        )
+        result = plan_h3_sliding_windows(
+            prompt,
+            model_type="minimax_h3_fl2va_full",
+            resolution="1280x704",
+            total_frames=2634,
+            window_frames=345,
+            overlap_frames=18,
+            fps=24,
+            planning_style="faithful",
+        )
+
+        self.assertEqual(result["window_count"], 8)
+        self.assertEqual(result["source_intent"]["cast_names"], ["George Costanza", "Joey"])
+        joined = "\n".join(result["window_prompts"])
+        for line in (
+            "Joey! Maestro 2.0! It's here!",
+            "Do I know you?",
+            "Forget who I am! There's an Editor now!",
+            "Are you selling me cable?",
+            "No! You can open the whole production in Editor!",
+            "So, like editing?",
+            "Yes, Joey! Editing, but with AI!",
+            "Okay, seriously, who are you?",
+        ):
+            self.assertEqual(joined.count(line), 1)
+        self.assertEqual(joined.count("bursts through the door"), 1)
+        self.assertNotIn("Silent visual action, never spoken narration: GEORGE:", joined)
+        self.assertNotIn("Silent visual action, never spoken narration: JOEY:", joined)
+        self.assertIn("George Costanza has not yet entered", result["window_prompts"][0])
+        self.assertIn("brisk, energetic real-time pacing", result["window_prompts"][0])
+
     def test_opening_entrance_and_dialogue_require_timed_camera_phases(self):
         prompt = (
             "George Costanza walks into the coffee shop and approaches Joey. "

@@ -27,7 +27,7 @@ from services.director.long_form_story import (
 )
 
 
-H3_STORY_LEDGER_VERSION = 20
+H3_STORY_LEDGER_VERSION = 21
 
 _H3_DIALOGUE_PREFERRED_WORDS_PER_SECOND = 2.1
 # H3 can still deliver a clear line slightly above the conservative planning
@@ -123,16 +123,41 @@ _CONTENT_STOPWORDS = {
 }
 
 _ACTION_VERBS = (
-    "approach|arrive|attack|board|break|breathe|climb|cross|descend|dive|drop|"
+    "approach|arrive|attack|board|break|breathe|burst|climb|cross|descend|dive|drop|"
     "enter|exit|fall|fight|fly|grab|hold|jump|laugh|launch|leap|mount|"
     "move|plummet|race|reach|ride|run|save|smash|sprint|stand|step|"
     "take|turn|walk|yell"
 )
 _FAST_ACTION_RE = re.compile(
     r"\b(?:high[- ]speed|high rate of speed|extreme(?:ly)? fast|rapid|"
-    r"supersonic|breakneck|frantic|plummet|free[- ]?fall|dive|race|"
+    r"supersonic|breakneck|plummet|free[- ]?fall|dive|race|"
     r"hurtl|speeding|never stopping|non[- ]stop)\w*\b",
     flags=re.IGNORECASE,
+)
+
+# Screenplay-style dialogue is common in pasted Studio prompts.  These labels
+# describe metadata or Context-IR fields rather than speaking characters and
+# must never be converted into H3 dialogue.
+_SCREENPLAY_NON_SPEAKER_LABELS = {
+    "action", "audio", "camera", "cast", "character", "characters",
+    "detailed description", "dialogue", "director", "end", "ext",
+    "exterior", "fade in", "fade out", "int", "interior", "location",
+    "music", "non diegetic music", "notes", "overall soundscape", "pov",
+    "prompt", "retention analysis", "scene", "shot", "style", "summary",
+    "subject definitions", "time", "title", "transition", "visual",
+}
+_NON_CAST_PROPER_NAMES = {
+    "anyone", "beat", "everybody", "everyone", "nobody", "no one",
+    "okay", "ok", "someone", "starts", "that", "there", "these", "this",
+    "those", "you",
+}
+_SCREENPLAY_DIALOGUE_RE = re.compile(
+    r"(?m)^[ \t]*(?:[-*][ \t]+)?(?:\*\*)?"
+    r"(?P<speaker>[A-Za-z][A-Za-z0-9_'\u2019.\-]*"
+    r"(?:[ \t]+[A-Za-z][A-Za-z0-9_'\u2019.\-]*){0,3})"
+    r"(?:[ \t]*\((?P<delivery>[^)\r\n]{1,80})\))?"
+    r"(?:\*\*)?[ \t]*:[ \t]*(?:\*\*)?"
+    r"(?P<text>[^\r\n]+?)[ \t]*$"
 )
 _ENERGETIC_PERFORMANCE_RE = re.compile(
     r"\b(?:animated|animatedly|breathless|breathlessly|burst(?:s|ing)?\s+in|"
@@ -254,6 +279,72 @@ def _is_creation_directive(value: str) -> bool:
         text,
         flags=re.IGNORECASE,
     ))
+
+
+def _is_screenplay_performance_directive(value: str) -> bool:
+    """Identify prose that only introduces the screenplay dialogue below it."""
+
+    text = sanitize_h3_prompt_text(value).strip(" \t\r\n-.,;:!?")
+    proper = _PROPER_NAME.pattern
+    return bool(re.fullmatch(
+        rf"(?:(?:{proper}|he|she|they)\s+)?"
+        r"(?:starts?|begins?|continues?|keeps?)\s+"
+        r"(?:(?:very|visibly)\s+)?"
+        r"(?:(?:animatedly|breathlessly|calmly|eagerly|energetically|"
+        r"enthusiastically|excitedly|frantically|nervously|passionately|"
+        r"quietly|softly|urgently)\s+)?"
+        r"(?:talking|speaking|telling|explaining)"
+        rf"(?:\s+(?:to|with)\s+(?:{proper}|him|her|them))?"
+        r"(?:\s+about\s+.+)?",
+        text,
+        flags=re.IGNORECASE,
+    ))
+
+
+def _collapse_duplicate_screenplay_entrances(fragments: list[str]) -> list[str]:
+    """Drop a synopsis entrance repeated by a more concrete script entrance.
+
+    Pasted scripts often start with a one-line premise (``George walks in``),
+    followed by blocking (``George bursts through the door``) and screenplay
+    dialogue.  Rendering both creates two copies of the same principal.  This
+    deliberately applies only before the first screenplay speech cue and only
+    when the later entrance names a physical threshold, with no exit/return
+    language that would establish a genuine second entrance.
+    """
+
+    first_speech = next((
+        index for index, value in enumerate(fragments)
+        if re.fullmatch(
+            r"[A-Z][A-Za-z0-9_'\u2019-]*(?:\s+[A-Z][A-Za-z0-9_'\u2019-]*){0,3}\s+speaks",
+            value,
+            flags=re.IGNORECASE,
+        )
+    ), len(fragments))
+    seen: dict[str, int] = {}
+    remove: set[int] = set()
+    for index, value in enumerate(fragments[:first_speech]):
+        entrance = _find_h3_opening_entrance(value)
+        if not entrance:
+            continue
+        entrant = _normalize_key(entrance.group("entrant"))
+        previous = seen.get(entrant)
+        if previous is not None:
+            between = " ".join(fragments[previous + 1:index + 1])
+            genuine_reentry = bool(re.search(
+                r"\b(?:again|another|next|second|returns?|re[- ]?enters?|"
+                r"exits?|leaves?|left)\b",
+                between,
+                flags=re.IGNORECASE,
+            ))
+            concrete_threshold = bool(re.search(
+                r"\b(?:door|doorway|entrance|gate|threshold)\b",
+                value,
+                flags=re.IGNORECASE,
+            ))
+            if concrete_threshold and not genuine_reentry:
+                remove.add(previous)
+        seen[entrant] = index
+    return [value for index, value in enumerate(fragments) if index not in remove]
 
 
 def _is_persistent_camera_directive(value: str) -> bool:
@@ -499,7 +590,8 @@ def _find_h3_opening_entrance(prompt: Any) -> re.Match[str] | None:
     return re.search(
         rf"(?P<entrant>{proper})\s+(?i:"
         r"enter(?:s|ed|ing)?|arriv(?:e|es|ed|ing)?|"
-        r"(?:walk|run|step|come)(?:s|ed|ing)?\s+(?:in|into|through))\b",
+        r"(?:walk|run|step|come)(?:s|ed|ing)?\s+(?:in|into|through)|"
+        r"burst(?:s|ed|ing)?\s+(?:in|into|through))\b",
         sanitize_h3_prompt_text(prompt),
     )
 
@@ -784,15 +876,22 @@ def extract_h3_source_intent(prompt: str) -> dict[str, Any]:
     planning LLM returns malformed JSON or exhausts its response budget.
     """
 
-    source = sanitize_h3_prompt_text(normalize_h3_dialogue_tags(prompt))
+    raw_source = normalize_h3_dialogue_tags(prompt)
+    locked_dialogue = extract_locked_dialogue(raw_source)
+    source = sanitize_h3_prompt_text(raw_source)
+    directive_source = sanitize_h3_prompt_text(_without_locked_dialogue(
+        raw_source,
+        locked_dialogue,
+        keep_screenplay_speaker_cues=True,
+    ))
     directive_source = re.sub(
         r"<d>\s*(?:\[[^\]]+\]\s*)?.*?</d>",
         ". ",
-        source,
+        directive_source,
         flags=re.IGNORECASE | re.DOTALL,
     )
-    lowered = source.casefold()
-    pov = bool(_POV_RE.search(source))
+    lowered = directive_source.casefold()
+    pov = bool(_POV_RE.search(directive_source))
     identity_match = re.search(
         r"\bviewer\s+is\s+([A-Z][A-Za-z0-9_'’-]*(?:\s+[A-Z][A-Za-z0-9_'’-]*){0,3})"
         r"(?=\s+(?:as|while|who|standing|walking|running|flying|riding)\b|[.,;:])",
@@ -811,7 +910,7 @@ def extract_h3_source_intent(prompt: str) -> dict[str, Any]:
     )
 
     proper_names: list[str] = []
-    names_source = re.sub(r'"[^"\r\n]*"|“[^”\r\n]*”', "", source)
+    names_source = directive_source
     for match in re.finditer(
         r"\b[A-Z][A-Za-z0-9_'’-]*(?:\s+[A-Z][A-Za-z0-9_'’-]*){0,3}\b",
         names_source,
@@ -826,13 +925,13 @@ def extract_h3_source_intent(prompt: str) -> dict[str, Any]:
         if name.casefold() in {
             "a", "an", "and", "both", "make", "the", "then", "extremely", "epic",
             "friends", "maestro",
-        } or (name.isupper() and len(name) <= 3):
+        } | _NON_CAST_PROPER_NAMES or (name.isupper() and len(name) <= 3):
             continue
         if name not in proper_names:
             proper_names.append(name)
-    cast_names = _derive_h3_cast_names(source, proper_names)
-    cast_cardinality = _h3_cast_cardinality_contract(source, cast_names)
-    blocking_contract = _infer_h3_blocking_contract(source, cast_names)
+    cast_names = _derive_h3_cast_names(raw_source, proper_names)
+    cast_cardinality = _h3_cast_cardinality_contract(raw_source, cast_names)
+    blocking_contract = _infer_h3_blocking_contract(raw_source, cast_names)
 
     style_fragments = [
         fragment.strip(" ,;:-.!?")
@@ -851,11 +950,11 @@ def extract_h3_source_intent(prompt: str) -> dict[str, Any]:
     ]
     nonverbal = list(dict.fromkeys(
         match.group(0).casefold()
-        for match in _NONVERBAL_VOCAL_RE.finditer(source)
+        for match in _NONVERBAL_VOCAL_RE.finditer(directive_source)
     ))
     hands_visible = bool(
-        re.search(r"\b(?:both|two)?\s*hands?\b", source, re.IGNORECASE)
-        and re.search(r"\b(?:holding|gripping|grasping)\b", source, re.IGNORECASE)
+        re.search(r"\b(?:both|two)?\s*hands?\b", directive_source, re.IGNORECASE)
+        and re.search(r"\b(?:holding|gripping|grasping)\b", directive_source, re.IGNORECASE)
     )
     ongoing = bool(re.search(
         r"\b(?:never[- ]ending|never stopping|non[- ]stop|keeps? (?:moving|falling|flying)|"
@@ -875,10 +974,10 @@ def extract_h3_source_intent(prompt: str) -> dict[str, Any]:
         )
     perspective_parts.extend(camera_fragments)
 
-    energetic_performance = bool(_ENERGETIC_PERFORMANCE_RE.search(source))
+    energetic_performance = bool(_ENERGETIC_PERFORMANCE_RE.search(directive_source))
     pacing = (
         "extremely fast real-time movement with sustained forward momentum, decisive choreography, and no slow motion"
-        if _FAST_ACTION_RE.search(source)
+        if _FAST_ACTION_RE.search(directive_source)
         else "brisk, energetic real-time pacing with immediate expressive performance and no slow motion"
         if energetic_performance
         else "natural real-time pacing"
@@ -886,7 +985,7 @@ def extract_h3_source_intent(prompt: str) -> dict[str, Any]:
     ambient_parts: list[str] = []
     if re.search(r"\bmountain|cliff|canyon|clouds?\b", lowered):
         ambient_parts.append("open-air mountain wind")
-    if _FAST_ACTION_RE.search(source):
+    if _FAST_ACTION_RE.search(directive_source):
         ambient_parts.append("speed-dependent rushing air")
     return {
         "first_person_pov": pov,
@@ -896,15 +995,15 @@ def extract_h3_source_intent(prompt: str) -> dict[str, Any]:
         "cast_cardinality_contract": cast_cardinality,
         "blocking_contract": blocking_contract,
         "opening_state_contract": _infer_h3_opening_state_contract(
-            source,
+            raw_source,
             cast_names,
         ),
-        "fast_action": bool(_FAST_ACTION_RE.search(source)),
+        "fast_action": bool(_FAST_ACTION_RE.search(directive_source)),
         "energetic_performance": energetic_performance,
         "opening_dialogue_id": _opening_h3_dialogue_id(
-            source,
-            extract_locked_dialogue(source),
-            extract_source_events(source),
+            raw_source,
+            locked_dialogue,
+            extract_source_events(raw_source),
         ),
         "ongoing_motion": ongoing,
         "hands_visible": hands_visible,
@@ -1050,8 +1149,89 @@ def _infer_quote_speaker(source: str, quote_start: int) -> tuple[str, str]:
     return speaker, delivery
 
 
+def _screenplay_dialogue_spans(source: str) -> list[dict[str, Any]]:
+    """Return unambiguous ``CHARACTER: line`` screenplay rows.
+
+    A colon is also used by camera notes and Context-IR, so only a short
+    person-like label at the start of its own line is accepted.  The body is
+    preserved verbatim except for optional wrapping quotation marks/Markdown.
+    """
+
+    spans: list[dict[str, Any]] = []
+    for match in _SCREENPLAY_DIALOGUE_RE.finditer(source):
+        speaker = sanitize_h3_prompt_text(match.group("speaker")).strip(" ,;:.-")
+        speaker_key = _normalize_key(speaker)
+        if (
+            not speaker_key
+            or speaker_key in _SCREENPLAY_NON_SPEAKER_LABELS
+            or re.fullmatch(r"(?:scene|shot|subject|picture|video|audio|s)\s*\d+", speaker_key)
+        ):
+            continue
+        text = str(match.group("text") or "").strip()
+        text = re.sub(r"\*\*\s*$", "", text).strip()
+        if len(text) >= 2 and (text[0], text[-1]) in {
+            ('"', '"'), ("\u201c", "\u201d"), ("'", "'"), ("\u2018", "\u2019"),
+        }:
+            text = text[1:-1].strip()
+        text = sanitize_h3_prompt_text(text)
+        if not text or _PLACEHOLDER_DIALOGUE.fullmatch(text):
+            continue
+        raw_delivery = sanitize_h3_prompt_text(match.group("delivery")).strip(" ,;:.-")
+        off_camera = bool(re.search(
+            r"\b(?:v\.?\s*o\.?|o\.?\s*s\.?|off[- ]?camera|off[- ]?screen|voice[- ]?over)\b",
+            raw_delivery,
+            flags=re.IGNORECASE,
+        ))
+        cleaned_delivery = re.sub(
+            r"\b(?:v\.?\s*o\.?|o\.?\s*s\.?|off[- ]?camera|off[- ]?screen|voice[- ]?over)\b",
+            "",
+            raw_delivery,
+            flags=re.IGNORECASE,
+        ).strip(" ,;:.-")
+        if cleaned_delivery:
+            delivery = (
+                f"speaks {cleaned_delivery}"
+                if cleaned_delivery.casefold().endswith("ly")
+                else f"speaks with {cleaned_delivery} delivery"
+            )
+        else:
+            delivery = "speaks naturally"
+        spans.append({
+            "start": match.start(),
+            "end": match.end(),
+            "text": text,
+            "speaker": speaker,
+            "language": "English",
+            "delivery": delivery,
+            "off_camera": off_camera,
+            "explicit_tag": False,
+            "source_form": "screenplay",
+        })
+    return spans
+
+
+def _without_locked_dialogue(
+    source: str,
+    locked_dialogue: list[dict[str, Any]],
+    *,
+    keep_screenplay_speaker_cues: bool,
+) -> str:
+    """Remove spoken words while preserving chronological screenplay cues."""
+
+    cleaned = source
+    for item in reversed(locked_dialogue):
+        start = int(item.get("source_offset") or 0)
+        end = int(item.get("source_end") or start)
+        replacement = " . "
+        if keep_screenplay_speaker_cues and item.get("source_form") == "screenplay":
+            speaker = sanitize_h3_prompt_text(item.get("speaker")) or "Speaker"
+            replacement = f"\n{speaker} speaks.\n"
+        cleaned = cleaned[:start] + replacement + cleaned[end:]
+    return cleaned
+
+
 def extract_locked_dialogue(prompt: str) -> list[dict[str, Any]]:
-    """Extract user-authored quoted or tagged lines before LLM rewriting."""
+    """Extract tagged, quoted, or screenplay-form dialogue before rewriting."""
 
     source = normalize_h3_dialogue_tags(prompt)
     tag_pattern = re.compile(
@@ -1060,21 +1240,27 @@ def extract_locked_dialogue(prompt: str) -> list[dict[str, Any]]:
     )
     quote_pattern = re.compile(r'"([^"\r\n]{1,600})"|“([^”\r\n]{1,600})”')
     spans: list[dict[str, Any]] = []
-    tagged_ranges: list[tuple[int, int]] = []
+    occupied_ranges: list[tuple[int, int]] = []
     for match in tag_pattern.finditer(source):
         text = sanitize_h3_prompt_text(match.group(2) or "").strip()
         if not text or _PLACEHOLDER_DIALOGUE.fullmatch(text):
             continue
-        tagged_ranges.append((match.start(), match.end()))
+        occupied_ranges.append((match.start(), match.end()))
         spans.append({
             "start": match.start(),
             "end": match.end(),
             "text": text,
             "language": sanitize_h3_prompt_text(match.group(1) or "English"),
             "explicit_tag": True,
+            "source_form": "tagged",
         })
+    for item in _screenplay_dialogue_spans(source):
+        if any(start <= int(item["start"]) < end for start, end in occupied_ranges):
+            continue
+        occupied_ranges.append((int(item["start"]), int(item["end"])))
+        spans.append(item)
     for match in quote_pattern.finditer(source):
-        if any(start <= match.start() < end for start, end in tagged_ranges):
+        if any(start <= match.start() < end for start, end in occupied_ranges):
             continue
         text = sanitize_h3_prompt_text(match.group(1) or match.group(2) or "").strip()
         if not text or _PLACEHOLDER_DIALOGUE.fullmatch(text):
@@ -1085,6 +1271,7 @@ def extract_locked_dialogue(prompt: str) -> list[dict[str, Any]]:
             "text": text,
             "language": "English",
             "explicit_tag": False,
+            "source_form": "quoted",
         })
     spans.sort(key=lambda item: int(item["start"]))
 
@@ -1093,7 +1280,14 @@ def extract_locked_dialogue(prompt: str) -> list[dict[str, Any]]:
         start = int(span["start"])
         end = int(span["end"])
         text = str(span["text"])
-        speaker, delivery = _infer_quote_speaker(source, start)
+        screenplay = span.get("source_form") == "screenplay"
+        speaker, delivery = (
+            (
+                sanitize_h3_prompt_text(span.get("speaker")) or "Speaker",
+                sanitize_h3_prompt_text(span.get("delivery")) or "speaks naturally",
+            )
+            if screenplay else _infer_quote_speaker(source, start)
+        )
         # A quoted title should not silently become dialogue. Speech cues,
         # screenplay-style ``Name:`` labels, and a quote-only prompt are the
         # three unambiguous forms accepted here. An explicit <d> block is
@@ -1106,15 +1300,16 @@ def extract_locked_dialogue(prompt: str) -> list[dict[str, Any]]:
         outside_quote = (source[:start] + source[end:]).strip(" \t\r\n.,;:!?-")
         if (
             not span["explicit_tag"]
+            and not screenplay
             and not _SPEECH_VERB.search(nearby)
             and not label
             and outside_quote
         ):
             continue
-        if label:
+        if label and not screenplay:
             speaker = label.group(1)
         speech_context = source[max(0, start - 240):start]
-        off_camera = bool(re.search(
+        off_camera = bool(span.get("off_camera")) or bool(re.search(
             r"\b(?:off[- ]camera|offscreen|off[- ]screen|pov\s+(?:off[- ]camera\s+)?voice)\b",
             speech_context,
             flags=re.IGNORECASE,
@@ -1128,6 +1323,7 @@ def extract_locked_dialogue(prompt: str) -> list[dict[str, Any]]:
             "off_camera": off_camera,
             "source_offset": start,
             "source_end": end,
+            "source_form": str(span.get("source_form") or "quoted"),
         })
     return locked
 
@@ -1136,21 +1332,23 @@ def _story_fragments(prompt: str) -> list[str]:
     # A user-authored line break is often the only boundary between two
     # actions in Studio's prompt box. Preserve it as sentence punctuation
     # before the general sanitizer collapses whitespace.
+    raw_source = normalize_h3_dialogue_tags(prompt)
+    locked_dialogue = extract_locked_dialogue(raw_source)
+    has_screenplay_dialogue = any(
+        item.get("source_form") == "screenplay" for item in locked_dialogue
+    )
+    raw_source = _without_locked_dialogue(
+        raw_source,
+        locked_dialogue,
+        keep_screenplay_speaker_cues=True,
+    )
     source = sanitize_h3_prompt_text(
         re.sub(
             r"(?:\r?\n)+",
             ". ",
-            normalize_h3_dialogue_tags(prompt),
+            raw_source,
         )
     )
-    # Preserve a sentence boundary where quoted dialogue was removed so a
-    # following physical event cannot collapse into the preceding speech cue.
-    for item in reversed(extract_locked_dialogue(source)):
-        source = (
-            source[: int(item["source_offset"])]
-            + " . "
-            + source[int(item["source_end"]):]
-        )
     pieces = re.split(
         r"(?<=[.!?])\s+|\s*;\s*|"
         r"\s+(?:(?:and\s+)?then(?:\s+then)*|after\s+that|next)\s+|"
@@ -1249,6 +1447,10 @@ def _story_fragments(prompt: str) -> list[str]:
                 or _is_persistent_audio_directive(value)
                 or _is_subject_only_fragment(value)
                 or _is_creation_directive(value)
+                or (
+                    has_screenplay_dialogue
+                    and _is_screenplay_performance_directive(value)
+                )
             ):
                 continue
             if re.fullmatch(
@@ -1283,6 +1485,8 @@ def _story_fragments(prompt: str) -> list[str]:
             compacted[-1] = f"{compacted[-1]} as {value}"
             continue
         compacted.append(value)
+    if has_screenplay_dialogue:
+        compacted = _collapse_duplicate_screenplay_entrances(compacted)
     return compacted or ["Establish and carry out the requested scene"]
 
 
@@ -5014,6 +5218,10 @@ def plan_h3_story_segments(
     if not segment_count:
         raise ValueError("H3 story planning requires at least one segment.")
     locked_dialogue = extract_locked_dialogue(prompt)
+    # Callers historically detected only quotation marks.  Treat any
+    # canonical dialogue form, including ``CHARACTER: line`` screenplay rows,
+    # as mandatory even when an older caller passes ``expect_dialogue=False``.
+    expect_dialogue = bool(expect_dialogue or locked_dialogue)
     source_events = extract_source_events(prompt)
     source_intent = extract_h3_source_intent(prompt)
     source_cast_names = _merge_h3_cast_names(
@@ -5349,6 +5557,16 @@ def plan_h3_story_segments(
     if source_intent.get("opening_state_contract"):
         ledger["initial_state"] = sanitize_h3_prompt_text(
             canonical_ledger.get("initial_state")
+        )
+        # Occupancy at an entrance boundary is source-owned.  A planning LLM
+        # sometimes rewrites shared continuity as "George and Joey are already
+        # seated" or carries "George bursts through the door" into every
+        # segment.  Either instruction duplicates the entrant before shot one.
+        ledger["setting_continuity"] = sanitize_h3_prompt_text(
+            canonical_ledger.get("setting_continuity")
+        )
+        ledger["visual_continuity"] = sanitize_h3_prompt_text(
+            canonical_ledger.get("visual_continuity")
         )
     ledger["source_intent"] = source_intent
     ledger["requested_nonverbal_vocals"] = source_intent[

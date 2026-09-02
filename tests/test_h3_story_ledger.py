@@ -530,6 +530,126 @@ class H3StoryLedgerTests(unittest.TestCase):
             ],
         )
 
+    def test_screenplay_rows_are_locked_dialogue_not_visual_events(self):
+        prompt = (
+            "George Costanza walks into the coffee shop on the TV show Friends. "
+            "Starts passionately talking to Joey.\n\n"
+            "Joey sits on the couch eating a muffin wearing a grey sweatshirt. "
+            "George Costanza bursts through the door, frantic, wearing a dark brown sport coat.\n\n"
+            "GEORGE: Joey! Maestro 2.0! It's here!\n\n"
+            "JOEY: Do I know you?\n\n"
+            "GEORGE (excitedly): Forget who I am! There's an Editor now!\n\n"
+            "Everyone looks over.\n"
+            "JOEY: Who are you?"
+        )
+
+        locked = extract_locked_dialogue(prompt)
+        self.assertEqual(
+            [(item["speaker"], item["text"]) for item in locked],
+            [
+                ("GEORGE", "Joey! Maestro 2.0! It's here!"),
+                ("JOEY", "Do I know you?"),
+                ("GEORGE", "Forget who I am! There's an Editor now!"),
+                ("JOEY", "Who are you?"),
+            ],
+        )
+        self.assertEqual(locked[2]["delivery"], "speaks excitedly")
+        self.assertTrue(all(item["source_form"] == "screenplay" for item in locked))
+
+        events = extract_source_events(prompt)
+        event_text = " | ".join(item["text"] for item in events)
+        self.assertNotIn("Starts passionately talking", event_text)
+        self.assertNotIn("walks into the coffee shop", event_text)
+        self.assertEqual(event_text.count("bursts through the door"), 1)
+        for spoken in ("Maestro 2.0", "Do I know you", "Forget who I am", "Who are you"):
+            self.assertNotIn(spoken, event_text)
+
+        intent = extract_h3_source_intent(prompt)
+        self.assertEqual(intent["cast_names"], ["George Costanza", "Joey"])
+        self.assertEqual(intent["opening_dialogue_id"], "D1")
+        self.assertFalse(intent["fast_action"])
+        self.assertTrue(intent["energetic_performance"])
+        self.assertNotIn("bursts through", intent["style_contract"])
+
+    def test_screenplay_dialogue_is_mandatory_and_entrance_is_not_persistent(self):
+        prompt = (
+            "George Costanza walks into the coffee shop on the TV show Friends. "
+            "Starts passionately talking to Joey.\n\n"
+            "Joey sits on the couch eating a muffin. George Costanza bursts "
+            "through the door, frantic, wearing a dark brown sport coat.\n\n"
+            "GEORGE: Joey! Maestro 2.0 is here!\n"
+            "JOEY: Are you selling me cable?\n"
+            "GEORGE: No! It has an Editor now!\n"
+            "JOEY: Okay, seriously, who are you?"
+        )
+        locked = extract_locked_dialogue(prompt)
+        canonical = _deterministic_ledger(
+            prompt,
+            segment_count=3,
+            segment_durations=[14.375, 14.375, 13.25],
+            locked_dialogue=locked,
+            camera_coverage="multi_shot",
+            reference_context="",
+        )
+        candidate = json.loads(json.dumps(canonical))
+        candidate["setting_continuity"] = (
+            "George Costanza and Joey are already seated opposite each other"
+        )
+        candidate["visual_continuity"] = (
+            "George Costanza bursts through the door in every segment"
+        )
+        calls = 0
+
+        def planned_then_offline(**_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return json.dumps(candidate)
+            raise RuntimeError("offline")
+
+        # Deliberately pass the legacy false value: the shared planner must
+        # discover screenplay-form dialogue on its own.
+        result = plan_h3_story_segments(
+            prompt,
+            segment_durations=[14.375, 14.375, 13.25],
+            mode="sliding_window",
+            camera_coverage="multi_shot",
+            expect_dialogue=False,
+            planning_style="faithful",
+            llm_generate=planned_then_offline,
+        )
+
+        rendered_dialogue = [
+            (line["speaker"], line["text"])
+            for segment in result["segments"]
+            for shot in segment["shots"]
+            for line in (shot.get("dialogue") or [])
+        ]
+        self.assertEqual(
+            rendered_dialogue,
+            [
+                ("George Costanza", "Joey! Maestro 2.0 is here!"),
+                ("Joey", "Are you selling me cable?"),
+                ("George Costanza", "No! It has an Editor now!"),
+                ("Joey", "Okay, seriously, who are you?"),
+            ],
+        )
+        self.assertEqual(
+            result["ledger"]["setting_continuity"],
+            canonical["setting_continuity"],
+        )
+        self.assertNotIn(
+            "bursts through the door in every segment",
+            result["ledger"]["visual_continuity"],
+        )
+        first_lines = [
+            line
+            for shot in result["segments"][0]["shots"]
+            for line in (shot.get("dialogue") or [])
+        ]
+        self.assertTrue(first_lines)
+        self.assertEqual(first_lines[0]["dialogue_id"], "D1")
+
     def test_spaced_h3_tags_lock_speakers_and_leave_only_visual_events(self):
         prompt = (
             "Yoda waits in the Dagobah swamp. Thanos says to Yoda, "

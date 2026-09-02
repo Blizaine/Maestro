@@ -22,6 +22,7 @@ from services.h3_story_ledger import (
     _same_h3_cast_identity,
     _source_requests_multiple_cast_instances,
     extract_h3_source_intent,
+    extract_locked_dialogue,
     normalize_h3_planning_style,
     plan_h3_story_segments,
     recover_h3_plain_story,
@@ -1614,7 +1615,7 @@ def plan_h3_reference_sequence(
     expect_dialogue = (
         _creative_dialogue_expected(prompt, len(clips))
         if planning_style == "creative"
-        else bool(re.search(r"[\"“][^\"”]+[\"”]", prompt))
+        else bool(extract_locked_dialogue(prompt))
     )
     resolved_coverage = _infer_camera_coverage(prompt, camera_coverage)
     story_ledger: dict[str, Any] | None = None
