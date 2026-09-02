@@ -17,6 +17,8 @@ if str(_APP) not in sys.path:
 
 from services.text_integrity import repair_payload, repair_text
 from services.director.planners.base import BasePlanner
+from services.director.schema import ShotPlan
+from services.director.validators.shot_validator import validate_shot_plan
 from services import llm_service
 from services.director_pipeline import _write_pipeline_json_unlocked, load_pipeline_state
 
@@ -90,6 +92,37 @@ class TestUnicodeIntegrity(unittest.TestCase):
 
         self.assertEqual(loaded["scene_description"], "Grüße aus Köln")
         self.assertEqual(persisted["scene_description"], "Grüße aus Köln")
+
+
+class TestDirectorStructuredOutputHardening(unittest.TestCase):
+    def test_null_dialogue_row_is_dropped_before_final_validation(self):
+        shot = ShotPlan.from_dict({
+            "shot_id": "long_form_48_last",
+            "index": 91,
+            "duration_sec": 14.0,
+            "skill_type": "short_film",
+            "scene_goal": "Finish the final visual beat",
+            "subjects_on_screen": [],
+            "spatial_setup": "wide room",
+            "environment": "television studio",
+            "visual_style": "cinematic",
+            "lighting": "soft",
+            "mood": "comic",
+            "action_beats": ["The reaction lands", "The room settles"],
+            "dialogue_beats": [
+                {"spoken_text": None, "speaker_id": "char_0"},
+                {"spoken_text": "  A real final line.  ", "speaker_id": "char_1"},
+            ],
+            "camera_plan": {"framing": "medium shot"},
+            "audio_plan": {"mode": "dialogue_driven"},
+            "ending_beat": "The scene resolves",
+        })
+
+        result = validate_shot_plan(shot)
+
+        self.assertTrue(result.valid)
+        self.assertEqual(len(shot.dialogue_beats or []), 1)
+        self.assertEqual(shot.dialogue_beats[0].spoken_text, "A real final line.")
 
 
 class TestH3PromptIntegrity(unittest.TestCase):

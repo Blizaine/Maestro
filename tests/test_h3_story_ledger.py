@@ -25,6 +25,7 @@ from services.h3_story_ledger import (  # noqa: E402
     _ledger_schema,
     _only_supplied_dialogue_requested,
     _prepare_render_dialogue_schedule,
+    _split_h3_shots_at_speaker_changes,
     extract_h3_source_intent,
     extract_locked_dialogue,
     extract_source_events,
@@ -341,6 +342,51 @@ class H3StoryLedgerTests(unittest.TestCase):
             [item["event_id"] for item in events],
         )
 
+    def test_long_exact_turn_borrows_headroom_for_a_clean_sentence_boundary(self):
+        prompt = (
+            "George Costanza walks into the coffee shop and walks up to Joey. "
+            'George says "Maestro two is out!" Joey says "What, who?" '
+            'George says "It is crazy! You can now generate videos up to an hour '
+            "with a single prompt! You can save and cast Characters just like "
+            "Sora 2's Cameos, and it has push notifications. It even has Qwen "
+            '3.8! And get this. It even has an editor!" Joey replies "Cool, '
+            'so, who are you again?"'
+        )
+        durations = [14.375, 13.625, 13.625]
+        locked = extract_locked_dialogue(prompt)
+        events = extract_source_events(prompt)
+        ledger = _deterministic_ledger(
+            prompt,
+            segment_count=3,
+            segment_durations=durations,
+            locked_dialogue=locked,
+            camera_coverage="multi_shot",
+            reference_context="",
+        )
+        catalog = _dialogue_catalog(ledger, locked)
+
+        _render_beats, render_catalog, _render_events, fragments = (
+            _prepare_render_dialogue_schedule(
+                ledger["beats"],
+                catalog,
+                segment_durations=durations,
+                source_events=events,
+                expected_dialogue_events=_expected_dialogue_events(prompt, locked),
+            )
+        )
+
+        self.assertEqual(fragments[0]["source_dialogue_id"], "D3")
+        pieces = [
+            item["text"] for item in render_catalog
+            if item.get("source_dialogue_id") == "D3"
+        ]
+        self.assertEqual(len(pieces), 2)
+        self.assertTrue(pieces[0].endswith("single prompt!"))
+        self.assertTrue(pieces[1].startswith("You can save and cast Characters"))
+        self.assertIn("Sora 2's Cameos", pieces[1])
+        self.assertIn("Qwen 3.8", pieces[1])
+        self.assertEqual(" ".join(pieces), locked[2]["text"])
+
     def test_conversation_schema_can_require_one_authored_line_per_segment(self):
         schema = _ledger_schema(
             4,
@@ -613,6 +659,79 @@ class H3StoryLedgerTests(unittest.TestCase):
         self.assertIn("assigned beat IDs are missing, foreign, or repeated", joined)
         self.assertIn("unusably short tail shot", joined)
 
+    def test_segment_rejects_unrequested_window_word_but_preserves_user_literal(self):
+        segment = _segment(1)
+        segment["shots"][0]["action"] = (
+            "Superman stands firm at the next window and demands the gauntlet"
+        )
+        segment["closing_state"] = "Superman waits beside the window"
+        kwargs = {
+            "segment_number": 1,
+            "duration": 10.0,
+            "assigned_beats": [_ledger()["beats"][0]],
+            "dialogue_catalog": self.locked,
+        }
+
+        violations = segment_violations(self.prompt, segment, **kwargs)
+        self.assertIn(
+            "introduced the internal term 'window' as visible scene content",
+            violations,
+        )
+
+        literal_prompt = self.prompt + " Superman stands beside a stained-glass window."
+        literal_violations = segment_violations(literal_prompt, segment, **kwargs)
+        self.assertNotIn(
+            "introduced the internal term 'window' as visible scene content",
+            literal_violations,
+        )
+
+    def test_final_prompt_camera_phases_split_when_visible_speaker_changes(self):
+        shots = [{
+            "shot": 4,
+            "start_seconds": 5.8,
+            "end_seconds": 14.375,
+            "transition": "hard cut",
+            "framing": "a motivated medium reaction angle",
+            "camera": "a coherent motivated camera follows the visible action",
+            "action": (
+                "Visual direction only, never spoken narration: Joey visibly "
+                "delivers the assigned dialogue line. Then George Costanza "
+                "visibly begins the assigned response"
+            ),
+            "dialogue": [
+                {
+                    "speaker": "Joey",
+                    "speaker_id": "S2",
+                    "text": "What, who?",
+                    "action": "only Joey's mouth moves",
+                },
+                {
+                    "speaker": "George Costanza",
+                    "speaker_id": "S1",
+                    "text": "It is crazy! Maestro now has an editor.",
+                    "action": "only George Costanza's mouth moves",
+                },
+            ],
+            "sound_effects": "Natural synchronized effects",
+        }]
+
+        split = _split_h3_shots_at_speaker_changes(
+            shots,
+            known_speakers=["George Costanza", "Joey"],
+        )
+
+        self.assertEqual(len(split), 2)
+        self.assertEqual(
+            [[line["speaker"] for line in shot["dialogue"]] for shot in split],
+            [["Joey"], ["George Costanza"]],
+        )
+        self.assertAlmostEqual(split[0]["end_seconds"], split[1]["start_seconds"], places=3)
+        self.assertEqual(split[1]["end_seconds"], 14.375)
+        self.assertIn("Joey visibly", split[0]["action"])
+        self.assertNotIn("George Costanza visibly", split[0]["action"])
+        self.assertIn("George Costanza visibly", split[1]["action"])
+        self.assertNotIn("Joey visibly", split[1]["action"])
+
     def test_staged_planner_keeps_dialogue_exact_and_canonicalizes_bad_timing(self):
         invalid_second = _segment(2)
         invalid_second["shots"][0]["start_seconds"] = 9.9
@@ -702,6 +821,103 @@ class H3StoryLedgerTests(unittest.TestCase):
         ]
         self.assertEqual(referenced, [item["event_id"] for item in extract_source_events(self.prompt)])
         self.assertIn("beats", calls[0]["json_schema"]["properties"])
+
+    def test_canonicalizer_anchors_immediate_first_line_without_llm_repair(self):
+        prompt = (
+            "George Costanza walks into the coffee shop and walks up to Joey, "
+            "who is sitting on the couch. "
+            'George passionately says "Maestro two is out!" '
+            'Joey says "What, who?" '
+            'George says "It is crazy! Maestro now has an editor." '
+            'Joey replies "Who are you?"'
+        )
+        durations = [14.375, 14.375, 13.25]
+        locked = extract_locked_dialogue(prompt)
+        events = extract_source_events(prompt)
+        canonical = _deterministic_ledger(
+            prompt,
+            segment_count=3,
+            segment_durations=durations,
+            locked_dialogue=locked,
+            camera_coverage="multi_shot",
+            reference_context="",
+        )
+        candidate = {
+            **{
+                key: canonical[key]
+                for key in (
+                    "subject_continuity",
+                    "setting_continuity",
+                    "visual_continuity",
+                    "editing_style",
+                    "initial_state",
+                    "ambient_audio",
+                    "music",
+                    "required_final_outcome",
+                )
+            },
+            "beats": [
+                {
+                    "segment": 1,
+                    "description": "George enters",
+                    "source_event_ids": [events[0]["event_id"]],
+                    "dialogue_ids": [],
+                    "state_after": "George is inside",
+                    "sound_effects": "Footsteps",
+                },
+                {
+                    "segment": 2,
+                    "description": "George approaches and speaks",
+                    "source_event_ids": [
+                        events[1]["event_id"],
+                        events[2]["event_id"],
+                    ],
+                    "dialogue_ids": ["D1"],
+                    "state_after": "George finishes his first line",
+                    "sound_effects": "Room tone",
+                },
+                {
+                    "segment": 3,
+                    "description": "Joey reacts, George explains, and Joey replies",
+                    "source_event_ids": [
+                        events[3]["event_id"],
+                        events[4]["event_id"],
+                        events[5]["event_id"],
+                    ],
+                    "dialogue_ids": ["D2", "D3", "D4"],
+                    "state_after": "Joey finishes his reply",
+                    "sound_effects": "Room tone",
+                },
+            ],
+            "generated_dialogue": [],
+        }
+
+        compiled = _canonicalize_story_ledger(
+            prompt,
+            canonical,
+            candidate,
+            locked_dialogue=locked,
+            segment_count=3,
+            allow_generated_dialogue=False,
+        )
+
+        owner = next(
+            beat for beat in compiled["beats"]
+            if "D1" in beat.get("dialogue_ids", [])
+        )
+        self.assertEqual(owner["segment"], 1)
+        self.assertEqual(
+            ledger_violations(
+                prompt,
+                compiled,
+                segment_count=3,
+                locked_dialogue=locked,
+                expect_dialogue=True,
+                allow_generated_dialogue=False,
+                segment_durations=durations,
+            ),
+            [],
+        )
 
     def test_creative_fallback_salvages_valid_dialogue_from_rejected_structure(self):
         prompt = (

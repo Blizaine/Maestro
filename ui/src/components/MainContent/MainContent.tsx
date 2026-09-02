@@ -374,13 +374,18 @@ function PipelinePlaceholder() {
   const pipelineStatus = useStore(s => s.pipelineStatus)
   const pipelineId = useStore(s => s.pipelineId)
   const stopPipeline = useStore(s => s.stopPipeline)
+  const resumePipeline = useStore(s => s.resumePipeline)
+  const reattachDirectorPipeline = useStore(s => s.reattachDirectorPipeline)
+  const [resuming, setResuming] = useState(false)
 
   if (!pipelineId || !pipelineStatus) return null
-  if (pipelineStatus.status === 'completed' || pipelineStatus.status === 'failed' || pipelineStatus.status === 'cancelled') return null
+  if (pipelineStatus.status === 'completed') return null
 
   const phase = pipelineStatus.phase || 'planning'
   const progress = pipelineStatus.progress
   const message = progress?.message || phase
+  const isFailed = pipelineStatus.status === 'failed' || pipelineStatus.status === 'cancelled'
+  const errorText = pipelineStatus.error || message || 'Director pipeline stopped'
 
   const hasSteps = (progress?.total_steps ?? 0) > 0
   const progressPct = hasSteps
@@ -397,22 +402,34 @@ function PipelinePlaceholder() {
   const projectClock = formatEstimatedClock(progress?.project_completion_at)
 
   return (
-    <div className="rounded-xl overflow-hidden border border-accent-blue/30 bg-bg-tertiary">
-      <div className="w-full aspect-video flex items-center justify-center">
+    <div className={`rounded-xl overflow-hidden border ${isFailed ? 'border-red-500/30' : 'border-accent-blue/30'} bg-bg-tertiary`}>
+      <div className="w-full aspect-video flex items-center justify-center relative">
+        {isFailed && (
+          <button
+            type="button"
+            onClick={() => useStore.setState({ pipelineId: null, pipelineStatus: null, directorError: null })}
+            className="absolute top-2 right-2 p-1.5 rounded-full bg-bg-active text-text-secondary hover:bg-red-600 hover:text-white transition-colors z-10"
+            title="Dismiss"
+          >
+            <X size={14} />
+          </button>
+        )}
         <div className="flex flex-col items-center gap-3 text-text-muted w-full max-w-xs px-4">
-          <Film size={40} className="animate-pulse" />
+          <Film size={40} className={isFailed ? 'text-red-400' : 'animate-pulse'} />
 
           <div className="text-center w-full">
-            <p className="text-sm font-medium text-text-secondary">
-              {pipelineStatus?.status === 'paused' ? 'Paused — Review' : 'Director'}
+            <p className={`text-sm font-medium ${isFailed ? 'text-red-400' : 'text-text-secondary'}`}>
+              {isFailed
+                ? (pipelineStatus.status === 'cancelled' ? 'Director Cancelled' : 'Director Failed')
+                : pipelineStatus.status === 'paused' ? 'Paused — Review' : 'Director'}
             </p>
-            <p className="text-xs mt-1 truncate">{phaseLabel}</p>
-            {hasSteps && (
+            {!isFailed && <p className="text-xs mt-1 truncate">{phaseLabel}</p>}
+            {hasSteps && !isFailed && (
               <p className="text-[10px] text-text-muted mt-0.5">
                 Step {progress!.step}/{progress!.total_steps}
               </p>
             )}
-            {currentClip ? (
+            {!isFailed && currentClip ? (
               <div className="mt-1 space-y-0.5 text-[10px] text-text-muted">
                 <p>
                   Clip {currentClip}/{totalClips || '?'}
@@ -433,34 +450,76 @@ function PipelinePlaceholder() {
                 )}
               </div>
             ) : null}
+            {isFailed && (
+              <>
+                {progress && progress.total > 0 && (
+                  <p className="mt-1 text-[10px] text-text-muted">
+                    Saved progress: {progress.current}/{progress.total}
+                  </p>
+                )}
+                <p className="text-[11px] text-text-secondary mt-2 max-h-24 overflow-y-auto px-2 leading-relaxed whitespace-pre-wrap break-words">
+                  {errorText}
+                </p>
+              </>
+            )}
           </div>
 
           {/* Progress bar */}
-          <div className="w-full bg-bg-active rounded-full h-1.5 overflow-hidden">
-            {progressPct > 0 ? (
-              <div
-                className="h-full bg-accent-green rounded-full transition-all duration-300"
-                style={{ width: `${progressPct}%` }}
-              />
-            ) : (
-              <div className="h-full bg-accent-green/60 rounded-full animate-pulse w-full" />
-            )}
-          </div>
+          {!isFailed && (
+            <div className="w-full bg-bg-active rounded-full h-1.5 overflow-hidden">
+              {progressPct > 0 ? (
+                <div
+                  className="h-full bg-accent-green rounded-full transition-all duration-300"
+                  style={{ width: `${progressPct}%` }}
+                />
+              ) : (
+                <div className="h-full bg-accent-green/60 rounded-full animate-pulse w-full" />
+              )}
+            </div>
+          )}
         </div>
       </div>
 
       {/* Bottom bar with stop button */}
       <div className="px-3 py-2 min-h-[40px] flex items-center justify-between">
         <div className="text-[11px] text-text-muted truncate flex-1">
-          {phaseLabel || 'Preparing...'}
+          {isFailed ? 'The saved Director checkpoint can be resumed' : phaseLabel || 'Preparing...'}
         </div>
-        <button
-          onClick={() => stopPipeline()}
-          className="flex items-center gap-1 text-xs text-red-400 hover:text-red-300 transition-colors shrink-0 ml-2"
-        >
-          <Square size={11} />
-          Stop
-        </button>
+        {isFailed ? (
+          <div className="flex items-center gap-2 shrink-0 ml-2">
+            <button
+              type="button"
+              onClick={() => void reattachDirectorPipeline(pipelineId, true)}
+              className="text-xs text-text-secondary hover:text-text-primary transition-colors"
+            >
+              Open Director
+            </button>
+            <button
+              type="button"
+              disabled={resuming}
+              onClick={async () => {
+                setResuming(true)
+                try {
+                  await resumePipeline(pipelineId)
+                } finally {
+                  setResuming(false)
+                }
+              }}
+              className="flex items-center gap-1 rounded-md bg-accent-blue px-2 py-1 text-xs text-white hover:bg-accent-blue-hover disabled:opacity-50"
+            >
+              {resuming ? <Loader2 size={11} className="animate-spin" /> : <Play size={11} />}
+              Resume
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => stopPipeline()}
+            className="flex items-center gap-1 text-xs text-red-400 hover:text-red-300 transition-colors shrink-0 ml-2"
+          >
+            <Square size={11} />
+            Stop
+          </button>
+        )}
       </div>
     </div>
   )

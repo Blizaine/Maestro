@@ -95,7 +95,9 @@ class TestDirectorProjectRevisionsAndQueue(unittest.TestCase):
         with open(state_path, "r", encoding="utf-8") as handle:
             saved = json.load(handle)
 
-        self.assertEqual(saved["version"], 2)
+        self.assertEqual(saved["version"], pipeline.PIPELINE_STATE_VERSION)
+        self.assertIn("planning_checkpoint", saved)
+        self.assertIsNone(saved["planning_checkpoint"])
         self.assertEqual(saved["project_id"], pid)
         self.assertEqual(saved["director_ui_snapshot"]["directorSongStyle"], "dark synthwave")
         self.assertEqual(saved["clips"][0]["video_prompt"], "same reviewed video prompt")

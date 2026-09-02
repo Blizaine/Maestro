@@ -72,6 +72,68 @@ can be applied to any video—including a clip selected in Editor.
   action and dialogue while keeping identity and continuity constraints.
 - Compatible long-form audio workflows use the same duration language; native
   music-generator limits remain visible and enforced.
+- Director stories longer than five minutes—including the 60-minute preset—are
+  planned hierarchically as a complete-film story bible, one causal outline,
+  chapters, and bounded screenplay sequences. The checkpointed bible locks the
+  premise engine, tone, ending, canonical cast, location registry, persistent
+  world rules, and forbidden story drift so each 90-second writing pass is
+  making the same film rather than rediscovering it.
+- Studio's hierarchical H3 story planner now carries the same story-bible,
+  chapter-state, relevant-cast, and registered-location contracts into its
+  bounded window batches, so hour-scale Studio sequences retain a global arc
+  without asking one local-model response to author hundreds of prompts.
+- Intentional recurring story machinery is now distinct from accidental
+  repetition. A user-requested pattern such as visiting a new show, delivering
+  a recurring line, and triggering a consequence can recur across its assigned
+  chapters with a different setup, reaction, escalation, and handoff each
+  time. One-time source events still occur exactly once in source order, and
+  remain attached to their exact user-written dialogue.
+- Chapter and sequence contracts now carry canonical location IDs, cast
+  presence, inherited physical/story state, named character availability
+  changes, and explicit recurring-motif IDs. A disappeared, dead, transformed,
+  or injured character stays in that state until an explicit restoration event.
+  Disappearances, injuries, knowledge, relationships, wardrobe damage, and
+  prop ownership are handed forward instead of being reset at each local-model
+  call. If a bounded H3 screenplay omits immutable dialogue after its focused
+  retry, Maestro restores the exact words in canonical screenplay form.
+- Expansion stories receive a focused pre-screenplay variety audit. If a local
+  model still cycles through too few places after repair, Maestro schedules
+  unused locations from the AI-authored story bible without inventing dialogue
+  or plot. Per-sequence writers receive only their relevant cast and neighboring
+  geography, while a final whole-film audit repairs phantom speakers, obvious
+  name drift, overlong H3 prompts, and records non-fatal quality diagnostics in
+  the resumable planning checkpoint.
+- Every long-form sequence now carries its own explicit dialogue intent and
+  timing target. Maestro rejects stale planning checkpoints, removes unowned
+  event/dialogue references from neighboring chapter prose, and settles hard
+  screenplay and spoken-word budgets before H3 dialogue becomes immutable or
+  LTX image/video prompts are written. Long-form LTX sequences also receive a
+  deterministic prompt-integrity pass: static image prompts, chronological
+  video/window prompts, visible identities, opening causes, and outgoing
+  handoffs are completed before a sequence is checkpointed. If a repaired H3
+  visual plan supplies too few clips for the locked exchange, Maestro adds
+  neutral same-scene coverage slots instead of rewriting or dropping dialogue.
+- Director's hard minor-safety boundary now evaluates structured production
+  plans one shot at a time and recognizes singular `minor` only when it refers
+  to a person. Ordinary phrases such as "minor camera movement" can no longer
+  combine with unrelated motion words elsewhere in a long plan and abort an
+  otherwise valid generation.
+- Long Director music-video, audio-film, and podcast timelines are planned in
+  small batches. Planning progress is visible, completed batches are saved as
+  they finish, and an interrupted run can resume at its first unfinished unit
+  instead of discarding the complete outline and prior prompts. Resume now
+  returns directly to the original Director chat, and a browser refresh
+  reconnects its live gallery progress card to the server-side worker.
+- Final long-form assembly now sanitizes empty dialogue rows returned by local
+  structured-output models instead of crashing after every segment has
+  finished. It also corrects unambiguous character-name typos, removes sound
+  effects or camera directions miscast as speakers, rejects named phantom cast
+  outside a complete story registry, and recompiles overlong H3 prompts from
+  the authoritative shot fields while preserving multimodal references and
+  exact dialogue. A durable quality report records duration, location and
+  motif coverage, duplicate scene goals, prompt sizes, and applied repairs.
+  Failed Director cards remain visible with the real error and saved counters,
+  and can reopen or resume the original checkpoint directly.
 
 Frequently reused Studio choices now survive browser refreshes and Maestro
 restarts, including media mode, workflow, model, prompt-planning mode, H3
@@ -180,4 +242,4 @@ select **Secure Remote Access (Tailscale)**.
 The v2.0 release candidate passes the production React build, the complete
 frontend ESLint policy, launcher syntax checks, JSON grammar regression runner,
 clean-repository boundary guard, first-party Python compile checks, and the
-complete 1,160-test Python suite.
+complete 1,207-test Python suite.

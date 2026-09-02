@@ -5,7 +5,7 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [Unreleased]
 
-## [2.0.0] - 2026-09-01
+## [2.0.0] - 2026-09-02
 
 Editor: added a third top-level Maestro workspace beside Director and Studio.
 The new non-destructive editor supports layered video, audio, and title tracks;

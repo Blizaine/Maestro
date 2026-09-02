@@ -75,6 +75,66 @@ class TestDirectorPipelineStatusReconnect(unittest.TestCase):
         self.assertEqual(status["status"], live["status"])
         self.assertIsNot(status, live)
 
+    def test_saved_failure_retains_phase_progress_and_error(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            state_path = os.path.join(
+                output_dir,
+                "_director_pipeline_deadbeef.json",
+            )
+            with open(state_path, "w", encoding="utf-8") as handle:
+                json.dump({
+                    "pipeline_id": "deadbeef",
+                    "status": "failed",
+                    "phase": "planning",
+                    "progress": {
+                        "current": 48,
+                        "total": 48,
+                        "message": "Error: final assembly failed",
+                        "step": 0,
+                        "total_steps": 0,
+                    },
+                    "error": "final assembly failed",
+                    "clips": [],
+                    "output_files": [],
+                }, handle)
+
+            status = pipeline.get_pipeline_status("deadbeef", output_dir)
+
+        self.assertEqual(status["status"], "failed")
+        self.assertEqual(status["phase"], "planning")
+        self.assertEqual(status["progress"]["current"], 48)
+        self.assertEqual(status["progress"]["total"], 48)
+        self.assertEqual(status["error"], "final assembly failed")
+
+    def test_legacy_failure_derives_progress_from_planning_checkpoint(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            state_path = os.path.join(
+                output_dir,
+                "_director_pipeline_deadbeef.json",
+            )
+            with open(state_path, "w", encoding="utf-8") as handle:
+                json.dump({
+                    "pipeline_id": "deadbeef",
+                    "status": "failed",
+                    "planning_checkpoint": {
+                        "stage": "complete",
+                        "completed_sequence_count": 48,
+                        "total_sequences": 48,
+                        "completed_sequences": {
+                            str(index): {"shots": []}
+                            for index in range(48)
+                        },
+                    },
+                    "clips": [],
+                    "output_files": [],
+                }, handle)
+
+            status = pipeline.get_pipeline_status("deadbeef", output_dir)
+
+        self.assertEqual(status["progress"]["current"], 48)
+        self.assertEqual(status["progress"]["total"], 48)
+        self.assertIn("Resume continues", status["progress"]["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

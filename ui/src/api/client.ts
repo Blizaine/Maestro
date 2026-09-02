@@ -769,7 +769,7 @@ export async function fetchGroupClips(groupId: string): Promise<{ group_id: stri
 export interface PipelineStatus {
   id: string
   status: 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'
-  phase: 'planning' | 'polishing_prompts' | 'generating_images' | 'preparing_video' | 'generating_video' | 'post_processing' | 'completed' | 'failed' | 'cancelled'
+  phase: 'resuming' | 'planning' | 'polishing_prompts' | 'generating_images' | 'preparing_video' | 'generating_video' | 'post_processing' | 'completed' | 'failed' | 'cancelled'
   auto_mode: boolean
   progress: {
     current: number
@@ -830,7 +830,9 @@ export async function startPipeline(params: Record<string, unknown>): Promise<{ 
 }
 
 export async function fetchPipelineStatus(pid: string): Promise<PipelineStatus> {
-  const res = await fetch(`${BASE}/api/v1/director/pipeline/${encodeURIComponent(pid)}`)
+  const res = await fetch(`${BASE}/api/v1/director/pipeline/${encodeURIComponent(pid)}`, {
+    cache: 'no-store',
+  })
   if (!res.ok) throw new Error('Failed to fetch pipeline status')
   return res.json()
 }
@@ -1030,7 +1032,7 @@ export async function fetchPreflight(): Promise<{ ok: boolean; checks: Preflight
 // ── Director Pipeline Dashboard ──────────────────────────────────────────
 
 export async function fetchPipelineList(): Promise<{ pipelines: import('../types').PipelineListItem[] }> {
-  const res = await fetch(`${BASE}/api/v1/director/pipelines`)
+  const res = await fetch(`${BASE}/api/v1/director/pipelines`, { cache: 'no-store' })
   if (!res.ok) throw new Error('Failed to fetch pipelines')
   return res.json()
 }

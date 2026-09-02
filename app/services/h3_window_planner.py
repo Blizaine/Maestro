@@ -548,6 +548,7 @@ def compile_h3_window_prompts(
     has_start_image: bool = False,
     has_end_image: bool = False,
     injected_keyframes: Iterable[dict[str, Any]] | None = None,
+    source_prompt: str | None = None,
 ) -> list[dict[str, Any]]:
     """Compile a planner JSON object into complete, window-local H3 prompts."""
 
@@ -625,9 +626,22 @@ def compile_h3_window_prompts(
                 150,
             )
         continuity_instruction = (
-            "This is the opening continuation window."
+            "This is the opening continuation segment."
             if position == 0
             else "Begin by matching the supplied previous frame exactly; do not restart, recap, or repeat earlier action."
+        )
+        cast_handoff_instruction = (
+            ""
+            if position == 0
+            else (
+                "Every principal still present at this boundary is already in "
+                "the scene in their last established position, whether visible "
+                "or briefly off camera. Preserve the same identity instances and "
+                "spatial relationships. A cut or reframe may reveal someone "
+                "already there but must not turn that reveal into a new entrance. "
+                "Do not replay completed entrances or blocking; anyone already "
+                "gone remains absent."
+            )
         )
         if sequence_shape == "ongoing":
             outcome_instruction = (
@@ -637,9 +651,9 @@ def compile_h3_window_prompts(
             )
         else:
             outcome_instruction = (
-                "Perform only this window's assigned events; later events remain unperformed."
+                "Perform only this segment's assigned events; later events remain unperformed."
                 if position + 1 < len(spans)
-                else "Complete only the final events assigned to this window."
+                else "Complete only the final events assigned to this segment."
             )
         dialogue_items = _window_dialogue_items(item)
         dialogue = any(
@@ -672,7 +686,7 @@ def compile_h3_window_prompts(
             "there are no additional spoken words, muttering, or gibberish."
             + nonverbal_clause
             if dialogue
-            else "No spoken words, muttering, or gibberish occur in this window."
+            else "No spoken words, muttering, or gibberish occur in this segment."
             + nonverbal_clause
         )
 
@@ -715,7 +729,7 @@ def compile_h3_window_prompts(
             }
             window_keyframes.append(mapped)
             picture_instructions.append(
-                f"At {local_seconds:.2f} seconds into this window, "
+                f"At {local_seconds:.2f} seconds into this segment, "
                 f"<Picture {next_picture_index}> is fully referenced as an exact "
                 "injected frame; the visible action must arrive at it naturally "
                 "and continue from it without an unrequested cut."
@@ -727,12 +741,22 @@ def compile_h3_window_prompts(
         pacing_sentence = f"Coverage is {coverage}; pacing is {pacing}."
         if "slow motion" not in pacing.casefold():
             pacing_sentence += " Slow motion occurs only when explicitly requested."
-        preamble = " ".join([
-            f"{shared_visual or 'A coherent cinematic scene'}.",
-            continuity_instruction,
-            f"At 0.00 seconds, {previous_closing}.",
-            pacing_sentence,
-        ])
+        preamble = " ".join(
+            part
+            for part in (
+                f"{shared_visual or 'A coherent cinematic scene'}.",
+                continuity_instruction,
+                (
+                    f"At 0.00 seconds, continue from this exact previous-scene "
+                    f"state: {previous_closing}."
+                    if position > 0 else
+                    f"At 0.00 seconds, {previous_closing}."
+                ),
+                cast_handoff_instruction,
+                pacing_sentence,
+            )
+            if part
+        )
         visual_parts = [
             _shot_prompt_sentence(
                 shot,
@@ -745,17 +769,17 @@ def compile_h3_window_prompts(
             [
                 silence,
                 outcome_instruction,
-                f"The window ends with {closing}.",
+                f"The segment ends with {closing}.",
             ]
         )
         soundscape = ambient
         if position > 0:
             soundscape += "; the same ambience continues seamlessly without restarting"
         if effects and effects.casefold() not in {"n/a", "none", "no one-time effect"}:
-            soundscape += f". Synchronized effects in this window: {effects}"
+            soundscape += f". Synchronized effects in this segment: {effects}"
         music_value = music
         if music.casefold() != "n/a" and position > 0:
-            music_value = f"{music}; continue seamlessly from the preceding window without restarting"
+            music_value = f"{music}; continue seamlessly from the preceding segment without restarting"
 
         prompt_parts = picture_instructions + [
             f"integrated_multimodal_description: {' '.join(visual_parts)}",
@@ -763,6 +787,14 @@ def compile_h3_window_prompts(
             f"non_diegetic_music: {music_value}",
         ]
         prompt = "\n\n".join(prompt_parts)
+        if (
+            source_prompt is not None
+            and not re.search(r"\bwindows?\b", str(source_prompt), flags=re.IGNORECASE)
+            and re.search(r"\bwindows?\b", prompt, flags=re.IGNORECASE)
+        ):
+            raise ValueError(
+                "H3 camera plan introduced the internal term 'window' into visible scene content."
+            )
         budgeted_prompt = fit_h3_base_prompt(prompt)
         compiled.append(
             {
@@ -1167,11 +1199,11 @@ def _fallback_plan(
             elif shot_index == 0:
                 framing = "a readable wide or medium-wide view of the geography"
                 camera = "a fast tracking move establishes positions and direction"
-                shot_action = f"Begin this window's assigned beat: {action}"
+                shot_action = f"Begin this segment's assigned beat: {action}"
             elif shot_index + 1 == shot_count:
                 framing = "a tighter impact or reaction angle"
                 camera = "a responsive handheld or low-angle move follows through, then settles clearly"
-                shot_action = "Complete only this window's assigned beat without repeating its opening"
+                shot_action = "Complete only this segment's assigned beat without repeating its opening"
             else:
                 framing = "a dynamic medium action angle"
                 camera = "a hard cut and rapid lateral tracking move maintain real-time speed"
@@ -1310,7 +1342,7 @@ def plan_h3_sliding_windows(
         media_context.append(
             f"<Picture {attachment_picture_index}> is an exact injected visual "
             f"anchor at {keyframe['global_seconds']:.3f}s on the full timeline "
-            f"(window {keyframe['window']}, {keyframe['local_seconds']:.3f}s local)."
+            f"(segment {keyframe['window']}, {keyframe['local_seconds']:.3f}s local)."
         )
     expect_dialogue = (
         _creative_dialogue_expected(prompt, len(boundaries))
@@ -1376,6 +1408,7 @@ def plan_h3_sliding_windows(
             has_start_image=has_start_image,
             has_end_image=has_end_image,
             injected_keyframes=normalized_keyframes,
+            source_prompt=prompt,
         )
     except H3DialogueTimingError:
         raise
@@ -1408,6 +1441,7 @@ def plan_h3_sliding_windows(
             has_start_image=has_start_image,
             has_end_image=has_end_image,
             injected_keyframes=normalized_keyframes,
+            source_prompt=prompt,
         )
 
     return {

@@ -9478,8 +9478,15 @@ def director_pipeline_status(pid: str):
     p = get_pipeline_status(pid, base)
     if not p:
         raise HTTPException(status_code=404, detail="Pipeline not found")
-    # Don't leak full params back to client
+    # Don't send immutable execution params or durable long-form planning
+    # checkpoints on every two-second UI poll. A one-hour screenplay can make
+    # the private checkpoint several megabytes even though the browser only
+    # needs the public phase/progress and completed plan fields.
     p.pop("params", None)
+    for key in tuple(p):
+        if str(key).startswith("_"):
+            p.pop(key, None)
+    p.pop("out_dir", None)
     return p
 
 

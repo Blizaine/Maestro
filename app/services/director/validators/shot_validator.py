@@ -89,7 +89,28 @@ def validate_shot_plan(shot: ShotPlan, plan: Optional[ProductionPlan] = None) ->
 
     # ── Dialogue budget check ────────────────────────────────────
     if shot.dialogue_beats:
-        total_words = sum(len(db.spoken_text.split()) for db in shot.dialogue_beats)
+        # Dialogue can originate in third-party/local structured LLM output,
+        # not only in our typed constructors. Never let one null or blank
+        # silent row crash an otherwise completed long-form plan during its
+        # final validation pass.
+        normalized_dialogue = []
+        removed_empty = 0
+        for beat in shot.dialogue_beats:
+            spoken_text = str(getattr(beat, "spoken_text", None) or "").strip()
+            if not spoken_text:
+                removed_empty += 1
+                continue
+            beat.spoken_text = spoken_text
+            normalized_dialogue.append(beat)
+        if removed_empty:
+            shot.dialogue_beats = normalized_dialogue or None
+            auto_fixes.append(
+                f"Removed {removed_empty} empty dialogue beat"
+                f"{'s' if removed_empty != 1 else ''}"
+            )
+        total_words = sum(
+            len(beat.spoken_text.split()) for beat in normalized_dialogue
+        )
         budget = int(shot.duration_sec * 2.5)
         if total_words > budget * 1.5:
             warnings.append(

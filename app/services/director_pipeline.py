@@ -1075,7 +1075,7 @@ def _strip_motion_effects(prompt: str) -> str:
 
 # ── Pipeline State Persistence ─────────────────────────────────────────────
 
-PIPELINE_STATE_VERSION = 2
+PIPELINE_STATE_VERSION = 3
 _PIPELINE_FILE_PREFIX = "_director_pipeline_"
 
 
@@ -1233,6 +1233,12 @@ def _save_pipeline_state_locked(pid: str) -> bool:
         "created_at": p.get("created_at"),
         "completed_at": p.get("_completed_at"),
         "status": p.get("status", "unknown"),
+        # Persist the user-visible terminal reason and the last meaningful
+        # progress snapshot. Without these, a browser/server reconnect turns
+        # a precise 48/48 planning failure into an unexplained generic card.
+        "phase": p.get("phase"),
+        "progress": copy.deepcopy(p.get("progress") or {}),
+        "error": p.get("error"),
         "workspace": p.get("workspace") or "default",
         "pipeline_type": params.get("pipeline_type", "music_video"),
         "scene_description": params.get("scene_description", ""),
@@ -1269,6 +1275,11 @@ def _save_pipeline_state_locked(pid: str) -> bool:
         "director_ui_snapshot": params.get("director_ui_snapshot", {}),
         "asset_manifest": params.get("_director_asset_manifest", {}),
         "llm_log": p.get("_llm_log"),
+        # Long-form planners publish completed outline/sequence batches as
+        # they go.  Keeping this separate from final clip_plans lets a failed
+        # or interrupted planning run resume at the first unfinished unit
+        # instead of repeating ten or more minutes of successful LLM work.
+        "planning_checkpoint": p.get("_planning_checkpoint") or None,
         "clips": clips,
         "output_files": p.get("output_files", []),
         "total_time_sec": (time.time() - p["created_at"]) if p.get("created_at") else None,
@@ -4684,6 +4695,7 @@ def start_pipeline(params: dict) -> str:
     params.pop("_director_shot_image_policy", None)
     params.pop("_director_video_execution_profile", None)
     params.pop("_director_asset_manifest", None)
+    params.pop("_director_planning_checkpoint", None)
     _director_apply_omni_drive_audio(params)
     params["_director_shot_image_policy"] = (
         _resolve_fresh_shot_image_policy(params)
@@ -4745,6 +4757,7 @@ def start_pipeline(params: dict) -> str:
         "workspace": workspace,
         "out_dir": out_dir,
         "_llm_log": copy.deepcopy(params.get("prepared_llm_log")),
+        "_planning_checkpoint": {},
         # For LLM streaming: the frontend polls /api/v1/llm/stream-status
         "llm_streaming": False,
     }
@@ -4808,20 +4821,52 @@ def get_pipeline_status(pid: str, out_dir: str) -> Optional[dict]:
         "failed": "Director generation failed",
         "crashed": "Director generation was interrupted when Maestro stopped",
     }.get(saved_status, "Saved Director generation")
+    saved_progress = saved.get("progress")
+    if not isinstance(saved_progress, dict):
+        saved_progress = {}
+    checkpoint = saved.get("planning_checkpoint")
+    if not saved_progress and isinstance(checkpoint, dict):
+        completed_sequences = checkpoint.get("completed_sequences")
+        checkpoint_current = int(
+            checkpoint.get("completed_sequence_count")
+            or (
+                len(completed_sequences)
+                if isinstance(completed_sequences, dict) else 0
+            )
+        )
+        checkpoint_total = int(checkpoint.get("total_sequences") or 0)
+        if checkpoint_current or checkpoint_total:
+            saved_progress = {
+                "current": checkpoint_current,
+                "total": checkpoint_total,
+                "message": (
+                    f"Saved {checkpoint_current}/{checkpoint_total} planning "
+                    "segments; Resume continues from this checkpoint"
+                ),
+                "step": 0,
+                "total_steps": 0,
+                "planning_stage": str(checkpoint.get("stage") or "planning"),
+            }
+    restored_progress = {
+        "current": len([
+            clip for clip in clips if clip.get("video_filename")
+        ]),
+        "total": len(clips),
+        "message": message,
+        "step": 0,
+        "total_steps": 0,
+        **copy.deepcopy(saved_progress),
+    }
+    restored_progress["message"] = (
+        str(saved_progress.get("message") or message)
+    )
+
     return {
         "id": pid,
         "status": response_status,
-        "phase": response_status,
+        "phase": saved.get("phase") or response_status,
         "auto_mode": bool(saved.get("auto_mode", True)),
-        "progress": {
-            "current": len([
-                clip for clip in clips if clip.get("video_filename")
-            ]),
-            "total": len(clips),
-            "message": message,
-            "step": 0,
-            "total_steps": 0,
-        },
+        "progress": restored_progress,
         "clip_plans": [{
             "image_prompt": clip.get("image_prompt", ""),
             "video_prompt": clip.get("video_prompt", ""),
@@ -4881,11 +4926,13 @@ def _find_pipeline_state_file(pid: str, out_dir: str) -> Optional[str]:
 def resume_pipeline(pid: str, out_dir: str) -> tuple[bool, str]:
     """Rehydrate a crashed pipeline from disk and re-run it.
 
-    Reuses the planning (and start images, when their files still exist)
-    that completed before the crash; only the video phase re-runs. Returns
-    (ok, message). Requires a state file that carries the full params
-    snapshot (written since the resume feature shipped) — older crash files
-    can't be resumed faithfully and report so.
+    Reuses completed long-form planning batches, a finished plan, and start
+    images whenever each is present. A planning-stage interruption resumes at
+    its first unfinished sequence; a later crash can skip planning entirely
+    and rerun only the missing generation work. Returns (ok, message).
+    Requires a state file that carries the full params snapshot (written since
+    the resume feature shipped) — older crash files cannot be resumed
+    faithfully and report so.
     """
     with _pipeline_lock:
         existing = _pipelines.get(pid)
@@ -5028,6 +5075,9 @@ def _resume_pipeline_reserved(pid: str, out_dir: str) -> tuple[bool, str]:
         ],
         "output_files": data.get("output_files", []) or [],
         "_llm_log": data.get("llm_log"),
+        "_planning_checkpoint": copy.deepcopy(
+            data.get("planning_checkpoint") or {}
+        ),
         "error": None,
         "created_at": data.get("created_at") or time.time(),
         "params": params,
@@ -5096,11 +5146,11 @@ def _run_pipeline(pid: str, resume: bool = False):
     """Main pipeline thread — runs the full Director flow.
 
     When resume=True the pipeline was rehydrated from a crashed state
-    (see resume_pipeline): planning + prompt-polish are skipped when the
-    saved clip_plans are present, and start-image generation is skipped
-    when the saved images still exist on disk. Only the (atomic) video
-    generation phase re-runs — so a crash 2 hours into a run doesn't
-    throw away the LLM planning that already succeeded.
+    (see resume_pipeline): bounded planning resumes from its durable
+    checkpoint when no final plan exists; planning + prompt-polish are skipped
+    when saved clip_plans are present; and start-image generation is skipped
+    when the saved images still exist on disk. A crash hours into a run no
+    longer throws away completed LLM planning.
     """
     try:
         with _pipeline_lock:
@@ -5178,6 +5228,13 @@ def _run_pipeline(pid: str, resume: bool = False):
         else:
             try:
                 clip_plans, planned_clips = _run_planning(pid, params, pipeline_type)
+            except InterruptedError:
+                print(
+                    f"[Pipeline {pid}] Director planning stopped; the latest "
+                    "completed planning checkpoint remains resumable."
+                )
+                _save_pipeline_state(pid)
+                return
             except Exception as plan_err:
                 print(f"[Pipeline] Planning error: {plan_err}")
                 import traceback
@@ -5609,6 +5666,17 @@ def _run_pipeline(pid: str, resume: bool = False):
                 if clip_slots:
                     artifact_updates["_clip_video_files"] = clip_slots
             _update_pipeline(pid, **artifact_updates)
+        with _pipeline_lock:
+            cancelled_during_work = (
+                (_pipelines.get(pid) or {}).get("status") == "cancelled"
+            )
+        if cancelled_during_work:
+            print(
+                f"[Pipeline {pid}] Cancelled during a bounded planning or "
+                "generation unit; its latest checkpoint was preserved."
+            )
+            _save_pipeline_state(pid)
+            return
         # Special-case the safety scanner. Don't print a stack trace for
         # safety violations — they're a clean refusal, not a crash, and
         # the user-visible message is purpose-built. Other exceptions
@@ -5650,10 +5718,29 @@ def _run_pipeline(pid: str, resume: bool = False):
             _oom_info = detect_oom(e, _coef)
         except Exception:
             pass  # Never fail a failure handler
-        _update_pipeline(pid, status="failed", error=str(e),
-                         oom_info=_oom_info,
-                         _completed_at=time.time(),
-                         progress={"current": 0, "total": 0, "message": f"Error: {e}", "step": 0, "total_steps": 0})
+        # Preserve the last completed planning/render counters. Resetting them
+        # to 0/0 made a post-planning assembly error look as if the hours of
+        # completed LLM work had vanished, even though its checkpoint remained
+        # safely resumable on disk.
+        with _pipeline_lock:
+            failed_progress = copy.deepcopy(
+                (_pipelines.get(pid) or {}).get("progress") or {}
+            )
+        failed_progress.update({
+            "message": f"Error: {e}",
+            "step": 0,
+            "total_steps": 0,
+        })
+        failed_progress.setdefault("current", 0)
+        failed_progress.setdefault("total", 0)
+        _update_pipeline(
+            pid,
+            status="failed",
+            error=str(e),
+            oom_info=_oom_info,
+            _completed_at=time.time(),
+            progress=failed_progress,
+        )
         _save_pipeline_state(pid)  # Save on failure too
     finally:
         with _pipeline_lock:
@@ -5840,6 +5927,46 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
         _capture_llm_pass(pid, f"streaming_{_pass_counter[0]}")
         return result
 
+    def _planning_progress(event: dict) -> None:
+        """Surface bounded long-form progress without changing UI contracts."""
+
+        if not isinstance(event, dict):
+            return
+        _update_pipeline(
+            pid,
+            phase="planning",
+            llm_streaming=True,
+            progress={
+                "current": max(0, int(event.get("current") or 0)),
+                "total": max(0, int(event.get("total") or 0)),
+                "message": str(
+                    event.get("message") or "Planning with LLM..."
+                ),
+                "step": 0,
+                "total_steps": 0,
+                "planning_stage": str(event.get("stage") or "planning"),
+                "chapter": event.get("chapter"),
+                "chapter_count": event.get("chapter_count"),
+                "sequence": event.get("sequence"),
+                "sequence_count": event.get("sequence_count"),
+            },
+        )
+
+    def _planning_checkpoint(checkpoint: dict) -> None:
+        if not isinstance(checkpoint, dict):
+            return
+        _update_pipeline(
+            pid,
+            _planning_checkpoint=copy.deepcopy(checkpoint),
+        )
+        _save_pipeline_state(pid)
+
+    def _planning_cancelled() -> bool:
+        with _pipeline_lock:
+            return (
+                (_pipelines.get(pid) or {}).get("status") == "cancelled"
+            )
+
     # Create orchestrator with logged LLM functions
     director = DirectorOrchestrator(
         llm_generate=_logged_generate,
@@ -5937,6 +6064,10 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
     # planner gets them unconditionally so it can pick the right
     # dialect-aware guide files (ltx2_shot_breakdown.md for LTX-2,
     # flux_image_edit_pass2.md for Flux.2 Klein, etc.).
+    with _pipeline_lock:
+        planning_checkpoint = copy.deepcopy(
+            (_pipelines.get(pid) or {}).get("_planning_checkpoint") or {}
+        )
     planner_kwargs = {
         "reference_image_path": reference_image_path,
         "speaker_mappings": params.get("speaker_mappings"),
@@ -5947,6 +6078,10 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
         "image_model": params.get("image_model", ""),
         "shot_image_policy": _director_effective_shot_image_policy(params),
         "multishot_lora_mode": multishot_lora_mode,
+        "_planning_progress_callback": _planning_progress,
+        "_planning_checkpoint_callback": _planning_checkpoint,
+        "_planning_cancelled_callback": _planning_cancelled,
+        "_planning_checkpoint": planning_checkpoint,
     }
 
     if pipeline_type == "short_film_story":

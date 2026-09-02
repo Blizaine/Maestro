@@ -30,9 +30,14 @@ from services.h3_window_planner import (  # noqa: E402
     reviewed_h3_window_plan_matches,
 )
 from services.h3_story_ledger import (  # noqa: E402
+    _expected_dialogue_events,
+    extract_h3_source_intent,
+    extract_locked_dialogue,
     extract_source_events,
+    ledger_violations,
     plan_h3_story_segments,
     recover_h3_plain_story,
+    segment_violations,
 )
 
 
@@ -401,6 +406,131 @@ class H3WindowPlannerTests(unittest.TestCase):
             self.assertEqual(item["prompt"].count("non_diegetic_music:"), 1)
             self.assertIn("Clark Kent wears the same blue shirt", item["prompt"])
 
+    def test_later_window_preserves_established_cast_blocking_without_reentry(self):
+        spans = compute_h3_window_boundaries(
+            672,
+            345,
+            fps=24,
+            overlap_frames=18,
+        )
+        first_closing = (
+            "George Costanza stands beside the couch facing Joey; Joey remains "
+            "seated on the couch looking up at George Costanza"
+        )
+        plan = {
+            "subject_continuity": (
+                "Keep exactly one George Costanza and one Joey throughout the scene"
+            ),
+            "setting_continuity": "The same Friends coffee shop",
+            "visual_continuity": "Warm live-action sitcom coverage",
+            "initial_state": (
+                "Joey is seated on the couch while George Costanza remains outside"
+            ),
+            "ambient_audio": "Coffee shop ambience",
+            "music": "N/A",
+            "windows": [
+                {
+                    "window": 1,
+                    "title": "George enters",
+                    "action": (
+                        "George Costanza enters once, reaches the couch, and faces Joey"
+                    ),
+                    "dialogue": [],
+                    "sound_effects": "Footsteps",
+                    "closing_state": first_closing,
+                },
+                {
+                    "window": 2,
+                    "title": "Conversation continues",
+                    "action": (
+                        "George Costanza talks directly to the already-seated Joey"
+                    ),
+                    "dialogue": [],
+                    "sound_effects": "Natural gestures",
+                    "closing_state": (
+                        "George Costanza and Joey remain together beside the couch"
+                    ),
+                },
+            ],
+        }
+
+        compiled = compile_h3_window_prompts(plan, spans)
+        first_prompt = compiled[0]["prompt"]
+        continuation_prompt = compiled[1]["prompt"]
+
+        self.assertNotIn("Every principal still present", first_prompt)
+        self.assertIn(
+            f"continue from this exact previous-scene state: {first_closing}",
+            continuation_prompt,
+        )
+        self.assertIn(
+            "Every principal still present at this boundary is already in the scene",
+            continuation_prompt,
+        )
+        self.assertIn(
+            "must not turn that reveal into a new entrance",
+            continuation_prompt,
+        )
+        self.assertIn(
+            "Do not replay completed entrances or blocking",
+            continuation_prompt,
+        )
+        self.assertEqual(compiled[1]["opening_state"], first_closing)
+        for item in compiled:
+            self.assertNotRegex(item["prompt"], r"(?i)\bwindow\b")
+
+    def test_compiler_preserves_a_literal_user_requested_window(self):
+        spans = compute_h3_window_boundaries(240, 240, fps=24)
+        plan = {
+            "subject_continuity": "The same woman remains in the cafe",
+            "setting_continuity": "A quiet cafe interior",
+            "visual_continuity": "Natural live-action coverage",
+            "initial_state": "The woman stands beside a stained-glass window",
+            "ambient_audio": "Quiet cafe ambience",
+            "music": "N/A",
+            "windows": [{
+                "window": 1,
+                "title": "Fresh air",
+                "action": "The woman opens the stained-glass window and looks outside",
+                "dialogue": [],
+                "sound_effects": "The latch clicks",
+                "closing_state": "The stained-glass window remains open",
+            }],
+        }
+
+        compiled = compile_h3_window_prompts(
+            plan,
+            spans,
+            source_prompt="A woman looks outside through a stained-glass window",
+        )
+        self.assertIn("stained-glass window", compiled[0]["prompt"])
+
+    def test_compiler_rejects_planner_window_leak_when_user_did_not_request_one(self):
+        spans = compute_h3_window_boundaries(240, 240, fps=24)
+        plan = {
+            "subject_continuity": "George and Joey remain the only two people",
+            "setting_continuity": "Central Perk coffee shop",
+            "visual_continuity": "Natural sitcom coverage",
+            "initial_state": "George and Joey sit together on the couch",
+            "ambient_audio": "Quiet coffee shop ambience",
+            "music": "N/A",
+            "windows": [{
+                "window": 1,
+                "title": "Conversation",
+                "action": "The camera moves outside the window while they talk",
+                "dialogue": [],
+                "sound_effects": "No one-time effect",
+                "closing_state": "They remain visible through the window",
+            }],
+        }
+
+        with self.assertRaisesRegex(ValueError, "internal term 'window'"):
+            compile_h3_window_prompts(
+                plan,
+                spans,
+                source_prompt="George and Joey continue talking on the couch",
+            )
+
     def test_compiler_assigns_endpoint_images_to_the_correct_passes(self):
         spans = compute_h3_window_boundaries(345, 124, fps=24, overlap_frames=1)
         plan = {
@@ -662,6 +792,198 @@ class H3WindowPlannerTests(unittest.TestCase):
                 "A hawk silently crosses a mountain landscape without dialogue.",
                 4,
             )
+        )
+
+    def test_full_name_and_later_first_name_are_one_h3_principal(self):
+        prompt = (
+            "George Costanza walks into the coffee shop and approaches Joey. "
+            "George passionately says \"Maestro two is out!\" Joey asks \"Who?\""
+        )
+        intent = extract_h3_source_intent(prompt)
+        self.assertEqual(intent["cast_names"], ["George Costanza", "Joey"])
+        self.assertIn(
+            "George Costanza, Joey",
+            intent["cast_cardinality_contract"],
+        )
+        self.assertNotIn(
+            "George Costanza, Joey, George",
+            intent["cast_cardinality_contract"],
+        )
+        dialogue = extract_locked_dialogue(prompt)
+        self.assertEqual(dialogue[0]["delivery"], "speaks passionately")
+
+    def test_immediate_opening_dialogue_cannot_be_delayed_to_window_two(self):
+        prompt = (
+            "George Costanza walks into the coffee shop and walks up to Joey, "
+            "who is sitting on the couch. George passionately says \"Maestro two is out!\" "
+            "Joey says \"What?\" George says \"It has an editor!\" "
+            "Joey replies \"Who are you?\""
+        )
+        events = extract_source_events(prompt)
+        dialogue = extract_locked_dialogue(prompt)
+        dialogue_events = _expected_dialogue_events(prompt, dialogue)
+        groups = [events[:1], events[1:3], events[3:]]
+        beats = []
+        for index, group in enumerate(groups, start=1):
+            event_ids = [item["event_id"] for item in group]
+            beats.append({
+                "beat_id": f"B{index}",
+                "segment": index,
+                "description": ". Then ".join(item["text"] for item in group),
+                "source_event_ids": event_ids,
+                "dialogue_ids": [
+                    item["dialogue_id"]
+                    for item in dialogue
+                    if dialogue_events.get(item["dialogue_id"]) in event_ids
+                ],
+                "state_after": f"State after segment {index}",
+                "sound_effects": "Natural synchronized effects",
+            })
+        ledger = {
+            "beats": beats,
+            "generated_dialogue": [],
+            "required_final_outcome": "Joey asks who George is",
+        }
+        violations = ledger_violations(
+            prompt,
+            ledger,
+            segment_count=3,
+            locked_dialogue=dialogue,
+            expect_dialogue=True,
+            allow_generated_dialogue=False,
+            segment_durations=[14.375, 14.375, 13.25],
+        )
+        self.assertIn(
+            "first requested dialogue D1 is delayed beyond segment 1",
+            violations,
+        )
+
+    def test_deterministic_repair_starts_immediate_dialogue_in_window_one(self):
+        prompt = (
+            "George Costanza walks into the coffee shop on the TV show Friends "
+            "and walks up to Joey, who is sitting on the couch. "
+            "George passionately says \"Maestro two is out!\" "
+            "Joey says \"What, who?\" "
+            "George says \"It is crazy! You can generate long videos, save and "
+            "cast characters, receive push notifications, use Qwen 3.8, and edit it all.\" "
+            "Joey replies \"Uh, who are you?\""
+        )
+
+        def offline(**_kwargs):
+            raise RuntimeError("offline")
+
+        result = plan_h3_story_segments(
+            prompt,
+            segment_durations=[14.375, 14.375, 13.25],
+            mode="sliding_window",
+            camera_coverage="auto",
+            expect_dialogue=True,
+            planning_style="faithful",
+            llm_generate=offline,
+        )
+        first_dialogue = [
+            line
+            for shot in result["segments"][0]["shots"]
+            for line in shot.get("dialogue") or []
+        ]
+        self.assertEqual(first_dialogue[0]["dialogue_id"], "D1")
+        self.assertEqual(first_dialogue[0]["speaker"], "George Costanza")
+        self.assertIn("passionately", first_dialogue[0]["delivery"])
+        self.assertIn("energetic", result["segments"][0]["pacing"])
+        first_dialogue_shot = next(
+            shot
+            for shot in result["segments"][0]["shots"]
+            if shot.get("dialogue")
+        )
+        self.assertLessEqual(first_dialogue_shot["start_seconds"], 4.5)
+        self.assertIn(
+            "George Costanza has not yet entered",
+            result["segments"][0]["opening_state"],
+        )
+        self.assertEqual(
+            result["source_intent"]["cast_names"],
+            ["George Costanza", "Joey"],
+        )
+        for segment in result["segments"]:
+            for shot in segment["shots"]:
+                visible_speakers = {
+                    str(line.get("speaker") or "").casefold()
+                    for line in (shot.get("dialogue") or [])
+                    if str(line.get("speaker") or "").strip()
+                    and "off-camera" not in str(line.get("action") or "").casefold()
+                }
+                self.assertLessEqual(
+                    len(visible_speakers),
+                    1,
+                    "A native H3 camera shot must not carry dialogue for two visible faces",
+                )
+        spans = []
+        elapsed = 0.0
+        for index, duration in enumerate((14.375, 14.375, 13.25), start=1):
+            spans.append({
+                "index": index,
+                "start_frame": int(round(elapsed * 24)),
+                "end_frame": int(round((elapsed + duration) * 24)),
+                "start_seconds": elapsed,
+                "end_seconds": elapsed + duration,
+            })
+            elapsed += duration
+        compiled = compile_h3_window_prompts(
+            {
+                **result["ledger"],
+                "source_intent": result["source_intent"],
+                "windows": result["segments"],
+            },
+            spans,
+        )
+        for item in compiled:
+            self.assertNotRegex(item["prompt"], r"(?i)\bwindow\b")
+
+    def test_opening_entrance_and_dialogue_require_timed_camera_phases(self):
+        prompt = (
+            "George Costanza walks into the coffee shop and approaches Joey. "
+            "George passionately says \"Maestro two is out!\""
+        )
+        events = extract_source_events(prompt)
+        dialogue = extract_locked_dialogue(prompt)
+        expected = _expected_dialogue_events(prompt, dialogue)
+        beats = [
+            {
+                "beat_id": f"B{index + 1}",
+                "description": event["text"],
+                "source_event_ids": [event["event_id"]],
+                "dialogue_ids": [
+                    item["dialogue_id"]
+                    for item in dialogue
+                    if expected.get(item["dialogue_id"]) == event["event_id"]
+                ],
+                "state_after": f"State after {event['event_id']}",
+            }
+            for index, event in enumerate(events)
+        ]
+        segment = {
+            "segment": 1,
+            "shots": [{
+                "shot": 1,
+                "start_seconds": 0.0,
+                "end_seconds": 14.375,
+                "beat_ids": [beat["beat_id"] for beat in beats],
+                "action": ". Then ".join(beat["description"] for beat in beats),
+                "dialogue": [{"dialogue_id": "D1"}],
+            }],
+            "closing_state": "George has delivered the line",
+        }
+        violations = segment_violations(
+            prompt,
+            segment,
+            segment_number=1,
+            duration=14.375,
+            assigned_beats=beats,
+            dialogue_catalog=dialogue,
+        )
+        self.assertIn(
+            "the opening entrance and first requested line need separate timed phases",
+            violations,
         )
 
     def test_compiler_preserves_timed_cuts_inside_each_local_window(self):

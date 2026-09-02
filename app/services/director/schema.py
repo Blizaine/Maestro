@@ -178,8 +178,14 @@ class DialogueBeat:
 
     @staticmethod
     def from_dict(d: dict) -> "DialogueBeat":
+        # LLM-produced structured output is still untrusted at this boundary.
+        # Some providers satisfy the JSON schema structurally while emitting
+        # ``null`` for an optional/silent dialogue row.  Keep the dataclass
+        # contract truthful so downstream prompt formatters and validators do
+        # not discover a None value hours later during final plan assembly.
+        d = d if isinstance(d, dict) else {}
         return DialogueBeat(
-            spoken_text=d["spoken_text"],
+            spoken_text=str(d.get("spoken_text") or "").strip(),
             speaker_id=d.get("speaker_id"),
             delivery=d.get("delivery"),
             physical_cue=d.get("physical_cue"),
@@ -357,6 +363,16 @@ class ShotPlan:
 
     @staticmethod
     def from_dict(d: dict) -> "ShotPlan":
+        dialogue_beats = []
+        for raw_beat in d.get("dialogue_beats", []) or []:
+            beat = DialogueBeat.from_dict(raw_beat)
+            # Empty rows are not dialogue. They are a common local-LLM way of
+            # representing a silent reaction and are safe to discard; locked
+            # user-written dialogue is checked separately by the Director
+            # fidelity contract before generation can begin.
+            if beat.spoken_text:
+                dialogue_beats.append(beat)
+
         return ShotPlan(
             shot_id=d.get("shot_id", f"shot_{d.get('index', 0)}"),
             index=d.get("index", 0),
@@ -379,7 +395,7 @@ class ShotPlan:
             image_strategy=d.get("image_strategy"),
             continuity_strategy=d.get("continuity_strategy", "independent"),
             performance_beats=d.get("performance_beats"),
-            dialogue_beats=[DialogueBeat.from_dict(db) for db in d.get("dialogue_beats", [])] if d.get("dialogue_beats") else None,
+            dialogue_beats=dialogue_beats or None,
             constraints=d.get("constraints"),
             continuity_refs=d.get("continuity_refs"),
             metadata=d.get("metadata"),

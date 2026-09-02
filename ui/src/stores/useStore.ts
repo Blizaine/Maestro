@@ -22,6 +22,7 @@ let _civitDownloadPollRequested = false
 const _civitRefreshedCheckpointDownloads = new Set<string>()
 const DIRECTOR_REPAIR_POLL_MS = 2000
 const DIRECTOR_REPAIR_ACTIVE = new Set(['queued', 'running', 'cancelling'])
+const DIRECTOR_PIPELINE_ACTIVE = new Set(['running', 'paused'])
 type DirectorRepairPoll = {
   operationId: string
   timer: number | null
@@ -30,6 +31,9 @@ const _directorRepairPolls = new Map<string, DirectorRepairPoll>()
 const _directorRepairDiscoveries = new Map<string, object>()
 let _dashboardPipelineLoadToken = 0
 let _dashboardPipelineListLoadToken = 0
+let _directorPipelineAttachToken = 0
+let _directorPipelineReconnectAttempted = false
+let _directorPipelinePollToken = 0
 let _h3WindowOverridesHydrated = false
 let _h3WindowOverrideSaveTask: Promise<void> = Promise.resolve()
 let _studioPreferencesHydrated = false
@@ -1504,6 +1508,7 @@ interface AppState {
   rerunClipVideo: (pid: string, clipIndex: number, prompt?: string) => Promise<unknown>
   rejoinPipelineClips: (pid: string) => Promise<unknown>
   resumePipeline: (pid: string) => Promise<void>
+  reattachDirectorPipeline: (pid: string, focusDirector?: boolean) => Promise<void>
   deletePipeline: (pid: string) => Promise<void>
   loadDirectorFromPipeline: (pid: string) => Promise<void>
   directorQueue: DirectorQueueState | null
@@ -2352,6 +2357,27 @@ async function _buildDirectorRestorePatch(
     directorLoadingMessage: null,
     directorError: null,
   }
+}
+
+function _directorStepForPipelineStatus(
+  status: api.PipelineStatus,
+  fallback: AppState['directorStep'],
+): AppState['directorStep'] {
+  if (status.status === 'paused') {
+    if (status.pause_reason === 'review_prompts') return 'review'
+    if (status.pause_reason === 'review_images') return 'review_video'
+  }
+  if (status.status === 'completed') return 'review_video'
+  if (status.phase === 'planning' || status.phase === 'resuming' || status.phase === 'polishing_prompts') {
+    return 'plan'
+  }
+  if (status.phase === 'generating_images') return 'generate_images'
+  if (
+    status.phase === 'preparing_video'
+    || status.phase === 'generating_video'
+    || status.phase === 'post_processing'
+  ) return 'review_video'
+  return fallback
 }
 
 // ── Per-sub-mode working sets (Studio Video) ─────────────────────────
@@ -3837,6 +3863,21 @@ export const useStore = create<AppState>((set, get) => ({
       if (loadToken !== _dashboardPipelineListLoadToken) return
       set({ dashboardPipelineList: pipelines })
 
+      // Studio jobs already reconnect after a browser reload; Director used
+      // to lose its only in-memory pipelineId and therefore hid both the
+      // gallery progress card and the live chat even though the server worker
+      // kept running. Discover the newest genuinely live pipeline once per
+      // page boot. This is deliberately non-focusing: refresh restores live
+      // progress without yanking a user out of Studio or Editor, while the
+      // explicit Resume action below opens the original Director chat.
+      if (!_directorPipelineReconnectAttempted) {
+        _directorPipelineReconnectAttempted = true
+        const active = pipelines.find(item => DIRECTOR_PIPELINE_ACTIVE.has(item.status))
+        if (active && !get().pipelineId) {
+          void get().reattachDirectorPipeline(active.id, false)
+        }
+      }
+
       // The repair worker belongs to the server, so a browser reload must
       // rediscover active operations and resume UI polling without requiring
       // the Dashboard to be opened first. Keep discovery separate from the
@@ -4070,17 +4111,108 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
   resumePipeline: async (pid: string) => {
-    // Kick the crashed pipeline back into running server-side, then close
-    // the Dashboard and reconnect the Director view to it so progress shows.
+    // Kick the crashed pipeline back into running server-side, then restore
+    // the exact Director project and reconnect its live progress. Previously
+    // this only closed the Dashboard, leaving the user in the gallery with no
+    // route back to the original Director chat.
     await api.resumePipeline(pid)
-    set({
-      dashboardOpen: false,
+    await get().reattachDirectorPipeline(pid, true)
+  },
+  reattachDirectorPipeline: async (pid: string, focusDirector = false) => {
+    const attachToken = ++_directorPipelineAttachToken
+    const status = await api.fetchPipelineStatus(pid)
+    if (attachToken !== _directorPipelineAttachToken) return
+
+    const active = DIRECTOR_PIPELINE_ACTIVE.has(status.status)
+    set(state => ({
+      ...(focusDirector ? {
+        sidebarMode: 'director' as const,
+        sidebarOpen: true,
+        dashboardOpen: false,
+      } : {}),
       pipelineId: pid,
-      pipelineStatus: null,
-      pipelinePolling: true,
-      directorLoading: true,
-    })
-    get().pollPipelineStatus()
+      pipelineStatus: status,
+      pipelinePolling: active,
+      directorStep: _directorStepForPipelineStatus(status, state.directorStep),
+      directorLoading: status.status === 'running',
+      directorLoadingMessage: status.progress?.message || null,
+      directorError: status.status === 'failed' || status.status === 'cancelled'
+        ? status.error || 'Pipeline stopped'
+        : null,
+    }))
+
+    // Start live polling immediately so a large long-form checkpoint cannot
+    // delay visible progress while its editable Director snapshot is loaded.
+    if (active) get().pollPipelineStatus()
+
+    try {
+      const pipeline = await api.fetchSavedPipeline(pid)
+      const restore = await _buildDirectorRestorePatch(pipeline)
+      if (attachToken !== _directorPipelineAttachToken) return
+      const params = _record(pipeline._params_snapshot)
+      const imageParams = _record(pipeline.image_params || params.image_params)
+      const videoParams = _record(pipeline.video_params || params.video_params)
+      const imageLoras = _record(pipeline.image_loras || params.image_loras)
+      const videoLoras = _record(pipeline.video_loras || params.video_loras)
+      const imageModel = pipeline.image_model || String(params.image_model || '')
+      const videoModel = pipeline.video_model || String(params.video_model || '')
+      set(state => {
+        const liveStatus = state.pipelineStatus?.id === pid
+          ? state.pipelineStatus
+          : status
+        return {
+          ...restore,
+          // A background refresh reconnect must not change the app mode the
+          // user is viewing. Explicit Resume does focus Director and opens its
+          // chat, matching the action's intent.
+          ...(!focusDirector ? {
+            sidebarMode: state.sidebarMode,
+            sidebarOpen: state.sidebarOpen,
+            dashboardOpen: state.dashboardOpen,
+          } : {
+            sidebarMode: 'director' as const,
+            sidebarOpen: true,
+            dashboardOpen: false,
+          }),
+          pipelineId: pid,
+          pipelineStatus: liveStatus,
+          pipelinePolling: DIRECTOR_PIPELINE_ACTIVE.has(liveStatus.status),
+          directorStep: _directorStepForPipelineStatus(
+            liveStatus,
+            (restore.directorStep || state.directorStep) as AppState['directorStep'],
+          ),
+          directorLoading: liveStatus.status === 'running',
+          directorLoadingMessage: liveStatus.progress?.message || null,
+          directorError: liveStatus.status === 'failed' || liveStatus.status === 'cancelled'
+            ? liveStatus.error || 'Pipeline stopped'
+            : null,
+          dashboardSelectedPipeline: pipeline,
+          selectedModelPerMode: {
+            ...state.selectedModelPerMode,
+            ...(imageModel ? { image: imageModel } : {}),
+            ...(videoModel ? { video: videoModel } : {}),
+          },
+          savedParamsPerMode: {
+            ...state.savedParamsPerMode,
+            ...(imageModel ? { image: { ...imageParams, model_type: imageModel } } : {}),
+            ...(videoModel ? { video: { ...videoParams, model_type: videoModel } } : {}),
+          },
+          savedLoraPerMode: {
+            ...state.savedLoraPerMode,
+            ...(imageModel ? { image: _directorLoraState(imageLoras) } : {}),
+            ...(videoModel ? { video: _directorLoraState(videoLoras) } : {}),
+          },
+        }
+      })
+      if (videoModel) {
+        await get().loadModelOptions(videoModel)
+        void get().loadLoras(videoModel)
+      }
+    } catch (error) {
+      // The live status connection is still useful even if an old/corrupt
+      // editable snapshot cannot be reconstructed. Never hide a running job.
+      console.warn(`Reconnected Director pipeline ${pid}, but could not restore its editor snapshot:`, error)
+    }
   },
   loadDirectorQueue: async () => {
     try {
@@ -4365,6 +4497,10 @@ export const useStore = create<AppState>((set, get) => ({
     get().pollCivitAIDownloads()
   },
   loadDirectorFromPipeline: async (pid) => {
+    // An explicit Open & Edit owns the Director UI. Prevent a slower startup
+    // reconnection from replacing this project after its fetch completes.
+    _directorPipelineAttachToken += 1
+    _directorPipelinePollToken += 1
     try {
       const pipeline = await api.fetchSavedPipeline(pid)
       const restore = await _buildDirectorRestorePatch(pipeline)
@@ -12639,6 +12775,7 @@ export const useStore = create<AppState>((set, get) => ({
         return
       }
       const { pipeline_id } = await api.startPipeline(pipelineParams)
+      _directorPipelineAttachToken += 1
       set({
         pipelineId: pipeline_id,
         directorProjectId: state.directorProjectId || pipeline_id,
@@ -12672,6 +12809,7 @@ export const useStore = create<AppState>((set, get) => ({
     if (!pid) return
     try {
       await api.stopPipeline(pid)
+      _directorPipelinePollToken += 1
       set({ pipelineId: null, pipelineStatus: null, pipelinePolling: false, directorLoading: false })
     } catch (e) {
       console.error('Failed to stop pipeline:', e)
@@ -12681,13 +12819,22 @@ export const useStore = create<AppState>((set, get) => ({
   pollPipelineStatus: () => {
     const pid = get().pipelineId
     if (!pid) return
+    const pollToken = ++_directorPipelinePollToken
 
     const poll = async () => {
-      if (!get().pipelinePolling || get().pipelineId !== pid) return
+      if (
+        pollToken !== _directorPipelinePollToken
+        || !get().pipelinePolling
+        || get().pipelineId !== pid
+      ) return
 
       try {
         const status = await api.fetchPipelineStatus(pid)
-        set({ pipelineStatus: status })
+        if (pollToken !== _directorPipelinePollToken || get().pipelineId !== pid) return
+        set({
+          pipelineStatus: status,
+          directorLoadingMessage: status.progress?.message || null,
+        })
 
         // Sync the backend's model-adapted plan, not just an initially empty
         // UI. H3 can split broad 20-30s music sections into additional native
@@ -12799,6 +12946,7 @@ export const useStore = create<AppState>((set, get) => ({
           set({
             pipelinePolling: false,
             directorLoading: false,
+            directorLoadingMessage: null,
             directorStep: 'review_video',
           })
           get().loadOutputs()
@@ -12810,6 +12958,7 @@ export const useStore = create<AppState>((set, get) => ({
           set({
             pipelinePolling: false,
             directorLoading: false,
+            directorLoadingMessage: null,
             directorError: status.error || 'Pipeline stopped',
           })
           return  // Stop polling
@@ -12820,7 +12969,7 @@ export const useStore = create<AppState>((set, get) => ({
       }
 
       // Continue polling
-      if (get().pipelinePolling) {
+      if (pollToken === _directorPipelinePollToken && get().pipelinePolling) {
         setTimeout(poll, 2000)
       }
     }

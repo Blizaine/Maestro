@@ -1109,13 +1109,14 @@ export function DirectorChat() {
             <div className="flex items-center gap-2 py-1">
               <Loader2 size={14} className="animate-spin text-accent-blue" />
               <span className="text-xs text-text-muted">
-                {pipelinePhase === 'polishing_prompts'
+                {pipelineStatus?.progress?.message
+                  || (pipelinePhase === 'polishing_prompts'
                   ? 'Polishing prompts (3rd pass)...'
                   : isStoryPath
                     ? `Planning scenes and writing ${usesShotImages ? 'prompts' : 'video prompts'}...`
                     : isShortFilm
                       ? `Writing ${usesShotImages ? 'scene prompts' : 'video prompts'}...`
-                      : `Writing ${usesShotImages ? 'image and video prompts' : 'video prompts'}...`}
+                      : `Writing ${usesShotImages ? 'image and video prompts' : 'video prompts'}...`)}
               </span>
             </div>
             {pipelinePhase !== 'polishing_prompts' && <LlmThinkingStream stage="plan" />}
