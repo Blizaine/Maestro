@@ -40,6 +40,7 @@ from services.director.planners.short_film import (  # noqa: E402
     _h3_explicit_story_dialogue_fingerprints,
     _h3_planner_token_budget,
     _h3_preferred_native_durations,
+    _repair_h3_screenplay_speaker_headings,
     _h3_screenplay_recovery_reasons,
     _h3_screenplay_thinking_budget,
     _normalize_h3_voice_bible,
@@ -693,6 +694,219 @@ class TestH3DirectorDialogueCompiler(unittest.TestCase):
             plans[0]["_director_speaker_registry"],
             plans[1]["_director_speaker_registry"],
         )
+
+    def test_long_form_local_cast_slots_are_rebound_before_ref2va_compile(self):
+        """A sequence-local char_2 must not turn Rachel into Michael Scott."""
+
+        reference = [{
+            "type": "image",
+            "role": "the identity and appearance of Thanos",
+            "image_intent": "identity",
+        }]
+        plans = [{
+            "video_prompt": (
+                "Rachel faces Thanos and asks a question. "
+                "overall_soundscape: Apartment room tone."
+            ),
+            "_director_h3_model_family": "ref2va",
+            "_director_subjects_on_screen": [{
+                "character_id": "char_0",
+                "speaker_name": "Thanos",
+                "visual_description": "Thanos: an imposing purple alien",
+            }, {
+                "character_id": "char_2",
+                # Reproduces a saved plan compiled by the old global-slot
+                # canonicalizer. The shot-local visual identity is correct.
+                "speaker_name": "Michael Scott",
+                "visual_description": "Rachel: seated on the cream sofa",
+            }],
+            "_director_dialogue_beats": [{
+                "speaker_id": "char_2",
+                "spoken_text": "What are you doing here?",
+            }],
+        }, {
+            "video_prompt": (
+                "Michael Scott faces Thanos in the office and speaks. "
+                "overall_soundscape: Office room tone."
+            ),
+            "_director_h3_model_family": "ref2va",
+            "_director_subjects_on_screen": [{
+                "character_id": "char_0",
+                "speaker_name": "Thanos",
+                "visual_description": "Thanos: an imposing purple alien",
+            }, {
+                "character_id": "char_2",
+                "speaker_name": "Michael Scott",
+                "visual_description": "Michael Scott: standing by his desk",
+            }],
+            "_director_dialogue_beats": [{
+                "speaker_id": "char_2",
+                "spoken_text": "This is a workplace.",
+            }],
+        }]
+
+        compile_h3_clip_plans(
+            plans,
+            prompt_modes=["ref2va", "ref2va"],
+            reference_manifests=[reference, reference],
+        )
+
+        rachel = plans[0]["_director_subjects_on_screen"][1]
+        michael = plans[1]["_director_subjects_on_screen"][1]
+        self.assertEqual(rachel["speaker_name"], "Rachel")
+        self.assertEqual(michael["speaker_name"], "Michael Scott")
+        self.assertNotEqual(rachel["character_id"], michael["character_id"])
+        self.assertEqual(
+            plans[0]["_director_dialogue_beats"][0]["speaker_id"],
+            rachel["character_id"],
+        )
+        self.assertEqual(
+            plans[1]["_director_dialogue_beats"][0]["speaker_id"],
+            michael["character_id"],
+        )
+        self.assertIn("<Subject 2> is Rachel", plans[0]["video_prompt"])
+        self.assertNotIn("Michael Scott", plans[0]["video_prompt"])
+        self.assertIn("<Subject 2> is Michael Scott", plans[1]["video_prompt"])
+        self.assertTrue(all(
+            plan.get("_director_h3_identity_rebound") for plan in plans
+        ))
+
+    def test_ref2va_identity_picture_is_one_person_not_inserted_footage(self):
+        references = [{
+            "type": "image",
+            "role": "the identity and appearance of Thanos",
+            "image_intent": "identity",
+        }]
+        subject = [{
+            "character_id": "thanos",
+            "speaker_name": "Thanos",
+            "visual_description": "Thanos in a deep crimson vest",
+            "wardrobe": "deep crimson vest and dark slacks",
+        }]
+
+        prompt, _ = compile_h3_official_prompt(
+            "Thanos enters through a portal. overall_soundscape: Portal hum.",
+            subject,
+            [],
+            mode="ref2va",
+            references=references,
+        )
+
+        self.assertIn("exactly one physical instance", prompt)
+        self.assertIn("literal reference-image cutaway", prompt)
+        self.assertIn("never as inserted source footage", prompt)
+        self.assertIn("follow the target shot's explicitly described wardrobe", prompt)
+
+        clone_prompt, _ = compile_h3_official_prompt(
+            "Two identical copies of Thanos step through the portal together.",
+            subject,
+            [],
+            mode="ref2va",
+            references=references,
+        )
+        self.assertNotIn("exactly one physical instance", clone_prompt)
+        self.assertIn("explicitly requested multiple instances", clone_prompt)
+
+    def test_screenplay_heading_typo_is_repaired_before_dialogue_lock(self):
+        screenplay = """INT. PARKS OFFICE - DAY
+
+Thanos steps through the portal and faces Leslie.
+
+THORNS
+(low and deliberate)
+Entropy needs an audience.
+
+LESLIE KNOPE
+That is not on today's agenda.
+
+THORNS
+Then change the agenda.
+"""
+        repaired, changes = _repair_h3_screenplay_speaker_headings(
+            screenplay,
+            ["Thanos", "Leslie Knope"],
+        )
+
+        self.assertEqual(changes, [("THORNS", "Thanos")])
+        self.assertNotIn("THORNS", repaired)
+        self.assertEqual(
+            [row["speaker_name"] for row in _extract_h3_screenplay_dialogue(repaired)],
+            ["THANOS", "LESLIE KNOPE", "THANOS"],
+        )
+
+    def test_saved_phantom_speaker_merges_into_existing_ref2va_principal(self):
+        reference = [{
+            "type": "image",
+            "role": "the identity and appearance of Thanos",
+            "image_intent": "identity",
+        }]
+
+        def plan(other_name, line, source):
+            return {
+                "video_prompt": source,
+                "_director_h3_source_prompt": source,
+                "_director_h3_model_family": "ref2va",
+                "_director_project_context": (
+                    "A comedy scene starring Thanos, Leslie Knope, and April Ludgate."
+                ),
+                "_director_subjects_on_screen": [{
+                    "character_id": "char_0",
+                    "speaker_name": "Thanos",
+                    "visual_description": "Thanos: a single imposing purple Titan",
+                }, {
+                    "character_id": "char_1",
+                    "speaker_name": other_name,
+                    "visual_description": f"{other_name}: watching Thanos",
+                }, {
+                    "character_id": "dialogue_thorns",
+                    "speaker_name": "Thorns",
+                    "visual_description": "THORNS",
+                    "position_or_relation": "beside the other speakers",
+                }],
+                "_director_dialogue_beats": [{
+                    "speaker_id": "dialogue_thorns",
+                    "spoken_text": line,
+                    "physical_cue": "THORNS visibly delivers the line.",
+                }],
+            }
+
+        plans = [
+            plan(
+                "Leslie Knope",
+                "Entropy needs an audience.",
+                "Action: Thanos begins to speak while Leslie watches. "
+                "overall_soundscape: Office room tone.",
+            ),
+            # No second attribution is necessary: the same screenplay typo was
+            # established safely by the preceding shot.
+            plan(
+                "April Ludgate",
+                "Then change the agenda.",
+                "April stares at Thorns without reacting. "
+                "overall_soundscape: Office room tone.",
+            ),
+        ]
+
+        compile_h3_clip_plans(
+            plans,
+            prompt_modes=["ref2va", "ref2va"],
+            reference_manifests=[reference, reference],
+        )
+
+        for item in plans:
+            self.assertNotIn("Thorns", item["video_prompt"])
+            self.assertNotIn("dialogue_thorns", item["_director_speaker_registry"])
+            self.assertEqual(
+                item["_director_dialogue_beats"][0]["speaker_id"],
+                "char_0",
+            )
+            names = [
+                subject["speaker_name"]
+                for subject in item["_director_subjects_on_screen"]
+            ]
+            self.assertEqual(names.count("Thanos"), 1)
+            self.assertNotIn("Thorns", names)
+            self.assertIn("exactly one physical instance", item["video_prompt"])
 
     def test_project_compiler_restores_full_names_and_world_in_every_clip(self):
         project = (

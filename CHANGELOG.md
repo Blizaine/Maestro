@@ -84,6 +84,16 @@ scene leakage without forcing the processed look on every reference. Improved
 memory and reference preparation avoids needless high-resolution decoding
 while retaining full-quality identity conditioning.
 
+Long H3 Director casts now treat sequence-local `char_N` values as local slots
+rather than project-global identities. The final compiler rebinds those slots
+from each shot's actual visual identity, corrects evident screenplay-heading
+typos before dialogue lock, and repairs the same defect in resumable legacy
+plans. Synthetic dialogue-only duplicates are merged into the explicitly
+attributed visible actor. Ref2VA identity-image contracts also require exactly
+one physical instance unless the user requests clones, reject literal source-
+image cutaways/backgrounds/reflections, and let the target shot control
+wardrobe and lighting.
+
 H3 planning and Director: long-form plans now use a causal story architecture,
 character voice bibles, dialogue table reads, exact locked dialogue manifests,
 conversation-aware shot packing, concrete opening/closing state, and official

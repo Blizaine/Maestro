@@ -166,6 +166,13 @@ optimizations, and the open/closed Characters and H3 Optimizations panels.
   per-reference and combined duration limits.
 - Added stronger reference-role manifests, diagnostic logging, and tests for
   image, voice, video, full/pruned, and accelerated reference paths.
+- Fixed duplicate principals in long H3 Director productions. Sequence-local
+  cast slots are rebound to the person actually described in each shot,
+  obvious screenplay-heading typos are corrected before dialogue locks, and
+  old saved plans merge a synthetic dialogue-only duplicate back into the one
+  visibly attributed actor. Ref2VA identity photos now explicitly define one
+  person—not a second actor, inserted still, reflection, or source-background
+  cutaway—and the target shot owns wardrobe and lighting.
 
 H3 prompt planning now follows the official Context-IR structure while keeping
 Maestro's long-form strengths. Causal scene planning, character voice bibles,

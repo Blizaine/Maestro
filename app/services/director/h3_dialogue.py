@@ -838,10 +838,21 @@ def _set_h3_subject_field(subject: Any, key: str, value: Any) -> None:
 
 def _leading_h3_identity(value: Any) -> str:
     text = _normalized_space(value)
-    match = re.match(
-        r"^([A-Z][A-Za-z0-9'’-]+(?:\s+[A-Z][A-Za-z0-9'’-]+){0,2})"
-        r"(?=\s*(?:\(|,|—|–|-))",
-        text,
+    proper = r"[A-Z][A-Za-z0-9'’-]+"
+    match = (
+        # Shot planners most commonly use ``Rachel: ...`` or
+        # ``George Costanza (char_2): ...``. A single capitalized token is
+        # trustworthy before those explicit identity delimiters.
+        re.match(rf"^({proper}(?:\s+{proper}){{0,2}})(?=\s*(?:\(|:))", text)
+        # Before ordinary descriptive punctuation, require a multi-token name
+        # so adjectives such as "Massive," or hyphenated wardrobe colors do
+        # not become phantom characters.
+        or re.match(rf"^({proper}(?:\s+{proper}){{1,2}})(?=\s*(?:,|—|–|-))", text)
+        or re.match(
+            rf"^({proper}(?:\s+{proper}){{0,2}})(?=\s+(?:is|wears|stands|"
+            r"sits|walks|enters|from|in)\b)",
+            text,
+        )
     )
     if not match:
         return ""
@@ -851,30 +862,359 @@ def _leading_h3_identity(value: Any) -> str:
     return candidate
 
 
+_H3_LOCAL_CAST_SLOT_RE = re.compile(
+    r"^(?:char(?:acter)?|subject|speaker)[_-]?\d+$",
+    re.IGNORECASE,
+)
+
+
+def _h3_identity_names_match(left: Any, right: Any) -> bool:
+    """Return true for a full cast name and its unambiguous short form."""
+
+    left_key = _h3_anchor_key(left)
+    right_key = _h3_anchor_key(right)
+    if not left_key or not right_key:
+        return False
+    if left_key == right_key:
+        return True
+    left_parts = left_key.split()
+    right_parts = right_key.split()
+    if len(left_parts) == 1:
+        return left_parts[0] in {right_parts[0], right_parts[-1]}
+    if len(right_parts) == 1:
+        return right_parts[0] in {left_parts[0], left_parts[-1]}
+    return False
+
+
+def _h3_subject_identity_evidence(subject: Any) -> tuple[str, list[str]]:
+    """Read the local shot's identity without trusting a stale global label.
+
+    Bounded long-form sequence writers legitimately reuse ``char_1`` and
+    ``char_2`` for different guest casts.  Older project compilation then
+    stamped one globally selected name onto every matching slot.  The leading
+    name in the shot-local visual description is more authoritative when it
+    directly contradicts that stale label.
+    """
+
+    name = _normalized_space(_field(subject, "speaker_name", ""))
+    inferred = _leading_h3_identity(
+        _field(subject, "visual_description", "")
+    )
+    if inferred and name and not _h3_identity_names_match(inferred, name):
+        return inferred, [inferred]
+    candidates = [
+        candidate for candidate in (name, inferred)
+        if candidate
+        and candidate.casefold() not in _H3_GENERIC_IDENTITY_LABELS
+        and not _H3_LOCAL_CAST_SLOT_RE.fullmatch(candidate)
+    ]
+    if not candidates:
+        return "", []
+    best = max(
+        candidates,
+        key=lambda candidate: (
+            len(_h3_anchor_key(candidate).split()),
+            int(not candidate.isupper()),
+            len(candidate),
+        ),
+    )
+    return best, candidates
+
+
+def _h3_identity_slug(value: Any) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", _h3_anchor_key(value)).strip("_")
+    return slug[:56] or "subject"
+
+
+def _h3_direct_speaker_mentions(value: Any, name: str) -> int:
+    """Count explicit action statements which assign speech to ``name``.
+
+    This deliberately recognizes only direct grammatical attributions such as
+    ``Thanos speaks`` or ``Thanos begins to speak``.  A loose proximity search
+    would misread action such as ``Thanos watches as Rachel speaks`` and move
+    Rachel's line to the wrong face.
+    """
+
+    text = normalize_h3_text(value)
+    clean_name = _normalized_space(name)
+    if not text or not clean_name:
+        return 0
+    pattern = re.compile(
+        rf"(?<![A-Za-z0-9]){re.escape(clean_name)}(?![A-Za-z0-9])"
+        r"(?:\s*\([^)]{0,80}\))?\s+"
+        r"(?:visibly\s+)?"
+        r"(?:(?:begins?|starts?|continues?|finishes?)\s+(?:to\s+)?)?"
+        r"(?:speaks?|says?|asks?|replies?|answers?|shouts?|yells?|"
+        r"declares?|whispers?|delivers?)\b",
+        flags=re.IGNORECASE,
+    )
+    return len(pattern.findall(text))
+
+
+def _repair_h3_phantom_dialogue_subjects(
+    clip_plans: Sequence[Mapping[str, Any]],
+) -> None:
+    """Merge a misspelled dialogue-only person back into the visible actor.
+
+    A long-form screenplay occasionally misspells an established heading
+    (for example ``THANOS`` -> ``THORNS``).  Pass 2 historically converted the
+    typo into a new ``dialogue_thorns`` subject, placed it beside Thanos, and
+    then handed both identities to Ref2VA.  That is a literal instruction to
+    render the principal twice.
+
+    Repair is intentionally evidence-bound: the unknown subject must use a
+    synthetic ``dialogue_*`` id, another visible subject must be explicitly
+    assigned speech in the shot action, and that attribution must identify one
+    unique person.  Once established, the same typo is repaired across later
+    clips in the bounded sequence.  Ambiguous or genuinely independent
+    speakers are left untouched for the normal contract validator.
+    """
+
+    alias_targets: dict[str, str] = {}
+
+    # Discover a reliable identity for each synthetic alias before mutating
+    # anything, so a later clip can reuse evidence established in an earlier
+    # one even when the later action contains only a reaction beat.
+    for plan in clip_plans:
+        if not isinstance(plan, Mapping):
+            continue
+        subjects = [
+            subject for subject in plan.get("_director_subjects_on_screen") or []
+            if isinstance(subject, Mapping)
+        ]
+        speaking_ids = {
+            _normalized_space(beat.get("speaker_id", "")).casefold()
+            for beat in plan.get("_director_dialogue_beats") or []
+            if isinstance(beat, Mapping)
+            and _normalized_space(beat.get("spoken_text", ""))
+        }
+        source = " ".join(filter(None, [
+            _normalized_space(plan.get("_director_h3_source_prompt", "")),
+            _normalized_space(plan.get("video_prompt_pre_polish", "")),
+        ]))
+        for phantom in subjects:
+            phantom_id = _normalized_space(phantom.get("character_id", ""))
+            if (
+                not phantom_id.casefold().startswith("dialogue_")
+                or phantom_id.casefold() not in speaking_ids
+            ):
+                continue
+            phantom_name = _normalized_space(
+                phantom.get("speaker_name", "") or phantom_id
+            )
+            alias_keys = {
+                phantom_id.casefold(),
+                phantom_name.casefold(),
+            }
+            if any(key in alias_targets for key in alias_keys):
+                continue
+            attributed: list[tuple[int, str]] = []
+            for candidate in subjects:
+                candidate_id = _normalized_space(candidate.get("character_id", ""))
+                if not candidate_id or candidate_id.casefold() == phantom_id.casefold():
+                    continue
+                candidate_name, _evidence = _h3_subject_identity_evidence(candidate)
+                if not candidate_name:
+                    candidate_name = _normalized_space(
+                        candidate.get("speaker_name", "") or candidate_id
+                    )
+                count = _h3_direct_speaker_mentions(source, candidate_name)
+                if count:
+                    attributed.append((count, candidate_name))
+            if not attributed:
+                continue
+            best_count = max(count for count, _name in attributed)
+            best_names = {
+                name for count, name in attributed if count == best_count
+            }
+            if len(best_names) != 1:
+                continue
+            target_name = next(iter(best_names))
+            for key in alias_keys:
+                alias_targets[key] = target_name
+
+    repaired = 0
+    for plan in clip_plans:
+        if not isinstance(plan, MutableMapping):
+            continue
+        subjects = [
+            subject for subject in plan.get("_director_subjects_on_screen") or []
+            if isinstance(subject, MutableMapping)
+        ]
+        replacements: list[tuple[str, str, str, str]] = []
+        for phantom in subjects:
+            phantom_id = _normalized_space(phantom.get("character_id", ""))
+            phantom_name = _normalized_space(
+                phantom.get("speaker_name", "") or phantom_id
+            )
+            target_name = (
+                alias_targets.get(phantom_id.casefold())
+                or alias_targets.get(phantom_name.casefold())
+            )
+            if not target_name:
+                continue
+            target = next((
+                candidate for candidate in subjects
+                if candidate is not phantom
+                and _h3_identity_names_match(
+                    _h3_subject_identity_evidence(candidate)[0]
+                    or candidate.get("speaker_name", ""),
+                    target_name,
+                )
+            ), None)
+            if target is None:
+                continue
+            target_id = _normalized_space(target.get("character_id", ""))
+            canonical_name = _normalized_space(
+                target.get("speaker_name", "") or target_name
+            )
+            if not target_id or not canonical_name:
+                continue
+            replacements.append((
+                phantom_id,
+                phantom_name,
+                target_id,
+                canonical_name,
+            ))
+
+        if not replacements:
+            continue
+        phantom_ids = {old_id.casefold() for old_id, _old, _new_id, _new in replacements}
+        plan["_director_subjects_on_screen"] = [
+            subject for subject in subjects
+            if _normalized_space(subject.get("character_id", "")).casefold()
+            not in phantom_ids
+        ]
+        for beat in plan.get("_director_dialogue_beats") or []:
+            if not isinstance(beat, MutableMapping):
+                continue
+            speaker_id = _normalized_space(beat.get("speaker_id", ""))
+            for old_id, old_name, new_id, new_name in replacements:
+                if speaker_id.casefold() != old_id.casefold():
+                    continue
+                beat["speaker_id"] = new_id
+                cue = _normalized_space(beat.get("physical_cue", ""))
+                if cue:
+                    beat["physical_cue"] = re.sub(
+                        rf"(?<![A-Za-z0-9]){re.escape(old_name)}(?![A-Za-z0-9])",
+                        new_name,
+                        cue,
+                        flags=re.IGNORECASE,
+                    )
+                repaired += 1
+                break
+
+        for field in (
+            "_director_h3_source_prompt",
+            "_director_opening_blocking",
+            "_director_closing_blocking",
+        ):
+            value = plan.get(field)
+            if not isinstance(value, str):
+                continue
+            for old_id, old_name, new_id, new_name in replacements:
+                value = re.sub(
+                    rf"(?<![A-Za-z0-9]){re.escape(old_id)}(?![A-Za-z0-9])",
+                    new_id,
+                    value,
+                    flags=re.IGNORECASE,
+                )
+                value = re.sub(
+                    rf"(?<![A-Za-z0-9]){re.escape(old_name)}(?![A-Za-z0-9])",
+                    new_name,
+                    value,
+                    flags=re.IGNORECASE,
+                )
+            plan[field] = value
+        # Force an immediate clean compilation rather than comparing against
+        # a wrapper produced before the identity merge.
+        plan.pop("_director_h3_compiled_prompt", None)
+        plan.pop("_director_speaker_registry", None)
+        plan["_director_h3_phantom_speaker_repaired"] = True
+
+    if repaired:
+        # The registry is copied onto every saved clip.  One phantom entry in
+        # a single shot therefore contaminates otherwise unrelated clips too;
+        # discard every cached copy and rebuild it from the cleaned subjects.
+        for plan in clip_plans:
+            if isinstance(plan, MutableMapping):
+                plan.pop("_director_speaker_registry", None)
+        print(
+            "[MiniMax H3] Merged "
+            f"{repaired} phantom dialogue turn(s) back into their explicitly "
+            "attributed visible character."
+        )
+
+
 def _canonicalize_h3_project_subject_names(
     clip_plans: Sequence[Mapping[str, Any]],
 ) -> None:
-    """Keep one most-specific cast name for each stable Director character ID."""
+    """Keep stable identities without conflating bounded-sequence cast slots.
+
+    Long-form Director calls are intentionally planned in small independent
+    batches.  A local model may use ``char_1`` for Monica in one batch, Pam in
+    the next, and Leslie later.  Treating that local slot as a project-global
+    identity caused the compiler to relabel every guest as one person and gave
+    Ref2VA contradictory identity evidence that could materialize duplicate
+    principals.  Rebind only demonstrably reused slots; meaningful IDs and
+    explicitly separate same-name characters remain unchanged.
+    """
 
     project_context = " ".join(
         _normalized_space(plan.get("_director_project_context", ""))
         for plan in clip_plans
         if isinstance(plan, Mapping)
     )
-    candidates: dict[str, list[str]] = {}
-    for plan in clip_plans:
-        for subject in plan.get("_director_subjects_on_screen") or []:
+    occurrences: list[dict[str, Any]] = []
+    identity_groups: list[dict[str, Any]] = []
+    groups_by_original_id: dict[str, set[int]] = {}
+
+    def matching_group(identity: str) -> int:
+        matches = [
+            index for index, group in enumerate(identity_groups)
+            if any(
+                _h3_identity_names_match(identity, candidate)
+                for candidate in group["candidates"]
+            )
+        ]
+        # A one-word shorthand can be ambiguous when two full names share it.
+        # Do not merge through that ambiguity.
+        if len(matches) == 1:
+            return matches[0]
+        identity_groups.append({"candidates": [], "occurrences": []})
+        return len(identity_groups) - 1
+
+    for plan_index, plan in enumerate(clip_plans):
+        for subject_index, subject in enumerate(
+            plan.get("_director_subjects_on_screen") or []
+        ):
             character_id = _normalized_space(_field(subject, "character_id", ""))
             if not character_id:
                 continue
-            key = character_id.casefold()
-            name = _normalized_space(_field(subject, "speaker_name", ""))
-            inferred = _leading_h3_identity(
-                _field(subject, "visual_description", "")
-            )
-            for candidate in (name, inferred):
-                if candidate and candidate not in candidates.setdefault(key, []):
-                    candidates[key].append(candidate)
+            original_key = character_id.casefold()
+            identity, candidates = _h3_subject_identity_evidence(subject)
+            if not identity:
+                identity = character_id
+                candidates = [character_id]
+            group_index = matching_group(identity)
+            group = identity_groups[group_index]
+            for candidate in candidates:
+                if candidate and not any(
+                    _h3_anchor_key(candidate) == _h3_anchor_key(existing)
+                    for existing in group["candidates"]
+                ):
+                    group["candidates"].append(candidate)
+            occurrence = {
+                "plan_index": plan_index,
+                "subject_index": subject_index,
+                "subject": subject,
+                "original_id": character_id,
+                "original_key": original_key,
+                "group_index": group_index,
+            }
+            occurrences.append(occurrence)
+            group["occurrences"].append(occurrence)
+            groups_by_original_id.setdefault(original_key, set()).add(group_index)
 
     def score(name: str) -> tuple[int, int, int, int]:
         words = re.findall(r"[A-Za-z0-9'’-]+", name)
@@ -893,17 +1233,101 @@ def _canonicalize_h3_project_subject_names(
             len(name),
         )
 
-    canonical = {
-        key: max(names, key=score)
-        for key, names in candidates.items()
-        if names
+    canonical_by_group = {
+        index: max(group["candidates"], key=score)
+        for index, group in enumerate(identity_groups)
+        if group["candidates"]
     }
-    for plan in clip_plans:
-        for subject in plan.get("_director_subjects_on_screen") or []:
-            character_id = _normalized_space(_field(subject, "character_id", ""))
-            name = canonical.get(character_id.casefold())
-            if name:
-                _set_h3_subject_field(subject, "speaker_name", name)
+    unstable_ids = {
+        key for key, groups in groups_by_original_id.items()
+        if len(groups) > 1
+    }
+    used_ids = {
+        occurrence["original_id"].casefold()
+        for occurrence in occurrences
+        if occurrence["original_key"] not in unstable_ids
+    }
+    generated_ids: dict[int, str] = {}
+    for occurrence in occurrences:
+        if occurrence["original_key"] not in unstable_ids:
+            continue
+        group_index = occurrence["group_index"]
+        if group_index in generated_ids:
+            continue
+        canonical_name = canonical_by_group.get(group_index, "subject")
+        base = f"director_identity_{_h3_identity_slug(canonical_name)}"
+        candidate = base
+        suffix = 2
+        while candidate.casefold() in used_ids:
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        generated_ids[group_index] = candidate
+        used_ids.add(candidate.casefold())
+
+    plan_rebindings: dict[int, dict[str, set[str]]] = {}
+    repaired_occurrences = 0
+    for occurrence in occurrences:
+        subject = occurrence["subject"]
+        group_index = occurrence["group_index"]
+        canonical_name = canonical_by_group.get(group_index)
+        if canonical_name:
+            _set_h3_subject_field(subject, "speaker_name", canonical_name)
+        if occurrence["original_key"] not in unstable_ids:
+            continue
+        target_id = generated_ids[group_index]
+        _set_h3_subject_field(subject, "character_id", target_id)
+        plan_rebindings.setdefault(
+            occurrence["plan_index"], {}
+        ).setdefault(occurrence["original_key"], set()).add(target_id)
+        repaired_occurrences += 1
+
+    for plan_index, plan in enumerate(clip_plans):
+        mappings = plan_rebindings.get(plan_index, {})
+        for beat in plan.get("_director_dialogue_beats") or []:
+            if not isinstance(beat, MutableMapping):
+                continue
+            speaker_id = _normalized_space(beat.get("speaker_id", ""))
+            targets = mappings.get(speaker_id.casefold(), set())
+            if len(targets) == 1:
+                beat["speaker_id"] = next(iter(targets))
+            elif len(targets) > 1:
+                raise H3DialogueContractError(
+                    "A long-form shot reused one local character ID for "
+                    "multiple visible people, so dialogue ownership is ambiguous."
+                )
+        if mappings and isinstance(plan, MutableMapping):
+            # Any saved registry was keyed by the now-invalid local slots.
+            # Rebuild it deterministically from the repaired project cast.
+            plan.pop("_director_speaker_registry", None)
+            plan["_director_h3_identity_rebound"] = True
+
+    if repaired_occurrences:
+        print(
+            "[MiniMax H3] Rebound "
+            f"{repaired_occurrences} long-form cast occurrence(s) from "
+            f"{len(unstable_ids)} reused local character slot(s)."
+        )
+
+
+def _h3_source_requests_multiple_instances(source: Any, name: Any) -> bool:
+    """Allow twins/copies only when the source explicitly requests them."""
+
+    text = normalize_h3_text(source)
+    identity = _normalized_space(name)
+    if not text or not identity:
+        return False
+    escaped = re.escape(identity)
+    quantity = (
+        r"(?:two|three|four|five|six|seven|eight|nine|ten|multiple|"
+        r"several|many|a\s+pair\s+of|a\s+group\s+of)"
+    )
+    return bool(re.search(
+        rf"(?:{quantity})\s+(?:identical\s+)?(?:copies?\s+of\s+)?"
+        rf"{escaped}\b|\b{escaped}(?:es|s)?\b[^.!?]{{0,45}}\b"
+        r"(?:twins?|clones?|copies|duplicates?|multiple\s+versions?)\b",
+        text,
+        flags=re.IGNORECASE,
+    ))
 
 
 def _h3_plan_context_anchors(plan: Mapping[str, Any]) -> list[str]:
@@ -1370,6 +1794,7 @@ def _reference_relationships(
     references: Sequence[Mapping[str, Any]] | None,
     subjects: Sequence[Any] | None = None,
     registry: Mapping[str, Any] | None = None,
+    source_text: str = "",
 ) -> tuple[
     list[str],
     list[str],
@@ -1477,16 +1902,38 @@ def _reference_relationships(
                     f"The visual treatment of <Subject {subject_no}> follows {label} broadly."
                 )
             else:
-                source_clause = f"visual identity and appearance come from {label}"
+                source_clause = (
+                    f"facial, bodily, and character identity come from {label}"
+                )
+                allow_multiple = _h3_source_requests_multiple_instances(
+                    source_text,
+                    subject_name,
+                )
+                uniqueness = (
+                    " This mapping is exactly one physical instance of the "
+                    "character; do not create a second copy, clone, reflection, "
+                    "portrait, screen image, background likeness, or literal "
+                    "reference-image cutaway."
+                    if not allow_multiple else ""
+                )
                 explanation = (
-                    f"preserve the identity and appearance supplied by {label}; "
-                    "use it for identity only and do not copy its background, "
-                    "source location, framing, "
-                    "composition, pose, or opening-still appearance"
+                    f"preserve the facial, bodily, and character identity supplied "
+                    f"by {label}; use it for identity only, follow the target "
+                    "shot's explicitly described wardrobe and lighting, and do "
+                    "not copy its background, source location, framing, "
+                    "composition, pose, source lighting, or opening-still appearance"
+                    f"{uniqueness}"
                 )
                 marker = "fully_preserved"
                 detail_bindings.append(
-                    f"At first appearance, <Subject {subject_no}> uses identity and appearance from {label}."
+                    f"<Subject {subject_no}> uses facial, bodily, and character "
+                    f"identity from {label} as the same single person already "
+                    "described in this shot, never as inserted source footage or "
+                    "an additional person."
+                    if not allow_multiple else
+                    f"<Subject {subject_no}> uses facial, bodily, and character "
+                    f"identity from {label} for the explicitly requested multiple "
+                    "instances."
                 )
 
             if subject_match:
@@ -1724,6 +2171,7 @@ def compile_h3_official_prompt(
         references if mode == "ref2va" else None,
         subjects or [],
         registry,
+        source_text=f"{project_context}\n{prompt}",
     )
     audio_mode = _normalized_space(_field(audio_plan or {}, "mode", "")).casefold()
     if audio_mode in {"audio_driven", "music_driven"}:
@@ -1780,6 +2228,7 @@ def compile_h3_official_prompt(
         if detail_bindings:
             body = re.sub(r"^\[Shot\s+1\]\s*", "", body, flags=re.IGNORECASE)
             body = f"[Shot 1] {' '.join(detail_bindings)} {body}".strip()
+        body = _ensure_h3_context_anchors(body, context_anchors or [])
         body = f"{style_opening} {body}".strip()
         if has_driving_audio and music == "N/A":
             music = "Use the mapped driving audio according to retention_analysis."
@@ -2032,6 +2481,7 @@ def compile_h3_clip_plans(
     Ref2VA wrapper around a previously compiled prompt.
     """
 
+    _repair_h3_phantom_dialogue_subjects(clip_plans)
     _canonicalize_h3_project_subject_names(clip_plans)
     registry = _build_stable_speaker_registry(clip_plans)
     for index, plan in enumerate(clip_plans):

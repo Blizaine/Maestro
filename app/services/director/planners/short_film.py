@@ -10,6 +10,7 @@ Outputs: ProductionPlan with ShotPlan objects (NOT final prompts).
 
 from __future__ import annotations
 import copy
+import difflib
 import json
 import math
 import os
@@ -1183,6 +1184,118 @@ def _extract_h3_screenplay_dialogue(screenplay: Any) -> list[dict[str, str]]:
                 "spoken_text": spoken,
             })
     return manifest
+
+
+def _repair_h3_screenplay_speaker_headings(
+    screenplay: Any,
+    canonical_names: Sequence[str],
+) -> tuple[str, list[tuple[str, str]]]:
+    """Correct an evident misspelled heading before dialogue becomes locked.
+
+    The screenwriter occasionally emits a near-name such as ``THORNS`` while
+    the surrounding action still says ``Thanos``.  If that typo reaches Pass
+    2 it becomes a new visible person.  Repairs require either a strong unique
+    spelling match or a moderate match to the one canonical person named in
+    the immediately preceding action paragraph.  Uncertain headings remain
+    untouched so an original supporting character cannot be silently merged.
+    """
+
+    text = _normalize_h3_text(screenplay)
+    names: list[str] = []
+    seen: set[str] = set()
+    for raw_name in canonical_names or []:
+        name = re.sub(r"\s+", " ", str(raw_name or "")).strip(" .")
+        key = " ".join(_h3_speaker_name_tokens(name))
+        if not key or key in seen or key in {
+            "he", "her", "him", "narration", "she", "speaker", "they",
+            "them", "voice", "voiceover",
+        }:
+            continue
+        seen.add(key)
+        names.append(name)
+    if not text or not names:
+        return text, []
+
+    canonical_keys = {
+        " ".join(_h3_speaker_name_tokens(name)): name for name in names
+    }
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    learned: dict[str, str] = {}
+    repairs: list[tuple[str, str]] = []
+
+    def previous_paragraph(index: int) -> str:
+        cursor = index - 1
+        while cursor >= 0 and not lines[cursor].strip():
+            cursor -= 1
+        block: list[str] = []
+        while cursor >= 0 and lines[cursor].strip():
+            # Do not treat a preceding dialogue block as action evidence.
+            if _h3_screenplay_speaker_heading(lines[cursor]):
+                break
+            block.append(lines[cursor].strip())
+            cursor -= 1
+        return " ".join(reversed(block))
+
+    for index, raw_line in enumerate(lines):
+        heading = _h3_screenplay_speaker_heading(raw_line)
+        if not heading:
+            continue
+        supplied_name, _centered = heading
+        supplied_key = " ".join(_h3_speaker_name_tokens(supplied_name))
+        if not supplied_key or supplied_key in canonical_keys:
+            continue
+        target = learned.get(supplied_key, "")
+        ratios = sorted(
+            (
+                difflib.SequenceMatcher(None, supplied_key, key).ratio(),
+                name,
+            )
+            for key, name in canonical_keys.items()
+        )
+        ratios.reverse()
+        if not target and ratios:
+            best_ratio, best_name = ratios[0]
+            runner_up = ratios[1][0] if len(ratios) > 1 else 0.0
+            if best_ratio >= 0.78 and best_ratio - runner_up >= 0.08:
+                target = best_name
+            elif best_ratio >= 0.62 and best_ratio - runner_up >= 0.08:
+                context = previous_paragraph(index)
+                mentioned = [
+                    name for name in names
+                    if re.search(
+                        rf"(?<![A-Za-z0-9]){re.escape(name)}(?![A-Za-z0-9])",
+                        context,
+                        flags=re.IGNORECASE,
+                    )
+                ]
+                if len(mentioned) == 1 and mentioned[0] == best_name:
+                    target = best_name
+        if not target:
+            continue
+        learned[supplied_key] = target
+        repairs.append((supplied_name, target))
+        stripped = raw_line.strip()
+        replacement = target.upper()
+        if re.fullmatch(
+            r"<center>\s*[^<\r\n]+?\s*</center>",
+            stripped,
+            flags=re.IGNORECASE,
+        ):
+            lines[index] = f"<center>{replacement}</center>"
+        elif re.fullmatch(r"\*\*\s*[^*\r\n]+?\s*\*\*", stripped):
+            lines[index] = f"**{replacement}**"
+        else:
+            continuation = re.search(
+                r"\s*(\((?:CONT['’]?D|V\.?O\.?|O\.?S\.?)\))\s*$",
+                stripped,
+                flags=re.IGNORECASE,
+            )
+            lines[index] = (
+                f"{replacement} {continuation.group(1)}"
+                if continuation else replacement
+            )
+
+    return "\n".join(lines), list(dict.fromkeys(repairs))
 
 
 def _h3_dialogue_word_fingerprint(value: Any) -> tuple[str, ...]:
@@ -7986,6 +8099,45 @@ SCREENPLAY TO REPAIR:
                         f"dialogue-light ({remaining_density_issue}); "
                         "continuing without inventing filler."
                     )
+
+        if is_h3_native:
+            long_form_bible = getattr(
+                self,
+                "_long_form_story_bible_override",
+                None,
+            )
+            canonical_speakers = [
+                str(row.get("character_name") or "").strip()
+                for row in h3_voice_bible
+                if isinstance(row, dict) and row.get("character_name")
+            ]
+            if isinstance(long_form_bible, dict):
+                canonical_speakers.extend(
+                    str(row.get("name") or "").strip()
+                    for row in long_form_bible.get("canonical_characters") or []
+                    if isinstance(row, dict) and row.get("name")
+                )
+            canonical_speakers.extend(
+                str(
+                    getattr(profile, "display_name", "")
+                    or getattr(profile, "id", "")
+                    or ""
+                ).strip()
+                for profile in (char_profiles or [])
+            )
+            screenplay, heading_repairs = _repair_h3_screenplay_speaker_headings(
+                screenplay,
+                canonical_speakers,
+            )
+            if heading_repairs:
+                print(
+                    "[ShortFilmPlanner] Corrected screenplay speaker heading "
+                    "drift before dialogue lock: "
+                    + ", ".join(
+                        f"{source} -> {target}"
+                        for source, target in heading_repairs
+                    )
+                )
 
         print(f"[ShortFilmPlanner] Screenplay: {len(screenplay)} chars")
 

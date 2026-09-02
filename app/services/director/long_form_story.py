@@ -14,7 +14,7 @@ import re
 from typing import Any, Iterable, Optional, Sequence
 
 
-LONG_FORM_STORY_BIBLE_REVISION = 1
+LONG_FORM_STORY_BIBLE_REVISION = 2
 
 
 LONG_FORM_STORY_BIBLE_SCHEMA: dict[str, Any] = {
@@ -179,7 +179,8 @@ def _extract_named_candidates(story: str) -> list[str]:
     result: list[str] = []
     rejected = {
         "a", "an", "and", "chapter", "director", "each", "every", "film",
-        "first", "last", "many", "maestro", "scene", "the", "then", "video",
+        "first", "last", "many", "maestro", "scene", "the", "then", "tv",
+        "video",
     }
     for match in re.finditer(
         r"\b[A-Z][A-Za-z0-9_'’-]*(?:\s+[A-Z][A-Za-z0-9_'’-]*){0,3}\b",
@@ -188,10 +189,79 @@ def _extract_named_candidates(story: str) -> list[str]:
         name = _clean(match.group(0), limit=100)
         while name.split() and name.split()[0].casefold() in {"a", "an", "the", "then"}:
             name = " ".join(name.split()[1:])
-        if not name or name.casefold() in rejected or name in result:
+        key = _key(name)
+        if (
+            not name
+            or name.casefold() in rejected
+            or key in _GENERIC_SPEAKERS
+            or key in _PSEUDO_SPEAKERS
+            or any(_key(existing) == key for existing in result)
+        ):
+            continue
+
+        # A capitalized work or destination in a list is not a person.  The
+        # previous fallback interpreted phrases such as "visits TV shows,
+        # Friends, The Office, Parks and Rec" as five cast members (including
+        # "He").  Those phantom identities then polluted every bounded
+        # chapter's cast registry.  Keep this deliberately contextual so a
+        # real character named in ordinary prose is still discovered.
+        prefix = without_quotes[max(0, match.start() - 140):match.start()]
+        sentence_start = max(
+            without_quotes.rfind(marker, 0, match.start())
+            for marker in ".!?"
+        ) + 1
+        sentence_end_candidates = [
+            position for marker in ".!?"
+            for position in [without_quotes.find(marker, match.end())]
+            if position >= 0
+        ]
+        sentence_end = (
+            min(sentence_end_candidates)
+            if sentence_end_candidates else len(without_quotes)
+        )
+        sentence = without_quotes[sentence_start:sentence_end]
+        visit_list = bool(
+            re.search(r"\bvisits?\b", sentence, flags=re.IGNORECASE)
+            and sentence.count(",") >= 2
+        )
+        if re.search(
+            r"\b(?:visits?|travels?\s+through|go(?:es|ing)?\s+(?:around\s+)?to|"
+            r"including|such\s+as)\s+(?:(?:different|many|several|iconic)\s+)?"
+            r"(?:(?:tv|television|streaming)\s+)?"
+            r"(?:shows?|series|sitcoms?|worlds?|locations?|places?|rooms?)"
+            r"\b[^.!?]{0,100}$",
+            prefix,
+            flags=re.IGNORECASE,
+        ) or re.search(
+            r"\b(?:(?:tv|television|streaming)\s+)?"
+            r"(?:show|series|sitcom|film|movie|episode)\s+"
+            r"(?:called\s+|named\s+)?$",
+            prefix,
+            flags=re.IGNORECASE,
+        ) or visit_list:
             continue
         result.append(name)
     return result
+
+
+def _locked_dialogue_character_names(
+    locked_dialogue: Sequence[dict[str, Any]],
+) -> list[str]:
+    """Return only concrete human speakers from the immutable dialogue map."""
+
+    result: list[str] = []
+    for item in locked_dialogue or []:
+        speaker = _clean(item.get("speaker"), limit=100)
+        key = _key(speaker)
+        if (
+            not speaker
+            or key in _GENERIC_SPEAKERS
+            or key in _PSEUDO_SPEAKERS
+            or re.fullmatch(r"(?:speaker|subject|character)[ _-]*\d+", key)
+        ):
+            continue
+        result.append(speaker)
+    return _unique_strings(result, limit=40)
 
 
 def _fallback_recurring_motif(
@@ -245,7 +315,11 @@ def build_long_form_story_bible_fallback(
     """Create a safe story memory when the creative bible call is unavailable."""
 
     story = _clean(story_description, limit=12000)
-    names = _unique_strings([*character_names, *_extract_named_candidates(story)], limit=40)
+    names = _unique_strings([
+        *character_names,
+        *_locked_dialogue_character_names(locked_dialogue),
+        *_extract_named_candidates(story),
+    ], limit=40)
     expansion = bool(_EXPANSION_RE.search(story))
     cast_expansion = bool(_CAST_EXPANSION_RE.search(story))
     location_expansion = bool(_LOCATION_EXPANSION_RE.search(story))
@@ -333,6 +407,11 @@ def normalize_long_form_story_bible(
             # narrowed by an architect that happens to return false.
             bible[field] = bool(value[field]) or bool(fallback[field])
 
+    source_character_names = _unique_strings([
+        *character_names,
+        *_locked_dialogue_character_names(locked_dialogue),
+        *_extract_named_candidates(story_description),
+    ], limit=40)
     characters: list[dict[str, str]] = []
     seen_names: set[str] = set()
     for raw in value.get("canonical_characters") or []:
@@ -341,10 +420,25 @@ def normalize_long_form_story_bible(
         name = _clean(raw.get("name"), limit=100)
         if not name or _key(name) in seen_names:
             continue
+        role = _clean(raw.get("role"), limit=300) or "Story character"
+        # Revision-1 deterministic fallback bibles labeled every extracted
+        # capitalized noun as a user-specified character.  On resume, discard
+        # only those legacy fallback entries that cannot be matched back to a
+        # supplied reference, a real quoted-line speaker, or a safe character
+        # candidate in the user's concept.  Creative LLM-authored supporting
+        # cast remains untouched.
+        if (
+            role.casefold() == "user-specified character"
+            and source_character_names
+            and not _canonical_name(name, source_character_names)
+        ):
+            continue
+        if _key(name) in _GENERIC_SPEAKERS or _key(name) in _PSEUDO_SPEAKERS:
+            continue
         seen_names.add(_key(name))
         characters.append({
             "name": name,
-            "role": _clean(raw.get("role"), limit=300) or "Story character",
+            "role": role,
             "initial_state": _clean(raw.get("initial_state"), limit=500) or "As established in the concept",
             "continuity_rules": _clean(raw.get("continuity_rules"), limit=500) or "Preserve accumulated state",
         })

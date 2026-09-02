@@ -120,6 +120,10 @@ class LongFormDirectorPlanningTests(unittest.TestCase):
             character_names=["Thanos"],
             chapter_count=12,
         )
+        self.assertEqual(
+            [item["name"] for item in bible["canonical_characters"]],
+            ["Thanos"],
+        )
         rows = [
             {
                 "chapter": index + 1,
@@ -143,6 +147,43 @@ class LongFormDirectorPlanningTests(unittest.TestCase):
         self.assertTrue(all("D1" in row["dialogue_ids"] for row in motif_rows))
         self.assertTrue(all("E4" in row["source_event_ids"] for row in motif_rows))
         self.assertTrue(all(row.get("motif_variation_contract") for row in motif_rows))
+
+    def test_legacy_fallback_bible_discards_pronouns_and_show_titles(self):
+        story = (
+            "A sitcom starring Thanos. He visits TV shows, Friends, The Office, "
+            "Parks and Rec, and many more."
+        )
+        legacy = {
+            "canonical_characters": [
+                {
+                    "name": name,
+                    "role": "User-specified character",
+                    "initial_state": "As established by the user concept",
+                    "continuity_rules": "Preserve accumulated state",
+                }
+                for name in (
+                    "Thanos", "He", "Friends", "Office", "Parks", "Rec"
+                )
+            ],
+            "canonical_locations": [],
+            "recurring_motifs": [],
+            "world_rules": [],
+            "forbidden_drift": [],
+        }
+
+        normalized = normalize_long_form_story_bible(
+            legacy,
+            story_description=story,
+            locked_dialogue=[{"speaker": "He", "text": "A line."}],
+            source_events=[],
+            character_names=["Thanos"],
+            chapter_count=8,
+        )
+
+        self.assertEqual(
+            [item["name"] for item in normalized["canonical_characters"]],
+            ["Thanos"],
+        )
 
     def test_abstract_location_flythrough_does_not_invent_a_recurring_motif(self):
         bible = build_long_form_story_bible_fallback(
