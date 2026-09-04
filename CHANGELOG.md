@@ -19,6 +19,9 @@ one continuation-aware calculation. The source-tail overlap is treated as
 context instead of new footage, so selecting one window produces one extension
 rather than a full pass plus a tiny accidental second pass. The UI reports the
 fresh footage contributed by the first pass and the stride of later passes.
+The gallery's **Extend this video** action now opens the named Studio Extend
+workflow and reliably populates its source-video tile instead of uploading the
+clip behind a still-visible Frames panel.
 
 H3 prompt integrity: AI Faithful extension no longer mistakes instructional
 text containing a bare opening dialogue marker for one enormous spoken line.

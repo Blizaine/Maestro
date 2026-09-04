@@ -28,6 +28,9 @@ round trip for the full Maestro 2 workflow surface.
   backend routing share the same continuation-aware geometry.
 - The duration summary explains how much fresh footage the first pass adds and
   how far each later sliding-window pass advances.
+- **Extend this video** from a gallery clip now switches to Studio's named
+  Extend workflow before attaching the source, reliably fills the drop zone,
+  and opens the sidecar on mobile so the result is immediately visible.
 - AI Faithful no longer reports an invented large spoken-word count when the
   user's extension contains only a short line of dialogue.
 

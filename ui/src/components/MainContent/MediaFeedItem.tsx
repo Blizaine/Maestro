@@ -80,7 +80,9 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const setStartImage = useStore(s => s.setStartImage)
   const addImageRef = useStore(s => s.addImageRef)
   const setContinueVideo = useStore(s => s.setContinueVideo)
-  const setParam = useStore(s => s.setParam)
+  const setStudioVideoWorkflow = useStore(s => s.setStudioVideoWorkflow)
+  const setSidebarMode = useStore(s => s.setSidebarMode)
+  const setSidebarOpen = useStore(s => s.setSidebarOpen)
   const openRetakeDialog = useStore(s => s.openRetakeDialog)
   const generationMode = useStore(s => s.generationMode)
   const workspaces = useStore(s => s.workspaces)
@@ -526,23 +528,37 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
 
   const handleContinueFrom = async () => {
     if (file.type !== 'video') return
+    let url = ''
     try {
       const res = await fetch(getFileUrl(file.name))
+      if (!res.ok) throw new Error(`Could not read source video (${res.status})`)
       const blob = await res.blob()
       const videoFile = new File([blob], file.name, { type: blob.type || 'video/mp4' })
-      const url = URL.createObjectURL(videoFile)
+      url = URL.createObjectURL(videoFile)
       const video = document.createElement('video')
-      video.src = url
-      video.onloadedmetadata = async () => {
-        const duration = video.duration && isFinite(video.duration) ? video.duration : 0
-        const uploaded = await uploadImage(videoFile)
-        // Switch sub-mode FIRST: the switch stashes the current sub-mode's
-        // working set and opens Extend's own slate. Setting the source
-        // after keeps it from being wiped by that swap.
-        setParam('image_mode', 3)
-        setContinueVideo(videoFile, uploaded.path, url, duration)
-      }
+      video.preload = 'metadata'
+      const duration = await new Promise<number>((resolve, reject) => {
+        video.onloadedmetadata = () => resolve(
+          video.duration && isFinite(video.duration) ? video.duration : 0,
+        )
+        video.onerror = () => reject(new Error('Could not read source video metadata'))
+        video.src = url
+        video.load()
+      })
+      const uploaded = await uploadImage(videoFile)
+
+      // Route through the named Studio workflow, not only the legacy numeric
+      // image_mode. The v2 sidecar renders from studioVideoWorkflow, so writing
+      // image_mode alone left the UI in Frames even though the upload succeeded.
+      // Switch first because the workflow transition restores/clears its own
+      // isolated slate; attach the source afterward so that transition cannot
+      // wipe the clip we just prepared.
+      setSidebarMode('studio')
+      setStudioVideoWorkflow('extend')
+      setContinueVideo(videoFile, uploaded.path, url, duration)
+      setSidebarOpen(true)
     } catch (e) {
+      if (url) URL.revokeObjectURL(url)
       console.error('Failed to load video for continuation:', e)
     }
   }

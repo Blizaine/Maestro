@@ -108,6 +108,20 @@ class GalleryActiveMediaTests(unittest.TestCase):
         self.assertIn("Click again to delete", feed_item)
         self.assertIn("No other workspaces", feed_item)
 
+    def test_extend_action_routes_to_named_workflow_before_attaching_source(self):
+        feed_item = (
+            ROOT / "ui" / "src" / "components" / "MainContent" / "MediaFeedItem.tsx"
+        ).read_text(encoding="utf-8")
+
+        route = "setStudioVideoWorkflow('extend')"
+        attach = "setContinueVideo(videoFile, uploaded.path, url, duration)"
+        self.assertIn("const setStudioVideoWorkflow = useStore", feed_item)
+        self.assertIn("setSidebarMode('studio')", feed_item)
+        self.assertIn(route, feed_item)
+        self.assertIn(attach, feed_item)
+        self.assertLess(feed_item.index(route), feed_item.index(attach))
+        self.assertNotIn("setParam('image_mode', 3)", feed_item)
+
     def test_card_height_measurements_immediately_reflow_virtualized_offsets(self):
         main_content = (
             ROOT / "ui" / "src" / "components" / "MainContent" / "MainContent.tsx"
