@@ -102,6 +102,24 @@ class TestPinokioGpuCompatibility(unittest.TestCase):
         self.assertIn("flash_only: true", updater)
         self.assertIn("venv: runtime.env", updater)
 
+    def test_missing_react_bundle_is_rebuilt_by_update_and_start(self):
+        updater = (_ROOT / "update.js").read_text(encoding="utf-8")
+
+        # The no-op Update path must not win merely because git and the GPU
+        # runtime are current. Interrupted Vite builds must re-enter `build`.
+        self.assertIn("exists('ui/dist/index.html')", updater)
+        self.assertIn("exists('ui/dist/assets')", updater)
+
+        # Start is the final safety net for users who already advanced git and
+        # then retried without realizing the first UI build was interrupted.
+        for filename in ("start.js", "start_sol.js"):
+            launcher = (_ROOT / filename).read_text(encoding="utf-8")
+            self.assertIn("!exists('ui/dist/index.html')", launcher)
+            self.assertIn("!exists('ui/dist/assets')", launcher)
+            self.assertIn('path: "ui"', launcher)
+            self.assertIn('"npm install"', launcher)
+            self.assertIn('"npm run build"', launcher)
+
     def test_runtime_diagnostics_run_inside_the_loaded_engine(self):
         engine = (_ROOT / "app" / "wgp.py").read_text(encoding="utf-8")
 

@@ -47,6 +47,18 @@ module.exports = async (kernel) => {
         }],
       },
     }, {
+      // Keep the legacy Sol entry point self-healing too. This runs only when
+      // an interrupted install/update left no complete Vite output.
+      when: "{{exists('ui/package.json') && (!exists('ui/dist/index.html') || !exists('ui/dist/assets'))}}",
+      method: "shell.run",
+      params: {
+        path: "ui",
+        message: [
+          "npm install",
+          "npm run build",
+        ],
+      },
+    }, {
       method: "shell.run",
       params: {
         venv: runtime.env,

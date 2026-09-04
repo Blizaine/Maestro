@@ -6,7 +6,7 @@ module.exports = async (kernel) => {
   const runtime = runtimeProfile(kernel)
   const samReadyMarker = "app/services/sam/env/.maestro-sam-ready"
   const alreadyCurrentAndReady =
-    `{{/already up[- ]to[- ]date/i.test(input.stdout) && exists('${runtime.marker}') && exists('${runtime.flashMarker}') && (!exists('app/services/sam/env') || exists('${samReadyMarker}')) ? 'uptodate' : 'build'}}`
+    `{{/already up[- ]to[- ]date/i.test(input.stdout) && exists('${runtime.marker}') && exists('${runtime.flashMarker}') && exists('ui/dist/index.html') && exists('ui/dist/assets') && (!exists('app/services/sam/env') || exists('${samReadyMarker}')) ? 'uptodate' : 'build'}}`
   return {
     run: [{
     // Pull the latest launcher + app code (single monorepo, so this one
@@ -32,8 +32,9 @@ module.exports = async (kernel) => {
     method: "jump",
     params: {
       // An already-current checkout still enters the build path when either
-      // its hardware runtime or optional FlashAttention repair marker is
-      // missing. This keeps interrupted installs and one-time repairs resumable.
+      // its hardware runtime, optional FlashAttention repair marker, or
+      // compiled React bundle is missing. This keeps interrupted installs and
+      // updates resumable instead of permanently skipping a failed UI build.
       id: alreadyCurrentAndReady
     }
   }, {

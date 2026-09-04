@@ -81,6 +81,21 @@ module.exports = async (kernel) => {
           raw: "The preferred H3 acceleration runtime is not ready; starting the preserved compatibility runtime. Run Update to finish the automatic migration.",
         },
       }] : []),
+      {
+        // A pulled update can be interrupted after Git advances but before
+        // Vite finishes. Build only when the served React bundle is missing,
+        // so the next normal Start repairs that state without a Reset or
+        // manual terminal commands.
+        when: "{{exists('ui/package.json') && (!exists('ui/dist/index.html') || !exists('ui/dist/assets'))}}",
+        method: "shell.run",
+        params: {
+          path: "ui",
+          message: [
+            "npm install",
+            "npm run build",
+          ],
+        },
+      },
       // SAM service starts on demand (launched by the backend when inpaint is used)
       // — not started here to avoid holding a CUDA context that wastes VRAM
       {

@@ -8,6 +8,10 @@ round trip for the full Maestro 2 workflow surface.
 ## Critical interface fix
 
 - Fixed the black or blank interface reported in GitHub issue #97.
+- Fixed an interrupted Update leaving Maestro at the JSON message `React UI
+  not built`. Update now treats a missing compiled bundle as unfinished even
+  when Git is already current, and Start performs the same one-time repair
+  automatically before launching the backend.
 - The cause was a circular LTX state update: Auto duration derived a timeline
   from the current native window while the native window simultaneously tried
   to follow that generated duration. Some restored/default LTX-2.5 states could
