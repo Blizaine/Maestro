@@ -35,6 +35,7 @@ jobs:
           "Pillow==11.3.0"
           "requests==2.32.4"
           "cryptography==49.0.0"
+          "ffmpeg-python==0.2.0"
           "imageio==2.37.2"
           "av==16.1.0"
           "decord==0.6.0"
