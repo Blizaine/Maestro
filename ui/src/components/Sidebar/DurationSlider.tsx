@@ -45,7 +45,7 @@ export function DurationSlider() {
   const resolution = useStore(s => s.params.resolution)
   const modelType = useStore(s => s.params.model_type)
   const prompt = useStore(s => s.params.prompt)
-  const durationPlanningMode = useStore(s => s.params._duration_planning_mode ?? 'duration')
+  const durationPlanningMode = useStore(s => s.params._duration_planning_mode ?? 'auto')
   // Keep the selector snapshot referentially stable when no references exist.
   // Returning a new [] here on every Zustand getSnapshot call can make React
   // repeatedly re-render the Studio shell before it ever becomes visible.

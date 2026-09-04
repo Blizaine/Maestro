@@ -382,7 +382,7 @@ def _apply_director_h3_optimizations(
 
     Initial generation, Dashboard regeneration, repair, and resume all pass
     through this helper so a saved project cannot silently lose its Turbo,
-    Sol attention, or First Block Cache settings.
+    sparse attention, or First Block Cache settings.
     """
 
     if not execution_profile.get("is_minimax_h3"):
@@ -397,15 +397,24 @@ def _apply_director_h3_optimizations(
     if turbo_enabled and turbo_preset:
         gen_params["minimax_h3_turbo_preset"] = turbo_preset
 
-    if video_params.get("override_attention") == "sol":
+    requested_attention = str(
+        video_params.get("override_attention") or ""
+    ).strip().lower()
+    if requested_attention in {"sol", "sla", "sdpa"}:
         supported_modes = getattr(
             _wgp, "override_attention_modes_supported", None
         )
-        if supported_modes is None or "sol" in supported_modes:
-            gen_params["override_attention"] = "sol"
+        # SLA deliberately survives an unsupported runtime: WGP reports the
+        # capability issue and performs its guaranteed dense fallback.
+        if (
+            requested_attention in {"sla", "sdpa"}
+            or supported_modes is None
+            or requested_attention in supported_modes
+        ):
+            gen_params["override_attention"] = requested_attention
         else:
             print(
-                "[Director] Saved H3 Sol Engine setting is unavailable in "
+                f"[Director] Saved H3 {requested_attention} setting is unavailable in "
                 "this runtime; using the default attention backend."
             )
 

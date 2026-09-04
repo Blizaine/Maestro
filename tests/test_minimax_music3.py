@@ -425,7 +425,7 @@ class MiniMaxMusic3Tests(unittest.TestCase):
         client = _read(_CLIENT)
         launch = _read(_LAUNCH)
         self.assertIn("'minimax_music3'", store)
-        self.assertIn("const DEFAULTS_VERSION = 10", store)
+        self.assertIn("const DEFAULTS_VERSION = 11", store)
         self.assertIn("music3_structured_caption", ui)
         self.assertIn("model_type: params.model_type", ui)
         self.assertIn("duration_seconds: durationSeconds", ui)

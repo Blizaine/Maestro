@@ -198,6 +198,96 @@ function wordCount(value: string): number {
 
 const dialogueAttributionOnly = /^(?:(?:then|and|but)\s+)?(?:[\p{L}\p{N}'’.-]+\s+)+(?:says?|asks?|responds?|replies?|answers?|adds?|shouts?|yells?|whispers?|murmurs?|exclaims?|calls?|announces?)(?:\s+(?:in|with)\s+.+)?$/iu
 const sceneRequestOnly = /^(?:please\s+)?(?:make|create|generate|write|produce)\s+(?:me\s+)?(?:a|an|the)?\s*(?:scene|video|clip|film|movie|sequence)\b(?:\s+(?:from|in|for|with|using)\b.*)?$/iu
+const productionHeadingOnly = /^(?:audio|camera|cast|characters?|duration|genre|lighting|location|music|notes?|prompt|scene|setting|shot|style|summary|tone|visuals?)\s*:/iu
+
+interface DialogueSpan {
+  start: number
+  end: number
+  text: string
+  screenplay: boolean
+}
+
+interface PromptTimingAnalysis {
+  dialogueWords: number
+  dialogueTurns: number
+  visibleBeats: number
+  hasScreenplayDialogue: boolean
+}
+
+const nonSpeakerLabels = /^(?:action|audio|camera|cast|characters?|description|dialogue|duration|genre|lighting|location|music|notes?|prompt|scene|setting|shot|style|summary|tone|visuals?)(?:\s+\d+)?$/iu
+
+function looksLikeSpeakerLabel(value: string): boolean {
+  const label = value
+    .replace(/^\*+|\*+$/g, '')
+    .replace(/\s*\([^\r\n)]*\)\s*$/, '')
+    .trim()
+  if (!label || nonSpeakerLabels.test(label)) return false
+  if (/^S\d+$/iu.test(label)) return true
+  const parts = label.split(/\s+/).filter(Boolean)
+  if (parts.length < 1 || parts.length > 5) return false
+  const containsLetter = /\p{L}/u.test(label)
+  const allCaps = containsLetter && label === label.toLocaleUpperCase()
+  const titleCaseName = parts.every(part => /^[\p{Lu}][\p{L}'’.-]*$/u.test(part))
+  return allCaps || titleCaseName
+}
+
+function overlapsDialogueSpan(start: number, end: number, spans: DialogueSpan[]): boolean {
+  return spans.some(span => start < span.end && end > span.start)
+}
+
+function dialogueTiming(prompt: string): {
+  spans: DialogueSpan[]
+  actionPrompt: string
+  screenplayTurns: number
+} {
+  const spans: DialogueSpan[] = []
+
+  // Screenplay dialogue is commonly pasted as `GEORGE: line` rather than
+  // wrapped in quotation marks. Treat the complete line as one spoken turn,
+  // while rejecting production headings such as `Camera:` and `Style:`.
+  for (const match of prompt.matchAll(/^[^\r\n]+/gmu)) {
+    const line = match[0]
+    const parsed = line.match(/^\s*(?:[-*]\s*)?(?:\*\*)?([^:\r\n]{1,64}?):(?:\*\*)?\s*(\S.*)\s*$/u)
+    if (!parsed || !looksLikeSpeakerLabel(parsed[1])) continue
+    const start = match.index ?? 0
+    spans.push({
+      start,
+      end: start + line.length,
+      text: parsed[2].trim(),
+      screenplay: true,
+    })
+  }
+
+  // Native H3 dialogue tags may appear in a reviewed/manual prompt. Count
+  // them unless they already live inside a screenplay line captured above.
+  for (const match of prompt.matchAll(/<d>\s*(?:\[[^\]\r\n]+\]\s*)?([\s\S]*?)<\/d>/giu)) {
+    const start = match.index ?? 0
+    const end = start + match[0].length
+    if (overlapsDialogueSpan(start, end, spans)) continue
+    spans.push({ start, end, text: match[1].trim(), screenplay: true })
+  }
+
+  // Preserve the existing natural-language prompt behavior for dialogue in
+  // straight or curly quotation marks, without double-counting quotes inside
+  // a screenplay line or native H3 tag.
+  for (const match of prompt.matchAll(/["“]([^"”]*?)["”]/gsu)) {
+    const start = match.index ?? 0
+    const end = start + match[0].length
+    if (overlapsDialogueSpan(start, end, spans)) continue
+    spans.push({ start, end, text: match[1].trim(), screenplay: false })
+  }
+
+  spans.sort((left, right) => left.start - right.start)
+  let actionPrompt = prompt
+  for (const span of [...spans].sort((left, right) => right.start - left.start)) {
+    actionPrompt = `${actionPrompt.slice(0, span.start)}. ${actionPrompt.slice(span.end)}`
+  }
+  return {
+    spans,
+    actionPrompt,
+    screenplayTurns: spans.filter(span => span.screenplay).length,
+  }
+}
 
 function visibleActionBeatCount(prompt: string): number {
   // Dialogue already receives its own word-based timing below. Replace every
@@ -210,9 +300,20 @@ function visibleActionBeatCount(prompt: string): number {
     .filter(Boolean)
     .filter(part => !dialogueAttributionOnly.test(part))
     .filter(part => !sceneRequestOnly.test(part))
+    .filter(part => !productionHeadingOnly.test(part))
   const actionText = actionSentences.join(' ')
   const transitions = (actionText.match(/\b(?:then|next|after(?:ward|wards)?|suddenly|finally|meanwhile|before|until|followed by)\b/gi) || []).length
   return Math.max(1, actionSentences.length, transitions + 1)
+}
+
+export function analyzePromptTiming(prompt: string): PromptTimingAnalysis {
+  const dialogue = dialogueTiming(String(prompt || ''))
+  return {
+    dialogueWords: dialogue.spans.reduce((sum, span) => sum + wordCount(span.text), 0),
+    dialogueTurns: dialogue.spans.filter(span => span.text.trim()).length,
+    visibleBeats: visibleActionBeatCount(dialogue.actionPrompt),
+    hasScreenplayDialogue: dialogue.screenplayTurns > 0,
+  }
 }
 
 function explicitDurationFromPrompt(prompt: string): number | null {
@@ -323,13 +424,14 @@ export function recommendAutoDuration(
     }
   }
 
-  const quoted = [...prompt.matchAll(/["“](.*?)["”]/gs)].map(match => match[1])
-  const dialogueWords = quoted.reduce((sum, line) => sum + wordCount(line), 0)
-  const dialogueTurns = quoted.filter(line => line.trim()).length
-  const visibleBeats = visibleActionBeatCount(prompt)
-  const speakingSeconds = dialogueWords / 2.15 + dialogueTurns * 0.8
+  const timing = analyzePromptTiming(prompt)
+  const { dialogueWords, dialogueTurns, visibleBeats } = timing
+  // H3 remains dependable around 2.15 spoken words/second. Speaker changes
+  // need a small reaction/breath allowance, but the visible performance can
+  // happen while a character talks and must not be added a second time.
+  const speakingSeconds = dialogueWords / 2.15 + Math.max(0, dialogueTurns - 1) * 0.4
   const actionSeconds = visibleBeats * 3.5
-  const scopedSeconds = Math.max(windowSeconds, speakingSeconds + actionSeconds)
+  const scopedSeconds = Math.max(windowSeconds, speakingSeconds, actionSeconds)
   const scopedPlan = durationWindowPlan(
     scopedSeconds,
     windowSeconds,
@@ -338,13 +440,34 @@ export function recommendAutoDuration(
   )
   const creativeFloor = options.planningStyle === 'creative' ? 3 : 1
   const dialogueFloor = dialogueTurns >= 2 ? 2 : 1
+  const maximumPlanWindows = maximumWholeWindowCount(
+    windowSeconds,
+    overlapSeconds,
+    discardSeconds,
+    maximum,
+  )
+  const dialoguePlan = durationWindowPlan(
+    Math.max(windowSeconds, speakingSeconds),
+    windowSeconds,
+    overlapSeconds,
+    discardSeconds,
+  )
+  // Eight windows remains a useful guard against turning a vague concept into
+  // an accidental all-day render. Explicit screenplay/H3 dialogue is a real
+  // user-owned timing constraint, though, and long quoted dialogue must also
+  // be given enough windows to fit instead of being silently compressed.
+  const boundedStoryWindows = timing.hasScreenplayDialogue
+    ? scopedPlan.windowCount
+    : Math.min(inferredLimit, scopedPlan.windowCount)
+  const dialogueRequiredWindows = dialogueTurns > 0 ? dialoguePlan.windowCount : 1
   const inferredCount = Math.max(
     creativeFloor,
     dialogueFloor,
-    Math.min(inferredLimit, scopedPlan.windowCount),
+    boundedStoryWindows,
+    dialogueRequiredWindows,
   )
   const plan = wholeWindowDuration(
-    Math.min(inferredLimit, inferredCount),
+    Math.min(maximumPlanWindows, inferredCount),
     windowSeconds,
     overlapSeconds,
     discardSeconds,
@@ -353,8 +476,8 @@ export function recommendAutoDuration(
   return {
     ...plan,
     reason: options.planningStyle === 'creative'
-      ? `Creative Auto gives the idea room for ${plan.windowCount} paced story windows.`
-      : `Auto sized ${plan.windowCount} ${plan.windowCount === 1 ? 'window' : 'windows'} from the visible beats and exact dialogue.`,
+      ? `Creative Auto gives the idea room for ${plan.windowCount} paced story windows${dialogueTurns > 0 ? `, including ${dialogueWords} spoken words across ${dialogueTurns} ${dialogueTurns === 1 ? 'turn' : 'turns'}` : ''}.`
+      : `Auto sized ${plan.windowCount} ${plan.windowCount === 1 ? 'window' : 'windows'} from ${visibleBeats} visible ${visibleBeats === 1 ? 'beat' : 'beats'}${dialogueTurns > 0 ? ` and ${dialogueWords} spoken words across ${dialogueTurns} ${dialogueTurns === 1 ? 'turn' : 'turns'}` : ''}.`,
     source: 'story_scope',
     inferredWindowLimit: inferredLimit,
   }

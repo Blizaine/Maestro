@@ -404,7 +404,7 @@ interface PersistedModeSettings {
   audioSubMode?: import('../types').AudioSubMode
   selectedModelPerAudioSubMode?: Partial<Record<import('../types').AudioSubMode, string>>
   h3OptimizationPreferences?: {
-    override_attention?: '' | 'sol'
+    override_attention?: '' | 'sol' | 'sla' | 'sdpa'
     skip_steps_cache_type?: '' | 'first_block'
     skip_steps_multiplier?: number
     skip_steps_start_step_perc?: number
@@ -873,9 +873,14 @@ const DEFAULT_ENABLED_MODELS = new Set([
   // MiniMax H3 Base: text, first/last-frame video, and native stereo audio.
   'minimax_h3',
   'minimax_h3_full',
+  // Experimental fused four-step Frames checkpoint. It is visible by
+  // default, but the ordinary H3/LTX selections below remain the active
+  // workflow defaults until a user explicitly chooses it.
+  'minimax_h3_fused_turbo',
   // MiniMax H3 Ref2VA: ordered image, video, and audio references.
   'minimax_h3_ref2va',
   'minimax_h3_ref2va_full',
+  'minimax_h3_ref2va_fused_turbo',
   // Audio — Speech
   'kugelaudio_0_open',
   'qwen3_tts_base',
@@ -901,7 +906,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
  * a user who then disables them stays disabled forever. (This is
  * deliberately narrower than auto-enabling every unknown model — only
  * the curated list's own additions are pushed.) */
-const DEFAULTS_VERSION = 10
+const DEFAULTS_VERSION = 11
 const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   // v1.2.0: the ACE-Step XL SFT pair; LM_4B becomes the music default.
   2: ['ace_step_v1_5_xl_sft', 'ace_step_v1_5_xl_sft_lm_4b'],
@@ -921,6 +926,8 @@ const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   9: ['ltx2_25'],
   // MiniMax-Music3 long-form stereo song generation.
   10: ['minimax_music3'],
+  // Experimental MATLOWAI fused four-step H3 Frames + References variants.
+  11: ['minimax_h3_fused_turbo', 'minimax_h3_ref2va_fused_turbo'],
 }
 const DEFAULTS_VERSION_KEY = 'maestro_defaults_version'
 
@@ -1448,7 +1455,7 @@ interface AppState {
   /** H3 accelerations live outside per-mode params so visiting Audio/Image
    *  cannot erase the user's Video optimization choices. */
   h3OptimizationPreferences: {
-    override_attention: '' | 'sol'
+    override_attention: '' | 'sol' | 'sla' | 'sdpa'
     skip_steps_cache_type: '' | 'first_block'
     skip_steps_multiplier?: number
     skip_steps_start_step_perc?: number
@@ -2055,6 +2062,7 @@ const defaultParams: GenerateParams = {
   skip_steps_cache_type: '',
   skip_steps_multiplier: 0.08,
   skip_steps_start_step_perc: 25,
+  _duration_planning_mode: 'auto',
   settings_version: 2.52,
 }
 
@@ -2688,6 +2696,8 @@ function _pairedH3CreateModel(
     minimax_h3_ref2va: { firstLast: 'minimax_h3', omni: 'minimax_h3_ref2va' },
     minimax_h3_full: { firstLast: 'minimax_h3_full', omni: 'minimax_h3_ref2va_full' },
     minimax_h3_ref2va_full: { firstLast: 'minimax_h3_full', omni: 'minimax_h3_ref2va_full' },
+    minimax_h3_fused_turbo: { firstLast: 'minimax_h3_fused_turbo', omni: 'minimax_h3_ref2va_fused_turbo' },
+    minimax_h3_ref2va_fused_turbo: { firstLast: 'minimax_h3_fused_turbo', omni: 'minimax_h3_ref2va_fused_turbo' },
   }
   const pair = pairs[modelType]
   if (!pair) return null
@@ -3790,7 +3800,11 @@ export const useStore = create<AppState>((set, get) => ({
         h3OptimizationPreferences: {
           ...s.h3OptimizationPreferences,
           ...(key === 'override_attention' ? {
-            override_attention: value === 'sol' ? 'sol' as const : '' as const,
+            override_attention: (
+              value === 'sol' || value === 'sla' || value === 'sdpa'
+                ? value
+                : ''
+            ) as '' | 'sol' | 'sla' | 'sdpa',
           } : {}),
           ...(key === 'skip_steps_cache_type' ? {
             skip_steps_cache_type: value === 'first_block' ? 'first_block' as const : '' as const,
@@ -4917,8 +4931,13 @@ export const useStore = create<AppState>((set, get) => ({
       const h3Preferences = durableConfigured
         ? studioPreferences.h3_optimizations
         : saved?.h3OptimizationPreferences
+      const restoredH3Attention: '' | 'sol' | 'sla' | 'sdpa' = (
+        h3Preferences?.override_attention === 'sol'
+        || h3Preferences?.override_attention === 'sla'
+        || h3Preferences?.override_attention === 'sdpa'
+      ) ? h3Preferences.override_attention : ''
       const restoredH3OptimizationPreferences = {
-        override_attention: h3Preferences?.override_attention === 'sol' ? 'sol' as const : '' as const,
+        override_attention: restoredH3Attention,
         skip_steps_cache_type: h3Preferences?.skip_steps_cache_type === 'first_block'
           ? 'first_block' as const
           : '' as const,
@@ -6952,13 +6971,18 @@ export const useStore = create<AppState>((set, get) => ({
     } else {
       delete params.ltx25_video_vae
     }
-    if (
+    if (state.modelOptions?.sla_attention) {
+      // The fused recipe may request SLA before its first Triton compile.
+      // Keep that intent even on unsupported hardware: the backend owns the
+      // advertised safe dense fallback and records which path actually ran.
+      params.override_attention = (
+        params.override_attention === 'sdpa' ? 'sdpa' : 'sla'
+      )
+    } else if (
       state.modelOptions?.sol_attention
       && state.modelOptions.sol_attention_status?.supported
     ) {
-      params.override_attention = (
-        params.override_attention === 'sol' ? 'sol' : ''
-      )
+      params.override_attention = params.override_attention === 'sol' ? 'sol' : ''
     } else {
       delete params.override_attention
     }
@@ -8653,6 +8677,21 @@ export const useStore = create<AppState>((set, get) => ({
             || options.ltx25_video_vae_choices[0].value
           )
         }
+      }
+      if (options.sla_attention) {
+        const requestedAttention = get().params.override_attention
+        paramUpdates.override_attention = requestedAttention === 'sdpa'
+          ? 'sdpa'
+          : 'sla'
+        // This checkpoint's acceleration adapters are already fused into
+        // its transformer. Never inherit an independent cache recipe across
+        // a model switch.
+        paramUpdates.skip_steps_cache_type = ''
+      } else if (
+        get().params.override_attention === 'sla'
+        || get().params.override_attention === 'sdpa'
+      ) {
+        paramUpdates.override_attention = ''
       }
       if (options.minimax_h3_turbo) {
         const turboPresets = options.minimax_h3_turbo.presets?.length
@@ -11089,6 +11128,8 @@ export const useStore = create<AppState>((set, get) => ({
         favorite: o.favorite || false,
         size: o.size,
         created_at: o.created_at,
+        metadata_ready: o.metadata_ready,
+        metadata_updated_at: o.metadata_updated_at,
       }))
       set({ outputs, outputsTotal: total, selectedOutput: 0, outputsLoading: false })
       if (outputs.length > 0) {
@@ -11119,6 +11160,8 @@ export const useStore = create<AppState>((set, get) => ({
         favorite: o.favorite || false,
         size: o.size,
         created_at: o.created_at,
+        metadata_ready: o.metadata_ready,
+        metadata_updated_at: o.metadata_updated_at,
       }))
       // Deduplicate (in case items shifted during generation)
       const existingNames = new Set(current.map(o => o.name))
@@ -11145,13 +11188,31 @@ export const useStore = create<AppState>((set, get) => ({
         favorite: o.favorite || false,
         size: o.size,
         created_at: o.created_at,
+        metadata_ready: o.metadata_ready,
+        metadata_updated_at: o.metadata_updated_at,
       }))
       const current = get().outputs
       const currentNames = new Set(current.map(o => o.name))
       const newItems = fresh.filter(o => !currentNames.has(o.name))
-      if (newItems.length > 0) {
-        // Prepend new items (newest first) and shift selectedOutput to keep the same item active
-        const merged = [...newItems, ...current]
+      const freshByName = new Map(fresh.map(output => [output.name, output]))
+      // Existing files can gain their authoritative sidecar after first being
+      // shown from embedded metadata. Merge refreshed entries as well as new
+      // ones so mounted cards observe metadata_ready changing false -> true.
+      let metadataChanged = false
+      const refreshedCurrent = current.map(output => {
+        const freshOutput = freshByName.get(output.name)
+        if (!freshOutput) return output
+        if (
+          freshOutput.metadata_ready !== output.metadata_ready
+          || freshOutput.metadata_updated_at !== output.metadata_updated_at
+        ) {
+          metadataChanged = true
+          return freshOutput
+        }
+        return output
+      })
+      if (newItems.length > 0 || metadataChanged) {
+        const merged = [...newItems, ...refreshedCurrent]
         const sel = get().selectedOutput
         set({ outputs: merged, outputsTotal: total, selectedOutput: sel + newItems.length })
       }
@@ -11591,7 +11652,11 @@ export const useStore = create<AppState>((set, get) => ({
     (newParams as Record<string, unknown>).audio_guidance_scale = (p.audio_guidance_scale as number) ?? undefined
     // H3 optimization controls are a cohesive saved recipe. Explicit off
     // values matter: undefined would retain the clip selected before this one.
-    newParams.override_attention = p.override_attention === 'sol' ? 'sol' : ''
+    newParams.override_attention = (
+      p.override_attention === 'sol'
+      || p.override_attention === 'sla'
+      || p.override_attention === 'sdpa'
+    ) ? p.override_attention : ''
     newParams.skip_steps_cache_type = (
       p.skip_steps_cache_type === 'first_block' ? 'first_block' : ''
     )
@@ -11609,6 +11674,34 @@ export const useStore = create<AppState>((set, get) => ({
     newParams.minimax_h3_turbo_preset = restoredTurboPreset?.id
     newParams.minimax_h3_text_encoder = restoredTextEncoder
     newParams.ltx25_video_vae = restoredLtx25VideoVae
+    if (restoredModelOptions?.minimax_h3_fused_turbo) {
+      const minSteps = Math.max(
+        1,
+        Math.round(Number(restoredModelOptions.inference_steps_min ?? 4)),
+      )
+      const maxSteps = Math.max(
+        minSteps,
+        Math.round(Number(restoredModelOptions.inference_steps_max ?? 8)),
+      )
+      const restoredSteps = Number(p.num_inference_steps)
+      const defaultSteps = Number(
+        restoredModelOptions.default_num_inference_steps ?? 4,
+      )
+      newParams.num_inference_steps = Math.max(
+        minSteps,
+        Math.min(
+          maxSteps,
+          Math.round(Number.isFinite(restoredSteps) ? restoredSteps : defaultSteps),
+        ),
+      )
+      newParams.guidance_scale = restoredModelOptions.default_guidance_scale ?? 1
+      newParams.activated_loras = []
+      newParams.loras_multipliers = ''
+      newParams.minimax_h3_turbo_mode = false
+      newParams.minimax_h3_turbo_preset = undefined
+      newParams.skip_steps_cache_type = ''
+      newParams.override_attention = p.override_attention === 'sdpa' ? 'sdpa' : 'sla'
+    }
     const restoredCustomSettings = (
       p.custom_settings
       && typeof p.custom_settings === 'object'
@@ -12487,6 +12580,13 @@ export const useStore = create<AppState>((set, get) => ({
       && directorVideoOptions.sol_attention_status?.supported
       && directorH3SolModeByModel[selectedVideoModel] === true
     )
+    const directorSlaEnabled = Boolean(
+      directorVideoOptions?.sla_attention
+      && (
+        directorH3SolModeByModel[selectedVideoModel]
+        ?? directorVideoOptions.sla_attention_default
+      ) !== false
+    )
     const directorFirstBlockCacheEnabled = Boolean(
       directorVideoOptions?.first_block_cache
       && directorH3FirstBlockCacheByModel[selectedVideoModel] === true
@@ -12680,13 +12780,26 @@ export const useStore = create<AppState>((set, get) => ({
         resolution: directorVideoResolution,
         minimax_h3_turbo_mode: directorTurboEnabled,
         minimax_h3_turbo_preset: directorTurboPreset?.id,
-        override_attention: directorSolEnabled ? 'sol' : '',
+        override_attention: directorSlaEnabled
+          ? 'sla'
+          : directorVideoOptions?.sla_attention
+            ? 'sdpa'
+            : directorSolEnabled
+              ? 'sol'
+              : '',
         skip_steps_cache_type: directorFirstBlockCacheEnabled ? 'first_block' : '',
         skip_steps_multiplier: directorCacheMultiplier,
         skip_steps_start_step_perc: directorCacheWarmup,
         ...(directorFixedMediaStrength ? { input_video_strength: 1.0 } : {}),
       },
-      video_loras: savedLoraPerMode.video || {},
+      video_loras: directorVideoOptions?.loras_disabled
+        ? {
+            activated_loras: [],
+            loras_multipliers: '',
+            loraWeights: {},
+            availableLoras: [],
+          }
+        : savedLoraPerMode.video || {},
       video_spatial_upsampling: directorVideoSpatialUpsampling,
       video_film_grain_intensity: directorVideoFilmGrainIntensity,
       video_film_grain_saturation: directorVideoFilmGrainSaturation,

@@ -83,7 +83,7 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
-### v2.0.0 (2026-09-02)
+### v2.0.0 (2026-09-03)
 
 **A complete create-to-edit workflow**
 - Added the new full-screen **Editor Mode** with multi-track video, audio, and title editing; 21:9 canvases; canvas transforms and snap guides; transitions, speed, opacity, volume, fonts, undo/redo, project history, and hardware-aware export.
@@ -93,8 +93,9 @@ The version you are running is shown next to the Maestro title in the UI. To upd
 
 **MiniMax H3, references, and local intelligence**
 - Added H3's native 768p tier, 21:9 canvases, and Regenerate 2K workflow, plus Alibaba PAI FL2VA and Ref2VA acceleration presets with native PDD support.
+- Added optional experimental **H3 Fused 4-Step** Frames and References models. Both share one pinned INT8 ConvRot checkpoint, default to the published four-evaluation recipe, expose 4-8 Total Steps, and use SLA sparse attention with a safe dense fallback.
 - Added a reusable Omni character library for named image + voice or video references, automatic reference-duration budgeting, and stronger reference isolation so identity media is not mistaken for a start frame. Exact Subject/Speaker bindings keep each character's face, voice, and dialogue together and reject phantom subjects.
-- Rebuilt H3 prompt planning around causal story continuity, exact dialogue preservation, official Context-IR guidance, model-aware token fitting, and safer multi-window continuation.
+- Rebuilt H3 prompt planning around causal story continuity, exact dialogue preservation, official Context-IR guidance, model-aware token fitting, and safer multi-window continuation. Faithful Studio planning now keeps the user's event/dialogue schedule authoritative while the LLM concentrates on cinematography.
 - Added Qwen3.8 27B Uncensored with creative thinking controls, prompt-enhancement telemetry, and non-thinking structured-output paths.
 
 **Remote workflow and release polish**

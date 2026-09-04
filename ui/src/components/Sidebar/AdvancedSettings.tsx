@@ -44,6 +44,11 @@ const H3_LONG_SEQUENCE_EXPERIMENTS = [
   },
 ] as const
 
+// Keep the diagnostic controls and runtime wiring available for future A/B
+// work, but do not expose unfinished long-sequence experiments in releases.
+// Flip this local development flag only while actively running those tests.
+const H3_LONG_SEQUENCE_TESTS_VISIBLE = false
+
 function PresetManager() {
   const presets = useStore(s => s.presets)
   const loadPresets = useStore(s => s.loadPresets)
@@ -261,7 +266,13 @@ export function useAdvancedActiveItems(): string[] {
   const items: string[] = []
   if (sidebarMode === 'director') {
     if (directorTurboMode[directorVideoModel] === true) items.push('H3 Turbo')
-    if (directorSolMode[directorVideoModel] === true) items.push('H3 Sol Engine')
+    if (directorSolMode[directorVideoModel] === true) {
+      items.push(
+        directorVideoModel.includes('fused_turbo')
+          ? 'H3 SLA'
+          : 'H3 Sol Engine',
+      )
+    }
     if (directorFirstBlockCache[directorVideoModel] === true) items.push('First Block Cache')
     return items
   }
@@ -282,7 +293,8 @@ export function useAdvancedActiveItems(): string[] {
     && slidingWindowLocked
   ) items.push('H3 window override')
   if (
-    String(modelOptions?.architecture || '').startsWith('minimax_h3')
+    H3_LONG_SEQUENCE_TESTS_VISIBLE
+    && String(modelOptions?.architecture || '').startsWith('minimax_h3')
     && modelOptions?.omni_reference !== true
     && params.minimax_h3_multi_window === true
   ) {
@@ -403,7 +415,8 @@ export function AdvancedSettings() {
   )
   const isH3 = String(modelOptions?.architecture || '').startsWith('minimax_h3')
   const showH3LongSequenceExperiments = (
-    isVideo
+    H3_LONG_SEQUENCE_TESTS_VISIBLE
+    && isVideo
     && isH3
     && modelOptions?.omni_reference !== true
     && params.minimax_h3_multi_window === true
@@ -412,6 +425,21 @@ export function AdvancedSettings() {
     !isAudioOnly
     && (isScailEdit || !modelOptions?.lock_inference_steps)
   )
+  const inferenceStepsMin = Math.max(
+    1,
+    Math.round(Number(modelOptions?.inference_steps_min ?? 1)),
+  )
+  const inferenceStepsMax = Math.max(
+    inferenceStepsMin,
+    Math.round(Number(modelOptions?.inference_steps_max ?? 50)),
+  )
+  const setInferenceSteps = (value: number) => {
+    if (!Number.isFinite(value)) return
+    setParam(
+      'num_inference_steps',
+      Math.max(inferenceStepsMin, Math.min(inferenceStepsMax, Math.round(value))),
+    )
+  }
   const showGuidanceScale = (
     !isAudioOnly
     && (
@@ -514,7 +542,12 @@ export function AdvancedSettings() {
               {/* Keep creative adapters near the top so users can choose them
                   before working through the lower-level tuning controls.
                   Official Outpaint owns its stage-one-only IC-LoRA schedule. */}
-              {!isOutpaint && <LoraSelector />}
+              {!isOutpaint && !modelOptions?.loras_disabled && <LoraSelector />}
+              {!isOutpaint && modelOptions?.loras_disabled && (
+                <p className="rounded-lg border border-amber-500/25 bg-amber-500/8 px-3 py-2 text-[9px] leading-relaxed text-text-muted">
+                  This fused four-step checkpoint already contains its acceleration and style adapters, so additional LoRAs are disabled.
+                </p>
+              )}
 
               <LtxFramesExperimentalControls />
 
@@ -851,7 +884,10 @@ export function AdvancedSettings() {
 
               {/* Stage 2 Steps */}
               {/* Pipeline Mode Toggle — distilled LTX models only */}
-              {!isScailEdit && modelOptions?.lock_inference_steps && (
+              {!isScailEdit
+                && modelOptions?.lock_inference_steps
+                && String(modelOptions.architecture || '').toLowerCase().startsWith('ltx2')
+                && (
                 <div className="space-y-3">
                   {/* Single / 2-Stage / 3-Stage segmented control — mutually exclusive */}
                   <div>
@@ -1029,25 +1065,35 @@ export function AdvancedSettings() {
               {showInferenceSteps && (
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
-                    <label className="text-[11px] text-text-muted uppercase tracking-wider">Inference Steps</label>
+                    <label className="text-[11px] text-text-muted uppercase tracking-wider">
+                      {modelOptions?.inference_steps_label || 'Inference Steps'}
+                    </label>
                     <input
                       type="number"
+                      min={inferenceStepsMin}
+                      max={inferenceStepsMax}
+                      step={1}
                       value={params.num_inference_steps}
                       disabled={h3TurboMode}
-                      onChange={e => setParam('num_inference_steps', Number(e.target.value))}
+                      onChange={e => setInferenceSteps(Number(e.target.value))}
                       className="w-16 bg-bg-tertiary border border-border rounded px-2 py-0.5 text-xs text-text-primary text-center focus:outline-none focus:border-accent-blue disabled:cursor-not-allowed disabled:opacity-50"
                     />
                   </div>
                   <input
-                    type="range" min={1} max={50} step={1}
+                    type="range" min={inferenceStepsMin} max={inferenceStepsMax} step={1}
                     value={params.num_inference_steps}
                     disabled={h3TurboMode}
-                    onChange={e => setParam('num_inference_steps', Number(e.target.value))}
+                    onChange={e => setInferenceSteps(Number(e.target.value))}
                     className="w-full disabled:cursor-not-allowed disabled:opacity-50"
                   />
                   {h3TurboMode && (
                     <p className="text-[9px] text-text-muted mt-0.5">
                       Turbo mode locks this preset to {modelOptions?.minimax_h3_turbo?.steps} steps.
+                    </p>
+                  )}
+                  {!h3TurboMode && modelOptions?.inference_steps_help && (
+                    <p className="text-[9px] text-text-muted mt-0.5">
+                      {modelOptions.inference_steps_help}
                     </p>
                   )}
                   {isScailFast && (

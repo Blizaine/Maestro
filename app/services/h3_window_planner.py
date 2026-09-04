@@ -403,7 +403,8 @@ def _dialogue_sentence(item: Any, speaker_ids: dict[str, str]) -> str:
         delivery = "says in an off-screen voiceover"
     if not re.search(
         r"\b(?:speaks?|says?|asks?|replies?|responds?|whispers?|shouts?|"
-        r"yells?|declares?|states?|tells?|calls?\s+out)\b",
+        r"yells?|declares?|states?|tells?|calls?\s+out|mumbles?|murmurs?|"
+        r"mutters?|muffles?)\b",
         delivery,
         flags=re.IGNORECASE,
     ):
@@ -631,19 +632,6 @@ def compile_h3_window_prompts(
             if position == 0
             else "Begin by matching the supplied previous frame exactly; do not restart, recap, or repeat earlier action."
         )
-        cast_handoff_instruction = (
-            ""
-            if position == 0
-            else (
-                "Every principal still present at this boundary is already in "
-                "the scene in their last established position, whether visible "
-                "or briefly off camera. Preserve the same identity instances and "
-                "spatial relationships. A cut or reframe may reveal someone "
-                "already there but must not turn that reveal into a new entrance. "
-                "Do not replay completed entrances or blocking; anyone already "
-                "gone remains absent."
-            )
-        )
         if sequence_shape == "ongoing":
             outcome_instruction = (
                 "Carry the requested motion cleanly across this boundary without settling or restarting."
@@ -742,6 +730,55 @@ def compile_h3_window_prompts(
         pacing_sentence = f"Coverage is {coverage}; pacing is {pacing}."
         if "slow motion" not in pacing.casefold():
             pacing_sentence += " Slow motion occurs only when explicitly requested."
+        incoming_handoff_cast = (
+            [
+                _compact(name, 80)
+                for name in (
+                    windows[position - 1].get("continuity_handoff_cast") or []
+                )
+                if _compact(name, 80)
+            ]
+            if position > 0 and isinstance(windows[position - 1], dict)
+            else []
+        )
+        incoming_handoff = ""
+        if incoming_handoff_cast:
+            incoming_names = ", ".join(incoming_handoff_cast)
+            incoming_handoff = (
+                f"Previously established principals {incoming_names} keep their "
+                "exact identity and wardrobe if visible or returning; do not "
+                "duplicate them, redesign them, or replay an entrance."
+            )
+        elif position > 0:
+            # Compatibility for reviewed/saved plans created before the
+            # introduced-cast ledger was stored.
+            incoming_handoff = (
+                "Every principal already present stays the same person in the "
+                "same position, including anyone briefly off camera; a reframe "
+                "must not create a new entrance."
+            )
+        elif position > 0:
+            # Compatibility for reviewed/saved plans created before the
+            # introduced-cast ledger was stored.
+            incoming_handoff = (
+                "Every principal already present stays the same person in the "
+                "same position, including anyone briefly off camera; a reframe "
+                "must not create a new entrance."
+            )
+        elif position > 0:
+            # Compatibility for reviewed/saved plans created before the
+            # introduced-cast ledger was stored.
+            incoming_handoff = (
+                "Every principal already present stays the same person in the "
+                "same position, including anyone briefly off camera; a reframe "
+                "must not create a new entrance."
+            )
+        blocking_instruction = (
+            "Cuts change camera angle only; preserve the same set, furniture, "
+            "and subject positions unless assigned action moves them. Never "
+            "replay an entrance."
+            if len(shots) > 1 else ""
+        )
         preamble = " ".join(
             part
             for part in (
@@ -753,7 +790,8 @@ def compile_h3_window_prompts(
                     if position > 0 else
                     f"At 0.00 seconds, {previous_closing}."
                 ),
-                cast_handoff_instruction,
+                incoming_handoff,
+                blocking_instruction,
                 pacing_sentence,
             )
             if part
@@ -766,13 +804,8 @@ def compile_h3_window_prompts(
             )
             for shot_index, shot in enumerate(shots)
         ]
-        visual_parts.extend(
-            [
-                silence,
-                outcome_instruction,
-                f"The segment ends with {closing}.",
-            ]
-        )
+        visual_parts.extend([silence, outcome_instruction])
+        visual_parts.append(f"The segment ends with {closing}.")
         soundscape = ambient
         if position > 0:
             soundscape += "; the same ambience continues seamlessly without restarting"

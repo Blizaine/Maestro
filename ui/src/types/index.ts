@@ -64,6 +64,8 @@ export interface ModelDef {
   // store auto-adds these models to enabledModels so they appear in
   // selectors without the user having to enable each one manually.
   nsfw_only?: boolean
+  /** Model is a self-contained baked recipe and cannot accept extra LoRAs. */
+  loras_disabled?: boolean
 }
 
 export interface Resolution {
@@ -102,7 +104,7 @@ export interface GenerateParams {
   /** Percentage of denoising steps to run before caching may begin. */
   skip_steps_start_step_perc?: number
   /** Per-generation attention override. Sol is H3-only and experimental. */
-  override_attention?: '' | 'sol'
+  override_attention?: '' | 'sol' | 'sla' | 'sdpa'
   guidance_phases?: number
   video_prompt_type?: string
   audio_prompt_type?: string
@@ -407,6 +409,10 @@ export interface OutputFile {
   favorite: boolean
   size: number
   created_at: number
+  /** True once the final output sidecar exists (rather than embedded temp metadata only). */
+  metadata_ready?: boolean
+  /** Sidecar modification time used to invalidate an in-progress metadata view. */
+  metadata_updated_at?: number | null
 }
 
 export type AppMode = 'director' | 'studio' | 'editor'
@@ -754,6 +760,27 @@ export interface ModelOptions {
     minimum_triton?: string
     first_run_compiles_kernels?: boolean
   } | null
+  sla_attention?: boolean
+  sla_attention_default?: boolean
+  sla_attention_status?: {
+    installed: boolean
+    supported: boolean
+    reason?: string | null
+    capability?: string
+    triton_version?: string | null
+    minimum_triton?: string
+    first_run_compiles_kernels?: boolean
+    safe_dense_fallback?: boolean
+  } | null
+  sla_attention_config?: {
+    sparsity_ratio: number
+    block_size: number
+    min_seq_len: number
+    dense_last_steps: number
+    protect_audio: boolean
+  } | null
+  minimax_h3_fused_turbo?: boolean
+  loras_disabled?: boolean
   skip_steps_multiplier_choices?: [string, number][] | null
   skip_steps_multiplier_label?: string
   default_skip_steps_multiplier?: number
@@ -764,6 +791,10 @@ export interface ModelOptions {
   /** Repair a standalone uploaded soundtrack whose hidden source mode was lost. */
   infer_audio_prompt_from_guide?: boolean
   lock_inference_steps: boolean
+  inference_steps_min?: number
+  inference_steps_max?: number
+  inference_steps_label?: string
+  inference_steps_help?: string
   lock_guidance_scale: boolean
   no_negative_prompt: boolean
   i2v_class: boolean

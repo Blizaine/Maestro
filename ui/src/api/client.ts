@@ -47,6 +47,10 @@ export interface ApiOutput {
   favorite?: boolean
   size: number
   created_at: number
+  /** True once the authoritative .meta.json sidecar has been published. */
+  metadata_ready?: boolean
+  /** Sidecar mtime; changes when final metadata replaces an in-progress view. */
+  metadata_updated_at?: number | null
   url: string
   workspace?: string
   /** Edit-mode sub-classification (retake / inpaint / outpaint / restyle /
@@ -262,7 +266,7 @@ export interface StudioPreferenceSettings {
   selected_model_per_mode?: Record<string, string>
   selected_model_per_audio_sub_mode?: Record<string, string>
   h3_optimizations?: {
-    override_attention?: '' | 'sol'
+    override_attention?: '' | 'sol' | 'sla' | 'sdpa'
     skip_steps_cache_type?: '' | 'first_block'
     skip_steps_multiplier?: number
     skip_steps_start_step_perc?: number
@@ -723,7 +727,10 @@ export async function fetchOutputMetadata(name: string): Promise<import('../type
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), PER_ATTEMPT_MS)
     try {
-      const res = await fetch(url, { signal: controller.signal })
+      // Generation media may expose embedded metadata before its authoritative
+      // sidecar is published. Never let the browser reuse that transient GET
+      // after the output list reports the completed sidecar.
+      const res = await fetch(url, { signal: controller.signal, cache: 'no-store' })
       if (!res.ok) return { source: 'none', params: null }
       return await res.json()
     } catch (e) {

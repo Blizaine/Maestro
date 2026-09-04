@@ -730,6 +730,7 @@ def list_models():
             # the entry — visibility gating happens client-side so a single
             # nsfw_mode toggle can show/hide without reloading models.
             "nsfw_only": bool(md.get("nsfw_only", False)),
+            "loras_disabled": bool(md.get("loras_disabled", False)),
         })
 
     return {"families": families, "models": models}
@@ -806,7 +807,7 @@ def _normalize_studio_preferences(values, current=None):
             raise ValueError("h3_optimizations must be an object.")
         override_attention = raw_h3.get("override_attention", "")
         cache_type = raw_h3.get("skip_steps_cache_type", "")
-        if override_attention not in ("", "sol"):
+        if override_attention not in ("", "sol", "sla", "sdpa"):
             raise ValueError("override_attention is invalid.")
         if cache_type not in ("", "first_block"):
             raise ValueError("skip_steps_cache_type is invalid.")
@@ -2085,7 +2086,10 @@ def _minimax_h3_turbo_option(model_def: dict) -> dict | None:
     """Return the managed Turbo preset exposed by a compatible H3 model."""
 
     architecture = str((model_def or {}).get("architecture") or "")
-    if not architecture.startswith("minimax_h3"):
+    if (
+        not architecture.startswith("minimax_h3")
+        or (model_def or {}).get("minimax_h3_fused_turbo", False)
+    ):
         return None
 
     from models.minimax_h3.turbo import (
@@ -2153,6 +2157,11 @@ def list_loras(model_type: str):
     md = wgp.get_model_def(model_type)
     if md is None:
         raise HTTPException(status_code=404, detail=f"Unknown model: {model_type}")
+    if md.get("loras_disabled", False):
+        return {
+            "loras": [],
+            "guidance_max_phases": md.get("guidance_max_phases", 1),
+        }
 
     try:
         lora_dir = wgp.get_lora_dir(model_type)
@@ -2195,6 +2204,11 @@ def list_loras_details(model_type: str):
     md = wgp.get_model_def(model_type)
     if md is None:
         raise HTTPException(status_code=404, detail=f"Unknown model: {model_type}")
+    if md.get("loras_disabled", False):
+        return {
+            "loras": [],
+            "guidance_max_phases": md.get("guidance_max_phases", 1),
+        }
     try:
         lora_dir = wgp.get_lora_dir(model_type)
     except Exception:
@@ -5906,6 +5920,19 @@ def get_model_options(model_type: str):
                 "supported": False,
                 "reason": f"Sol Engine runtime detection failed: {error}",
             }
+    _sla_attention_status = None
+    if md.get("sla_attention", False):
+        try:
+            from shared.attention import get_sla_attention_status
+
+            _sla_attention_status = get_sla_attention_status()
+        except Exception as error:
+            _sla_attention_status = {
+                "installed": False,
+                "supported": False,
+                "reason": f"H3 SLA runtime detection failed: {error}",
+                "safe_dense_fallback": True,
+            }
 
     return {
         "model_type": model_type,
@@ -5922,6 +5949,10 @@ def get_model_options(model_type: str):
         "first_block_cache": md.get("first_block_cache", False),
         "sol_attention": md.get("sol_attention", False),
         "sol_attention_status": _sol_attention_status,
+        "sla_attention": md.get("sla_attention", False),
+        "sla_attention_default": md.get("sla_attention_default", False),
+        "sla_attention_status": _sla_attention_status,
+        "sla_attention_config": md.get("sla_attention_config"),
         "skip_steps_multiplier_choices": [
             [str(choice[0]), float(choice[1])]
             for choice in md.get("skip_steps_multiplier_choices", [])
@@ -5946,6 +5977,12 @@ def get_model_options(model_type: str):
             "infer_audio_prompt_from_guide", False
         ),
         "lock_inference_steps": md.get("lock_inference_steps", False),
+        "inference_steps_min": md.get("inference_steps_min", 1),
+        "inference_steps_max": md.get("inference_steps_max", 50),
+        "inference_steps_label": md.get(
+            "inference_steps_label", "Inference Steps"
+        ),
+        "inference_steps_help": md.get("inference_steps_help", ""),
         "lock_guidance_scale": md.get("lock_guidance_scale", False),
         "no_negative_prompt": md.get("no_negative_prompt", False),
         "i2v_class": md.get("i2v_class", False),
@@ -5988,6 +6025,10 @@ def get_model_options(model_type: str):
             "fast",
         ),
         "minimax_h3_turbo": _minimax_h3_turbo_option(md),
+        "minimax_h3_fused_turbo": md.get(
+            "minimax_h3_fused_turbo", False
+        ),
+        "loras_disabled": md.get("loras_disabled", False),
         "minimax_h3_runtime_advisory": _minimax_h3_runtime_advisory(md),
         "minimax_h3_media_sources": md.get(
             "minimax_h3_media_sources", False
@@ -10059,6 +10100,18 @@ async def _prepare_generation_submission(
             )
         body["minimax_h3_text_encoder"] = selected_encoder
         try:
+            if _generation_model_def.get("minimax_h3_fused_turbo", False):
+                from models.minimax_h3.fused_turbo import (
+                    normalize_fused_h3_request,
+                )
+
+                removed_accelerators = normalize_fused_h3_request(body)
+                if removed_accelerators:
+                    print(
+                        "[MiniMax H3 Fused] Removed "
+                        f"{removed_accelerators} stale managed Turbo/PDD "
+                        "selection(s) after the model switch."
+                    )
             from models.minimax_h3.turbo import (
                 normalize_minimax_h3_turbo_request,
             )
@@ -27082,6 +27135,13 @@ def list_outputs(limit: int = 0, offset: int = 0, favorites_only: bool = False, 
             "mode": meta.get("generation_mode"),
             "edit_sub_mode": params.get("edit_sub_mode"),
             "multi_clip_info": params.get("multi_clip_info"),
+            # A media file can become visible while a multi-window job is
+            # still writing it, before Maestro publishes the authoritative
+            # sidecar.  Surface this transition so an already-mounted gallery
+            # card can replace temporary embedded generation metadata with the
+            # final source-prompt/window-plan provenance.
+            "metadata_ready": True,
+            "metadata_updated_at": os.path.getmtime(meta_path),
         }
         mci = sidecar_cache[name]["multi_clip_info"]
         if mci and mci.get("group_id"):
@@ -27130,6 +27190,8 @@ def list_outputs(limit: int = 0, offset: int = 0, favorites_only: bool = False, 
             "workspace": browsed_workspace,
             "size": size,
             "created_at": mtime,
+            "metadata_ready": bool(cached.get("metadata_ready")),
+            "metadata_updated_at": cached.get("metadata_updated_at"),
             "url": f"/api/v1/file/{name}",
         })
 

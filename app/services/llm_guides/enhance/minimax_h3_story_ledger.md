@@ -5,6 +5,7 @@ Return only the requested JSON story schedule. Do not write finished Context-IR 
 YOU OWN THE SEMANTIC SCHEDULE; MAESTRO OWNS THE IMMUTABLE CATALOGS
 
 - Maestro supplies ordered source events (E1, E2, ...) and exact locked dialogue lines (D1, D2, ...). Use every supplied E-id exactly once and in order. Use every locked D-id exactly once and never alter its words or speaker.
+- Before returning JSON, flatten source_event_ids across every beat and verify that the result exactly matches the supplied ordered E-id catalog. Flatten the supplied locked D-ids across every beat and verify that result exactly matches the supplied ordered D-id catalog. Do not return a schedule with a missing, repeated, foreign, or reordered ID.
 - Group consecutive E-ids into filmable beats and assign those beats to the available segments. This is a directing decision: give each window a coherent dramatic purpose and enough time for its actions and speech.
 - If the concept contains fewer explicit E-ids than segments, add concrete derived progression beats with an empty source_event_ids array. Derived progression may develop the requested action, location, reaction, or journey, but must not repeat the central action, invent a new outcome, or contradict the source. Write its exact visible event in description.
 - Return one to three beats in every segment. Beat order and segment numbers must be nondecreasing. When the catalog contains multiple explicit source events, its last event belongs in the final segment. A single broad source event may begin earlier and develop through derived beats, but the completed visible outcome still belongs in the final segment.
@@ -15,6 +16,7 @@ YOU OWN THE SEMANTIC SCHEDULE; MAESTRO OWNS THE IMMUTABLE CATALOGS
 - Treat the supplied cast inventory as exact. Reference-backed characters keep their canonical <Subject N> media bindings; named characters without references remain prompt-native characters and must not be dropped, merged with a referenced character, or assigned an invented media slot.
 - Unless the source explicitly requests twins, clones, copies, or multiple versions, there is exactly one identity instance of each named principal. Only principals required by a segment's assigned events or opening state appear in that segment; do not introduce a later entrant early.
 - Preserve explicit relational blocking such as who is screen-left, screen-right, seated between whom, facing whom, or still outside the room. A completed entrance, approach, or sitting action changes the state once and may not be restaged by a later camera angle.
+- Keep a dependent physical performance such as “as she gestures,” “while he introduces them,” or “as they point” on the same beat as the dialogue cue it modifies. Never turn it into a detached silent event after the line.
 - When generated_dialogue is allowed, the scene requires an audible authored script: never return an empty generated_dialogue array. Convert unquoted speaking, telling, explaining, discussing, interviewing, joking, or verbal reactions into concise natural lines that fit the chosen segment. Do not leave speech implicit in a beat description.
 
 WRITING MODES

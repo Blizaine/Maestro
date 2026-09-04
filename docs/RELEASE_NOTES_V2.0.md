@@ -145,6 +145,18 @@ optimizations, and the open/closed Characters and H3 Optimizations panels.
 - Added **21:9** output canvases and the **H3 Regenerate 2K** workflow.
 - Added separate Alibaba PAI eight-step acceleration presets for FL2VA and
   Ref2VA, including the official PDD parallel-head execution path.
+- Added optional experimental **H3 Fused 4-Step — Frames** and **References**
+  models. They share one revision-pinned 21 GB INT8 ConvRot checkpoint with the
+  Turbo, Mystic, and Ref2VA components already fused, so enabling both does not
+  duplicate the transformer download. They are visible in the model lists but
+  do not replace the user's selected model.
+- The fused models default to the published four-evaluation `res_multistep`
+  recipe. Advanced exposes 4-8 Total Steps for testing additional refinement,
+  while preventing incompatible Turbo LoRAs, Sol, or First Block Cache from
+  being stacked on an already fused checkpoint.
+- Added an H3 SLA sparse-attention backend for the fused workflow. It is used
+  automatically when its CUDA/Triton path is compatible and falls back to
+  dense SDPA rather than failing the generation.
 - Improved Omni reference isolation so a character reference is not silently
   interpreted as the opening frame.
 - Added a reusable named character library. Save an image and voice reference,
@@ -180,7 +192,12 @@ dialogue table reads, locked spoken lines, conversation-aware shot packing, and
 explicit opening/closing states improve the feeling that Director is making one
 film rather than a collection of unrelated clips. Token fitting is based on the
 actual tokenizer and prompt structure instead of a false universal 512-token
-limit.
+limit. In Faithful Studio mode, Maestro now owns the immutable event/dialogue
+schedule and asks the LLM for one bounded cinematic treatment rather than a
+second competing story plan. This prevents a previous enhanced prompt,
+duplicate character entrance, or failed model-authored schedule from replacing
+the user's source story while preserving the LLM's camera, tone, and pacing
+choices.
 
 ## Better local writing with Qwen3.8
 
@@ -249,4 +266,4 @@ select **Secure Remote Access (Tailscale)**.
 The v2.0 release candidate passes the production React build, the complete
 frontend ESLint policy, launcher syntax checks, JSON grammar regression runner,
 clean-repository boundary guard, first-party Python compile checks, and the
-complete 1,207-test Python suite.
+complete 1,240-test Python suite.

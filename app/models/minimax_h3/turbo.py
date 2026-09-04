@@ -379,10 +379,18 @@ def normalize_minimax_h3_turbo_request(
 
 
 def h3_scheduler_grid_points(requested_steps: int, *, turbo_active: bool) -> int:
-    """Convert the UI's requested evaluations to H3 sigma-grid points."""
+    """Convert the UI's requested evaluations to H3 sigma-grid points.
+
+    H3's scheduler includes the terminal clean sigma in its grid and therefore
+    performs one fewer model evaluation than there are grid points.  The UI
+    value is an evaluation count for every H3 mode, so every schedule needs the
+    additional terminal point.  ``turbo_active`` remains in the signature for
+    compatibility with existing callers and tests; Turbo previously applied
+    this correction on its own while standard H3 did not.
+    """
 
     requested_steps = int(requested_steps)
-    return requested_steps + 1 if turbo_active else requested_steps
+    return requested_steps + 1
 
 
 __all__ = [

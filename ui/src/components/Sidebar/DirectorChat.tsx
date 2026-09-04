@@ -32,7 +32,7 @@ function DirectorTargetDurationControl() {
   const aspectRatio = useStore(s => s.directorAspectRatio)
   const totalVramGb = useStore(s => s.systemStats?.gpu.vram_total_gb ?? 0)
   const [options, setOptions] = useState<ModelOptions | null>(null)
-  const [planningMode, setPlanningMode] = useState<'duration' | 'windows' | 'auto'>('duration')
+  const [planningMode, setPlanningMode] = useState<'duration' | 'windows' | 'auto'>('auto')
 
   useEffect(() => {
     let cancelled = false
@@ -2315,14 +2315,27 @@ function DirectorAdvancedAccordion() {
   const activeDirectorVideoOptions = directorVideoOptions?.model_type === videoModel
     ? directorVideoOptions
     : null
+  const videoStepsMin = Math.max(
+    1,
+    Math.round(Number(activeDirectorVideoOptions?.inference_steps_min ?? 1)),
+  )
+  const videoStepsMax = Math.max(
+    videoStepsMin,
+    Math.round(Number(activeDirectorVideoOptions?.inference_steps_max ?? 50)),
+  )
+  const clampVideoSteps = (value: number) => (
+    Math.max(videoStepsMin, Math.min(videoStepsMax, Math.round(value)))
+  )
   const rawDefaultVideoSteps = activeDirectorVideoOptions?.default_num_inference_steps
   const defaultVideoSteps = rawDefaultVideoSteps == null
     ? null
-    : Math.max(1, Math.min(50, Math.round(rawDefaultVideoSteps)))
+    : clampVideoSteps(rawDefaultVideoSteps)
   const configuredVideoSteps = videoStepsByModel[videoModel]
   const videoSteps = activeDirectorVideoOptions?.lock_inference_steps
     ? defaultVideoSteps
-    : (configuredVideoSteps ?? defaultVideoSteps)
+    : (configuredVideoSteps == null
+        ? defaultVideoSteps
+        : clampVideoSteps(configuredVideoSteps))
   const videoStepsLocked = activeDirectorVideoOptions?.lock_inference_steps === true
   const resolvedVideoResolution = resolveResolution(
     activeDirectorVideoOptions,
@@ -2476,7 +2489,9 @@ function DirectorAdvancedAccordion() {
 
             <div title="Applies to every newly generated Director shot and is saved with the project for later repair or regeneration.">
               <div className="flex items-center justify-between mb-1">
-                <label className="text-[11px] text-text-secondary">Inference steps</label>
+                <label className="text-[11px] text-text-secondary">
+                  {activeDirectorVideoOptions?.inference_steps_label || 'Inference steps'}
+                </label>
                 <div className="flex items-center gap-1.5">
                   {!videoStepsLocked && !turboSelected && defaultVideoSteps != null && configuredVideoSteps != null
                     && configuredVideoSteps !== defaultVideoSteps && (
@@ -2490,14 +2505,16 @@ function DirectorAdvancedAccordion() {
                   )}
                   <input
                     type="number"
-                    min={1}
-                    max={50}
+                    min={videoStepsMin}
+                    max={videoStepsMax}
                     step={1}
                     value={videoSteps ?? ''}
                     disabled={videoSteps == null || videoStepsLocked || turboSelected}
                     onChange={e => {
                       const value = Number(e.target.value)
-                      if (Number.isFinite(value)) setVideoSteps(videoModel, value)
+                      if (Number.isFinite(value)) {
+                        setVideoSteps(videoModel, clampVideoSteps(value))
+                      }
                     }}
                     className="w-14 bg-bg-tertiary border border-border rounded px-1.5 py-0.5 text-[11px] text-text-primary text-center focus:outline-none focus:border-accent-blue disabled:opacity-50"
                   />
@@ -2505,12 +2522,15 @@ function DirectorAdvancedAccordion() {
               </div>
               <input
                 type="range"
-                min={1}
-                max={50}
+                min={videoStepsMin}
+                max={videoStepsMax}
                 step={1}
                 value={videoSteps ?? 1}
                 disabled={videoSteps == null || videoStepsLocked || turboSelected}
-                onChange={e => setVideoSteps(videoModel, Number(e.target.value))}
+                onChange={e => setVideoSteps(
+                  videoModel,
+                  clampVideoSteps(Number(e.target.value)),
+                )}
                 className="w-full disabled:opacity-50"
               />
               <p className="text-[10px] text-text-muted mt-0.5">
@@ -2520,7 +2540,8 @@ function DirectorAdvancedAccordion() {
                   ? 'Fixed by this model.'
                   : videoSteps == null
                     ? 'Loading model default...'
-                    : `Director setting for this model${defaultVideoSteps === videoSteps ? ' (default)' : ''}.`}
+                    : activeDirectorVideoOptions?.inference_steps_help
+                      || `Director setting for this model${defaultVideoSteps === videoSteps ? ' (default)' : ''}.`}
               </p>
             </div>
 
@@ -2810,6 +2831,9 @@ function DirectorLoraAccordion() {
   // (flux2_klein_9b) instead of the active Studio model fixes that.
   const imageModel = useStore(s => s.selectedModelPerMode.image || 'flux2_klein_9b')
   const videoModel = useStore(s => s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1')
+  const videoLorasDisabled = useStore(s => s.models.find(
+    model => model.model_type === videoModel,
+  )?.loras_disabled === true)
   const shotImageSupport = useStore(s => s.models.find(
     model => model.model_type === videoModel,
   )?.director?.shot_image_support)
@@ -2857,7 +2881,7 @@ function DirectorLoraAccordion() {
         </div>
       )}
       {/* Video LoRAs */}
-      {videoModel && (
+      {videoModel && !videoLorasDisabled && (
         <div className="border border-border rounded-lg overflow-hidden">
           <button
             onClick={() => setVideoOpen(!videoOpen)}
@@ -2872,6 +2896,11 @@ function DirectorLoraAccordion() {
             </div>
           )}
         </div>
+      )}
+      {videoModel && videoLorasDisabled && (
+        <p className="rounded-lg border border-amber-500/25 bg-amber-500/8 px-2.5 py-2 text-[9px] leading-relaxed text-text-muted">
+          Video LoRAs are disabled because this model already contains its Turbo and Mystic adapters.
+        </p>
       )}
     </div>
   )

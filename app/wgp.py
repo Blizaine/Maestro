@@ -7766,6 +7766,28 @@ def generate_video(
         )
         send_cmd("exit")
         return True
+    elif attn == "sla" and not model_def.get("sla_attention", False):
+        send_cmd(
+            "info",
+            "H3 SLA is available only for compatible fused MiniMax H3 models.",
+        )
+        send_cmd("exit")
+        return True
+    elif attn == "sla" and attn not in override_attention_modes_supported:
+        from shared.attention import get_default_attention_mode, get_sla_attention_status
+
+        status = get_sla_attention_status()
+        attn = get_default_attention_mode()
+        print(
+            "[MiniMax H3 SLA] Requested sparse attention is unavailable "
+            f"({status.get('reason') or 'unsupported runtime'}); "
+            f"using {attn}."
+        )
+        send_cmd(
+            "info",
+            "H3 SLA is unavailable in this runtime; this generation will "
+            f"use the safe dense {attn} backend.",
+        )
     elif attn not in override_attention_modes_supported:
         send_cmd("info", f"You have selected attention mode '{attn}'. However it is not installed or supported on your system. You should either install it or switch to the default 'sdpa' attention.")
         send_cmd("exit")

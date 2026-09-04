@@ -24,7 +24,6 @@ module.exports = {
       sol_install: info.running("sol_install.js"),
       start: info.running("start.js"),
       start_sol: info.running("start_sol.js"),
-      start_classic: info.running("start_classic.js"),
       update: info.running("update.js"),
       huggingface_login: info.running("huggingface_login.js"),
       tailscale_setup: info.running("tailscale_setup.js"),
@@ -145,26 +144,6 @@ module.exports = {
           text: "Sol Runtime Terminal",
           href: "start_sol.js",
         }]
-      } else if (running.start_classic) {
-        let local = info.local("start_classic.js")
-        if (local && local.url) {
-          return [{
-            default: true,
-            icon: "fa-solid fa-rocket",
-            text: "Open Classic UI",
-            href: local.url,
-          }, {
-            icon: 'fa-solid fa-terminal',
-            text: "Terminal",
-            href: "start_classic.js",
-          }]
-        } else {
-          return [{
-            icon: 'fa-solid fa-terminal',
-            text: "Terminal",
-            href: "start_classic.js",
-          }]
-        }
       } else if (running.reset) {
         return [{
           default: true,
@@ -188,13 +167,6 @@ module.exports = {
             icon: "fa-solid fa-power-off",
             text: "Compiled (Faster but may not work)",
             href: "start.js",
-            params: {
-              compile: true
-            }
-          }, {
-            icon: "fa-solid fa-power-off",
-            text: "Classic Compiled",
-            href: "start_classic.js",
             params: {
               compile: true
             }

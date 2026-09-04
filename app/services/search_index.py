@@ -180,6 +180,10 @@ class SearchIndex:
             override_attention = str(params.get("override_attention") or "").lower()
             if override_attention == "sol":
                 searchable_parts.append("sol engine attention optimization")
+            elif override_attention == "sla":
+                searchable_parts.append("sla sparse attention fast h3 fasth3")
+            if "fused_turbo" in model.lower():
+                searchable_parts.append("fused fused 4-step fast h3 fasth3")
 
             # A few high-value scalar details make exact searches such as
             # "40 steps" and "seed 1234" useful without indexing every private

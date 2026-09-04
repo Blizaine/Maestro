@@ -34,6 +34,9 @@ class LongFormDurationUiTests(unittest.TestCase):
         director = (
             ROOT / "ui/src/components/Sidebar/DirectorChat.tsx"
         ).read_text(encoding="utf-8")
+        store = (
+            ROOT / "ui/src/stores/useStore.ts"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("DurationPlanningMode = 'duration' | 'windows' | 'auto'", planning)
         self.assertIn("wholeWindowDuration", planning)
@@ -44,11 +47,26 @@ class LongFormDurationUiTests(unittest.TestCase):
         self.assertIn("visibleActionBeatCount", planning)
         self.assertIn("const nonDialoguePrompt = prompt.replace", planning)
         self.assertIn("dialogueAttributionOnly", planning)
+        self.assertIn("productionHeadingOnly", planning)
+        self.assertIn("looksLikeSpeakerLabel", planning)
+        self.assertIn("analyzePromptTiming", planning)
+        self.assertIn("dialogueWords / 2.15", planning)
+        self.assertIn("timing.hasScreenplayDialogue", planning)
+        self.assertIn("dialogueRequiredWindows", planning)
+        self.assertIn("Vague inferred concepts are capped", control)
         self.assertNotIn("const sentences = prompt", planning)
-        self.assertIn("Auto · Beta", control)
+        self.assertIn("['auto', 'duration', 'windows']", control)
+        self.assertIn("mode === 'duration' ? 'Time' : 'Window'", control)
+        self.assertNotIn("Auto · Beta", control)
+        self.assertIn("_duration_planning_mode: 'auto'", store)
+        self.assertIn("s.params._duration_planning_mode ?? 'auto'", studio)
+        self.assertIn("useState<'duration' | 'windows' | 'auto'>('auto')", director)
         self.assertIn("WINDOW_COUNT_PRESETS = [1, 2, 3, 4, 6, 8]", control)
         self.assertIn("Exact window count", control)
-        self.assertIn("Timed media, explicit durations, and manual prompt lines", control)
+        self.assertIn(
+            "Timed media, explicit durations, manual prompt lines, and explicit screenplay dialogue",
+            control,
+        )
         self.assertIn("enablePlanningModes={isH3 || isLtx || supportsSlidingWindows}", studio)
         self.assertIn("autoSourceLabel={autoSourceLabel}", studio)
         self.assertNotIn("s.params.minimax_h3_references ?? []", studio)

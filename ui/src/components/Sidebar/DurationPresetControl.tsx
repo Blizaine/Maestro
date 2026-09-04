@@ -28,7 +28,7 @@ interface DurationPresetControlProps {
   disabled?: boolean
   modelLimitLabel?: string
   quantizeToWindows?: boolean
-  /** Add Duration / Windows / Auto selection for long-form video planning. */
+  /** Add Auto / Time / Window selection for long-form video planning. */
   enablePlanningModes?: boolean
   planningMode?: DurationPlanningMode
   onPlanningModeChange?: (mode: DurationPlanningMode) => void
@@ -68,7 +68,7 @@ export function DurationPresetControl({
   const inputRef = useRef<HTMLInputElement>(null)
   const [customText, setCustomText] = useState<string | null>(null)
   const [selectedPreset, setSelectedPreset] = useState<PresetSelection>(null)
-  const [internalPlanningMode, setInternalPlanningMode] = useState<DurationPlanningMode>('duration')
+  const [internalPlanningMode, setInternalPlanningMode] = useState<DurationPlanningMode>('auto')
   const effectivePlanningMode = enablePlanningModes
     ? (planningMode ?? internalPlanningMode)
     : 'duration'
@@ -170,7 +170,7 @@ export function DurationPresetControl({
 
       {enablePlanningModes && (
         <div className="grid grid-cols-3 rounded-lg border border-border bg-bg-secondary p-0.5" aria-label={`${label} planning mode`}>
-          {(['duration', 'windows', 'auto'] as DurationPlanningMode[]).map(mode => (
+          {(['auto', 'duration', 'windows'] as DurationPlanningMode[]).map(mode => (
             <button
               key={mode}
               type="button"
@@ -180,14 +180,14 @@ export function DurationPresetControl({
                 ? 'Choose a target runtime'
                 : mode === 'windows'
                   ? 'Choose the exact number of native generation windows'
-                  : `Let Maestro infer a bounded duration from timed media, manual prompt lines, exact dialogue, and story scope (inferred ideas max ${autoMaximumInferredWindows} windows)`}
+                  : `Let Maestro infer duration from timed media, manual prompt lines, exact dialogue, and story scope (vague concepts max ${autoMaximumInferredWindows} windows; explicit scripts may run longer)`}
               className={`rounded-md px-2 py-1.5 text-[10px] capitalize transition-colors disabled:opacity-40 ${
                 effectivePlanningMode === mode
                   ? 'bg-accent-blue/15 text-text-primary shadow-sm'
                   : 'text-text-muted hover:text-text-secondary'
               }`}
             >
-              {mode === 'auto' ? 'Auto · Beta' : mode}
+              {mode === 'auto' ? 'Auto' : mode === 'duration' ? 'Time' : 'Window'}
             </button>
           ))}
         </div>
@@ -365,7 +365,7 @@ export function DurationPresetControl({
           </div>
           <p className="mt-1 text-text-secondary">{autoPlan.reason}</p>
           <p className="mt-1 text-[9px] text-text-muted">
-            Timed media, explicit durations, and manual prompt lines are honored exactly. Inferred story scope is capped at {autoPlan.inferredWindowLimit} windows; choose Duration or Windows for longer jobs.
+            Timed media, explicit durations, manual prompt lines, and explicit screenplay dialogue are honored. Vague inferred concepts are capped at {autoPlan.inferredWindowLimit} windows; choose Time or Window for a different runtime.
           </p>
           {modelLimitLabel && <p className="mt-1 text-[9px] text-text-muted">{modelLimitLabel}</p>}
         </div>

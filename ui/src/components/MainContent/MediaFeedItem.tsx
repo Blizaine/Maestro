@@ -147,6 +147,22 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     return () => observer.disconnect()
   }, [file.name, metaLoaded])
 
+  // Multi-window media becomes gallery-visible before its final sidecar is
+  // necessarily written.  The first request can therefore return embedded
+  // runtime metadata whose `prompt` is the compiled per-window payload. Once
+  // the output listing reports the sidecar, replace that transient view with
+  // the authoritative source prompt, plan, and timing metadata.
+  useEffect(() => {
+    if (!metaLoaded || !file.metadata_ready || !meta || meta.source === 'sidecar') return
+    let cancelled = false
+    fetchOutputMetadata(file.name)
+      .then(nextMeta => {
+        if (!cancelled) setMeta(nextMeta)
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [file.name, file.metadata_ready, file.metadata_updated_at, metaLoaded, meta])
+
   // Pause video when scrolled out of view (but don't auto-play when scrolled in)
   useEffect(() => {
     if (!videoRef.current) return
@@ -158,8 +174,6 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const params = meta?.params as Record<string, unknown> | null
   const uploadFilenames = meta?.upload_filenames as Record<string, string> | undefined
 
-  const prompt = (params?._tts_original_prompt as string) || (params?.prompt as string) || ''
-  const originalPrompt = (params?._h3_original_prompt as string) || ''
   const h3WindowPlan = (
     params?.h3_window_plan && typeof params.h3_window_plan === 'object'
       ? params.h3_window_plan as Record<string, unknown>
@@ -186,6 +200,26 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     return []
   })()
   const effectivePromptPlan = h3WindowPlan || ltxWindowPlan
+  const rawPrompt = String(
+    params?._tts_original_prompt
+      || params?.prompt
+      || '',
+  )
+  const immutableWindowSourcePrompt = String(
+    effectivePromptPlan?.source_prompt
+      || params?._h3_original_prompt
+      || params?._ltx_original_prompt
+      || rawPrompt,
+  )
+  // Never label a compiled H3/LTX window payload as the source prompt. The
+  // planner's immutable source is authoritative even while only embedded
+  // in-progress metadata is available.
+  const prompt = effectiveWindowPrompts.length > 0
+    ? immutableWindowSourcePrompt
+    : rawPrompt
+  const originalPrompt = effectiveWindowPrompts.length > 0
+    ? ''
+    : String(params?._h3_original_prompt || params?._ltx_original_prompt || '')
   const effectivePromptPlannedBy = String(
     effectivePromptPlan?.planned_by || '',
   ).trim().toLowerCase()
@@ -239,13 +273,17 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   )
   const firstBlockEnabled = params?.skip_steps_cache_type === 'first_block'
   const solEnabled = String(params?.override_attention || '').toLowerCase() === 'sol'
+  const slaEnabled = String(params?.override_attention || '').toLowerCase() === 'sla'
+  const fusedFourStep = modelType.includes('fused_turbo')
   const h3Workflow = modelType.includes('minimax_h3')
     ? (modelType.includes('ref2va') ? 'Omni / Ref2VA' : 'First / Last / FL2VA')
     : ''
   const optimizationLabels = [
+    ...(fusedFourStep ? ['Fused 4-Step'] : []),
     ...(turboEnabled ? ['Turbo'] : []),
     ...(pddEnabled ? ['PDD'] : []),
     ...(solEnabled ? ['Sol Engine'] : []),
+    ...(slaEnabled ? ['SLA'] : []),
     ...(firstBlockEnabled ? ['First Block Cache'] : []),
   ]
 

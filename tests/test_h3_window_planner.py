@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import sys
 import unittest
 from unittest.mock import patch
@@ -464,15 +465,15 @@ class H3WindowPlannerTests(unittest.TestCase):
             continuation_prompt,
         )
         self.assertIn(
-            "Every principal still present at this boundary is already in the scene",
+            "Every principal already present stays the same person in the same position",
             continuation_prompt,
         )
         self.assertIn(
-            "must not turn that reveal into a new entrance",
+            "including anyone briefly off camera",
             continuation_prompt,
         )
         self.assertIn(
-            "Do not replay completed entrances or blocking",
+            "must not create a new entrance",
             continuation_prompt,
         )
         self.assertEqual(compiled[1]["opening_state"], first_closing)
@@ -986,6 +987,77 @@ class H3WindowPlannerTests(unittest.TestCase):
         self.assertIn("George Costanza has not yet entered", result["window_prompts"][0])
         self.assertIn("brisk, energetic real-time pacing", result["window_prompts"][0])
 
+    @patch("services.llm_service.generate", side_effect=RuntimeError("offline"))
+    def test_studio_faithful_nine_window_dense_screenplay_repackages_dialogue(self, _generate):
+        prompt = (
+            "George Costanza walks into the coffee shop on the TV show Friends. "
+            "Starts passionately talking to Joey.\n\n"
+            "Joey sits on the couch eating a muffin wearing a grey sweatshirt. "
+            "George Costanza bursts through the door, frantic, wearing a dark brown sport coat.\n\n"
+            "GEORGE: Joey! Maestro 2.0! It's here!\n"
+            "JOEY: Do I know you?\n"
+            "GEORGE: Forget who I am! There's an Editor now! Director, Studio, Editor—three "
+            "workspaces! A real timeline! Video layers, audio, titles, trimming, splitting, "
+            "fades, transforms, H.265, AV1—\n"
+            "JOEY: Are you selling me cable?\n"
+            "GEORGE: NO! You make something in Director, open the whole production in Editor, "
+            "every generated shot is already there! Music on its own track! You don't like a "
+            "clip? Send it back to Studio, AI-fix it, and the new take comes right back into the timeline!\n"
+            "JOEY: So…like editing?\n"
+            "GEORGE: YES, JOEY! EDITING! But with AI!\n"
+            "George drops into the chair opposite him.\n"
+            "GEORGE: Studio's cleaned up too. Video, image, audio—actual organized workflows. "
+            "And long-form generation! Thirty seconds, ten minutes, an hour! Maestro figures "
+            "out the windows, overlaps, dialogue timing—the whole thing!\n"
+            "JOEY: An hour? That seems…long.\n"
+            "GEORGE: IT'S A MOVIE, JOEY!\n"
+            "Everyone looks over.\n"
+            "GEORGE: And H3! Character library. Save a character's face and voice, give them a "
+            "name, Maestro keeps the right voice with the right person. No more two characters "
+            "suddenly swapping dialogue!\n"
+            "JOEY: That happens?\n"
+            "GEORGE: NOT ANYMORE!\n"
+            "George springs back up.\n"
+            "GEORGE: Plus notifications when renders finish, PWA, private remote access through "
+            "Tailscale, better ETAs that learn your hardware—\n"
+            "JOEY: Okay, seriously…who are you?\n"
+            "George freezes.\n"
+            "GEORGE: George Costanza.\n"
+            "JOEY: Oh.\n"
+            "Beat.\n"
+            "JOEY: And you made Maestro?\n"
+            "GEORGE: …No.\n"
+            "JOEY: Then why are you yelling at me?\n"
+            "George stares at him.\n"
+            "GEORGE: Because nobody else understands what's happening!\n"
+            "JOEY: I definitely don't.\n"
+            "GEORGE: EXACTLY!"
+        )
+        result = plan_h3_sliding_windows(
+            prompt,
+            model_type="minimax_h3_fl2va_full",
+            resolution="1280x704",
+            total_frames=2961,
+            window_frames=345,
+            overlap_frames=18,
+            fps=24,
+            planning_style="faithful",
+        )
+
+        self.assertEqual(result["window_count"], 9)
+        joined = "\n".join(result["window_prompts"])
+        locked = extract_locked_dialogue(prompt)
+        rendered_dialogue = re.findall(
+            r"<d>\[[^\]]+\]\s*(.*?)</d>",
+            joined,
+            flags=re.DOTALL,
+        )
+        self.assertEqual(
+            " ".join(rendered_dialogue),
+            " ".join(line["text"] for line in locked),
+        )
+        self.assertEqual(joined.count("bursts through the door"), 1)
+
     def test_opening_entrance_and_dialogue_require_timed_camera_phases(self):
         prompt = (
             "George Costanza walks into the coffee shop and approaches Joey. "
@@ -1109,6 +1181,78 @@ class H3WindowPlannerTests(unittest.TestCase):
             compiled[1]["prompt"],
         )
 
+    def test_compiler_preserves_returning_cast_without_forcing_an_outgoing_group_shot(self):
+        boundaries = compute_h3_window_boundaries(
+            672,
+            336,
+            fps=24,
+            overlap_frames=0,
+        )
+        plan = {
+            "subject_continuity": (
+                "George Costanza and Joey retain their established identities"
+            ),
+            "setting_continuity": "The same coffee shop",
+            "visual_continuity": "Natural sitcom coverage",
+            "initial_state": "George stands beside Joey on the couch",
+            "ambient_audio": "Coffee shop room tone",
+            "music": "N/A",
+            "windows": [
+                {
+                    "window": 1,
+                    "title": "George explains",
+                    "coverage": "multi-shot dialogue coverage",
+                    "pacing": "natural real-time pacing",
+                    "active_cast": ["George Costanza", "Joey"],
+                    "continuity_handoff_cast": ["George Costanza", "Joey"],
+                    "shots": [{
+                        "shot": 1,
+                        "start_seconds": 0,
+                        "end_seconds": 14,
+                        "transition": "opening composition",
+                        "framing": "close-up on George Costanza",
+                        "camera": "hold on George Costanza",
+                        "action": "George finishes explaining the new release",
+                        "dialogue": [],
+                        "sound_effects": "Coffee cups clink",
+                    }],
+                    "closing_state": "George finishes his explanation beside Joey",
+                },
+                {
+                    "window": 2,
+                    "title": "Joey responds",
+                    "coverage": "multi-shot dialogue coverage",
+                    "pacing": "natural real-time pacing",
+                    "active_cast": ["George Costanza", "Joey"],
+                    "continuity_handoff_cast": [],
+                    "shots": [{
+                        "shot": 1,
+                        "start_seconds": 0,
+                        "end_seconds": 14,
+                        "transition": "opening composition",
+                        "framing": "medium shot on Joey",
+                        "camera": "settle on Joey",
+                        "action": "Joey reacts to George",
+                        "dialogue": [],
+                        "sound_effects": "Coffee shop room tone",
+                    }],
+                    "closing_state": "Joey has reacted",
+                },
+            ],
+        }
+
+        compiled = compile_h3_window_prompts(plan, boundaries)
+
+        self.assertNotIn("During the final 1.00 seconds", compiled[0]["prompt"])
+        self.assertNotIn("continuity composition", compiled[0]["prompt"])
+        self.assertIn(
+            "Previously established principals George Costanza, Joey keep their exact identity and wardrobe",
+            compiled[1]["prompt"],
+        )
+        self.assertIn("if visible or returning", compiled[1]["prompt"])
+        self.assertIn("or replay an entrance", compiled[1]["prompt"])
+        self.assertNotIn("During the final 1.00 seconds", compiled[1]["prompt"])
+
     def test_contract_allows_local_cut_but_rejects_global_timeline_labels(self):
         prompt = (
             "Tom Welling as Clark Kent uses his powers to save Lana Lang "
@@ -1231,6 +1375,13 @@ class H3WindowPlannerTests(unittest.TestCase):
         self.assertIn("H3WindowPromptTextarea", prompt_input)
         self.assertIn("Generated window prompts", media_item)
         self.assertIn("AI window 1", media_item)
+        self.assertIn("effectivePromptPlan?.source_prompt", media_item)
+        self.assertIn("Never label a compiled H3/LTX window payload as the source prompt", media_item)
+        self.assertIn("file.metadata_ready", media_item)
+        self.assertIn("meta.source === 'sidecar'", media_item)
+        self.assertIn("metadata_ready", launch)
+        self.assertIn("metadata_updated_at", launch)
+        self.assertIn("cache: 'no-store'", (ROOT / "ui" / "src" / "api" / "client.ts").read_text(encoding="utf-8"))
         self.assertIn("textarea.scrollHeight", prompt_input)
         self.assertNotIn("max-h-[360px] overflow-y-auto", prompt_input)
         self.assertNotIn("min-h-[118px] resize-y", prompt_input)

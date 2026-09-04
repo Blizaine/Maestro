@@ -73,7 +73,8 @@ class TestStudioPreferencePersistence(unittest.TestCase):
         self.assertIn("studioVideoWorkflow: restoredVideoWorkflow", store)
         self.assertIn("audioSubMode: restoredAudioSubMode", store)
         self.assertIn("selectedModelPerAudioSubMode", store)
-        self.assertIn("override_attention: h3Preferences?.override_attention", store)
+        self.assertIn("const restoredH3Attention: '' | 'sol' | 'sla' | 'sdpa'", store)
+        self.assertIn("override_attention: restoredH3Attention", store)
         self.assertIn("skip_steps_cache_type: h3Preferences?.skip_steps_cache_type", store)
         self.assertIn("_persistStickyStudioPreferences(get())", store)
 

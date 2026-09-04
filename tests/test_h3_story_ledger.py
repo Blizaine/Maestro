@@ -16,6 +16,7 @@ if str(APP) not in sys.path:
 from services.h3_story_ledger import (  # noqa: E402
     _canonicalize_segment_contract,
     _canonicalize_story_ledger,
+    _coalesce_camera_phases,
     _creative_conversation_brief,
     _deterministic_ledger,
     _dialogue_catalog,
@@ -23,8 +24,12 @@ from services.h3_story_ledger import (  # noqa: E402
     _expected_dialogue_events,
     _fallback_segment,
     _ledger_schema,
+    _materialize_segment,
+    _materialized_segment_violations,
     _only_supplied_dialogue_requested,
+    _apply_faithful_treatment,
     _prepare_render_dialogue_schedule,
+    _repair_materialized_segment_staging,
     _split_h3_shots_at_speaker_changes,
     extract_h3_source_intent,
     extract_locked_dialogue,
@@ -852,6 +857,145 @@ class H3StoryLedgerTests(unittest.TestCase):
         self.assertIn("George Costanza visibly", split[1]["action"])
         self.assertNotIn("Joey visibly", split[1]["action"])
 
+    def test_camera_planner_merges_continuous_silent_setup_before_speaker_turns(self):
+        phases = [
+            {
+                "beat_id": "B1",
+                "source_event_ids": ["E1"],
+                "dialogue_ids": [],
+                "description": "George enters the coffee shop",
+                "state_after": "George is inside near the entrance",
+                "sound_effects": "Door bell",
+            },
+            {
+                "beat_id": "B2",
+                "source_event_ids": ["E2"],
+                "dialogue_ids": [],
+                "description": "George walks to Joey on the couch",
+                "state_after": "George stands beside Joey",
+                "sound_effects": "Footsteps",
+            },
+            *[
+                {
+                    "beat_id": f"B{index + 3}",
+                    "source_event_ids": [f"E{index + 3}"],
+                    "dialogue_ids": [f"D{index + 1}"],
+                    "description": f"Speaker turn {index + 1}",
+                    "state_after": f"Speaker turn {index + 1} is complete",
+                    "sound_effects": "Room tone",
+                }
+                for index in range(3)
+            ],
+        ]
+
+        fitted = _coalesce_camera_phases(phases, target_count=4)
+
+        self.assertEqual(len(fitted), 4)
+        self.assertEqual(fitted[0]["source_event_ids"], ["E1", "E2"])
+        self.assertEqual(fitted[0]["dialogue_ids"], [])
+        self.assertIn("George enters", fitted[0]["description"])
+        self.assertIn("George walks", fitted[0]["description"])
+        self.assertEqual(
+            [item["dialogue_ids"] for item in fitted[1:]],
+            [["D1"], ["D2"], ["D3"]],
+        )
+
+    def test_reported_george_joey_dwight_faithful_plan_has_no_id_repair(self):
+        prompt = (
+            "George Costanza walks into the coffee shop on the TV show Friends, "
+            "from the outside, and walks up to Joey, who is sitting on the couch. "
+            'George passionately says "Maestro two is out!" '
+            'Joey says "Wha, who?" George says "It is crazy! You can now generate '
+            "videos up to an hour with a single prompt! You can save and cast "
+            "Characters just like Sora, and it has push notifications! It has "
+            "Qwen 3.8! It has the latest turbo LoRAs. And get this. It even has "
+            'an editor!" Joey replies "Wow, cool. Um, who are you again?" '
+            "Camera pans to Dwight from The Office, who is also in the Friends "
+            'coffee shop, and Dwight says with frustration "Ugh, Joey, this is '
+            'George. George—Joey" as he introduces them. Dwight then muffles '
+            'softly "I hate A.I."'
+        )
+        calls: list[dict] = []
+
+        def generate(**kwargs):
+            calls.append(kwargs)
+            schema = kwargs["json_schema"]
+            if "setting_continuity" in schema.get("properties", {}):
+                return json.dumps({
+                    "setting_continuity": "The same busy Friends coffee shop",
+                    "visual_continuity": "Warm multi-camera sitcom realism",
+                    "editing_style": "Motivated speaker coverage and reaction cuts",
+                    "ambient_audio": "Coffee cups, footsteps, and room tone",
+                })
+            segment_number = schema["properties"]["segment"]["minimum"]
+            maximum_shots = schema["properties"]["shots"]["maxItems"]
+            match = kwargs["prompt"].split(
+                "Immutable chronological events (depict each once, in order):\n",
+                1,
+            )[1].split(
+                "\n\nImmutable dialogue performances",
+                1,
+            )[0]
+            beat_count = len(json.loads(match))
+            shot_count = min(maximum_shots, max(1, beat_count))
+            duration = [14.375, 13.625, 13.625][segment_number - 1]
+            shots = []
+            for index in range(shot_count):
+                shots.append({
+                    "shot": index + 1,
+                    "start_seconds": duration * index / shot_count,
+                    "end_seconds": duration * (index + 1) / shot_count,
+                    "transition": "opening composition" if index == 0 else "hard cut",
+                    "framing": "cinematic medium scene composition",
+                    "camera": "a motivated camera follows the active performance",
+                    "action": "The assigned visible event advances",
+                    "sound_effects": "Natural synchronized effects",
+                })
+            return json.dumps({
+                "segment": segment_number,
+                "title": f"Segment {segment_number}",
+                "opening_state": "The supplied opening state",
+                "coverage": "motivated multi-shot coverage",
+                "pacing": "brisk natural pacing",
+                "shots": shots,
+                "closing_state": "The assigned visible result holds",
+            })
+
+        result = plan_h3_story_segments(
+            prompt,
+            segment_durations=[14.375, 13.625, 13.625],
+            mode="sliding_window",
+            camera_coverage="multi_shot",
+            expect_dialogue=True,
+            planning_style="faithful",
+            llm_generate=generate,
+        )
+
+        self.assertEqual(result["planned_by"], "llm")
+        self.assertEqual(result["planning_warnings"], [])
+        self.assertEqual(result["planning_diagnostics"], [])
+        self.assertNotIn("beats", calls[0]["json_schema"]["properties"])
+        self.assertNotIn("MANDATORY OUTPUT CHECKSUM", calls[0]["prompt"])
+        self.assertLessEqual(len(result["segments"][0]["shots"]), 4)
+        rendered_dialogue = [
+            (line["dialogue_id"], line["speaker"])
+            for segment in result["segments"]
+            for shot in segment["shots"]
+            for line in shot.get("dialogue") or []
+        ]
+        self.assertEqual(
+            rendered_dialogue,
+            [
+                ("D1", "George Costanza"),
+                ("D2", "Joey"),
+                ("D3F1", "George Costanza"),
+                ("D3F2", "George Costanza"),
+                ("D4", "Joey"),
+                ("D5", "Dwight"),
+                ("D6", "Dwight"),
+            ],
+        )
+
     def test_staged_planner_keeps_dialogue_exact_and_canonicalizes_bad_timing(self):
         invalid_second = _segment(2)
         invalid_second["shots"][0]["start_seconds"] = 9.9
@@ -887,12 +1031,17 @@ class H3StoryLedgerTests(unittest.TestCase):
         self.assertEqual(rendered.count("I am inevitable."), 1)
         self.assertEqual(result["segments"][1]["opening_state"], result["segments"][0]["closing_state"])
         # The ledger owns the close; the camera response cannot silently alter it.
-        self.assertEqual(
+        self.assertIn(
+            "Thanos raises his left hand",
             result["segments"][1]["closing_state"],
-            "Thanos holds the raised gauntlet toward Superman",
         )
+        self.assertNotIn("MANDATORY OUTPUT CHECKSUM", calls[0]["prompt"])
+        self.assertNotIn("beats", calls[0]["json_schema"]["properties"])
+        self.assertIn("Maestro has already parsed", calls[0]["prompt"])
+        self.assertIn("dialogue_performances", calls[1]["prompt"])
+        self.assertIn("SPEAKER-CAMERA LOCK", calls[1]["prompt"])
 
-    def test_invalid_llm_schedule_gets_one_focused_semantic_repair(self):
+    def test_faithful_treatment_never_asks_llm_to_copy_internal_story_ids(self):
         candidate = _ledger()
         candidate["beats"] = [{
             "beat_id": "B99",
@@ -903,15 +1052,8 @@ class H3StoryLedgerTests(unittest.TestCase):
             "state_after": "The wrong ending",
             "sound_effects": "N/A",
         }]
-        repaired = _ledger()
-        # The focused repair may fix E-id coverage while still returning the
-        # locked D-id arrays in the wrong order. Maestro owns that relationship
-        # and should compile it without falling back a second time.
-        repaired["beats"][0]["dialogue_ids"] = ["D2", "D2"]
-        repaired["beats"][1]["dialogue_ids"] = ["D1"]
         responses = iter([
             json.dumps(candidate),
-            json.dumps(repaired),
             json.dumps(_segment(1)),
             json.dumps(_segment(2)),
         ])
@@ -932,15 +1074,16 @@ class H3StoryLedgerTests(unittest.TestCase):
 
         self.assertEqual(result["planned_by"], "llm")
         self.assertEqual(result["planning_warnings"], [])
-        self.assertEqual(len(calls), 4)
-        self.assertIn("REPAIR THE COMPLETE STORY SCHEDULE", calls[1]["prompt"])
+        self.assertEqual(len(calls), 3)
+        self.assertNotIn("REPAIR THE COMPLETE STORY SCHEDULE", calls[0]["prompt"])
+        self.assertNotIn("source_event_ids", calls[0]["json_schema"]["properties"])
         referenced = [
             event_id
             for beat in result["ledger"]["beats"]
             for event_id in beat["source_event_ids"]
         ]
         self.assertEqual(referenced, [item["event_id"] for item in extract_source_events(self.prompt)])
-        self.assertIn("beats", calls[0]["json_schema"]["properties"])
+        self.assertNotIn("beats", calls[0]["json_schema"]["properties"])
 
     def test_canonicalizer_anchors_immediate_first_line_without_llm_repair(self):
         prompt = (
@@ -1523,6 +1666,228 @@ class H3StoryLedgerTests(unittest.TestCase):
         self.assertNotIn("speaker-focused", final_shot["framing"])
         self.assertNotIn("hold Thanos's visible face", final_shot["camera"])
         self.assertNotIn("Yoda", final_shot["action"])
+
+    def test_late_dwight_entrance_keeps_cast_and_adjacent_dialogue_local(self):
+        prompt = (
+            "George Costanza walks into the coffee shop on the TV show Friends, "
+            "from the outside, and walks up to Joey, who is sitting on the couch. "
+            'George passionately says "Maestro two is out!" '
+            'Joey says "Wha, who?" George says "It is crazy! It even has an editor!" '
+            'Joey replies "Wow, cool. Um, who are you again?" '
+            "Camera pans to Dwight from The Office, who is also in the Friends "
+            'Coffee shop, and Dwight says with frustration "Ugh, Joey, this is '
+            'George. George—Joey" as he introduces them. Dwight then muffles '
+            'softly "I hate A.I."'
+        )
+
+        intent = extract_h3_source_intent(prompt)
+        dialogue = extract_locked_dialogue(prompt)
+
+        self.assertEqual(intent["cast_names"], ["George Costanza", "Joey", "Dwight"])
+        self.assertNotIn("Camera", intent["cast_cardinality_contract"])
+        self.assertNotIn("Office", intent["cast_cardinality_contract"])
+        self.assertNotIn("Friends Coffee", intent["cast_cardinality_contract"])
+        self.assertEqual(dialogue[-1]["speaker"], "Dwight")
+        self.assertEqual(dialogue[-1]["delivery"], "muffles softly")
+        self.assertNotIn("George—Joey", dialogue[-1]["delivery"])
+        events = extract_source_events(prompt)
+        event_text = [item["text"] for item in events]
+        self.assertFalse(any(
+            value.casefold() == "as he introduces them"
+            for value in event_text
+        ))
+        self.assertTrue(any(
+            "while he introduces them" in value.casefold()
+            for value in event_text
+        ))
+        self.assertTrue(any(
+            "dwight muffles softly" in value.casefold()
+            for value in event_text
+        ))
+        dialogue_events = _expected_dialogue_events(prompt, dialogue)
+        self.assertEqual(
+            next(
+                item["text"] for item in events
+                if item["event_id"] == dialogue_events["D6"]
+            ).casefold(),
+            "dwight muffles softly",
+        )
+
+        result = plan_h3_story_segments(
+            prompt,
+            segment_durations=[14.375, 13.625, 13.583],
+            mode="sliding_window",
+            camera_coverage="multi_shot",
+            expect_dialogue=True,
+            planning_style="faithful",
+            llm_generate=lambda **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("offline")
+            ),
+        )
+
+        self.assertEqual(result["source_intent"]["cast_names"], [
+            "George Costanza",
+            "Joey",
+            "Dwight",
+        ])
+        self.assertEqual(
+            result["segments"][0]["continuity_handoff_cast"],
+            ["George Costanza", "Joey"],
+        )
+        self.assertEqual(
+            result["segments"][1]["continuity_handoff_cast"],
+            ["George Costanza", "Joey"],
+        )
+        self.assertEqual(result["segments"][2]["continuity_handoff_cast"], [])
+        self.assertNotIn("Dwight", json.dumps(result["segments"][1]))
+        rendered = [
+            (line["dialogue_id"], line["speaker"], line["text"])
+            for segment in result["segments"]
+            for shot in segment["shots"]
+            for line in shot.get("dialogue") or []
+        ]
+        self.assertEqual(
+            [(dialogue_id, speaker) for dialogue_id, speaker, _text in rendered],
+            [
+                ("D1", "George Costanza"),
+                ("D2", "Joey"),
+                ("D3", "George Costanza"),
+                ("D4", "Joey"),
+                ("D5", "Dwight"),
+                ("D6", "Dwight"),
+            ],
+        )
+        self.assertTrue(result["planning_warnings"])
+        self.assertNotIn(
+            "AI-authored dialogue",
+            " ".join(result["planning_warnings"]),
+        )
+
+    def test_materialization_removes_a_future_character_reaction_angle(self):
+        segment = {
+            "segment": 2,
+            "title": "George continues",
+            "opening_state": "George stands beside Joey",
+            "coverage": "multi_shot",
+            "pacing": "natural real-time pacing",
+            "shots": [{
+                "shot": 1,
+                "start_seconds": 0.0,
+                "end_seconds": 10.0,
+                "transition": "opening composition",
+                    "framing": "Medium shot focused on Dwight while George remains behind him",
+                    "camera": "A slow push in on Dwight",
+                    "sound_effects": "Dwight sighs softly near the counter",
+                "beat_ids": ["B1"],
+                "action": "George continues explaining the editor to Joey",
+                "dialogue": [],
+                "sound_effects": "Coffee shop ambience",
+            }],
+            "closing_state": "George finishes the explanation",
+        }
+        beats = [{
+            "beat_id": "B1",
+            "description": "George continues explaining the editor to Joey",
+            "source_event_ids": ["E1"],
+            "dialogue_ids": [],
+            "state_after": "George finishes the explanation",
+        }]
+        materialized = _materialize_segment(
+            segment,
+            beats=beats,
+            dialogue_catalog=[{
+                "dialogue_id": "D1",
+                "speaker": "Dwight",
+                "text": "I hate A.I.",
+            }],
+            source_events=[{
+                "event_id": "E1",
+                "text": "George continues explaining the editor to Joey",
+            }],
+            future_cast=["Dwight"],
+        )
+
+        shot = materialized["shots"][0]
+        self.assertNotIn("Dwight", shot["framing"])
+        self.assertNotIn("Dwight", shot["camera"])
+        self.assertNotIn("Dwight", shot["sound_effects"])
+
+    def test_faithful_treatment_rejects_a_shot_plan_inside_ambient_audio(self):
+        canonical = _ledger()
+        canonical["source_intent"] = {
+            "cast_names": ["George Costanza", "Joey", "Dwight"],
+        }
+        candidate = {
+            "setting_continuity": "The same warm coffee shop interior",
+            "visual_continuity": "Warm live-action sitcom photography",
+            "editing_style": "Motivated conversational coverage",
+            "ambient_audio": (
+                "--- Sequence Progression: Camera starts on Joey, then George "
+                "enters, then pan to Dwight for his dialogue."
+            ),
+        }
+
+        result = _apply_faithful_treatment(canonical, candidate)
+
+        self.assertEqual(result["ambient_audio"], canonical["ambient_audio"])
+        self.assertEqual(
+            result["editing_style"],
+            "Motivated conversational coverage",
+        )
+
+    def test_final_staging_repairs_listener_focus_before_visible_dialogue(self):
+        segment = {
+            "shots": [
+                {
+                    "shot": 1,
+                    "framing": "Medium Shot of Joey seated on the couch",
+                    "camera": (
+                        "Maintain target-scene coverage with George Costanza "
+                        "as the active visible speaker"
+                    ),
+                    "dialogue": [{"speaker": "George Costanza", "text": "Hello"}],
+                },
+                {
+                    "shot": 2,
+                    "framing": "Medium scene composition",
+                    "camera": "Locked camera subtly elevates George above Joey",
+                    "dialogue": [{"speaker": "Joey", "text": "Who are you?"}],
+                },
+                {
+                    "shot": 3,
+                    "framing": "Medium Shot of Dwight",
+                    "camera": "A subtle rack focus from Dwight to Joey",
+                    "dialogue": [{"speaker": "Dwight", "text": "I hate A.I."}],
+                },
+            ],
+        }
+        speakers = ["George Costanza", "Joey", "Dwight"]
+
+        violations = _materialized_segment_violations(
+            segment,
+            known_speakers=speakers,
+        )
+        self.assertTrue(any("shot 1 framing" in item for item in violations))
+        self.assertTrue(any("shot 2 camera" in item for item in violations))
+        self.assertTrue(any("shot 3 camera" in item for item in violations))
+
+        repaired = _repair_materialized_segment_staging(
+            segment,
+            known_speakers=speakers,
+        )
+        self.assertEqual(
+            _materialized_segment_violations(
+                repaired,
+                known_speakers=speakers,
+            ),
+            [],
+        )
+        self.assertIn(
+            "George Costanza carries the visible speaking performance",
+            repaired["shots"][0]["framing"],
+        )
+        self.assertIn("settle on Joey", repaired["shots"][1]["camera"])
+        self.assertIn("settle on Dwight", repaired["shots"][2]["camera"])
 
     def test_action_only_shots_cannot_become_narration_or_repeat_planner_prose(self):
         prompt = (

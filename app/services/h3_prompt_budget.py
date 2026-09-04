@@ -61,6 +61,19 @@ _BOILERPLATE_PATTERNS = (
         r"Keep lighting, color, screen direction, and established geography coherent\.\s*",
         re.IGNORECASE,
     ),
+    re.compile(
+        r"Silent visual action, never spoken narration:\s*",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"Visual direction only, never spoken narration:\s*",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"No words are spoken or mouthed in this shot;\s*only explicitly "
+        r"requested nonverbal reactions may be heard\.?\s*",
+        re.IGNORECASE,
+    ),
 )
 _TIMED_CLAUSE_RE = re.compile(
     r"\b(?:"
@@ -170,6 +183,13 @@ def _clean_boilerplate(text: str) -> str:
     for pattern in _BOILERPLATE_PATTERNS:
         cleaned = pattern.sub("", cleaned)
     cleaned = re.sub(
+        r"while in the established target scene,\s*only\s+(.+?)'s mouth "
+        r"moves while every other visible mouth stays closed",
+        r"while only \1's mouth moves and all other mouths stay closed",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
         r"\bSlow motion occurs only when explicitly requested\.\s*"
         r"(?:Slow motion occurs only when explicitly requested\.\s*)+",
         "Slow motion occurs only when explicitly requested. ",
@@ -182,6 +202,15 @@ def _clean_boilerplate(text: str) -> str:
 
 def _split_clauses(text: str) -> list[str]:
     protected, _blocks = _protect_dialogue(text)
+    # A dialogue tag commonly owns the punctuation that ends its sentence.
+    # Once replaced by a placeholder, preserve that boundary explicitly so a
+    # following continuity or camera instruction is not capped as disposable
+    # prose attached to the dialogue block.
+    protected = re.sub(
+        r"(H3DIALOGUEBLOCK\d+)\s+",
+        r"\1\n",
+        protected,
+    )
     protected = re.sub(r"\s+(?=\[Shot\s+\d+\])", "\n", protected, flags=re.IGNORECASE)
     rough = re.split(r"\n+|(?<=[.!?])\s+", protected)
     clauses: list[str] = []
@@ -256,6 +285,14 @@ def _cap_clause(clause: str, *, level: int) -> str:
             if part.strip()
         ).strip()
     limits = (46, 34, 25, 18, 13)
+    lowered = clause.casefold()
+    if (
+        "continuity composition" in lowered
+        or "continuing principals" in lowered
+    ):
+        # Preserve the cast names plus the face/wardrobe lock. A tiny generic
+        # remnant such as "settle into final frame" has no continuity value.
+        return _word_cap(clause, max(36, limits[min(level, len(limits) - 1)]), keep_tail=8)
     return _word_cap(clause, limits[min(level, len(limits) - 1)], keep_tail=4)
 
 
@@ -294,6 +331,15 @@ def _compact_candidate(
             # Speed and coverage are global motion controls. Dropping them can
             # turn a fast continuation into the slow-motion behavior the
             # window planner exists to prevent.
+            required.add(index)
+        if (
+            "continuity composition" in lowered
+            or "continuing principals" in lowered
+        ):
+            # These clauses keep every recurring character visible in the
+            # carried H3 overlap and lock their identity/wardrobe on the next
+            # segment. Dropping them during prompt compaction reintroduces
+            # off-camera wardrobe drift at an otherwise seamless boundary.
             required.add(index)
 
     selected = set(required)

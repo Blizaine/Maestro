@@ -67,11 +67,17 @@ class H3PromptBudgetTests(unittest.TestCase):
             "ridges, atmospheric haze, layered clouds, rocks, grasses, and sunlight."
             for _index in range(70)
         )
+        continuity_handoff = (
+            "During the final 1.00 seconds, settle into a readable continuity "
+            "composition with Hermione and Ron visibly present together in "
+            "their established wardrobe through the final frame."
+        )
         prompt = (
             f"{alignment}\n\n"
             "integrated_multimodal_description: "
             f"{timed_clauses} {verbose_clauses} Hermione (S1) speaks clearly: {dialogue[0]} "
             f"Ron (S2) answers nervously: {dialogue[1]} "
+            f"{continuity_handoff} "
             "The final frame shows them diving between the canyon walls.\n\n"
             "overall_soundscape: Continuous mountain wind, broom movement, rushing air, "
             "distant birds, fabric movement, and synchronized canyon echoes.\n\n"
@@ -95,6 +101,7 @@ class H3PromptBudgetTests(unittest.TestCase):
             result.prompt.index("non_diegetic_music:"),
         )
         self.assertIn("final frame", result.prompt.casefold())
+        self.assertIn("continuity composition", result.prompt.casefold())
 
     def test_dialogue_is_never_blindly_truncated(self):
         dialogue = "<d>[English] " + "verylongword " * 700 + "</d>"
@@ -107,6 +114,33 @@ class H3PromptBudgetTests(unittest.TestCase):
 
         self.assertEqual(result.prompt.count(dialogue), 1)
         self.assertGreater(result.token_count, 128)
+
+    def test_compaction_drops_silence_boilerplate_without_cutting_entrance_action(self):
+        entrance = (
+            "George Costanza walks into the coffee shop on the TV show Friends, "
+            "from the outside. Then George Costanza walks up to Joey, who is "
+            "sitting on the couch."
+        )
+        filler = " ".join(
+            "The camera preserves elaborate warm sitcom production design and atmospheric detail."
+            for _index in range(90)
+        )
+        prompt = (
+            "integrated_multimodal_description: [Shot 1] From 0.00 to 4.35 seconds, "
+            "a medium tracking shot; Silent visual action, never spoken narration: "
+            f"{entrance} No words are spoken or mouthed in this shot; only explicitly "
+            f"requested nonverbal reactions may be heard. {filler} "
+            "The final frame holds George beside Joey at the original couch.\n\n"
+            "overall_soundscape: Coffee shop room tone and footsteps.\n\n"
+            "non_diegetic_music: N/A"
+        )
+
+        result = fit_h3_base_prompt(prompt, target_tokens=240)
+
+        self.assertTrue(result.compacted)
+        self.assertIn(entrance, result.prompt)
+        self.assertNotIn("Silent visual action, never spoken narration", result.prompt)
+        self.assertNotIn("No words are spoken or mouthed", result.prompt)
 
     def test_long_unstructured_prompt_is_preserved_instead_of_rejected(self):
         prompt = " ".join(f"word{index}" for index in range(600))

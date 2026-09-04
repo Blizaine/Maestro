@@ -1440,6 +1440,8 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         advanced = _read(_ADVANCED_SETTINGS_PATH)
         store = _read(_STORE_PATH)
         wgp = _read(_WGP_PATH)
+        self.assertIn("H3_LONG_SEQUENCE_TESTS_VISIBLE = false", advanced)
+        self.assertIn("H3_LONG_SEQUENCE_TESTS_VISIBLE\n    && isVideo", advanced)
         self.assertIn("Long-sequence tests", advanced)
         self.assertIn("Single-frame handoff after window 3", advanced)
         self.assertIn("newParams.custom_settings", store)
@@ -2418,7 +2420,8 @@ class TestMiniMaxH3Definition(unittest.TestCase):
 class TestMiniMaxH3RuntimeSource(unittest.TestCase):
     def test_runtime_uses_the_official_dual_scheduler_and_audio_output(self):
         main = _read(_MAIN_PATH)
-        self.assertIn("MiniMaxH3Scheduler(shift=12.0)", main)
+        self.assertIn("shift=12.0", main)
+        self.assertIn("solver=self.sample_solver", main)
         self.assertIn("MiniMaxH3Scheduler(shift=3.0)", main)
         self.assertIn('"audio_sampling_rate": MINIMAX_H3_AUDIO_SAMPLE_RATE', main)
         self.assertIn("MINIMAX_H3_KEYFRAME_ENCODE_SEED", main)
@@ -2595,8 +2598,9 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
                 "minimax_h3_turbo_4step_ckpt500.safetensors"
             )
         )
-        self.assertEqual(turbo.h3_scheduler_grid_points(8, turbo_active=False), 8)
+        self.assertEqual(turbo.h3_scheduler_grid_points(8, turbo_active=False), 9)
         self.assertEqual(turbo.h3_scheduler_grid_points(8, turbo_active=True), 9)
+        self.assertEqual(turbo.h3_scheduler_grid_points(30, turbo_active=False), 31)
 
         metadata = {
             "__metadata__": {
@@ -2870,7 +2874,14 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
         self.assertIn("attention_mask=attention_mask,", conditioner)
         self.assertIn("native causal attention", conditioner)
         self.assertIn("dtype=torch.float32", transformer)
-        self.assertIn('if qkv_layout == "interleaved"', main)
+        self.assertIn(
+            'if qkv_layout in {"grouped", "interleaved"}',
+            main,
+        )
+        self.assertIn(
+            'interleaved=qkv_layout == "interleaved"',
+            main,
+        )
         self.assertIn("else 'fused projection'", main)
 
     def test_conditioner_passes_complete_h3_prompt_without_text_truncation(self):
@@ -3014,6 +3025,83 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
     def tearDownClass(cls):
         if sys.path and sys.path[0] == str(_APP):
             sys.path.pop(0)
+
+    def test_int8_convrot_video_vae_qkv_preserves_module_descriptors(self):
+        from models.minimax_h3.checkpoint import (
+            VIDEO_VAE_HEAD_DIM,
+            VIDEO_VAE_HEADS,
+            preprocess_video_vae_state_dict,
+        )
+
+        rows = VIDEO_VAE_HEADS * 3 * VIDEO_VAE_HEAD_DIM
+        weight = self.torch.arange(rows, dtype=self.torch.int32).reshape(rows, 1)
+        scale = self.torch.arange(rows, dtype=self.torch.float32).reshape(rows, 1)
+        descriptor = self.torch.tensor(
+            list(
+                json.dumps(
+                    {
+                        "format": "int8_tensorwise",
+                        "convrot": True,
+                        "convrot_groupsize": 256,
+                    }
+                ).encode("utf-8")
+            ),
+            dtype=self.torch.uint8,
+        )
+        prefix = "decoder.transformer_blocks.0.attn.to_qkv"
+        processed = preprocess_video_vae_state_dict(
+            {
+                f"{prefix}.weight": weight,
+                f"{prefix}.weight_scale": scale,
+                f"{prefix}.comfy_quant": descriptor,
+            }
+        )
+
+        grouped_weight = weight.reshape(VIDEO_VAE_HEADS, 3, VIDEO_VAE_HEAD_DIM, 1)
+        grouped_scale = scale.reshape(VIDEO_VAE_HEADS, 3, VIDEO_VAE_HEAD_DIM, 1)
+        pointers = []
+        for index, name in enumerate(("to_q", "to_k", "to_v")):
+            target = f"decoder.transformer_blocks.0.attn.{name}"
+            expected_weight = grouped_weight[:, index].reshape(-1, 1)
+            expected_scale = grouped_scale[:, index].reshape(-1, 1)
+            self.assertTrue(self.torch.equal(processed[f"{target}.weight"], expected_weight))
+            self.assertTrue(self.torch.equal(processed[f"{target}.weight_scale"], expected_scale))
+            self.assertTrue(self.torch.equal(processed[f"{target}.comfy_quant"], descriptor))
+            pointers.append(processed[f"{target}.weight"].data_ptr())
+
+        self.assertEqual(len(set(pointers)), 3)
+
+    def test_int8_convrot_video_vae_feed_forward_descriptor_is_not_reordered(self):
+        from models.minimax_h3.checkpoint import preprocess_video_vae_state_dict
+
+        descriptor = self.torch.tensor(
+            list(
+                json.dumps(
+                    {
+                        "format": "int8_tensorwise",
+                        "convrot": True,
+                        "convrot_groupsize": 256,
+                    }
+                ).encode("utf-8")
+            ),
+            dtype=self.torch.uint8,
+        )
+        weight = self.torch.arange(8, dtype=self.torch.int8).reshape(8, 1)
+        processed = preprocess_video_vae_state_dict(
+            {
+                "decoder.transformer_blocks.0.ff.w1.weight": weight,
+                "decoder.transformer_blocks.0.ff.w1.comfy_quant": descriptor,
+            }
+        )
+
+        target = "decoder.transformer_blocks.0.ff.net.0.proj"
+        self.assertTrue(
+            self.torch.equal(
+                processed[f"{target}.weight"],
+                self.torch.cat((weight[4:], weight[:4]), dim=0),
+            )
+        )
+        self.assertTrue(self.torch.equal(processed[f"{target}.comfy_quant"], descriptor))
 
     def test_plain_conditioner_keeps_more_than_512_text_tokens(self):
         from models.minimax_h3.conditioner import MiniMaxH3Conditioner

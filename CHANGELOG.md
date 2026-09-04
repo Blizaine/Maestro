@@ -5,7 +5,7 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [Unreleased]
 
-## [2.0.0] - 2026-09-02
+## [2.0.0] - 2026-09-03
 
 Editor: added a third top-level Maestro workspace beside Director and Studio.
 The new non-destructive editor supports layered video, audio, and title tracks;
@@ -64,6 +64,13 @@ user supplies.
 MiniMax H3: added the native 768p tier, 21:9 canvases, and the Regenerate 2K
 workflow. FL2VA and Ref2VA expose their corresponding Alibaba PAI eight-step
 acceleration presets, including native PDD parallel-head loading and sampling.
+Two optional experimental H3 Fused 4-Step entries bring Frames and References
+workflows to one shared, revision-pinned 21 GB INT8 ConvRot checkpoint with its
+Turbo, Mystic, and Ref2VA delta already baked in. The published four-evaluation
+recipe is the default, Advanced can test 4-8 total steps, and the integrated SLA
+sparse-attention path falls back safely to dense SDPA when its CUDA/Triton
+kernel is unavailable. These entries appear in the model lists but never
+replace a user's active model automatically.
 Reference conditioning no longer promotes an Omni identity reference into an
 implicit first frame. A new character library stores named image + voice pairs
 or video references, recalls them into Studio and Director Omni jobs, and
@@ -100,7 +107,11 @@ conversation-aware shot packing, concrete opening/closing state, and official
 MiniMax Context-IR conventions. Prompt enhancement uses structure-aware token
 estimates instead of a false 512-token rejection, preserves visible quoted text
 without treating it as speech, and compacts only prose that can be shortened
-without losing dialogue or timing. Director and Studio report per-clip,
+without losing dialogue or timing. Faithful Studio planning keeps the user's
+event and dialogue schedule application-owned while the LLM supplies a bounded
+cinematic treatment, preventing previous enhanced prompts, duplicate entrances,
+or an uncertain model-authored schedule from replacing the source story.
+Director and Studio report per-clip,
 multi-window, and project ETAs with observed cache acceleration folded into
 later estimates. A private local SQLite timing history learns from completed
 runs with the same hardware, model, resolution, steps, LoRAs, and optimization

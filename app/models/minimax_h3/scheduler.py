@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Rectified-flow Euler scheduler for MiniMax-H3.
+"""Rectified-flow Euler and RES multistep schedulers for MiniMax-H3.
 
 Three things make this incompatible with a [`FlowMatchEulerDiscreteScheduler`] config, which is why
 it is a separate class:
@@ -40,6 +40,8 @@ instances, e.g. `scheduler` and `audio_scheduler`.
 
 from dataclasses import dataclass
 
+import math
+
 import torch
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
@@ -60,6 +62,67 @@ class MiniMaxH3SchedulerOutput(BaseOutput):
     prev_sample: torch.FloatTensor
 
 
+def res_multistep_coefficients(
+    sigmas: list[float] | torch.Tensor,
+) -> tuple[tuple[float, float, float], ...]:
+    """Precompute deterministic second-order RES weights.
+
+    This is the eta=0 ``res_multistep`` formulation used by ComfyUI and the
+    current WanGP H3 pipeline. The first interval and the terminal interval
+    intentionally reduce to the ordinary first-order rectified-flow update.
+    """
+
+    values = [float(value) for value in torch.as_tensor(sigmas).flatten()]
+    if len(values) < 2:
+        raise ValueError("RES multistep needs at least two sigma values.")
+    coefficients: list[tuple[float, float, float]] = []
+    old_sigma_down: float | None = None
+    for index, (sigma, sigma_next) in enumerate(zip(values, values[1:])):
+        if sigma <= 0 or sigma_next < 0 or sigma_next >= sigma:
+            raise ValueError("RES multistep sigmas must be strictly decreasing to zero.")
+        if old_sigma_down is None or sigma_next == 0.0:
+            ratio = sigma_next / sigma
+            coefficients.append((ratio, 1.0 - ratio, 0.0))
+        else:
+            t = -math.log(sigma)
+            h = -math.log(sigma_next) - t
+            c2 = (-math.log(values[index - 1]) + math.log(old_sigma_down)) / h
+            phi1 = math.expm1(-h) / -h
+            phi2 = (phi1 - 1.0) / -h
+            coefficients.append(
+                (
+                    math.exp(-h),
+                    h * (phi1 - phi2 / c2),
+                    h * phi2 / c2,
+                )
+            )
+        old_sigma_down = sigma_next
+    return tuple(coefficients)
+
+
+def res_multistep_update(
+    sample: torch.Tensor,
+    denoised: torch.Tensor,
+    old_denoised: torch.Tensor | None,
+    coefficients: tuple[float, float, float],
+) -> torch.Tensor:
+    """Apply one deterministic RES update without mutating caller tensors."""
+
+    sample_coefficient, denoised_coefficient, old_coefficient = coefficients
+    compute_dtype = (
+        torch.float32
+        if sample.dtype in (torch.float16, torch.bfloat16)
+        else sample.dtype
+    )
+    result = sample.to(compute_dtype).mul(sample_coefficient)
+    result.add_(denoised.to(compute_dtype), alpha=denoised_coefficient)
+    if old_coefficient:
+        if old_denoised is None:
+            raise ValueError("RES multistep history is missing after the first interval.")
+        result.add_(old_denoised.to(compute_dtype), alpha=old_coefficient)
+    return result.to(sample.dtype)
+
+
 class MiniMaxH3Scheduler(SchedulerMixin, ConfigMixin):
     r"""
     Rectified-flow Euler scheduler (`eta = 0`) with an exponential sigma shift, as used by MiniMax-H3.
@@ -74,21 +137,36 @@ class MiniMaxH3Scheduler(SchedulerMixin, ConfigMixin):
     order = 1
 
     @register_to_config
-    def __init__(self, shift: float = 12.0):
+    def __init__(self, shift: float = 12.0, solver: str = "euler"):
         if shift <= 0:
             raise ValueError(f"`shift` must be positive, got {shift}.")
+        if solver not in {"euler", "res_multistep"}:
+            raise ValueError(f"Unsupported MiniMax H3 solver {solver!r}.")
 
         self.num_inference_steps: int | None = None
         self.sigmas: torch.Tensor | None = None
         self.timesteps: torch.Tensor | None = None
         self._shift = float(shift)
+        self._solver = str(solver)
         self._step_index: int | None = None
         self._begin_index: int | None = None
+        self._res_coefficients: tuple[tuple[float, float, float], ...] = ()
+        self._old_denoised: torch.Tensor | None = None
 
     @property
     def shift(self) -> float:
         """The exponential shift currently applied to the sigma grid."""
         return self._shift
+
+    @property
+    def solver(self) -> str:
+        return self._solver
+
+    def set_solver(self, solver: str) -> None:
+        if solver not in {"euler", "res_multistep"}:
+            raise ValueError(f"Unsupported MiniMax H3 solver {solver!r}.")
+        self._solver = str(solver)
+        self._old_denoised = None
 
     @property
     def step_index(self) -> int | None:
@@ -171,6 +249,22 @@ class MiniMaxH3Scheduler(SchedulerMixin, ConfigMixin):
         self.num_inference_steps = int(self.timesteps.numel())
         self._step_index = None
         self._begin_index = None
+        self._old_denoised = None
+        self._res_coefficients = (
+            res_multistep_coefficients(sigmas)
+            if self._solver == "res_multistep"
+            else ()
+        )
+
+    def coefficients_for_step(
+        self,
+        step_index: int,
+    ) -> tuple[float, float, float]:
+        """Return the precomputed RES weights for an explicit interval."""
+
+        if self._solver != "res_multistep" or not self._res_coefficients:
+            raise ValueError("RES multistep coefficients are not active.")
+        return self._res_coefficients[int(step_index)]
 
     def index_for_timestep(self, timestep: float | torch.Tensor) -> int:
         """
@@ -273,16 +367,33 @@ class MiniMaxH3Scheduler(SchedulerMixin, ConfigMixin):
             sigma_from_timestep = sigma_from_timestep.unsqueeze(-1)
         denoised = sample + sigma_from_timestep * model_output
 
-        # Euler with eta = 0, written as an x_t / x0 blend and evaluated in float32.
-        compute_dtype = torch.float32 if sample.dtype in (torch.float16, torch.bfloat16) else sample.dtype
-        sigma = self.sigmas[self._step_index].to(device=sample.device, dtype=compute_dtype)
-        sigma_next = self.sigmas[self._step_index + 1].to(device=sample.device, dtype=compute_dtype)
-        ratio = sigma_next / sigma
-        prev_sample = ratio * sample.to(dtype=compute_dtype) + (1.0 - ratio) * denoised.to(dtype=compute_dtype)
-        prev_sample = prev_sample.to(dtype=sample.dtype)
+        if self._solver == "res_multistep":
+            prev_sample = res_multistep_update(
+                sample,
+                denoised,
+                self._old_denoised,
+                self.coefficients_for_step(self._step_index),
+            )
+            self._old_denoised = denoised.detach()
+        else:
+            # Euler with eta = 0, written as an x_t / x0 blend and evaluated in float32.
+            compute_dtype = torch.float32 if sample.dtype in (torch.float16, torch.bfloat16) else sample.dtype
+            sigma = self.sigmas[self._step_index].to(device=sample.device, dtype=compute_dtype)
+            sigma_next = self.sigmas[self._step_index + 1].to(device=sample.device, dtype=compute_dtype)
+            ratio = sigma_next / sigma
+            prev_sample = ratio * sample.to(dtype=compute_dtype) + (1.0 - ratio) * denoised.to(dtype=compute_dtype)
+            prev_sample = prev_sample.to(dtype=sample.dtype)
 
         self._step_index += 1
 
         if not return_dict:
             return (prev_sample,)
         return MiniMaxH3SchedulerOutput(prev_sample=prev_sample)
+
+
+__all__ = [
+    "MiniMaxH3Scheduler",
+    "MiniMaxH3SchedulerOutput",
+    "res_multistep_coefficients",
+    "res_multistep_update",
+]
