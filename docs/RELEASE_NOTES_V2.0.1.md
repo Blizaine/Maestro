@@ -77,6 +77,18 @@ previous item.
 - **Original Prompt** now has its own Copy button, independent of the effective
   or AI-generated prompt.
 
+## Background notification delivery
+
+- Fixed completed and failed jobs not reaching enrolled iPhone, iPad, or
+  desktop Web Push subscriptions even though foreground tests worked.
+- Maestro now parses its persisted VAPID PEM key explicitly before signing a
+  push and uses a public-domain contact claim accepted by Apple's push service.
+  Existing device subscriptions, permissions, and Tailscale Home Screen apps
+  remain valid; users do not need to enroll again.
+- Notification settings now distinguish the foreground-only test from the
+  closed-app test, so a local browser alert cannot be mistaken for proof that
+  background delivery is working.
+
 ## Release validation
 
 - Added regression coverage for startup duration stability, continuation-window

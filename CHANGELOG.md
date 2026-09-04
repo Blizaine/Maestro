@@ -46,6 +46,12 @@ clips as well as multi-window sequences, excluding queue wait and model-load
 time when that timing basis is available. Original Prompt has its own Copy
 button alongside the generated/effective prompt.
 
+Background Web Push now loads Maestro's persisted VAPID PEM as an explicit
+signer instead of misreading the PEM text as raw DER. Completion, failure, and
+queue alerts use an Apple-compatible public-domain subject and can once again reach
+enrolled iPhone, iPad, and desktop devices; existing subscriptions remain
+valid.
+
 Release validation was expanded so the complete model/UI test suite runs in a
 portable CPU CI environment. CUDA capability probing now also returns a safe
 CPU sentinel instead of importing attention support through a nonexistent GPU.

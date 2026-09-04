@@ -186,7 +186,7 @@ export function NotificationSettingsPanel() {
     setAvailability(getBrowserNotificationAvailability())
     setPreferences(getDeviceNotificationPreferences())
     setMessage(shown
-      ? 'Test alert sent.'
+      ? 'Foreground alert shown. Use Test closed-app notification to verify background delivery.'
       : 'The browser could not display a system notification. In-app alerts still work.')
   }
 
@@ -369,7 +369,7 @@ export function NotificationSettingsPanel() {
             disabled={!availability.supported || !availability.secure || availability.permission === 'denied'}
             className="flex-1 rounded-md border border-border px-2 py-1.5 text-[10px] text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
           >
-            Test notification
+            Test while open
           </button>
           <button
             type="button"

@@ -34,6 +34,7 @@ _CATEGORY_PREFERENCE = {
     "queue": "notifyQueue",
     "test": None,
 }
+_VAPID_SUBJECT = "mailto:blizaine@users.noreply.github.com"
 
 
 class WebPushUnavailable(RuntimeError):
@@ -85,6 +86,27 @@ def _new_vapid_pair() -> tuple[str, str]:
         + public_numbers.y.to_bytes(32, "big")
     )
     return private_pem, _b64url(public_raw)
+
+
+def _load_vapid_signer(private_key: str) -> Any:
+    """Load a persisted VAPID key without treating PEM text as raw DER.
+
+    ``pywebpush`` accepts a Vapid object, a filesystem path, or an encoded
+    raw/DER string. Passing Maestro's persisted PEM *contents* as a normal
+    string selects the raw/DER branch and fails during ASN.1 parsing. Parse
+    PEM explicitly and pass the ready signer instead. The non-PEM branch keeps
+    compatibility with any older encoded key stores.
+    """
+    try:
+        from py_vapid import Vapid
+
+        if "-----BEGIN" in private_key:
+            return Vapid.from_pem(private_key.encode("ascii"))
+        return Vapid.from_string(private_key)
+    except Exception as exc:
+        raise WebPushUnavailable(
+            "Maestro could not load its background-notification signing key."
+        ) from exc
 
 
 def _clean_preferences(raw: Any) -> dict[str, bool]:
@@ -266,10 +288,13 @@ class WebPushService:
         from pywebpush import WebPushException, webpush
 
         subscriptions = self._eligible(category, endpoint)
+        if not subscriptions:
+            return PushDeliveryResult(attempted=0, delivered=0, removed=0)
+
         delivered = 0
         stale: list[str] = []
         errors: list[str] = []
-        private_key = str(self._state["vapid_private_key"])
+        signer = _load_vapid_signer(str(self._state["vapid_private_key"]))
         for item in subscriptions:
             payload = {
                 "category": category,
@@ -290,8 +315,11 @@ class WebPushService:
                 webpush(
                     subscription_info=subscription_info,
                     data=json.dumps(payload, ensure_ascii=False),
-                    vapid_private_key=private_key,
-                    vapid_claims={"sub": "mailto:notifications@maestro.local"},
+                    vapid_private_key=signer,
+                    # Apple rejects localhost/.local VAPID subjects with
+                    # BadJwtToken even when the key and signature are valid.
+                    # Use a public-domain contact URI instead.
+                    vapid_claims={"sub": _VAPID_SUBJECT},
                     ttl=86400,
                 )
                 delivered += 1

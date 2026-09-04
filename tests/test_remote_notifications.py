@@ -76,11 +76,30 @@ class TestWebPushService(unittest.TestCase):
             class FakeWebPushException(Exception):
                 pass
 
+            parsed_pem = []
+            signer = object()
+
+            class FakeVapid:
+                @classmethod
+                def from_pem(cls, private_key):
+                    parsed_pem.append(private_key)
+                    return signer
+
+                @classmethod
+                def from_string(cls, private_key):
+                    raise AssertionError(
+                        f"PEM key incorrectly parsed as encoded key: {private_key!r}"
+                    )
+
             fake_module = types.SimpleNamespace(
                 WebPushException=FakeWebPushException,
                 webpush=lambda **kwargs: calls.append(kwargs),
             )
-            with patch.dict(sys.modules, {"pywebpush": fake_module}):
+            fake_vapid = types.SimpleNamespace(Vapid=FakeVapid)
+            with patch.dict(
+                sys.modules,
+                {"pywebpush": fake_module, "py_vapid": fake_vapid},
+            ):
                 completed = service._send(
                     category="completion",
                     title="Complete",
@@ -96,9 +115,52 @@ class TestWebPushService(unittest.TestCase):
             self.assertEqual(completed.attempted, 0)
             self.assertEqual(failed.delivered, 1)
             self.assertEqual(len(calls), 1)
+            self.assertEqual(len(parsed_pem), 1)
+            self.assertIn(b"BEGIN PRIVATE KEY", parsed_pem[0])
+            self.assertIs(calls[0]["vapid_private_key"], signer)
+            self.assertEqual(
+                calls[0]["vapid_claims"]["sub"],
+                "mailto:blizaine@users.noreply.github.com",
+            )
             payload = json.loads(calls[0]["data"])
             self.assertEqual(payload["url"], "https://maestro.example.ts.net")
             self.assertTrue(payload["onlyWhenHidden"])
+
+    def test_legacy_encoded_vapid_key_uses_string_parser(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = WebPushService(directory)
+            service.subscribe(
+                _subscription(), origin="https://maestro.example.ts.net"
+            )
+            service._state["vapid_private_key"] = "legacy-encoded-key"
+            parsed_strings = []
+            signer = object()
+
+            class FakeVapid:
+                @classmethod
+                def from_pem(cls, _private_key):
+                    raise AssertionError("Legacy encoded key was treated as PEM")
+
+                @classmethod
+                def from_string(cls, private_key):
+                    parsed_strings.append(private_key)
+                    return signer
+
+            calls = []
+            fake_webpush = types.SimpleNamespace(
+                WebPushException=RuntimeError,
+                webpush=lambda **kwargs: calls.append(kwargs),
+            )
+            fake_vapid = types.SimpleNamespace(Vapid=FakeVapid)
+            with patch.dict(
+                sys.modules,
+                {"pywebpush": fake_webpush, "py_vapid": fake_vapid},
+            ):
+                result = service.send_test()
+
+            self.assertEqual(result.delivered, 1)
+            self.assertEqual(parsed_strings, ["legacy-encoded-key"])
+            self.assertIs(calls[0]["vapid_private_key"], signer)
 
 
 class TestTailscaleManager(unittest.TestCase):
