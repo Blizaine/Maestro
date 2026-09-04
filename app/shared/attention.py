@@ -4,15 +4,20 @@ from importlib.metadata import version
 from mmgp import offload
 import torch.nn.functional as F
 import warnings
-from importlib.metadata import version
 
-if torch.cuda.is_available():
+
+def _cuda_capability(device=None):
+    """Return the active CUDA capability, or a safe CPU-only sentinel."""
+
+    if not torch.cuda.is_available():
+        return (0, 0)
     try:
-        major, minor = torch.cuda.get_device_capability(None)
+        return tuple(torch.cuda.get_device_capability(device))
     except (AssertionError, RuntimeError):
-        major, minor = 0, 0
-else:
-    major, minor = 0, 0
+        return (0, 0)
+
+
+major, minor = _cuda_capability()
 bfloat16_supported = major >= 8
 
 try:
@@ -273,7 +278,7 @@ def get_attention_modes():
 
 def get_supported_attention_modes():
     ret = get_attention_modes()
-    major, minor = torch.cuda.get_device_capability()
+    major, minor = _cuda_capability()
     if  major < 10 or not triton_installed:
         if "sage3" in ret:
             ret.remove("sage3")
@@ -314,7 +319,7 @@ def _triton_version_tuple():
 def get_sol_attention_status():
     """Describe whether the bundled H3-only Sol backend can run here."""
 
-    capability = tuple(torch.cuda.get_device_capability())
+    capability = _cuda_capability()
     triton_version = str(getattr(triton, "__version__", "")) if triton_installed else None
     if not triton_installed:
         reason = "Sol Engine requires Triton 3.6 or newer."
@@ -351,7 +356,7 @@ def get_sol_attention_status():
 def get_sla_attention_status():
     """Describe whether the H3-only SLA Triton kernels can run here."""
 
-    capability = tuple(torch.cuda.get_device_capability())
+    capability = _cuda_capability()
     triton_version = (
         str(getattr(triton, "__version__", ""))
         if triton_installed
