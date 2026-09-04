@@ -51,6 +51,9 @@ class GalleryActiveMediaTests(unittest.TestCase):
         self.assertIn("First Block Cache", feed_item)
         self.assertIn("Sol Engine", feed_item)
         self.assertIn("whitespace-pre-wrap", feed_item)
+        self.assertIn("handleCopyOriginalPrompt", feed_item)
+        self.assertIn('aria-label="Copy original prompt"', feed_item)
+        self.assertIn("copiedOriginalPrompt ? 'Copied' : 'Copy'", feed_item)
 
     def test_generation_details_expose_multi_window_summary_and_exact_timings(self):
         feed_item = (
@@ -66,6 +69,18 @@ class GalleryActiveMediaTests(unittest.TestCase):
         self.assertIn("Total render", feed_item)
         self.assertIn("window_generation_seconds", types)
         self.assertIn("...(turboEnabled ? ['Turbo'] : [])", feed_item)
+
+    def test_generation_details_expose_single_window_render_time(self):
+        feed_item = (
+            ROOT / "ui" / "src" / "components" / "MainContent" / "MediaFeedItem.tsx"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("singleWindowGenerationSeconds", feed_item)
+        self.assertIn('>Generation time</dt>', feed_item)
+        self.assertIn(
+            "Generation time excluding queue wait and model loading",
+            feed_item,
+        )
 
     def test_clip_footer_uses_compact_persistent_controls_and_labeled_more_menu(self):
         feed_item = (

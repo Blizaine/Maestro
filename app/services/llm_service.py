@@ -3695,7 +3695,7 @@ def _extract_h3_source_dialogue_entries(
     spans: list[dict] = []
     tagged_ranges: list[tuple[int, int]] = []
     tag_pattern = re.compile(
-        r"<d>\s*(?:\[([^\]\r\n]+)\])?\s*(.*?)\s*</d>",
+        r"<d>\s*(?:\[([^\]\r\n]+)\])?\s*((?:(?!<d>).)*?)\s*</d>",
         flags=re.DOTALL | re.IGNORECASE,
     )
     for match in tag_pattern.finditer(source):
@@ -3843,7 +3843,7 @@ def _extract_h3_dialogue_blocks(text: str) -> list[str]:
     return [
         match.strip()
         for match in re.findall(
-            r"<d>\s*\[[^\]]+\]\s*(.*?)\s*</d>",
+            r"<d>\s*\[[^\]]+\]\s*((?:(?!<d>).)*?)\s*</d>",
             normalize_h3_dialogue_tags(text),
             flags=re.DOTALL,
         )
@@ -3856,7 +3856,7 @@ def _extract_h3_dialogue_entries(text: str) -> list[tuple[str, str]]:
     return [
         (_canonical_h3_language_tag(language), words.strip())
         for language, words in re.findall(
-            r"<d>\s*\[([^\]]+)\]\s*(.*?)\s*</d>",
+            r"<d>\s*\[([^\]]+)\]\s*((?:(?!<d>).)*?)\s*</d>",
             normalize_h3_dialogue_tags(text),
             flags=re.DOTALL | re.IGNORECASE,
         )
@@ -3889,7 +3889,7 @@ def _build_h3_timed_silence_clause(prompt: str, duration_seconds: Optional[float
         f"From 0.00 to {start:.2f} seconds, show active scene-appropriate nonverbal action rather "
         "than idle staring; every mouth stays completely closed and the audio contains no human "
         "voice. Begin the first tagged line at approximately "
-        f"{start:.2f} seconds and finish all <d> dialogue by approximately {end:.2f} seconds. "
+        f"{start:.2f} seconds and finish all tagged dialogue by approximately {end:.2f} seconds. "
         f"From {end:.2f} to {duration:.2f} seconds, fill the remaining timeline with concrete "
         "nonverbal action, reactions, camera development, ambience, and synchronized practical "
         "effects. Outside the tagged interval there are no voices, whispers, grunts, audible "
@@ -4385,7 +4385,7 @@ def _canonicalize_h3_ref2va_dialogue_speakers(
         text,
     ):
         ownership = (
-            "Each <d> block is spoken exactly once by its adjacent mapped speaker only. "
+            "Each tagged dialogue block is spoken exactly once by its adjacent mapped speaker only. "
             "No other character repeats, echoes, mouths, or paraphrases another character's line; "
             "while one character speaks, every other visible mouth remains closed."
         )
@@ -4643,7 +4643,12 @@ def _strip_h3_untagged_dialogue_duplicates(result: str, prompt: str) -> str:
         protected.append(match.group(0))
         return f"@@MAESTRO_H3_DIALOGUE_{len(protected) - 1}@@"
 
-    text = re.sub(r"<d>.*?</d>", stash, str(result or ""), flags=re.DOTALL)
+    text = re.sub(
+        r"<d>(?:(?!<d>).)*?</d>",
+        stash,
+        normalize_h3_dialogue_tags(result),
+        flags=re.DOTALL | re.IGNORECASE,
+    )
 
     def replace_quote(match):
         value = match.group(1) or match.group(2) or ""
@@ -4765,7 +4770,7 @@ def _build_h3_ref2va_tagged_fallback(
         f"[Shot 1] {visible_subjects} The finished target video follows this request: {request} "
         "Reference pictures provide identity and appearance only, never their original background, "
         "framing, pose, or an opening still. The scripted dialogue is the only speech; all mouths "
-        "remain closed before and after it. Each <d> block is spoken exactly once by its adjacent "
+        "remain closed before and after it. Each tagged dialogue block is spoken exactly once by its adjacent "
         "mapped speaker only; no other subject repeats, echoes, mouths, or paraphrases another "
         f"subject's line. {timed_clause}\n"
         "overall_soundscape: Continuous scene-appropriate stereo ambience and synchronized practical "

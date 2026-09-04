@@ -5,6 +5,51 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-09-04
+
+Startup and duration planning: fixed the post-v2.0 black-screen regression
+reported in GitHub issue #97. LTX Auto duration could synchronously feed its
+recommended duration back into native window sizing until React reached its
+maximum update depth. Single-window Auto plans now remain stable, while a real
+long-form request moves directly to the model's safe long-window ceiling.
+Frames and References still retain their efficient multi-window behavior.
+
+Video Extend: duration, window-count, prompt-count, and runtime routing now use
+one continuation-aware calculation. The source-tail overlap is treated as
+context instead of new footage, so selecting one window produces one extension
+rather than a full pass plus a tiny accidental second pass. The UI reports the
+fresh footage contributed by the first pass and the stride of later passes.
+
+H3 prompt integrity: AI Faithful extension no longer mistakes instructional
+text containing a bare opening dialogue marker for one enormous spoken line.
+Nested/malformed dialogue tags are bounded safely, Context-IR field names are
+never inferred as speakers, and the actual user-authored source prompt—not a
+previous enhanced Context-IR document—is used if Auto duration later expands a
+single prompt into multiple windows.
+
+Load Settings is now a complete workflow round trip rather than a prompt-only
+shortcut. Studio restores Frames, References, Extend, Blend, Retake, Prompt
+Edit, Inpaint, Outpaint, Repaint, Recast, image workflows, Music, Speech, Sound
+Effects, Revoice, Mixer, Upscale, Film Grain, and their source assets and
+controls. Director revisions reopen in Director and Editor exports reopen the
+saved timeline project. Restoring one output also clears incompatible state
+from the previously open recipe instead of silently carrying it forward.
+
+Output metadata now retains the filenames and settings needed for those
+round trips, including multi-file references, voice slots, masks, anchors,
+blend controls, outpaint geometry, and post-processing parameters. Mixer
+outputs receive their own restorable sidecars and appear in the gallery as soon
+as they finish.
+
+Gallery details now show active generation time for ordinary single-window
+clips as well as multi-window sequences, excluding queue wait and model-load
+time when that timing basis is available. Original Prompt has its own Copy
+button alongside the generated/effective prompt.
+
+Release validation was expanded so the complete model/UI test suite runs in a
+portable CPU CI environment. CUDA capability probing now also returns a safe
+CPU sentinel instead of importing attention support through a nonexistent GPU.
+
 ## [2.0.0] - 2026-09-03
 
 Editor: added a third top-level Maestro workspace beside Director and Studio.

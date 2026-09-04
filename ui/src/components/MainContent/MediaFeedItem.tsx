@@ -106,6 +106,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const confirmRef = useRef(false)
   const timeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined)
   const [copied, setCopied] = useState(false)
+  const [copiedOriginalPrompt, setCopiedOriginalPrompt] = useState(false)
   const [rejoining, setRejoining] = useState(false)
   const [sentToInput, setSentToInput] = useState(false)
   const [showActionMenu, setShowActionMenu] = useState(false)
@@ -172,7 +173,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   }, [isActive])
 
   const params = meta?.params as Record<string, unknown> | null
-  const uploadFilenames = meta?.upload_filenames as Record<string, string> | undefined
+  const uploadFilenames = meta?.upload_filenames as Record<string, string | string[]> | undefined
 
   const h3WindowPlan = (
     params?.h3_window_plan && typeof params.h3_window_plan === 'object'
@@ -321,6 +322,13 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const totalWindowGenerationSeconds = numberValue(
     meta?.multi_window_timing?.total_generation_seconds,
   ) || (isMultiWindow ? numberValue(generationTime) : 0)
+  const singleWindowGenerationSeconds = !isMultiWindow
+    ? (
+      numberValue(generationTime)
+      || numberValue(meta?.multi_window_timing?.total_generation_seconds)
+      || numberValue(timedWindowSeconds[0])
+    )
+    : 0
   const completedWindowCount = Math.min(
     windowCount,
     Math.max(
@@ -361,39 +369,39 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     setTimeout(() => rerollGeneration(), 50)
   }, [index, setSelectedOutput, rerollGeneration])
 
-  const handleCopyPrompt = () => {
-    if (!prompt) return
-    // navigator.clipboard requires secure context; fallback to execCommand
-    if (navigator.clipboard?.writeText) {
-      navigator.clipboard.writeText(prompt).then(() => {
-        setCopied(true)
-        setTimeout(() => setCopied(false), 1500)
-      }).catch(() => {
-        // Fallback
-        const ta = document.createElement('textarea')
-        ta.value = prompt
-        ta.style.position = 'fixed'
-        ta.style.opacity = '0'
-        document.body.appendChild(ta)
-        ta.select()
-        document.execCommand('copy')
-        document.body.removeChild(ta)
-        setCopied(true)
-        setTimeout(() => setCopied(false), 1500)
-      })
-    } else {
+  const copyPromptText = (
+    text: string,
+    setCopyState: (copied: boolean) => void,
+  ) => {
+    if (!text) return
+    const markCopied = () => {
+      setCopyState(true)
+      setTimeout(() => setCopyState(false), 1500)
+    }
+    const fallbackCopy = () => {
       const ta = document.createElement('textarea')
-      ta.value = prompt
+      ta.value = text
       ta.style.position = 'fixed'
       ta.style.opacity = '0'
       document.body.appendChild(ta)
       ta.select()
       document.execCommand('copy')
       document.body.removeChild(ta)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
+      markCopied()
+    }
+    // navigator.clipboard requires secure context; fallback to execCommand
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).then(markCopied).catch(fallbackCopy)
+    } else {
+      fallbackCopy()
     }
   }
+
+  const handleCopyPrompt = () => copyPromptText(prompt, setCopied)
+  const handleCopyOriginalPrompt = () => copyPromptText(
+    originalPrompt,
+    setCopiedOriginalPrompt,
+  )
 
   const handleDelete = async () => {
     if (!confirmRef.current) {
@@ -1011,6 +1019,19 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
                 </dd>
               </>
             )}
+            {singleWindowGenerationSeconds > 0 && (
+              <>
+                <dt className="text-text-muted">Generation time</dt>
+                <dd
+                  className="text-text-secondary"
+                  title={meta?.generation_time_basis === 'active'
+                    ? 'Generation time excluding queue wait and model loading'
+                    : 'Recorded generation time'}
+                >
+                  {formatGenerationDuration(singleWindowGenerationSeconds)}
+                </dd>
+              </>
+            )}
             {seed != null && seed >= 0 && (
               <>
                 <dt className="text-text-muted">Seed</dt>
@@ -1118,7 +1139,19 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
           )}
           {originalPrompt && originalPrompt.trim() !== prompt.trim() && (
             <div className="mt-3">
-              <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-text-muted">Original prompt</div>
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <span className="text-[10px] font-medium uppercase tracking-wide text-text-muted">Original prompt</span>
+                <button
+                  type="button"
+                  onClick={handleCopyOriginalPrompt}
+                  className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-text-muted hover:bg-bg-hover hover:text-text-primary"
+                  title="Copy original prompt"
+                  aria-label="Copy original prompt"
+                >
+                  {copiedOriginalPrompt ? <Check size={10} className="text-accent-green" /> : <Copy size={10} />}
+                  {copiedOriginalPrompt ? 'Copied' : 'Copy'}
+                </button>
+              </div>
               <div className="max-h-28 overflow-y-auto whitespace-pre-wrap break-words rounded-lg border border-border bg-bg-tertiary p-2 text-[11px] leading-relaxed text-text-secondary">
                 {originalPrompt}
               </div>

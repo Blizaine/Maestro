@@ -83,6 +83,18 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v2.0.1 (2026-09-04)
+
+**Stability and exact workflow restoration**
+- Fixed GitHub issue #97, where an LTX Auto-duration feedback loop could flash the interface and leave a black screen after updating to v2.0.0.
+- Fixed Video Extend window math so one requested continuation window cannot become a full pass plus a tiny second pass. The duration UI, prompt count, and runtime now agree on how much new footage the source-overlap pass contributes.
+- Fixed H3 AI Faithful dialogue inflation caused by an instructional `<d>` marker being interpreted as the start of a giant spoken line. Auto-expanded jobs now plan from the user's original prompt instead of reparsing an already enhanced Context-IR prompt.
+- Rebuilt **Load Settings** as a complete round trip across Studio generation, transform, audio, finishing, Mixer, Director, and Editor workflows—including source media, references, masks, anchors, LoRAs, H3 optimizations, and workflow-specific controls.
+- Added single-window generation time to expanded gallery details and a dedicated Copy button for Original Prompt.
+- Expanded sidecar fidelity and portable release validation so older outputs restore safely and incompatible settings from the previously viewed output cannot leak into the next run.
+
+See the [complete v2.0.1 release notes](docs/RELEASE_NOTES_V2.0.1.md).
+
 ### v2.0.0 (2026-09-03)
 
 **A complete create-to-edit workflow**

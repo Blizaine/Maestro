@@ -40,6 +40,11 @@ export function ControlVideoSection() {
 
   const isFramesInjection = currentValue.includes('KFI')
   const showUpload = !isFramesInjection && modelOptions.guide_preprocessing != null && currentValue !== ''
+  const restoredGuideFilename = guideFilename || (
+    typeof params.video_guide === 'string' && params.video_guide
+      ? params.video_guide.replace(/\\/g, '/').split('/').pop() || null
+      : null
+  )
 
   const handleUpload = async (file: File) => {
     setUploading(true)
@@ -83,7 +88,7 @@ export function ControlVideoSection() {
           <FileUploadZone
             label={uploading ? 'Uploading...' : isImageMode ? 'Drop control image (.png, .jpg, .webp)' : 'Drop control video (.mp4, .webm)'}
             accept={isImageMode ? '.png,.jpg,.jpeg,.webp,.bmp' : '.mp4,.webm,.avi,.mov'}
-            filename={guideFilename}
+            filename={restoredGuideFilename}
             onFile={handleUpload}
             onClear={() => {
               setParam('video_guide', undefined)

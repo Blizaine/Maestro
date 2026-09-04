@@ -1674,7 +1674,13 @@ export async function samServiceStatus(): Promise<{
 
 // --- Audio Mix ---
 
-export async function mixAudio(tracks: { path: string; start_time: number; volume: number }[], workspace?: string): Promise<{ filename: string; path: string }> {
+export async function mixAudio(tracks: {
+  path: string
+  filename?: string
+  start_time: number
+  volume: number
+  duration_seconds?: number | null
+}[], workspace?: string): Promise<{ filename: string; path: string }> {
   const res = await fetch(`${BASE}/api/v1/audio/mix`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

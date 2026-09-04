@@ -6,6 +6,10 @@ import {
   h3OmniSequenceWindowCount,
   h3TimelineFrames,
 } from '../../lib/h3Memory'
+import {
+  continuationFirstWindowFrames,
+  durationWindowPlan,
+} from '../../lib/durationPlanning'
 
 const placeholders: Record<string, string> = {
   image: 'Describe your image...',
@@ -140,6 +144,7 @@ export function PromptInput() {
   const resolution = useStore(s => s.params.resolution)
   const totalVramGb = useStore(s => s.systemStats?.gpu.vram_total_gb ?? 0)
   const imageMode = useStore(s => s.params.image_mode)
+  const studioVideoWorkflow = useStore(s => s.studioVideoWorkflow)
   const h3CameraCoverage = useStore(s => s.params.minimax_h3_camera_coverage || 'auto')
   const h3FirstLastMultiWindow = useStore(s => s.params.minimax_h3_multi_window === true)
   const h3WindowPlanningEnabled = useStore(s => s.params.minimax_h3_window_storyboard !== false)
@@ -186,8 +191,23 @@ export function PromptInput() {
   const discardFrames = swDefaults?.discard_last_frames ?? 0
   const overlapSec = slidingWindowOverlap / fps
   const discardSec = discardFrames / fps
-  const stride = slidingWindowSeconds - discardSec - overlapSec
   const supportsSlidingWindows = modelOptions?.sliding_window === true
+  const firstWindowSeconds = (
+    studioVideoWorkflow === 'extend'
+    && supportsSlidingWindows
+  )
+    ? continuationFirstWindowFrames(
+        Math.round(slidingWindowSeconds * fps),
+        slidingWindowOverlap,
+      ) / fps
+    : slidingWindowSeconds
+  const plannedDuration = durationWindowPlan(
+    durationSeconds,
+    slidingWindowSeconds,
+    overlapSec,
+    discardSec,
+    firstWindowSeconds,
+  )
   const isH3FirstLast = (
     String(modelOptions?.architecture || '').startsWith('minimax_h3')
     && modelOptions?.omni_reference !== true
@@ -196,9 +216,7 @@ export function PromptInput() {
   const windowCount = supportsSlidingWindows
     && (!isH3FirstLast || h3FirstLastMultiWindow)
     && (!isLtxSequence || ltxMultiWindow)
-    && stride > 0
-    && durationSeconds > slidingWindowSeconds
-    ? 1 + Math.ceil((durationSeconds - slidingWindowSeconds + discardSec) / stride)
+    ? plannedDuration.windowCount
     : 1
   const usesWindows = generationMode === 'video' && supportsSlidingWindows && windowCount > 1 && imageMode !== 2
   const usesH3WindowPlanner = (

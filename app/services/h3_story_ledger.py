@@ -95,12 +95,14 @@ UNREQUESTED_SPECTACLE_PATTERNS = (
 
 _CONTEXT_IR_LABEL = re.compile(
     r"\b(subject_definitions|summary|retention_analysis|detailed_description|"
+    r"integrated_multimodal_description|"
     r"overall_soundscape|non_diegetic_music)\s*:",
     flags=re.IGNORECASE,
 )
 _CONTEXT_IR_FIELD = re.compile(
     r"^[ \t]*(subject_definitions|summary|retention_analysis|"
-    r"detailed_description|overall_soundscape|non_diegetic_music)\s*:\s*",
+    r"detailed_description|integrated_multimodal_description|"
+    r"overall_soundscape|non_diegetic_music)\s*:\s*",
     flags=re.IGNORECASE | re.MULTILINE,
 )
 _SPEECH_VERB = re.compile(
@@ -144,7 +146,8 @@ _SCREENPLAY_NON_SPEAKER_LABELS = {
     "action", "audio", "camera", "cast", "character", "characters",
     "detailed description", "dialogue", "director", "end", "ext",
     "exterior", "fade in", "fade out", "int", "interior", "location",
-    "music", "non diegetic music", "notes", "overall soundscape", "pov",
+    "integrated multimodal description", "music", "non diegetic music",
+    "notes", "overall soundscape", "pov",
     "prompt", "retention analysis", "scene", "shot", "style", "summary",
     "subject definitions", "time", "title", "transition", "visual",
 }
@@ -897,7 +900,7 @@ def extract_h3_source_intent(prompt: str) -> dict[str, Any]:
         keep_screenplay_speaker_cues=True,
     ))
     directive_source = re.sub(
-        r"<d>\s*(?:\[[^\]]+\]\s*)?.*?</d>",
+        r"<d>\s*(?:\[[^\]]+\]\s*)?(?:(?!<d>).)*?</d>",
         ". ",
         directive_source,
         flags=re.IGNORECASE | re.DOTALL,
@@ -1082,7 +1085,7 @@ def recover_h3_plain_story(value: Any) -> str:
     detailed = fields.get("detailed_description", "")
     dialogue_events: list[str] = []
     for match in re.finditer(
-        r"<d>\s*(?:\[[^\]]+\]\s*)?(.*?)\s*</d>",
+        r"<d>\s*(?:\[[^\]]+\]\s*)?((?:(?!<d>).)*?)\s*</d>",
         detailed,
         flags=re.IGNORECASE | re.DOTALL,
     ):
@@ -1270,7 +1273,7 @@ def extract_locked_dialogue(prompt: str) -> list[dict[str, Any]]:
 
     source = normalize_h3_dialogue_tags(prompt)
     tag_pattern = re.compile(
-        r"<d>\s*(?:\[([^\]\r\n]+)\])?\s*(.*?)\s*</d>",
+        r"<d>\s*(?:\[([^\]\r\n]+)\])?\s*((?:(?!<d>).)*?)\s*</d>",
         flags=re.IGNORECASE | re.DOTALL,
     )
     quote_pattern = re.compile(r'"([^"\r\n]{1,600})"|“([^”\r\n]{1,600})”')

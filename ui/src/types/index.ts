@@ -113,6 +113,9 @@ export interface GenerateParams {
   flow_shift?: number
   audio_guide?: string
   audio_scale?: number
+  /** Optional LTX ID-LoRA voice identity reference. */
+  voice_reference?: string
+  identity_guidance_scale?: number
   video_guide?: string
   video_mask?: string
   /** Still-image control inputs used by Image Edit/Inpaint/Outpaint. */
@@ -137,10 +140,24 @@ export interface GenerateParams {
   _studio_image_workflow?: StudioImageWorkflow
   /** UI-only Video workflow marker retained in output sidecars. */
   _studio_video_workflow?: StudioVideoWorkflow
+  /** UI-only Audio workflow marker retained in output sidecars. */
+  _audio_sub_mode?: AudioSubMode
+  /** Restorable ffmpeg Mixer recipe. Volumes use the backend's 0-1 scale. */
+  audio_mixer_tracks?: Array<{
+    path: string
+    filename?: string
+    start_time: number
+    volume: number
+    duration_seconds?: number | null
+  }>
   /** UI-only long-form selector retained for reload/sidecar fidelity. */
   _duration_planning_mode?: 'duration' | 'windows' | 'auto'
   // TTS-specific
   audio_guide2?: string
+  audio_guide3?: string
+  audio_guide4?: string
+  audio_guide5?: string
+  audio_guide6?: string
   duration_seconds?: number
   pause_seconds?: number
   temperature?: number
@@ -186,6 +203,10 @@ export interface GenerateParams {
   tts_comp_release?: number
   tts_comp_makeup?: number
   tts_voice_count?: number
+  /** Optional SeedVC post-processing recipe attached to a generation. */
+  voice_clone_enabled?: boolean
+  voice_clone_mode?: 'single' | 'two'
+  voice_clone_refs?: string[]
   // MiniMax H3 Ref2VA ordered Omni-reference manifest.
   minimax_h3_references?: MiniMaxH3Reference[]
   minimax_h3_reference_detail?: 'match' | 'max'
@@ -984,10 +1005,10 @@ export interface OutputMetadata {
   params: Record<string, unknown> | null
   /** Standalone Studio post-processing outputs are restored through their
    *  workflow panels instead of being treated as generation models. */
-  tool?: 'upscale' | 'film_grain' | 'revoice'
+  tool?: 'upscale' | 'film_grain' | 'revoice' | 'editor' | 'audio_mixer'
   tool_media_type?: 'image' | 'video'
   tool_source?: string
-  upload_filenames?: Record<string, string>
+  upload_filenames?: Record<string, string | string[]>
   job_id?: string
   /** Director revision that produced this artifact. Gallery "Load settings"
    *  uses it to reopen the complete Director project instead of flattening

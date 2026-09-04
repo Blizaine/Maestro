@@ -1906,7 +1906,8 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             "s.params.minimax_h3_multi_window === true",
             duration,
         )
-        self.assertIn("const shouldSequence = duration > windowSize + 0.05", duration)
+        self.assertIn("const shouldSequence = durationPlan.windowCount > 1", duration)
+        self.assertIn("continuationFirstWindowSeconds(windowSize, overlap, fps)", duration)
         self.assertIn("minimax_h3_reference_sequence', shouldSequence", duration)
         self.assertIn("minimax_h3_multi_window', shouldSequence", duration)
         self.assertIn("setDuration(preferredSeconds)", duration)
@@ -2122,10 +2123,12 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         expected = "supportsSlidingWindows = state.modelOptions?.sliding_window === true"
         self.assertIn(expected, store)
         self.assertIn("(!isH3FirstLast || params.minimax_h3_multi_window === true)", store)
-        self.assertIn("&& stride > 0", store)
+        self.assertIn("const plannedDuration = durationWindowPlan(", store)
+        self.assertIn("? plannedDuration.windowCount", store)
         self.assertIn("supportsSlidingWindows = modelOptions?.sliding_window === true", prompt_input)
         self.assertIn("(!isH3FirstLast || h3FirstLastMultiWindow)", prompt_input)
-        self.assertIn("&& stride > 0", prompt_input)
+        self.assertIn("const plannedDuration = durationWindowPlan(", prompt_input)
+        self.assertIn("? plannedDuration.windowCount", prompt_input)
 
     def test_omni_drive_audio_adopts_timeline_without_mutating_voice_or_style(self):
         section = _read(_OMNI_REFERENCE_SECTION_PATH)
@@ -2302,11 +2305,20 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             "Jim and Dwight discuss local AI.",
             has_start_image=False,
         )
+        # Human-readable instructions inside a runtime prompt must never emit
+        # a bare opening <d> marker. A later focused dialogue insertion would
+        # otherwise make the parser swallow all intervening scene prose as
+        # one enormous spoken line.
+        self.assertNotIn("<d>", silent_discussion)
         generated = helpers["_inject_h3_generated_dialogue"](
             silent_discussion,
             "Jim (S1): <d>[English] It runs locally.</d>\n"
             "Dwight (S2): <d>[English] Good. More secure.</d>\nIgnore this narration.",
             ref2va=False,
+        )
+        self.assertEqual(
+            helpers["_extract_h3_dialogue_blocks"](generated),
+            ["It runs locally.", "Good. More secure."],
         )
         self.assertTrue(
             helpers["_h3_dialogue_contract_satisfied"](
@@ -2474,6 +2486,23 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
             "params.video_length = currentFrames - overlapFrames",
             store,
         )
+        duration_planning = _read(
+            _ROOT / "ui" / "src" / "lib" / "durationPlanning.ts"
+        )
+        duration_control = _read(
+            _ROOT
+            / "ui"
+            / "src"
+            / "components"
+            / "Sidebar"
+            / "DurationPresetControl.tsx"
+        )
+        duration_slider = _read(_DURATION_SLIDER_PATH)
+        self.assertIn("continuationFirstWindowSeconds", duration_planning)
+        self.assertIn("Math.round(overlapFrames || 0) - 1", duration_planning)
+        self.assertIn("effectiveFirstWindow", duration_control)
+        self.assertIn("firstWindowSeconds={firstWindowSeconds}", duration_slider)
+        self.assertIn("studioVideoWorkflow === 'extend'", duration_slider)
 
     def test_h3_runtime_exposes_native_media_source_conditioning(self):
         main = _read(_MAIN_PATH)

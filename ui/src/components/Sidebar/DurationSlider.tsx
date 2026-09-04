@@ -2,7 +2,11 @@
 import { useEffect, useRef } from 'react'
 import { Lock, Save, Unlock } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
-import { LONG_FORM_MAX_SECONDS } from '../../lib/durationPlanning'
+import {
+  continuationFirstWindowSeconds,
+  durationWindowPlan,
+  LONG_FORM_MAX_SECONDS,
+} from '../../lib/durationPlanning'
 import {
   effectiveH3OmniSequenceFrames,
   h3OmniSequenceWindowCount,
@@ -44,7 +48,10 @@ export function DurationSlider() {
   ))
   const resolution = useStore(s => s.params.resolution)
   const modelType = useStore(s => s.params.model_type)
+  const studioVideoWorkflow = useStore(s => s.studioVideoWorkflow)
   const prompt = useStore(s => s.params.prompt)
+  const h3OriginalPrompt = useStore(s => s.params._h3_original_prompt)
+  const ltxOriginalPrompt = useStore(s => s.params._ltx_original_prompt)
   const durationPlanningMode = useStore(s => s.params._duration_planning_mode ?? 'auto')
   // Keep the selector snapshot referentially stable when no references exist.
   // Returning a new [] here on every Zustand getSnapshot call can make React
@@ -69,6 +76,18 @@ export function DurationSlider() {
   const isOmniReference = modelOptions?.omni_reference === true
   const isH3 = String(modelOptions?.architecture || '').startsWith('minimax_h3')
   const isLtx = modelOptions?.multi_window_sequence_controls === true
+  // Prompt Enhance replaces the visible runtime prompt with a much longer
+  // model-native document. Auto duration must keep sizing the user's story,
+  // not count Context-IR field prose (or its tag instructions) as new action
+  // and dialogue. The immutable source is retained until the user edits the
+  // prompt, at which point setParam('prompt') deliberately clears it.
+  const durationPlanningPrompt = String(
+    (isH3 && typeof h3OriginalPrompt === 'string' && h3OriginalPrompt.trim())
+      ? h3OriginalPrompt
+      : (isLtx && typeof ltxOriginalPrompt === 'string' && ltxOriginalPrompt.trim())
+        ? ltxOriginalPrompt
+        : prompt,
+  )
   const h3MultiWindowEnabled = isOmniReference
     ? omniReferenceSequence
     : h3FirstLastMultiWindow
@@ -101,20 +120,33 @@ export function DurationSlider() {
   const nativeMaxSeconds = modelOptions?.frames_maximum
     ? modelOptions.frames_maximum / fps
     : null
-  const minDuration = Math.max(1, nativeMinSeconds)
+  const isVideoExtend = studioVideoWorkflow === 'extend' && supportsSlidingWindows
+  const minDuration = Math.max(
+    1,
+    isVideoExtend
+      ? continuationFirstWindowSeconds(nativeMinSeconds, overlap, fps)
+      : nativeMinSeconds,
+  )
   const maxDuration = isH3 || isLtx || supportsSlidingWindows
     ? LONG_FORM_MAX_SECONDS
     : Math.max(minDuration, nativeMaxSeconds ?? LONG_FORM_MAX_SECONDS)
   const discardFrames = swDefaults?.discard_last_frames ?? 0
   const overlapSeconds = overlap / fps
   const discardSeconds = discardFrames / fps
-  const stride = windowSize - discardSeconds - overlapSeconds
-  const windowCount = rollingSequenceEnabled && stride > 0 && duration > windowSize
-    ? 1 + Math.ceil((duration - windowSize + discardSeconds) / stride)
-    : 1
+  const firstWindowSeconds = isVideoExtend
+    ? continuationFirstWindowSeconds(windowSize, overlap, fps)
+    : windowSize
+  const durationPlan = durationWindowPlan(
+    duration,
+    windowSize,
+    overlapSeconds,
+    discardSeconds,
+    firstWindowSeconds,
+  )
+  const windowCount = rollingSequenceEnabled ? durationPlan.windowCount : 1
   const showSlidingWindow = supportsSlidingWindows
     && rollingSequenceEnabled
-    && duration > windowSize
+    && windowCount > 1
     && !omniReferenceSequence
   const { frames: omniSequenceClipFrames } = effectiveH3OmniSequenceFrames({
     policy: modelOptions?.omni_sequence_memory_policy,
@@ -148,7 +180,7 @@ export function DurationSlider() {
   // choice. This also repairs older sidecars whose saved duration exceeded a
   // native pass but whose legacy multi-window checkbox was off.
   useEffect(() => {
-    const shouldSequence = duration > windowSize + 0.05
+    const shouldSequence = durationPlan.windowCount > 1
     if (isLtx && ltxMultiWindow !== shouldSequence) {
       setParam('ltx_multi_window', shouldSequence)
     } else if (isH3 && isOmniReference && omniReferenceSequence !== shouldSequence) {
@@ -156,7 +188,7 @@ export function DurationSlider() {
     } else if (isH3 && !isOmniReference && h3FirstLastMultiWindow !== shouldSequence) {
       setParam('minimax_h3_multi_window', shouldSequence)
     }
-  }, [duration, h3FirstLastMultiWindow, isH3, isLtx, isOmniReference, ltxMultiWindow, omniReferenceSequence, setParam, windowSize])
+  }, [durationPlan.windowCount, h3FirstLastMultiWindow, isH3, isLtx, isOmniReference, ltxMultiWindow, omniReferenceSequence, setParam])
 
   // A saved override belongs to one exact model/canvas pair. Switching model
   // or resolution starts both the visible Duration and native Window Length
@@ -257,6 +289,23 @@ export function DurationSlider() {
     }
     if (!supportsSlidingWindows || locked) return
 
+    // Auto Duration already derives its recommendation from the current
+    // native window. Feeding a one-window recommendation back into LTX's
+    // duration-following window control creates a circular update:
+    //
+    //   duration = window -> window = duration + one step -> repeat
+    //
+    // LTX-2.5's 10.0s default needs roughly 33 synchronous updates to reach
+    // its 20.9s ceiling, which trips React's maximum-update-depth guard and
+    // blanks the entire UI during startup (GitHub #97). A one-window Auto plan
+    // therefore stays at its stable native default. A genuine multi-window
+    // Auto plan jumps directly to the safe ceiling below, retaining the
+    // efficient long-window behavior without a chain of nested updates.
+    if (
+      durationPlanningMode === 'auto'
+      && duration <= windowSize + 0.05
+    ) return
+
     let nextWindowSize: number
     if (swDefaults) {
       const windowMin = (swDefaults.window_min ?? Math.round(3 * fps)) / fps
@@ -268,10 +317,12 @@ export function DurationSlider() {
           : (safeWindowFrames != null ? safeWindowFrames / fps : windowMax),
       )
       const nativeBuffer = (swDefaults.window_step ?? fps) / fps
-      nextWindowSize = Math.min(
-        automaticWindowMax,
-        Math.max(windowMin, duration + nativeBuffer),
-      )
+      nextWindowSize = durationPlanningMode === 'auto'
+        ? automaticWindowMax
+        : Math.min(
+            automaticWindowMax,
+            Math.max(windowMin, duration + nativeBuffer),
+          )
     } else if (duration <= 20) {
       nextWindowSize = duration + 1
     } else if (windowSize < 10) {
@@ -282,7 +333,7 @@ export function DurationSlider() {
     if (Math.abs(nextWindowSize - windowSize) > 0.0001) {
       setWindowSize(nextWindowSize)
     }
-  }, [duration, locked, supportsSlidingWindows, omniReferenceSequence, maxDuration, fps, swDefaults, safeWindowFrames, unsupportedAutoResolution, windowSize, setDuration, setWindowSize, isH3, isLtx, ltxMultiWindow, savedOverrideFrames, overrideKey])
+  }, [duration, durationPlanningMode, locked, supportsSlidingWindows, omniReferenceSequence, maxDuration, fps, swDefaults, safeWindowFrames, unsupportedAutoResolution, windowSize, setDuration, setWindowSize, isH3, isLtx, ltxMultiWindow, savedOverrideFrames, overrideKey])
 
   const imageMode = useStore(s => s.params.image_mode)
   const isMultiClip = imageMode === 2
@@ -321,13 +372,14 @@ export function DurationSlider() {
         minSeconds={minDuration}
         maxSeconds={maxDuration}
         windowSeconds={windowSize}
+        firstWindowSeconds={firstWindowSeconds}
         overlapSeconds={overlapSeconds}
         discardSeconds={discardSeconds}
         showSingleWindow={isH3 || isLtx || supportsSlidingWindows}
         enablePlanningModes={isH3 || isLtx || supportsSlidingWindows}
         planningMode={durationPlanningMode}
         onPlanningModeChange={mode => setParam('_duration_planning_mode', mode)}
-        autoPrompt={prompt}
+        autoPrompt={durationPlanningPrompt}
         autoPlanningStyle={creativeWindowPlanning ? 'creative' : 'faithful'}
         autoSourceSeconds={autoSourceSeconds}
         autoSourceLabel={autoSourceLabel}

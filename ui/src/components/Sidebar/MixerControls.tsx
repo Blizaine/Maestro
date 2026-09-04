@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Plus, Trash2, Play, ArrowRight } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { FileUploadZone } from '../shared/FileUploadZone'
@@ -39,12 +39,34 @@ export function MixerControls() {
   const setGenerationMode = useStore(s => s.setGenerationMode)
   const setDurationSeconds = useStore(s => s.setDurationSeconds)
   const activeWorkspace = useStore(s => s.activeWorkspace)
+  const restoredTracks = useStore(s => s.params.audio_mixer_tracks)
+  const loadOutputs = useStore(s => s.loadOutputs)
 
   const [baseTrack, setBaseTrack] = useState<MixerTrack>(() => ({ ...emptyTrack(), volume: 100 }))
   const [overlays, setOverlays] = useState<MixerTrack[]>([])
   const [mixing, setMixing] = useState(false)
   const [mixResult, setMixResult] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Gallery Load Settings restores the recipe into the shared params store.
+  // Every Load Settings click supplies a fresh recipe object, including when
+  // the user reloads the same output after changing the local mixer controls.
+  useEffect(() => {
+    if (!Array.isArray(restoredTracks) || restoredTracks.length === 0) return
+    const toTrack = (track: NonNullable<typeof restoredTracks>[number]): MixerTrack => ({
+      id: _nextTrackId++,
+      filename: track.filename || track.path.replace(/\\/g, '/').split('/').pop() || null,
+      path: track.path || null,
+      startTime: Math.max(0, Number(track.start_time) || 0),
+      volume: Math.max(0, Math.min(100, Math.round((Number(track.volume) || 0) * 100))),
+      durationSec: Number.isFinite(Number(track.duration_seconds))
+        ? Number(track.duration_seconds)
+        : null,
+    })
+    setBaseTrack(toTrack(restoredTracks[0]))
+    setOverlays(restoredTracks.slice(1).map(toTrack))
+    setMixResult(null)
+    setError(null)
+  }, [restoredTracks])
 
   const handleFileUpload = async (file: File, track: MixerTrack, update: (t: MixerTrack) => void) => {
     try {
@@ -83,15 +105,22 @@ export function MixerControls() {
     setMixResult(null)
     try {
       const tracks = [
-        { path: baseTrack.path!, start_time: 0, volume: baseTrack.volume / 100 },
+        {
+          path: baseTrack.path!, filename: baseTrack.filename || undefined,
+          start_time: 0, volume: baseTrack.volume / 100,
+          duration_seconds: baseTrack.durationSec,
+        },
         ...overlays.filter(t => t.path).map(t => ({
           path: t.path!,
+          filename: t.filename || undefined,
           start_time: t.startTime,
           volume: t.volume / 100,
+          duration_seconds: t.durationSec,
         })),
       ]
       const data = await api.mixAudio(tracks, activeWorkspace)
       setMixResult(data.filename)
+      void loadOutputs()
 
       if (useAsGuide) {
         // Switch to Video mode with the mixed audio as audio guide

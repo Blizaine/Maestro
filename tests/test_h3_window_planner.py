@@ -1368,6 +1368,12 @@ class H3WindowPlannerTests(unittest.TestCase):
         self.assertIn("api.planH3Windows", store)
         self.assertIn("params._h3_window_plan_reviewed = true", store)
         self.assertIn("preserve_reviewed_h3_plan", launch)
+        self.assertIn("h3_first_last_source_prompt", launch)
+        self.assertIn('body.get("_h3_original_prompt")', launch)
+        self.assertIn(
+            "plan_h3_sliding_windows,\n                    h3_first_last_source_prompt",
+            launch,
+        )
         self.assertIn("planner LLM bypassed", launch)
         self.assertNotIn("Plan Prompt Across Windows", advanced)
         self.assertIn("Window prompts", multi_window)

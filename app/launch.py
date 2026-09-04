@@ -8920,6 +8920,8 @@ async def mix_audio(request: Request):
     """
     import subprocess
 
+    mix_started_at = time.time()
+
     body = await request.json()
     tracks = body.get("tracks", [])
     if len(tracks) < 2:
@@ -9009,6 +9011,44 @@ async def mix_audio(request: Request):
         raise HTTPException(status_code=500, detail="Mix output file not created")
 
     print(f"[Audio Mix] Done: {out_filename}")
+
+    # Mixer has no diffusion model/job, so write its own sidecar. This makes
+    # the gallery pencil a true round trip instead of restoring a blank Audio
+    # screen with no knowledge of the source tracks.
+    mixer_tracks = []
+    for track in tracks:
+        mixer_tracks.append({
+            "path": track["path"],
+            "filename": str(
+                track.get("filename") or os.path.basename(track["path"])
+            ),
+            "start_time": float(track.get("start_time", 0)),
+            "volume": max(0.0, min(1.0, float(track.get("volume", 1.0)))),
+            "duration_seconds": track.get("duration_seconds"),
+        })
+    mixer_sidecar = {
+        "params": {
+            "model_type": "audio_mixer",
+            "generation_mode": "audio",
+            "_audio_sub_mode": "mixer",
+            "audio_mixer_tracks": mixer_tracks,
+        },
+        "upload_filenames": {
+            "audio_mixer_tracks": [
+                os.path.basename(track["path"]) for track in tracks
+            ],
+        },
+        "generation_mode": "audio",
+        "generation_time": int(round(time.time() - mix_started_at)),
+        "created_at": time.time(),
+        "output_filename": out_filename,
+    }
+    with open(
+        os.path.splitext(out_path)[0] + ".meta.json",
+        "w",
+        encoding="utf-8",
+    ) as handle:
+        json.dump(mixer_sidecar, handle, indent=2)
 
     return {
         "filename": out_filename,
@@ -10717,6 +10757,16 @@ async def _prepare_generation_submission(
             if h3_first_last_prompt_mode == "creative"
             else "faithful"
         )
+        # A one-pass Prompt Enhance stores a model-native Context-IR document
+        # in ``prompt`` for rendering and keeps the user's idea separately.
+        # If Auto duration later crosses a native boundary, the window planner
+        # must schedule the original story rather than interpreting Context-IR
+        # labels, timing prose, or tag instructions as new dialogue/events.
+        h3_first_last_source_prompt = str(
+            body.get("_h3_original_prompt")
+            or body.get("prompt")
+            or ""
+        ).strip()
         h3_storyboard_enabled = h3_first_last_prompt_mode != "manual"
         h3_multi_window_enabled = body.get("minimax_h3_multi_window", False) is True
         h3_is_multi_clip = int(body.get("multi_prompts_gen_type") or 0) == 3
@@ -10793,7 +10843,7 @@ async def _prepare_generation_submission(
             h3_has_end = bool(h3_end_value)
             h3_injected_keyframes = _h3_injected_keyframes_from_body(body)
             h3_expected_signature = h3_window_plan_signature(
-                str(body.get("prompt") or ""),
+                h3_first_last_source_prompt,
                 model_type=str(body.get("model_type") or ""),
                 resolution=str(body.get("resolution") or ""),
                 total_frames=h3_total_frames,
@@ -10830,7 +10880,7 @@ async def _prepare_generation_submission(
                 and reviewed_h3_window_plan_matches(
                     cached_plan,
                     cached_prompts,
-                    source_prompt=str(body.get("prompt") or ""),
+                    source_prompt=h3_first_last_source_prompt,
                     model_type=str(body.get("model_type") or ""),
                     resolution=str(body.get("resolution") or ""),
                     window_frames=h3_window_frames,
@@ -10902,7 +10952,7 @@ async def _prepare_generation_submission(
                 )
                 h3_window_plan_response = await asyncio.to_thread(
                     plan_h3_sliding_windows,
-                    str(body.get("prompt") or ""),
+                    h3_first_last_source_prompt,
                     model_type=str(body.get("model_type") or ""),
                     resolution=str(body.get("resolution") or ""),
                     total_frames=h3_total_frames,
@@ -11444,6 +11494,7 @@ async def retake_video_endpoint(request: Request):
         "edit_video_path": video_path,
         "edit_start_time": start_time,
         "edit_end_time": end_time,
+        "edit_prompt_strength": float(body.get("guidance_scale", 3.0)),
     }
 
     workspace = body.get("workspace") or _get_active_workspace()
@@ -12051,6 +12102,7 @@ async def edit_anything_endpoint(request: Request):
         "edit_anything_lora_strength": lora_strength,
         "edit_start_time": start_time,
         "edit_end_time": end_time if end_time > 0 else (total_frames / fps if fps else 0),
+        "edit_prompt_strength": float(body.get("guidance_scale", 1.0)),
         # Optional user-provided boundary anchors. When present, ltx2.py's
         # retake setup uses these instead of auto-extracting the source's
         # first/last frames as I2V anchors. Empty slots fall through to
@@ -21171,11 +21223,16 @@ async def blend_endpoint(request: Request):
             "loras_multipliers": " ".join(m.split(";")[0] for m in (body.get("loras_multipliers", "") or "").split()),
             "sliding_window_size": transition_frames + 10,
             "settings_version": 2.52,
+            "_studio_video_workflow": "blend",
             "_blend_clip_a": clip_a_path,
             "_blend_clip_b": clip_b_path,
             "_blend_temp_dir": temp_dir,
             "_blend_mode": blend_mode,
             "_blend_overlap_sec": overlap_sec_eff,
+            "_blend_transition_sec": float(body.get("transition_sec", overlap_sec_eff)),
+            "_blend_motion_prefix_sec": motion_prefix_sec,
+            "_blend_motion_suffix_sec": motion_suffix_sec,
+            "_blend_anchor_strength": input_video_strength,
             "_blend_fps": fps,
             "_blend_out_w": src_w,
             "_blend_out_h": src_h,
@@ -21872,6 +21929,9 @@ async def inpaint_endpoint(request: Request):
         # Track restore-able fields for the UI.
         "edit_video_path": video_path,
         "edit_target": intent.get("target"),
+        "edit_sam_target": body.get("sam_target") or intent.get("target"),
+        "edit_invert_mask": bool(body.get("invert_mask", False)),
+        "edit_prompt_strength": _inpaint_cfg,
         "edit_start_time": start_time,
         "edit_end_time": end_time if end_time > 0 else (total_frames / fps if fps else 0),
     }
@@ -23503,7 +23563,22 @@ def _run_tool_revoice(job_id: str):
                 except OSError:
                     pass
                 return False
-            _write_tool_sidecar(out_dir, fname, source_name=os.path.basename(video_source), tool="revoice", params={"mode": mode, "model_type": "post_processing"}, elapsed=time.time() - start_time, job_id=job_id)
+            _write_tool_sidecar(
+                out_dir,
+                fname,
+                source_name=os.path.basename(video_source),
+                tool="revoice",
+                params={
+                    "mode": mode,
+                    "voice_ref_paths": voice_refs,
+                    "diffusion_steps": int(params.get("diffusion_steps", 25)),
+                    "cfg_rate": float(params.get("cfg_rate", 0.5)),
+                    "model_type": "post_processing",
+                    "_audio_sub_mode": "revoice",
+                },
+                elapsed=time.time() - start_time,
+                job_id=job_id,
+            )
 
             completed = finish_job(
                 job,
@@ -24636,6 +24711,12 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     "video_guide", "audio_guide",
                     "audio_guide2", "audio_guide3", "audio_guide4",
                     "audio_guide5", "audio_guide6",
+                    "image_refs", "video_source", "video_end",
+                    "voice_reference", "voice_clone_refs",
+                    "edit_video_path", "retake_video",
+                    "retake_user_start_anchor", "retake_user_end_anchor",
+                    "edit_repaint_target_frame", "edit_recast_ref_path",
+                    "_blend_clip_a", "_blend_clip_b",
                 ]:
                     val = job["params"].get(key)
                     if val and isinstance(val, str):
@@ -26073,6 +26154,12 @@ def _write_recast_shot_aware_sidecar(
         "image_start", "image_end", "video_guide", "audio_guide",
         "audio_guide2", "audio_guide3", "audio_guide4",
         "audio_guide5", "audio_guide6",
+        "image_refs", "video_source", "video_end",
+        "voice_reference", "voice_clone_refs",
+        "edit_video_path", "retake_video",
+        "retake_user_start_anchor", "retake_user_end_anchor",
+        "edit_repaint_target_frame", "edit_recast_ref_path",
+        "_blend_clip_a", "_blend_clip_b",
     ):
         value = params.get(key)
         if isinstance(value, str) and value:
@@ -26318,6 +26405,12 @@ def _write_repaint_shot_aware_sidecar(
         "image_start", "image_end", "video_guide", "audio_guide",
         "audio_guide2", "audio_guide3", "audio_guide4",
         "audio_guide5", "audio_guide6",
+        "image_refs", "video_source", "video_end",
+        "voice_reference", "voice_clone_refs",
+        "edit_video_path", "retake_video",
+        "retake_user_start_anchor", "retake_user_end_anchor",
+        "edit_repaint_target_frame", "edit_recast_ref_path",
+        "_blend_clip_a", "_blend_clip_b",
     ):
         value = params.get(key)
         if isinstance(value, str) and value:
@@ -26545,6 +26638,11 @@ def _write_outpaint_shot_aware_sidecar(
 
     output_name = os.path.basename(output_path)
     params = copy.deepcopy(job.get("params") or {})
+    private_outpaint = {
+        key: value
+        for key, value in params.items()
+        if str(key).startswith("_outpaint_")
+    }
     params.pop("_defer_output_publication", None)
     for key in list(params):
         if str(key).startswith("_outpaint_"):
@@ -26558,12 +26656,34 @@ def _write_outpaint_shot_aware_sidecar(
     params["outpaint_preserve_source_audio"] = bool(
         shot_bundle.get("preserve_source_audio", True)
     )
+    params["outpaint_lock_source_pixels"] = bool(
+        private_outpaint.get("_outpaint_lock_source_pixels", False)
+    )
+    params["outpaint_trim_smear"] = bool(
+        private_outpaint.get("_outpaint_trim_smear", False)
+    )
+    for public_key, private_key in (
+        ("outpaint_canvas_w", "_outpaint_canvas_w"),
+        ("outpaint_canvas_h", "_outpaint_canvas_h"),
+        ("outpaint_overlay_w", "_outpaint_overlay_w"),
+        ("outpaint_overlay_h", "_outpaint_overlay_h"),
+        ("outpaint_overlay_x", "_outpaint_overlay_x"),
+        ("outpaint_overlay_y", "_outpaint_overlay_y"),
+    ):
+        if private_key in private_outpaint:
+            params[public_key] = private_outpaint[private_key]
 
     upload_filenames = {}
     for key in (
         "image_start", "image_end", "video_guide", "audio_guide",
         "audio_guide2", "audio_guide3", "audio_guide4",
         "audio_guide5", "audio_guide6",
+        "image_refs", "video_source", "video_end",
+        "voice_reference", "voice_clone_refs",
+        "edit_video_path", "retake_video",
+        "retake_user_start_anchor", "retake_user_end_anchor",
+        "edit_repaint_target_frame", "edit_recast_ref_path",
+        "_blend_clip_a", "_blend_clip_b",
     ):
         value = params.get(key)
         if isinstance(value, str) and value:

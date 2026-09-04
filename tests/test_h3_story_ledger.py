@@ -684,6 +684,32 @@ class H3StoryLedgerTests(unittest.TestCase):
         self.assertIn("Thanos snaps his fingers", events)
         self.assertIn("Blaine turns to dust", events)
 
+    def test_instructional_open_tag_cannot_swallow_real_dialogue(self):
+        prompt = (
+            "Finish all <d> dialogue before the action ends. "
+            "The speaker then says (S1) <d>[English] Seven spoken words stay here, nowhere else.</d>"
+        )
+        locked = extract_locked_dialogue(prompt)
+        self.assertEqual(len(locked), 1)
+        self.assertEqual(
+            locked[0]["text"],
+            "Seven spoken words stay here, nowhere else.",
+        )
+        self.assertEqual(_dialogue_word_count(locked[0]["text"]), 7)
+
+    def test_context_ir_field_is_never_a_screenplay_speaker(self):
+        prompt = (
+            "integrated_multimodal_description: [Shot 1] Alex crosses the room and says "
+            "(S1) <d>[English] Seven spoken words stay here, nowhere else.</d> "
+            "while the camera follows.\n\n"
+            "overall_soundscape: Quiet room tone.\n\n"
+            "non_diegetic_music: N/A"
+        )
+        locked = extract_locked_dialogue(prompt)
+        self.assertEqual(len(locked), 1)
+        self.assertEqual(_dialogue_word_count(locked[0]["text"]), 7)
+        self.assertEqual(locked[0]["speaker"], "Alex")
+
     def test_quoted_title_is_not_misclassified_as_spoken_dialogue(self):
         prompt = 'A sitcom episode titled "The One With the Broken Robot" follows Alex repairing it.'
         self.assertEqual(extract_locked_dialogue(prompt), [])

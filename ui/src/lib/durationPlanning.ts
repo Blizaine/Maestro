@@ -78,6 +78,55 @@ export interface AutoDurationOptions {
   minimumSeconds?: number
   maximumSeconds?: number
   maximumInferredWindows?: number
+  /**
+   * Fresh output contributed by the first native pass. Video Extend spends
+   * part of that pass on source-tail motion context, so this can be shorter
+   * than `windowSeconds` while every later pass still advances by `stride`.
+   */
+  firstWindowSeconds?: number | null
+}
+
+/** Fresh footage that one source-conditioned continuation pass can add.
+ *
+ * WanGP places `overlapFrames` source frames at the front of the first pass,
+ * but its public frame-count convention already shares the boundary frame.
+ * Consequently only `overlapFrames - 1` frames reduce the requested
+ * continuation duration. Keeping this arithmetic in one exported helper
+ * prevents the duration picker from promising one window while the runtime
+ * quietly schedules a tiny second pass.
+ */
+export function continuationFirstWindowSeconds(
+  windowSeconds: number,
+  overlapFrames: number,
+  fps: number,
+): number {
+  const rate = Math.max(1, Number.isFinite(fps) ? fps : 1)
+  const windowFrames = Math.max(1, Math.round(windowSeconds * rate))
+  return continuationFirstWindowFrames(windowFrames, overlapFrames) / rate
+}
+
+export function continuationFirstWindowFrames(
+  windowFrames: number,
+  overlapFrames: number,
+): number {
+  const nativeWindowFrames = Math.max(1, Math.round(windowFrames || 0))
+  const contextFrames = Math.max(0, Math.round(overlapFrames || 0) - 1)
+  return Math.max(1, nativeWindowFrames - contextFrames)
+}
+
+function firstPassSeconds(
+  windowSeconds: number,
+  requestedFirstWindowSeconds?: number | null,
+): number {
+  const window = Math.max(0.1, windowSeconds)
+  if (
+    requestedFirstWindowSeconds == null
+    || !Number.isFinite(Number(requestedFirstWindowSeconds))
+  ) return window
+  return Math.max(
+    0.1,
+    Math.min(window, Number(requestedFirstWindowSeconds)),
+  )
 }
 
 export function durationWindowPlan(
@@ -85,21 +134,23 @@ export function durationWindowPlan(
   windowSeconds: number,
   overlapSeconds = 0,
   discardSeconds = 0,
+  firstWindowSeconds?: number | null,
 ): DurationWindowPlan {
   const requested = Math.max(0, requestedSeconds)
   const window = Math.max(0.1, windowSeconds)
+  const firstWindow = firstPassSeconds(window, firstWindowSeconds)
   const stride = Math.max(0.1, window - Math.max(0, overlapSeconds) - Math.max(0, discardSeconds))
-  if (requested <= window + 0.0001) {
+  if (requested <= firstWindow + 0.0001) {
     return {
       windowCount: 1,
-      generatedSeconds: window,
+      generatedSeconds: firstWindow,
       requestedSeconds: requested,
-      trimSeconds: Math.max(0, window - requested),
+      trimSeconds: Math.max(0, firstWindow - requested),
       strideSeconds: stride,
     }
   }
-  const count = 1 + Math.ceil((requested - window + Math.max(0, discardSeconds)) / stride)
-  const generated = window + (count - 1) * stride - Math.max(0, discardSeconds)
+  const count = 1 + Math.ceil((requested - firstWindow + Math.max(0, discardSeconds)) / stride)
+  const generated = firstWindow + (count - 1) * stride - Math.max(0, discardSeconds)
   return {
     windowCount: count,
     generatedSeconds: generated,
@@ -115,23 +166,25 @@ export function nearestWholeWindowDuration(
   overlapSeconds = 0,
   discardSeconds = 0,
   maximumSeconds = LONG_FORM_MAX_SECONDS,
+  firstWindowSeconds?: number | null,
 ): DurationWindowPlan {
   const window = Math.max(0.1, windowSeconds)
+  const firstWindow = firstPassSeconds(window, firstWindowSeconds)
   const stride = Math.max(0.1, window - Math.max(0, overlapSeconds) - Math.max(0, discardSeconds))
-  const target = Math.min(maximumSeconds, Math.max(window, targetSeconds))
-  const estimate = Math.max(1, Math.round((target - window + Math.max(0, discardSeconds)) / stride) + 1)
+  const target = Math.min(maximumSeconds, Math.max(firstWindow, targetSeconds))
+  const estimate = Math.max(1, Math.round((target - firstWindow + Math.max(0, discardSeconds)) / stride) + 1)
   const candidates = [estimate - 1, estimate, estimate + 1]
     .filter(count => count >= 1)
     .map(count => {
       const generated = count === 1
-        ? window
-        : window + (count - 1) * stride - Math.max(0, discardSeconds)
+        ? firstWindow
+        : firstWindow + (count - 1) * stride - Math.max(0, discardSeconds)
       return { count, generated }
     })
     .filter(candidate => candidate.generated <= maximumSeconds + 0.0001)
   const best = candidates.sort((a, b) => (
     Math.abs(a.generated - target) - Math.abs(b.generated - target)
-  ))[0] || { count: 1, generated: Math.min(window, maximumSeconds) }
+  ))[0] || { count: 1, generated: Math.min(firstWindow, maximumSeconds) }
   return {
     windowCount: best.count,
     generatedSeconds: best.generated,
@@ -154,21 +207,24 @@ export function wholeWindowDuration(
   overlapSeconds = 0,
   discardSeconds = 0,
   maximumSeconds = LONG_FORM_MAX_SECONDS,
+  firstWindowSeconds?: number | null,
 ): DurationWindowPlan {
   const window = Math.max(0.1, windowSeconds)
+  const firstWindow = firstPassSeconds(window, firstWindowSeconds)
   const stride = Math.max(0.1, window - Math.max(0, overlapSeconds) - Math.max(0, discardSeconds))
   const maximumCount = maximumWholeWindowCount(
     window,
     overlapSeconds,
     discardSeconds,
     maximumSeconds,
+    firstWindow,
   )
   const count = Math.max(1, Math.min(maximumCount, Math.round(requestedWindowCount || 1)))
   const generated = count === 1
-    ? Math.min(window, maximumSeconds)
+    ? Math.min(firstWindow, maximumSeconds)
     : Math.min(
         maximumSeconds,
-        window + (count - 1) * stride - Math.max(0, discardSeconds),
+        firstWindow + (count - 1) * stride - Math.max(0, discardSeconds),
       )
   return {
     windowCount: count,
@@ -184,12 +240,14 @@ export function maximumWholeWindowCount(
   overlapSeconds = 0,
   discardSeconds = 0,
   maximumSeconds = LONG_FORM_MAX_SECONDS,
+  firstWindowSeconds?: number | null,
 ): number {
   const window = Math.max(0.1, windowSeconds)
+  const firstWindow = firstPassSeconds(window, firstWindowSeconds)
   const discard = Math.max(0, discardSeconds)
   const stride = Math.max(0.1, window - Math.max(0, overlapSeconds) - discard)
-  if (maximumSeconds <= window + 0.0001) return 1
-  return Math.max(1, Math.floor((maximumSeconds + discard - window) / stride) + 1)
+  if (maximumSeconds <= firstWindow + 0.0001) return 1
+  return Math.max(1, Math.floor((maximumSeconds + discard - firstWindow) / stride) + 1)
 }
 
 function wordCount(value: string): number {
@@ -360,11 +418,13 @@ export function recommendAutoDuration(
   const minimum = Math.max(0.1, options.minimumSeconds ?? 1)
   const maximum = Math.max(minimum, options.maximumSeconds ?? LONG_FORM_MAX_SECONDS)
   const inferredLimit = Math.max(1, Math.round(options.maximumInferredWindows ?? 8))
+  const firstWindow = firstPassSeconds(windowSeconds, options.firstWindowSeconds)
   const boundedPlan = (seconds: number) => durationWindowPlan(
     Math.min(maximum, Math.max(minimum, seconds)),
     windowSeconds,
     overlapSeconds,
     discardSeconds,
+    firstWindow,
   )
   const result = (
     seconds: number,
@@ -395,6 +455,7 @@ export function recommendAutoDuration(
       overlapSeconds,
       discardSeconds,
       maximum,
+      firstWindow,
     )
     return {
       ...plan,
@@ -415,7 +476,14 @@ export function recommendAutoDuration(
   }
 
   if (!prompt) {
-    const plan = wholeWindowDuration(1, windowSeconds, overlapSeconds, discardSeconds, maximum)
+    const plan = wholeWindowDuration(
+      1,
+      windowSeconds,
+      overlapSeconds,
+      discardSeconds,
+      maximum,
+      firstWindow,
+    )
     return {
       ...plan,
       reason: 'No timed media or story scope yet, so Auto starts with one window.',
@@ -431,12 +499,13 @@ export function recommendAutoDuration(
   // happen while a character talks and must not be added a second time.
   const speakingSeconds = dialogueWords / 2.15 + Math.max(0, dialogueTurns - 1) * 0.4
   const actionSeconds = visibleBeats * 3.5
-  const scopedSeconds = Math.max(windowSeconds, speakingSeconds, actionSeconds)
+  const scopedSeconds = Math.max(firstWindow, speakingSeconds, actionSeconds)
   const scopedPlan = durationWindowPlan(
     scopedSeconds,
     windowSeconds,
     overlapSeconds,
     discardSeconds,
+    firstWindow,
   )
   const creativeFloor = options.planningStyle === 'creative' ? 3 : 1
   const dialogueFloor = dialogueTurns >= 2 ? 2 : 1
@@ -445,12 +514,14 @@ export function recommendAutoDuration(
     overlapSeconds,
     discardSeconds,
     maximum,
+    firstWindow,
   )
   const dialoguePlan = durationWindowPlan(
-    Math.max(windowSeconds, speakingSeconds),
+    Math.max(firstWindow, speakingSeconds),
     windowSeconds,
     overlapSeconds,
     discardSeconds,
+    firstWindow,
   )
   // Eight windows remains a useful guard against turning a vague concept into
   // an accidental all-day render. Explicit screenplay/H3 dialogue is a real
@@ -472,6 +543,7 @@ export function recommendAutoDuration(
     overlapSeconds,
     discardSeconds,
     maximum,
+    firstWindow,
   )
   return {
     ...plan,

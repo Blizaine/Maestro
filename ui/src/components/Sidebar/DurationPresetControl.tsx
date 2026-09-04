@@ -21,6 +21,8 @@ interface DurationPresetControlProps {
   minSeconds?: number
   maxSeconds: number
   windowSeconds?: number | null
+  /** Fresh output contributed by pass one when source context occupies part of it. */
+  firstWindowSeconds?: number | null
   overlapSeconds?: number
   discardSeconds?: number
   showSingleWindow?: boolean
@@ -48,6 +50,7 @@ export function DurationPresetControl({
   minSeconds = 1,
   maxSeconds,
   windowSeconds = null,
+  firstWindowSeconds = null,
   overlapSeconds = 0,
   discardSeconds = 0,
   showSingleWindow = true,
@@ -73,13 +76,25 @@ export function DurationPresetControl({
     ? (planningMode ?? internalPlanningMode)
     : 'duration'
   const effectiveWindow = Math.max(minSeconds, windowSeconds || value || minSeconds)
-  const exactPlan = durationWindowPlan(value, effectiveWindow, overlapSeconds, discardSeconds)
+  const effectiveFirstWindow = Math.max(
+    minSeconds,
+    Math.min(effectiveWindow, firstWindowSeconds ?? effectiveWindow),
+  )
+  const hasReducedFirstWindow = effectiveFirstWindow < effectiveWindow - 0.01
+  const exactPlan = durationWindowPlan(
+    value,
+    effectiveWindow,
+    overlapSeconds,
+    discardSeconds,
+    effectiveFirstWindow,
+  )
   const isSequence = exactPlan.windowCount > 1
   const maximumWindowCount = maximumWholeWindowCount(
     effectiveWindow,
     overlapSeconds,
     discardSeconds,
     maxSeconds,
+    effectiveFirstWindow,
   )
   const autoPlan = recommendAutoDuration(
     effectiveWindow,
@@ -94,13 +109,14 @@ export function DurationPresetControl({
       minimumSeconds: minSeconds,
       maximumSeconds: maxSeconds,
       maximumInferredWindows: autoMaximumInferredWindows,
+      firstWindowSeconds: effectiveFirstWindow,
     },
   )
 
   useEffect(() => {
     if (effectivePlanningMode !== 'duration' || selectedPreset == null) return
     const next = selectedPreset === 'single'
-      ? Math.min(maxSeconds, effectiveWindow)
+      ? Math.min(maxSeconds, effectiveFirstWindow)
       : quantizeToWindows
         ? nearestWholeWindowDuration(
           selectedPreset,
@@ -108,10 +124,11 @@ export function DurationPresetControl({
           overlapSeconds,
           discardSeconds,
           maxSeconds,
+          effectiveFirstWindow,
         ).generatedSeconds
         : Math.min(maxSeconds, Math.max(minSeconds, selectedPreset))
     if (Math.abs(next - value) > 0.05) onChange(next)
-  }, [discardSeconds, effectivePlanningMode, effectiveWindow, maxSeconds, minSeconds, onChange, overlapSeconds, quantizeToWindows, selectedPreset, value])
+  }, [discardSeconds, effectiveFirstWindow, effectivePlanningMode, effectiveWindow, maxSeconds, minSeconds, onChange, overlapSeconds, quantizeToWindows, selectedPreset, value])
 
   useEffect(() => {
     if (effectivePlanningMode !== 'auto') return
@@ -133,6 +150,7 @@ export function DurationPresetControl({
         overlapSeconds,
         discardSeconds,
         maxSeconds,
+        effectiveFirstWindow,
       )
       if (Math.abs(plan.generatedSeconds - value) > 0.05) onChange(plan.generatedSeconds)
     }
@@ -145,6 +163,7 @@ export function DurationPresetControl({
       overlapSeconds,
       discardSeconds,
       maxSeconds,
+      effectiveFirstWindow,
     )
     onChange(plan.generatedSeconds)
   }
@@ -202,7 +221,9 @@ export function DurationPresetControl({
               <button
                 type="button"
                 disabled={disabled}
-                title={`One complete model window: ${formatDuration(Math.min(maxSeconds, effectiveWindow), true)}`}
+                title={hasReducedFirstWindow
+                  ? `One continuation pass: ${formatDuration(Math.min(maxSeconds, effectiveFirstWindow), true)} of new footage; ${formatDuration(effectiveWindow, true)} native pass includes source-tail context.`
+                  : `One complete model window: ${formatDuration(Math.min(maxSeconds, effectiveWindow), true)}`}
                 onClick={() => setSelectedPreset('single')}
                 className={`col-span-4 w-full rounded-md border px-2 py-1 text-[9px] transition-colors disabled:opacity-40 ${
                   selectedPreset === 'single'
@@ -221,6 +242,7 @@ export function DurationPresetControl({
                     overlapSeconds,
                     discardSeconds,
                     maxSeconds,
+                    effectiveFirstWindow,
                   )
                 : {
                     generatedSeconds: Math.min(maxSeconds, preset.seconds),
@@ -292,8 +314,12 @@ export function DurationPresetControl({
               {!quantizeToWindows
                 ? `Exact requested output · ${formatDuration(value, true)}`
                 : isSequence
-                ? `${exactPlan.windowCount} windows × ${formatDuration(effectiveWindow, true)}; final output ${formatDuration(value, true)}${exactPlan.trimSeconds > 0.05 ? ` (trim ${formatDuration(exactPlan.trimSeconds, true)})` : ''}`
-                : `Single window · ${formatDuration(value, true)}`}
+                ? hasReducedFirstWindow
+                  ? `${exactPlan.windowCount} continuation passes; first adds ${formatDuration(effectiveFirstWindow, true)}, later passes add ${formatDuration(exactPlan.strideSeconds, true)}; final output ${formatDuration(value, true)}${exactPlan.trimSeconds > 0.05 ? ` (trim ${formatDuration(exactPlan.trimSeconds, true)})` : ''}`
+                  : `${exactPlan.windowCount} windows × ${formatDuration(effectiveWindow, true)}; final output ${formatDuration(value, true)}${exactPlan.trimSeconds > 0.05 ? ` (trim ${formatDuration(exactPlan.trimSeconds, true)})` : ''}`
+                : hasReducedFirstWindow
+                  ? `Single continuation pass · ${formatDuration(value, true)} new footage; source-tail context uses the rest of the ${formatDuration(effectiveWindow, true)} pass`
+                  : `Single window · ${formatDuration(value, true)}`}
               {modelLimitLabel && <span className="block">{modelLimitLabel}</span>}
             </div>
           </div>
@@ -349,7 +375,9 @@ export function DurationPresetControl({
           <div className="text-[9px] leading-snug text-text-muted">
             <span className="text-text-secondary">{exactPlan.windowCount} exact {exactPlan.windowCount === 1 ? 'window' : 'windows'}</span>
             {' · '}{formatDuration(value, true)} final output
-            {' · '}each pass up to {formatDuration(effectiveWindow, true)}
+            {hasReducedFirstWindow
+              ? ` · first pass adds ${formatDuration(effectiveFirstWindow, true)}; later passes add ${formatDuration(exactPlan.strideSeconds, true)}`
+              : ` · each pass up to ${formatDuration(effectiveWindow, true)}`}
             {modelLimitLabel && <span className="block mt-0.5">{modelLimitLabel}</span>}
           </div>
         </div>

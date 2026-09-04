@@ -18,6 +18,11 @@ export function SfxControls() {
   const sfxPrompt = ((params as unknown as Record<string, unknown>).MMAudio_prompt as string) || ''
   const sfxNegPrompt = ((params as unknown as Record<string, unknown>).MMAudio_neg_prompt as string) || ''
   const textWeight = ((params as unknown as Record<string, unknown>).sfx_text_weight as number) ?? 1.0
+  const restoredVideoFilename = videoFilename || (
+    typeof params.video_guide === 'string' && params.video_guide
+      ? params.video_guide.replace(/\\/g, '/').split('/').pop() || null
+      : null
+  )
 
   const handleVideoUpload = async (file: File) => {
     setUploading(true)
@@ -55,7 +60,7 @@ export function SfxControls() {
         <FileUploadZone
           label={uploading ? 'Uploading...' : 'Drop video to generate matching audio'}
           accept=".mp4,.webm,.avi,.mov,.mkv"
-          filename={videoFilename}
+          filename={restoredVideoFilename}
           onFile={handleVideoUpload}
           onClear={() => {
             setParam('video_guide' as keyof typeof params, undefined)
@@ -68,7 +73,7 @@ export function SfxControls() {
       </div>
 
       {/* Duration (shown when no video — max 20s, MMAudio single-pass limit) */}
-      {!videoFilename && (
+      {!restoredVideoFilename && (
         <div>
           <div className="flex items-center justify-between mb-1.5">
             <label className="text-[11px] text-text-muted uppercase tracking-wider">Duration</label>

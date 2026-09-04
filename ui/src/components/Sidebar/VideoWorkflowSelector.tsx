@@ -89,7 +89,20 @@ function deriveActiveWorkflow(
   if (imageMode === 2) return 'legacy_multishot'
   if (imageMode === 3) return 'extend'
   if (imageMode === 4) return 'blend'
-  return rememberedWorkflow === 'references' ? 'references' : 'frames'
+  // Load Settings restores the user-facing workflow explicitly. Several
+  // specialized endpoints normalize their engine payload back to
+  // image_mode=0 before writing the sidecar (Extend is the important
+  // example), so image_mode alone cannot distinguish Frames from the mode
+  // that actually produced the clip. Trust the durable workflow marker for
+  // every ordinary Video workflow; the generationMode branches above remain
+  // authoritative for Transform and Finish outputs.
+  if (
+    rememberedWorkflow === 'frames'
+    || rememberedWorkflow === 'references'
+    || rememberedWorkflow === 'extend'
+    || rememberedWorkflow === 'blend'
+  ) return rememberedWorkflow
+  return 'frames'
 }
 
 export function VideoWorkflowSelector() {

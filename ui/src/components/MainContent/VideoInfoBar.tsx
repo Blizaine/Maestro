@@ -39,7 +39,7 @@ export function VideoInfoBar() {
   }
 
   const params = meta?.params as Record<string, unknown> | null
-  const uploadFilenames = meta?.upload_filenames as Record<string, string> | undefined
+  const uploadFilenames = meta?.upload_filenames as Record<string, string | string[]> | undefined
 
   // Extract display values
   const prompt = (params?.prompt as string) || ''
