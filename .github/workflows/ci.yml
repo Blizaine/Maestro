@@ -35,6 +35,10 @@ jobs:
           "Pillow==11.3.0"
           "requests==2.32.4"
           "cryptography==49.0.0"
+          "imageio==2.37.2"
+          "iopath==0.1.10"
+          "timm==1.0.24"
+          "ftfy==6.3.1"
       - name: Install CPU PyTorch test dependency
         run: >-
           python -m pip install

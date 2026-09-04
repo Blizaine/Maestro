@@ -6,8 +6,14 @@ import torch.nn.functional as F
 import warnings
 from importlib.metadata import version
 
-major, minor = torch.cuda.get_device_capability(None)
-bfloat16_supported =  major >= 8 
+if torch.cuda.is_available():
+    try:
+        major, minor = torch.cuda.get_device_capability(None)
+    except (AssertionError, RuntimeError):
+        major, minor = 0, 0
+else:
+    major, minor = 0, 0
+bfloat16_supported = major >= 8
 
 try:
     import triton
