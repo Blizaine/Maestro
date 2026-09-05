@@ -626,7 +626,8 @@ def get_available_models(provider: str = "local", remote_url: str = "", api_key:
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
             url = remote_url.rstrip("/")
-            resp = requests.get(f"{url}/v1/models", headers=headers, timeout=10)
+            models_url = f"{url}/models" if url.endswith("/v1") else f"{url}/v1/models"
+            resp = requests.get(models_url, headers=headers, timeout=10)
             if resp.ok:
                 data = resp.json()
                 for m in data.get("data", []):
@@ -734,7 +735,27 @@ def _finalize_payload(payload: dict) -> dict:
 def _server_url() -> str:
     if _provider in ("remote", "openai") and _remote_url:
         return _remote_url.rstrip("/")
+    if _provider == "openai" and not _remote_url:
+        # The Settings UI allows a blank base URL for the OpenAI provider
+        # ("Leave blank for default OpenAI endpoint"). Default to the
+        # official OpenAI API root instead of silently falling back to the
+        # local llama-server socket.
+        return "https://api.openai.com/v1"
     return f"http://127.0.0.1:{_server_port}"
+
+
+def _chat_completions_url() -> str:
+    """OpenAI-compatible chat endpoint for the active provider.
+
+    OpenAI/xAI document their base URL with a trailing ``/v1``
+    (``https://api.x.ai/v1``), while the local llama-server socket has no
+    path prefix. Build the endpoint without doubling ``/v1`` when the user
+    pasted a ``.../v1`` base URL.
+    """
+    base = _server_url()
+    if base.endswith("/v1"):
+        return f"{base}/chat/completions"
+    return f"{base}/v1/chat/completions"
 
 
 def _api_headers() -> dict:
@@ -2177,13 +2198,17 @@ def generate(
         "max_tokens": total_tokens,
         "cache_prompt": False,  # Disable prompt caching — system prompt changes between calls (LoRA hints, etc.)
     }
-    # Apply caller penalties first, then model/mode defaults. Registry values
-    # intentionally win (for example Qwen3.8 uses different official sampling
-    # profiles in thinking and non-thinking mode).
-    if frequency_penalty > 0:
-        payload["frequency_penalty"] = frequency_penalty
-    if presence_penalty > 0:
-        payload["presence_penalty"] = presence_penalty
+    # Apply caller penalties first (local llama-server only — some remote
+    # endpoints reject these optional sampling knobs, e.g. xAI Grok rejects
+    # presence_penalty and some OpenAI-compatible servers reject both), then
+    # model/mode defaults. Registry values intentionally win (for example
+    # Qwen3.8 uses different official sampling profiles in thinking and
+    # non-thinking mode).
+    if _provider == "local":
+        if frequency_penalty > 0:
+            payload["frequency_penalty"] = frequency_penalty
+        if presence_penalty > 0:
+            payload["presence_penalty"] = presence_penalty
     temperature, top_p = _apply_model_defaults(
         temperature,
         top_p,
@@ -2192,7 +2217,6 @@ def generate(
     )
     payload["temperature"] = max(temperature, 0.01)
     payload["top_p"] = top_p
-
     if seed is not None and seed >= 0:
         payload["seed"] = seed
     resolved_effort = _apply_reasoning_controls(
@@ -2237,7 +2261,7 @@ def generate(
 
     try:
         resp = requests.post(
-            f"{_server_url()}/v1/chat/completions",
+            _chat_completions_url(),
             json=_finalize_payload(payload),
             headers=_api_headers(),
             # (connect, read): fail fast if the server socket is gone;
@@ -2402,10 +2426,14 @@ def generate_streaming(
     # (Gemma 4 → no penalty; Qwen 3.x → penalty stays as caller suggested).
     payload["temperature"] = max(temperature, 0.01)
     payload["top_p"] = top_p
-    if frequency_penalty > 0:
-        payload["frequency_penalty"] = frequency_penalty
-    if presence_penalty > 0:
-        payload["presence_penalty"] = presence_penalty
+    # Penalty params are optional sampling knobs that some remote endpoints
+    # reject (xAI Grok rejects presence_penalty; some OpenAI-compatible
+    # servers reject both). Only forward them to the local llama-server.
+    if _provider == "local":
+        if frequency_penalty > 0:
+            payload["frequency_penalty"] = frequency_penalty
+        if presence_penalty > 0:
+            payload["presence_penalty"] = presence_penalty
     # Per-model sampling defaults — registry wins over caller for any
     # field it specifies. Models without sampling_defaults (e.g. Qwen
     # 3.x) pass through unchanged. See _apply_model_defaults().
@@ -2489,7 +2517,7 @@ def generate_streaming(
     finish_reason = "unknown"
     try:
         resp = requests.post(
-            f"{_server_url()}/v1/chat/completions",
+            _chat_completions_url(),
             json=_finalize_payload(payload),
             headers=_api_headers(),
             timeout=(10, 600),
@@ -2902,13 +2930,18 @@ def enhance_prompt(
         # ~1 token), and the user gets the unmodified Pass-2 prompt. Better
         # than the previous behavior of burning 26k+ tokens producing nothing.
         prompt_with_marker = f"/no_think\n\n{prompt}" if prompt else "/no_think"
+        # The `stop` thinking-marker list is a llama-server-only safety net
+        # (see the comment above). Grok and other OpenAI-compatible endpoints
+        # reject the `stop` parameter ("Model ... does not support parameter
+        # stop"), so only forward it to the local llama-server.
+        stop_tokens = ["<think>", "<thinking>"] if _provider == "local" else None
         result = generate(
             prompt=prompt_with_marker,
             system_prompt=system,
             max_new_tokens=max(max_new_tokens, 1024),
             temperature=temperature,
             enable_thinking=False,
-            stop=["<think>", "<thinking>"],
+            stop=stop_tokens,
         )
         return repair_text(result).strip() if result else prompt
 
