@@ -1,11 +1,16 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { AlertTriangle, ChevronDown, Gauge, Layers, Zap } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { InfoTooltip } from './InfoTooltip'
+import { readPersistentDisclosure, writePersistentDisclosure } from '../../lib/persistentDisclosure'
+
+const H3_OPTIMIZATIONS_EXPANDED_KEY = 'maestro-h3-optimizations-expanded'
 
 /** Main-sidecar controls for H3's independent speed optimizations. */
 export function MiniMaxH3Optimizations() {
-  const [expanded, setExpanded] = useState(true)
+  const [expanded, setExpanded] = useState(() => (
+    readPersistentDisclosure(H3_OPTIMIZATIONS_EXPANDED_KEY, true)
+  ))
   const modelOptions = useStore(s => s.modelOptions)
   const option = useStore(s => s.modelOptions?.minimax_h3_turbo)
   const advisory = useStore(s => s.modelOptions?.minimax_h3_runtime_advisory)
@@ -17,6 +22,10 @@ export function MiniMaxH3Optimizations() {
   const toggleLora = useStore(s => s.toggleLora)
   const setLoraWeight = useStore(s => s.setLoraWeight)
   const selectModel = useStore(s => s.selectModel)
+
+  useEffect(() => {
+    writePersistentDisclosure(H3_OPTIMIZATIONS_EXPANDED_KEY, expanded)
+  }, [expanded])
 
   const turboPresets = option?.presets?.length
     ? option.presets
@@ -34,18 +43,30 @@ export function MiniMaxH3Optimizations() {
           revision: '',
         }]
       : []
-  const selectedTurboPreset = (
-    turboPresets.find(preset => preset.id === params.minimax_h3_turbo_preset)
-    || turboPresets.find(preset => preset.id === option?.preset_id)
+  const turboEnabled = params.minimax_h3_turbo_mode === true
+  const defaultTurboPreset = (
+    turboPresets.find(preset => preset.id === option?.preset_id)
     || turboPresets[0]
   )
+  const configuredTurboPreset = turboPresets.find(
+    preset => preset.id === params.minimax_h3_turbo_preset,
+  )
+  // A disabled recipe starts from Maestro's current recommendation when it
+  // is enabled again. Preserve a user's alternate checkpoint while Turbo is
+  // actively selected, but do not let the former six-step default remain a
+  // hidden default forever in persisted pre-PDD state.
+  const selectedTurboPreset = turboEnabled
+    ? (configuredTurboPreset || defaultTurboPreset)
+    : defaultTurboPreset
   const architecture = String(modelOptions?.architecture || '')
   const isH3 = architecture.startsWith('minimax_h3')
-  const turboEnabled = params.minimax_h3_turbo_mode === true
+  const fusedTurbo = modelOptions?.minimax_h3_fused_turbo === true
   const solEnabled = params.override_attention === 'sol'
+  const slaEnabled = params.override_attention === 'sla'
   const cacheEnabled = params.skip_steps_cache_type === 'first_block'
   const solSupported = modelOptions?.sol_attention_status?.supported === true
-  const activeCount = [turboEnabled, solEnabled, cacheEnabled].filter(Boolean).length
+  const slaSupported = modelOptions?.sla_attention_status?.supported === true
+  const activeCount = [turboEnabled, solEnabled, slaEnabled, cacheEnabled].filter(Boolean).length
 
   if (!isH3 && !advisory) return null
 
@@ -163,7 +184,7 @@ export function MiniMaxH3Optimizations() {
         </div>
       )}
 
-      {(option || modelOptions?.sol_attention || modelOptions?.first_block_cache) && (
+      {(option || modelOptions?.sol_attention || modelOptions?.sla_attention || modelOptions?.first_block_cache) && (
         <section className="overflow-hidden rounded-lg border border-border bg-bg-tertiary/35">
           <button
             type="button"
@@ -194,6 +215,21 @@ export function MiniMaxH3Optimizations() {
 
           {expanded && (
             <div className="divide-y divide-border/60">
+            {fusedTurbo && (
+              <div className="bg-amber-500/8 px-3 py-2.5">
+                <div className="flex items-start gap-2">
+                  <Zap size={13} className="mt-0.5 shrink-0 text-indicator-warning" />
+                  <span className="min-w-0">
+                    <span className="block text-[11px] font-medium text-text-primary">
+                      Fused Turbo Recipe
+                    </span>
+                    <span className="mt-0.5 block text-[9px] leading-relaxed text-text-muted">
+                      Turbo, Mystic, INT8 ConvRot, and RES sampling are baked in. Four steps is the default; Total Steps can be adjusted from 4-8 in Advanced. Extra LoRAs, Sol Engine, and First Block Cache are intentionally disabled.
+                    </span>
+                  </span>
+                </div>
+              </div>
+            )}
             {option && (
               <div className={`flex items-center gap-2 px-3 py-2 transition-colors ${
                 turboEnabled ? 'bg-accent-blue/10' : ''
@@ -281,6 +317,37 @@ export function MiniMaxH3Optimizations() {
                   </span>
                 </label>
                 <InfoTooltip label="About H3 Sol Engine" text={solHelp} />
+              </div>
+            )}
+
+            {modelOptions?.sla_attention && (
+              <div className={`flex items-center gap-2 px-3 py-2 transition-colors ${
+                slaEnabled ? 'bg-accent-blue/10' : ''
+              }`}>
+                <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 select-none">
+                  <input
+                    type="checkbox"
+                    checked={slaEnabled}
+                    onChange={event => setParam(
+                      'override_attention',
+                      event.target.checked ? 'sla' : 'sdpa',
+                    )}
+                    className="accent-accent-blue"
+                  />
+                  <Gauge size={13} className={slaEnabled ? 'text-accent-blue' : 'text-text-muted'} />
+                  <span className="min-w-0">
+                    <span className="block text-[11px] font-medium text-text-primary">SLA Sparse Attention</span>
+                    <span className="block text-[9px] text-text-muted">
+                      {slaSupported ? 'Published FastH3 sparse recipe' : 'Safe dense fallback when unavailable'}
+                    </span>
+                  </span>
+                </label>
+                <InfoTooltip
+                  label="About H3 SLA"
+                  text={slaSupported
+                    ? 'Uses the checkpoint author\'s 90% block-sparse SLA recipe. The first use compiles and caches Triton kernels; reference and audio prefix rows stay protected.'
+                    : `${modelOptions?.sla_attention_status?.reason || 'SLA is unavailable in this runtime.'} Maestro will automatically use dense attention, so the four-step model remains usable.`}
+                />
               </div>
             )}
 

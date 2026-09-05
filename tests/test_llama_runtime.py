@@ -46,7 +46,7 @@ class TestLlamaBuildMetadata(unittest.TestCase):
 
     def test_semver_pointer_is_not_treated_as_a_binary_release(self):
         release = {
-            "tag_name": "v0.3.0",
+            "tag_name": "v0.2.0",
             "assets": [
                 {
                     "name": "nightly-tag.txt",
@@ -67,10 +67,10 @@ class TestLlamaBuildMetadata(unittest.TestCase):
 
     def test_binary_nightly_requires_every_requested_asset(self):
         release = {
-            "tag_name": "b10621",
+            "tag_name": "b10566",
             "assets": [
                 {
-                    "name": "llama-b10621-bin-win-cuda-12.4-x64.zip",
+                    "name": "llama-b10566-bin-win-cuda-12.4-x64.zip",
                     "browser_download_url": "https://example.test/llama.zip",
                 },
                 {
@@ -79,15 +79,22 @@ class TestLlamaBuildMetadata(unittest.TestCase):
                 },
             ],
         }
-        specs = [
-            ("llama-", "bin-win-cuda-12.4-x64.zip"),
-            ("cudart-", "bin-win-cuda-12.4-x64.zip"),
-        ]
-        self.assertTrue(llm_service._llama_release_has_assets(release, specs))
+        self.assertTrue(
+            llm_service._llama_release_has_assets(
+                release,
+                [
+                    ("llama-", "bin-win-cuda-12.4-x64.zip"),
+                    ("cudart-", "bin-win-cuda-12.4-x64.zip"),
+                ],
+            )
+        )
         self.assertFalse(
             llm_service._llama_release_has_assets(
                 {**release, "assets": release["assets"][:1]},
-                specs,
+                [
+                    ("llama-", "bin-win-cuda-12.4-x64.zip"),
+                    ("cudart-", "bin-win-cuda-12.4-x64.zip"),
+                ],
             )
         )
 
@@ -199,7 +206,7 @@ class TestLlamaRuntimeReleaseResolution(unittest.TestCase):
 
     def test_stable_pointer_resolves_the_binary_nightly(self):
         latest = {
-            "tag_name": "v0.3.0",
+            "tag_name": "v0.2.0",
             "assets": [
                 {
                     "name": "nightly-tag.txt",
@@ -208,10 +215,10 @@ class TestLlamaRuntimeReleaseResolution(unittest.TestCase):
             ],
         }
         nightly = {
-            "tag_name": "b10621",
+            "tag_name": "b10566",
             "assets": [
                 {
-                    "name": "llama-b10621-bin-win-cuda-12.4-x64.zip",
+                    "name": "llama-b10566-bin-win-cuda-12.4-x64.zip",
                     "browser_download_url": "https://example.test/llama.zip",
                 },
                 {
@@ -224,7 +231,7 @@ class TestLlamaRuntimeReleaseResolution(unittest.TestCase):
         responses = iter(
             [
                 self._json_response(latest),
-                self._Response(b"b10621\n"),
+                self._Response(b"b10566\n"),
                 self._json_response(nightly),
                 self._zip_response({"build/bin/llama-server.exe": b"server"}),
                 self._zip_response(
@@ -246,21 +253,19 @@ class TestLlamaRuntimeReleaseResolution(unittest.TestCase):
                 mock.patch.object(
                     llm_service,
                     "_llama_server_build",
-                    return_value=10621,
+                    return_value=10566,
                 ),
                 mock.patch("urllib.request.urlopen", side_effect=fake_urlopen),
             ):
                 llm_service._ensure_llama_server(directory)
 
-            self.assertTrue(
-                os.path.isfile(os.path.join(directory, "llama-server.exe"))
-            )
+            self.assertTrue(os.path.isfile(os.path.join(directory, "llama-server.exe")))
             for filename in llm_service._WINDOWS_LLAMA_CUDA_FILES:
                 self.assertTrue(os.path.isfile(os.path.join(directory, filename)))
             receipt = llm_service._read_llama_runtime_receipt(directory)
-            self.assertEqual(receipt["release_tag"], "b10621")
+            self.assertEqual(receipt["release_tag"], "b10566")
             self.assertFalse(
-                any("v0.3.0/llama-v0.3.0" in url for url in requested_urls)
+                any("v0.2.0/llama-v0.2.0" in url for url in requested_urls)
             )
 
 if __name__ == "__main__":

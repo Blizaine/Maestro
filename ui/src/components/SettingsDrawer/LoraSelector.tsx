@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- shared LoRA display helpers are intentionally colocated */
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { Search, X, Loader2, Globe, Sparkles, BookOpen, Info, ArrowUpCircle, RefreshCw, ArrowDownAZ, Clock } from 'lucide-react'

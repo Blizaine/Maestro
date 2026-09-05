@@ -1,6 +1,8 @@
 import { useEffect } from 'react'
 import { Music } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
+import { DurationPresetControl } from './DurationPresetControl'
+import { formatDuration } from '../../lib/durationPlanning'
 
 const DIRECTOR_MUSIC_MODEL_ORDER = [
   'ace_step_v1_5_xl_sft_lm_4b',
@@ -92,21 +94,16 @@ export function DirectorSongSetup() {
         )}
       </div>
 
-      <div>
-        <div className="flex items-center justify-between mb-1">
-          <label className="text-[11px] text-text-muted uppercase tracking-wider">Length</label>
-          <span className="text-[10px] text-text-secondary tabular-nums">{duration}s</span>
-        </div>
-        <input
-          type="range"
-          min={5}
-          max={maximumDuration}
-          step={5}
-          value={duration}
-          onChange={e => setDuration(Number(e.target.value))}
-          className="w-full accent-accent-blue"
-        />
-      </div>
+      <DurationPresetControl
+        label="Song length"
+        value={duration}
+        onChange={setDuration}
+        minSeconds={5}
+        maxSeconds={maximumDuration}
+        showSingleWindow={false}
+        quantizeToWindows={false}
+        modelLimitLabel={`${isMusic3 ? 'MiniMax-Music3' : 'ACE-Step'} can generate up to ${formatDuration(maximumDuration)} per song.`}
+      />
 
       <p className="text-[10px] text-text-muted leading-snug">
         Describe your music video in the box below and hit Generate — the song

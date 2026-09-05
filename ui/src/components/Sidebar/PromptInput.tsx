@@ -6,12 +6,22 @@ import {
   h3OmniSequenceWindowCount,
   h3TimelineFrames,
 } from '../../lib/h3Memory'
+import {
+  continuationFirstWindowFrames,
+  durationWindowPlan,
+} from '../../lib/durationPlanning'
 
 const placeholders: Record<string, string> = {
   image: 'Describe your image...',
   video: 'Describe your video...',
   audio: 'Enter text to speak or describe audio...',
-  avatar: 'Describe your avatar animation...',
+  avatar: 'Describe the finished video...',
+}
+
+/** Lightweight display-only estimate for reviewed AI window prompts. */
+function estimateH3TextTokens(value: string): number {
+  const lexical = value.match(/[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*|[^\w\s]/g)?.length ?? 0
+  return Math.ceil(lexical * 1.25) + (value.trim() ? 8 : 0)
 }
 
 function useAutoGrowingTextarea(value: string) {
@@ -69,12 +79,11 @@ function useEnhanceStatus(isEnhancing: boolean) {
   const [status, setStatus] = useState<{ phase: 'loading' | 'thinking' | 'writing' | 'idle'; chars: number }>({ phase: 'idle', chars: 0 })
 
   useEffect(() => {
-    if (!isEnhancing) {
-      setStatus({ phase: 'idle', chars: 0 })
-      return
-    }
-    setStatus({ phase: 'loading', chars: 0 })
+    if (!isEnhancing) return
     let active = true
+    queueMicrotask(() => {
+      if (active) setStatus({ phase: 'loading', chars: 0 })
+    })
     const poll = async () => {
       let streamStarted = false
       while (active) {
@@ -115,7 +124,7 @@ function useEnhanceStatus(isEnhancing: boolean) {
     return () => { active = false }
   }, [isEnhancing])
 
-  return status
+  return isEnhancing ? status : { phase: 'idle' as const, chars: 0 }
 }
 
 export function PromptInput() {
@@ -135,6 +144,7 @@ export function PromptInput() {
   const resolution = useStore(s => s.params.resolution)
   const totalVramGb = useStore(s => s.systemStats?.gpu.vram_total_gb ?? 0)
   const imageMode = useStore(s => s.params.image_mode)
+  const studioVideoWorkflow = useStore(s => s.studioVideoWorkflow)
   const h3CameraCoverage = useStore(s => s.params.minimax_h3_camera_coverage || 'auto')
   const h3FirstLastMultiWindow = useStore(s => s.params.minimax_h3_multi_window === true)
   const h3WindowPlanningEnabled = useStore(s => s.params.minimax_h3_window_storyboard !== false)
@@ -157,7 +167,7 @@ export function PromptInput() {
     && !!item.h3WindowPlan
   ))?.h3WindowPlan?.signature || '')
   const [ttsMenuOpen, setTtsMenuOpen] = useState(false)
-  const [windowPlanOpen, setWindowPlanOpen] = useState(false)
+  const [closedWindowPlanSignature, setClosedWindowPlanSignature] = useState<string | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
 
   const isAudioOnly = modelOptions?.audio_only
@@ -181,8 +191,23 @@ export function PromptInput() {
   const discardFrames = swDefaults?.discard_last_frames ?? 0
   const overlapSec = slidingWindowOverlap / fps
   const discardSec = discardFrames / fps
-  const stride = slidingWindowSeconds - discardSec - overlapSec
   const supportsSlidingWindows = modelOptions?.sliding_window === true
+  const firstWindowSeconds = (
+    studioVideoWorkflow === 'extend'
+    && supportsSlidingWindows
+  )
+    ? continuationFirstWindowFrames(
+        Math.round(slidingWindowSeconds * fps),
+        slidingWindowOverlap,
+      ) / fps
+    : slidingWindowSeconds
+  const plannedDuration = durationWindowPlan(
+    durationSeconds,
+    slidingWindowSeconds,
+    overlapSec,
+    discardSec,
+    firstWindowSeconds,
+  )
   const isH3FirstLast = (
     String(modelOptions?.architecture || '').startsWith('minimax_h3')
     && modelOptions?.omni_reference !== true
@@ -191,9 +216,7 @@ export function PromptInput() {
   const windowCount = supportsSlidingWindows
     && (!isH3FirstLast || h3FirstLastMultiWindow)
     && (!isLtxSequence || ltxMultiWindow)
-    && stride > 0
-    && durationSeconds > slidingWindowSeconds
-    ? 1 + Math.ceil((durationSeconds - slidingWindowSeconds + discardSec) / stride)
+    ? plannedDuration.windowCount
     : 1
   const usesWindows = generationMode === 'video' && supportsSlidingWindows && windowCount > 1 && imageMode !== 2
   const usesH3WindowPlanner = (
@@ -252,7 +275,7 @@ export function PromptInput() {
         windowFrames: sequenceClipFrames,
         overlapFrames: slidingWindowOverlap,
         nativeContinuation: h3NativeSequence,
-      })
+    })
     : 1
   const manualPromptLineCount = prompt.split('\n').filter(line => line.trim()).length
   const manualPromptCount = (usesH3ManualFirstLast || usesLtxManualPrompts)
@@ -292,6 +315,12 @@ export function PromptInput() {
     ? 'Describe the finished video and replacement characters...'
     : generationMode === 'avatar' && editSubMode === 'restyle'
       ? 'Describe the finished video...'
+      : generationMode === 'avatar' && editSubMode === 'outpaint'
+        ? 'Describe the expanded scene...'
+        : generationMode === 'avatar' && editSubMode === 'retake'
+          ? 'Describe the replacement performance...'
+          : generationMode === 'avatar' && editSubMode === 'edit_anything'
+            ? 'Describe the change you want...'
       : (placeholders[generationMode] || 'Describe your content...')
 
   // Close TTS menu on outside click
@@ -304,14 +333,14 @@ export function PromptInput() {
     return () => document.removeEventListener('mousedown', handler)
   }, [ttsMenuOpen])
 
-  // A server-created plan used to arrive collapsed, making the exact prompts
-  // effectively invisible once an expensive generation had started. Open a
-  // newly planned storyboard once; the user can still collapse it afterward.
-  useEffect(() => {
-    if (usesH3Plan && h3WindowPlan?.signature) {
-      setWindowPlanOpen(true)
-    }
-  }, [usesH3Plan, h3WindowPlan?.signature])
+  // A newly planned storyboard opens automatically. Store only the signature
+  // the user explicitly closed so a replacement plan opens without a state-
+  // synchronization effect or an extra render.
+  const windowPlanOpen = Boolean(
+    usesH3Plan
+    && h3WindowPlan?.signature
+    && closedWindowPlanSignature !== h3WindowPlan.signature
+  )
 
   // Keep the prompt area at the bottom when the sidebar has spare room. The
   // textarea itself grows to its complete content height, and the sidebar's
@@ -352,7 +381,9 @@ export function PromptInput() {
           <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-border bg-bg-tertiary/70">
             <button
               type="button"
-              onClick={() => setWindowPlanOpen(open => !open)}
+              onClick={() => setClosedWindowPlanSignature(current => (
+                current === h3WindowPlan?.signature ? null : (h3WindowPlan?.signature ?? null)
+              ))}
               className="flex-1 min-w-0 flex items-center gap-1.5 text-left"
               title="Review the complete Context-IR prompt assigned to each H3 continuation window."
             >
@@ -363,8 +394,10 @@ export function PromptInput() {
               {h3PlanIsStale && (
                 <span className="text-[9px] text-amber-400">Needs update</span>
               )}
-              {h3WindowPlan.planned_by === 'deterministic_fallback' && (
-                <span className="text-[9px] text-amber-400">Fallback</span>
+              {(h3WindowPlan.planned_by === 'deterministic_fallback' || h3WindowPlan.planned_by === 'hybrid_repair') && (
+                <span className="text-[9px] text-amber-400">
+                  {h3WindowPlan.planned_by === 'hybrid_repair' ? 'Repaired' : 'Fallback'}
+                </span>
               )}
             </button>
             <button
@@ -377,6 +410,45 @@ export function PromptInput() {
               <RefreshCw size={11} className={isEnhancing ? 'animate-spin' : ''} />
             </button>
           </div>
+          {!!h3WindowPlan.planning_warnings?.length && (
+            <div
+              role="alert"
+              className="mt-1.5 rounded-lg border border-amber-400/35 bg-amber-400/10 px-2.5 py-2 text-[10px] leading-relaxed text-amber-300"
+            >
+              <div className="font-medium">Maestro repaired this H3 plan</div>
+              {h3WindowPlan.planning_warnings.map((warning, index) => (
+                <div key={`${index}-${warning}`} className="mt-0.5">
+                  {warning}
+                </div>
+              ))}
+              {!!h3WindowPlan.planning_diagnostics?.length && (
+                <details className="mt-1 text-text-muted">
+                  <summary className="cursor-pointer select-none">Why repair was needed</summary>
+                  <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                    {h3WindowPlan.planning_diagnostics.map((diagnostic, index) => (
+                      <li key={`${index}-${diagnostic}`}>{diagnostic}</li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+              <div className="mt-1 text-text-muted">
+                Review the exact window prompts below or press refresh to try the AI planner again.
+              </div>
+            </div>
+          )}
+          {!!h3WindowPlan.planning_notes?.length && (
+            <div
+              role="status"
+              className="mt-1.5 rounded-lg border border-border bg-bg-tertiary/70 px-2.5 py-2 text-[10px] leading-relaxed text-text-muted"
+            >
+              <div className="font-medium text-text-secondary">H3 timing note</div>
+              {h3WindowPlan.planning_notes.map((note, index) => (
+                <div key={`${index}-${note}`} className="mt-0.5">
+                  {note}
+                </div>
+              ))}
+            </div>
+          )}
           {windowPlanOpen && (
             <div className="mt-2 space-y-3">
               {h3WindowPlan.windows.map((window, index) => (
@@ -391,7 +463,10 @@ export function PromptInput() {
                       {usesH3SequencePlanner && !h3NativeSequence ? 'Clip' : 'Window'} {window.index}: {window.title || `Beat ${window.index}`}
                       {activeH3Window === window.index ? ' · Generating now' : ''}
                     </span>
-                    <span>{window.start_seconds.toFixed(1)}–{window.end_seconds.toFixed(1)}s</span>
+                    <span>
+                      {window.start_seconds.toFixed(1)}–{window.end_seconds.toFixed(1)}s
+                      {usesH3WindowPlanner && ` · ~${estimateH3TextTokens(window.prompt)} tokens`}
+                    </span>
                   </div>
                   <H3WindowPromptTextarea
                     value={window.prompt}

@@ -22,6 +22,8 @@ from .base import BasePlanner
 class PodcastPlanner(BasePlanner):
     skill_type = "podcast"
 
+    _LONG_FORM_BATCH_SIZE = 12
+
     def plan(
         self,
         transcript: Optional[list[dict]] = None,
@@ -81,6 +83,24 @@ class PodcastPlanner(BasePlanner):
                 for sid, info in speaker_mappings.items()
             ]
 
+        self._configure_planning_runtime(
+            kwargs,
+            kind="podcast",
+            fingerprint_payload={
+                "planner_revision": 2,
+                "transcript": transcript or [],
+                "audio_path": audio_path,
+                "reference_image_path": reference_image_path,
+                "speaker_mappings": speaker_mappings or {},
+                "characters": characters or [],
+                "visual_style": visual_style,
+                "target_duration": target_duration,
+                "clips": clips or [],
+                "video_model": kwargs.get("video_model", ""),
+                "image_model": kwargs.get("image_model", ""),
+            },
+        )
+
         ref_assets = ReferenceAssets(
             start_image=AssetRef(id="ref_image", type="image", uri=reference_image_path) if has_reference else None,
             audio=AssetRef(id="audio", type="audio", uri=audio_path) if audio_path else None,
@@ -101,6 +121,7 @@ class PodcastPlanner(BasePlanner):
                 has_reference=has_reference,
                 reference_image_path=reference_image_path,
                 visual_style=visual_style,
+                **kwargs,
             )
         else:
             shots = self._plan_from_transcript(
@@ -111,6 +132,7 @@ class PodcastPlanner(BasePlanner):
                 reference_image_path=reference_image_path,
                 visual_style=visual_style,
                 target_duration=target_duration,
+                **kwargs,
             )
 
         total_dur = sum(s.duration_sec for s in shots) if shots else target_duration
@@ -140,6 +162,7 @@ class PodcastPlanner(BasePlanner):
         has_reference: bool,
         reference_image_path: Optional[str],
         visual_style: str,
+        **kwargs,
     ) -> list[ShotPlan]:
         """Plan shots from pre-segmented clips (similar to audio-driven short film)."""
         speaker_names = {sid: info.get("name", sid) for sid, info in (speaker_mappings or {}).items()}
@@ -215,25 +238,85 @@ OUTPUT FORMAT — respond with ONLY a JSON array:
     "ending_beat": "host nods thoughtfully"
   }}
 ]
-
-Output exactly {len(clips)} shot plans. Go:"""
-
-        user_prompt = f"""Visual Style: {visual_style}
-
-Segments:
-{chr(10).join(clip_contexts)}
-
-Write {len(clips)} structured shot plans. Go:"""
+"""
 
         image_paths = [reference_image_path] if has_reference and reference_image_path else None
-        max_tokens = max(1024, len(clips) * 300 + 512)
 
-        shot_dicts = self._call_llm_json(
-            user_prompt=user_prompt,
-            system_prompt=system_prompt,
-            max_tokens=max_tokens,
-            image_paths=image_paths,
-        )
+        def plan_batch(
+            batch_number: int,
+            start: int,
+            batch_clips: list[dict],
+            previous: Optional[dict],
+        ) -> list[dict]:
+            end = start + len(batch_clips)
+            previous_ending = str(
+                (previous or {}).get("ending_beat") or ""
+            ).strip()
+            continuity = (
+                "This is the opening batch. Establish the studio and speakers."
+                if start == 0 else
+                "Continue from the prior planned segment without resetting the "
+                f"conversation or staging. Prior ending: {previous_ending or 'the preceding speaker beat'}"
+            )
+            batch_system = (
+                f"{system_prompt}\n\n"
+                f"Output exactly {len(batch_clips)} shot plans for global "
+                f"segments {start + 1}-{end} of {len(clips)}. {continuity}"
+            )
+            batch_user = f"""Visual Style: {visual_style}
+
+LONG-FORM PODCAST CONTINUITY:
+{continuity}
+
+Segments:
+{chr(10).join(clip_contexts[start:end])}
+
+Write exactly {len(batch_clips)} structured shot plans. Go:"""
+            return self._call_llm_json(
+                user_prompt=batch_user,
+                system_prompt=batch_system,
+                max_tokens=max(1024, len(batch_clips) * 300 + 512),
+                thinking_budget=(
+                    0
+                    if len(clips) > self._LONG_FORM_BATCH_SIZE
+                    else None
+                ),
+                image_paths=image_paths,
+            )
+
+        if len(clips) > self._LONG_FORM_BATCH_SIZE:
+            shot_dicts = self._run_checkpointed_json_batches(
+                items=clips,
+                batch_size=self._LONG_FORM_BATCH_SIZE,
+                checkpoint_key="podcast_batches",
+                stage="podcast_batch",
+                progress_label="podcast",
+                call_batch=plan_batch,
+                fallback_factory=lambda index, _clip: {
+                    "scene_goal": f"Continue podcast segment {index + 1}",
+                    "scene_type": "speaker",
+                    "subjects_on_screen": [],
+                    "spatial_setup": "Maintain the established speaker positions",
+                    "environment": "podcast studio",
+                    "visual_style": visual_style,
+                    "lighting": "soft studio lighting",
+                    "mood": "conversational",
+                    "action_beats": ["The active speaker continues naturally"],
+                    "dialogue_beats": [],
+                    "camera_plan": {
+                        "framing": "medium shot",
+                        "movement": "static",
+                        "movement_intensity": "static",
+                    },
+                    "audio_plan": {
+                        "mode": "dialogue_driven",
+                        "lip_sync_critical": True,
+                    },
+                    "ending_beat": "The conversation continues",
+                },
+            )
+        else:
+            shot_dicts = plan_batch(1, 0, clips, None)
 
         shots = []
         for i, clip in enumerate(clips):
@@ -294,6 +377,7 @@ Write {len(clips)} structured shot plans. Go:"""
         reference_image_path: Optional[str],
         visual_style: str,
         target_duration: Optional[float],
+        **kwargs,
     ) -> list[ShotPlan]:
         """Segment transcript into clips and plan — stub for auto-segmentation."""
         # For now, create one shot per ~15s chunk of transcript
@@ -319,4 +403,5 @@ Write {len(clips)} structured shot plans. Go:"""
             has_reference=has_reference,
             reference_image_path=reference_image_path,
             visual_style=visual_style,
+            **kwargs,
         )

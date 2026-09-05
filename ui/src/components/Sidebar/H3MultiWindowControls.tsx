@@ -1,5 +1,6 @@
 import { Info } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
+import type { WindowPromptMode } from '../../types'
 
 /**
  * Shared long-form controls for MiniMax H3 and every LTX video family.
@@ -24,27 +25,28 @@ export function H3MultiWindowControls() {
     : isOmni
       ? params.minimax_h3_reference_sequence === true
       : params.minimax_h3_multi_window === true
+  const explicitPromptMode = isLtx
+    ? params.ltx_window_prompt_mode
+    : params.minimax_h3_sequence_prompt_mode
   const promptMode = isLtx
-    ? (params.ltx_window_prompt_mode === 'manual' ? 'manual' : 'auto')
+    ? (explicitPromptMode === 'auto' || explicitPromptMode === 'creative' || explicitPromptMode === 'manual'
+        ? explicitPromptMode
+        : enabled ? 'auto' : 'manual')
     : isOmni
-      ? (params.minimax_h3_sequence_prompt_mode === 'manual' ? 'manual' : 'auto')
-      : params.minimax_h3_sequence_prompt_mode === 'manual'
+      ? (explicitPromptMode === 'auto' || explicitPromptMode === 'creative' || explicitPromptMode === 'manual'
+          ? explicitPromptMode
+          : enabled ? 'auto' : 'manual')
+      : explicitPromptMode === 'manual'
         ? 'manual'
-        : params.minimax_h3_sequence_prompt_mode === 'auto'
-          ? 'auto'
-          : (params.minimax_h3_window_storyboard === false ? 'manual' : 'auto')
+        : explicitPromptMode === 'creative'
+          ? 'creative'
+          : explicitPromptMode === 'auto'
+            ? 'auto'
+            : enabled
+              ? (params.minimax_h3_window_storyboard === false ? 'manual' : 'auto')
+              : 'manual'
 
-  const setEnabled = (checked: boolean) => {
-    if (isLtx) {
-      setParam('ltx_multi_window', checked)
-    } else if (isOmni) {
-      setParam('minimax_h3_reference_sequence', checked)
-    } else {
-      setParam('minimax_h3_multi_window', checked)
-    }
-  }
-
-  const setPromptMode = (mode: 'auto' | 'manual') => {
+  const setPromptMode = (mode: WindowPromptMode) => {
     if (isLtx) {
       setParam('ltx_window_prompt_mode', mode)
     } else if (isOmni) {
@@ -53,78 +55,81 @@ export function H3MultiWindowControls() {
       // Retain the legacy storyboard switch for backend compatibility while
       // also persisting the explicit UI choice in new sidecars.
       setParam('minimax_h3_sequence_prompt_mode', mode)
-      setParam('minimax_h3_window_storyboard', mode === 'auto')
+      setParam('minimax_h3_window_storyboard', mode !== 'manual')
     }
   }
 
   return (
     <div className="rounded-lg border border-border bg-bg-tertiary/50 px-2.5 py-2 space-y-1.5">
-      <label className="flex items-center gap-2 cursor-pointer">
-        <input
-          type="checkbox"
-          checked={enabled}
-          onChange={event => setEnabled(event.target.checked)}
-          className="accent-accent-blue"
-        />
-        <span className="text-[10px] text-text-secondary">Multi-window sequence</span>
-        {isOmni && (
-          <span className="text-[8px] text-amber-300/90 border border-amber-400/30 rounded px-1 py-0.5">
-            Experimental
-          </span>
-        )}
+      <div className="flex items-center gap-2">
+        <span className="text-[10px] text-text-secondary">
+          {enabled ? 'Long sequence · automatic' : 'Prompt writing'}
+        </span>
         <span
           title={isOmni
-            ? 'Extends Duration beyond one native Omni pass. Canonical references remain available in every pass.'
+            ? 'Duration automatically becomes a native Omni sequence when it exceeds one model/GPU-aware window. Canonical references remain available in every pass.'
             : isLtx
-              ? 'Extends Duration beyond one native LTX pass. Motion and, on audio-capable LTX models, synchronized audio continue into each new window.'
-              : 'Extends Duration beyond one native First / Last pass while carrying recent motion and synchronized audio into the next window.'}
+              ? 'Duration automatically becomes a rolling LTX sequence when it exceeds one window. Motion and synchronized audio continue into each new window.'
+              : 'Duration automatically becomes a First / Last sequence when it exceeds one window, carrying recent motion and synchronized audio forward.'}
           className="text-text-muted cursor-help"
         >
           <Info size={11} />
         </span>
+      </div>
+
+      <label className="flex items-center justify-between gap-2 text-[9px] text-text-muted">
+        <span className="flex items-center gap-1">
+          {enabled ? 'Window prompts' : 'Prompt writing'}
+          <span
+            title={enabled
+              ? "AI - Faithful preserves and distributes only your supplied events and dialogue. AI - Creative treats your prompt as a brief and writes a complete scene with story beats, camera coverage, and dialogue. Manual uses each non-empty line for the matching window."
+              : "AI - Faithful expands only what you supplied. AI - Creative may invent supporting story beats and dialogue. Manual sends the visible prompt as written."}
+            className="text-text-muted cursor-help"
+          >
+            <Info size={10} />
+          </span>
+        </span>
+        <select
+          value={promptMode}
+          onChange={event => setPromptMode(
+            event.target.value === 'manual'
+              ? 'manual'
+              : event.target.value === 'creative'
+                ? 'creative'
+                : 'auto',
+          )}
+          className="min-w-[158px] rounded border border-border bg-bg-secondary px-2 py-1 text-[9px] text-text-secondary focus:outline-none focus:border-accent-blue"
+        >
+          <option value="auto">AI - Faithful</option>
+          <option value="creative">AI - Creative story + dialogue</option>
+          <option value="manual">{enabled ? 'Manual - one per line' : 'Manual'}</option>
+        </select>
       </label>
 
-      {enabled && (
-        <>
-          <label className="flex items-center justify-between gap-2 text-[9px] text-text-muted">
-            <span className="flex items-center gap-1">
-              Window prompts
-              <span
-                title="Auto plan expands one overall idea with Maestro's LLM. Manual uses each non-empty line in the prompt box for the matching window."
-                className="text-text-muted cursor-help"
-              >
-                <Info size={10} />
-              </span>
-            </span>
-            <select
-              value={promptMode}
-              onChange={event => setPromptMode(
-                event.target.value === 'manual' ? 'manual' : 'auto',
-              )}
-              className="min-w-[138px] rounded border border-border bg-bg-secondary px-2 py-1 text-[9px] text-text-secondary focus:outline-none focus:border-accent-blue"
-            >
-              <option value="auto">Auto plan (AI)</option>
-              <option value="manual">Manual - one per line</option>
-            </select>
-          </label>
+      {!enabled && promptMode !== 'manual' && (
+        <p className="text-[8px] leading-relaxed text-text-muted">
+          {promptMode === 'creative'
+            ? 'Maestro treats your prompt as a creative brief and writes the scene automatically. Exact quoted lines stay locked; add “only these lines” when no extra dialogue should be written.'
+            : 'Maestro expands this prompt without inventing new story events or dialogue.'}{' '}
+          Queued prompts wait for their own turn so the LLM never competes with an active generation. Use the sparkle button first only when you want to review the result.
+        </p>
+      )}
 
-          {isOmni && (
-            <label className="flex items-start gap-2 text-[9px] text-text-muted cursor-pointer">
-              <input
-                type="checkbox"
-                checked={params.minimax_h3_sequence_continuity !== false}
-                onChange={event => setParam('minimax_h3_sequence_continuity', event.target.checked)}
-                className="accent-accent-blue mt-0.5"
-              />
-              <span>
-                Carry motion and sound between windows
-                <span className="block text-[8px] mt-0.5">
-                  Uses native Ref2VA overlap for smooth continuation. Turn off for independent hard-cut clips.
-                </span>
-              </span>
-            </label>
-          )}
-        </>
+      {enabled && isOmni && (
+        <label className="flex items-start gap-2 text-[9px] text-text-muted cursor-pointer">
+          <input
+            type="checkbox"
+            checked={params.minimax_h3_sequence_continuity !== false}
+            onChange={event => setParam('minimax_h3_sequence_continuity', event.target.checked)}
+            className="accent-accent-blue mt-0.5"
+          />
+          <span>
+            Carry motion and sound between windows
+            <span className="block text-[8px] mt-0.5">
+              Uses native Ref2VA overlap for smooth continuation. Turn off for independent hard-cut clips.
+            </span>
+          </span>
+        </label>
       )}
     </div>
   )

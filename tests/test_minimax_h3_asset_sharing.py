@@ -323,6 +323,14 @@ class TestMiniMaxH3AssetSharing(unittest.TestCase):
             "text_encoder_filename = get_compatible_local_model_filename(",
             source,
         )
+        self.assertIn(
+            "_local = get_compatible_local_model_filename(\n"
+            "                    _primary_filename,\n"
+            "                    model_type,\n"
+            "                    file_type=0,\n"
+            "                )",
+            source,
+        )
 
         launch_source = _LAUNCH_PATH.read_text(encoding="utf-8")
         self.assertIn(
@@ -346,8 +354,14 @@ class TestMiniMaxH3AssetSharing(unittest.TestCase):
         self.assertIn("and _is_convrot_config(value)", convrot_source)
 
         main_source = _H3_MAIN_PATH.read_text(encoding="utf-8")
-        self.assertIn('if checkpoint["convrot"]:', main_source)
-        self.assertIn('qkv_layout = "interleaved"', main_source)
+        self.assertIn(
+            'if qkv_layout in {"grouped", "interleaved"}',
+            main_source,
+        )
+        self.assertIn(
+            'interleaved=qkv_layout == "interleaved"',
+            main_source,
+        )
         self.assertIn("[MiniMax H3 Assets] Resolved component sources:", main_source)
 
     def test_convrot_metadata_payload_is_detected_when_torch_is_available(self):

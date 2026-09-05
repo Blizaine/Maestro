@@ -1,4 +1,4 @@
-import type { DirectorModelCompatibility, H3WindowPlan, LTXWindowPlan, MiniMaxH3Reference, ScailResolutionProfile } from '../types'
+import type { DirectorModelCompatibility, H3WindowPlan, LTXWindowPlan, MiniMaxH3Reference, ProductionPlan, SavedOmniCharacter, ScailResolutionProfile } from '../types'
 
 const BASE = ''  // same origin in production; Vite proxy handles /api in dev
 
@@ -47,7 +47,12 @@ export interface ApiOutput {
   favorite?: boolean
   size: number
   created_at: number
+  /** True once the authoritative .meta.json sidecar has been published. */
+  metadata_ready?: boolean
+  /** Sidecar mtime; changes when final metadata replaces an in-progress view. */
+  metadata_updated_at?: number | null
   url: string
+  workspace?: string
   /** Edit-mode sub-classification (retake / inpaint / outpaint / restyle /
    *  edit_anything). Field added as a recovery stub after a git
    *  filter-repo reset wiped the original Stream C/D work that
@@ -58,6 +63,11 @@ export interface ApiOutput {
 
 export interface ApiJobStatus {
   job_id: string
+  /** Stable browser-generated identity used to recover an accepted submit. */
+  client_submission_id?: string | null
+  /** Direct submits remain visible while queued for deferred AI planning. */
+  show_in_gallery?: boolean
+  kind?: 'generation' | 'editor_export' | string
   status: 'held' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
   progress: number
   step: number
@@ -69,6 +79,26 @@ export interface ApiJobStatus {
   /** Present only on failed jobs that look like CUDA OOMs.
    *  See `OomInfo` in types/index.ts. */
   oom_info?: import('../types').OomInfo | null
+  /** Adaptive video-generation ETA. Values are absent for non-video jobs. */
+  current_clip?: number
+  total_clips?: number
+  current_window?: number
+  total_windows?: number
+  window_eta_seconds?: number | null
+  clip_eta_seconds?: number | null
+  generation_eta_seconds?: number | null
+  project_eta_seconds?: number | null
+  window_completion_at?: number | null
+  clip_completion_at?: number | null
+  generation_completion_at?: number | null
+  project_completion_at?: number | null
+  eta_confidence?: 'calibrating' | 'low' | 'medium' | 'high'
+  eta_basis?: 'waiting-for-first-clip' | 'historical' | 'historical-adaptive' | 'live-adaptive' | 'live-cache-aware'
+  eta_history_samples?: number
+  eta_history_match?: 'exact' | 'family' | null
+  /** Produced after a queued automatic planner obtains the generation slot. */
+  h3_window_plan?: H3WindowPlan | null
+  ltx_window_plan?: LTXWindowPlan | null
 }
 
 // --- Models & Families ---
@@ -191,6 +221,7 @@ export async function planH3Windows(params: {
   image_paths?: string[]
   injected_keyframes?: Array<{ path: string; position: string }>
   camera_coverage?: 'auto' | 'continuous' | 'multi_shot'
+  planning_style?: 'faithful' | 'creative'
 }): Promise<H3WindowPlan> {
   const res = await fetch(`${BASE}/api/v1/llm/plan-h3-windows`, {
     method: 'POST',
@@ -226,6 +257,42 @@ export async function updateH3WindowOverrides(
   return res.json()
 }
 
+export interface StudioPreferenceSettings {
+  configured: boolean
+  generation_mode?: 'image' | 'video' | 'audio' | 'avatar'
+  studio_video_workflow?: string
+  studio_image_workflow?: string
+  audio_sub_mode?: 'speech' | 'music' | 'sfx' | 'mixer' | 'revoice'
+  selected_model_per_mode?: Record<string, string>
+  selected_model_per_audio_sub_mode?: Record<string, string>
+  h3_optimizations?: {
+    override_attention?: '' | 'sol' | 'sla' | 'sdpa'
+    skip_steps_cache_type?: '' | 'first_block'
+    skip_steps_multiplier?: number
+    skip_steps_start_step_perc?: number
+  }
+}
+
+export type StudioPreferenceUpdate = Omit<StudioPreferenceSettings, 'configured'>
+
+export async function fetchStudioPreferences(): Promise<StudioPreferenceSettings> {
+  const res = await fetch(`${BASE}/api/v1/studio-preferences`)
+  if (!res.ok) throw new Error('Failed to fetch Studio preferences')
+  return res.json()
+}
+
+export async function updateStudioPreferences(
+  preferences: StudioPreferenceUpdate,
+): Promise<StudioPreferenceSettings> {
+  const res = await fetch(`${BASE}/api/v1/studio-preferences`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(preferences),
+  })
+  if (!res.ok) throw new Error('Failed to save Studio preferences')
+  return res.json()
+}
+
 export async function planH3Sequence(params: {
   prompt: string
   model_type: string
@@ -237,6 +304,7 @@ export async function planH3Sequence(params: {
   overlap_frames?: number
   sequence_continuity?: boolean
   camera_coverage?: 'auto' | 'continuous' | 'multi_shot'
+  planning_style?: 'faithful' | 'creative'
 }): Promise<H3WindowPlan> {
   const res = await fetch(`${BASE}/api/v1/llm/plan-h3-sequence`, {
     method: 'POST',
@@ -308,7 +376,10 @@ export async function generateMusic(params: {
 // --- Tools: standalone post-processing on an existing clip ---
 
 export async function submitToolUpscale(params: {
-  video_path: string
+  /** `video_path` remains accepted by older backends; new callers use media_path. */
+  video_path?: string
+  media_path?: string
+  media_type?: 'image' | 'video'
   method?: string
   seed?: number
   workspace?: string
@@ -321,6 +392,24 @@ export async function submitToolUpscale(params: {
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Upscale failed' }))
     throw new Error(err.detail || 'Upscale failed')
+  }
+  return res.json()
+}
+
+export async function submitToolFilmGrain(params: {
+  video_path: string
+  intensity: number
+  saturation: number
+  workspace?: string
+}): Promise<{ job_id: string }> {
+  const res = await fetch(`${BASE}/api/v1/tools/film-grain`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Film grain failed' }))
+    throw new Error(err.detail || 'Film grain failed')
   }
   return res.json()
 }
@@ -389,6 +478,155 @@ export async function deleteWorkspace(name: string): Promise<{ switched_to_defau
   return res.json()
 }
 
+// --- Editor projects ---
+
+export async function fetchEditorProjects(workspace?: string): Promise<{
+  projects: import('../types').EditorProjectSummary[]
+}> {
+  const params = new URLSearchParams()
+  if (workspace) params.set('workspace', workspace)
+  const query = params.toString()
+  const res = await fetch(`${BASE}/api/v1/editor/projects${query ? `?${query}` : ''}`, {
+    cache: 'no-store',
+  })
+  if (!res.ok) throw new Error('Failed to load Editor projects')
+  return res.json()
+}
+
+export async function createEditorProject(params: {
+  workspace?: string
+  name?: string
+  canvas?: Partial<import('../types').EditorCanvas>
+  project?: import('../types').EditorProject
+}): Promise<import('../types').EditorProject> {
+  const res = await fetch(`${BASE}/api/v1/editor/projects`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'Project creation failed' }))
+    throw new Error(error.detail || 'Project creation failed')
+  }
+  return res.json()
+}
+
+export async function fetchEditorProject(
+  projectId: string,
+  workspace?: string,
+): Promise<import('../types').EditorProject> {
+  const params = new URLSearchParams()
+  if (workspace) params.set('workspace', workspace)
+  const query = params.toString()
+  const res = await fetch(
+    `${BASE}/api/v1/editor/projects/${encodeURIComponent(projectId)}${query ? `?${query}` : ''}`,
+    { cache: 'no-store' },
+  )
+  if (!res.ok) throw new Error('Editor project not found')
+  return res.json()
+}
+
+export async function saveEditorProject(
+  project: import('../types').EditorProject,
+): Promise<import('../types').EditorProject> {
+  const res = await fetch(`${BASE}/api/v1/editor/projects/${encodeURIComponent(project.id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workspace: project.workspace, project }),
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'Project save failed' }))
+    throw new Error(error.detail || 'Project save failed')
+  }
+  return res.json()
+}
+
+export async function deleteEditorProject(projectId: string, workspace?: string): Promise<void> {
+  const params = new URLSearchParams()
+  if (workspace) params.set('workspace', workspace)
+  const query = params.toString()
+  const res = await fetch(
+    `${BASE}/api/v1/editor/projects/${encodeURIComponent(projectId)}${query ? `?${query}` : ''}`,
+    { method: 'DELETE' },
+  )
+  if (!res.ok) throw new Error('Failed to delete Editor project')
+}
+
+export async function probeEditorMedia(
+  asset: Pick<import('../types').EditorAsset, 'name' | 'origin' | 'path' | 'workspace'>,
+  workspace?: string,
+): Promise<import('../types').EditorMediaProbe> {
+  const res = await fetch(`${BASE}/api/v1/editor/media/probe`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workspace, asset }),
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'Unable to inspect media' }))
+    throw new Error(error.detail || 'Unable to inspect media')
+  }
+  return res.json()
+}
+
+export async function fetchEditorMediaStatus(
+  project: import('../types').EditorProject,
+): Promise<{ assets: import('../types').EditorMediaStatus[] }> {
+  const res = await fetch(`${BASE}/api/v1/editor/media/status`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workspace: project.workspace, project }),
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'Unable to verify Editor media' }))
+    throw new Error(error.detail || 'Unable to verify Editor media')
+  }
+  return res.json()
+}
+
+export async function fetchEditorMediaPreview(
+  asset: import('../types').EditorAsset,
+  workspace: string,
+  includeProxy = false,
+  proxyProfile: 'auto' | 'mobile' = 'auto',
+): Promise<import('../types').EditorMediaPreview> {
+  const res = await fetch(`${BASE}/api/v1/editor/media/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workspace, asset, include_proxy: includeProxy, proxy_profile: proxyProfile }),
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'Unable to prepare Editor preview' }))
+    throw new Error(error.detail || 'Unable to prepare Editor preview')
+  }
+  return res.json()
+}
+
+export async function fetchEditorExportCapabilities(): Promise<import('../types').EditorExportCapabilities> {
+  const res = await fetch(`${BASE}/api/v1/editor/export/capabilities`)
+  if (!res.ok) throw new Error('Unable to inspect export encoders')
+  return res.json()
+}
+
+export async function exportEditorProject(
+  project: import('../types').EditorProject,
+  mode: 'now' | 'queue' = 'now',
+): Promise<{ job_id: string; status: ApiJobStatus['status'] }> {
+  const res = await fetch(`${BASE}/api/v1/editor/export`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      workspace: project.workspace,
+      project,
+      queue_mode: mode === 'queue' ? 'held' : 'now',
+    }),
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'Editor export failed to start' }))
+    throw new Error(error.detail || 'Editor export failed to start')
+  }
+  return res.json()
+}
+
 // --- Job Management ---
 
 export async function cancelJob(jobId: string): Promise<void> {
@@ -406,10 +644,11 @@ export async function startStudioQueue(): Promise<{
   return res.json()
 }
 
-export async function fetchActiveJobs(): Promise<{ jobs: Array<{
-  job_id: string; status: ApiJobStatus['status']; progress: number; step: number;
-  total_steps: number; phase: string; message: string; output_files: string[];
-  error: string | null; created_at: number; h3_window_plan?: H3WindowPlan | null;
+export async function fetchActiveJobs(): Promise<{ jobs: Array<ApiJobStatus & {
+  created_at: number
+  client_submission_id?: string | null
+  show_in_gallery?: boolean
+  h3_window_plan?: H3WindowPlan | null
 }> }> {
   const res = await fetch(`${BASE}/api/v1/jobs`)
   if (!res.ok) throw new Error('Failed to fetch jobs')
@@ -456,7 +695,7 @@ export async function fetchOutputs(limit = 0, offset = 0, opts?: { favoritesOnly
   return { outputs: data.outputs, total: data.total ?? data.outputs.length }
 }
 
-export function getFileUrl(filename: string): string {
+export function getFileUrl(filename: string, workspace?: string): string {
   // Preserve path separators for Director-owned assets such as
   // `_director_assets/<project>/<file>`. Encoding the entire value turns `/`
   // into `%2F`, which some ASGI/proxy combinations reject before FastAPI's
@@ -467,7 +706,8 @@ export function getFileUrl(filename: string): string {
     .filter(part => part.length > 0)
     .map(part => encodeURIComponent(part))
     .join('/')
-  return `${BASE}/api/v1/file/${safePath}`
+  const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
+  return `${BASE}/api/v1/file/${safePath}${query}`
 }
 
 export function getUploadUrl(filename: string): string {
@@ -487,7 +727,10 @@ export async function fetchOutputMetadata(name: string): Promise<import('../type
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), PER_ATTEMPT_MS)
     try {
-      const res = await fetch(url, { signal: controller.signal })
+      // Generation media may expose embedded metadata before its authoritative
+      // sidecar is published. Never let the browser reuse that transient GET
+      // after the output list reports the completed sidecar.
+      const res = await fetch(url, { signal: controller.signal, cache: 'no-store' })
       if (!res.ok) return { source: 'none', params: null }
       return await res.json()
     } catch (e) {
@@ -533,9 +776,32 @@ export async function fetchGroupClips(groupId: string): Promise<{ group_id: stri
 export interface PipelineStatus {
   id: string
   status: 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'
-  phase: 'planning' | 'polishing_prompts' | 'generating_images' | 'preparing_video' | 'generating_video' | 'post_processing' | 'completed' | 'failed' | 'cancelled'
+  phase: 'resuming' | 'planning' | 'polishing_prompts' | 'generating_images' | 'preparing_video' | 'generating_video' | 'post_processing' | 'completed' | 'failed' | 'cancelled'
   auto_mode: boolean
-  progress: { current: number; total: number; message: string; step: number; total_steps: number }
+  progress: {
+    current: number
+    total: number
+    message: string
+    step: number
+    total_steps: number
+    /** One-based active video clip and total native clips/windows. */
+    current_clip?: number
+    total_clips?: number
+    /** Adaptive remaining-time estimates, recalibrated from live sampler steps. */
+    clip_eta_seconds?: number | null
+    project_eta_seconds?: number | null
+    clip_completion_at?: number | null
+    project_completion_at?: number | null
+    eta_confidence?: 'calibrating' | 'low' | 'medium' | 'high'
+    eta_basis?: 'waiting-for-first-clip' | 'historical' | 'historical-adaptive' | 'live-adaptive' | 'live-cache-aware'
+    eta_history_samples?: number
+    eta_history_match?: 'exact' | 'family' | null
+    clip_estimates?: Array<{
+      clip: number
+      status: 'completed' | 'current' | 'pending'
+      seconds: number | null
+    }>
+  }
   clip_plans: Array<{ video_prompt: string; image_prompt: string }>
   /** Model-adapted native timeline. This can contain more, shorter clips than
    *  the initial music-analysis timeline (for example MiniMax H3's 14.4s cap). */
@@ -571,7 +837,9 @@ export async function startPipeline(params: Record<string, unknown>): Promise<{ 
 }
 
 export async function fetchPipelineStatus(pid: string): Promise<PipelineStatus> {
-  const res = await fetch(`${BASE}/api/v1/director/pipeline/${encodeURIComponent(pid)}`)
+  const res = await fetch(`${BASE}/api/v1/director/pipeline/${encodeURIComponent(pid)}`, {
+    cache: 'no-store',
+  })
   if (!res.ok) throw new Error('Failed to fetch pipeline status')
   return res.json()
 }
@@ -771,7 +1039,7 @@ export async function fetchPreflight(): Promise<{ ok: boolean; checks: Preflight
 // ── Director Pipeline Dashboard ──────────────────────────────────────────
 
 export async function fetchPipelineList(): Promise<{ pipelines: import('../types').PipelineListItem[] }> {
-  const res = await fetch(`${BASE}/api/v1/director/pipelines`)
+  const res = await fetch(`${BASE}/api/v1/director/pipelines`, { cache: 'no-store' })
   if (!res.ok) throw new Error('Failed to fetch pipelines')
   return res.json()
 }
@@ -909,7 +1177,7 @@ export interface DirectorV2PlanRequest {
 
 export interface DirectorV2PlanResponse {
   clip_plans: Array<{ video_prompt: string; image_prompt: string }>
-  production_plan: Record<string, unknown>
+  production_plan: ProductionPlan
   skill_type: string
 }
 
@@ -1419,7 +1687,13 @@ export async function samServiceStatus(): Promise<{
 
 // --- Audio Mix ---
 
-export async function mixAudio(tracks: { path: string; start_time: number; volume: number }[], workspace?: string): Promise<{ filename: string; path: string }> {
+export async function mixAudio(tracks: {
+  path: string
+  filename?: string
+  start_time: number
+  volume: number
+  duration_seconds?: number | null
+}[], workspace?: string): Promise<{ filename: string; path: string }> {
   const res = await fetch(`${BASE}/api/v1/audio/mix`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1478,6 +1752,138 @@ export async function updateSystemConfig(
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Update failed' }))
     throw new Error(err.detail || 'Update failed')
+  }
+  return res.json()
+}
+
+export async function fetchCharacters(): Promise<SavedOmniCharacter[]> {
+  const res = await fetch(`${BASE}/api/v1/characters`)
+  if (!res.ok) throw new Error('Failed to load saved characters')
+  const data = await res.json()
+  return Array.isArray(data.characters) ? data.characters : []
+}
+
+export async function createCharacter(params: {
+  name: string
+  visual_path: string
+  visual_type: 'image' | 'video'
+  voice_path?: string
+  use_video_voice?: boolean
+}): Promise<SavedOmniCharacter> {
+  const res = await fetch(`${BASE}/api/v1/characters`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'Character save failed' }))
+    throw new Error(error.detail || 'Character save failed')
+  }
+  return res.json()
+}
+
+export async function deleteCharacter(characterId: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/v1/characters/${encodeURIComponent(characterId)}`, {
+    method: 'DELETE',
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'Character delete failed' }))
+    throw new Error(error.detail || 'Character delete failed')
+  }
+}
+
+export async function testHostNotificationSound(
+  volume?: number,
+): Promise<{ status: string; volume: number }> {
+  const res = await fetch(`${BASE}/api/v1/notification-sound/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(volume == null ? {} : { volume }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Sound test failed' }))
+    throw new Error(err.detail || 'Sound test failed')
+  }
+  return res.json()
+}
+
+export async function fetchWebPushStatus(): Promise<import('../types').WebPushStatus> {
+  const res = await fetch(`${BASE}/api/v1/notifications/push/status`)
+  if (!res.ok) throw new Error('Failed to read background notification status')
+  return res.json()
+}
+
+export async function subscribeWebPush(
+  subscription: PushSubscriptionJSON,
+  preferences: Record<string, boolean>,
+  origin: string,
+  label: string,
+): Promise<import('../types').WebPushMutationResult> {
+  const res = await fetch(`${BASE}/api/v1/notifications/push/subscribe`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ subscription, preferences, origin, label }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Background notification setup failed' }))
+    throw new Error(err.detail || 'Background notification setup failed')
+  }
+  return res.json()
+}
+
+export async function unsubscribeWebPush(
+  endpoint: string,
+): Promise<import('../types').WebPushMutationResult> {
+  const res = await fetch(`${BASE}/api/v1/notifications/push/subscribe`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ endpoint }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Background notification removal failed' }))
+    throw new Error(err.detail || 'Background notification removal failed')
+  }
+  return res.json()
+}
+
+export async function testWebPush(endpoint: string): Promise<{
+  status: string
+  attempted: number
+  delivered: number
+  removed: number
+}> {
+  const res = await fetch(`${BASE}/api/v1/notifications/push/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ endpoint }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Background notification test failed' }))
+    throw new Error(err.detail || 'Background notification test failed')
+  }
+  return res.json()
+}
+
+export async function fetchTailscaleRemoteAccessStatus(): Promise<import('../types').TailscaleRemoteAccessStatus> {
+  const res = await fetch(`${BASE}/api/v1/remote-access/tailscale/status`)
+  if (!res.ok) throw new Error('Failed to read Tailscale status')
+  return res.json()
+}
+
+export async function enableTailscaleRemoteAccess(): Promise<import('../types').TailscaleRemoteAccessStatus> {
+  const res = await fetch(`${BASE}/api/v1/remote-access/tailscale/enable`, { method: 'POST' })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Tailscale setup failed' }))
+    throw new Error(err.detail || 'Tailscale setup failed')
+  }
+  return res.json()
+}
+
+export async function disableTailscaleRemoteAccess(): Promise<import('../types').TailscaleRemoteAccessStatus> {
+  const res = await fetch(`${BASE}/api/v1/remote-access/tailscale/disable`, { method: 'POST' })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Could not disable Tailscale access' }))
+    throw new Error(err.detail || 'Could not disable Tailscale access')
   }
   return res.json()
 }
@@ -1603,7 +2009,11 @@ export async function llmEnhancePrompt(params: {
   tts_voice_count?: number
   max_new_tokens?: number
   reference_context?: string
-}): Promise<{ original: string; enhanced: string }> {
+  planning_style?: 'faithful' | 'creative'
+}): Promise<{
+  original: string
+  enhanced: string
+}> {
   const res = await fetch(`${BASE}/api/v1/llm/enhance-prompt`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

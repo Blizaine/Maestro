@@ -4,7 +4,9 @@
 
 # SAM 3 core deps
 timm>=1.0.17
-numpy>=2
+# SAM3 requires NumPy 1.x. OpenCV 4.12+ and SciPy 1.18+ require NumPy 2,
+# so keep all three packages on their newest mutually compatible release line.
+numpy>=1.26,<2
 tqdm
 ftfy==6.1.1
 regex
@@ -17,7 +19,7 @@ psutil
 einops
 pycocotools
 decord
-opencv-python-headless
+opencv-python-headless<4.12
 
 # Triton (platform-specific)
 triton-windows; sys_platform == 'win32'
@@ -28,5 +30,5 @@ xformers
 fastapi>=0.115.0
 uvicorn>=0.34.0
 Pillow>=10.0
-scipy
+scipy<1.18
 ninja

@@ -6,12 +6,13 @@ const {
 module.exports = {
   version: "8.0",
   title: "Maestro",
-  description: "An all-in-one, 100% local AI video, image & music studio. Its Director mode turns a single prompt into a full music video or short film — LLM-planned, shot by shot. Built on the WanGP pipeline (Wan 2.1/2.2, LTX-2.3, Qwen, Hunyuan Video, Flux). Requires an NVIDIA GPU (6GB+ VRAM).",
+  description: "An all-in-one, 100% local AI creative studio, director, and multi-track editor. Generate with MiniMax H3, LTX-2.5/2.3, Wan, Flux, Qwen, and more; turn an idea or song into a planned production; then finish it on the timeline. Requires an NVIDIA GPU (6GB+ VRAM).",
   icon: "maestro_simplified_icon_alpha.png",
   menu: async (kernel, info) => {
     const runtime = runtimeProfile(kernel)
     const solCapable = isSolCapable(kernel)
     const cuda13DriverUpdateRequired = solCapable && needsCuda13DriverUpdate(kernel)
+    const samReady = info.exists("app/services/sam/env/.maestro-sam-ready")
     // Do not gate this menu on kernel.gpu. Pinokio can render an app menu
     // before its hardware inventory has populated that property, which would
     // hide Start from supported systems. install.js retains the documented
@@ -23,9 +24,9 @@ module.exports = {
       sol_install: info.running("sol_install.js"),
       start: info.running("start.js"),
       start_sol: info.running("start_sol.js"),
-      start_classic: info.running("start_classic.js"),
       update: info.running("update.js"),
       huggingface_login: info.running("huggingface_login.js"),
+      tailscale_setup: info.running("tailscale_setup.js"),
       reset: info.running("reset.js")
     }
     if (running.install || running.sol_install) {
@@ -95,9 +96,14 @@ module.exports = {
             text: "Open Web UI",
             href: local.url,
           }, {
-            icon: "fa-solid fa-rocket",
-            text: "Open Classic UI",
-            href: local.url + "/classic",
+            icon: "fa-solid fa-shield-halved",
+            text: running.tailscale_setup
+              ? "Configuring Secure Remote Access"
+              : "Secure Remote Access (Tailscale)",
+            href: "tailscale_setup.js",
+            params: {
+              port: local.port,
+            },
           }, {
             icon: 'fa-solid fa-terminal',
             text: "Terminal",
@@ -119,6 +125,15 @@ module.exports = {
             text: "Open Web UI (Sol Runtime)",
             href: local.url,
           }, {
+            icon: "fa-solid fa-shield-halved",
+            text: running.tailscale_setup
+              ? "Configuring Secure Remote Access"
+              : "Secure Remote Access (Tailscale)",
+            href: "tailscale_setup.js",
+            params: {
+              port: local.port,
+            },
+          }, {
             icon: 'fa-solid fa-terminal',
             text: "Sol Runtime Terminal",
             href: "start_sol.js",
@@ -129,26 +144,6 @@ module.exports = {
           text: "Sol Runtime Terminal",
           href: "start_sol.js",
         }]
-      } else if (running.start_classic) {
-        let local = info.local("start_classic.js")
-        if (local && local.url) {
-          return [{
-            default: true,
-            icon: "fa-solid fa-rocket",
-            text: "Open Classic UI",
-            href: local.url,
-          }, {
-            icon: 'fa-solid fa-terminal',
-            text: "Terminal",
-            href: "start_classic.js",
-          }]
-        } else {
-          return [{
-            icon: 'fa-solid fa-terminal',
-            text: "Terminal",
-            href: "start_classic.js",
-          }]
-        }
       } else if (running.reset) {
         return [{
           default: true,
@@ -162,9 +157,9 @@ module.exports = {
           text: "Start",
           href: "start.js",
         }, {
-          icon: "fa-solid fa-display",
-          text: "Start (Classic UI)",
-          href: "start_classic.js",
+          icon: "fa-solid fa-shield-halved",
+          text: "<div><strong>Secure Remote Access (Tailscale)</strong><div>Start Maestro first, then run this action again to create its private HTTPS address.</div></div>",
+          href: "tailscale_setup.js",
         }, {
           icon: "fa-solid fa-power-off",
           text: "Advanced",
@@ -172,13 +167,6 @@ module.exports = {
             icon: "fa-solid fa-power-off",
             text: "Compiled (Faster but may not work)",
             href: "start.js",
-            params: {
-              compile: true
-            }
-          }, {
-            icon: "fa-solid fa-power-off",
-            text: "Classic Compiled",
-            href: "start_classic.js",
             params: {
               compile: true
             }
@@ -194,13 +182,8 @@ module.exports = {
           }] : [])]
         }, {
           icon: "fa-regular fa-folder-open",
-          text: "T2V Loras (save lora files here)",
+          text: "Loras (save lora files here)",
           href: "app/loras",
-          fs: true
-        }, {
-          icon: "fa-regular fa-folder-open",
-          text: "I2V Loras (save lora files here)",
-          href: "app/loras_i2v",
           fs: true
         }, {
           icon: "fa-solid fa-plug",
@@ -220,10 +203,10 @@ module.exports = {
           // needed for the experimental Inpaint feature in Edit
           // mode — most users never need it, which is why install.js
           // no longer runs sam_install.js automatically. Label flips
-          // to "Update Inpaint Support" once installed so users can
-          // refresh SAM independently of the main app update.
+          // to "Update Inpaint Support" only after the installer's dependency
+          // and import health checks pass, so a partial env is never reported ready.
           icon: "fa-solid fa-vector-square",
-          text: info.exists("app/services/sam/env")
+          text: samReady
             ? "Update Inpaint Support (SAM 3.1)"
             : "Install Inpaint Support (SAM 3.1)",
           href: "sam_install.js",

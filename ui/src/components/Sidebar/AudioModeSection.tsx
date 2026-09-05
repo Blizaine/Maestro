@@ -31,6 +31,11 @@ export function AudioModeSection() {
   const audioBaseMode = audioValue.replace(/[NV]/g, '')
   const needsAudioUpload = audioBaseMode.includes('A') && !isAudioOnly
   const needsVideoGuideUpload = audioValue === 'K' && !modelOptions.guide_preprocessing
+  const restoredVideoGuideFilename = videoGuideFilename || (
+    typeof params.video_guide === 'string' && params.video_guide
+      ? params.video_guide.replace(/\\/g, '/').split('/').pop() || null
+      : null
+  )
   // Models that derive audio_prompt_type purely from the voice-clone slot count
   // (e.g. KugelAudio: 0→"", 1→"A", 2+→"AB") opt out of the manual ChoiceControl
   // by setting `audio_mode_from_voice_count: true` in their model_def. The Add
@@ -303,7 +308,7 @@ export function AudioModeSection() {
           <FileUploadZone
             label={uploading ? 'Uploading...' : 'Drop video file (.mp4)'}
             accept=".mp4,.webm,.mkv"
-            filename={videoGuideFilename}
+            filename={restoredVideoGuideFilename}
             onFile={file => handleLegacyUpload(file, 'video_guide', setVideoGuideFilename)}
             onClear={() => {
               setParam('video_guide', undefined)

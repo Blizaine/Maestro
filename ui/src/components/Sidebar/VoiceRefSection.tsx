@@ -11,9 +11,8 @@ const AUDIO_ACCEPT = '.wav,.mp3,.flac,.ogg,.m4a'
  * and (when combined with an ID-LoRA) keeps the speaker's voice
  * consistent across clips.
  *
- * The component is gated by the global `voice_reference_enabled` flag
- * in services config — when the toggle in Settings → Services is off,
- * the section renders nothing.
+ * The component is gated by the LTX-only switch in Video Frames →
+ * Advanced. H3 Omni voice references use the native References workflow.
  *
  * State lives on `directorVoiceRef` / `directorVoiceRefPath` /
  * `directorIdentityGuidanceScale` in the store. Despite the
@@ -22,7 +21,15 @@ const AUDIO_ACCEPT = '.wav,.mp3,.flac,.ogg,.m4a'
  * works in both contexts.
  */
 export function VoiceRefSection() {
-  const enabled = useStore(s => !!s.servicesConfig?.voice_reference_enabled)
+  const enabled = useStore(s => {
+    const model = s.models.find(candidate => candidate.model_type === s.params.model_type)
+    const family = String(model?.family || '').toLowerCase()
+    const architecture = String(model?.architecture || '').toLowerCase()
+    const isLtx = family === 'ltx2' || family === 'ltx25' || architecture.startsWith('ltx2')
+    return s.studioVideoWorkflow === 'frames'
+      && isLtx
+      && s.servicesConfig?.voice_reference_enabled === true
+  })
   const voiceRef = useStore(s => s.directorVoiceRef)
   const setVoiceRef = useStore(s => s.setDirectorVoiceRef)
   const identityScale = useStore(s => s.directorIdentityGuidanceScale)

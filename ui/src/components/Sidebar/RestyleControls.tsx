@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import {
   ChevronDown,
   ChevronRight,
@@ -52,14 +52,16 @@ export function RestyleControls() {
   const sendFrameToImageMode = useStore(s => s.sendFrameToImageMode)
 
   const videoInputRef = useRef<HTMLInputElement>(null)
-  const [showRegions, setShowRegions] = useState(mappings.length > 0)
+  const [regionDisclosure, setRegionDisclosure] = useState({
+    mappingCount: mappings.length,
+    open: mappings.length > 0,
+  })
+  const showRegions = regionDisclosure.mappingCount === mappings.length
+    ? regionDisclosure.open
+    : mappings.length > 0
   const [previewState, setPreviewState] = useState<'idle' | 'loading' | 'found' | 'error'>('idle')
   const [preview, setPreview] = useState<PreviewResult | null>(null)
   const [previewError, setPreviewError] = useState('')
-
-  useEffect(() => {
-    if (mappings.length > 0) setShowRegions(true)
-  }, [mappings.length])
 
   const resetPreview = useCallback(() => {
     setPreviewState('idle')
@@ -280,7 +282,10 @@ export function RestyleControls() {
       <div className="rounded-lg border border-border overflow-hidden">
         <div className="flex items-center">
           <button
-            onClick={() => setShowRegions(value => !value)}
+            onClick={() => setRegionDisclosure(current => ({
+              mappingCount: mappings.length,
+              open: current.mappingCount === mappings.length ? !current.open : false,
+            }))}
             className="flex flex-1 items-center gap-1.5 px-2.5 py-2 text-left hover:bg-bg-hover/40"
           >
             {showRegions ? <ChevronDown size={12} /> : <ChevronRight size={12} />}

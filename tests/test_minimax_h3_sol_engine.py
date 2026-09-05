@@ -20,7 +20,8 @@ class TestSolEngineSourceContracts(unittest.TestCase):
         engine = (APP / "wgp.py").read_text(encoding="utf-8")
         attention = (APP / "shared" / "attention.py").read_text(encoding="utf-8")
 
-        self.assertIn('"sol_attention": True', handler)
+        self.assertIn('"sol_attention": not fused_turbo', handler)
+        self.assertIn('"sla_attention": fused_turbo', handler)
         self.assertIn('"sol_attention_status": _sol_attention_status', launch)
         self.assertIn('attn == "sol" and not model_def.get("sol_attention"', engine)
         self.assertIn("get_supported_override_attention_modes", engine)

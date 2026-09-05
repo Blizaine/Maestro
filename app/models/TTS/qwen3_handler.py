@@ -111,7 +111,9 @@ QWEN3_TTS_SPEAKER_META = {
 QWEN3_TTS_DURATION_SLIDER = {
     "label": "Max duration (seconds)",
     "min": 1,
-    "max": 600,
+    # Qwen's pipeline streams text in sentence/paragraph chunks; this is a
+    # project-duration ceiling, not one autoregressive pass.
+    "max": 3600,
     "increment": 1,
     "default": 20,
 }

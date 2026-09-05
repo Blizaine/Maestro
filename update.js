@@ -4,8 +4,9 @@ const {
 
 module.exports = async (kernel) => {
   const runtime = runtimeProfile(kernel)
+  const samReadyMarker = "app/services/sam/env/.maestro-sam-ready"
   const alreadyCurrentAndReady =
-    `{{/already up[- ]to[- ]date/i.test(input.stdout) && exists('${runtime.marker}') && exists('${runtime.flashMarker}') ? 'uptodate' : 'build'}}`
+    `{{/already up[- ]to[- ]date/i.test(input.stdout) && exists('${runtime.marker}') && exists('${runtime.flashMarker}') && exists('ui/dist/index.html') && exists('ui/dist/assets') && (!exists('app/services/sam/env') || exists('${samReadyMarker}')) ? 'uptodate' : 'build'}}`
   return {
     run: [{
     // Pull the latest launcher + app code (single monorepo, so this one
@@ -31,17 +32,30 @@ module.exports = async (kernel) => {
     method: "jump",
     params: {
       // An already-current checkout still enters the build path when either
-      // its hardware runtime or optional FlashAttention repair marker is
-      // missing. This keeps interrupted installs and one-time repairs resumable.
+      // its hardware runtime, optional FlashAttention repair marker, or
+      // compiled React bundle is missing. This keeps interrupted installs and
+      // updates resumable instead of permanently skipping a failed UI build.
       id: alreadyCurrentAndReady
     }
   }, {
-    // Reached ONLY when the repo was already current (the "build" path
-    // jumps over this step). Before halting, self-heal the seed-vc
-    // component if it's missing (GPL-3.0, cloned from its own repo — see
-    // install.js): a failed earlier clone shouldn't leave voice features
-    // broken until the next code update.
+    // Reached ONLY when the repo was already current (the "build" path jumps
+    // over this step). Keep the tiny optional Web Push runtime reconciled even
+    // on the fast path. This makes the in-app "Run Maestro Update once"
+    // recovery instruction truthful for installations that received the UI
+    // before pywebpush was installed, without repeating the full dependency
+    // install or UI build on every no-op update.
     id: "uptodate",
+    method: "shell.run",
+    params: {
+      venv: runtime.env,
+      venv_python: runtime.python,
+      path: "app",
+      message: "uv pip install pywebpush==2.3.0"
+    }
+  }, {
+    // Before halting, self-heal the seed-vc component if it's missing
+    // (GPL-3.0, cloned from its own repo — see install.js): a failed earlier
+    // clone shouldn't leave voice features broken until the next code update.
     when: "{{!exists('app/postprocessing/seedvc/__init__.py')}}",
     method: "shell.run",
     params: {
@@ -50,7 +64,7 @@ module.exports = async (kernel) => {
   }, {
     method: "log",
     params: {
-      raw: "Already up to date — no new commits pulled. Skipped dependency install and UI rebuild."
+      raw: "Already up to date — Web Push runtime verified; skipped the full dependency install and UI rebuild."
     },
     next: null
   }, {
@@ -135,7 +149,9 @@ module.exports = async (kernel) => {
     }
   },
   // Update SAM 3.1 service (pull latest + reinstall) ONLY if SAM is
-  // already installed. This way:
+  // already installed. The ready marker is intentionally not used for this gate:
+  // an older or interrupted env without the marker must enter sam_install.js so
+  // Update can repair it and validate it instead of silently skipping it. This way:
   //   - Users who never installed SAM (most users) don't get a slow
   //     conda env install they didn't ask for during a regular update.
   //   - Users who DID install SAM keep getting it kept up to date

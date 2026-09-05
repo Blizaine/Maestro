@@ -6,6 +6,8 @@ import { MediaFeedItem } from './MediaFeedItem'
 import { GlobalQueuePopover } from '../GlobalQueuePopover'
 import { useStore } from '../../stores/useStore'
 import { useIsMobile } from '../../lib/useIsMobile'
+import { formatEstimatedClock, formatEtaDuration } from '../../lib/format'
+import { PROMPT_ENHANCEMENT_ACTIVITY } from '../../lib/promptEnhancementActivity'
 import type { GenerationJob } from '../../types'
 
 function WorkspaceSelector() {
@@ -184,22 +186,33 @@ function stripTimeSuffix(msg: string): string {
   return msg.replace(/\s*\|\s*\d+:\d+.*$/, '').trim()
 }
 
-function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop: () => void; onDismiss: () => void }) {
+function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop?: () => void; onDismiss: () => void }) {
   const hasSteps = job.totalSteps > 0
   const progressPct = hasSteps ? (job.step / job.totalSteps) * 100 : job.progress * 100
   const phase = stripTimeSuffix(job.phase || job.message)
   const isFailed = job.status === 'failed' || job.status === 'cancelled'
+  const isPromptPlanning = job.kind === 'prompt_enhancement'
   const errorText = job.error || job.message || (job.status === 'cancelled' ? 'Cancelled' : 'Generation failed')
-  const [showH3Prompts, setShowH3Prompts] = useState(false)
+  const h3PlanSignature = job.h3WindowPlan?.signature
+  const [h3PromptDisclosure, setH3PromptDisclosure] = useState({
+    signature: h3PlanSignature,
+    open: false,
+  })
+  const showH3Prompts = (
+    h3PromptDisclosure.signature === h3PlanSignature && h3PromptDisclosure.open
+  )
   const h3WindowMatch = (job.phase || job.message || '').match(/Sliding Window\s+(\d+)\/(\d+)/i)
-  const activeH3Window = h3WindowMatch ? Number(h3WindowMatch[1]) : 1
+  const activeH3Window = job.currentWindow ?? (h3WindowMatch ? Number(h3WindowMatch[1]) : 1)
+  const totalStudioWindows = job.totalWindows ?? (h3WindowMatch ? Number(h3WindowMatch[2]) : 1)
+  const isMultiWindow = totalStudioWindows > 1
+  const isMultiClip = (job.totalClips ?? 1) > 1
+  const windowEta = formatEtaDuration(job.windowEtaSeconds)
+  const windowClock = formatEstimatedClock(job.windowCompletionAt)
+  const generationEta = formatEtaDuration(job.generationEtaSeconds)
+  const generationClock = formatEstimatedClock(job.generationCompletionAt)
   const activeH3PlanWindow = job.h3WindowPlan?.windows.find(
     window => window.index === activeH3Window,
   ) || job.h3WindowPlan?.windows[0]
-
-  useEffect(() => {
-    setShowH3Prompts(false)
-  }, [job.h3WindowPlan?.signature])
 
   return (
     <div className={`rounded-xl border overflow-hidden ${
@@ -221,7 +234,13 @@ function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop
 
           <div className="text-center w-full">
             <p className={`text-sm font-medium ${isFailed ? 'text-red-400' : 'text-text-secondary'}`}>
-              {isFailed ? (job.status === 'cancelled' ? 'Cancelled' : 'Generation Failed') : job.status === 'queued' ? 'Queued...' : 'Generating...'}
+              {isFailed
+                ? (job.status === 'cancelled' ? 'Cancelled' : 'Generation Failed')
+                : isPromptPlanning
+                  ? 'Planning with AI...'
+                  : job.status === 'queued'
+                    ? 'Queued...'
+                    : 'Generating...'}
             </p>
             {!isFailed && phase && (
               <p className="text-xs mt-1 truncate">{phase}</p>
@@ -230,6 +249,35 @@ function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop
               <p className="text-[10px] text-text-muted mt-0.5">
                 Step {job.step}/{job.totalSteps}
               </p>
+            )}
+            {!isFailed && job.status === 'running' && (
+              <div className="mt-1 space-y-0.5 text-[10px] text-text-muted">
+                {isMultiClip && (
+                  <p>
+                    Clip {job.currentClip ?? 1}/{job.totalClips}
+                    {isMultiWindow ? ` · Window ${activeH3Window}/${totalStudioWindows}` : ''}
+                  </p>
+                )}
+                {isMultiWindow && windowEta && (
+                  <p>
+                    Window {activeH3Window}/{totalStudioWindows} · {windowEta} remaining
+                    {windowClock ? ` · around ${windowClock}` : ''}
+                  </p>
+                )}
+                {generationEta ? (
+                  <p>
+                    {isMultiWindow || isMultiClip ? 'Full Studio render' : 'Estimated'} {generationEta}
+                    {generationClock ? ` · around ${generationClock}` : ''}
+                  </p>
+                ) : job.etaConfidence === 'calibrating' ? (
+                  <p>Calibrating ETA…</p>
+                ) : null}
+                {(job.etaHistorySamples ?? 0) > 0 && (
+                  <p>
+                    Learned from {job.etaHistorySamples} {job.etaHistoryMatch === 'exact' ? 'matching' : 'related'} local render{job.etaHistorySamples === 1 ? '' : 's'}
+                  </p>
+                )}
+              </div>
             )}
             {isFailed && (
               <p className="text-[11px] text-text-secondary mt-2 max-h-24 overflow-y-auto px-2 leading-relaxed whitespace-pre-wrap break-words">
@@ -262,7 +310,10 @@ function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop
             </span>
             <button
               type="button"
-              onClick={() => setShowH3Prompts(open => !open)}
+              onClick={() => setH3PromptDisclosure(current => ({
+                signature: h3PlanSignature,
+                open: current.signature === h3PlanSignature ? !current.open : true,
+              }))}
               className="flex items-center gap-1 text-accent-blue hover:text-accent-blue/80"
             >
               {showH3Prompts ? 'Hide all' : 'View all'}
@@ -305,7 +356,7 @@ function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop
         <div className="text-[11px] text-text-muted truncate flex-1">
           {isFailed ? 'Click × to dismiss — the tile stays so you can see what failed' : phase || 'Preparing...'}
         </div>
-        {!isFailed && (
+        {!isFailed && onStop && (
           <button
             onClick={onStop}
             className="flex items-center gap-1 text-xs text-red-400 hover:text-red-300 transition-colors shrink-0 ml-2"
@@ -323,13 +374,18 @@ function PipelinePlaceholder() {
   const pipelineStatus = useStore(s => s.pipelineStatus)
   const pipelineId = useStore(s => s.pipelineId)
   const stopPipeline = useStore(s => s.stopPipeline)
+  const resumePipeline = useStore(s => s.resumePipeline)
+  const reattachDirectorPipeline = useStore(s => s.reattachDirectorPipeline)
+  const [resuming, setResuming] = useState(false)
 
   if (!pipelineId || !pipelineStatus) return null
-  if (pipelineStatus.status === 'completed' || pipelineStatus.status === 'failed' || pipelineStatus.status === 'cancelled') return null
+  if (pipelineStatus.status === 'completed') return null
 
   const phase = pipelineStatus.phase || 'planning'
   const progress = pipelineStatus.progress
   const message = progress?.message || phase
+  const isFailed = pipelineStatus.status === 'failed' || pipelineStatus.status === 'cancelled'
+  const errorText = pipelineStatus.error || message || 'Director pipeline stopped'
 
   const hasSteps = (progress?.total_steps ?? 0) > 0
   const progressPct = hasSteps
@@ -338,51 +394,132 @@ function PipelinePlaceholder() {
       ? (progress.current / progress.total) * 100
       : 0
   const phaseLabel = stripTimeSuffix(message)
+  const currentClip = progress?.current_clip
+  const totalClips = progress?.total_clips
+  const clipEta = formatEtaDuration(progress?.clip_eta_seconds)
+  const clipClock = formatEstimatedClock(progress?.clip_completion_at)
+  const projectEta = formatEtaDuration(progress?.project_eta_seconds)
+  const projectClock = formatEstimatedClock(progress?.project_completion_at)
 
   return (
-    <div className="rounded-xl overflow-hidden border border-accent-blue/30 bg-bg-tertiary">
-      <div className="w-full aspect-video flex items-center justify-center">
+    <div className={`rounded-xl overflow-hidden border ${isFailed ? 'border-red-500/30' : 'border-accent-blue/30'} bg-bg-tertiary`}>
+      <div className="w-full aspect-video flex items-center justify-center relative">
+        {isFailed && (
+          <button
+            type="button"
+            onClick={() => useStore.setState({ pipelineId: null, pipelineStatus: null, directorError: null })}
+            className="absolute top-2 right-2 p-1.5 rounded-full bg-bg-active text-text-secondary hover:bg-red-600 hover:text-white transition-colors z-10"
+            title="Dismiss"
+          >
+            <X size={14} />
+          </button>
+        )}
         <div className="flex flex-col items-center gap-3 text-text-muted w-full max-w-xs px-4">
-          <Film size={40} className="animate-pulse" />
+          <Film size={40} className={isFailed ? 'text-red-400' : 'animate-pulse'} />
 
           <div className="text-center w-full">
-            <p className="text-sm font-medium text-text-secondary">
-              {pipelineStatus?.status === 'paused' ? 'Paused — Review' : 'Director'}
+            <p className={`text-sm font-medium ${isFailed ? 'text-red-400' : 'text-text-secondary'}`}>
+              {isFailed
+                ? (pipelineStatus.status === 'cancelled' ? 'Director Cancelled' : 'Director Failed')
+                : pipelineStatus.status === 'paused' ? 'Paused — Review' : 'Director'}
             </p>
-            <p className="text-xs mt-1 truncate">{phaseLabel}</p>
-            {hasSteps && (
+            {!isFailed && <p className="text-xs mt-1 truncate">{phaseLabel}</p>}
+            {hasSteps && !isFailed && (
               <p className="text-[10px] text-text-muted mt-0.5">
                 Step {progress!.step}/{progress!.total_steps}
               </p>
             )}
+            {!isFailed && currentClip ? (
+              <div className="mt-1 space-y-0.5 text-[10px] text-text-muted">
+                <p>
+                  Clip {currentClip}/{totalClips || '?'}
+                  {clipEta
+                    ? ` · ${clipEta} remaining${clipClock ? ` · around ${clipClock}` : ''}`
+                    : ' · Calibrating ETA…'}
+                </p>
+                {projectEta && (
+                  <p>
+                    Full Director render {projectEta}
+                    {projectClock ? ` · around ${projectClock}` : ''}
+                  </p>
+                )}
+                {(progress?.eta_history_samples ?? 0) > 0 && (
+                  <p>
+                    Learned from {progress!.eta_history_samples} {progress!.eta_history_match === 'exact' ? 'matching' : 'related'} local render{progress!.eta_history_samples === 1 ? '' : 's'}
+                  </p>
+                )}
+              </div>
+            ) : null}
+            {isFailed && (
+              <>
+                {progress && progress.total > 0 && (
+                  <p className="mt-1 text-[10px] text-text-muted">
+                    Saved progress: {progress.current}/{progress.total}
+                  </p>
+                )}
+                <p className="text-[11px] text-text-secondary mt-2 max-h-24 overflow-y-auto px-2 leading-relaxed whitespace-pre-wrap break-words">
+                  {errorText}
+                </p>
+              </>
+            )}
           </div>
 
           {/* Progress bar */}
-          <div className="w-full bg-bg-active rounded-full h-1.5 overflow-hidden">
-            {progressPct > 0 ? (
-              <div
-                className="h-full bg-accent-green rounded-full transition-all duration-300"
-                style={{ width: `${progressPct}%` }}
-              />
-            ) : (
-              <div className="h-full bg-accent-green/60 rounded-full animate-pulse w-full" />
-            )}
-          </div>
+          {!isFailed && (
+            <div className="w-full bg-bg-active rounded-full h-1.5 overflow-hidden">
+              {progressPct > 0 ? (
+                <div
+                  className="h-full bg-accent-green rounded-full transition-all duration-300"
+                  style={{ width: `${progressPct}%` }}
+                />
+              ) : (
+                <div className="h-full bg-accent-green/60 rounded-full animate-pulse w-full" />
+              )}
+            </div>
+          )}
         </div>
       </div>
 
       {/* Bottom bar with stop button */}
       <div className="px-3 py-2 min-h-[40px] flex items-center justify-between">
         <div className="text-[11px] text-text-muted truncate flex-1">
-          {phaseLabel || 'Preparing...'}
+          {isFailed ? 'The saved Director checkpoint can be resumed' : phaseLabel || 'Preparing...'}
         </div>
-        <button
-          onClick={() => stopPipeline()}
-          className="flex items-center gap-1 text-xs text-red-400 hover:text-red-300 transition-colors shrink-0 ml-2"
-        >
-          <Square size={11} />
-          Stop
-        </button>
+        {isFailed ? (
+          <div className="flex items-center gap-2 shrink-0 ml-2">
+            <button
+              type="button"
+              onClick={() => void reattachDirectorPipeline(pipelineId, true)}
+              className="text-xs text-text-secondary hover:text-text-primary transition-colors"
+            >
+              Open Director
+            </button>
+            <button
+              type="button"
+              disabled={resuming}
+              onClick={async () => {
+                setResuming(true)
+                try {
+                  await resumePipeline(pipelineId)
+                } finally {
+                  setResuming(false)
+                }
+              }}
+              className="flex items-center gap-1 rounded-md bg-accent-blue px-2 py-1 text-xs text-white hover:bg-accent-blue-hover disabled:opacity-50"
+            >
+              {resuming ? <Loader2 size={11} className="animate-spin" /> : <Play size={11} />}
+              Resume
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => stopPipeline()}
+            className="flex items-center gap-1 text-xs text-red-400 hover:text-red-300 transition-colors shrink-0 ml-2"
+          >
+            <Square size={11} />
+            Stop
+          </button>
+        )}
       </div>
     </div>
   )
@@ -394,27 +531,145 @@ export function MainContent() {
   const outputsTotal = useStore(s => s.outputsTotal)
   const outputsLoading = useStore(s => s.outputsLoading)
   const jobs = useStore(s => s.jobs)
+  const isEnhancing = useStore(s => s.isEnhancing)
   const generationMode = useStore(s => s.generationMode)
   const stopGeneration = useStore(s => s.stopGeneration)
   const dismissJob = useStore(s => s.dismissJob)
+  const activeIndex = useStore(s => s.selectedOutput)
   const setSelectedOutput = useStore(s => s.setSelectedOutput)
   // Waiting work now lives in the universal top-bar queue. Keep the gallery
   // focused on media plus useful live/error cards instead of large blank
   // placeholders for every job that has not started yet.
   const galleryJobs = useMemo(
-    () => jobs.filter(job => job.status !== 'held' && job.status !== 'queued'),
-    [jobs],
+    () => {
+      const visibleJobs = jobs.filter(job => (
+        job.status !== 'held'
+        && (job.status !== 'queued' || job.showInGallery === true)
+      ))
+      return isEnhancing ? [PROMPT_ENHANCEMENT_ACTIVITY, ...visibleJobs] : visibleJobs
+    },
+    [isEnhancing, jobs],
   )
 
   const feedRef = useRef<HTMLDivElement>(null)
-  const [activeIndex, setActiveIndex] = useState(0)
-  const isUserScrolling = useRef(false)
   const scrollTargetIndex = useRef<number | null>(null)
+  const centerSelectionFrame = useRef<number | null>(null)
+
+  const activateIndex = useCallback((index: number) => {
+    if (index < 0 || index >= useStore.getState().filteredOutputs().length) return
+    // Avoid re-fetching the same output metadata on every scroll event.
+    if (useStore.getState().selectedOutput !== index) {
+      setSelectedOutput(index)
+    }
+  }, [setSelectedOutput])
+
+  const selectViewportCenteredItem = useCallback(() => {
+    centerSelectionFrame.current = null
+    if (scrollTargetIndex.current !== null) return
+
+    const feedEl = feedRef.current
+    if (!feedEl) return
+    const viewport = feedEl.getBoundingClientRect()
+    const viewportCenterY = viewport.top + viewport.height / 2
+
+    // Playback is a stronger intent signal than passive scrolling. Keep a
+    // currently playing, still-visible clip selected so a pending scroll frame
+    // cannot immediately mute/pause the item the user just started.
+    const playingMedia = Array.from(
+      feedEl.querySelectorAll<HTMLMediaElement>('[data-gallery-media="true"]'),
+    ).find(media => !media.paused && !media.ended)
+    const playingItem = playingMedia?.closest<HTMLElement>('[data-feed-index]')
+    if (playingItem) {
+      const rect = playingItem.getBoundingClientRect()
+      if (Math.min(rect.bottom, viewport.bottom) > Math.max(rect.top, viewport.top)) {
+        const index = Number(playingItem.dataset.feedIndex)
+        if (Number.isInteger(index)) {
+          activateIndex(index)
+          return
+        }
+      }
+    }
+
+    // The viewport center sits below the first card when the gallery is at its
+    // hard top (especially on phones with a tall viewport), so center-based
+    // selection alone can incorrectly highlight card two. At either scroll
+    // boundary, prefer the first/last actually visible output. Direct playback
+    // remains stronger intent and is handled above.
+    const visibleItems = Array.from(
+      feedEl.querySelectorAll<HTMLElement>('[data-feed-index]'),
+    ).filter((item) => {
+      const rect = item.getBoundingClientRect()
+      return Math.min(rect.bottom, viewport.bottom) > Math.max(rect.top, viewport.top)
+    })
+    const boundaryTolerance = 3
+    if (feedEl.scrollTop <= boundaryTolerance && visibleItems.length > 0) {
+      const firstIndex = Math.min(...visibleItems.map(item => Number(item.dataset.feedIndex)))
+      if (Number.isInteger(firstIndex)) {
+        activateIndex(firstIndex)
+        return
+      }
+    }
+    if (
+      feedEl.scrollHeight - feedEl.scrollTop - feedEl.clientHeight <= boundaryTolerance
+      && visibleItems.length > 0
+    ) {
+      const lastIndex = Math.max(...visibleItems.map(item => Number(item.dataset.feedIndex)))
+      if (Number.isInteger(lastIndex)) {
+        activateIndex(lastIndex)
+        return
+      }
+    }
+
+    let bestIndex: number | null = null
+    let bestEdgeDistance = Number.POSITIVE_INFINITY
+    let bestCenterDistance = Number.POSITIVE_INFINITY
+
+    feedEl.querySelectorAll<HTMLElement>('[data-feed-index]').forEach((item) => {
+      const index = Number(item.dataset.feedIndex)
+      if (!Number.isInteger(index)) return
+      const rect = item.getBoundingClientRect()
+      const visibleTop = Math.max(rect.top, viewport.top)
+      const visibleBottom = Math.min(rect.bottom, viewport.bottom)
+      if (visibleBottom <= visibleTop) return
+
+      // Prefer the card intersected by the viewport's horizontal center line.
+      // The item-center distance breaks ties for unusually tall/overlapping
+      // layouts and keeps the behavior intuitive during responsive resizing.
+      const edgeDistance = viewportCenterY < rect.top
+        ? rect.top - viewportCenterY
+        : viewportCenterY > rect.bottom
+          ? viewportCenterY - rect.bottom
+          : 0
+      const centerDistance = Math.abs((rect.top + rect.bottom) / 2 - viewportCenterY)
+      if (
+        edgeDistance < bestEdgeDistance
+        || (edgeDistance === bestEdgeDistance && centerDistance < bestCenterDistance)
+      ) {
+        bestIndex = index
+        bestEdgeDistance = edgeDistance
+        bestCenterDistance = centerDistance
+      }
+    })
+
+    if (bestIndex !== null) activateIndex(bestIndex)
+  }, [activateIndex])
+
+  const scheduleCenteredSelection = useCallback(() => {
+    if (centerSelectionFrame.current !== null) return
+    centerSelectionFrame.current = requestAnimationFrame(selectViewportCenteredItem)
+  }, [selectViewportCenteredItem])
+
+  useEffect(() => () => {
+    if (centerSelectionFrame.current !== null) {
+      cancelAnimationFrame(centerSelectionFrame.current)
+    }
+  }, [])
 
   // Virtualization state
   const [scrollTop, setScrollTop] = useState(0)
   const [containerHeight, setContainerHeight] = useState(800)
   const [containerWidth, setContainerWidth] = useState(800)
+  const [measureEpoch, setMeasureEpoch] = useState(0)
   const measuredHeights = useRef<Map<number, number>>(new Map())
 
   // Dynamic estimated item height based on actual container width
@@ -439,16 +694,20 @@ export function MainContent() {
         measuredHeights.current.clear()
       }
       prevWidth = newWidth
+      scheduleCenteredSelection()
     })
     ro.observe(el)
     return () => ro.disconnect()
-  }, [])
+  }, [scheduleCenteredSelection])
 
   const getItemHeight = useCallback((index: number) => {
     return measuredHeights.current.get(index) ?? estimatedItemHeight
   }, [estimatedItemHeight])
 
   const { startIndex, endIndex, totalHeight, itemOffsets } = useMemo(() => {
+    // Measurement changes must invalidate the virtual layout even though the
+    // actual values live in a ref rather than in React state.
+    void measureEpoch
     const count = outputs.length
     const offsets: number[] = new Array(count)
     let cumulative = placeholderTotalHeight
@@ -478,30 +737,32 @@ export function MainContent() {
       totalHeight: Math.max(total, placeholderTotalHeight),
       itemOffsets: offsets,
     }
-  }, [outputs.length, scrollTop, containerHeight, getItemHeight, placeholderTotalHeight, estimatedItemHeight])
+  }, [outputs.length, scrollTop, containerHeight, getItemHeight, placeholderTotalHeight, estimatedItemHeight, measureEpoch])
 
-  const [, setMeasureEpoch] = useState(0)
   const handleItemMeasured = useCallback((index: number, height: number) => {
     const prev = measuredHeights.current.get(index)
     if (prev !== height) {
       measuredHeights.current.set(index, height)
       setMeasureEpoch(e => e + 1)
+      scheduleCenteredSelection()
     }
-  }, [])
+  }, [scheduleCenteredSelection])
 
-  const handleItemVisible = useCallback((index: number) => {
-    if (scrollTargetIndex.current !== null) return
-    setActiveIndex(index)
-    if (isUserScrolling.current) {
-      setSelectedOutput(index)
-    }
-  }, [setSelectedOutput])
+  const handlePlaybackStart = useCallback((index: number, media: HTMLMediaElement) => {
+    activateIndex(index)
+    // One audible gallery player at a time. This avoids the only meaningful
+    // downside of auto-unmuting: two clips talking over one another.
+    feedRef.current?.querySelectorAll<HTMLMediaElement>('[data-gallery-media="true"]').forEach((candidate) => {
+      if (candidate === media) return
+      candidate.pause()
+      candidate.muted = true
+    })
+    media.muted = false
+  }, [activateIndex])
 
   const handleThumbnailClick = useCallback((index: number) => {
     setSelectedOutput(index)
-    setActiveIndex(index)
     scrollTargetIndex.current = index
-    isUserScrolling.current = false
     const feedEl = feedRef.current
     if (!feedEl) return
 
@@ -531,9 +792,9 @@ export function MainContent() {
     //            By the time the element exists, its height has been
     //            measured, so this final align is accurate.
     //   Guard:   scrollTargetIndex.current is held until phase 2
-    //            finishes (not a fixed timeout). handleItemVisible
-    //            ignores intersection events while this is non-null,
-    //            so no wrong-active leak through.
+    //            finishes (not a fixed timeout). The gallery-level center
+    //            selector ignores scroll events while this is non-null,
+    //            so no wrong-active selection can leak through.
     //   Re-entrancy: a stale align loop checks scrollTargetIndex
     //            against its captured target on every frame and bails
     //            if a newer click overrode it.
@@ -557,6 +818,7 @@ export function MainContent() {
         requestAnimationFrame(() => {
           if (scrollTargetIndex.current === targetIndexAtStart) {
             scrollTargetIndex.current = null
+            scheduleCenteredSelection()
           }
         })
       } else if (attempts < MAX_ATTEMPTS) {
@@ -567,11 +829,12 @@ export function MainContent() {
         // mid-flight or the index is out of range.
         if (scrollTargetIndex.current === targetIndexAtStart) {
           scrollTargetIndex.current = null
+          scheduleCenteredSelection()
         }
       }
     }
     requestAnimationFrame(align)
-  }, [setSelectedOutput, getItemHeight, placeholderTotalHeight])
+  }, [setSelectedOutput, getItemHeight, placeholderTotalHeight, scheduleCenteredSelection])
 
   // Infinite scroll: load more when near the bottom
   const loadingMore = useRef(false)
@@ -579,9 +842,7 @@ export function MainContent() {
     const el = feedRef.current
     if (!el) return
     setScrollTop(el.scrollTop)
-    if (scrollTargetIndex.current === null) {
-      isUserScrolling.current = true
-    }
+    scheduleCenteredSelection()
     // Trigger load-more when within 2 screens of the bottom
     const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
     if (distanceToBottom < el.clientHeight * 2 && !loadingMore.current) {
@@ -591,11 +852,12 @@ export function MainContent() {
         store.loadMoreOutputs().finally(() => { loadingMore.current = false })
       }
     }
-  }, [])
+  }, [scheduleCenteredSelection])
 
   useEffect(() => {
     measuredHeights.current.clear()
-  }, [outputs.length])
+    scheduleCenteredSelection()
+  }, [outputs.length, scheduleCenteredSelection])
 
   const visibleItems = useMemo(() => {
     const items: JSX.Element[] = []
@@ -608,7 +870,8 @@ export function MainContent() {
           file={file}
           index={i}
           isActive={activeIndex === i}
-          onVisible={handleItemVisible}
+          onActivate={activateIndex}
+          onPlaybackStart={handlePlaybackStart}
           onMeasured={handleItemMeasured}
           style={{
             position: 'absolute',
@@ -620,7 +883,7 @@ export function MainContent() {
       )
     }
     return items
-  }, [startIndex, endIndex, outputs, activeIndex, handleItemVisible, handleItemMeasured, itemOffsets])
+  }, [startIndex, endIndex, outputs, activeIndex, activateIndex, handlePlaybackStart, handleItemMeasured, itemOffsets])
 
   return (
     <main className="flex-1 flex flex-col h-full overflow-hidden">
@@ -653,7 +916,7 @@ export function MainContent() {
               <JobPlaceholder
                 key={j.id || `pending-${i}`}
                 job={j}
-                onStop={() => stopGeneration(j.id)}
+                onStop={j.kind === 'prompt_enhancement' ? undefined : () => stopGeneration(j.id)}
                 onDismiss={() => dismissJob(j.id)}
               />
             ))}

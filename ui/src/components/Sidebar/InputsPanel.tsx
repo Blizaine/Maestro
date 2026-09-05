@@ -2,6 +2,10 @@ import { useState, useMemo, useEffect } from 'react'
 import { X, Upload, Plus, Music, Film, Mic } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
+import {
+  continuationFirstWindowFrames,
+  durationWindowPlan,
+} from '../../lib/durationPlanning'
 
 // Unified, media-driven "Inputs" panel for Studio Frames mode (image_mode 0).
 //
@@ -93,7 +97,15 @@ export function InputsPanel() {
   const setAudioGuideFilename = useStore(s => s.setAudioGuideFilename)
   const setDurationSeconds = useStore(s => s.setDurationSeconds)
   const setGuideVideoFps = useStore(s => s.setGuideVideoFps)
-  const voiceRefEnabled = useStore(s => !!s.servicesConfig?.voice_reference_enabled)
+  const voiceRefEnabled = useStore(s => {
+    const model = s.models.find(candidate => candidate.model_type === s.params.model_type)
+    const family = String(model?.family || '').toLowerCase()
+    const architecture = String(model?.architecture || '').toLowerCase()
+    const isLtx = family === 'ltx2' || family === 'ltx25' || architecture.startsWith('ltx2')
+    return s.studioVideoWorkflow === 'frames'
+      && isLtx
+      && s.servicesConfig?.voice_reference_enabled === true
+  })
   const directorVoiceRef = useStore(s => s.directorVoiceRef)
   const setDirectorVoiceRef = useStore(s => s.setDirectorVoiceRef)
   const identityScale = useStore(s => s.directorIdentityGuidanceScale)
@@ -139,12 +151,21 @@ export function InputsPanel() {
     const overlapFrames = slidingWindowOverlap ?? swDefaults?.overlap_default ?? 0
     const discardSec = discardFrames / fps
     const overlapSec = overlapFrames / fps
-    const stride = slidingWindowSeconds - discardSec - overlapSec
-    const windowCount = stride > 0 && durationSeconds > slidingWindowSeconds
-      ? Math.max(1, 1 + Math.ceil((durationSeconds - slidingWindowSeconds + discardSec) / stride))
-      : 1
+    const firstWindowSeconds = isExtend && modelOptions?.sliding_window === true
+      ? continuationFirstWindowFrames(
+          Math.round(slidingWindowSeconds * fps),
+          overlapFrames,
+        ) / fps
+      : slidingWindowSeconds
+    const windowCount = durationWindowPlan(
+      durationSeconds,
+      slidingWindowSeconds,
+      overlapSec,
+      discardSec,
+      firstWindowSeconds,
+    ).windowCount
     return { fps, windowCount }
-  }, [modelOptions, durationSeconds, slidingWindowSeconds, slidingWindowOverlap])
+  }, [modelOptions, durationSeconds, slidingWindowSeconds, slidingWindowOverlap, isExtend])
 
   // ── Audio / control-video capability + current state ───────────────
   const audioCfg = modelOptions?.audio_prompt_type_sources as
@@ -257,7 +278,7 @@ export function InputsPanel() {
           win = Math.max(0, parseInt(m[1], 10) - 1)
           offset = snapToOffsetPreset(Math.min(100, parseInt(m[2], 10)) / 100)
         }
-        return { path: refPath, filename, position: pos, previewUrl: `/api/v1/uploads/${filename}`, window: win, offset, file: null }
+        return { path: refPath, filename, position: pos, previewUrl: api.getFileUrl(filename), window: win, offset, file: null }
       })
       const same = restored.length === injectedFrames.length &&
         restored.every((r, i) => r.path === injectedFrames[i]?.path && r.position === injectedFrames[i]?.position)
@@ -304,7 +325,7 @@ export function InputsPanel() {
       const newFrame: InjectedFrame = {
         path: p, filename: file?.name || basename(p), file: file ?? null,
         position: calcPositionToken(windowIdx, offset),
-        previewUrl: previewUrl || `/api/v1/uploads/${basename(p)}`,
+        previewUrl: previewUrl || api.getFileUrl(basename(p)),
         window: windowIdx, offset,
       }
       const updated = [...injectedFrames, newFrame]
@@ -356,13 +377,13 @@ export function InputsPanel() {
     const out: FrameTile[] = []
     if (!isExtend) {
       const startPreview = startImage ? URL.createObjectURL(startImage)
-        : (params.image_start ? `/api/v1/uploads/${basename(params.image_start as string)}` : null)
+        : (params.image_start ? api.getFileUrl(basename(params.image_start as string)) : null)
       if (startPreview) out.push({ key: 'frame-start', kind: 'start', preview: startPreview, offset: 'start', window: 0, sortKey: 0 })
     }
     injectedFrames.forEach((f, i) => out.push({ key: `frame-inj-${i}`, kind: 'inject', injectIndex: i, preview: f.previewUrl, offset: f.offset, window: f.window, sortKey: frameKey(f.window, f.offset) }))
     if (!isExtend) {
       const endPreview = endImage ? URL.createObjectURL(endImage)
-        : (params.image_end ? `/api/v1/uploads/${basename(params.image_end as string)}` : null)
+        : (params.image_end ? api.getFileUrl(basename(params.image_end as string)) : null)
       if (endPreview) out.push({ key: 'frame-end', kind: 'end', preview: endPreview, offset: 'end', window: nativeEndWindow, sortKey: frameKey(nativeEndWindow, 'end') })
     }
     out.sort((a, b) => a.sortKey - b.sortKey)

@@ -33,6 +33,30 @@ GIVE EACH CHARACTER A DISTINCT VOICE:
 - Keep each character's voice consistent across the whole film — a reader
   should be able to tell who is speaking with the name removed.
 
+EMBODY THE CHARACTER; DO NOT DESCRIBE THE CHARACTER:
+- Before every generated line, silently step inside the speaker for this exact
+  beat. What do they want from the listener right now? What will they not admit?
+  Do they pressure, dodge, needle, charm, reassure, deflect, lecture, or retreat?
+  Write the line produced by that tactic. Do not output this rehearsal.
+- Personality notes are acting instructions, not conversation topics. A proud
+  person does not announce that they are proud. A disciplined person does not
+  give a speech about "order" or "consistency." A rough person does not explain
+  "chaos" or "grit." Their choices, word choice, rhythm, and subtext reveal it.
+- For an established fictional character named by the user, use broadly known
+  characterization, relationships, vocabulary level, syntax, cadence, humor,
+  and pressure behavior. Write entirely fresh lines: recognizable does not mean
+  copying a catchphrase, and copyright-safe does not mean bland or generic.
+- "Actor as Character" is casting, not a personality transplant. The actor can
+  define appearance and screen presence; the fictional character still defines
+  nationality, accent, slang, biography, relationships, and dialogue unless the
+  user explicitly asks for a reinterpretation. Never give a role the performer's
+  real accent or personal speech habits merely because the performer was named.
+- Run the name-hidden test after each exchange. If the headings vanished, the
+  wording and conversational tactics should still reveal who said each line.
+- Never use elevated synonyms merely to make a line look rewritten. Plain,
+  speakable, situation-specific language beats academic, corporate, therapy,
+  technical, or production-note language unless that speaker truly uses it.
+
 MAKE IT SOUND SPOKEN, NOT WRITTEN:
 - Use contractions by default ("I'm", "don't", "gonna", "c'mon", "it's").
   Only drop them when a character is deliberately stiff or formal.

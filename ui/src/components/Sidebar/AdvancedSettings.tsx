@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- the advanced badge hooks share this settings contract */
 import { useState, useEffect, useRef } from 'react'
 import { X, Save, Trash2, FolderOpen, SlidersHorizontal } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
@@ -8,6 +9,45 @@ import { ResolutionPresets } from './ResolutionPresets'
 import { AspectRatioGrid } from './AspectRatioGrid'
 import { WindowSettings } from './DurationSlider'
 import { DirectorH3Optimizations } from './DirectorH3Optimizations'
+import type { GenerateParams } from '../../types'
+
+const H3_LONG_SEQUENCE_EXPERIMENTS = [
+  {
+    id: 'h3_long_sequence_clean_tail',
+    label: 'Clean-tail handoff',
+    activeLabel: 'H3 clean-tail handoff',
+    description: 'Drops the final 17 generated frames before selecting the next continuation tail.',
+  },
+  {
+    id: 'h3_long_sequence_single_frame_after_three',
+    label: 'Single-frame handoff after window 3',
+    activeLabel: 'H3 one-frame fallback',
+    description: 'From window 4 onward, keeps only the last boundary frame instead of recursive motion history.',
+  },
+  {
+    id: 'h3_long_sequence_vary_seed',
+    label: 'Vary seed per window',
+    activeLabel: 'H3 per-window seeds',
+    description: 'Keeps window 1 unchanged, then derives a repeatable seed for every continuation window.',
+  },
+  {
+    id: 'h3_long_sequence_periodic_reset',
+    label: 'Reset motion history every 3 windows',
+    activeLabel: 'H3 periodic handoff reset',
+    description: 'Windows 4, 7, 10, and so on use only the last boundary frame, then full motion history resumes.',
+  },
+  {
+    id: 'h3_long_sequence_diagnostics',
+    label: 'Log continuation diagnostics',
+    activeLabel: 'H3 continuation logging',
+    description: 'Prints each window seed, handoff mode, and sampled video/audio fingerprints to the console.',
+  },
+] as const
+
+// Keep the diagnostic controls and runtime wiring available for future A/B
+// work, but do not expose unfinished long-sequence experiments in releases.
+// Flip this local development flag only while actively running those tests.
+const H3_LONG_SEQUENCE_TESTS_VISIBLE = false
 
 function PresetManager() {
   const presets = useStore(s => s.presets)
@@ -17,6 +57,7 @@ function PresetManager() {
   const deletePreset = useStore(s => s.deletePreset)
   const generationMode = useStore(s => s.generationMode)
   const currentModel = useStore(s => s.params.model_type)
+  const modeLabel = generationMode === 'avatar' ? 'video transform' : generationMode
   const [saveName, setSaveName] = useState('')
   const [showSave, setShowSave] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
@@ -101,8 +142,98 @@ function PresetManager() {
           ))}
         </div>
       ) : (
-        <p className="text-[10px] text-text-muted">No {generationMode} presets for this model</p>
+        <p className="text-[10px] text-text-muted">No {modeLabel} presets for this model</p>
       )}
+    </div>
+  )
+}
+
+function LtxExperimentalToggle({
+  checked,
+  onChange,
+  label,
+  badge,
+  description,
+}: {
+  checked: boolean
+  onChange: () => void
+  label: string
+  badge?: string
+  description: string
+}) {
+  return (
+    <div className="flex items-start justify-between gap-3">
+      <div className="min-w-0">
+        <div className="text-[11px] text-text-secondary">
+          {label}
+          {badge ? (
+            <span className="ml-1.5 rounded border border-accent-blue/30 px-1 py-0.5 text-[8px] text-accent-blue">
+              {badge}
+            </span>
+          ) : null}
+        </div>
+        <p className="mt-0.5 text-[9px] leading-relaxed text-text-muted">
+          {description}
+        </p>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        aria-label={label}
+        onClick={onChange}
+        className={`relative mt-0.5 h-5 w-9 shrink-0 rounded-full transition-colors ${
+          checked ? 'bg-accent-blue' : 'border border-border bg-bg-tertiary'
+        }`}
+      >
+        <span className={`absolute left-0.5 top-0.5 h-4 w-4 rounded-full border border-border bg-white shadow transition-transform ${
+          checked ? 'translate-x-4' : 'translate-x-0'
+        }`} />
+      </button>
+    </div>
+  )
+}
+
+function LtxFramesExperimentalControls() {
+  const generationMode = useStore(s => s.generationMode)
+  const workflow = useStore(s => s.studioVideoWorkflow)
+  const modelType = useStore(s => s.params.model_type)
+  const model = useStore(s => s.models.find(candidate => candidate.model_type === modelType))
+  const servicesConfig = useStore(s => s.servicesConfig)
+  const updateServicesConfig = useStore(s => s.updateServicesConfig)
+  const family = String(model?.family || '').toLowerCase()
+  const architecture = String(model?.architecture || '').toLowerCase()
+  const isLtx = family === 'ltx2' || family === 'ltx25' || architecture.startsWith('ltx2')
+
+  if (generationMode !== 'video' || workflow !== 'frames' || !isLtx || !servicesConfig) {
+    return null
+  }
+
+  return (
+    <div className="space-y-3 rounded-lg border border-border bg-bg-tertiary/25 p-3">
+      <div>
+        <label className="text-[11px] uppercase tracking-wider text-text-muted">
+          LTX optional conditioning
+        </label>
+        <p className="mt-0.5 text-[9px] text-text-muted">Off by default. Applies only to Video Frames with an LTX model.</p>
+      </div>
+      <LtxExperimentalToggle
+        checked={servicesConfig.voice_reference_enabled === true}
+        onChange={() => updateServicesConfig({
+          voice_reference_enabled: !servicesConfig.voice_reference_enabled,
+        })}
+        label="Voice Reference (ID-LoRA)"
+        description="Adds a voice sample input for speaker identity conditioning with a compatible LTX ID-LoRA."
+      />
+      <LtxExperimentalToggle
+        checked={servicesConfig.director_multishot_lora_mode === true}
+        onChange={() => updateServicesConfig({
+          director_multishot_lora_mode: !servicesConfig.director_multishot_lora_mode,
+        })}
+        label="Multi-Shot LoRA Prompting"
+        badge="Beta"
+        description="Uses storyboard-style shot prompts with compatible LTX multi-shot IC-LoRAs. Enable the matching LoRA separately."
+      />
     </div>
   )
 }
@@ -123,6 +254,9 @@ export function useAdvancedActiveItems(): string[] {
   const generationMode = useStore(s => s.generationMode)
   const editSubMode = useStore(s => s.editSubMode)
   const slidingWindowLocked = useStore(s => s.slidingWindowLocked)
+  const servicesConfig = useStore(s => s.servicesConfig)
+  const studioVideoWorkflow = useStore(s => s.studioVideoWorkflow)
+  const selectedModel = useStore(s => s.models.find(model => model.model_type === s.params.model_type))
   const isScailEdit = (
     generationMode === 'avatar'
     && (editSubMode === 'recast' || editSubMode === 'restyle')
@@ -132,15 +266,45 @@ export function useAdvancedActiveItems(): string[] {
   const items: string[] = []
   if (sidebarMode === 'director') {
     if (directorTurboMode[directorVideoModel] === true) items.push('H3 Turbo')
-    if (directorSolMode[directorVideoModel] === true) items.push('H3 Sol Engine')
+    if (directorSolMode[directorVideoModel] === true) {
+      items.push(
+        directorVideoModel.includes('fused_turbo')
+          ? 'H3 SLA'
+          : 'H3 Sol Engine',
+      )
+    }
     if (directorFirstBlockCache[directorVideoModel] === true) items.push('First Block Cache')
     return items
   }
   if (params.seed !== -1) items.push(`Seed ${params.seed}`)
+  const selectedFamily = String(selectedModel?.family || '').toLowerCase()
+  const selectedArchitecture = String(selectedModel?.architecture || '').toLowerCase()
+  const isLtxFrames = generationMode === 'video'
+    && studioVideoWorkflow === 'frames'
+    && (
+      selectedFamily === 'ltx2'
+      || selectedFamily === 'ltx25'
+      || selectedArchitecture.startsWith('ltx2')
+    )
+  if (isLtxFrames && servicesConfig?.voice_reference_enabled) items.push('LTX voice reference')
+  if (isLtxFrames && servicesConfig?.director_multishot_lora_mode) items.push('LTX multi-shot prompting')
   if (
     String(modelOptions?.architecture || '').startsWith('minimax_h3')
     && slidingWindowLocked
   ) items.push('H3 window override')
+  if (
+    H3_LONG_SEQUENCE_TESTS_VISIBLE
+    && String(modelOptions?.architecture || '').startsWith('minimax_h3')
+    && modelOptions?.omni_reference !== true
+    && params.minimax_h3_multi_window === true
+  ) {
+    const customSettings = params.custom_settings || {}
+    for (const experiment of H3_LONG_SEQUENCE_EXPERIMENTS) {
+      if (customSettings[experiment.id] === true) {
+        items.push(experiment.activeLabel)
+      }
+    }
+  }
   if (
     (
       modelOptions?.sliding_window_auto_prompt_pacing === true
@@ -250,10 +414,32 @@ export function AdvancedSettings() {
     && modelOptions?.minimax_h3_turbo != null
   )
   const isH3 = String(modelOptions?.architecture || '').startsWith('minimax_h3')
+  const showH3LongSequenceExperiments = (
+    H3_LONG_SEQUENCE_TESTS_VISIBLE
+    && isVideo
+    && isH3
+    && modelOptions?.omni_reference !== true
+    && params.minimax_h3_multi_window === true
+  )
   const showInferenceSteps = (
     !isAudioOnly
     && (isScailEdit || !modelOptions?.lock_inference_steps)
   )
+  const inferenceStepsMin = Math.max(
+    1,
+    Math.round(Number(modelOptions?.inference_steps_min ?? 1)),
+  )
+  const inferenceStepsMax = Math.max(
+    inferenceStepsMin,
+    Math.round(Number(modelOptions?.inference_steps_max ?? 50)),
+  )
+  const setInferenceSteps = (value: number) => {
+    if (!Number.isFinite(value)) return
+    setParam(
+      'num_inference_steps',
+      Math.max(inferenceStepsMin, Math.min(inferenceStepsMax, Math.round(value))),
+    )
+  }
   const showGuidanceScale = (
     !isAudioOnly
     && (
@@ -272,8 +458,6 @@ export function AdvancedSettings() {
     const refs = s.params.image_refs
     return refs && refs.length > 0
   })
-  const durationSeconds = useStore(s => s.durationSeconds)
-  const setDurationSeconds = useStore(s => s.setDurationSeconds)
   const panelRef = useRef<HTMLDivElement>(null)
   const advancedItems = useAdvancedActiveItems()
   const advancedCount = advancedItems.length
@@ -351,10 +535,21 @@ export function AdvancedSettings() {
                 </>
               )}
 
+              {/* Presets belong with the creative adapter controls so users can
+                  save or restore a setup before adjusting its LoRAs. */}
+              <PresetManager />
+
               {/* Keep creative adapters near the top so users can choose them
                   before working through the lower-level tuning controls.
                   Official Outpaint owns its stage-one-only IC-LoRA schedule. */}
-              {!isOutpaint && <LoraSelector />}
+              {!isOutpaint && !modelOptions?.loras_disabled && <LoraSelector />}
+              {!isOutpaint && modelOptions?.loras_disabled && (
+                <p className="rounded-lg border border-amber-500/25 bg-amber-500/8 px-3 py-2 text-[9px] leading-relaxed text-text-muted">
+                  This fused four-step checkpoint already contains its acceleration and style adapters, so additional LoRAs are disabled.
+                </p>
+              )}
+
+              <LtxFramesExperimentalControls />
 
               {/* The Qwen conditioner is shared by every H3 transformer.
                   Expose it once here instead of multiplying model entries. */}
@@ -365,7 +560,10 @@ export function AdvancedSettings() {
                   </label>
                   <select
                     value={params.minimax_h3_text_encoder || modelOptions.minimax_h3_text_encoder_default || modelOptions.minimax_h3_text_encoder_choices[0]?.value}
-                    onChange={e => setParam('minimax_h3_text_encoder', e.target.value as any)}
+                    onChange={e => setParam(
+                      'minimax_h3_text_encoder',
+                      e.target.value as NonNullable<GenerateParams['minimax_h3_text_encoder']>,
+                    )}
                     className="w-full bg-bg-tertiary border border-border rounded px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent-blue"
                   >
                     {modelOptions.minimax_h3_text_encoder_choices.map(choice => (
@@ -523,25 +721,6 @@ export function AdvancedSettings() {
               {/* TTS Settings */}
               {isAudioOnly && (
                 <>
-                  {/* Max Duration */}
-                  {modelOptions?.duration_slider && (
-                    <div>
-                      <div className="flex items-center justify-between mb-1.5">
-                        <label className="text-[11px] text-text-muted uppercase tracking-wider">
-                          {modelOptions.duration_slider.label || 'Max Duration'}
-                        </label>
-                        <span className="text-xs text-text-secondary">{Math.round(durationSeconds)}s</span>
-                      </div>
-                      <input
-                        type="range"
-                        min={modelOptions.duration_slider.min} max={modelOptions.duration_slider.max} step={modelOptions.duration_slider.increment}
-                        value={durationSeconds}
-                        onChange={e => setDurationSeconds(parseFloat(e.target.value))}
-                        className="w-full"
-                      />
-                    </div>
-                  )}
-
                   {/* Speaker Pause */}
                   {modelOptions?.pause_between_sentences && (
                     <div>
@@ -669,7 +848,7 @@ export function AdvancedSettings() {
               {!isAudio && !isScailEdit && <PostProcessing />}
 
               {/* Seed */}
-              {((
+              {
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
                     <label className="text-[11px] text-text-muted uppercase tracking-wider">Seed</label>
@@ -685,7 +864,7 @@ export function AdvancedSettings() {
                     placeholder="-1 for random"
                   />
                 </div>
-              ) as any)}
+              }
 
               {/* Self Refiner */}
               {!isScailEdit && modelOptions?.self_refiner && (
@@ -705,7 +884,10 @@ export function AdvancedSettings() {
 
               {/* Stage 2 Steps */}
               {/* Pipeline Mode Toggle — distilled LTX models only */}
-              {!isScailEdit && modelOptions?.lock_inference_steps && (
+              {!isScailEdit
+                && modelOptions?.lock_inference_steps
+                && String(modelOptions.architecture || '').toLowerCase().startsWith('ltx2')
+                && (
                 <div className="space-y-3">
                   {/* Single / 2-Stage / 3-Stage segmented control — mutually exclusive */}
                   <div>
@@ -883,25 +1065,35 @@ export function AdvancedSettings() {
               {showInferenceSteps && (
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
-                    <label className="text-[11px] text-text-muted uppercase tracking-wider">Inference Steps</label>
+                    <label className="text-[11px] text-text-muted uppercase tracking-wider">
+                      {modelOptions?.inference_steps_label || 'Inference Steps'}
+                    </label>
                     <input
                       type="number"
+                      min={inferenceStepsMin}
+                      max={inferenceStepsMax}
+                      step={1}
                       value={params.num_inference_steps}
                       disabled={h3TurboMode}
-                      onChange={e => setParam('num_inference_steps', Number(e.target.value))}
+                      onChange={e => setInferenceSteps(Number(e.target.value))}
                       className="w-16 bg-bg-tertiary border border-border rounded px-2 py-0.5 text-xs text-text-primary text-center focus:outline-none focus:border-accent-blue disabled:cursor-not-allowed disabled:opacity-50"
                     />
                   </div>
                   <input
-                    type="range" min={1} max={50} step={1}
+                    type="range" min={inferenceStepsMin} max={inferenceStepsMax} step={1}
                     value={params.num_inference_steps}
                     disabled={h3TurboMode}
-                    onChange={e => setParam('num_inference_steps', Number(e.target.value))}
+                    onChange={e => setInferenceSteps(Number(e.target.value))}
                     className="w-full disabled:cursor-not-allowed disabled:opacity-50"
                   />
                   {h3TurboMode && (
                     <p className="text-[9px] text-text-muted mt-0.5">
                       Turbo mode locks this preset to {modelOptions?.minimax_h3_turbo?.steps} steps.
+                    </p>
+                  )}
+                  {!h3TurboMode && modelOptions?.inference_steps_help && (
+                    <p className="text-[9px] text-text-muted mt-0.5">
+                      {modelOptions.inference_steps_help}
                     </p>
                   )}
                   {isScailFast && (
@@ -1082,9 +1274,6 @@ export function AdvancedSettings() {
                 </div>
               )}
 
-              {/* Presets */}
-              <PresetManager />
-
               {/* Dedicated SCAIL edit endpoints own their source video,
                   edited/reference frames, masks, and process selection. */}
               {(modelOptions?.guide_preprocessing || modelOptions?.guide_custom_choices) &&
@@ -1105,6 +1294,65 @@ export function AdvancedSettings() {
                   className="w-full"
                 />
               </div>}
+
+              {showH3LongSequenceExperiments && (
+                <div className="space-y-2.5 rounded-lg border border-amber-400/30 bg-amber-400/5 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="text-[11px] uppercase tracking-wider text-amber-300">
+                      Long-sequence tests
+                    </label>
+                    <span className="rounded border border-amber-400/30 px-1 py-0.5 text-[8px] text-amber-300/90">
+                      Experimental
+                    </span>
+                  </div>
+                  <p className="text-[10px] leading-relaxed text-text-muted">
+                    A/B controls for diagnosing repetition and cumulative over-processing in long H3 First / Last sequences. Defaults remain off.
+                  </p>
+                  <div className="space-y-2.5">
+                    {H3_LONG_SEQUENCE_EXPERIMENTS.map(experiment => {
+                      const customSettings = params.custom_settings || {}
+                      const checked = customSettings[experiment.id] === true
+                      return (
+                        <label
+                          key={experiment.id}
+                          className="flex cursor-pointer items-start gap-2 group"
+                          title={experiment.description}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={event => {
+                              const nextSettings = {
+                                ...(params.custom_settings || {}),
+                              }
+                              if (event.target.checked) {
+                                nextSettings[experiment.id] = true
+                              } else {
+                                delete nextSettings[experiment.id]
+                              }
+                              setParam(
+                                'custom_settings',
+                                Object.keys(nextSettings).length > 0
+                                  ? nextSettings
+                                  : undefined,
+                              )
+                            }}
+                            className="mt-0.5 accent-accent-blue"
+                          />
+                          <span className="min-w-0">
+                            <span className="block text-[11px] text-text-secondary transition-colors group-hover:text-text-primary">
+                              {experiment.label}
+                            </span>
+                            <span className="mt-0.5 block text-[9px] leading-relaxed text-text-muted">
+                              {experiment.description}
+                            </span>
+                          </span>
+                        </label>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
                 </>
               )}
             </div>

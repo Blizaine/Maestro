@@ -2,15 +2,17 @@ import { X } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { SystemSettingsPanel } from './SystemSettingsPanel'
 import { ServicesSettingsPanel } from './ServicesSettingsPanel'
+import { NotificationSettingsPanel } from './NotificationSettingsPanel'
 
 /**
- * Settings drawer — global panel for hardware/perf and external-service
- * configuration. Two tabs in both Studio and Director modes:
+ * Settings drawer — global panel for hardware/perf, external-service, and
+ * notification configuration in both Studio and Director modes:
  *
  *   Performance    — VRAM coefficient, profile, hardware tier, etc.
  *                    (mounts <SystemSettingsPanel />)
  *   Integrations   — LLM provider, API keys, NSFW master gate, etc.
  *                    (mounts <ServicesSettingsPanel />)
+ *   Notifications  — browser alerts, device chime, host-computer sound.
  *
  * Director-mode-specific controls used to live in a third "Parameters"
  * tab here, but everything in that tab was either:
@@ -33,6 +35,7 @@ export function SettingsDrawer() {
   const tabs = [
     { id: 'performance' as const, label: 'Performance' },
     { id: 'integrations' as const, label: 'Integrations' },
+    { id: 'notifications' as const, label: 'Notifications' },
   ]
 
   return (
@@ -87,6 +90,10 @@ export function SettingsDrawer() {
 
           {settingsTab === 'integrations' && (
             <ServicesSettingsPanel />
+          )}
+
+          {settingsTab === 'notifications' && (
+            <NotificationSettingsPanel />
           )}
         </div>
       </div>

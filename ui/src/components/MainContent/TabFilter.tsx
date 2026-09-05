@@ -142,7 +142,7 @@ export function TabFilter() {
             defaultValue={searchQuery}
             onChange={e => handleSearchChange(e.target.value)}
             onKeyDown={event => { if (event.key === 'Escape') setSearchOpen(false) }}
-            placeholder="Search..."
+            placeholder="Prompt, model, LoRA..."
             className="w-24 bg-transparent text-xs text-text-primary placeholder:text-text-muted focus:outline-none md:min-w-0 md:flex-1 xl:w-36 xl:flex-none"
           />
           <button onClick={() => { setSearchOpen(false); if (searchQuery) setSearchQuery('') }}
@@ -154,7 +154,7 @@ export function TabFilter() {
         <button
           onClick={() => setSearchOpen(true)}
           className={`p-1.5 rounded-lg transition-colors ${searchQuery ? 'text-accent-blue bg-accent-blue/10' : 'text-text-muted hover:text-text-secondary hover:bg-bg-hover'}`}
-          title="Search outputs"
+          title="Search prompts, models, LoRAs, resolutions, and optimizations"
           aria-label="Search outputs"
         >
           <Search size={14} />

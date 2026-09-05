@@ -24,6 +24,7 @@ if _APP_DIR not in sys.path:
 from services.director.safety_scan import (  # noqa: E402
     SafetyViolationError,
     assert_no_minor_content,
+    assert_no_minor_content_in_pass2,
     collect_pass2_text,
     screenplay_contains_minor_content,
 )
@@ -137,6 +138,24 @@ class TestScreenplayContainsMinorContent(unittest.TestCase):
     def test_plain_girl_and_boy_are_not_minor_terms(self):
         self.assertEqual(screenplay_contains_minor_content("the party girl is nude"), [])
         self.assertEqual(screenplay_contains_minor_content("the cowboy is nude"), [])
+
+    def test_minor_as_production_adjective_does_not_trigger(self):
+        text = (
+            "A minor, definitive act of chaos leaves minor postural strain. "
+            "Metal gears keep grinding while the titan stands straddling two sets."
+        )
+        self.assertEqual(screenplay_contains_minor_content(text), [])
+
+    def test_minor_as_person_still_triggers(self):
+        matches = screenplay_contains_minor_content("A minor undresses.")
+        self.assertIn("minor", matches)
+        self.assertIn("undresses", matches)
+
+        possessive_matches = screenplay_contains_minor_content(
+            "The minor's body is nude."
+        )
+        self.assertIn("minor", possessive_matches)
+        self.assertIn("nude", possessive_matches)
 
     def test_word_boundary_avoids_substring_false_positive(self):
         # "kindergarten" contains "kid" as a substring? Actually no — "kid"
@@ -263,6 +282,44 @@ class TestCollectPass2Text(unittest.TestCase):
         blob = collect_pass2_text(clean_shots)
         # Should NOT raise.
         assert_no_minor_content(blob, source="shot list (Pass 2)")
+
+    def test_structured_scan_does_not_cross_unrelated_shots(self):
+        shots = [
+            {
+                "title": "Family arrival",
+                "subjects_on_screen": [
+                    {"visual_description": "a child with a backpack"},
+                ],
+                "video_prompt": "The child walks into the kitchen.",
+            },
+            {
+                "title": "Separate adult scene",
+                "subjects_on_screen": [
+                    {"visual_description": "an adult woman, age 32"},
+                ],
+                "video_prompt": "The adult woman undresses in private.",
+            },
+        ]
+        self.assertIsNone(
+            assert_no_minor_content_in_pass2(
+                shots,
+                source="shot list (Pass 2)",
+            )
+        )
+
+    def test_structured_scan_catches_cross_field_violation_in_one_shot(self):
+        shots = [{
+            "subjects_on_screen": [
+                {"visual_description": "a pre-teen child"},
+            ],
+            "video_prompt": "The subject undresses.",
+        }]
+        with self.assertRaises(SafetyViolationError) as ctx:
+            assert_no_minor_content_in_pass2(
+                shots,
+                source="shot list (Pass 2)",
+            )
+        self.assertIn("shot 1", ctx.exception.source)
 
 
 if __name__ == "__main__":

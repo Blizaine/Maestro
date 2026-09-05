@@ -26,6 +26,7 @@ _registrations: dict[
         Callable[[], None] | None,
     ],
 ] = {}
+_terminal_listeners: set[Callable[[Mapping[str, Any], str], None]] = set()
 
 
 @dataclass(frozen=True)
@@ -389,7 +390,34 @@ def finish_job(
             return False
         job.update(updates)
         job["status"] = status
-        return True
+        snapshot = dict(job)
+        listeners = tuple(_terminal_listeners)
+
+    # Notification/logging listeners must never hold the lifecycle lock or
+    # make a successful model result fail. They receive a snapshot so an
+    # observer cannot mutate the canonical job after publication.
+    for listener in listeners:
+        try:
+            listener(snapshot, status)
+        except Exception:
+            pass
+    return True
+
+
+def register_terminal_listener(
+    listener: Callable[[Mapping[str, Any], str], None],
+) -> None:
+    """Subscribe to successfully-published completed/failed job states."""
+    with _lifecycle_lock:
+        _terminal_listeners.add(listener)
+
+
+def unregister_terminal_listener(
+    listener: Callable[[Mapping[str, Any], str], None],
+) -> None:
+    """Remove a terminal listener. Primarily useful for tests/embedders."""
+    with _lifecycle_lock:
+        _terminal_listeners.discard(listener)
 
 
 def acquire_generation_slot(

@@ -122,16 +122,35 @@ def preprocess_video_vae_state_dict(state_dict: dict[str, torch.Tensor]) -> dict
             continue
 
         if ".attn.to_qkv." in source_key:
-            reordered = _reorder_interleaved_qkv(tensor)
-            query, key, value = reordered.chunk(3, dim=0)
             prefix, suffix = source_key.split(".attn.to_qkv.")
-            converted[f"{prefix}.attn.to_q.{suffix}"] = query.contiguous()
-            converted[f"{prefix}.attn.to_k.{suffix}"] = key.contiguous()
-            converted[f"{prefix}.attn.to_v.{suffix}"] = value.contiguous()
+            target_keys = (
+                f"{prefix}.attn.to_q.{suffix}",
+                f"{prefix}.attn.to_k.{suffix}",
+                f"{prefix}.attn.to_v.{suffix}",
+            )
+            if suffix == "comfy_quant":
+                # Quantization descriptors describe the Linear module rather
+                # than output rows.  Preserve one intact descriptor for each
+                # independent Q/K/V projection; interpreting its JSON bytes as
+                # a 6144-row tensor caused INT8 ConvRot VAEs to fail before
+                # model loading.
+                for target_key in target_keys:
+                    converted[target_key] = tensor.clone()
+                continue
+
+            reordered = _reorder_interleaved_qkv(tensor)
+            for target_key, part in zip(target_keys, reordered.chunk(3, dim=0)):
+                # ``Tensor.contiguous()`` can retain the shared storage of a
+                # contiguous chunk.  Q, K, and V are independent parameters,
+                # so materialize each slice to keep MMGP from identifying them
+                # as tied weights during residency planning.
+                converted[target_key] = part.clone(
+                    memory_format=torch.contiguous_format
+                )
             continue
 
         target_key = _rename_video_vae_key(source_key)
-        if ".ff.w1." in source_key:
+        if ".ff.w1." in source_key and not source_key.endswith(".comfy_quant"):
             gate, value = tensor.chunk(2, dim=0)
             tensor = torch.cat([value, gate], dim=0).contiguous()
         converted[target_key] = tensor

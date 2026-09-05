@@ -210,11 +210,17 @@ class Qwen3TTSPipeline:
 
     def _resolve_auto_split_seconds(self, kwargs: dict) -> Optional[float]:
         custom_settings = kwargs.get("custom_settings", None)
-        if not isinstance(custom_settings, dict):
-            return None
-        raw_value = custom_settings.get(qwen3_defs.QWEN3_TTS_AUTO_SPLIT_SETTING_ID, None)
+        raw_value = (
+            custom_settings.get(qwen3_defs.QWEN3_TTS_AUTO_SPLIT_SETTING_ID, None)
+            if isinstance(custom_settings, dict) else None
+        )
         if raw_value is None:
-            return None
+            try:
+                # Long-form speech must never become one giant autoregressive
+                # pass merely because the optional Advanced field is blank.
+                return 45.0 if float(kwargs.get("duration_seconds") or 0) > 90 else None
+            except (TypeError, ValueError):
+                return None
         if isinstance(raw_value, str):
             raw_value = raw_value.strip()
             if len(raw_value) == 0:

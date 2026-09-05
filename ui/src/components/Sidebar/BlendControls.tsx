@@ -103,14 +103,12 @@ export function BlendControls() {
         video.src = url
         video.onloadedmetadata = () => {
           const duration = video.duration && isFinite(video.duration) ? video.duration : 0
-          target === 'A'
-            ? setBlendClipA(file, result.path, url, duration)
-            : setBlendClipB(file, result.path, url, duration)
+          if (target === 'A') setBlendClipA(file, result.path, url, duration)
+          else setBlendClipB(file, result.path, url, duration)
         }
       } else {
-        target === 'A'
-          ? setBlendClipA(file, result.path, url, 0)
-          : setBlendClipB(file, result.path, url, 0)
+        if (target === 'A') setBlendClipA(file, result.path, url, 0)
+        else setBlendClipB(file, result.path, url, 0)
       }
     } catch {
       setError('Failed to upload')

@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +14,7 @@ from services.ltx_window_planner import (  # noqa: E402
     deterministic_ltx_window_prompts,
     extract_ltx_global_invariants,
     parse_ltx_window_prompts,
+    plan_ltx_sliding_windows,
     reinforce_ltx_window_invariants,
     requests_open_ended_ltx_motion,
 )
@@ -202,6 +204,56 @@ class LtxWindowPlannerTests(unittest.TestCase):
         self.assertIn("EVERY paragraph", request)
         self.assertIn("must not slow, settle, stop, or resolve", request)
 
+    def test_creative_request_authors_a_full_arc_while_faithful_locks_source_events(self):
+        creative = _build_enhance_user_prompt(
+            "Three characters discuss local AI. Make it funny.",
+            "video",
+            60,
+            4,
+            15,
+            "ltx2_25",
+            "creative",
+        )
+        faithful = _build_enhance_user_prompt(
+            "Three characters discuss local AI. Make it funny.",
+            "video",
+            60,
+            4,
+            15,
+            "ltx2_25",
+            "faithful",
+        )
+        self.assertIn("CREATIVE MULTI-WINDOW WRITING", creative)
+        self.assertIn("opening, escalation, and payoff", creative)
+        self.assertIn("character-specific dialogue", creative)
+        self.assertIn("FAITHFUL MULTI-WINDOW PLANNING", faithful)
+        self.assertIn("without inventing", faithful)
+
+    def test_long_sequences_are_planned_as_bounded_chapters(self):
+        calls = []
+
+        def fake_enhance(_prompt, **kwargs):
+            count = int(kwargs["window_count"])
+            calls.append((count, kwargs.get("planning_style")))
+            return "\n\n".join(
+                f"Planned beat {index + 1} of {count}."
+                for index in range(count)
+            )
+
+        with patch("services.llm_service.enhance_prompt", side_effect=fake_enhance):
+            plan = plan_ltx_sliding_windows(
+                "A continuous journey through an evolving city.",
+                model_type="ltx2_25",
+                duration_seconds=500,
+                window_count=25,
+                window_size_seconds=20,
+                planning_style="creative",
+            )
+
+        self.assertEqual("hierarchical_llm", plan["planned_by"])
+        self.assertEqual(25, len(plan["window_prompts"]))
+        self.assertEqual([(3, "creative"), (12, "creative"), (12, "creative"), (1, "creative")], calls)
+
 
 class LtxMultiWindowWiringTests(unittest.TestCase):
     def test_every_ltx_video_handler_declares_sequence_controls(self):
@@ -243,6 +295,8 @@ class LtxMultiWindowWiringTests(unittest.TestCase):
         self.assertIn("multi_window_sequence_controls", controls)
         self.assertIn("ltx_multi_window", controls)
         self.assertIn("ltx_window_prompt_mode", controls)
+        self.assertIn('value="creative"', controls)
+        self.assertIn("AI - Creative story + dialogue", controls)
         self.assertIn("AI-planned window prompts", duration)
         self.assertIn("LTX long-form Auto follows Duration", duration)
         self.assertNotIn("if (isLtx && ltxMultiWindow) return", duration)

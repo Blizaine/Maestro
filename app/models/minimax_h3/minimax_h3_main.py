@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 import os
 from contextlib import nullcontext
+from functools import partial
 
 import numpy as np
 import torch
@@ -57,14 +58,23 @@ from .packing import (
 from .ref2va import (
     MiniMaxH3PreparedReference,
     add_ref2va_continuation_context,
+    align_ref2va_voice_reference_order,
     build_ref2va_packed_sequence,
     ensure_ref2va_prompt_relationships,
     prepare_references,
+    select_ref2va_window_voice_references,
     trim_reference_num_frames,
 )
 from .reference_manifest import apply_exact_drive_audio_prompt_contract
-from .scheduler import MiniMaxH3Scheduler
+from .scheduler import (
+    MiniMaxH3Scheduler,
+    res_multistep_update,
+)
 from .first_block_cache import MiniMaxH3FirstBlockCache
+from .fused_turbo import (
+    FUSED_H3_MAX_EVALUATIONS,
+    FUSED_H3_MIN_EVALUATIONS,
+)
 from .transformer import (
     MiniMaxH3Transformer,
     _activation_chunk_tokens,
@@ -72,8 +82,15 @@ from .transformer import (
 )
 from .turbo import (
     MINIMAX_H3_TURBO_MIN_STEPS,
+    find_minimax_h3_pdd_loras,
     find_minimax_h3_turbo_loras,
     h3_scheduler_grid_points,
+    minimax_h3_turbo_preset_for_path,
+)
+from .pdd import (
+    PDD_NUM_EVALUATIONS,
+    install_pdd_parallel_heads,
+    release_pdd_parallel_heads,
 )
 from .video_vae import AutoencoderKLMiniMaxH3
 
@@ -606,8 +623,15 @@ def _strip_transformer_wrappers(
     state_dict,
     quantization_map=None,
     tied_weights_map=None,
+    *,
+    interleave_qkv: bool = True,
 ):
-    restore_interleaved_h3_qkv(state_dict)
+    # ConvRot exports store fused QKV rows in Comfy's native grouped
+    # [Q, K, V] order. Preserve that order for the grouped MMGP split used by
+    # INT8 ConvRot checkpoints. Only older checkpoint definitions that declare
+    # the official head-interleaved layout need this physical reorder.
+    if interleave_qkv:
+        restore_interleaved_h3_qkv(state_dict)
     prefixes = ("model.diffusion_model.", "diffusion_model.")
 
     def strip(mapping):
@@ -717,33 +741,34 @@ def _load_transformer(
     dtype: torch.dtype,
     *,
     qkv_layout: str = "contiguous",
+    sla_config=None,
 ) -> MiniMaxH3Transformer:
     checkpoint = probe_h3_checkpoint(filename)
-    # Current WanGP pruned checkpoints use the same compressed rank-8 model
-    # as Maestro's scaled-FP8 export, but publish it as an interleaved-QKV
-    # INT8 ConvRot file. Detect the tensor format from checkpoint metadata so
-    # a linked alternate receives the same split/reorder path as Full H3.
-    if checkpoint["convrot"]:
-        qkv_layout = "interleaved"
+    qkv_layout = str(qkv_layout or "contiguous").strip().lower()
+    if qkv_layout not in {"contiguous", "grouped", "interleaved"}:
+        raise ValueError(f"Unsupported MiniMax H3 QKV layout {qkv_layout!r}")
     with init_empty_weights(include_buffers=True):
         transformer = MiniMaxH3Transformer(
             curve_grid=checkpoint["adaln_curve_grid"],
             curve_dim=int(checkpoint["time_embed_dim"]),
             dtype=dtype,
+            sla_config=sla_config,
         )
     inner_size = 56 * 128
-    # Comfy's scaled-FP8 pruned checkpoints already store grouped [Q, K, V]
-    # weights in the exact fused layout used by this runtime.  MMGP 3.7.6's
-    # scaled-FP8 fused splitter rebuilds the three tensors as shared-storage
-    # views and later mistakes them for tied parameters, corrupting attention.
-    # Keep that proven consumer path fused.  Full WanGP ConvRot checkpoints
-    # use the official head-interleaved layout and still require an explicit
-    # split/reorder before inference.
-    split_map = (
-        get_linear_split_map(inner_size, interleaved=True)
-        if qkv_layout == "interleaved"
-        else None
-    )
+    # Comfy's scaled-FP8 pruned checkpoint already stores grouped [Q, K, V]
+    # weights in the exact fused layout used by this runtime. MMGP 3.7.6's
+    # scaled-FP8 splitter rebuilds the tensors as shared-storage views and can
+    # mistake them for tied parameters, so that legacy definition stays fused.
+    # ConvRot checkpoints use WanGP's proven independent-projection path. The
+    # custom INT8 handler splits their quantized data and row scales as three
+    # contiguous [Q, K, V] groups; older BF16/full definitions can still ask
+    # for the head-interleaved split explicitly.
+    split_map = None
+    if qkv_layout in {"grouped", "interleaved"}:
+        split_map = get_linear_split_map(
+            inner_size,
+            interleaved=qkv_layout == "interleaved",
+        )
     if split_map is not None:
         offload.split_linear_modules(transformer, split_map)
     offload.load_model_data(
@@ -751,7 +776,10 @@ def _load_transformer(
         filename,
         writable_tensors=False,
         default_dtype=dtype,
-        preprocess_sd=_strip_transformer_wrappers,
+        preprocess_sd=partial(
+            _strip_transformer_wrappers,
+            interleave_qkv=qkv_layout == "interleaved",
+        ),
         fused_split_map=split_map,
     )
     transformer._model_dtype = dtype
@@ -913,6 +941,12 @@ class MiniMaxH3Model:
         self.model_def = model_def
         self.assets_root = model_def.get("minimax_h3_assets_root", "minimax_h3")
         self.omni_reference = bool(model_def.get("omni_reference", False))
+        self._fused_turbo = bool(
+            model_def.get("minimax_h3_fused_turbo", False)
+        )
+        self.sample_solver = str(
+            model_def.get("minimax_h3_sampler") or "euler"
+        ).strip().lower()
 
         transformer_path = _first_path(model_filename)
         if not transformer_path:
@@ -920,8 +954,12 @@ class MiniMaxH3Model:
         if not text_encoder_filename:
             raise FileNotFoundError("MiniMax H3 Qwen3-VL conditioner checkpoint is missing.")
 
+        video_vae_filename = str(
+            model_def.get("minimax_h3_video_vae_filename")
+            or "minimax_h3_video_vae_fp16.safetensors"
+        )
         video_vae_path = fl.locate_file(
-            os.path.join(self.assets_root, "vae", "minimax_h3_video_vae_fp16.safetensors")
+            os.path.join(self.assets_root, "vae", video_vae_filename)
         )
         audio_vae_path = fl.locate_file(
             os.path.join(self.assets_root, "vae", "minimax_h3_audio_vae_fp32.safetensors")
@@ -948,6 +986,7 @@ class MiniMaxH3Model:
             transformer_path,
             dtype,
             qkv_layout=qkv_layout,
+            sla_config=model_def.get("sla_attention_config"),
         )
         self.conditioner = _load_conditioner(
             text_encoder_filename,
@@ -957,18 +996,104 @@ class MiniMaxH3Model:
         )
         self.vae = _load_video_vae(video_vae_path)
         self.audio_vae = _load_audio_vae(audio_vae_path)
-        self.scheduler = MiniMaxH3Scheduler(shift=12.0)
+        self.scheduler = MiniMaxH3Scheduler(
+            shift=12.0,
+            solver=self.sample_solver,
+        )
         self.audio_scheduler = MiniMaxH3Scheduler(shift=3.0)
         self._turbo_lora_active = False
         self._turbo_lora_paths: tuple[str, ...] = ()
+        self._pdd_lora_active = False
+        self._pdd_lora_path: str | None = None
+        self._pdd_lora_strength = 1.0
+        self._pdd_controller = None
         self.__interrupt = False
 
     def validate_loras(self, loras_selected) -> None:
         """Validate special H3 adapter requirements before MMGP loads them."""
 
+        # A retained model can be reused across jobs. Always restore its
+        # ordinary heads before inspecting the next job's adapter selection.
+        self.release_special_loras()
+        if getattr(self, "_fused_turbo", False):
+            selected = [
+                str(path).strip()
+                for path in (loras_selected or [])
+                if str(path).strip()
+            ]
+            if selected:
+                raise ValueError(
+                    "H3 Fused 4-Step already contains its Turbo and Mystic "
+                    "adapters; additional LoRAs are disabled for this model."
+                )
+            return
         turbo_paths = tuple(find_minimax_h3_turbo_loras(loras_selected))
+        if len(turbo_paths) > 1:
+            raise ValueError(
+                "MiniMax H3 supports one Turbo accelerator at a time; "
+                "select one preset in H3 Optimizations."
+            )
+        pdd_paths = tuple(find_minimax_h3_pdd_loras(loras_selected))
+        if len(pdd_paths) > 1:
+            raise ValueError(
+                "MiniMax H3 supports one Parallel Decoding Distillation "
+                "adapter at a time."
+            )
+        for path in pdd_paths:
+            preset = minimax_h3_turbo_preset_for_path(path)
+            if preset is None:
+                continue
+            expected = "ref2va" if self.omni_reference else "fl2va"
+            actual = str(preset.get("workflow") or "all").lower()
+            if actual not in {"all", expected}:
+                raise ValueError(
+                    f"{os.path.basename(path)} is for {actual.upper()}, "
+                    f"but the selected model uses {expected.upper()}."
+                )
+            if (
+                preset.get("full_checkpoint_only")
+                and not self.model_def.get("minimax_h3_full_checkpoint", False)
+            ):
+                required_model = (
+                    "H3 Omni — Full"
+                    if actual == "ref2va"
+                    else "H3 First / Last — Full"
+                )
+                raise ValueError(
+                    f"{preset.get('label') or os.path.basename(path)} requires "
+                    f"{required_model}. Choose {required_model} or another "
+                    "Turbo preset."
+                )
         self._turbo_lora_paths = turbo_paths
         self._turbo_lora_active = bool(turbo_paths)
+        self._pdd_lora_active = bool(pdd_paths)
+        self._pdd_lora_path = pdd_paths[0] if pdd_paths else None
+        self._pdd_lora_strength = 1.0
+
+    def configure_special_loras(self, loras_selected, multipliers) -> None:
+        """Capture the PDD head strength before MMGP preprocesses its tensors."""
+
+        if not self._pdd_lora_active or self._pdd_lora_path is None:
+            return
+        selected = [str(path) for path in (loras_selected or [])]
+        try:
+            index = selected.index(self._pdd_lora_path)
+        except ValueError as error:
+            raise ValueError("MiniMax H3 PDD adapter selection became inconsistent.") from error
+        values = list(multipliers or [])
+        strength = values[index] if index < len(values) else 1.0
+        if isinstance(strength, (list, tuple)):
+            unique = {float(value) for value in strength}
+            if len(unique) != 1:
+                raise ValueError(
+                    "MiniMax H3 PDD requires one constant adapter strength "
+                    "for the full eight-step schedule."
+                )
+            strength = unique.pop()
+        strength = float(strength)
+        if not 0.0 <= strength <= 2.0:
+            raise ValueError("MiniMax H3 PDD strength must be between 0 and 2.")
+        self._pdd_lora_strength = strength
 
     def finalize_loras(self) -> None:
         """Preserve ConvRot math after MMGP attaches active LoRA hooks."""
@@ -988,6 +1113,28 @@ class MiniMaxH3Model:
                 "[MiniMax H3 LoRA] Preserved native ConvRot activation math for "
                 f"{installed} adapter-targeted layer(s)."
             )
+        if self._pdd_lora_active:
+            try:
+                self._pdd_controller = install_pdd_parallel_heads(
+                    self.transformer,
+                    self._pdd_lora_path,
+                    strength=self._pdd_lora_strength,
+                )
+                if self._pdd_controller.num_steps != PDD_NUM_EVALUATIONS:
+                    raise ValueError(
+                        "MiniMax H3 PDD checkpoint does not expose the "
+                        f"required {PDD_NUM_EVALUATIONS} evaluations."
+                    )
+            except Exception:
+                self.release_special_loras()
+                raise
+
+    def release_special_loras(self) -> None:
+        """Restore ordinary output heads after a PDD job or failed setup."""
+
+        if hasattr(self, "transformer"):
+            release_pdd_parallel_heads(self.transformer)
+        self._pdd_controller = None
 
     @property
     def _interrupt(self) -> bool:
@@ -1370,6 +1517,13 @@ class MiniMaxH3Model:
             )
         frame_num = align_num_frames(int(frame_num))
         duration = frame_num / fps
+        if self._pdd_lora_active and duration > 10.13:
+            print(
+                "[MiniMax H3 PDD] Long accelerated clip: "
+                f"{duration:.2f}s. Alibaba's published Ref2VA PDD examples "
+                "cover up to 10.13s; Maestro will continue, but quality "
+                "beyond that demonstrated envelope is experimental."
+            )
         if not MINIMAX_H3_MIN_DURATION <= duration <= MINIMAX_H3_MAX_DURATION:
             raise ValueError(
                 f"MiniMax H3 supports {MINIMAX_H3_MIN_DURATION:g}-{MINIMAX_H3_MAX_DURATION:g}s at 24 fps; "
@@ -1377,11 +1531,26 @@ class MiniMaxH3Model:
             )
         if int(sampling_steps) < 2:
             raise ValueError("MiniMax H3 needs at least two scheduler grid points.")
+        if self._fused_turbo and not (
+            FUSED_H3_MIN_EVALUATIONS
+            <= int(sampling_steps)
+            <= FUSED_H3_MAX_EVALUATIONS
+        ):
+            raise ValueError(
+                "H3 Fused Turbo supports 4-8 total denoising steps; "
+                f"received {int(sampling_steps)}. Four is the published default."
+            )
         if self._turbo_lora_active and int(sampling_steps) < MINIMAX_H3_TURBO_MIN_STEPS:
             raise ValueError(
                 "MiniMax H3 Turbo LoRA needs at least "
                 f"{MINIMAX_H3_TURBO_MIN_STEPS} denoising steps; "
                 f"received {int(sampling_steps)}."
+            )
+        if self._pdd_lora_active and int(sampling_steps) != PDD_NUM_EVALUATIONS:
+            raise ValueError(
+                "Alibaba PAI MiniMax H3 Acc-LoRAs require exactly "
+                f"{PDD_NUM_EVALUATIONS} model evaluations; received "
+                f"{int(sampling_steps)}."
             )
 
         audio_prompt_type = str(audio_prompt_type or "")
@@ -1753,23 +1922,104 @@ class MiniMaxH3Model:
 
         audio_condition_rows = None
         if self.omni_reference:
+            minimax_h3_reference_detail = str(
+                minimax_h3_reference_detail or "match"
+            ).strip().lower()
+            if minimax_h3_reference_detail not in {"match", "max"}:
+                raise ValueError(
+                    "MiniMax H3 reference detail must be 'match' or 'max'."
+                )
+            if self._pdd_lora_active:
+                reference_preparation = (
+                    "official high detail (2048px short edge)"
+                    if minimax_h3_reference_detail == "max"
+                    else "Match output (no reference upscaling)"
+                )
+                print(
+                    "[MiniMax H3 PDD] Runtime reference preparation: "
+                    f"{reference_preparation}."
+                )
             if source_audio_mode:
                 input_prompt = apply_exact_drive_audio_prompt_contract(
                     input_prompt,
                     minimax_h3_exact_drive_audio_ordinal,
                 )
+            input_prompt, runtime_references, reference_remap = (
+                align_ref2va_voice_reference_order(
+                    input_prompt,
+                    minimax_h3_references,
+                )
+            )
+            if reference_remap:
+                mapping = "; ".join(
+                    f"{kind} " + ", ".join(
+                        f"{old} -> {new}" for old, new in sorted(remap.items())
+                    )
+                    for kind, remap in reference_remap.items()
+                )
+                print(
+                    "[MiniMax H3 Ref2VA] Canonicalized physical reference order "
+                    f"and prompt labels ({mapping})."
+                )
+            input_prompt, runtime_references, voice_scope = (
+                select_ref2va_window_voice_references(
+                    input_prompt,
+                    runtime_references,
+                )
+            )
+            if voice_scope["voice_total"]:
+                kept = ", ".join(voice_scope["kept_roles"]) or "none"
+                print(
+                    "[MiniMax H3 Ref2VA] Window-scoped voice references: "
+                    f"kept {voice_scope['voice_kept']}/{voice_scope['voice_total']} "
+                    f"({kept})."
+                )
+                if voice_scope["voice_omitted"]:
+                    omitted = ", ".join(voice_scope["omitted_roles"])
+                    print(
+                        "[MiniMax H3 Ref2VA] Omitted non-speaking or over-limit "
+                        f"voice references for this window: {omitted}."
+                    )
             conditioned_prompt = ensure_ref2va_prompt_relationships(
                 input_prompt,
-                minimax_h3_references,
+                runtime_references,
                 duration_seconds=target_frame_num / fps,
             )
             if conditioned_prompt != str(input_prompt or "").strip():
                 print(
-                    "[MiniMax H3 Ref2VA] Added explicit reference relationships "
-                    "to an untagged prompt."
+                    "[MiniMax H3 Ref2VA] Applied canonical Subject/Speaker/Audio "
+                    "bindings to the final model prompt."
                 )
+            picture_no = video_no = audio_no = 0
+            presentation_order = []
+            for reference in runtime_references:
+                kind = reference.get("type")
+                role = str(
+                    reference.get("character_name")
+                    or reference.get("role")
+                    or kind
+                ).strip()
+                if kind == "image":
+                    picture_no += 1
+                    presentation_order.append(f"Picture {picture_no}={role}")
+                elif kind == "video":
+                    video_no += 1
+                    presentation_order.append(f"Video {video_no}={role}")
+                    if (
+                        (reference.get("has_audio") or reference.get("audio_path"))
+                        and reference.get("include_audio", True)
+                    ):
+                        audio_no += 1
+                        presentation_order.append(f"Audio {audio_no}={role}")
+                elif kind == "audio":
+                    audio_no += 1
+                    presentation_order.append(f"Audio {audio_no}={role}")
+            print(
+                "[MiniMax H3 Ref2VA] Runtime reference bindings: "
+                + "; ".join(presentation_order)
+            )
             references = prepare_references(
-                minimax_h3_references,
+                runtime_references,
                 num_frames=frame_num,
                 target_height=height,
                 target_width=width,
@@ -1963,11 +2213,27 @@ class MiniMaxH3Model:
             int(sampling_steps),
             turbo_active=self._turbo_lora_active,
         )
+        self.scheduler.set_solver(self.sample_solver)
         self.scheduler.set_timesteps(scheduler_points, device=self.device)
         self.audio_scheduler.set_timesteps(scheduler_points, device=self.device)
         timesteps = self.scheduler.timesteps
         audio_timesteps = self.audio_scheduler.timesteps
         model_steps = len(timesteps)
+        if self._pdd_controller is not None:
+            self._pdd_controller.configure_sigmas(
+                self.scheduler.sigmas,
+                self.audio_scheduler.sigmas,
+            )
+            if self._pdd_controller.num_steps != model_steps:
+                raise ValueError(
+                    "MiniMax H3 PDD produced "
+                    f"{self._pdd_controller.num_steps} head plans for "
+                    f"{model_steps} denoising evaluations."
+                )
+            print(
+                "[MiniMax H3 PDD] Aligned interval heads to the exact "
+                f"{model_steps}-evaluation video/audio sigma schedules."
+            )
         denoising_start_step = int(
             round(model_steps * (1.0 - denoising_strength), 4)
         )
@@ -2111,13 +2377,35 @@ class MiniMaxH3Model:
 
         if callback is not None:
             callback(-1, None, True, override_num_inference_steps=len(timesteps))
+        old_audio_denoised = None
+        res_multistep = self.sample_solver == "res_multistep"
+        audio_scale = float(self.scheduler.shift) / float(
+            self.audio_scheduler.shift
+        )
         try:
             with tqdm(total=len(timesteps), desc="MiniMax H3 denoising") as progress:
                 for index, (video_timestep, audio_timestep) in enumerate(zip(timesteps, audio_timesteps)):
                     if self._interrupt:
                         return None
+                    if self._pdd_controller is not None:
+                        self._pdd_controller.set_step(index)
                     if first_block_cache is not None:
                         first_block_cache.begin_step(index)
+                    self.transformer.sla_attention.begin_step(
+                        index,
+                        model_steps,
+                    )
+                    if res_multistep and generated_audio_local_indices.numel():
+                        audio_target = audio_rows[
+                            layout.num_condition_audio_rows :
+                        ]
+                        audio_target[generated_audio_local_indices] = (
+                            audio_target[generated_audio_local_indices]
+                            * (
+                                self.audio_scheduler.sigmas[index]
+                                / self.scheduler.sigmas[index]
+                            )
+                        )
                     unique_timesteps, timestep_indices = row_plan[index]
                     prediction = self.transformer(
                         hidden_states=video_rows[None],
@@ -2168,22 +2456,71 @@ class MiniMaxH3Model:
                         audio_velocity_target = audio_velocity[
                             0, layout.num_condition_audio_rows :
                         ]
-                        audio_target[generated_audio_local_indices] = (
-                            self.audio_scheduler.step(
+                        if res_multistep:
+                            audio_sample = audio_target[
+                                generated_audio_local_indices
+                            ]
+                            audio_sigma = self.audio_scheduler.sigmas[index].to(
+                                device=audio_sample.device,
+                                dtype=audio_sample.dtype,
+                            )
+                            audio_denoised = (
+                                audio_velocity_target[
+                                    generated_audio_local_indices
+                                ].float()
+                                * audio_sigma.float()
+                                + audio_sample.float()
+                            ).mul_(audio_scale)
+                            audio_video_coordinate = audio_sample.mul(
+                                self.scheduler.sigmas[index].to(audio_sample)
+                                / self.audio_scheduler.sigmas[index].to(
+                                    audio_sample
+                                )
+                            )
+                            audio_target[generated_audio_local_indices] = (
+                                res_multistep_update(
+                                    audio_video_coordinate,
+                                    audio_denoised,
+                                    old_audio_denoised,
+                                    self.scheduler.coefficients_for_step(index),
+                                )
+                            )
+                            old_audio_denoised = audio_denoised.detach()
+                        else:
+                            audio_target[generated_audio_local_indices] = (
+                                self.audio_scheduler.step(
                                 audio_velocity_target[
                                     generated_audio_local_indices
                                 ].float(),
                                 audio_timestep,
                                 audio_target[generated_audio_local_indices],
                                 return_dict=False,
-                            )[0]
-                        )
+                                )[0]
+                            )
                     if callback is not None:
                         callback(index, None)
                     progress.update()
         finally:
             if first_block_cache is not None:
                 first_block_cache.reset()
+            if res_multistep and offload.shared_state.get("_attention") == "sla":
+                print(
+                    "[MiniMax H3 SLA] Run summary: "
+                    f"{self.transformer.sla_attention.summary()}."
+                )
+
+        # During RES, generated audio is evolved on the video sigma schedule
+        # so both modalities use the same second-order coefficients. Restore
+        # H3's native audio latent scale before decoding. Reference/guide rows
+        # are deliberately excluded, matching WanGP's ``audio_tail`` recipe.
+        if res_multistep and generated_audio_local_indices.numel():
+            audio_target = audio_rows[layout.num_condition_audio_rows :]
+            # Advanced indexing returns a copy, so ``.div_`` on that result
+            # never updated the packed audio rows. Assign the restored scale
+            # explicitly before decoding, matching WanGP's basic-slice path.
+            audio_target[generated_audio_local_indices] = (
+                audio_target[generated_audio_local_indices] / audio_scale
+            )
 
         if self._interrupt:
             return None

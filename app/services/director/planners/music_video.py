@@ -253,6 +253,8 @@ def _parse_performer_map(scene_description: str) -> dict[str, str]:
 class MusicVideoPlanner(BasePlanner):
     skill_type = "music_video"
 
+    _LONG_FORM_BATCH_SIZE = 12
+
     def plan(
         self,
         clips: list[dict],
@@ -303,6 +305,26 @@ class MusicVideoPlanner(BasePlanner):
 
         # Build speaker lookup
         speaker_names = self._build_speaker_names(speaker_mappings, lyrics)
+
+        self._configure_planning_runtime(
+            kwargs,
+            kind="music_video",
+            fingerprint_payload={
+                "planner_revision": 2,
+                "scene_description": scene_description,
+                "clips": clips,
+                "lyrics": lyrics or [],
+                "bpm": bpm,
+                "reference_image_path": reference_image_path,
+                "speaker_mappings": speaker_mappings or {},
+                "characters": characters or [],
+                "video_model": video_model,
+                "image_model": kwargs.get("image_model", ""),
+                "shot_image_policy": shot_image_policy,
+                "character_ref_labels": kwargs.get("character_ref_labels") or [],
+                "location_ref_labels": kwargs.get("location_ref_labels") or [],
+            },
+        )
 
         # Build reference assets
         ref_assets = ReferenceAssets(
@@ -619,6 +641,87 @@ class MusicVideoPlanner(BasePlanner):
         """Call LLM to generate structured shot plans."""
         from ..nsfw_guidance import inject_nsfw_if_enabled
 
+        if (
+            len(clips) > self._LONG_FORM_BATCH_SIZE
+            and not kwargs.get("_bounded_music_batch")
+        ):
+            forwarded_kwargs = {
+                key: value for key, value in kwargs.items()
+                if key not in {
+                    "_bounded_music_batch",
+                    "_planning_progress_callback",
+                    "_planning_checkpoint_callback",
+                    "_planning_cancelled_callback",
+                    "_planning_checkpoint",
+                }
+            }
+
+            def call_batch(
+                batch_number: int,
+                start: int,
+                batch_clips: list[dict],
+                previous: Optional[dict],
+            ) -> list[dict]:
+                end = start + len(batch_clips)
+                previous_ending = (
+                    str((previous or {}).get("ending_beat") or "").strip()
+                    or "No prior clip; establish the opening cleanly."
+                )
+                batch_concept = (
+                    f"{scene_description}\n\n"
+                    "LONG-FORM TIMELINE CONTRACT:\n"
+                    f"This is planning batch {batch_number}, covering global "
+                    f"clips {start + 1}-{end} of {len(clips)}. Continue the "
+                    "same music video; do not restart its visual premise or "
+                    "repeat completed clip ideas. Preserve performer identity, "
+                    "wardrobe, world, and established visual grammar unless "
+                    "the song section motivates a visible change.\n"
+                    f"Previous planned ending: {previous_ending}"
+                )
+                return self._plan_with_llm(
+                    clips=batch_clips,
+                    clip_contexts=clip_contexts[start:end],
+                    scene_description=batch_concept,
+                    bpm=bpm,
+                    has_reference=has_reference,
+                    reference_image_path=reference_image_path,
+                    char_profiles=char_profiles,
+                    performer_map=performer_map,
+                    nsfw=nsfw,
+                    _bounded_music_batch=True,
+                    **forwarded_kwargs,
+                )
+
+            return self._run_checkpointed_json_batches(
+                items=clips,
+                batch_size=self._LONG_FORM_BATCH_SIZE,
+                checkpoint_key="music_video_batches",
+                stage="music_video_batch",
+                progress_label="music-video",
+                call_batch=call_batch,
+                fallback_factory=lambda index, clip: {
+                    "scene_goal": (
+                        f"Continue the {str(clip.get('label') or 'music')} "
+                        f"section at global clip {index + 1}"
+                    ),
+                    "scene_type": (
+                        "atmospheric"
+                        if str(clip.get("label") or "").lower()
+                        == "instrumental" else "performance"
+                    ),
+                    "subjects_on_screen": [],
+                    "environment": "",
+                    "visual_style": "",
+                    "lighting": "",
+                    "mood": "",
+                    "action_beats": [],
+                    "camera_plan": {"framing": "medium shot"},
+                    "ending_beat": "The performance continues into the next clip",
+                    "video_prompt": scene_description,
+                    "window_prompts": [],
+                },
+            )
+
         num_character_refs = len(kwargs.get("character_ref_paths", []) or [])
         num_location_refs = len(kwargs.get("location_ref_paths", []) or [])
         has_asset_references = bool(
@@ -806,7 +909,12 @@ Write {len(clips)} structured shot plans. Go:"""
             user_prompt=user_prompt,
             system_prompt=system_prompt,
             max_tokens=max_tokens,
-            thinking_budget=4096,
+            # A long timeline is already divided into a bounded, explicit clip
+            # batch. Keep that structured transformation grammar-constrained
+            # and spend reasoning only on the historical short-form path.
+            thinking_budget=(
+                0 if kwargs.get("_bounded_music_batch") else 4096
+            ),
             image_paths=image_paths,
             json_schema=_music_shot_schema(
                 len(clips),

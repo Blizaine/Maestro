@@ -14,6 +14,8 @@ import {
   X,
 } from 'lucide-react'
 import { useStore } from '../stores/useStore'
+import { formatEtaDuration } from '../lib/format'
+import { PROMPT_ENHANCEMENT_ACTIVITY } from '../lib/promptEnhancementActivity'
 
 const ACTIVE_JOB_STATUSES = new Set(['held', 'queued', 'running'])
 const ACTIVE_DIRECTOR_STATUSES = new Set(['held', 'queued', 'running'])
@@ -40,6 +42,7 @@ export function GlobalQueuePopover({
   const rootRef = useRef<HTMLDivElement>(null)
 
   const jobs = useStore(state => state.jobs)
+  const isEnhancing = useStore(state => state.isEnhancing)
   const stopGeneration = useStore(state => state.stopGeneration)
   const startStudioQueue = useStore(state => state.startStudioQueue)
   const directorQueue = useStore(state => state.directorQueue)
@@ -57,8 +60,11 @@ export function GlobalQueuePopover({
   const setSettingsOpen = useStore(state => state.setSettingsOpen)
 
   const studioJobs = useMemo(
-    () => jobs.filter(job => ACTIVE_JOB_STATUSES.has(job.status)),
-    [jobs],
+    () => {
+      const activeJobs = jobs.filter(job => ACTIVE_JOB_STATUSES.has(job.status))
+      return isEnhancing ? [PROMPT_ENHANCEMENT_ACTIVITY, ...activeJobs] : activeJobs
+    },
+    [isEnhancing, jobs],
   )
   const studioHeldCount = studioJobs.filter(job => job.status === 'held').length
   const directorEntries = directorQueue?.entries || []
@@ -180,7 +186,7 @@ export function GlobalQueuePopover({
                   {totalCount} {totalCount === 1 ? 'item' : 'items'}
                 </span>
               </div>
-              <p className="mt-0.5 text-[9px] text-text-muted">Studio and Director in one place</p>
+              <p className="mt-0.5 text-[9px] text-text-muted">Studio, Director, and Editor in one place</p>
             </div>
             <button
               type="button"
@@ -206,7 +212,12 @@ export function GlobalQueuePopover({
                       <div className="truncate text-[10px] text-text-secondary">
                         {pipelineStatus.progress?.message || compactStatus(pipelineStatus.phase)}
                       </div>
-                      <div className="text-[9px] text-text-muted">Director · {compactStatus(pipelineStatus.status)}</div>
+                      <div className="text-[9px] text-text-muted">
+                        Director · {compactStatus(pipelineStatus.status)}
+                        {pipelineStatus.progress?.project_eta_seconds != null
+                          ? ` · ${formatEtaDuration(pipelineStatus.progress.project_eta_seconds)} remaining`
+                          : ''}
+                      </div>
                     </div>
                     <button
                       type="button"
@@ -234,7 +245,7 @@ export function GlobalQueuePopover({
             {studioJobs.length > 0 && (
               <section className="space-y-1.5">
                 <div className="flex items-center justify-between px-1">
-                  <span className="text-[10px] font-medium uppercase tracking-wider text-text-muted">Studio</span>
+                  <span className="text-[10px] font-medium uppercase tracking-wider text-text-muted">Studio &amp; Editor</span>
                   {studioHeldCount > 0 ? (
                     <button
                       type="button"
@@ -255,6 +266,7 @@ export function GlobalQueuePopover({
                 <div className="space-y-1">
                   {studioJobs.map((job, index) => {
                     const percent = progressPercent(job.step, job.totalSteps, job.progress)
+                    const isPromptPlanning = job.kind === 'prompt_enhancement'
                     const label = job.phase || job.message || (
                       job.status === 'held'
                         ? 'Ready - waiting for Start Queue'
@@ -271,29 +283,38 @@ export function GlobalQueuePopover({
                           <div className="min-w-0 flex-1">
                             <div className="truncate text-[10px] text-text-secondary">{label}</div>
                             <div className="text-[9px] text-text-muted">
-                              Studio · {compactStatus(job.status)}
+                              {job.kind === 'editor_export'
+                                ? `Editor export · ${compactStatus(job.status)}`
+                                : isPromptPlanning
+                                  ? 'Studio · AI planning'
+                                  : `Studio · ${compactStatus(job.status)}`}
                               {job.totalSteps > 0 ? ` · Step ${job.step}/${job.totalSteps}` : ''}
+                              {job.generationEtaSeconds != null
+                                ? ` · ${formatEtaDuration(job.generationEtaSeconds)} remaining`
+                                : ''}
                             </div>
                           </div>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (job.id) stopGeneration(job.id)
-                            }}
-                            disabled={!job.id}
-                            className="rounded p-1 text-red-400 hover:bg-red-500/10 hover:text-red-300 disabled:cursor-wait disabled:opacity-30"
-                            title={!job.id
-                              ? 'Waiting for the server to accept this job'
-                              : job.status === 'held'
-                                ? 'Remove held generation'
-                                : job.status === 'queued'
-                                  ? 'Cancel queued generation'
-                                : 'Stop generation'}
-                          >
-                            {job.status === 'held' || job.status === 'queued'
-                              ? <X size={11} />
-                              : <Square size={10} />}
-                          </button>
+                          {!isPromptPlanning && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (job.id) stopGeneration(job.id)
+                              }}
+                              disabled={!job.id}
+                              className="rounded p-1 text-red-400 hover:bg-red-500/10 hover:text-red-300 disabled:cursor-wait disabled:opacity-30"
+                              title={!job.id
+                                ? 'Waiting for the server to accept this job'
+                                : job.status === 'held'
+                                  ? 'Remove held generation'
+                                  : job.status === 'queued'
+                                    ? 'Cancel queued generation'
+                                    : 'Stop generation'}
+                            >
+                              {job.status === 'held' || job.status === 'queued'
+                                ? <X size={11} />
+                                : <Square size={10} />}
+                            </button>
+                          )}
                         </div>
                         <div className="mt-2 h-1 overflow-hidden rounded-full bg-bg-active">
                           <div
@@ -412,7 +433,7 @@ export function GlobalQueuePopover({
                 <ListVideo size={28} className="text-text-muted/60" />
                 <div className="text-xs font-medium text-text-secondary">Queue is empty</div>
                 <p className="text-[10px] leading-relaxed text-text-muted">
-                  Queued Studio generations and held Director projects will appear here.
+                  Queued Studio generations, Editor exports, and held Director projects will appear here.
                 </p>
               </div>
             )}

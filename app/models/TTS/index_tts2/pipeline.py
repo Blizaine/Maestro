@@ -277,13 +277,18 @@ class IndexTTS2Pipeline:
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
 
-    def _resolve_auto_split_seconds(self, kwargs: dict) -> Optional[float]:
+    def _resolve_auto_split_seconds(
+        self,
+        kwargs: dict,
+        duration_seconds: float = 0.0,
+    ) -> Optional[float]:
         custom_settings = kwargs.get("custom_settings", None)
-        if not isinstance(custom_settings, dict):
-            return None
-        raw_value = custom_settings.get(_AUTO_SPLIT_SETTING_ID, None)
+        raw_value = (
+            custom_settings.get(_AUTO_SPLIT_SETTING_ID, None)
+            if isinstance(custom_settings, dict) else None
+        )
         if raw_value is None:
-            return None
+            return 45.0 if float(duration_seconds or 0) > 90 else None
         if isinstance(raw_value, str):
             raw_value = raw_value.strip()
             if len(raw_value) == 0:
@@ -586,7 +591,10 @@ class IndexTTS2Pipeline:
             # No explicit duration: use a generous budget tied to split limit.
             global_max_mel_tokens = int(math.ceil(max_text_tokens_per_segment * 24.0))
         global_max_mel_tokens = max(1500, min(12000, global_max_mel_tokens))
-        auto_split_seconds = self._resolve_auto_split_seconds(kwargs)
+        auto_split_seconds = self._resolve_auto_split_seconds(
+            kwargs,
+            duration_seconds=duration_seconds,
+        )
         auto_split_tokens = (
             max(1, int(round(auto_split_seconds * _AUTO_SPLIT_TOKENS_PER_SECOND)))
             if auto_split_seconds is not None

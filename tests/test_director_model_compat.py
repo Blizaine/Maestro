@@ -1109,8 +1109,10 @@ class TestDirectorVideoExecutionProfile(unittest.TestCase):
             "minimax_h3_full_checkpoint": full,
             "director_memory_policy": memory_policy,
             "resolutions": [
+                ("1632x704 (21:9 720p)", "1632x704"),
                 ("1280x704 (16:9 720p)", "1280x704"),
                 ("704x1280 (9:16 720p)", "704x1280"),
+                ("1792x768 (21:9 native)", "1792x768"),
                 ("1920x1088 (16:9 1080p)", "1920x1088"),
                 ("1088x1920 (9:16 1080p)", "1088x1920"),
             ],
@@ -1166,6 +1168,18 @@ class TestDirectorVideoExecutionProfile(unittest.TestCase):
         self.assertEqual(profile["effective_max_frames"], 243)
         self.assertAlmostEqual(profile["effective_max_seconds"], 10.125)
         self.assertFalse(profile["manual_override"])
+
+        ultrawide = build_director_video_execution_profile(
+            "minimax_h3",
+            self._h3_model(),
+            {"resolution": "1632x704"},
+            {"gpu_vram_gb": 24},
+            resolution_preset="720p",
+            aspect_ratio="21:9",
+        )
+        self.assertEqual(ultrawide["normalized_resolution"], "1632x704")
+        self.assertEqual(ultrawide["aspect_ratio"], "21:9")
+        self.assertEqual(ultrawide["recommended_max_frames"], 243)
 
         high_resolution = build_director_video_execution_profile(
             "minimax_h3",
@@ -1318,10 +1332,10 @@ class TestDirectorVideoExecutionProfile(unittest.TestCase):
             pipeline._prepare_director_generation_params(params)
 
         self.assertTrue(params["sliding_window_memory_override"])
-        self.assertEqual(params["num_inference_steps"], 6)
+        self.assertEqual(params["num_inference_steps"], 8)
         self.assertEqual(
             params["activated_loras"],
-            ["minimax_h3_turbo_v4_step600_ema.safetensors"],
+            ["MiniMax-H3-FL2VA-Acc-8Step.safetensors"],
         )
         self.assertEqual(params["loras_multipliers"], "1.00")
 
@@ -1998,6 +2012,108 @@ class TestDirectorH3GenerationContract(unittest.TestCase):
             captured["prompt"].index("detailed_description:"),
         )
 
+    def test_ref2va_director_preserves_ordered_mixed_manifest_and_detail(self):
+        model_type = "minimax_h3_ref2va"
+        model_def = {
+            "name": "H3 Ref2VA",
+            "fps": 24,
+            "frames_minimum": 124,
+            "frames_maximum": 345,
+            "frames_steps": 17,
+            "latent_size": 17,
+            "image_prompt_types_allowed": "",
+            "returns_audio": True,
+            "omni_reference": True,
+            "director_video_strategy": "omni_reference",
+            "director_shot_image_support": "direct_references",
+            "director_audio_input_mode": "reference_manifest",
+            "director_trim_end_frames": False,
+        }
+        self._install_registry(model_type, model_def)
+        motion = self._file("motion.mp4")
+        voice = self._file("voice.wav")
+        identity = self._file("identity.png")
+        soundtrack = self._file("soundtrack.wav")
+        captured = {}
+        params = {
+            "video_model": model_type,
+            "pipeline_type": "short_film_story",
+            "seamless": False,
+            "video_params": {},
+            "minimax_h3_reference_detail": "max",
+            "minimax_h3_references": [
+                {"type": "video", "path": motion, "role": "camera motion"},
+                {
+                    "type": "audio", "path": voice,
+                    "role": "Blaine voice", "audio_intent": "voice",
+                },
+                {
+                    "type": "image", "path": identity,
+                    "role": "Blaine identity", "image_intent": "identity",
+                },
+                {
+                    "type": "audio", "path": soundtrack,
+                    "role": "exact score", "audio_intent": "drive",
+                },
+            ],
+            "_director_omni_drive_audio": True,
+            "audio_path": soundtrack,
+            "_director_shot_image_policy": SHOT_IMAGES_DIRECT_REFERENCES,
+        }
+
+        with patch.object(
+            pipeline,
+            "_submit_and_wait",
+            side_effect=lambda generated, **kwargs: captured.update(generated) or [
+                "joined.mp4"
+            ],
+        ):
+            pipeline._run_video_generation(
+                "h3-omni-mixed",
+                params,
+                [{"video_prompt": "Blaine follows the supplied motion."}],
+                [{"duration_frames": 124}],
+                [""],
+                out_dir=self.temp_dir.name,
+            )
+
+        manifest = captured["per_clip_minimax_h3_references"][0]
+        self.assertEqual(
+            [(item["type"], item.get("role")) for item in manifest],
+            [
+                ("video", "camera motion"),
+                ("audio", "Blaine voice"),
+                ("image", "Blaine identity"),
+            ],
+        )
+        self.assertEqual(captured["minimax_h3_reference_detail"], "max")
+        self.assertEqual(captured["audio_prompt_type"], "AD")
+        self.assertEqual(captured["audio_guide"], soundtrack)
+        self.assertEqual(captured["multi_clip_concat_audio"], soundtrack)
+        self.assertIn("<Video 1>", captured["prompt"])
+        self.assertIn("<Audio 1>", captured["prompt"])
+        self.assertIn("<Picture 1>", captured["prompt"])
+
+    def test_ref2va_director_routes_explicit_drive_audio_before_freezing(self):
+        old_audio = self._file("old.wav")
+        drive_audio = self._file("drive.wav")
+        params = {
+            "video_model": "minimax_h3_ref2va",
+            "audio_path": old_audio,
+            "audio_vocals_path": self._file("old-vocals.wav"),
+            "minimax_h3_references": [{
+                "type": "audio",
+                "path": drive_audio,
+                "audio_intent": "drive",
+            }],
+        }
+
+        pipeline._director_apply_omni_drive_audio(params)
+
+        self.assertEqual(params["audio_path"], drive_audio)
+        self.assertNotIn("audio_vocals_path", params)
+        self.assertTrue(params["_director_omni_drive_audio"])
+
     def test_ref2va_builds_per_shot_native_manifests_without_fixed_start_frames(self):
         model_type = "minimax_h3_ref2va"
         model_def = {
@@ -2168,7 +2284,10 @@ class TestDirectorUICatalogContract(unittest.TestCase):
         self.assertIn("resolution: directorVideoResolution", store)
         self.assertIn("minimax_h3_turbo_mode: directorTurboEnabled", store)
         self.assertIn("minimax_h3_turbo_preset: directorTurboPreset?.id", store)
-        self.assertIn("override_attention: directorSolEnabled ? 'sol' : ''", store)
+        self.assertIn("override_attention: directorSlaEnabled", store)
+        self.assertIn("? 'sla'", store)
+        self.assertIn("? 'sdpa'", store)
+        self.assertIn("? 'sol'", store)
         self.assertIn("skip_steps_cache_type: directorFirstBlockCacheEnabled", store)
         self.assertIn("directorModelUsesFixedMediaStrength", store)
         self.assertIn("input_video_strength: 1.0", store)
@@ -2183,7 +2302,10 @@ class TestDirectorUICatalogContract(unittest.TestCase):
         self.assertIn("Maximum planned shot", chat)
         self.assertIn("H3 Optimizations", director_h3_optimizations)
         self.assertIn("Director H3 Turbo", director_h3_optimizations)
+        self.assertIn("const defaultTurboPreset", director_h3_optimizations)
+        self.assertIn("const selectedTurboPreset = turboRequested", director_h3_optimizations)
         self.assertIn("Director H3 Sol Engine", director_h3_optimizations)
+        self.assertIn("SLA Sparse Attention", director_h3_optimizations)
         self.assertIn("Director First Block Cache", director_h3_optimizations)
         self.assertIn("setDirectorH3TurboMode", director_h3_optimizations)
         self.assertIn("setDirectorH3SolMode", director_h3_optimizations)

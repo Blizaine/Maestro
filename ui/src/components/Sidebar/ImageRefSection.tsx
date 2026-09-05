@@ -1,9 +1,11 @@
 import { useState, useCallback, useEffect } from 'react'
-import { Upload, X } from 'lucide-react'
+import { Image as ImageIcon, Upload, X } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 
 export function ImageRefSection() {
   const modelOptions = useStore(s => s.modelOptions)
+  const generationMode = useStore(s => s.generationMode)
+  const imageWorkflow = useStore(s => s.studioImageWorkflow)
   const imageMode = useStore(s => Number(s.params.image_mode ?? 1))
   const imageRefs = useStore(s => s.imageRefs)
   const imageRefType = useStore(s => s.imageRefType)
@@ -13,9 +15,16 @@ export function ImageRefSection() {
   const reorderImageRefs = useStore(s => s.reorderImageRefs)
   const setImageRefType = useStore(s => s.setImageRefType)
   const setRemoveBackgroundRefs = useStore(s => s.setRemoveBackgroundRefs)
+  const outputs = useStore(s => s.outputs)
+  const selectedOutput = useStore(s => s.selectedOutput)
+  const selectedGalleryImage = outputs[selectedOutput]?.type === 'image'
+    ? outputs[selectedOutput]
+    : null
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null)
+  const [copyingGalleryImage, setCopyingGalleryImage] = useState(false)
 
   const config = modelOptions?.image_ref_choices
+  const isAdaptiveImageGenerate = generationMode === 'image' && imageWorkflow === 'generate'
   const bgLabel = modelOptions?.background_removal_label
   // max_image_refs is the model's total conditioning-image budget. In Edit
   // mode the uploaded source already consumes one slot.
@@ -36,7 +45,8 @@ export function ImageRefSection() {
   // Auto-set ref type when images are added/removed
   useEffect(() => {
     if (!config) return
-    if (imageRefs.length > 0 && imageRefType === '') {
+    const validRefTypes = new Set(config.choices?.map(([, value]) => value) ?? [])
+    if (imageRefs.length > 0 && (imageRefType === '' || !validRefTypes.has(imageRefType))) {
       setImageRefType(defaultRefType)
     } else if (imageRefs.length === 0 && imageRefType !== '') {
       setImageRefType('')
@@ -63,12 +73,36 @@ export function ImageRefSection() {
     input.click()
   }, [addFiles])
 
-  if (!config) return null
+  const addSelectedGalleryImage = useCallback(async () => {
+    if (!selectedGalleryImage || !canAddMore) return
+    setCopyingGalleryImage(true)
+    try {
+      const response = await fetch(selectedGalleryImage.url)
+      if (!response.ok) throw new Error(`Gallery image returned ${response.status}`)
+      const blob = await response.blob()
+      addFiles([
+        new File(
+          [blob],
+          selectedGalleryImage.name,
+          { type: blob.type || 'image/png' },
+        ),
+      ])
+    } catch (error) {
+      console.error('Could not add selected gallery image:', error)
+    } finally {
+      setCopyingGalleryImage(false)
+    }
+  }, [addFiles, canAddMore, selectedGalleryImage])
+
+  // Image Generate must always expose its optional source picker. Starting
+  // from a T2I model is valid; adding the first image immediately filters and
+  // switches the selector to a compatible I2I/edit model.
+  if (!config && !isAdaptiveImageGenerate) return null
 
   return (
     <div className="space-y-2">
       <label className="text-[11px] text-text-muted uppercase tracking-wider block">
-        Reference Images
+        {isAdaptiveImageGenerate ? 'Source / Reference Images (Optional)' : 'Reference Images'}
       </label>
 
       {/* Thumbnails + add button in a unified row */}
@@ -108,6 +142,11 @@ export function ImageRefSection() {
                 Main
               </div>
             )}
+            {i === 0 && isAdaptiveImageGenerate && (
+              <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-[8px] text-white text-center py-0.5">
+                Source
+              </div>
+            )}
             {/* Position number */}
             <span className="absolute top-0.5 left-0.5 bg-black/60 text-white text-[8px] px-1 rounded pointer-events-none">
               {i + 1}
@@ -135,9 +174,31 @@ export function ImageRefSection() {
         )}
       </div>
 
+      {isAdaptiveImageGenerate && (
+        <button
+          type="button"
+          onClick={() => void addSelectedGalleryImage()}
+          disabled={!selectedGalleryImage || !canAddMore || copyingGalleryImage}
+          className="flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-bg-tertiary py-1.5 text-[11px] text-text-secondary transition-colors hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <ImageIcon size={12} />
+          {copyingGalleryImage
+            ? 'Adding selected image…'
+            : selectedGalleryImage
+              ? 'Add selected gallery image'
+              : 'Select an image in the gallery to add it'}
+        </button>
+      )}
+
       {maxRefs != null && (
         <p className="text-[9px] text-text-muted">
           Up to {maxRefs} reference image{maxRefs === 1 ? '' : 's'}.
+        </p>
+      )}
+
+      {isAdaptiveImageGenerate && imageRefs.length > 0 && (
+        <p className="text-[10px] text-text-muted">
+          Describe the finished image below. Add more images when the model supports multi-reference editing.
         </p>
       )}
 

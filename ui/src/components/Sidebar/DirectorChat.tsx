@@ -1,12 +1,16 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from 'react'
-import { Upload, Loader2, Music, RotateCcw, Check, X, ChevronRight, ChevronDown, ImageIcon, Play, Film, Mic, Sparkles, Send, Users, FileText, Clock, ListVideo } from 'lucide-react'
+import { Upload, Loader2, Music, RotateCcw, Check, X, ChevronRight, ChevronDown, ImageIcon, Play, Film, Mic, Sparkles, Send, Users, FileText, ListVideo } from 'lucide-react'
 import { useStore, directorModelUsesFixedMediaStrength, getFamiliesForMode, getModelsForFamily, resolveResolution } from '../../stores/useStore'
 import { fetchModelOptions, getFileUrl } from '../../api/client'
 import { DirectorLoraSelector } from '../SettingsDrawer/DirectorLoraSelector'
 import { DirectorSongSetup } from './DirectorSongSetup'
 import { DirectorH3Optimizations } from './DirectorH3Optimizations'
+import { OmniReferenceSection } from './OmniReferenceSection'
 import { InfoTooltip } from './InfoTooltip'
 import { formatSeconds, recommendedWindowProfile } from './DurationSlider'
+import { DurationPresetControl } from './DurationPresetControl'
+import { LONG_FORM_MAX_SECONDS, formatDuration } from '../../lib/durationPlanning'
+import { formatEstimatedClock, formatEtaDuration } from '../../lib/format'
 import type { DirectorPipelineType, DirectorShotImageGuidance, DirectorSkill, ModelOptions, ShortFilmCharacter, ShortFilmPath } from '../../types'
 
 // AUDIO_ACCEPT lists both audio formats AND video formats. When a video
@@ -17,6 +21,66 @@ import type { DirectorPipelineType, DirectorShotImageGuidance, DirectorSkill, Mo
 const AUDIO_ACCEPT = '.wav,.mp3,.flac,.ogg,.m4a,.mp4,.mov,.mkv,.webm,.avi,.m4v'
 const IMAGE_ACCEPT = '.png,.jpg,.jpeg,.webp,.bmp'
 const DIRECTOR_IMAGE_MODEL_NONE = '__none__'
+
+function DirectorTargetDurationControl() {
+  const duration = useStore(s => s.shortFilmTargetDuration)
+  const setDuration = useStore(s => s.shortFilmSetTargetDuration)
+  const prompt = useStore(s => s.directorSceneDescription)
+  const references = useStore(s => s.directorH3References)
+  const videoModel = useStore(s => s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1')
+  const resolution = useStore(s => s.directorResolution)
+  const aspectRatio = useStore(s => s.directorAspectRatio)
+  const totalVramGb = useStore(s => s.systemStats?.gpu.vram_total_gb ?? 0)
+  const [options, setOptions] = useState<ModelOptions | null>(null)
+  const [planningMode, setPlanningMode] = useState<'duration' | 'windows' | 'auto'>('auto')
+
+  useEffect(() => {
+    let cancelled = false
+    fetchModelOptions(videoModel)
+      .then(value => { if (!cancelled) setOptions(value) })
+      .catch(() => { if (!cancelled) setOptions(null) })
+    return () => { cancelled = true }
+  }, [videoModel])
+
+  const fps = options?.fps || 24
+  const resolvedResolution = resolveResolution(options, resolution, aspectRatio)
+  const recommendation = recommendedWindowProfile(
+    options?.director_memory_policy || options?.sliding_window_memory_policy,
+    resolvedResolution,
+    totalVramGb,
+  )
+  const defaults = options?.sliding_window_defaults
+  const windowFrames = recommendation?.frames
+    || defaults?.window_max
+    || options?.frames_maximum
+    || Math.round(14.4 * fps)
+  const windowSeconds = Math.max(1, windowFrames / fps)
+  const driveReference = references.find(reference => (
+    reference.type === 'audio' && reference.audio_intent === 'drive'
+  ))
+  const driveDuration = Number(driveReference?.duration_seconds)
+
+  return (
+    <DurationPresetControl
+      label="Target duration"
+      value={duration}
+      onChange={setDuration}
+      minSeconds={10}
+      maxSeconds={LONG_FORM_MAX_SECONDS}
+      windowSeconds={windowSeconds}
+      overlapSeconds={(defaults?.overlap_default || 0) / fps}
+      discardSeconds={(defaults?.discard_last_frames || 0) / fps}
+      enablePlanningModes
+      planningMode={planningMode}
+      onPlanningModeChange={setPlanningMode}
+      autoPrompt={prompt}
+      autoPlanningStyle="creative"
+      autoSourceSeconds={Number.isFinite(driveDuration) && driveDuration > 0 ? driveDuration : null}
+      autoSourceLabel="music / performance timeline"
+      modelLimitLabel={`Director plans ${formatDuration(duration, true)} as restart-safe scenes; current automatic shot target is ${formatDuration(windowSeconds, true)}.`}
+    />
+  )
+}
 
 function directorWillGenerateShotImages(
   support: 'required' | 'optional' | 'direct_references' | undefined,
@@ -382,6 +446,12 @@ export function DirectorChat() {
   const selectedDirectorShotImageSupport = useStore(s => s.models.find(
     model => model.model_type === (s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'),
   )?.director?.shot_image_support)
+  const directorUsesOmniManifest = useStore(s => {
+    const selected = s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+    return selected.toLowerCase().startsWith('minimax_h3_ref2va')
+      || s.models.find(model => model.model_type === selected)
+        ?.director?.video_strategy === 'omni_reference'
+  })
   const directorShotImageGuidance = useStore(s => s.directorShotImageGuidance)
   const directorHasVisualReferences = useStore(s => Boolean(
     s.directorReferenceImage
@@ -390,6 +460,14 @@ export function DirectorChat() {
     || s.directorCharacterRefPaths.length
     || s.directorLocationRefs.length
     || s.directorLocationRefPaths.length
+    || (
+      s.models.find(model => model.model_type === (
+        s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+      ))?.director?.video_strategy === 'omni_reference'
+      && s.directorH3References.some(
+        reference => reference.type === 'image' || reference.type === 'video',
+      )
+    )
   ))
   const sceneDescription = useStore(s => s.directorSceneDescription)
   const audioFile = useStore(s => s.directorAudioFile)
@@ -433,7 +511,6 @@ export function DirectorChat() {
   const shortFilmSetPath = useStore(s => s.shortFilmSetPath)
   const shortFilmPlanFromStory = useStore(s => s.shortFilmPlanFromStory)
   const shortFilmTargetDuration = useStore(s => s.shortFilmTargetDuration)
-  const shortFilmSetTargetDuration = useStore(s => s.shortFilmSetTargetDuration)
   const shortFilmNarrative = useStore(s => s.shortFilmNarrative)
   const shortFilmSetNarrative = useStore(s => s.shortFilmSetNarrative)
   const startDirectorPipeline = useStore(s => s.startDirectorPipeline)
@@ -443,6 +520,7 @@ export function DirectorChat() {
     pipelineStatus && !['completed', 'failed', 'cancelled'].includes(pipelineStatus.status),
   )
   const directorQueue = useStore(s => s.directorQueue)
+  const directorQueueLoading = useStore(s => s.directorQueueLoading)
   const directorQueueEditingEntryId = useStore(s => s.directorQueueEditingEntryId)
   const queueCurrentDirectorPipeline = useStore(s => s.queueCurrentDirectorPipeline)
   const usesShotImages = directorWillGenerateShotImages(
@@ -465,13 +543,21 @@ export function DirectorChat() {
   const [showAnalysisDetails, setShowAnalysisDetails] = useState(false)
   const sliderRef = useRef<number | null>(null)
   const [chatInput, setChatInput] = useState('')
+  const [draftQueuePending, setDraftQueuePending] = useState(false)
+  const [draftQueueConfirmation, setDraftQueueConfirmation] = useState<string | null>(null)
 
   // Sync chatInput with store's sceneDescription when entering style step
   useEffect(() => {
     if (step === 'style' && sceneDescription && !chatInput) {
       setChatInput(sceneDescription)
     }
-  }, [step])
+  }, [chatInput, sceneDescription, step])
+
+  useEffect(() => {
+    if (!draftQueueConfirmation) return
+    const timer = window.setTimeout(() => setDraftQueueConfirmation(null), 5000)
+    return () => window.clearTimeout(timer)
+  }, [draftQueueConfirmation])
 
   const refImagePreview = useMemo(
     () => referenceImage ? URL.createObjectURL(referenceImage) : null,
@@ -554,7 +640,7 @@ export function DirectorChat() {
     // Music Video "Generate a track": the chat is the song description, and
     // Send runs write-song → render track → analyze → plan → images → video.
     if (mvGenerateSetup) {
-      if (songDescription.trim() && !loading) generateTrack()
+      if (songDescription.trim() && !loading) void generateTrack('now')
       return
     }
     if (step === 'style' && chatInput.trim()) {
@@ -569,6 +655,44 @@ export function DirectorChat() {
       } else {
         planPrompts()
       }
+    }
+  }
+
+  const handleQueueDraft = async () => {
+    const description = (mvGenerateSetup ? songDescription : chatInput).trim()
+    if (!description || !chatInputEnabled || draftQueuePending || directorQueueLoading) return
+
+    // Keep the store authoritative even if the user clicks Queue immediately
+    // after typing. startDirectorPipeline freezes this value along with every
+    // selected model, LoRA, reference, and Director option.
+    if (!mvGenerateSetup) setSceneDescription(description)
+    setDraftQueuePending(true)
+    setDraftQueueConfirmation(null)
+    const before = useStore.getState()
+    const editingEntryId = before.directorQueueEditingEntryId
+    const beforeIds = new Set((before.directorQueue?.entries || []).map(entry => entry.id))
+    try {
+      if (mvGenerateSetup) {
+        await generateTrack('queue')
+      } else {
+        await queueCurrentDirectorPipeline()
+      }
+      const after = useStore.getState()
+      const queue = after.directorQueue
+      const savedEntry = editingEntryId
+        ? queue?.entries.find(entry => entry.id === editingEntryId)
+        : queue?.entries.find(entry => !beforeIds.has(entry.id))
+      if (!queue || !savedEntry || after.directorError) return
+      const waitingCount = queue.entries.filter(
+        entry => ['held', 'queued', 'running'].includes(entry.status),
+      ).length
+      setDraftQueueConfirmation(
+        editingEntryId
+          ? 'Queue changes saved. The project remains paused until Start Queue.'
+          : `Added to Queue · ${waitingCount} Director ${waitingCount === 1 ? 'project' : 'projects'} waiting. Configure another idea or press Start Queue when ready.`,
+      )
+    } finally {
+      setDraftQueuePending(false)
     }
   }
 
@@ -691,8 +815,41 @@ export function DirectorChat() {
         )}
 
         {pipelineActive && step === 'review_video' && (
-          <div className="rounded-lg border border-accent-blue/25 bg-accent-blue/10 px-3 py-2 text-[10px] leading-relaxed text-text-secondary">
-            The current render is frozen. Changes here apply to a new revision; Generate will add it to the held queue.
+          <div className="space-y-1 rounded-lg border border-accent-blue/25 bg-accent-blue/10 px-3 py-2 text-[10px] leading-relaxed text-text-secondary">
+            <div>
+              The current render is frozen. Changes here apply to a new revision; Generate will add it to the held queue.
+            </div>
+            {pipelineStatus?.progress?.current_clip && (
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 border-t border-accent-blue/15 pt-1 text-text-primary">
+                <span>
+                  Clip {pipelineStatus.progress.current_clip}/{pipelineStatus.progress.total_clips || '?'}
+                </span>
+                {pipelineStatus.progress.clip_eta_seconds != null && (
+                  <span>
+                    {formatEtaDuration(pipelineStatus.progress.clip_eta_seconds)} remaining
+                    {pipelineStatus.progress.clip_completion_at
+                      ? ` · around ${formatEstimatedClock(pipelineStatus.progress.clip_completion_at)}`
+                      : ''}
+                  </span>
+                )}
+                {pipelineStatus.progress.project_eta_seconds != null && (
+                  <span className="text-text-muted">
+                    Full render {formatEtaDuration(pipelineStatus.progress.project_eta_seconds)}
+                    {pipelineStatus.progress.project_completion_at
+                      ? ` · around ${formatEstimatedClock(pipelineStatus.progress.project_completion_at)}`
+                      : ''}
+                  </span>
+                )}
+                {pipelineStatus.progress.eta_confidence === 'calibrating' && (
+                  <span className="text-text-muted">Calibrating ETA…</span>
+                )}
+                {(pipelineStatus.progress.eta_history_samples ?? 0) > 0 && (
+                  <span className="text-text-muted">
+                    Based on {pipelineStatus.progress.eta_history_samples} {pipelineStatus.progress.eta_history_match === 'exact' ? 'matching' : 'related'} local render{pipelineStatus.progress.eta_history_samples === 1 ? '' : 's'}
+                  </span>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -702,8 +859,12 @@ export function DirectorChat() {
               <SystemBubble>
                 <p className="text-xs text-text-secondary mb-2">
                   {isShortFilm
-                    ? 'Upload dialogue audio, then add optional character and location references.'
-                    : 'Upload or generate a track, then add optional visual references.'}
+                    ? directorUsesOmniManifest
+                      ? 'Upload dialogue audio, then add ordered H3 Omni identity, motion, scene, voice, or style references.'
+                      : 'Upload dialogue audio, then add optional character and location references.'
+                    : directorUsesOmniManifest
+                      ? 'Upload or generate a track, then add ordered H3 Omni identity, motion, scene, voice, or style references.'
+                      : 'Upload or generate a track, then add optional visual references.'}
                 </p>
                 <div className="space-y-3">
                   {/* Music Video: upload a track OR generate one with the selected music model. */}
@@ -739,12 +900,11 @@ export function DirectorChat() {
                       isShortFilm={isShortFilm}
                     />
                   )}
-                  <ReferenceImageUpload
+                  <DirectorReferenceInputs
                     referenceImage={referenceImage}
                     refImagePreview={refImagePreview}
                     setReferenceImage={setReferenceImage}
                   />
-                  {<AdditionalRefsSection />}
                   {isShortFilm && referenceImage && (
                     <CharacterNaming
                       characters={shortFilmCharacters}
@@ -779,12 +939,12 @@ export function DirectorChat() {
                       as "my selections disappeared". Interaction is disabled
                       while loading; the state is untouched. */}
                   <div className={loading ? 'opacity-60 pointer-events-none' : ''}>
-                    <ReferenceImageUpload
+                    <DirectorReferenceInputs
                       referenceImage={referenceImage}
                       refImagePreview={refImagePreview}
                       setReferenceImage={setReferenceImage}
+                      disabled={loading}
                     />
-                    {<AdditionalRefsSection />}
                   </div>
                 </div>
               </SystemBubble>
@@ -823,12 +983,11 @@ export function DirectorChat() {
             {/* Allow adding/changing reference photo after analysis */}
             {!pastStep('style') && (
               <div className="mt-2 pt-2 border-t border-border/50">
-                <ReferenceImageUpload
+                <DirectorReferenceInputs
                   referenceImage={referenceImage}
                   refImagePreview={refImagePreview}
                   setReferenceImage={setReferenceImage}
                 />
-                {<AdditionalRefsSection />}
               </div>
             )}
           </SystemBubble>
@@ -879,42 +1038,23 @@ export function DirectorChat() {
             {isStoryPath && atStep('style') && (
               <SystemBubble>
                 <p className="text-xs text-text-secondary mb-2">
-                  Set up your short film. Upload a reference photo, name your characters, and set the target duration.
+                  {directorUsesOmniManifest
+                    ? 'Set up your short film with ordered H3 Omni image, video, and audio references, then set the target duration.'
+                    : 'Set up your short film. Upload a reference photo, name your characters, and set the target duration.'}
                 </p>
                 <div className="space-y-3">
-                  <ReferenceImageUpload
+                  <DirectorReferenceInputs
                     referenceImage={referenceImage}
                     refImagePreview={refImagePreview}
                     setReferenceImage={setReferenceImage}
                   />
-                  {<AdditionalRefsSection />}
                   {referenceImage && (
                     <CharacterNaming
                       characters={shortFilmCharacters}
                       setCharacters={shortFilmSetCharacters}
                     />
                   )}
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-[10px] text-text-muted flex items-center gap-1">
-                        <Clock size={10} /> Target Duration
-                      </span>
-                      <span className="text-[10px] text-text-primary font-medium">{shortFilmTargetDuration}s</span>
-                    </div>
-                    <input
-                      type="range"
-                      min={10}
-                      max={300}
-                      step={5}
-                      value={shortFilmTargetDuration}
-                      onChange={e => shortFilmSetTargetDuration(Number(e.target.value))}
-                      className="w-full h-1 bg-bg-hover rounded-lg appearance-none cursor-pointer accent-accent-blue"
-                    />
-                    <div className="flex justify-between text-[9px] text-text-muted mt-0.5">
-                      <span>10s</span>
-                      <span>5m</span>
-                    </div>
-                  </div>
+                  <DirectorTargetDurationControl />
                   <label className="flex items-center gap-2 cursor-pointer group">
                     <input
                       type="checkbox"
@@ -969,13 +1109,14 @@ export function DirectorChat() {
             <div className="flex items-center gap-2 py-1">
               <Loader2 size={14} className="animate-spin text-accent-blue" />
               <span className="text-xs text-text-muted">
-                {pipelinePhase === 'polishing_prompts'
+                {pipelineStatus?.progress?.message
+                  || (pipelinePhase === 'polishing_prompts'
                   ? 'Polishing prompts (3rd pass)...'
                   : isStoryPath
                     ? `Planning scenes and writing ${usesShotImages ? 'prompts' : 'video prompts'}...`
                     : isShortFilm
                       ? `Writing ${usesShotImages ? 'scene prompts' : 'video prompts'}...`
-                      : `Writing ${usesShotImages ? 'image and video prompts' : 'video prompts'}...`}
+                      : `Writing ${usesShotImages ? 'image and video prompts' : 'video prompts'}...`)}
               </span>
             </div>
             {pipelinePhase !== 'polishing_prompts' && <LlmThinkingStream stage="plan" />}
@@ -1075,6 +1216,7 @@ export function DirectorChat() {
             value={mvGenerateSetup ? songDescription : chatInput}
             onChange={e => {
               const v = e.target.value
+              setDraftQueueConfirmation(null)
               if (mvGenerateSetup) { setSongDescription(v); return }
               setChatInput(v)
               if (step === 'style') setSceneDescription(v)
@@ -1092,18 +1234,46 @@ export function DirectorChat() {
             maxHeight={240}
             className="flex-1 bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary placeholder:text-text-muted resize-none focus:outline-none focus:border-accent-blue transition-colors disabled:opacity-50 disabled:cursor-not-allowed scrollbar-visible"
           />
-          <button
-            onClick={handleChatSubmit}
-            disabled={!chatInputEnabled || !(mvGenerateSetup ? songDescription : chatInput).trim()}
-            className="p-2 rounded-lg bg-accent-blue text-white hover:bg-accent-blue-hover transition-colors disabled:opacity-30 disabled:cursor-not-allowed shrink-0"
-          >
-            {loading && (step === 'style' || isMusicVideo) ? (
-              <Loader2 size={16} className="animate-spin" />
-            ) : (
-              <Send size={16} />
-            )}
-          </button>
+          <div className="flex shrink-0 overflow-hidden rounded-lg border border-accent-blue/60">
+            <button
+              onClick={handleChatSubmit}
+              disabled={!chatInputEnabled || draftQueuePending || !(mvGenerateSetup ? songDescription : chatInput).trim()}
+              className="p-2 bg-accent-blue text-white hover:bg-accent-blue-hover transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+              title={mvGenerateSetup ? 'Generate the song and start this Director project' : 'Start this Director project now'}
+              aria-label={mvGenerateSetup ? 'Generate song and start Director project' : 'Start Director project now'}
+            >
+              {loading && (step === 'style' || isMusicVideo) && !draftQueuePending ? (
+                <Loader2 size={16} className="animate-spin" />
+              ) : (
+                <Send size={16} />
+              )}
+            </button>
+            <button
+              onClick={() => void handleQueueDraft()}
+              disabled={!chatInputEnabled || draftQueuePending || directorQueueLoading || !(mvGenerateSetup ? songDescription : chatInput).trim()}
+              className="border-l border-white/20 bg-accent-blue/85 px-2 text-white hover:bg-accent-blue-hover transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+              title={mvGenerateSetup
+                ? 'Generate the song, then hold the complete Director project in the paused queue'
+                : 'Add this complete Director project to the paused queue without starting it'}
+              aria-label={directorQueueEditingEntryId ? 'Save Director queue changes' : 'Add Director project to queue'}
+            >
+              {draftQueuePending || directorQueueLoading
+                ? <Loader2 size={14} className="animate-spin" />
+                : draftQueueConfirmation
+                  ? <Check size={14} />
+                  : <ListVideo size={14} />}
+            </button>
+          </div>
         </div>
+        {draftQueueConfirmation && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="rounded-md border border-green-500/20 bg-green-500/5 px-2.5 py-2 text-[10px] leading-relaxed text-indicator-success"
+          >
+            {draftQueueConfirmation}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -1180,7 +1350,17 @@ function CharacterNaming({
 function DirectorAspectRatioSelector({ disabled = false }: { disabled?: boolean }) {
   const ratio = useStore(s => s.directorAspectRatio)
   const setRatio = useStore(s => s.setDirectorAspectRatio)
+  const videoModel = useStore(s => s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1')
+  const supportsUltraWide = videoModel.toLowerCase().startsWith('minimax_h3')
+
+  useEffect(() => {
+    if (!supportsUltraWide && ratio === '21:9') setRatio('16:9')
+  }, [ratio, setRatio, supportsUltraWide])
+
   const presets = [
+    ...(supportsUltraWide
+      ? [{ value: '21:9' as const, label: '21:9', desc: 'Cinema' }]
+      : []),
     { value: '16:9' as const, label: '16:9', desc: 'Wide' },
     { value: '9:16' as const, label: '9:16', desc: 'Portrait' },
     { value: '1:1' as const, label: '1:1', desc: 'Square' },
@@ -1229,7 +1409,7 @@ function DirectorResolutionSelector({ disabled = false }: { disabled?: boolean }
 
   const fallbackOrder = ['480p', '540p', '720p', '1080p'] as const
   const modelPresetOrder = (options?.resolution_preset_order || []).filter(
-    value => value !== 'auto' && value !== '768p',
+    value => value !== 'auto',
   )
   const presetOrder = modelPresetOrder.length > 0
     ? modelPresetOrder
@@ -1562,6 +1742,39 @@ function ReferenceImageUpload({
   )
 }
 
+function DirectorReferenceInputs({
+  referenceImage,
+  refImagePreview,
+  setReferenceImage,
+  disabled = false,
+}: {
+  referenceImage: File | null
+  refImagePreview: string | null
+  setReferenceImage: (file: File | null) => void
+  disabled?: boolean
+}) {
+  const usesOmniManifest = useStore(s => {
+    const selected = s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+    return selected.toLowerCase().startsWith('minimax_h3_ref2va')
+      || s.models.find(model => model.model_type === selected)
+        ?.director?.video_strategy === 'omni_reference'
+  })
+
+  if (usesOmniManifest) {
+    return <OmniReferenceSection scope="director" disabled={disabled} />
+  }
+  return (
+    <>
+      <ReferenceImageUpload
+        referenceImage={referenceImage}
+        refImagePreview={refImagePreview}
+        setReferenceImage={setReferenceImage}
+      />
+      <AdditionalRefsSection />
+    </>
+  )
+}
+
 function DraggableRefRow({ file, label, index, onRemove, onLabelChange, onReorder, placeholder }: {
   file: File; label: string; index: number
   onRemove: (i: number) => void
@@ -1751,7 +1964,7 @@ function AdditionalRefsSection() {
 }
 
 function AnalysisSummary({
-  analysis, showDetails, setShowDetails, speakerMappings: _speakerMappings, isShortFilm,
+  analysis, showDetails, setShowDetails, isShortFilm,
 }: {
   analysis: NonNullable<ReturnType<typeof useStore.getState>['directorAnalysis']>
   showDetails: boolean
@@ -2045,6 +2258,13 @@ function DirectorAdvancedAccordion() {
     || s.directorCharacterRefPaths.length
     || s.directorLocationRefs.length
     || s.directorLocationRefPaths.length
+    || (
+      s.models.find(model => model.model_type === videoModel)
+        ?.director?.video_strategy === 'omni_reference'
+      && s.directorH3References.some(
+        reference => reference.type === 'image' || reference.type === 'video',
+      )
+    )
   ))
   const generateShotImages = directorWillGenerateShotImages(
     shotImageSupport,
@@ -2095,14 +2315,27 @@ function DirectorAdvancedAccordion() {
   const activeDirectorVideoOptions = directorVideoOptions?.model_type === videoModel
     ? directorVideoOptions
     : null
+  const videoStepsMin = Math.max(
+    1,
+    Math.round(Number(activeDirectorVideoOptions?.inference_steps_min ?? 1)),
+  )
+  const videoStepsMax = Math.max(
+    videoStepsMin,
+    Math.round(Number(activeDirectorVideoOptions?.inference_steps_max ?? 50)),
+  )
+  const clampVideoSteps = (value: number) => (
+    Math.max(videoStepsMin, Math.min(videoStepsMax, Math.round(value)))
+  )
   const rawDefaultVideoSteps = activeDirectorVideoOptions?.default_num_inference_steps
   const defaultVideoSteps = rawDefaultVideoSteps == null
     ? null
-    : Math.max(1, Math.min(50, Math.round(rawDefaultVideoSteps)))
+    : clampVideoSteps(rawDefaultVideoSteps)
   const configuredVideoSteps = videoStepsByModel[videoModel]
   const videoSteps = activeDirectorVideoOptions?.lock_inference_steps
     ? defaultVideoSteps
-    : (configuredVideoSteps ?? defaultVideoSteps)
+    : (configuredVideoSteps == null
+        ? defaultVideoSteps
+        : clampVideoSteps(configuredVideoSteps))
   const videoStepsLocked = activeDirectorVideoOptions?.lock_inference_steps === true
   const resolvedVideoResolution = resolveResolution(
     activeDirectorVideoOptions,
@@ -2256,7 +2489,9 @@ function DirectorAdvancedAccordion() {
 
             <div title="Applies to every newly generated Director shot and is saved with the project for later repair or regeneration.">
               <div className="flex items-center justify-between mb-1">
-                <label className="text-[11px] text-text-secondary">Inference steps</label>
+                <label className="text-[11px] text-text-secondary">
+                  {activeDirectorVideoOptions?.inference_steps_label || 'Inference steps'}
+                </label>
                 <div className="flex items-center gap-1.5">
                   {!videoStepsLocked && !turboSelected && defaultVideoSteps != null && configuredVideoSteps != null
                     && configuredVideoSteps !== defaultVideoSteps && (
@@ -2270,14 +2505,16 @@ function DirectorAdvancedAccordion() {
                   )}
                   <input
                     type="number"
-                    min={1}
-                    max={50}
+                    min={videoStepsMin}
+                    max={videoStepsMax}
                     step={1}
                     value={videoSteps ?? ''}
                     disabled={videoSteps == null || videoStepsLocked || turboSelected}
                     onChange={e => {
                       const value = Number(e.target.value)
-                      if (Number.isFinite(value)) setVideoSteps(videoModel, value)
+                      if (Number.isFinite(value)) {
+                        setVideoSteps(videoModel, clampVideoSteps(value))
+                      }
                     }}
                     className="w-14 bg-bg-tertiary border border-border rounded px-1.5 py-0.5 text-[11px] text-text-primary text-center focus:outline-none focus:border-accent-blue disabled:opacity-50"
                   />
@@ -2285,12 +2522,15 @@ function DirectorAdvancedAccordion() {
               </div>
               <input
                 type="range"
-                min={1}
-                max={50}
+                min={videoStepsMin}
+                max={videoStepsMax}
                 step={1}
                 value={videoSteps ?? 1}
                 disabled={videoSteps == null || videoStepsLocked || turboSelected}
-                onChange={e => setVideoSteps(videoModel, Number(e.target.value))}
+                onChange={e => setVideoSteps(
+                  videoModel,
+                  clampVideoSteps(Number(e.target.value)),
+                )}
                 className="w-full disabled:opacity-50"
               />
               <p className="text-[10px] text-text-muted mt-0.5">
@@ -2300,7 +2540,8 @@ function DirectorAdvancedAccordion() {
                   ? 'Fixed by this model.'
                   : videoSteps == null
                     ? 'Loading model default...'
-                    : `Director setting for this model${defaultVideoSteps === videoSteps ? ' (default)' : ''}.`}
+                    : activeDirectorVideoOptions?.inference_steps_help
+                      || `Director setting for this model${defaultVideoSteps === videoSteps ? ' (default)' : ''}.`}
               </p>
             </div>
 
@@ -2525,6 +2766,14 @@ function DirectorModelSelection({ disabled = false }: { disabled?: boolean }) {
     || s.directorCharacterRefPaths.length
     || s.directorLocationRefs.length
     || s.directorLocationRefPaths.length
+    || (
+      s.models.find(model => model.model_type === (
+        s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+      ))?.director?.video_strategy === 'omni_reference'
+      && s.directorH3References.some(
+        reference => reference.type === 'image' || reference.type === 'video',
+      )
+    )
   ))
   const selectDirectorImageModel = useStore(s => s.selectDirectorImageModel)
   const selectDirectorVideoModel = useStore(s => s.selectDirectorVideoModel)
@@ -2582,6 +2831,9 @@ function DirectorLoraAccordion() {
   // (flux2_klein_9b) instead of the active Studio model fixes that.
   const imageModel = useStore(s => s.selectedModelPerMode.image || 'flux2_klein_9b')
   const videoModel = useStore(s => s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1')
+  const videoLorasDisabled = useStore(s => s.models.find(
+    model => model.model_type === videoModel,
+  )?.loras_disabled === true)
   const shotImageSupport = useStore(s => s.models.find(
     model => model.model_type === videoModel,
   )?.director?.shot_image_support)
@@ -2593,6 +2845,13 @@ function DirectorLoraAccordion() {
     || s.directorCharacterRefPaths.length
     || s.directorLocationRefs.length
     || s.directorLocationRefPaths.length
+    || (
+      s.models.find(model => model.model_type === videoModel)
+        ?.director?.video_strategy === 'omni_reference'
+      && s.directorH3References.some(
+        reference => reference.type === 'image' || reference.type === 'video',
+      )
+    )
   ))
   const generateShotImages = directorWillGenerateShotImages(
     shotImageSupport,
@@ -2622,7 +2881,7 @@ function DirectorLoraAccordion() {
         </div>
       )}
       {/* Video LoRAs */}
-      {videoModel && (
+      {videoModel && !videoLorasDisabled && (
         <div className="border border-border rounded-lg overflow-hidden">
           <button
             onClick={() => setVideoOpen(!videoOpen)}
@@ -2637,6 +2896,11 @@ function DirectorLoraAccordion() {
             </div>
           )}
         </div>
+      )}
+      {videoModel && videoLorasDisabled && (
+        <p className="rounded-lg border border-amber-500/25 bg-amber-500/8 px-2.5 py-2 text-[9px] leading-relaxed text-text-muted">
+          Video LoRAs are disabled because this model already contains its Turbo and Mystic adapters.
+        </p>
       )}
     </div>
   )
@@ -2762,7 +3026,7 @@ function StyleForm({
 
 function ImagePromptsReview({
   clipPlans, plannedClips, speakerMappings, editClipPlan, planPrompts,
-  planVideoPrompts: _planVideoPrompts, generateStartImages, loading, isActive, isShortFilm,
+  generateStartImages, loading, isActive, isShortFilm,
 }: {
   clipPlans: ReturnType<typeof useStore.getState>['directorClipPlans']
   plannedClips: ReturnType<typeof useStore.getState>['directorPlannedClips']
@@ -2844,7 +3108,7 @@ function ImagePromptsReview({
 }
 
 function ImageGenView({
-  loading, imageGenProgress, clipImages, planVideoPrompts: _planVideoPrompts2,
+  loading, imageGenProgress, clipImages,
 }: {
   loading: boolean
   imageGenProgress: ReturnType<typeof useStore.getState>['directorImageGenProgress']

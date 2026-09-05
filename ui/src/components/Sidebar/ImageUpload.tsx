@@ -18,14 +18,16 @@ export function ImageUpload() {
     e.preventDefault()
     const file = e.dataTransfer.files[0]
     if (file && file.type.startsWith('image/')) {
-      target === 'start' ? setStartImage(file) : setEndImage(file)
+      if (target === 'start') setStartImage(file)
+      else setEndImage(file)
     }
   }, [setStartImage, setEndImage])
 
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>, target: 'start' | 'end') => {
     const file = e.target.files?.[0]
     if (file) {
-      target === 'start' ? setStartImage(file) : setEndImage(file)
+      if (target === 'start') setStartImage(file)
+      else setEndImage(file)
     }
   }, [setStartImage, setEndImage])
 

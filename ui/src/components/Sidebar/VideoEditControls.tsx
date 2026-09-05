@@ -33,7 +33,7 @@ export function VideoEditControls() {
     try {
       const result = await api.uploadImage(file)
       setRefImage(file)
-      setParam('image_refs' as any, [result.path])
+      setParam('image_refs', [result.path])
       // Add K and I to video_prompt_type for reference image
       const vpt = params.video_prompt_type || ''
       let newVpt = vpt
@@ -129,7 +129,7 @@ export function VideoEditControls() {
                 onClick={e => {
                   e.stopPropagation()
                   setRefImage(null)
-                  setParam('image_refs' as any, undefined)
+                  setParam('image_refs', undefined)
                 }}
                 className="p-0.5 rounded hover:bg-bg-hover text-text-muted"
               >

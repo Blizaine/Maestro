@@ -6,10 +6,13 @@ This is a HARD rule. It is not a guidance hint, not a user-toggleable
 setting, and not gated on any optional download — it ships with the
 public repo and is always active.
 
-Hybrid co-occurrence detection: a match requires BOTH minor-vocabulary
-AND sexual-vocabulary present in the same scanned blob. This avoids
-false positives on legitimate non-sexual content involving minors
-(children's films, family stories) AND on legitimate adult NSFW content.
+Hybrid co-occurrence detection: a match requires BOTH person-specific
+minor vocabulary AND sexual vocabulary in the same semantic scope. This
+avoids false positives on legitimate non-sexual content involving minors
+(children's films, family stories), legitimate adult NSFW content, and
+ordinary production phrases such as "minor camera movement". Structured
+shot lists are checked one shot at a time so unrelated words from a long
+sequence cannot combine into a synthetic violation.
 A match aborts the generation pipeline via SafetyViolationError, which
 the pipeline error handler in director_pipeline.py converts into a clean
 user-visible message in the chat.
@@ -52,7 +55,7 @@ class SafetyViolationError(RuntimeError):
 
 _MINOR_TERMS: tuple[str, ...] = (
     # Direct age vocabulary.
-    "child", "children", "kid", "kids", "minor", "minors", "underage",
+    "child", "children", "kid", "kids", "minors", "underage",
     "adolescent", "adolescents", "youngster", "youngsters",
     "juvenile", "juveniles",
     # Very young.
@@ -116,6 +119,25 @@ _AGE_NUMERIC = re.compile(
     re.IGNORECASE,
 )
 
+# Singular ``minor`` is unusually ambiguous in film-production text: local
+# models naturally write "minor damage", "minor camera adjustment", and
+# "minor character".  Treat it as age evidence only when grammar identifies
+# a person.  The plural ``minors`` remains in _MINOR_TERMS because it is
+# overwhelmingly person-specific.
+_MINOR_PERSON_CONTEXT = re.compile(
+    r"(?:\b(?:a|an|the|this|that|any|each|every|one)\s+minor's\b|"
+    r"\b(?:a|an|the|this|that|any|each|every|one)\s+minor\b"
+    r"(?=\s*(?:$|[.!?;:]|\b(?:who|whom|whose|is|was|being|remains?|"
+    r"appears?|speaks?|talks?|walks?|stands?|sits?|lies?|undresses?|"
+    r"strips?|touches?|enters?|leaves?|continues?)\b))|"
+    r"\bminor(?:-aged)?\s+(?:person|people|individual|individuals|child|"
+    r"children|girl|girls|boy|boys|teen|teens|teenager|teenagers|student|"
+    r"students)\b|"
+    r"\b(?:person|individual|child|girl|boy|teen|teenager|student)\s+"
+    r"(?:is|was|being|remains?)\s+(?:a|an)?\s*minor\b)",
+    re.IGNORECASE,
+)
+
 
 def _build_regex(terms: Iterable[str]) -> "re.Pattern[str]":
     """Compile a case-insensitive word-boundary alternation from a term list.
@@ -161,6 +183,8 @@ def screenplay_contains_minor_content(text: str) -> list[str]:
     if not text:
         return []
     minor_hits = _hits(_minor_regex(), text)
+    if _MINOR_PERSON_CONTEXT.search(text):
+        minor_hits.append("minor")
     minor_hits += [m.group(0).lower() for m in _AGE_NUMERIC.finditer(text)]
     if not minor_hits:
         return []
@@ -206,3 +230,29 @@ def collect_pass2_text(shot_dicts: list[dict]) -> str:
 
     collect(shot_dicts)
     return "\n".join(parts)
+
+
+def assert_no_minor_content_in_pass2(
+    shot_dicts: list[dict],
+    source: str,
+) -> None:
+    """Apply the hard rule within each structured shot's semantic scope.
+
+    A Pass-2 response can contain many independent shots and hundreds of
+    string fields. Concatenating all of them lets an innocent age word in one
+    shot combine with an unrelated movement or anatomy word several shots
+    later. Each shot already repeats its visible cast and action contract, so
+    it is the correct unit for co-occurrence detection and still catches a
+    minor descriptor in one field plus prohibited action in another.
+    """
+
+    if not shot_dicts:
+        return
+    for index, shot in enumerate(shot_dicts):
+        scoped_text = collect_pass2_text([shot])
+        matches = screenplay_contains_minor_content(scoped_text)
+        if matches:
+            raise SafetyViolationError(
+                source=f"{source}, shot {index + 1}",
+                matched_terms=matches,
+            )

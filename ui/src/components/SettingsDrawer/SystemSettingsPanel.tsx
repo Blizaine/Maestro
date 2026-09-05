@@ -56,7 +56,7 @@ const MODE_LABELS: { mode: GenerationMode; label: string }[] = [
   { mode: 'image', label: 'Image' },
   { mode: 'video', label: 'Video' },
   { mode: 'audio', label: 'Audio' },
-  { mode: 'avatar', label: 'Edit' },
+  { mode: 'avatar', label: 'Video Transforms' },
 ]
 
 // Family collapse state persists so "collapse the families I never use"
@@ -81,7 +81,7 @@ function ModelVisibilitySection() {
   const modelVisibilityFocus = useStore(s => s.modelVisibilityFocus)
   const clearModelVisibilityFocus = useStore(s => s.clearModelVisibilityFocus)
   // Root open by default so the section is discoverable; mode groups
-  // (Image/Video/Audio/Edit) start collapsed to keep the list scannable.
+  // (Image/Video/Audio/Video Transforms) start collapsed to keep the list scannable.
   const [open, setOpen] = useState(true)
   const [expandedModes, setExpandedModes] = useState<Set<GenerationMode>>(new Set())
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)

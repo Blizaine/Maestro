@@ -1,4 +1,4 @@
-"""Regression coverage for Voice Reference and beta-feature defaults."""
+"""Regression coverage for LTX-only Voice Reference settings."""
 
 import os
 import unittest
@@ -14,6 +14,14 @@ _SERVICES_PANEL_PATH = os.path.join(
     "SettingsDrawer",
     "ServicesSettingsPanel.tsx",
 )
+_ADVANCED_PATH = os.path.join(
+    _ROOT,
+    "ui",
+    "src",
+    "components",
+    "Sidebar",
+    "AdvancedSettings.tsx",
+)
 
 
 def _read(path):
@@ -22,11 +30,16 @@ def _read(path):
 
 
 class TestVoiceReferenceSettings(unittest.TestCase):
-    def test_voice_reference_defaults_on_while_beta_features_default_off(self):
+    def test_voice_reference_and_multishot_default_off(self):
         launch = _read(_LAUNCH_PATH)
         self.assertIn(
             '"voice_reference_enabled": services.get('
-            '"voice_reference_enabled", True)',
+            '"voice_reference_enabled", False)',
+            launch,
+        )
+        self.assertIn(
+            '"director_multishot_lora_mode": services.get('
+            '"director_multishot_lora_mode", False)',
             launch,
         )
         self.assertIn(
@@ -34,19 +47,18 @@ class TestVoiceReferenceSettings(unittest.TestCase):
             launch,
         )
 
-    def test_voice_reference_setting_is_not_behind_beta_feature_gate(self):
+    def test_ltx_controls_moved_out_of_integrations(self):
         panel = _read(_SERVICES_PANEL_PATH)
-        block_start = panel.index("{/* Voice Reference (ID-LoRA)")
-        block_end = panel.index("</label>", block_start)
-        voice_reference_block = panel[block_start:block_end]
+        self.assertNotIn("Voice Reference (ID-LoRA)", panel)
+        self.assertNotIn("Multi-Shot LoRA Mode", panel)
 
-        self.assertIn("Voice Reference (ID-LoRA)", voice_reference_block)
-        self.assertIn("voice_reference_enabled", voice_reference_block)
-        self.assertNotIn("show_experimental", voice_reference_block)
-        self.assertNotIn("Experimental", voice_reference_block)
-
-        beta_copy = panel[panel.index("Show in-development features"):]
-        self.assertNotIn("Voice Reference", beta_copy)
+        advanced = _read(_ADVANCED_PATH)
+        self.assertIn("function LtxFramesExperimentalControls()", advanced)
+        self.assertIn("workflow !== 'frames'", advanced)
+        self.assertIn("architecture.startsWith('ltx2')", advanced)
+        self.assertIn("Voice Reference (ID-LoRA)", advanced)
+        self.assertIn("Multi-Shot LoRA Prompting", advanced)
+        self.assertIn("Off by default", advanced)
 
 
 if __name__ == "__main__":

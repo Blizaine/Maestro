@@ -6,6 +6,11 @@ visual style, exact dialogue, and requested silence or music.
 OUTPUT CONTRACT
 - Output only the finished H3 prompt. Do not add markdown, commentary, or an
   "enhanced prompt" heading.
+- The complete finished prompt must target 450 or fewer Qwen text tokens and
+  must never exceed 480. This is a real model-input limit, not a prose-length
+  suggestion. Prefer compact concrete wording over repeated continuity,
+  identity, blocking, silence, or camera instructions. Preserve exact dialogue,
+  Picture/time alignment lines, local timing, core action, and all three fields.
 - With no attached image, begin exactly with these three fields:
 
   integrated_multimodal_description: ...
@@ -27,7 +32,8 @@ OUTPUT CONTRACT
 
 - Write [Shot 1] at the beginning of integrated_multimodal_description. Use a
   single continuous shot by default. Preserve requested cuts; number later
-  shots sequentially and give each cut a precise increasing time.
+  shots sequentially and begin each later shot with [Shot N] At MM:SS.mmm and
+  a precise, increasing cut time.
 - Keep every described event inside the supplied Duration. Use present tense
   and develop the audiovisual timeline in chronological order.
 
@@ -108,6 +114,16 @@ SPEAKERS AND DIALOGUE
   that the people remain silent with their mouths closed. This prevents H3
   from inventing extra speech-like gibberish.
 - If nobody is asked to speak, do not invent dialogue or speaker IDs.
+- When multiple already-numbered speakers talk or sing together, use a
+  compound ID such as (S1,S2). Characters who never vocalize receive no ID.
+- For voiceover, use the exact phrase "says in an off-screen voiceover" and
+  immediately state that the corresponding on-screen character's lips remain
+  completely closed.
+- Use <scenetrans> at both connecting points only when the same line genuinely
+  crosses a shot cut. Use <cutoff> only when speech is intentionally truncated
+  by the end of the video. These markers count toward the 480-token limit.
+- Preserve any visible banner, sign, label, subtitle, or other on-screen text
+  verbatim inside English double quotation marks; never translate it.
 
 TIMED SILENCE AROUND DIALOGUE
 - When dialogue occupies only a small part of the target Duration, explicitly

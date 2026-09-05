@@ -10,6 +10,8 @@ from __future__ import annotations
 import math
 import os
 import re
+import threading
+from functools import lru_cache
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -50,6 +52,1095 @@ MINIMAX_H3_QWEN_VIDEO_SAMPLE_FPS = 2.0
 MINIMAX_H3_QWEN_TEMPORAL_PATCH = 2
 _REFERENCE_TAG_RE = re.compile(r"<(?:Picture|Video|Audio)\s+\d+>", re.IGNORECASE)
 _PICTURE_TAG_RE = re.compile(r"<Picture\s+(\d+)>", re.IGNORECASE)
+_DIALOGUE_TAG_RE = re.compile(r"<d(?:\s+[^>]*)?>(.*?)</d>", re.IGNORECASE | re.DOTALL)
+_SPEAKER_MARKER_RE = re.compile(r"\(S(\d+)\)", re.IGNORECASE)
+_AUDIO_LABEL_RE = re.compile(
+    r"(?P<tag><Audio\s+(?P<tag_index>\d+)>)|"
+    r"(?P<plain>\bAudio\s+(?P<plain_index>\d+)\b)",
+    re.IGNORECASE,
+)
+_SPEECH_VERB_RE = re.compile(
+    r"\b(?:say|says|said|ask|asks|asked|reply|replies|replied|respond|responds|"
+    r"responded|answer|answers|answered|speak|speaks|spoke|shout|shouts|shouted|"
+    r"yell|yells|yelled|whisper|whispers|whispered|exclaim|exclaims|exclaimed|"
+    r"murmur|murmurs|murmured|call|calls|called|cry|cries|cried|add|adds|added|"
+    r"remark|remarks|remarked|state|states|stated|declare|declares|declared|"
+    r"warn|warns|warned|demand|demands|demanded|tell|tells|told)\b",
+    re.IGNORECASE,
+)
+_DIALOGUE_OWNER_NAME_RE = re.compile(
+    r"(?<!\w)([A-Z][A-Za-z0-9_'’-]*(?:\s+[A-Z][A-Za-z0-9_'’-]*){0,3})(?!\w)"
+)
+_DIALOGUE_OWNER_LEADING_WORDS = {
+    "a", "after", "an", "and", "as", "at", "both", "during", "from",
+    "he", "her", "his", "immediately", "in", "inside", "it", "later",
+    "next", "only", "outside", "she", "the", "their", "then", "they",
+    "this", "while", "with",
+}
+
+_REF2VA_DIALOGUE_OWNERSHIP_CONTRACT = (
+    "Each tagged line is performed once by its adjacent <Subject N> (Sx) speaker."
+)
+_REF2VA_VOICE_ACOUSTIC_CONTRACT = (
+    "Voice references define vocal identity, timbre, emotion, and delivery; each new performance "
+    "uses the distance, reflections, and ambience of the target environment."
+)
+_REF2VA_IDENTITY_ISOLATION_CONTRACT = (
+    "Identity references define subject appearance; the target uses the newly described setting, "
+    "composition, pose, camera view, and natural motion."
+)
+
+_REFERENCE_BACKGROUND_SESSION = None
+_REFERENCE_BACKGROUND_SESSION_LOCK = threading.Lock()
+_REFERENCE_BACKGROUND_RUN_LOCK = threading.Lock()
+
+_REF2VA_CONTEXT_IR_HEADERS = (
+    "subject_definitions",
+    "summary",
+    "retention_analysis",
+    "detailed_description",
+    "overall_soundscape",
+    "non_diegetic_music",
+)
+
+
+def _normalize_ref2va_context_ir_sections(text: str) -> str:
+    """Keep MiniMax's six Context-IR fields as distinct prompt sections.
+
+    Window-scoped reference filtering edits an already compiled prompt.  An
+    omitted reference clause can be the final sentence before the next field;
+    if its terminating newline is removed as part of that clause, MiniMax sees
+    ``summary`` as more subject prose (and ``detailed_description`` as
+    retention prose).  Besides confusing narration with dialogue, that can
+    promote an identity reference into target footage.  Normalize recognized
+    field boundaries after every such edit, including saved prompts produced
+    by older Maestro versions.
+    """
+
+    source = str(text or "").strip()
+    if not source or not re.search(
+        r"(?i)\bsubject_definitions\s*:",
+        source,
+    ):
+        return source
+    for header in _REF2VA_CONTEXT_IR_HEADERS[1:]:
+        source = re.sub(
+            rf"(?:[ \t]+|\r?\n[ \t]*)({re.escape(header)}\s*:)",
+            lambda match: f"\n\n{match.group(1)}",
+            source,
+            flags=re.IGNORECASE,
+        )
+    source = re.sub(r"\r?\n[ \t]*\r?\n(?:[ \t]*\r?\n)+", "\n\n", source)
+    return source.strip()
+
+
+def _validate_ref2va_context_ir_sections(text: str) -> str:
+    """Reject a complete Context-IR prompt if its field layout is corrupted."""
+
+    source = _normalize_ref2va_context_ir_sections(text)
+    present = [
+        bool(re.search(rf"(?mi)^\s*{re.escape(header)}\s*:", source))
+        for header in _REF2VA_CONTEXT_IR_HEADERS
+    ]
+    # Advanced manual prompts may intentionally provide only a subset.  A
+    # generated six-field prompt, however, must remain complete and ordered.
+    if not all(present):
+        return source
+    offsets = [
+        re.search(rf"(?mi)^\s*{re.escape(header)}\s*:", source).start()
+        for header in _REF2VA_CONTEXT_IR_HEADERS
+    ]
+    if offsets != sorted(offsets):
+        raise ValueError(
+            "MiniMax H3 Omni Context-IR sections are out of order after "
+            "reference preparation; no generation was started."
+        )
+    return source
+
+
+def _sanitize_legacy_ref2va_context_ir(text: str) -> str:
+    """Remove old Maestro control prose that H3 can mistake for speech.
+
+    Before the native Subject/Speaker/Audio compiler, saved sequence prompts
+    used repeated negative instructions such as ``never spoken narration`` and
+    ``only X's mouth moves``.  Ref2VA sometimes performs that prose instead of
+    treating it as metadata.  Loaded gallery settings can still contain those
+    prompts, so sanitize them at the final model boundary as well as
+    invalidating their planner signature.
+    """
+
+    source = _normalize_ref2va_context_ir_sections(text)
+    if not (
+        re.search(r"(?mi)^\s*subject_definitions\s*:", source)
+        and re.search(r"(?mi)^\s*detailed_description\s*:", source)
+    ):
+        return source
+
+    definitions = re.search(
+        r"(?ms)^\s*subject_definitions\s*:(.*?)(?=^\s*summary\s*:)",
+        source,
+    )
+    if definitions:
+        body = definitions.group(1)
+        canonical_start = re.search(
+            r"<Subject\s+\d+>\s+is\b",
+            body,
+            flags=re.IGNORECASE,
+        )
+        # Old LLM output was sometimes concatenated directly before Maestro's
+        # canonical reference map (``black shirt <Subject 1> is ...``).  Drop
+        # only a prefix that contains no reference label of its own.
+        if (
+            canonical_start
+            and not _REFERENCE_TAG_RE.search(body[:canonical_start.start()])
+        ):
+            body = body[canonical_start.start():]
+            source = (
+                f"{source[:definitions.start(1)]} {body.strip()}\n\n"
+                f"{source[definitions.end(1):].lstrip()}"
+            )
+
+    substitutions = (
+        (r"\bVisual direction only,\s*never spoken narration:\s*", ""),
+        (r"\bSilent visual action,\s*never spoken narration:\s*", ""),
+        (
+            r",?\s*only\s+[^,.;:\r\n]{1,100}['’]s\s+mouth\s+moves\s+while\s+"
+            r"every\s+other\s+visible\s+mouth\s+stays\s+closed",
+            "",
+        ),
+        (
+            r"\s*Immediately after the line,\s*the speaker closes their mouth\.",
+            "",
+        ),
+        (
+            r"\s*Only the tagged words are spoken once in order\.\s*Outside those "
+            r"lines, there are no additional spoken words, muttering, or gibberish\.",
+            "",
+        ),
+        (
+            r"\s*No words are spoken or mouthed in this shot;\s*only explicitly "
+            r"requested nonverbal reactions may be heard\.",
+            "",
+        ),
+        (
+            r"\b[A-Z][A-Za-z0-9 _'’.-]{0,80}\s+visibly delivers the assigned "
+            r"dialogue line(?:\.\s*Then\s+|\.?)",
+            "",
+        ),
+    )
+    for pattern, replacement in substitutions:
+        source = re.sub(pattern, replacement, source, flags=re.IGNORECASE)
+    source = re.sub(r"[ \t]{2,}", " ", source)
+    source = re.sub(r"(?m)^\s*;\s*", "", source)
+    return _normalize_ref2va_context_ir_sections(source)
+
+
+def _normalize_ref2va_speaker_alias(value: Any) -> str:
+    alias = re.sub(r"\s+", " ", str(value or "").strip().casefold())
+    alias = re.sub(
+        r"\s+(?:voice(?:\s+reference)?|audio(?:\s+reference)?|character\s+reference)\s*$",
+        "",
+        alias,
+    )
+    return alias.strip(" \t\r\n.,:;_-–—")
+
+
+def _ref2va_character_visual(item: dict) -> bool:
+    kind = item.get("type")
+    return (
+        kind == "image" and item.get("image_intent", "identity") == "identity"
+    ) or (
+        kind == "video" and item.get("video_intent", "motion") == "character"
+    )
+
+
+def _ref2va_alias_values(item: dict, fallback_role: str = "") -> list[str]:
+    values: list[str] = []
+    for raw in (item.get("character_name"), item.get("role"), fallback_role):
+        alias = _normalize_ref2va_speaker_alias(raw)
+        if alias and alias not in values:
+            values.append(alias)
+    return values
+
+
+def _build_ref2va_character_bindings(items: list[dict]):
+    """Assign character Subjects before scene/style Subjects are described.
+
+    Saved-character media may be interleaved (or contain both an image and a
+    video), but one library character must always remain one Subject.  The
+    returned alias table contains only unambiguous names.
+    """
+
+    key_subjects: dict[str, int] = {}
+    reference_subjects: dict[int, int] = {}
+    character_subjects: dict[str, int] = {}
+    alias_candidates: dict[str, set[int]] = {}
+
+    for reference_index, item in enumerate(items):
+        if not _ref2va_character_visual(item):
+            continue
+        library_id = str(item.get("library_character_id") or "").strip()
+        aliases = _ref2va_alias_values(item)
+        identity_key = (
+            f"library:{library_id}"
+            if library_id
+            else f"name:{aliases[0]}"
+            if aliases
+            else f"reference:{reference_index}"
+        )
+        subject = key_subjects.get(identity_key)
+        if subject is None:
+            subject = len(key_subjects) + 1
+            key_subjects[identity_key] = subject
+        reference_subjects[reference_index] = subject
+        if library_id:
+            character_subjects[library_id] = subject
+        for alias in aliases:
+            alias_candidates.setdefault(alias, set()).add(subject)
+
+    # Audio references often appear before their paired visual reference.
+    # Register their names after all visual subjects have been allocated.
+    for item in items:
+        if item.get("type") != "audio" or item.get("audio_intent", "voice") != "voice":
+            continue
+        library_id = str(item.get("library_character_id") or "").strip()
+        mapped_subject = character_subjects.get(library_id) if library_id else None
+        if mapped_subject is None:
+            for alias in _ref2va_alias_values(item):
+                candidates = alias_candidates.get(alias, set())
+                if len(candidates) == 1:
+                    mapped_subject = next(iter(candidates))
+                    break
+        if mapped_subject is not None:
+            for alias in _ref2va_alias_values(item):
+                alias_candidates.setdefault(alias, set()).add(mapped_subject)
+
+    speaker_aliases = {
+        alias: next(iter(subjects))
+        for alias, subjects in alias_candidates.items()
+        if len(subjects) == 1
+    }
+    role_subjects = dict(speaker_aliases)
+    return (
+        reference_subjects,
+        character_subjects,
+        role_subjects,
+        speaker_aliases,
+        len(key_subjects),
+    )
+
+
+def _ref2va_audio_item_subject(
+    item: dict,
+    character_subjects: dict[str, int],
+    role_subjects: dict[str, int],
+) -> int | None:
+    """Return the immutable visual Subject paired with one voice reference."""
+
+    library_id = str(item.get("library_character_id") or "").strip()
+    if library_id and library_id in character_subjects:
+        return character_subjects[library_id]
+    for alias in _ref2va_alias_values(item):
+        subject = role_subjects.get(alias)
+        if subject is not None:
+            return subject
+    return None
+
+
+def _ref2va_voice_audio_by_subject(
+    items: list[dict],
+    character_subjects: dict[str, int],
+    role_subjects: dict[str, int],
+) -> dict[int, int]:
+    """Map each stable visual Subject to its independent Audio ordinal."""
+
+    result: dict[int, int] = {}
+    audio_ordinal = 0
+    for item in items:
+        kind = item.get("type")
+        carries_audio = kind == "audio" or (
+            kind == "video"
+            and (item.get("has_audio") or item.get("audio_path"))
+            and item.get("include_audio", True)
+        )
+        if not carries_audio:
+            continue
+        audio_ordinal += 1
+        if kind != "audio" or item.get("audio_intent", "voice") != "voice":
+            continue
+        subject = _ref2va_audio_item_subject(
+            item,
+            character_subjects,
+            role_subjects,
+        )
+        if subject is not None:
+            result.setdefault(subject, audio_ordinal)
+    return result
+
+
+def _ref2va_audio_ordinals_by_item(items: list[dict]) -> dict[int, int]:
+    """Return the independent ``<Audio N>`` ordinal owned by each item."""
+
+    labels: dict[int, int] = {}
+    ordinal = 0
+    for index, item in enumerate(items):
+        kind = item.get("type")
+        carries_audio = kind == "audio" or (
+            kind == "video"
+            and (item.get("has_audio") or item.get("audio_path"))
+            and item.get("include_audio", True)
+        )
+        if carries_audio:
+            ordinal += 1
+            labels[index] = ordinal
+    return labels
+
+
+def canonicalize_ref2va_reference_order(
+    prompt: str,
+    references,
+) -> tuple[str, list[dict], dict[str, dict[int, int]]]:
+    """Present visual references before standalone audio references.
+
+    MiniMax treats the packed reference order as semantic.  ComfyUI/WanGP's
+    native Ref2VA input path presents every visual reference first, followed
+    by standalone audio references.  Saved Maestro characters arrive as
+    ``image, audio, image, audio`` pairs, which previously interleaved audio
+    rows between character portraits on the shared rotary timeline.  Keep the
+    each modality's user order intact, group pictures before videos and
+    standalone audio, and atomically remap Audio labels when an audio-bearing
+    video makes that necessary.
+    """
+
+    items = validate_reference_manifest(
+        references,
+        require_files=False,
+        require_visual=False,
+        allow_empty=True,
+    )
+    indexed = list(enumerate(items))
+    ordered_entries = [
+        entry for kind in ("image", "video", "audio")
+        for entry in indexed
+        if entry[1].get("type") == kind
+    ]
+    if [index for index, _item in ordered_entries] == list(range(len(items))):
+        return str(prompt or ""), items, {}
+
+    old_audio = _ref2va_audio_ordinals_by_item(items)
+    ordered_items = [item for _index, item in ordered_entries]
+    new_audio_by_original: dict[int, int] = {}
+    ordinal = 0
+    for original_index, item in ordered_entries:
+        carries_audio = item.get("type") == "audio" or (
+            item.get("type") == "video"
+            and (item.get("has_audio") or item.get("audio_path"))
+            and item.get("include_audio", True)
+        )
+        if carries_audio:
+            ordinal += 1
+            new_audio_by_original[original_index] = ordinal
+    audio_map = {
+        old_audio[original_index]: new_audio_by_original[original_index]
+        for original_index in old_audio
+        if old_audio[original_index] != new_audio_by_original[original_index]
+    }
+    ordinal_maps = {"Audio": audio_map} if audio_map else {}
+    return (
+        _remap_ref2va_audio_labels(prompt, audio_map),
+        ordered_items,
+        ordinal_maps,
+    )
+
+
+def _ref2va_dialogue_subject_order(
+    text: str,
+    speaker_aliases: dict[str, int],
+    character_subject_count: int,
+) -> list[int]:
+    """Resolve target speakers in first-vocal-event order.
+
+    MiniMax's documented ``Sx`` namespace is event ordered. This helper also
+    accepts an already structured prompt, where ``<Subject N> (Sx)`` may be the
+    only ownership cue beside a dialogue tag.
+    """
+
+    source = str(text or "")
+    valid_subjects = set(range(1, character_subject_count + 1))
+    events = list(_DIALOGUE_TAG_RE.finditer(source))
+    if not events:
+        events.extend(
+            re.finditer(r'"([^"\r\n]{1,500})"|“([^”\r\n]{1,500})”', source)
+        )
+    events.sort(key=lambda match: match.start())
+
+    order: list[int] = []
+    for match in events:
+        subject = _resolve_ref2va_dialogue_speaker(
+            source,
+            match.start(),
+            match.end(),
+            speaker_aliases,
+            valid_subjects,
+        )
+        if subject in valid_subjects and subject not in order:
+            order.append(subject)
+    return order
+
+
+def _remap_ref2va_audio_labels(text: str, ordinal_map: dict[int, int]) -> str:
+    if not ordinal_map:
+        return str(text or "")
+
+    def replace(match: re.Match) -> str:
+        raw = match.group("tag_index") or match.group("plain_index")
+        old = int(raw)
+        new = int(ordinal_map.get(old, old))
+        return f"<Audio {new}>" if match.group("tag") else f"Audio {new}"
+
+    return _AUDIO_LABEL_RE.sub(replace, str(text or ""))
+
+
+def _strip_ref2va_audio_clauses(text: str, ordinals: set[int]) -> str:
+    """Remove prompt clauses that describe audio references omitted for a window."""
+
+    if not ordinals:
+        return str(text or "")
+    values = "|".join(str(value) for value in sorted(ordinals))
+    label_re = re.compile(
+        rf"(?:<Audio\s+(?:{values})>|\bAudio\s+(?:{values})\b)",
+        re.IGNORECASE,
+    )
+    # Context-IR reference relationships are sentence/semicolon clauses. Work
+    # at that boundary so removing an unused voice never deletes adjacent
+    # character identity, action, camera, or dialogue instructions.
+    parts = re.split(r"([.;](?:\s+|$)|\n+)", str(text or ""))
+    output: list[str] = []
+    index = 0
+    while index < len(parts):
+        clause = parts[index]
+        separator = parts[index + 1] if index + 1 < len(parts) else ""
+        if not label_re.search(clause):
+            output.extend((clause, separator))
+        elif "\n" in separator:
+            # The omitted clause may terminate a Context-IR section.  Retain
+            # its structural newline even though its punctuation and prose are
+            # removed, otherwise the following field becomes part of the
+            # preceding field's value.
+            output.append("\n\n")
+        index += 2
+    stripped = re.sub(r"[ \t]{2,}", " ", "".join(output)).strip()
+    return _normalize_ref2va_context_ir_sections(stripped)
+
+
+def select_ref2va_window_voice_references(
+    prompt: str,
+    references,
+    *,
+    max_audio_references: int = 2,
+) -> tuple[str, list[dict], dict[str, Any]]:
+    """Limit each native Ref2VA pass to voices that speak in that window.
+
+    A project may contain more characters than H3 can accept audio references
+    for in one pass. Passing every saved voice to every continuation window
+    made H3 replay source recordings and promote their paired portraits into
+    target footage. Visual identity references remain stable across the whole
+    sequence; voice recordings are selected in first-vocal-event order for the
+    current prompt and their Audio ordinals are rebuilt atomically.
+    """
+
+    source_prompt, items, _order_remap = canonicalize_ref2va_reference_order(
+        prompt,
+        references,
+    )
+    (
+        _reference_subjects,
+        character_subjects,
+        role_subjects,
+        speaker_aliases,
+        character_subject_count,
+    ) = _build_ref2va_character_bindings(items)
+    speaker_order = _ref2va_dialogue_subject_order(
+        source_prompt,
+        speaker_aliases,
+        character_subject_count,
+    )
+    has_dialogue = bool(
+        _DIALOGUE_TAG_RE.search(source_prompt)
+        or re.search(r'"[^"\r\n]{1,500}"|“[^”\r\n]{1,500}”', source_prompt)
+    )
+
+    audio_entries: list[tuple[int, int, bool, int | None]] = []
+    audio_ordinal = 0
+    non_voice_audio_count = 0
+    for item_index, item in enumerate(items):
+        kind = item.get("type")
+        if kind == "video":
+            if (
+                (item.get("has_audio") or item.get("audio_path"))
+                and item.get("include_audio", True)
+            ):
+                audio_ordinal += 1
+                non_voice_audio_count += 1
+                audio_entries.append((item_index, audio_ordinal, False, None))
+            continue
+        if kind != "audio":
+            continue
+        audio_ordinal += 1
+        is_voice = item.get("audio_intent", "voice") == "voice"
+        mapped_subject = (
+            _ref2va_audio_item_subject(item, character_subjects, role_subjects)
+            if is_voice
+            else None
+        )
+        audio_entries.append((item_index, audio_ordinal, is_voice, mapped_subject))
+        if not is_voice:
+            non_voice_audio_count += 1
+
+    available_voice_slots = max(0, int(max_audio_references) - non_voice_audio_count)
+    voice_entries = [entry for entry in audio_entries if entry[2]]
+    selected_voice_indices: list[int] = []
+    if has_dialogue and available_voice_slots:
+        for subject in speaker_order:
+            match = next(
+                (entry for entry in voice_entries if entry[3] == subject),
+                None,
+            )
+            if match is not None and match[0] not in selected_voice_indices:
+                selected_voice_indices.append(match[0])
+            if len(selected_voice_indices) >= available_voice_slots:
+                break
+        # Preserve the common one-character/generic-voice workflow when the
+        # audio was not explicitly paired by character metadata.
+        for entry in voice_entries:
+            if len(selected_voice_indices) >= available_voice_slots:
+                break
+            if entry[3] is None and entry[0] not in selected_voice_indices:
+                selected_voice_indices.append(entry[0])
+
+    selected_voice_set = set(selected_voice_indices)
+    omitted_entries = [entry for entry in voice_entries if entry[0] not in selected_voice_set]
+    omitted_ordinals = {entry[1] for entry in omitted_entries}
+    retained_indices = {
+        index
+        for index, item in enumerate(items)
+        if item.get("type") != "audio"
+        or item.get("audio_intent", "voice") != "voice"
+        or index in selected_voice_set
+    }
+    scoped_items = [item for index, item in enumerate(items) if index in retained_indices]
+
+    old_to_new: dict[int, int] = {}
+    new_audio_ordinal = 0
+    for item_index, old_ordinal, _is_voice, _subject in audio_entries:
+        if item_index not in retained_indices:
+            continue
+        new_audio_ordinal += 1
+        old_to_new[old_ordinal] = new_audio_ordinal
+
+    scoped_prompt = _strip_ref2va_audio_clauses(source_prompt, omitted_ordinals)
+    scoped_prompt = _remap_ref2va_audio_labels(scoped_prompt, old_to_new)
+    omitted_roles = [
+        str(items[index].get("character_name") or items[index].get("role") or f"Audio {ordinal}")
+        for index, ordinal, _is_voice, _subject in omitted_entries
+    ]
+    kept_roles = [
+        str(items[index].get("character_name") or items[index].get("role") or f"Audio {ordinal}")
+        for index, ordinal, _is_voice, _subject in voice_entries
+        if index in selected_voice_set
+    ]
+    diagnostics: dict[str, Any] = {
+        "speaking_subjects": speaker_order,
+        "voice_total": len(voice_entries),
+        "voice_kept": len(selected_voice_set),
+        "voice_omitted": len(omitted_entries),
+        "kept_roles": kept_roles,
+        "omitted_roles": omitted_roles,
+        "max_audio_references": int(max_audio_references),
+        "non_voice_audio_references": non_voice_audio_count,
+    }
+    return scoped_prompt, scoped_items, diagnostics
+
+
+def _remap_ref2va_reference_labels(
+    text: str,
+    ordinal_maps: dict[str, dict[int, int]],
+) -> str:
+    """Atomically remap Subject/Picture/Video/Audio labels in one prompt."""
+
+    source = str(text or "")
+    for kind in ("Subject", "Picture", "Video"):
+        mapping = ordinal_maps.get(kind, {})
+        if not mapping:
+            continue
+
+        def replace(match: re.Match, *, current_kind=kind, current_map=mapping) -> str:
+            old = int(match.group(1))
+            return f"<{current_kind} {int(current_map.get(old, old))}>"
+
+        source = re.sub(
+            rf"<{kind}\s+(\d+)>",
+            replace,
+            source,
+            flags=re.IGNORECASE,
+        )
+    return _remap_ref2va_audio_labels(source, ordinal_maps.get("Audio", {}))
+
+
+def align_ref2va_voice_reference_order(
+    prompt: str,
+    references,
+) -> tuple[str, list[dict], dict[str, dict[int, int]]]:
+    """Keep immutable Subject identities while normalizing media presentation.
+
+    ``<Subject N>`` identifies reusable reference content; ``(Sx)`` identifies
+    first-vocal-event order inside one target clip.  Reordering complete
+    character groups to make those two namespaces numerically match was not
+    part of MiniMax's contract and made identity labels depend on dialogue
+    order.  Keep Subject/Picture labels stable and only normalize the physical
+    presentation to visual references followed by standalone audio.
+    """
+
+    return canonicalize_ref2va_reference_order(prompt, references)
+
+
+def _ref2va_alias_occurrences(source: str, aliases: dict[str, int]):
+    occurrences: list[tuple[int, int, str, int]] = []
+    for alias, subject in aliases.items():
+        alias_pattern = re.escape(alias).replace(r"\ ", r"\s+")
+        for match in re.finditer(
+            rf"(?<!\w){alias_pattern}(?!\w)",
+            source,
+            re.IGNORECASE,
+        ):
+            occurrences.append((match.start(), match.end(), alias, subject))
+    return sorted(occurrences, key=lambda row: (row[0], -(row[1] - row[0])))
+
+
+def _clean_ref2va_dialogue_owner_name(value: str) -> str:
+    """Return a human speaker label without sentence-leading glue words."""
+
+    words = re.sub(r"\s+", " ", str(value or "")).strip(" \t\r\n,;:-")
+    parts = words.split()
+    while len(parts) > 1 and parts[0].casefold() in _DIALOGUE_OWNER_LEADING_WORDS:
+        parts.pop(0)
+    candidate = " ".join(parts).strip()
+    if not candidate or candidate.casefold() in _DIALOGUE_OWNER_LEADING_WORDS:
+        return ""
+    return candidate
+
+
+def _resolve_ref2va_dialogue_owner_name(
+    source: str,
+    dialogue_start: int,
+    dialogue_end: int,
+) -> str:
+    """Resolve an explicitly named speaker, including non-reference actors.
+
+    Ref2VA's ``(Sx)`` marker identifies first-vocal-event order. It does not
+    identify ``<Subject x>``.  Detecting the grammatical speaker separately is
+    what lets a saved Blaine character share a scene with unreferenced Rachel
+    and Ross without either guest inheriting Blaine's portrait or voice.
+    """
+
+    before = source[max(0, dialogue_start - 420):dialogue_start]
+    after = source[dialogue_end:dialogue_end + 180]
+    clause_start = max(
+        before.rfind("."),
+        before.rfind("!"),
+        before.rfind("?"),
+        before.rfind(";"),
+        before.rfind("\n"),
+    ) + 1
+    clause = before[clause_start:]
+
+    def occurrences(value: str):
+        return [
+            (match.start(), match.end(), _clean_ref2va_dialogue_owner_name(match.group(1)))
+            for match in _DIALOGUE_OWNER_NAME_RE.finditer(value)
+            if _clean_ref2va_dialogue_owner_name(match.group(1))
+        ]
+
+    # Direct screenplay syntax: ``Rachel: <d>...</d>``.
+    for start, end, name in reversed(occurrences(clause)):
+        tail = clause[end:]
+        leading = clause[:start]
+        if (
+            re.fullmatch(r"\s*(?:'s\s+voice\s*)?[:,\-–—]\s*", tail, re.IGNORECASE)
+            and not _SPEECH_VERB_RE.search(leading)
+        ):
+            return name
+
+    # Postposed attribution: ``<d>...</d>, replies Rachel``.
+    after_verb = re.match(
+        rf"\s*[,;:\-–—]?\s*({_SPEECH_VERB_RE.pattern})",
+        after,
+        re.IGNORECASE,
+    )
+    if after_verb:
+        candidates = [
+            (start - after_verb.end(), -(end - start), name)
+            for start, end, name in occurrences(after)
+            if start >= after_verb.end()
+        ]
+        if candidates:
+            return min(candidates)[-1]
+
+    # Natural prose: ``Blaine turns to Yoda and says, ...``. The last name
+    # before the speech verb is not necessarily the speaker, so reject names
+    # introduced by object prepositions such as ``to`` or ``at``.
+    verbs = list(_SPEECH_VERB_RE.finditer(clause))
+    if verbs:
+        verb = verbs[-1]
+        candidates = []
+        for start, end, name in occurrences(clause):
+            if end > verb.start():
+                continue
+            leading = clause[max(0, start - 32):start]
+            is_object = bool(re.search(
+                r"(?:\bto|\bat|\btoward|\btowards|\bwith|\bbeside|\bnear|\bbehind)\s+$",
+                leading,
+                re.IGNORECASE,
+            ))
+            candidates.append((is_object, verb.start() - end, -(end - start), name))
+        non_objects = [candidate for candidate in candidates if not candidate[0]]
+        if non_objects:
+            return min(non_objects)[-1]
+        if candidates:
+            return min(candidates)[-1]
+
+    # Finished Context-IR often writes ``Rachel (S1) ...`` beside the tag
+    # without repeating a speech verb. This marker can confirm the nearby
+    # name, but it still never maps the name to Subject 1.
+    marked = list(re.finditer(
+        r"([A-Z][A-Za-z0-9_'’-]*(?:\s+[A-Z][A-Za-z0-9_'’-]*){0,3})"
+        r"\s*\(S\d+\)",
+        clause,
+    ))
+    if marked:
+        return _clean_ref2va_dialogue_owner_name(marked[-1].group(1))
+    return ""
+
+
+def _resolve_ref2va_dialogue_speaker(
+    source: str,
+    dialogue_start: int,
+    dialogue_end: int,
+    speaker_aliases: dict[str, int],
+    valid_subjects: set[int],
+) -> int | None:
+    """Resolve a dialogue speaker from natural-language cues around one line."""
+
+    before_start = max(0, dialogue_start - 360)
+    before = source[before_start:dialogue_start]
+    after = source[dialogue_end:dialogue_end + 180]
+    clause_start = max(
+        before.rfind("."),
+        before.rfind("!"),
+        before.rfind("?"),
+        before.rfind(";"),
+        before.rfind("\n"),
+    ) + 1
+    clause = before[clause_start:]
+    explicit_subjects = re.findall(
+        r"<Subject\s+(\d+)>", clause, flags=re.IGNORECASE
+    )
+    if explicit_subjects:
+        explicit_subject = int(explicit_subjects[-1])
+        if explicit_subject in valid_subjects:
+            return explicit_subject
+    occurrences = _ref2va_alias_occurrences(clause, speaker_aliases)
+
+    # Direct screenplay syntax: ``Yoda: "..."`` or ``Yoda's voice: "..."``.
+    # Do not mistake the addressed character in natural prose such as
+    # ``Thanos says to Yoda, <d>...</d>`` for a screenplay speaker label.  A
+    # preceding speech verb means the grammatical-speaker pass below owns the
+    # decision, where ``to Yoda`` is correctly treated as the object.
+    for start, end, _alias, subject in reversed(occurrences):
+        tail = clause[end:]
+        leading = clause[:start]
+        if (
+            re.fullmatch(r"\s*(?:'s\s+voice\s*)?[:,\-–—]\s*", tail, re.IGNORECASE)
+            and not _SPEECH_VERB_RE.search(leading)
+        ):
+            return subject
+
+    # Postposed attribution is highly specific and takes precedence over an
+    # unrelated speech verb in the preceding sentence.
+    after_verb = re.match(
+        rf"\s*[,;:\-–—]?\s*({_SPEECH_VERB_RE.pattern})",
+        after,
+        re.IGNORECASE,
+    )
+    if after_verb:
+        after_occurrences = _ref2va_alias_occurrences(after, speaker_aliases)
+        candidates = [
+            (start - after_verb.end(), -len(alias), subject)
+            for start, _end, alias, subject in after_occurrences
+            if start >= after_verb.end()
+        ]
+        if candidates:
+            return min(candidates)[-1]
+
+    # Natural syntax before the line: ``Blaine turns to Yoda and says, ...``.
+    # Select the last non-object character before the final speech verb.
+    verbs = list(_SPEECH_VERB_RE.finditer(clause))
+    if verbs:
+        verb = verbs[-1]
+        candidates = []
+        for start, end, alias, subject in occurrences:
+            if end > verb.start():
+                continue
+            leading = clause[max(0, start - 28):start]
+            is_object = bool(re.search(
+                r"(?:\bto|\bat|\btoward|\btowards|\bwith|\bbeside|\bnear|\bbehind)\s+$",
+                leading,
+                re.IGNORECASE,
+            ))
+            candidates.append((is_object, verb.start() - end, -len(alias), subject))
+        non_objects = [candidate for candidate in candidates if not candidate[0]]
+        if non_objects:
+            return min(non_objects)[-1]
+        if candidates:
+            return min(candidates)[-1]
+
+    # A manually authored Context-IR prompt may put the <d> tag in the sentence
+    # after the named performance cue, for example: ``Yoda nods. He answers.
+    # <d>...</d>``. Follow that short discourse chain, but only when the latest
+    # named sentence has one unambiguous grammatical subject. This is purposely
+    # conservative: ``Yoda and Blaine react. They answer.`` remains ambiguous.
+    preceding_dialogue_end = 0
+    for previous_match in _DIALOGUE_TAG_RE.finditer(source, 0, dialogue_start):
+        preceding_dialogue_end = previous_match.end()
+    discourse_start = max(preceding_dialogue_end, dialogue_start - 720)
+    # Context-IR fields are independent contracts. Never reach backward from
+    # detailed_description into subject_definitions/retention_analysis and use
+    # a saved character named there as the grammatical speaker of a guest's
+    # line. The latest field header is the hard discourse boundary.
+    field_headers = list(re.finditer(
+        r"(?im)^\s*(?:subject_definitions|summary|retention_analysis|"
+        r"detailed_description|overall_soundscape|non_diegetic_music)\s*:\s*",
+        source[discourse_start:dialogue_start],
+    ))
+    if field_headers:
+        discourse_start += field_headers[-1].end()
+    discourse = source[discourse_start:dialogue_start]
+    segments = [
+        segment.strip()
+        for segment in re.split(r"(?<=[.!?;])\s+|[\r\n]+", discourse)
+        if segment.strip()
+    ]
+    for segment in reversed(segments):
+        segment_occurrences = _ref2va_alias_occurrences(segment, speaker_aliases)
+        if not segment_occurrences:
+            continue
+        candidate_subjects: set[int] = set()
+        for start, _end, _alias, candidate_subject in segment_occurrences:
+            leading = segment[max(0, start - 32):start]
+            is_object = bool(re.search(
+                r"(?:\bto|\bat|\btoward|\btowards|\bwith|\bbeside|\bnear|"
+                r"\bbehind|\bfrom|\bfor|\bof|\bby)\s+$",
+                leading,
+                re.IGNORECASE,
+            ))
+            if not is_object:
+                candidate_subjects.add(candidate_subject)
+        if len(candidate_subjects) == 1:
+            return next(iter(candidate_subjects))
+        # Do not reach past a more recent sentence that names multiple possible
+        # speakers. Guessing here would recreate the original voice-swap bug.
+        return None
+    return None
+
+
+def _ambiguous_ref2va_dialogue_error(words: str) -> ValueError:
+    excerpt = re.sub(r"\s+", " ", words).strip()[:80]
+    return ValueError(
+        "MiniMax H3 Omni could not determine which referenced character speaks "
+        f"{excerpt!r}. Name the speaker beside the line (for example, Yoda says, "
+        '"Do or do not.") or place that character\'s explicit <Subject N> tag '
+        "beside the line. (Sx) labels only identify vocal-event order."
+    )
+
+
+def _canonicalize_ref2va_tagged_dialogue(
+    text: str,
+    speaker_aliases: dict[str, int],
+    character_subject_count: int,
+    audio_by_subject: dict[int, int] | None = None,
+) -> str:
+    """Repair named H3 dialogue using official event-ordered speaker IDs.
+
+    ``<Subject N>`` numbers identify reusable reference content.  MiniMax's
+    ``(Sx)`` numbers are a separate namespace assigned in order of the first
+    actual vocal event.  Treating Subject 1 as Speaker 1 caused a later
+    character who spoke first to inherit or repeat another character's line.
+    """
+
+    valid_subjects = set(range(1, character_subject_count + 1))
+    audio_by_subject = dict(audio_by_subject or {})
+    matches = list(_DIALOGUE_TAG_RE.finditer(text))
+    if not matches:
+        return text
+    edits: list[tuple[int, int, str]] = []
+    vocal_speakers: dict[tuple[str, Any], int] = {}
+    previous_dialogue_end = 0
+    for match in matches:
+        words = match.group(1).strip()
+        subject = _resolve_ref2va_dialogue_speaker(
+            text,
+            match.start(),
+            match.end(),
+            speaker_aliases,
+            valid_subjects,
+        )
+        explicit_owner = _resolve_ref2va_dialogue_owner_name(
+            text,
+            match.start(),
+            match.end(),
+        )
+        context_start = max(previous_dialogue_end, match.start() - 240)
+        markers = list(_SPEAKER_MARKER_RE.finditer(text, context_start, match.start()))
+        marker = markers[-1] if markers else None
+        # ``(Sx)`` is vocal-event order, not a Subject identifier.  It can
+        # validate a resolved speaker but must never select a face by itself.
+        # The old fallback silently mapped S1 to Subject 1, which is exactly
+        # how a correct voice could be lip-synced by the wrong character.
+        if subject is None and character_subject_count == 1 and not explicit_owner:
+            subject = 1
+        if subject is None and character_subject_count > 1 and not explicit_owner:
+            raise _ambiguous_ref2va_dialogue_error(words)
+        speaker_key: tuple[str, Any] = (
+            ("subject", subject)
+            if subject is not None else
+            ("name", explicit_owner.casefold())
+            if explicit_owner else
+            ("event", len(vocal_speakers) + 1)
+        )
+        speaker = vocal_speakers.setdefault(speaker_key, len(vocal_speakers) + 1)
+        if subject is not None or explicit_owner:
+            owner_context = text[max(previous_dialogue_end, match.start() - 180):match.start()]
+            owner_clause_start = max(
+                owner_context.rfind("."),
+                owner_context.rfind("!"),
+                owner_context.rfind("?"),
+                owner_context.rfind(";"),
+                owner_context.rfind("\n"),
+            ) + 1
+            nearby_subject = bool(
+                subject is not None
+                and re.search(
+                    rf"<Subject\s+{subject}>",
+                    owner_context[owner_clause_start:],
+                    flags=re.IGNORECASE,
+                )
+            )
+            owner = (
+                "" if subject is None or nearby_subject else f"<Subject {subject}> "
+            )
+            nearby_audio = bool(
+                subject is not None
+                and re.search(
+                    rf"<Audio\s+{audio_by_subject.get(subject, -1)}>",
+                    owner_context[owner_clause_start:],
+                    flags=re.IGNORECASE,
+                )
+            )
+            voice = (
+                f" in the voice referenced from <Audio {audio_by_subject[subject]}>,"
+                if subject is not None and subject in audio_by_subject and not nearby_audio
+                else ""
+            )
+            if marker is not None:
+                if int(marker.group(1)) != speaker:
+                    edits.append((marker.start(), marker.end(), f"{owner}(S{speaker}){voice}"))
+                elif owner:
+                    edits.append((marker.start(), marker.end(), f"{owner}(S{speaker}){voice}"))
+                elif voice:
+                    edits.append((marker.start(), marker.end(), f"(S{speaker}){voice}"))
+            else:
+                direct = f"{owner}(S{speaker})"
+                if voice:
+                    direct += voice
+                edits.append((match.start(), match.start(), f"{direct} "))
+        previous_dialogue_end = match.end()
+
+    for start, end, replacement in reversed(edits):
+        text = f"{text[:start]}{replacement}{text[end:]}"
+
+    # Subject definitions describe reusable visual identity only.  Speaker
+    # IDs belong beside actual dialogue events and may reset per window.
+    definitions = re.search(
+        r"(?ms)^\s*subject_definitions\s*:(.*?)(?=^\s*summary\s*:)",
+        text,
+    )
+    if definitions:
+        body = re.sub(
+            r"(<Subject\s+\d+>)\s*\(S\d+\)(?=\s+is\b)",
+            r"\1",
+            definitions.group(1),
+            flags=re.IGNORECASE,
+        )
+        for (speaker_kind, subject), speaker in vocal_speakers.items():
+            if speaker_kind != "subject":
+                continue
+            body = re.sub(
+                rf"(<Audio\s+\d+>[^.\r\n]{{0,260}}?"
+                rf"(?:for|to|of)\s+<Subject\s+{subject}>)"
+                r"(?:\s*\(S\d+\))?",
+                rf"\1 (S{speaker})",
+                body,
+                flags=re.IGNORECASE,
+            )
+        text = (
+            f"{text[:definitions.start(1)]}{body}{text[definitions.end(1):]}"
+        )
+    return text
+
+
+def _ensure_ref2va_voice_acoustic_contract(text: str) -> str:
+    """Keep voice identity while explicitly rejecting source-room acoustics."""
+
+    if _REF2VA_VOICE_ACOUSTIC_CONTRACT.casefold() in str(text or "").casefold():
+        return text
+    source = str(text or "").rstrip()
+    music = re.search(r"(?mi)^\s*non_diegetic_music\s*:", source)
+    if music:
+        insert_at = music.start()
+        return (
+            f"{source[:insert_at].rstrip()} {_REF2VA_VOICE_ACOUSTIC_CONTRACT}\n\n"
+            f"{source[insert_at:].lstrip()}"
+        ).strip()
+    return f"{source} {_REF2VA_VOICE_ACOUSTIC_CONTRACT}".strip()
+
+
+def _ensure_ref2va_identity_isolation_contract(text: str, items: list[dict]) -> str:
+    """Prevent identity media from becoming a keyframe, insert, or cutaway."""
+
+    if not any(_ref2va_character_visual(item) for item in items):
+        return str(text or "")
+    if _REF2VA_IDENTITY_ISOLATION_CONTRACT.casefold() in str(text or "").casefold():
+        return str(text or "")
+    source = str(text or "").rstrip()
+    soundscape = re.search(r"(?mi)^\s*overall_soundscape\s*:", source)
+    if soundscape:
+        insert_at = soundscape.start()
+        return (
+            f"{source[:insert_at].rstrip()} {_REF2VA_IDENTITY_ISOLATION_CONTRACT}\n\n"
+            f"{source[insert_at:].lstrip()}"
+        ).strip()
+    return f"{source} {_REF2VA_IDENTITY_ISOLATION_CONTRACT}".strip()
+
+
+def _apply_ref2va_media_contracts(text: str, items: list[dict]) -> str:
+    compiled = _ensure_ref2va_identity_isolation_contract(text, items)
+    if any(
+        item.get("type") == "audio"
+        and item.get("audio_intent", "voice") == "voice"
+        for item in items
+    ):
+        compiled = _ensure_ref2va_voice_acoustic_contract(compiled)
+    return compiled
 
 
 @dataclass
@@ -90,21 +1181,48 @@ def ensure_ref2va_prompt_relationships(
     MiniMax H3 uses natural-language Context-IR to decide whether audio is
     copied/reused or merely referenced. Media tensors alone cannot communicate
     that distinction, so a raw Studio prompt receives a complete relationship
-    map and literal dialogue tags. An already enhanced/tagged prompt is
-    preserved verbatim.
+    map and literal dialogue tags. An already enhanced/tagged prompt keeps its
+    creative content, while its dialogue speaker markers are checked against
+    the same immutable character manifest used for raw prompts.
     """
 
-    text = str(prompt or "").strip()
+    ordered_prompt, items, _order_remap = canonicalize_ref2va_reference_order(
+        prompt,
+        references,
+    )
+    text = _normalize_ref2va_context_ir_sections(ordered_prompt)
+    (
+        character_reference_subjects,
+        character_subjects,
+        role_subjects,
+        speaker_aliases,
+        character_subject_count,
+    ) = _build_ref2va_character_bindings(items)
+    voice_audio_by_subject = _ref2va_voice_audio_by_subject(
+        items,
+        character_subjects,
+        role_subjects,
+    )
     if _REFERENCE_TAG_RE.search(text):
-        return text
+        text = _sanitize_legacy_ref2va_context_ir(text)
+        compiled = _canonicalize_ref2va_tagged_dialogue(
+            text,
+            speaker_aliases,
+            character_subject_count,
+            voice_audio_by_subject,
+        )
+        return _validate_ref2va_context_ir_sections(
+            _apply_ref2va_media_contracts(compiled, items)
+        )
 
-    items = validate_reference_manifest(references, require_files=False)
     picture_index = 0
     video_index = 0
     audio_index = 0
+    subject_index = character_subject_count
     relationships: list[str] = []
+    retention: list[str] = []
 
-    for item in items:
+    for reference_index, item in enumerate(items):
         kind = item["type"]
         role = item.get("role") or f"the supplied {kind} reference"
         if kind == "image":
@@ -113,28 +1231,46 @@ def ensure_ref2va_prompt_relationships(
             if intent == "composition":
                 relationships.append(
                     f"<Picture {picture_index}> is a soft composition and cast-layout reference for {role} "
-                    "(retention weak_reference); preserve the intended subjects, wardrobe, setting, and "
-                    "spatial arrangement while generating a naturally moving opening rather than copying "
-                    "the picture as a frozen first frame."
+                    "that preserves the intended subjects, wardrobe, setting, and spatial arrangement "
+                    "while generating a naturally moving opening rather than copying the picture as a "
+                    "frozen first frame."
+                )
+                retention.append(
+                    f"<Picture {picture_index}> ([Shot 1] composition anchor): weak_reference - "
+                    "retain broad subject placement, setting, and spatial relationships."
                 )
             elif intent == "scene":
+                subject_index += 1
                 relationships.append(
-                    f"<Picture {picture_index}> defines the environment and location for {role} "
-                    "(retention reference); preserve its architecture, materials, lighting context, and "
-                    "scene identity without treating people in it as target character identities."
+                    f"<Subject {subject_index}> is the environment and location for {role}, defined by "
+                    f"<Picture {picture_index}>; its architecture, materials, lighting context, and scene "
+                    "identity apply without treating incidental people as target character identities."
+                )
+                retention.append(
+                    f"<Subject {subject_index}> (appears in [Shot 1]): fully_preserved - preserve the "
+                    "referenced architecture, materials, lighting context, and location identity."
                 )
             elif intent == "style":
+                subject_index += 1
                 relationships.append(
-                    f"<Picture {picture_index}> is a visual style reference for {role} "
-                    "(retention weak_reference); reuse its medium, palette, lighting language, and texture, "
-                    "but do not copy its people, pose, framing, or exact composition."
+                    f"<Subject {subject_index}> is the visual treatment for {role}, guided by "
+                    f"<Picture {picture_index}>; use its medium, palette, lighting language, and texture "
+                    "without copying its people, pose, framing, or exact composition."
+                )
+                retention.append(
+                    f"<Subject {subject_index}>: weak_reference - retain broad similarity in medium, "
+                    "palette, lighting language, and texture."
                 )
             else:
+                character_subject = character_reference_subjects[reference_index]
                 relationships.append(
-                    f"<Picture {picture_index}> defines the visual identity and appearance of {role} "
-                    "(retention reference for identity only); "
-                    "use it as identity evidence only, not as an opening freeze-frame, source location, "
-                    "background, composition, framing, or pose."
+                    f"<Subject {character_subject}> is {role} from <Picture {picture_index}>, preserving "
+                    "visual identity and appearance; the source background, framing, composition, and "
+                    "pose do not define the target scene."
+                )
+                retention.append(
+                    f"<Subject {character_subject}> (appears in [Shot 1]): fully_preserved - preserve the "
+                    f"identity and appearance defined by <Picture {picture_index}>."
                 )
             continue
 
@@ -145,14 +1281,44 @@ def ensure_ref2va_prompt_relationships(
                 audio_index += 1
                 relationships.append(
                     f"<Audio {audio_index}> is the synchronized soundtrack paired with "
-                    f"<Video {next_video_index}> (audio reuse, retention partially_copy); "
-                    "reuse its audible timeline and synchronize "
+                    f"<Video {next_video_index}>; reuse its audible timeline and synchronize "
                     "visible action and lip movement to it."
                 )
+                retention.append(
+                    f"<Audio {audio_index}>: partially_copy - reuse the enabled soundtrack timeline "
+                    "while allowing synchronized scene effects."
+                )
             video_index = next_video_index
-            relationships.append(
-                f"<Video {video_index}> provides motion, camera, scene, and temporal reference for {role}."
-            )
+            video_intent = item.get("video_intent", "motion")
+            if video_intent == "character":
+                character_subject = character_reference_subjects[reference_index]
+                relationships.append(
+                    f"<Subject {character_subject}> is {role} from <Video {video_index}>, preserving "
+                    "identity, appearance, and characteristic motion while using the newly described "
+                    "target scene and action."
+                )
+                retention.append(
+                    f"<Subject {character_subject}> (appears in [Shot 1]): fully_preserved - preserve the "
+                    f"identity and appearance defined by <Video {video_index}> while generating the "
+                    "requested target action and setting."
+                )
+            elif video_intent == "scene":
+                relationships.append(
+                    f"<Video {video_index}> provides environment, lighting, and scene continuity for {role}; "
+                    "do not copy incidental people as target character identities."
+                )
+                retention.append(
+                    f"<Video {video_index}>: partially_preserved - retain the requested environment, "
+                    "lighting, and scene continuity."
+                )
+            else:
+                relationships.append(
+                    f"<Video {video_index}> provides motion, camera, scene, and temporal reference for {role}."
+                )
+                retention.append(
+                    f"<Video {video_index}>: partially_preserved - retain the requested motion, camera, "
+                    "scene, and temporal structure."
+                )
             continue
 
         audio_index += 1
@@ -160,64 +1326,112 @@ def ensure_ref2va_prompt_relationships(
         if intent == "drive":
             relationships.append(
                 f"<Audio {audio_index}> is the performance-driving audio timeline for {role} "
-                "(audio reuse, retention partially_copy); "
-                "reuse its audible content and synchronize visible action and lip movement to it."
+                "and supplies the audible content synchronized to visible action and lip movement."
+            )
+            retention.append(
+                f"<Audio {audio_index}>: partially_copy - reuse its audible content and timeline "
+                "while allowing synchronized scene effects."
             )
         elif intent == "style":
             relationships.append(
                 f"<Audio {audio_index}> is an audio style, rhythm, and texture reference for {role} "
-                "(audio reference, retention weak_reference); "
-                "do not copy its waveform, source words, or exact timing."
+                "without copying its waveform, source words, or exact timing."
+            )
+            retention.append(
+                f"<Audio {audio_index}>: weak_reference - retain broad similarity in sound, rhythm, "
+                "texture, or music style."
             )
         else:
+            character_key = str(item.get("library_character_id") or "").strip()
+            mapped_subject = character_subjects.get(character_key) if character_key else None
+            if mapped_subject is None:
+                for alias in _ref2va_alias_values(item, role):
+                    mapped_subject = role_subjects.get(alias)
+                    if mapped_subject is not None:
+                        break
+            target = (
+                f"<Subject {mapped_subject}>"
+                if mapped_subject else str(role)
+            )
             relationships.append(
-                f"<Audio {audio_index}> is a voice-timbre, emotion, and delivery reference for {role} "
-                "(audio reference, retention reference); "
-                "generate only explicitly requested dialogue and do not copy its source words, "
-                "timing, or waveform."
+                f"<Audio {audio_index}> is the voice-timbre reference for {target}, guiding vocal "
+                "identity, emotion, and delivery for newly scripted dialogue without reusing the "
+                "recording's words or timing."
+            )
+            retention.append(
+                f"<Audio {audio_index}>: reference - use its voice timbre, emotion, and delivery "
+                "without copying the source signal, words, timing, or recording-room acoustics."
             )
 
     dialogue_counter = 0
     dialogue_word_count = 0
+    def is_visible_text_quote(match) -> bool:
+        before = text[max(0, match.start() - 150):match.start()]
+        after = text[match.end():match.end() + 100]
+        if re.search(
+            r"(?i)\b(?:titled|entitled|called|named|captioned)\s*[:,-]?\s*$",
+            before,
+        ):
+            return True
+        visible_noun = re.search(
+            r"(?i)\b(?:sign|banner|label|subtitle|caption|marquee|poster|billboard|"
+            r"screen|monitor|display|neon|placard|headline|logo|shirt|door|wall)\b",
+            before,
+        )
+        visible_cue = re.search(
+            r"(?i)\b(?:reads?|reading|shows?|showing|displays?|displaying|bears?|"
+            r"bearing|marked|printed|written|spells?|saying|with(?:\s+the)?\s+"
+            r"(?:text|words?|lettering))\s*[:,-]?\s*$",
+            before,
+        )
+        if visible_noun and visible_cue:
+            return True
+        return bool(re.match(
+            r"(?i)^\s*(?:appears?|is\s+(?:visible|written|printed|displayed)|glows?)"
+            r"\b[^.!?\r\n]{0,70}\b(?:on|across|above|below|behind|over)\b",
+            after,
+        ))
 
     def compile_dialogue(match):
         nonlocal dialogue_counter, dialogue_word_count
+        if is_visible_text_quote(match):
+            return match.group(0)
         dialogue_counter += 1
         words = (match.group(1) or match.group(2) or "").strip()
         dialogue_word_count += len(words.split())
-        return f"(S{dialogue_counter}) <d>[English] {words}</d>"
+        # Speaker/Subject ownership is compiled in one place below. Inserting
+        # ``(S{subject})`` here used the immutable Subject number as if it were
+        # event order and could silently bind an unreferenced actor to the only
+        # saved character.
+        return f"<d>[English] {words}</d>"
 
     compiled_target = re.sub(
         r'"([^"\r\n]{1,500})"|“([^”\r\n]{1,500})”',
         compile_dialogue,
         text,
     )
+    compiled_target = _canonicalize_ref2va_tagged_dialogue(
+        compiled_target,
+        speaker_aliases,
+        character_subject_count,
+        voice_audio_by_subject,
+    )
+    tagged_dialogue = list(_DIALOGUE_TAG_RE.finditer(compiled_target))
+    dialogue_counter = len(tagged_dialogue)
+    dialogue_word_count = sum(
+        len(re.sub(r"^\s*\[[^]]+\]\s*", "", match.group(1)).split())
+        for match in tagged_dialogue
+    )
     relationship_block = " ".join(relationships)
+    retention_block = " ".join(retention)
     if dialogue_counter:
         duration = max(2.0, float(duration_seconds or 8.0))
-        speech_duration = min(
-            max(1.0, dialogue_word_count / 2.0),
-            max(1.0, duration * 0.55),
-        )
-        dialogue_start = min(
-            max(0.5, duration * 0.2),
-            max(0.25, duration - speech_duration - 0.75),
-        )
-        dialogue_end = min(duration - 0.25, dialogue_start + speech_duration)
         dialogue_rule = (
-            f"From 0.00 to {dialogue_start:.2f} seconds, show active scene-appropriate nonverbal "
-            "action rather than idle staring; every mouth stays closed and the audio contains no "
-            f"human voice. Begin the first tagged line at {dialogue_start:.2f} seconds and finish "
-            f"all dialogue by {dialogue_end:.2f} seconds. From {dialogue_end:.2f} to "
-            f"{duration:.2f} seconds, fill the remaining timeline with concrete nonverbal action, "
-            "reactions, camera development, ambience, and synchronized practical effects. The tagged "
-            "lines are the only spoken words; outside them there are no voices, whispers, grunts, "
-            "audible breathing, or speech-like vocalizations, and every mouth remains closed."
+            f"The tagged lines are performed once in source order and fit naturally within the "
+            f"{duration:.2f}-second scene."
         )
     else:
-        dialogue_rule = (
-            "Do not generate dialogue, voices, or speech-like vocalizations unless a <d> block is supplied."
-        )
+        dialogue_rule = "The described performance remains nonverbal."
     has_mapped_music = any(item.get("audio_intent") in {"drive", "style"} for item in items)
     requests_music = bool(re.search(r"\b(?:music|song|score|soundtrack)\b", text, re.IGNORECASE))
     music_direction = (
@@ -227,19 +1441,43 @@ def ensure_ref2va_prompt_relationships(
         if requests_music
         else "N/A"
     )
-    return (
-        f"subject_definitions: {relationship_block}\n"
-        "summary: A finished video matching the requested action, identity, setting, and explicitly "
-        "tagged dialogue.\n"
-        f"retention_analysis: {relationship_block}\n"
-        f"detailed_description: The finished target video follows this request: {compiled_target} "
-        f"{dialogue_rule}\n"
-        "overall_soundscape: Continuous scene-appropriate stereo ambience and synchronized practical "
-        "sound effects begin at the first frame and continue naturally underneath any scripted dialogue. "
-        "Outside tagged dialogue there are no human voices, whispers, grunts, audible breathing, or "
-        "speech-like vocalizations.\n"
+    task_types = ["reference generation"]
+    if any(
+        item.get("audio_intent") == "drive"
+        or (
+            item.get("type") == "video"
+            and (item.get("has_audio") or item.get("audio_path"))
+            and item.get("include_audio", True)
+        )
+        for item in items
+    ):
+        task_types.append("audio reuse")
+    if any(
+        item.get("type") == "audio"
+        and item.get("audio_intent", "voice") in {"voice", "style"}
+        for item in items
+    ):
+        task_types.append("audio reference")
+    compiled_prompt = (
+        f"subject_definitions: {relationship_block}\n\n"
+        f"summary: [{' + '.join(task_types)}] A finished video matching the requested action, "
+        "identity, setting, reference roles, and explicitly tagged dialogue.\n\n"
+        f"retention_analysis: {retention_block}\n\n"
+        "detailed_description: The target video maintains the requested visual style, lighting, "
+        "color, and cinematic texture. "
+        f"[Shot 1] "
+        f"{compiled_target} {dialogue_rule}\n\n"
+        "overall_soundscape: Scene-appropriate stereo ambience and synchronized practical effects "
+        "accompany the visible action and scripted dialogue.\n\n"
         f"non_diegetic_music: {music_direction}"
     )
+    compiled_prompt = _canonicalize_ref2va_tagged_dialogue(
+        compiled_prompt,
+        speaker_aliases,
+        character_subject_count,
+        voice_audio_by_subject,
+    )
+    return _apply_ref2va_media_contracts(compiled_prompt, items)
 
 
 def add_ref2va_continuation_context(
@@ -409,6 +1647,101 @@ def prepare_reference_image(image: Image.Image, height: int, width: int) -> Imag
     return image.resize((width, height), Image.Resampling.LANCZOS)
 
 
+def _get_reference_background_session():
+    """Load Maestro's existing U2Net remover once, explicitly on CPU.
+
+    H3 references are prepared after the diffusion model has been loaded.  A
+    default ONNX Runtime CUDA provider would therefore consume generation
+    VRAM and can also be binary-incompatible with PyTorch's CUDA runtime.  The
+    short device override mirrors Recast's proven CPU-only session setup.
+    """
+
+    global _REFERENCE_BACKGROUND_SESSION
+    if _REFERENCE_BACKGROUND_SESSION is not None:
+        return _REFERENCE_BACKGROUND_SESSION
+    with _REFERENCE_BACKGROUND_SESSION_LOCK:
+        if _REFERENCE_BACKGROUND_SESSION is None:
+            model_home = os.path.abspath(os.path.join("ckpts", "rembg"))
+            os.makedirs(model_home, exist_ok=True)
+            os.environ.setdefault("U2NET_HOME", model_home)
+            import onnxruntime as ort
+            from rembg import new_session
+
+            original_get_device = ort.get_device
+            try:
+                ort.get_device = lambda: "CPU"
+                _REFERENCE_BACKGROUND_SESSION = new_session("u2net")
+            finally:
+                ort.get_device = original_get_device
+    return _REFERENCE_BACKGROUND_SESSION
+
+
+def _composite_authored_alpha_on_white(image: Image.Image) -> Image.Image | None:
+    """Preserve a user's authored cutout instead of re-segmenting it."""
+
+    if image.mode not in {"RGBA", "LA"} and "transparency" not in image.info:
+        return None
+    rgba = image.convert("RGBA")
+    alpha = rgba.getchannel("A")
+    minimum, _maximum = alpha.getextrema()
+    if minimum >= 255:
+        return None
+    canvas = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+    canvas.alpha_composite(rgba)
+    return canvas.convert("RGB")
+
+
+@lru_cache(maxsize=32)
+def _isolate_reference_image_background_cached(
+    normalized_path: str,
+    modified_ns: int,
+    file_size: int,
+) -> Image.Image:
+    """Return a cached white-background identity portrait.
+
+    The stat values intentionally participate in the cache key so replacing a
+    file at the same path cannot reuse an obsolete cutout.
+    """
+
+    del modified_ns, file_size
+    with Image.open(normalized_path) as source:
+        oriented = ImageOps.exif_transpose(source)
+        authored_cutout = _composite_authored_alpha_on_white(oriented)
+        if authored_cutout is not None:
+            return authored_cutout
+        source_rgb = oriented.convert("RGB")
+
+    from rembg import remove
+
+    with _REFERENCE_BACKGROUND_RUN_LOCK:
+        cutout = remove(
+            source_rgb,
+            session=_get_reference_background_session(),
+            alpha_matting=True,
+            alpha_matting_erode_size=1,
+            bgcolor=(255, 255, 255, 0),
+        )
+    if not isinstance(cutout, Image.Image):
+        raise ValueError("U2Net returned an unsupported character cutout.")
+    print(
+        "[MiniMax H3 Ref2VA] Isolated character background: "
+        f"{os.path.basename(normalized_path)}."
+    )
+    return cutout.convert("RGB")
+
+
+def isolate_reference_image_background(path: str) -> Image.Image:
+    """Remove one identity portrait's source background without changing it."""
+
+    normalized_path = os.path.normcase(os.path.realpath(path))
+    stat = os.stat(normalized_path)
+    return _isolate_reference_image_background_cached(
+        normalized_path,
+        int(stat.st_mtime_ns),
+        int(stat.st_size),
+    ).copy()
+
+
 def resample_reference_frames(frames: np.ndarray, fps: float) -> np.ndarray:
     if fps <= 0:
         raise ValueError(f"A reference video must have a positive frame rate, got {fps}.")
@@ -536,7 +1869,11 @@ def prepare_references(
 ) -> list[MiniMaxH3PreparedReference]:
     """Decode and prepare every reference without changing target geometry."""
 
-    items = validate_reference_manifest(manifest, require_files=True)
+    _prompt, ordered_items, _order_remap = canonicalize_ref2va_reference_order(
+        "",
+        manifest,
+    )
+    items = validate_reference_manifest(ordered_items, require_files=True)
     max_duration = num_frames / MINIMAX_H3_FPS
     timeline_start_frame = max(0, int(timeline_start_frame or 0))
     timeline_start_time = timeline_start_frame / MINIMAX_H3_FPS
@@ -552,15 +1889,29 @@ def prepare_references(
         )
 
         if kind == "image":
-            with Image.open(item["path"]) as source:
-                image = ImageOps.exif_transpose(source).convert("RGB")
-                height, width = resolve_reference_image_size(
-                    *image.size,
-                    detail=detail,
-                    target_height=target_height,
-                    target_width=target_width,
-                )
-                reference.image = prepare_reference_image(image, height, width).copy()
+            if item.get("remove_background"):
+                try:
+                    image = isolate_reference_image_background(item["path"])
+                except Exception as error:
+                    # Background isolation improves identity cleanliness but
+                    # must never turn a valid reference into a failed render.
+                    print(
+                        "[MiniMax H3 Ref2VA] Character background isolation "
+                        f"failed for {os.path.basename(item['path'])}; using the "
+                        f"original image ({error})."
+                    )
+                    with Image.open(item["path"]) as source:
+                        image = ImageOps.exif_transpose(source).convert("RGB")
+            else:
+                with Image.open(item["path"]) as source:
+                    image = ImageOps.exif_transpose(source).convert("RGB")
+            height, width = resolve_reference_image_size(
+                *image.size,
+                detail=detail,
+                target_height=target_height,
+                target_width=target_width,
+            )
+            reference.image = prepare_reference_image(image, height, width).copy()
         elif kind == "video":
             wants_embedded_audio = bool(item.get("include_audio", True)) and not item.get("audio_path")
             if item.get("has_audio") is False:

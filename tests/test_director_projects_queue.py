@@ -95,7 +95,9 @@ class TestDirectorProjectRevisionsAndQueue(unittest.TestCase):
         with open(state_path, "r", encoding="utf-8") as handle:
             saved = json.load(handle)
 
-        self.assertEqual(saved["version"], 2)
+        self.assertEqual(saved["version"], pipeline.PIPELINE_STATE_VERSION)
+        self.assertIn("planning_checkpoint", saved)
+        self.assertIsNone(saved["planning_checkpoint"])
         self.assertEqual(saved["project_id"], pid)
         self.assertEqual(saved["director_ui_snapshot"]["directorSongStyle"], "dark synthwave")
         self.assertEqual(saved["clips"][0]["video_prompt"], "same reviewed video prompt")
@@ -155,6 +157,48 @@ class TestDirectorProjectRevisionsAndQueue(unittest.TestCase):
         self.assertTrue(pipeline.remove_director_queue_entry(self.temp_dir.name, first_id))
         remaining = pipeline.list_director_queue(self.temp_dir.name)
         self.assertEqual([entry["id"] for entry in remaining["entries"]], [second_id])
+
+    def test_held_queue_owns_ordered_omni_media_and_attached_soundtrack(self):
+        identity = self._asset("identity.png")
+        motion = self._asset("motion.mp4")
+        attached = self._asset("motion-audio.wav")
+        queue = pipeline.enqueue_director_pipeline(self.temp_dir.name, {
+            "scene_description": "Mixed Omni references",
+            "pipeline_type": "short_film_story",
+            "video_model": "minimax_h3_ref2va",
+            "minimax_h3_references": [
+                {
+                    "id": "picture",
+                    "type": "image",
+                    "path": identity,
+                    "filename": "identity.png",
+                    "role": "the hero",
+                },
+                {
+                    "id": "motion",
+                    "type": "video",
+                    "path": motion,
+                    "filename": "motion.mp4",
+                    "role": "camera movement",
+                    "audio_path": attached,
+                    "include_audio": True,
+                },
+            ],
+        })
+
+        entry_id = queue["entries"][0]["id"]
+        detail = pipeline.get_director_queue_entry(self.temp_dir.name, entry_id)
+        references = detail["params"]["minimax_h3_references"]
+        self.assertEqual([item["id"] for item in references], ["picture", "motion"])
+        for reference in references:
+            self.assertTrue(os.path.isfile(reference["path"]))
+            self.assertIn(os.path.join("_director_queue_assets", entry_id), reference["path"])
+        self.assertTrue(os.path.isfile(references[1]["audio_path"]))
+        manifest = detail["params"]["_director_asset_manifest"][
+            "minimax_h3_references"
+        ]
+        self.assertIn("path", manifest[0])
+        self.assertIn("audio_path", manifest[1])
 
     def test_restart_returns_running_entry_to_held_queue(self):
         path = os.path.join(self.temp_dir.name, "_director_queue.json")

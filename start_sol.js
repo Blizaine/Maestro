@@ -6,7 +6,8 @@ module.exports = async (kernel) => {
       "The optimized H3 Sol Engine requires an NVIDIA SM89, SM90, SM100, or SM120 GPU."
     )
   }
-  const port = await kernel.port()
+  const fallbackPort = await kernel.port()
+  const port = `{{local.remote_access && local.remote_access.enabled && local.remote_access.pinokio_port_lock && local.remote_access.target_port ? local.remote_access.target_port : ${fallbackPort}}}`
   const runtime = solRuntimeProfile(kernel)
   return {
     requires: {
@@ -21,6 +22,42 @@ module.exports = async (kernel) => {
         description: "Run Maestro's normal Update action to install or repair the H3 performance runtime, then use the normal Start button.",
       },
       next: null,
+    }, {
+      when: "{{exists('app/settings/remote_access.json')}}",
+      method: "json.get",
+      params: {
+        remote_access: "app/settings/remote_access.json",
+      },
+    }, {
+      when: "{{platform === 'win32' && local.remote_access && local.remote_access.enabled && local.remote_access.windows_restore_task}}",
+      method: "shell.run",
+      params: {
+        path: ".",
+        message: {
+          _: [
+            "schtasks.exe",
+            "/Run",
+            "/TN",
+            "Maestro Tailscale Serve",
+          ],
+        },
+        on: [{
+          event: "/ERROR:/i",
+          break: false,
+        }],
+      },
+    }, {
+      // Keep the legacy Sol entry point self-healing too. This runs only when
+      // an interrupted install/update left no complete Vite output.
+      when: "{{exists('ui/package.json') && (!exists('ui/dist/index.html') || !exists('ui/dist/assets'))}}",
+      method: "shell.run",
+      params: {
+        path: "ui",
+        message: [
+          "npm install",
+          "npm run build",
+        ],
+      },
     }, {
       method: "shell.run",
       params: {
@@ -43,6 +80,7 @@ module.exports = async (kernel) => {
       method: "local.set",
       params: {
         url: "{{input.event[1]}}",
+        port: "{{input.event[1].split(':').pop()}}",
       },
     }],
   }

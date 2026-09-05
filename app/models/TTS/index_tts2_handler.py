@@ -49,7 +49,8 @@ INDEX_TTS2_QWEN_EMO_FILES = [
 INDEX_TTS2_DURATION_SLIDER = {
     "label": "Max duration (seconds)",
     "min": 1,
-    "max": 600,
+    # IndexTTS2 auto-splits long scripts into bounded synthesis segments.
+    "max": 3600,
     "increment": 1,
     "default": 25,
 }

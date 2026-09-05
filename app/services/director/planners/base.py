@@ -7,11 +7,14 @@ renderer's job.
 """
 
 from __future__ import annotations
+import copy
+import hashlib
 import json
 import re
 import os
+import time
 from abc import ABC, abstractmethod
-from typing import Optional, Any
+from typing import Optional, Any, Callable
 
 # Optional dependency: json_repair handles common LLM JSON mistakes
 # (missing commas between properties, trailing commas, single quotes,
@@ -38,6 +41,11 @@ from services.text_integrity import repair_payload, repair_text
 # most once, making field-level repeat loops unrepresentable.
 _GENERIC_ARRAY_SCHEMA = {"type": "array", "items": {"type": "object"}, "minItems": 1}
 
+# Checkpoints persist creative planning across restarts.  Increment this when
+# the meaning of stored planner rows changes so a repaired runtime never
+# replays structurally valid but semantically stale outlines.
+_PLANNING_CHECKPOINT_SCHEMA_VERSION = 2
+
 
 class BasePlanner(ABC):
     """Abstract base class for all skill planners."""
@@ -53,6 +61,235 @@ class BasePlanner(ABC):
         """
         self._generate = llm_generate
         self._generate_streaming = llm_generate_streaming
+        self._planning_progress_callback = None
+        self._planning_checkpoint_callback = None
+        self._planning_cancelled_callback = None
+        self._planning_resume_checkpoint: dict[str, Any] = {}
+        self._planning_checkpoint_kind = ""
+        self._planning_checkpoint_fingerprint = ""
+
+    # ── Durable long-form planning helpers ──────────────────────────
+
+    def _configure_planning_runtime(
+        self,
+        kwargs: dict[str, Any],
+        *,
+        kind: str,
+        fingerprint_payload: Any,
+    ) -> None:
+        """Attach optional pipeline progress/checkpoint callbacks.
+
+        Director planners are also used directly by unit tests and legacy
+        callers, so durable planning remains opt-in.  The pipeline passes the
+        callbacks for real jobs; direct callers retain the historical API.
+        A content fingerprint prevents a stale checkpoint from a different
+        revision being replayed into a new plan.
+        """
+
+        self._planning_progress_callback = kwargs.get(
+            "_planning_progress_callback"
+        )
+        self._planning_checkpoint_callback = kwargs.get(
+            "_planning_checkpoint_callback"
+        )
+        self._planning_cancelled_callback = kwargs.get(
+            "_planning_cancelled_callback"
+        )
+        self._planning_checkpoint_kind = str(kind or "")
+        encoded = json.dumps(
+            fingerprint_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        self._planning_checkpoint_fingerprint = hashlib.sha256(encoded).hexdigest()
+        candidate = kwargs.get("_planning_checkpoint")
+        if (
+            isinstance(candidate, dict)
+            and int(candidate.get("version") or 0)
+            == _PLANNING_CHECKPOINT_SCHEMA_VERSION
+            and candidate.get("kind") == self._planning_checkpoint_kind
+            and candidate.get("fingerprint")
+            == self._planning_checkpoint_fingerprint
+        ):
+            self._planning_resume_checkpoint = copy.deepcopy(candidate)
+        else:
+            self._planning_resume_checkpoint = {}
+
+    def _emit_planning_progress(
+        self,
+        *,
+        message: str,
+        current: int,
+        total: int,
+        stage: str,
+        **metadata: Any,
+    ) -> None:
+        self._raise_if_planning_cancelled()
+        callback = self._planning_progress_callback
+        if not callable(callback):
+            return
+        event = {
+            "message": str(message),
+            "current": max(0, int(current or 0)),
+            "total": max(0, int(total or 0)),
+            "stage": str(stage or "planning"),
+            **metadata,
+        }
+        callback(event)
+
+    def _raise_if_planning_cancelled(self) -> None:
+        callback = self._planning_cancelled_callback
+        if callable(callback) and bool(callback()):
+            raise InterruptedError("Director planning cancelled")
+
+    def _publish_planning_checkpoint(
+        self,
+        checkpoint: dict[str, Any],
+    ) -> None:
+        """Publish one serializable, revision-bound planning checkpoint."""
+
+        checkpoint["version"] = _PLANNING_CHECKPOINT_SCHEMA_VERSION
+        checkpoint["kind"] = self._planning_checkpoint_kind
+        checkpoint["fingerprint"] = self._planning_checkpoint_fingerprint
+        checkpoint["updated_at"] = time.time()
+        self._planning_resume_checkpoint = copy.deepcopy(checkpoint)
+        callback = self._planning_checkpoint_callback
+        if callable(callback):
+            callback(copy.deepcopy(checkpoint))
+        self._raise_if_planning_cancelled()
+
+    def _run_checkpointed_json_batches(
+        self,
+        *,
+        items: list[Any],
+        batch_size: int,
+        checkpoint_key: str,
+        stage: str,
+        progress_label: str,
+        call_batch: Callable[[int, int, list[Any], Optional[dict]], list[dict]],
+        fallback_factory: Optional[Callable[[int, Any], dict]] = None,
+    ) -> list[dict]:
+        """Run a long structured plan in small, durable JSON batches.
+
+        Each completed batch is published immediately through the Director
+        pipeline checkpoint callback.  A resumed run reuses only batches whose
+        recorded item count still matches the current timeline.  One malformed
+        batch therefore cannot erase minutes of already validated planning.
+        """
+
+        source = list(items or [])
+        if not source:
+            return []
+        size = max(1, int(batch_size or 1))
+        total = len(source)
+        batch_total = (total + size - 1) // size
+        checkpoint = copy.deepcopy(self._planning_resume_checkpoint or {})
+        stored_batches = checkpoint.get(checkpoint_key)
+        if not isinstance(stored_batches, dict):
+            stored_batches = {}
+            checkpoint[checkpoint_key] = stored_batches
+
+        output: list[dict] = []
+        for batch_index, start in enumerate(range(0, total, size), start=1):
+            self._raise_if_planning_cancelled()
+            batch_items = source[start:start + size]
+            expected = len(batch_items)
+            key = str(start)
+            saved = stored_batches.get(key)
+            saved_rows = saved.get("rows") if isinstance(saved, dict) else None
+            if (
+                isinstance(saved_rows, list)
+                and int(saved.get("count") or 0) == expected
+            ):
+                rows = [dict(row) for row in saved_rows if isinstance(row, dict)]
+                if len(rows) != expected:
+                    rows = []
+            else:
+                rows = []
+
+            if not rows:
+                self._emit_planning_progress(
+                    message=(
+                        f"Planning {progress_label} batch "
+                        f"{batch_index}/{batch_total}..."
+                    ),
+                    current=start,
+                    total=total,
+                    stage=stage,
+                    batch=batch_index,
+                    batch_count=batch_total,
+                )
+                previous = output[-1] if output else None
+                try:
+                    candidate = call_batch(
+                        batch_index,
+                        start,
+                        batch_items,
+                        previous,
+                    )
+                    rows = [
+                        dict(row) for row in (candidate or [])
+                        if isinstance(row, dict)
+                    ][:expected]
+                except InterruptedError:
+                    # Cancellation is a control-flow signal, not a malformed
+                    # planner response. Never convert an interrupted batch
+                    # into completed fallback rows or resume would skip work
+                    # the user explicitly stopped.
+                    raise
+                except Exception as exc:
+                    print(
+                        f"[DirectorPlanner] {progress_label} batch "
+                        f"{batch_index}/{batch_total} failed; preserving prior "
+                        f"batches and using bounded fallbacks for this batch "
+                        f"({exc})."
+                    )
+                    rows = []
+
+                while len(rows) < expected:
+                    item_index = start + len(rows)
+                    fallback = (
+                        fallback_factory(item_index, source[item_index])
+                        if callable(fallback_factory) else {}
+                    )
+                    rows.append(dict(fallback or {}))
+
+                stored_batches[key] = {
+                    "count": expected,
+                    "rows": copy.deepcopy(rows),
+                }
+                checkpoint.update({
+                    "stage": stage,
+                    "batch_size": size,
+                    "completed_items": start + expected,
+                    "total_items": total,
+                    "complete": False,
+                })
+                self._publish_planning_checkpoint(checkpoint)
+
+            output.extend(rows)
+            self._emit_planning_progress(
+                message=(
+                    f"Planned {len(output)}/{total} {progress_label} "
+                    "timeline items"
+                ),
+                current=len(output),
+                total=total,
+                stage=f"{stage}_complete",
+                batch=batch_index,
+                batch_count=batch_total,
+            )
+
+        checkpoint.update({
+            "stage": "complete",
+            "completed_items": total,
+            "total_items": total,
+            "complete": True,
+        })
+        self._publish_planning_checkpoint(checkpoint)
+        return output
 
     @abstractmethod
     def plan(self, **kwargs) -> ProductionPlan:

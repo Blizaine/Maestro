@@ -145,6 +145,30 @@ either selected adapter in Advanced. Both are listed virtually for Full and
 Pruned checkpoints, downloaded and hash-verified on first use, and atomically
 published with an integrity receipt.
 
+The selector also exposes Alibaba PAI's Apache-2.0 MiniMax H3 Acc-LoRAs for
+their matching FL2VA and Ref2VA workflows. These adapters use Parallel
+Decoding Distillation rather than an ordinary low-rank-only sampler: 32
+interval-specific video/audio output heads are fused four at a time into eight
+model evaluations. Maestro adapts the official `minimax_h3_pdd.py` recipe from
+`alibaba-pai/MiniMax-H3-Acc-LoRAs` revision
+`78db175437ee05df7ec492ee366f01b68b8d20e6`, keeps the backbone updates in
+MMGP's streamed LoRA path, and retains only the eight fused output-head pairs
+in CPU memory. The head plans are rebuilt from the exact runtime video and
+audio sigma boundaries, matching WanGP's PDD implementation introduced in
+v12.645 instead of assuming that every future scheduler uses the original
+uniform eight-evaluation grid. The FL2VA and Ref2VA files are pinned separately by immutable
+revision, size, and Hugging Face LFS SHA-256; neither can appear for the wrong
+workflow. Both PDD presets remain available on Full and Pruned checkpoints;
+Maestro converts their canonical AdaLN adapters to the selected checkpoint at
+load time. Ref2VA PDD defaults to Diffusers' official 2048px-short-edge
+reference preparation, while an explicit Match output selection remains a
+lower-memory, no-upscale option. Full and Pruned tests showed the same
+composition promotion when the distilled Ref2VA interval heads were fed the
+matched-detail references, ruling out checkpoint width as the cause. Alibaba's
+published Ref2VA PDD examples currently cover 5.18s and 10.13s clips; Maestro
+allows the ordinary H3 maximum but labels longer accelerated clips as
+experimental and reports that fact in the generation log.
+
 `.github/workflows/h3-turbo-upstream.yml` checks the public repository revision
 daily and opens or updates one review issue when upstream changes. It never
 edits the manifest or promotes weights automatically; promotion requires an

@@ -2,7 +2,7 @@ import { ArrowLeft, X, Check, SkipForward } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 
 /**
- * Persistent banner that drives Edit Anything/Recast/Repaint → Image Mode
+ * Persistent banner that drives Prompt Edit/Recast/Repaint → Image Mode
  * round-trips for one boundary anchor or reference at a time.
  * Mounted at the top of the sidebar whenever `editReturnTarget` is set.
  *
@@ -11,9 +11,9 @@ import { useStore } from '../../stores/useStore'
  *
  * Actions:
  *   - Apply: take the most recent Image-mode output and store it as the
- *     anchor identified by editReturnTarget.anchor, then return to Edit
- *     Anything mode.
- *   - Skip: return to Edit Anything without setting the anchor. The
+ *     anchor identified by editReturnTarget.anchor, then return to Prompt
+ *     Edit.
+ *   - Skip: return to Prompt Edit without setting the anchor. The
  *     model will fall back to extracting the source frame at generation
  *     time (the morph-from-source default).
  *   - Cancel (×): same as Skip — return without applying.
@@ -58,7 +58,7 @@ export function AnchorReturnBanner() {
             ? 'Cancel — return to Recast without changing its reference'
             : isRepaint
               ? 'Cancel — return to Repaint without changing its edited frame'
-              : 'Cancel — return to Edit Anything without setting this anchor'}
+              : 'Cancel — return to Prompt Edit without setting this anchor'}
           className="ml-auto p-0.5 rounded hover:bg-accent-blue/20 text-accent-blue/80 hover:text-accent-blue"
         >
           <X size={11} />

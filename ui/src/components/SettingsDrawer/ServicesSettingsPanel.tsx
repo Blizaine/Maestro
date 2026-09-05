@@ -582,63 +582,6 @@ export function ServicesSettingsPanel() {
           </p>
         </div>
 
-        {/* Multi-Shot LoRA Mode toggle (Beta) — Phase 1 of LoRA
-            capabilities catalog. When on, Pass 2 emits storyboard-format
-            video_prompts for 20s shots so a compatible IC-LoRA (e.g.
-            Maque AI LTX-2.3 IC-LoRA) can cut between camera angles
-            inside a single generation. Short reaction (≤15s) and long
-            sustained (≥40s) shots keep the regular flowing format.
-            User must also add the matching LoRA to their video_loras
-            selection for cuts to actually render — the toggle only
-            changes the prompt format. */}
-        <label className="flex items-center justify-between cursor-pointer group">
-          <div className="flex-1 mr-3">
-            <div className="text-sm text-text-primary group-hover:text-accent-blue transition-colors">
-              Multi-Shot LoRA Mode <span className="text-[10px] text-accent-blue/80 font-normal">Beta</span>
-            </div>
-            <div className="text-[10px] text-text-muted mt-0.5">
-              Emits storyboard-format prompts for 20s shots so an IC-LoRA
-              (e.g. Maque AI LTX-2.3) can cut between camera angles inside
-              one generation. Add the matching LoRA to your video LoRA
-              selection for cuts to render. Short and long-sustained shots
-              stay single-camera.
-            </div>
-          </div>
-          <div
-            onClick={() => updateConfig({ director_multishot_lora_mode: !servicesConfig.director_multishot_lora_mode })}
-            className={`w-9 h-5 rounded-full transition-colors relative shrink-0 ${
-              servicesConfig.director_multishot_lora_mode ? 'bg-accent-blue' : 'bg-bg-tertiary border border-border'
-            }`}
-          >
-            <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white border border-border shadow transition-transform ${
-              servicesConfig.director_multishot_lora_mode ? 'translate-x-4' : 'translate-x-0.5'
-            }`} />
-          </div>
-        </label>
-
-        {/* Voice Reference (ID-LoRA) is a standard setting, independent of
-            the in-development feature gate and enabled by default. */}
-        <label className="flex items-center justify-between cursor-pointer group">
-          <div className="flex-1 mr-3">
-            <div className="text-sm text-text-primary group-hover:text-accent-blue transition-colors">
-              Voice Reference (ID-LoRA)
-            </div>
-            <div className="text-[10px] text-text-muted mt-0.5">
-              Adds a voice-sample dropzone to Studio Video and Director for speaker identity preservation across clips.
-              Maestro loads the matching ID-LoRA when a reference is supplied. Enabled by default.
-            </div>
-          </div>
-          <div
-            onClick={() => updateConfig({ voice_reference_enabled: !servicesConfig.voice_reference_enabled })}
-            className={`w-9 h-5 rounded-full transition-colors relative shrink-0 ${
-              servicesConfig.voice_reference_enabled ? 'bg-accent-blue' : 'bg-bg-tertiary border border-border'
-            }`}
-          >
-            <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white border border-border shadow transition-transform ${
-              servicesConfig.voice_reference_enabled ? 'translate-x-4' : 'translate-x-0.5'
-            }`} />
-          </div>
-        </label>
       </div>
 
       <hr className="border-border" />

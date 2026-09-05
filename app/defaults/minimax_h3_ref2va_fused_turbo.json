@@ -1,0 +1,61 @@
+{
+    "model": {
+        "name": "H3 Fused 4-Step — References (Experimental)",
+        "architecture": "minimax_h3_ref2va",
+        "description": "Experimental all-in-one MiniMax H3 References checkpoint with the FL2VA-to-Ref2VA rank-1024 delta, LightX2V Turbo, Mystic, and native INT8 ConvRot weights already fused. Ordered image, video, and audio references can guide identity, appearance, motion, voices, and sound in four model evaluations by default, with an experimental 4-8 step adjustment. SLA sparse attention is enabled by default when supported and falls back safely to dense attention.",
+        "selector_help": "FASTH3 PREVIEW\nThe same pinned 21 GB INT8 ConvRot checkpoint powers the References workflow, so enabling both entries does not duplicate the transformer download. The published recipe defaults to four evaluations with res_multistep, video shift 12, audio shift 3, and no CFG. Advanced exposes 4-8 Total Steps for optional extra refinement; four remains the recommended speed preset. Turbo and Mystic are already baked in: do not add another Turbo preset or LoRA. SLA is enabled by default on compatible CUDA/Triton systems; turn it off for a dense reference run. This is an experimental community checkpoint, not an official MiniMax release.",
+        "URLs": [
+            "https://huggingface.co/MATLOWAI/minimax-h3-fused-turbo-int8-convrot/resolve/3b51096a1bf67608d98131116558202208fcf195/diffusion_models/minimax_h3_fused_refdelta_r1024_turbo8_mystic07_int8_convrot.safetensors"
+        ],
+        "minimax_h3_fused_turbo": true,
+        "minimax_h3_qkv_layout": "grouped",
+        "minimax_h3_sampler": "res_multistep",
+        "minimax_h3_video_vae_filename": "minimax_h3_video_vae_int8_convrot.safetensors",
+        "sla_attention": true,
+        "sla_attention_default": true,
+        "sla_attention_config": {
+            "sparsity_ratio": 0.9,
+            "block_size": 64,
+            "min_seq_len": 8192,
+            "dense_last_steps": 0,
+            "protect_audio": true
+        },
+        "sol_attention": false,
+        "first_block_cache": false,
+        "loras_disabled": true,
+        "lock_inference_steps": false,
+        "inference_steps_min": 4,
+        "inference_steps_max": 8,
+        "inference_steps_label": "Total Steps",
+        "inference_steps_help": "4 is the published speed preset. Try 5-6 for a little more refinement; 8 is the checkpoint's slower high end.",
+        "lock_guidance_scale": true,
+        "source_repo": "https://huggingface.co/MATLOWAI/minimax-h3-fused-turbo-int8-convrot",
+        "source_revision": "3b51096a1bf67608d98131116558202208fcf195",
+        "source_sha256": "4262e4e9963c553fa00016bbe83961407a4fc0a888be95fd836c8d4f2304e48b",
+        "video_vae_source_repo": "https://huggingface.co/Kijai/MiniMax-H3-experimental",
+        "video_vae_source_revision": "a3e7d8da4ae7ba8df0779094cf5ab9d6ee855fe4",
+        "video_vae_source_sha256": "9bb2d96f218c76babd85e0611b85ca8fb330a90546c01a0005e8a58a59593410",
+        "license_name": "MiniMax Model License plus upstream component licenses",
+        "license_url": "https://huggingface.co/MATLOWAI/minimax-h3-fused-turbo-int8-convrot/blob/main/LICENSE",
+        "notice_url": "https://huggingface.co/MATLOWAI/minimax-h3-fused-turbo-int8-convrot/blob/main/NOTICE",
+        "model_size_gb": 21,
+        "required_model_assets": [
+            "minimax_h3/vae/minimax_h3_video_vae_int8_convrot.safetensors",
+            "minimax_h3/vae/minimax_h3_audio_vae_fp32.safetensors",
+            "minimax_h3/fused_turbo/LICENSE",
+            "minimax_h3/fused_turbo/NOTICE"
+        ]
+    },
+    "prompt": "Use the ordered references to create a coherent cinematic scene with faithful identities, appearance, motion, and sound.",
+    "num_inference_steps": 4,
+    "video_length": 243,
+    "sliding_window_size": 243,
+    "sliding_window_overlap": 18,
+    "sliding_window_discard_last_frames": 0,
+    "resolution": "1152x640",
+    "guidance_scale": 1.0,
+    "image_prompt_type": "",
+    "minimax_h3_references": [],
+    "minimax_h3_reference_detail": "match",
+    "override_attention": "sla"
+}

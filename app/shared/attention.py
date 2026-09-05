@@ -4,10 +4,21 @@ from importlib.metadata import version
 from mmgp import offload
 import torch.nn.functional as F
 import warnings
-from importlib.metadata import version
 
-major, minor = torch.cuda.get_device_capability(None)
-bfloat16_supported =  major >= 8 
+
+def _cuda_capability(device=None):
+    """Return the active CUDA capability, or a safe CPU-only sentinel."""
+
+    if not torch.cuda.is_available():
+        return (0, 0)
+    try:
+        return tuple(torch.cuda.get_device_capability(device))
+    except (AssertionError, RuntimeError):
+        return (0, 0)
+
+
+major, minor = _cuda_capability()
+bfloat16_supported = major >= 8
 
 try:
     import triton
@@ -267,7 +278,7 @@ def get_attention_modes():
 
 def get_supported_attention_modes():
     ret = get_attention_modes()
-    major, minor = torch.cuda.get_device_capability()
+    major, minor = _cuda_capability()
     if  major < 10 or not triton_installed:
         if "sage3" in ret:
             ret.remove("sage3")
@@ -290,6 +301,8 @@ def get_supported_attention_modes():
 
 SOL_ATTENTION_CAPABILITIES = ((8, 9), (9, 0), (10, 0), (12, 0))
 SOL_ATTENTION_MIN_TRITON = (3, 6)
+SLA_ATTENTION_MIN_CAPABILITY = (8, 0)
+SLA_ATTENTION_MIN_TRITON = (3, 0)
 
 
 def _triton_version_tuple():
@@ -306,7 +319,7 @@ def _triton_version_tuple():
 def get_sol_attention_status():
     """Describe whether the bundled H3-only Sol backend can run here."""
 
-    capability = tuple(torch.cuda.get_device_capability())
+    capability = _cuda_capability()
     triton_version = str(getattr(triton, "__version__", "")) if triton_installed else None
     if not triton_installed:
         reason = "Sol Engine requires Triton 3.6 or newer."
@@ -340,12 +353,53 @@ def get_sol_attention_status():
     }
 
 
+def get_sla_attention_status():
+    """Describe whether the H3-only SLA Triton kernels can run here."""
+
+    capability = _cuda_capability()
+    triton_version = (
+        str(getattr(triton, "__version__", ""))
+        if triton_installed
+        else None
+    )
+    if not triton_installed:
+        installed = supported = False
+        reason = "H3 SLA requires Triton 3.0 or newer."
+    elif _triton_version_tuple() < SLA_ATTENTION_MIN_TRITON:
+        installed = supported = False
+        reason = (
+            "H3 SLA requires Triton 3.0 or newer "
+            f"(this runtime has {triton_version})."
+        )
+    elif capability < SLA_ATTENTION_MIN_CAPABILITY:
+        installed, supported = True, False
+        reason = (
+            "H3 SLA requires an NVIDIA Ampere-or-newer GPU (SM80+); "
+            f"this GPU is SM{capability[0]}{capability[1]}."
+        )
+    else:
+        installed = supported = True
+        reason = None
+    return {
+        "installed": installed,
+        "supported": supported,
+        "reason": reason,
+        "capability": f"SM{capability[0]}{capability[1]}",
+        "triton_version": triton_version,
+        "minimum_triton": "3.0",
+        "first_run_compiles_kernels": True,
+        "safe_dense_fallback": True,
+    }
+
+
 def get_override_attention_modes():
     """Generation overrides include model-specific backends such as Sol."""
 
     modes = get_attention_modes()
     if get_sol_attention_status()["installed"]:
         modes.append("sol")
+    if get_sla_attention_status()["installed"]:
+        modes.append("sla")
     return modes
 
 
@@ -353,6 +407,8 @@ def get_supported_override_attention_modes():
     modes = get_supported_attention_modes()
     if get_sol_attention_status()["supported"]:
         modes.append("sol")
+    if get_sla_attention_status()["supported"]:
+        modes.append("sla")
     return modes
 
 
@@ -370,6 +426,7 @@ __all__ = [
     'get_override_attention_modes',
     'get_supported_override_attention_modes',
     'get_sol_attention_status',
+    'get_sla_attention_status',
     'get_default_attention_mode',
 ]
 
@@ -412,7 +469,7 @@ def pay_attention(
     # Sol is a MiniMax-H3 main-DiT override, not a general attention mode.
     # H3's short token-refiner calls and any fail-safe recovery come through
     # this shared function and should use the fastest supported dense backend.
-    if attn == "sol":
+    if attn in {"sol", "sla"}:
         attn = get_default_attention_mode()
 
     q,k,v = qkv_list

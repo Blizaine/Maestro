@@ -25,7 +25,8 @@ KUGELAUDIO_TOKENIZER_FILES = [
 KUGELAUDIO_DURATION_SLIDER = {
     "label": "Max duration (seconds)",
     "min": 1,
-    "max": 600,
+    # KugelAudio's auto/manual split path keeps each inference segment short.
+    "max": 3600,
     "increment": 1,
     "default": 20,
 }

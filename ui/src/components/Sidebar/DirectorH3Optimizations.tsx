@@ -30,26 +30,39 @@ export function DirectorH3Optimizations() {
   const setCacheWarmup = useStore(s => s.setDirectorH3FirstBlockCacheWarmup)
   const savedVideoLoras = useStore(s => s.savedLoraPerMode.video)
   const directorSetLora = useStore(s => s.directorSetLora)
-  const [modelOptions, setModelOptions] = useState<ModelOptions | null>(null)
+  const [loadedOptions, setLoadedOptions] = useState<{
+    model: string
+    options: ModelOptions | null
+  }>({ model: '', options: null })
+  const modelOptions = loadedOptions.model === videoModel ? loadedOptions.options : null
 
   useEffect(() => {
     let cancelled = false
-    setModelOptions(null)
     fetchModelOptions(videoModel)
       .then(options => {
         if (cancelled) return
-        setModelOptions(options)
+        setLoadedOptions({ model: videoModel, options })
         const defaultSteps = options.default_num_inference_steps
         if (defaultSteps != null && Number.isFinite(defaultSteps)) {
           const current = useStore.getState().directorVideoInferenceStepsByModel[videoModel]
           if (current == null) setVideoSteps(videoModel, defaultSteps)
         }
+        if (
+          options.sla_attention
+          && options.sla_attention_default
+          && useStore.getState().directorH3SolModeByModel[videoModel] == null
+        ) {
+          // This legacy-named boolean now represents the selected H3 sparse
+          // engine. Standard checkpoints map it to Sol; the baked fused
+          // recipe maps it to SLA.
+          setSolMode(videoModel, true)
+        }
       })
       .catch(() => {
-        if (!cancelled) setModelOptions(null)
+        if (!cancelled) setLoadedOptions({ model: videoModel, options: null })
       })
     return () => { cancelled = true }
-  }, [setVideoSteps, videoModel])
+  }, [setSolMode, setVideoSteps, videoModel])
 
   const isH3 = String(modelOptions?.architecture || '').startsWith('minimax_h3')
   if (!isH3) return null
@@ -71,14 +84,20 @@ export function DirectorH3Optimizations() {
           revision: '',
         }]
       : []
-  const selectedTurboPreset = (
-    turboPresets.find(preset => preset.id === turboPresetByModel[videoModel])
-    || turboPresets.find(preset => preset.id === turboOption?.preset_id)
+  const turboRequested = turboModeByModel[videoModel] === true
+  const defaultTurboPreset = (
+    turboPresets.find(preset => preset.id === turboOption?.preset_id)
     || turboPresets[0]
   )
+  const configuredTurboPreset = turboPresets.find(
+    preset => preset.id === turboPresetByModel[videoModel],
+  )
+  const selectedTurboPreset = turboRequested
+    ? (configuredTurboPreset || defaultTurboPreset)
+    : defaultTurboPreset
   const turboSelected = Boolean(
     turboOption && selectedTurboPreset
-    && turboModeByModel[videoModel] === true
+    && turboRequested
     && savedVideoLoras?.activated_loras?.includes(selectedTurboPreset.filename)
   )
   const solStatus = modelOptions?.sol_attention_status
@@ -91,6 +110,11 @@ export function DirectorH3Optimizations() {
     modelOptions?.first_block_cache
     && firstBlockCacheByModel[videoModel] === true
   )
+  const slaStatus = modelOptions?.sla_attention_status
+  const slaSelected = Boolean(
+    modelOptions?.sla_attention
+    && (solModeByModel[videoModel] ?? modelOptions.sla_attention_default) !== false
+  )
   const cacheMultiplierChoices = modelOptions?.skip_steps_multiplier_choices || []
   const cacheMultiplier = (
     cacheMultiplierByModel[videoModel]
@@ -102,7 +126,8 @@ export function DirectorH3Optimizations() {
     ?? modelOptions?.default_skip_steps_start_step_perc
     ?? 25
   )
-  const activeCount = [turboSelected, solSelected, cacheSelected].filter(Boolean).length
+  const fusedTurbo = modelOptions?.minimax_h3_fused_turbo === true
+  const activeCount = [turboSelected, solSelected, slaSelected, cacheSelected].filter(Boolean).length
   const defaultSteps = modelOptions?.default_num_inference_steps
   const currentSteps = videoStepsByModel[videoModel] ?? defaultSteps
 
@@ -184,6 +209,22 @@ export function DirectorH3Optimizations() {
         )}
       </div>
 
+      {fusedTurbo && (
+        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2.5">
+          <div className="flex items-start gap-2.5">
+            <Zap size={13} className="mt-0.5 shrink-0 text-indicator-warning" />
+            <span className="min-w-0">
+              <span className="block text-[11px] font-medium text-text-primary">
+                Fused Turbo Recipe
+              </span>
+              <span className="mt-0.5 block text-[9px] leading-relaxed text-text-muted">
+                Every Director shot uses the checkpoint's RES sampler, baked Turbo and Mystic adapters, and INT8 ConvRot weights. Four steps is the default; Total Steps can be adjusted from 4-8 in Director Advanced. Additional LoRAs and cache recipes are disabled.
+              </span>
+            </span>
+          </div>
+        </div>
+      )}
+
       {turboOption && (
         <div className={`rounded-lg border px-3 py-2.5 ${
           turboSelected
@@ -263,6 +304,41 @@ export function DirectorH3Optimizations() {
               text={solStatus?.supported
                 ? 'Uses H3-aware sparse attention for every newly generated Director shot. Unsupported calls fall back automatically.'
                 : solStatus?.reason || 'Sol Engine is unavailable in this runtime.'}
+            />
+          </label>
+        </div>
+      )}
+
+      {modelOptions?.sla_attention && (
+        <div className={`rounded-lg border px-3 py-2.5 ${
+          slaSelected
+            ? 'border-accent-blue/50 bg-accent-blue/10'
+            : 'border-border bg-bg-tertiary/50'
+        }`}>
+          <label className="flex cursor-pointer items-center gap-2.5">
+            <input
+              type="checkbox"
+              checked={slaSelected}
+              onChange={event => setSolMode(videoModel, event.target.checked)}
+              className="accent-accent-blue"
+            />
+            <Gauge size={13} className={slaSelected ? 'text-accent-blue' : 'text-text-muted'} />
+            <span className="min-w-0 flex-1">
+              <span className="block text-[11px] font-medium text-text-primary">SLA Sparse Attention</span>
+              <span className="block text-[9px] text-text-muted">
+                {slaStatus?.supported
+                  ? 'Published FastH3 sparse recipe'
+                  : 'Safe dense fallback when unavailable'}
+              </span>
+            </span>
+            <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[8px] font-medium uppercase tracking-wider text-indicator-warning">
+              Experimental
+            </span>
+            <InfoTooltip
+              label="About Director H3 SLA"
+              text={slaStatus?.supported
+                ? 'Runs the fused checkpoint with its published 90% block-sparse SLA recipe. The first use compiles and caches Triton kernels.'
+                : `${slaStatus?.reason || 'SLA is unavailable in this runtime.'} Maestro will use dense attention without failing the generation.`}
             />
           </label>
         </div>

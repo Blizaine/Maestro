@@ -27,10 +27,20 @@ def _load_module(name: str, path: Path):
 
 
 class ManagedTurboAssetTests(unittest.TestCase):
-    def test_manifest_promotes_v4_default_and_keeps_legacy_rollback(self):
+    def test_manifest_promotes_pdd_defaults_and_keeps_standard_rollbacks(self):
         manifest = json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))
         presets = {preset["id"]: preset for preset in manifest["presets"]}
-        self.assertEqual(manifest["default_preset_id"], "v4-step600-ema")
+        self.assertEqual(
+            manifest["default_preset_id"],
+            "alibaba-pai-fl2va-pdd-8step",
+        )
+        self.assertEqual(
+            manifest["workflow_default_preset_ids"],
+            {
+                "fl2va": "alibaba-pai-fl2va-pdd-8step",
+                "ref2va": "alibaba-pai-ref2va-pdd-8step",
+            },
+        )
         self.assertEqual(presets["v1-ckpt500"]["status"], "legacy")
         current = presets["v4-step600-ema"]
         self.assertEqual(current["status"], "validated")
@@ -41,6 +51,31 @@ class ManagedTurboAssetTests(unittest.TestCase):
             current["sha256"],
             "5f3a626cd72c93a8b9318d6760c510bc5092d2ab13aaba1f932c5bab07a416d3",
         )
+
+        fl2va = presets["alibaba-pai-fl2va-pdd-8step"]
+        ref2va = presets["alibaba-pai-ref2va-pdd-8step"]
+        for preset, workflow, digest in (
+            (
+                fl2va,
+                "fl2va",
+                "0b29be7042d883970eb0c20774a9ba03d95669ed80a721bb4d21be8ea0d0a196",
+            ),
+            (
+                ref2va,
+                "ref2va",
+                "111c82e669f6e20e628228172edf39395f1a9fc3ad049793895e542c0f55b18c",
+            ),
+        ):
+            self.assertEqual(preset["repo_id"], "alibaba-pai/MiniMax-H3-Acc-LoRAs")
+            self.assertEqual(preset["workflow"], workflow)
+            self.assertEqual(preset["runtime"], "pdd")
+            self.assertEqual(preset["steps"], 8)
+            self.assertEqual(preset["weight"], 1.0)
+            self.assertEqual(preset["size"], 1_372_450_680)
+            self.assertEqual(preset["sha256"], digest)
+        self.assertEqual(ref2va["reference_detail"], "max")
+        self.assertNotIn("full_checkpoint_only", ref2va)
+        self.assertNotIn("full_checkpoint_only", fl2va)
 
     def test_managed_asset_receipt_revalidates_changed_manifest_or_file(self):
         managed_assets = _load_module("maestro_managed_assets_test", _MANAGED_ASSETS_PATH)

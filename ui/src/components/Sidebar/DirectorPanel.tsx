@@ -95,7 +95,7 @@ export function DirectorPanel() {
       }
     }
     return samples
-  }, [analysis?.lyrics])
+  }, [analysis])
 
   const [dragOver, setDragOver] = useState(false)
   const [localBias, setLocalBias] = useState<number | null>(null)
