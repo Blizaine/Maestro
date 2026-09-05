@@ -76,6 +76,11 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
   const baseModel = version?.baseModel || ''
   const [architectures, setArchitectures] = useState<CheckpointArchitecture[]>([])
   const [targetArchitecture, setTargetArchitecture] = useState('')
+  const isH3Checkpoint = isCheckpoint && baseModel.trim().toLowerCase() === 'minimax h3'
+  const unsupportedH3File = isH3Checkpoint && /int4|nvfp4|fp4|nf4|w[ _-]?4[ _-]?a[ _-]?\d+|4[ _-]?bit|gguf/i.test(file?.name || '')
+  const h3FileReason = unsupportedH3File ? 'This file is an unsupported 4-bit or GGUF export. Choose a different file or version, such as FL2VA Pruned INT8 ConvRot. The base pipeline and INT8 load setting cannot convert this file.' : null
+  const [h3QkvLayout, setH3QkvLayout] = useState('')
+  useEffect(() => { setH3QkvLayout('') }, [version?.id, file?.id, targetArchitecture])
   const [checkpointSupportReason, setCheckpointSupportReason] = useState<string | null>(null)
   const [checkpointArchitectureLoading, setCheckpointArchitectureLoading] = useState(false)
   useEffect(() => {
@@ -111,6 +116,17 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
     return () => { cancelled = true }
   }, [isCheckpoint, baseModel])
 
+  // Filename hints select only explicit workflow/size pairs; the streamed
+  // tensor header still verifies the selection before downloading weights.
+  useEffect(() => {
+    if (!isH3Checkpoint || !architectures.length) return
+    const name = (file?.name || '').toLowerCase()
+    const workflow = /ref2va/.test(name) ? 'minimax_h3_ref2va' : /fl2va|t2va/.test(name) ? 'minimax_h3' : ''
+    const size = /pruned/.test(name) ? '' : /full|33b/.test(name) ? '_full' : null
+    const suggested = workflow && size !== null ? workflow + size : ''
+    setTargetArchitecture(architectures.some(a => a.architecture === suggested) ? suggested : '')
+  }, [isH3Checkpoint, architectures, file?.name, version?.id])
+
   // Group architectures by family for an <optgroup> picker.
   const groupedArchs = useMemo(() => {
     const groups: Record<string, CheckpointArchitecture[]> = {}
@@ -125,12 +141,12 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
   const LARGE_CKPT_BYTES = 12 * 1024 * 1024 * 1024 // 12 GB
   const [autoQuantize, setAutoQuantize] = useState(false)
   useEffect(() => {
-    if (isCheckpoint) setAutoQuantize(fileBytes > LARGE_CKPT_BYTES)
-  }, [isCheckpoint, fileBytes, LARGE_CKPT_BYTES])
+    if (isCheckpoint) setAutoQuantize(!isH3Checkpoint && fileBytes > LARGE_CKPT_BYTES)
+  }, [isCheckpoint, isH3Checkpoint, fileBytes, LARGE_CKPT_BYTES])
 
   const handleDownload = () => {
     if (!file || !version) return
-    if (isCheckpoint && (checkpointArchitectureLoading || checkpointSupportReason || !targetArchitecture)) return
+    if (isCheckpoint && (checkpointArchitectureLoading || checkpointSupportReason || h3FileReason || !targetArchitecture || (isH3Checkpoint && !h3QkvLayout))) return
 
     // Extract example prompts from image metadata
     const examplePrompts: string[] = []
@@ -163,7 +179,7 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
       published_at: version.publishedAt || undefined,
     }
     if (isCheckpoint) {
-      startDownload({ ...common, target_arch: '', kind: 'checkpoint', target_architecture: targetArchitecture, auto_quantize: autoQuantize })
+      startDownload({ ...common, target_arch: '', kind: 'checkpoint', target_architecture: targetArchitecture, auto_quantize: isH3Checkpoint ? false : autoQuantize, h3_qkv_layout: isH3Checkpoint ? h3QkvLayout : undefined })
     } else {
       startDownload({ ...common, target_arch: localArch || '', target_dir_name: targetDirOverride || undefined })
     }
@@ -214,6 +230,9 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
         )}
 
         <div className="px-4 py-3 space-y-4">
+          {isCheckpoint && versions.length === 0 && (
+            <p className="text-sm text-text-muted">This model has no files in a supported import format. Return to the results and choose another model.</p>
+          )}
           {/* Version selector */}
           {versions.length > 1 && (
             <div>
@@ -310,7 +329,7 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
           {isCheckpoint ? (
             <div>
               <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1 flex items-center gap-1.5">
-                <Boxes size={12} /> Import as model
+                <Boxes size={12} /> Base model / pipeline
               </label>
               <select
                 value={targetArchitecture}
@@ -331,12 +350,30 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
               </select>
               <p className="text-[10px] text-text-muted mt-1 leading-snug">
                 The base model this checkpoint was trained for{baseModel ? ` (CivitAI base: ${baseModel})` : ''}.
-                Compatible SafeTensor shapes are verified before the file is installed.
+                A new model entry is created automatically. The tensor header is checked before downloading the weights.
               </p>
-              {checkpointSupportReason && (
+              {isH3Checkpoint && (
+                <div className="mt-3">
+                  <label htmlFor="h3-checkpoint-layout" className="text-[11px] text-text-muted uppercase tracking-wider mb-1 block">H3 checkpoint QKV layout</label>
+                  <select id="h3-checkpoint-layout" value={h3QkvLayout} onChange={e => setH3QkvLayout(e.target.value)} className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary">
+                    <option value="">Select the publisher's export layout…</option>
+                    <option value="grouped">Grouped Q/K/V — as specified by the publisher</option>
+                    <option value="interleaved">Head-interleaved Q/K/V — as specified by the publisher</option>
+                  </select>
+                  <p className="text-[10px] text-text-muted mt-1 leading-snug">
+                    Match First / Last or Omni and Pruned or Full to the model card.
+                    ConvRot alone does not identify the QKV layout. Maestro’s built-in DeepBeepMeep/WanGP
+                    INT8 ConvRot definitions use head-interleaved; other exports can differ.
+                    QKV order cannot be inferred from tensor shapes; a wrong choice can corrupt output.
+                    Supports BF16, FP16, FP8 and INT8 single-file transformers, not GGUF or packed 4-bit exports.
+                    Fused or distilled checkpoints may also require the publisher's sampling settings.
+                  </p>
+                </div>
+              )}
+              {(checkpointSupportReason || h3FileReason) && (
                 <div className="flex items-start gap-2 mt-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-text-primary leading-snug">
                   <AlertTriangle size={13} className="text-indicator-warning shrink-0 mt-0.5" />
-                  <span>{checkpointSupportReason}</span>
+                  <span>{checkpointSupportReason || h3FileReason}</span>
                 </div>
               )}
             </div>
@@ -358,8 +395,14 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
             )
           )}
 
-          {/* Ask-per-download int8 (checkpoint only) */}
-          {isCheckpoint && architectures.length > 0 && (
+          {isH3Checkpoint && (
+            <p className="text-[11px] text-text-secondary leading-snug">
+              H3 uses the precision stored in the downloaded file. Load-time INT8 conversion is unavailable;
+              choose a supported pre-quantized file to reduce memory use.
+            </p>
+          )}
+          {/* Ask-per-download int8 (supported checkpoint loaders only) */}
+          {isCheckpoint && !isH3Checkpoint && architectures.length > 0 && (
             <label className="flex items-start gap-2 cursor-pointer">
               <input
                 type="checkbox"
@@ -456,7 +499,7 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
                 )}
                 <button
                   onClick={handleDownload}
-                  disabled={!file || (isCheckpoint && (checkpointArchitectureLoading || !!checkpointSupportReason || !targetArchitecture))}
+                  disabled={!file || (isCheckpoint && (checkpointArchitectureLoading || !!checkpointSupportReason || !!h3FileReason || !targetArchitecture || (isH3Checkpoint && !h3QkvLayout)))}
                   className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-accent-blue text-white text-sm rounded-lg hover:bg-accent-blue-hover transition-colors disabled:opacity-50"
                 >
                   <Download size={14} />

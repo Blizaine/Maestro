@@ -160,10 +160,15 @@ export function LoraBrowser() {
 
   // Load model filters from backend
   useEffect(() => {
-    if (open && modelFilters.length === 0) {
-      fetchCivitAIModelFilters().then(r => setModelFilters(r.filters)).catch(() => {})
-    }
-  }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+    if (!open) return
+    let cancelled = false
+    fetchCivitAIModelFilters(browseKind).then(r => {
+      if (cancelled) return
+      setModelFilters(r.filters)
+      setSelectedFilter(previous => r.filters.some(f => f.label === previous) ? previous : '')
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [open, browseKind])
 
   // Adopt any server-side download, including imports started before this
   // browser session. The store action is singleton-safe across all callers.
@@ -614,6 +619,13 @@ export function LoraBrowser() {
             </button>
           )}
 
+          {browseKind === 'checkpoint' && (
+            <p className="px-4 py-2 text-xs text-text-muted">
+              Only supported base models and file formats are shown. Unsupported H3 INT4/GGUF files are hidden.
+              Tensor compatibility is checked when the download starts.
+            </p>
+          )}
+
           {/* Checkpoint-mode "My Models" toggle (imported checkpoints). */}
           {browseKind === 'checkpoint' && (
             <button
@@ -853,7 +865,7 @@ export function LoraBrowser() {
             {!loading && results.length === 0 && !searchError && (
               <div className="flex flex-col items-center justify-center py-20 text-text-muted">
                 <Search size={32} className="mb-3 opacity-50" />
-                <p className="text-sm">No results found</p>
+                <p className="text-sm">{cursor ? 'Looking for more matching results…' : browseKind === 'checkpoint' ? 'No supported checkpoint files found' : 'No results found'}</p>
                 <p className="text-xs mt-1">Try different search terms or filters</p>
               </div>
             )}
