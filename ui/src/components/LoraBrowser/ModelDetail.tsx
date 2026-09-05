@@ -76,6 +76,9 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
   const baseModel = version?.baseModel || ''
   const [architectures, setArchitectures] = useState<CheckpointArchitecture[]>([])
   const [targetArchitecture, setTargetArchitecture] = useState('')
+  const isH3Checkpoint = isCheckpoint && targetArchitecture.startsWith('minimax_h3')
+  const [h3QkvLayout, setH3QkvLayout] = useState('')
+  useEffect(() => { setH3QkvLayout('') }, [version?.id, file?.id, targetArchitecture])
   const [checkpointSupportReason, setCheckpointSupportReason] = useState<string | null>(null)
   const [checkpointArchitectureLoading, setCheckpointArchitectureLoading] = useState(false)
   useEffect(() => {
@@ -130,7 +133,7 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
 
   const handleDownload = () => {
     if (!file || !version) return
-    if (isCheckpoint && (checkpointArchitectureLoading || checkpointSupportReason || !targetArchitecture)) return
+    if (isCheckpoint && (checkpointArchitectureLoading || checkpointSupportReason || !targetArchitecture || (isH3Checkpoint && !h3QkvLayout))) return
 
     // Extract example prompts from image metadata
     const examplePrompts: string[] = []
@@ -163,7 +166,7 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
       published_at: version.publishedAt || undefined,
     }
     if (isCheckpoint) {
-      startDownload({ ...common, target_arch: '', kind: 'checkpoint', target_architecture: targetArchitecture, auto_quantize: autoQuantize })
+      startDownload({ ...common, target_arch: '', kind: 'checkpoint', target_architecture: targetArchitecture, auto_quantize: autoQuantize, h3_qkv_layout: isH3Checkpoint ? h3QkvLayout : undefined })
     } else {
       startDownload({ ...common, target_arch: localArch || '', target_dir_name: targetDirOverride || undefined })
     }
@@ -333,6 +336,22 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
                 The base model this checkpoint was trained for{baseModel ? ` (CivitAI base: ${baseModel})` : ''}.
                 Compatible SafeTensor shapes are verified before the file is installed.
               </p>
+              {isH3Checkpoint && (
+                <div className="mt-3">
+                  <label htmlFor="h3-checkpoint-layout" className="text-[11px] text-text-muted uppercase tracking-wider mb-1 block">H3 checkpoint QKV layout</label>
+                  <select id="h3-checkpoint-layout" value={h3QkvLayout} onChange={e => setH3QkvLayout(e.target.value)} className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary">
+                    <option value="">Select the publisher's export layout…</option>
+                    <option value="grouped">Grouped Q/K/V (Comfy / ConvRot exports)</option>
+                    <option value="interleaved">Head-interleaved (original exports)</option>
+                  </select>
+                  <p className="text-[10px] text-text-muted mt-1 leading-snug">
+                    Match First / Last or Omni and Pruned or Full to the model card.
+                    QKV order cannot be inferred from tensor shapes; a wrong choice can corrupt output.
+                    Supports BF16, FP16, FP8 and INT8 single-file transformers, not GGUF or packed 4-bit exports.
+                    Fused or distilled checkpoints may also require the publisher's sampling settings.
+                  </p>
+                </div>
+              )}
               {checkpointSupportReason && (
                 <div className="flex items-start gap-2 mt-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-text-primary leading-snug">
                   <AlertTriangle size={13} className="text-indicator-warning shrink-0 mt-0.5" />
@@ -456,7 +475,7 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
                 )}
                 <button
                   onClick={handleDownload}
-                  disabled={!file || (isCheckpoint && (checkpointArchitectureLoading || !!checkpointSupportReason || !targetArchitecture))}
+                  disabled={!file || (isCheckpoint && (checkpointArchitectureLoading || !!checkpointSupportReason || !targetArchitecture || (isH3Checkpoint && !h3QkvLayout)))}
                   className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-accent-blue text-white text-sm rounded-lg hover:bg-accent-blue-hover transition-colors disabled:opacity-50"
                 >
                   <Download size={14} />

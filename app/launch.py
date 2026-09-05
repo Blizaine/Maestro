@@ -55,6 +55,7 @@ from services import safe_download  # noqa: F401 (side-effect import)
 from services.checkpoint_compatibility import (
     CheckpointCompatibilityError,
     checkpoint_targets_for_base,
+    checkpoint_import_options,
     checkpoint_template_model_type,
     ensure_allowed_checkpoint_target,
     quarantine_incompatible_checkpoint_definitions,
@@ -2982,7 +2983,8 @@ def _checkpoint_download_dir() -> str:
 
 def _register_checkpoint_finetune(save_path: str, sidecar_data: dict,
                                   target_architecture: str,
-                                  auto_quantize: bool = False) -> tuple:
+                                  auto_quantize: bool = False,
+                                  qkv_layout: str = "") -> tuple:
     """Write app/finetunes/<slug>.json registering the downloaded checkpoint as
     a variant of `target_architecture`. Returns (model_type, finetune_path).
 
@@ -2998,6 +3000,7 @@ def _register_checkpoint_finetune(save_path: str, sidecar_data: dict,
         base_model,
         target_architecture,
         filename=filename,
+        qkv_layout=qkv_layout,
     )
     template_model_type = checkpoint_template_model_type(
         base_model, target_architecture
@@ -3040,6 +3043,7 @@ def _register_checkpoint_finetune(save_path: str, sidecar_data: dict,
     if desc:
         new_model["description"] = desc[:500]
     new_model["URLs"] = [filename]
+    new_model.update(compatibility["model_options"])
     new_model["civitai"] = {
         "modelId": model_id,
         "versionId": version_id,
@@ -4059,6 +4063,7 @@ async def civitai_download(request: Request):
         # any architecture that happens to exist in defaults/.
         try:
             ensure_allowed_checkpoint_target(base_model, target_architecture)
+            checkpoint_import_options(target_architecture, body.get("h3_qkv_layout", ""))
         except CheckpointCompatibilityError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         available_targets = {
@@ -4125,6 +4130,7 @@ async def civitai_download(request: Request):
         # LoRAs so users can tell which of a creator's renamed variants
         # is actually current.
         "_published_at": body.get("published_at"),
+        "_h3_qkv_layout": body.get("h3_qkv_layout", ""),
         "_kind": kind,
         "_target_architecture": target_architecture,
         "_auto_quantize": auto_quantize,
@@ -4282,6 +4288,7 @@ def _run_civitai_download(download_id: str):
                 dl.get("_base_model", ""),
                 dl.get("_target_architecture", ""),
                 filename=filename,
+                qkv_layout=dl.get("_h3_qkv_layout", ""),
             )
             dl["_checkpoint_compatibility"] = checkpoint_compatibility
 
@@ -4358,6 +4365,7 @@ def _run_civitai_download(download_id: str):
                 model_type, finetune_path = _register_checkpoint_finetune(
                     save_path, sidecar_data, dl.get("_target_architecture", ""),
                     auto_quantize=dl.get("_auto_quantize", False),
+                    qkv_layout=dl.get("_h3_qkv_layout", ""),
                 )
                 dl["model_type"] = model_type
                 dl["message"] = f"Registered as model '{model_type}'"

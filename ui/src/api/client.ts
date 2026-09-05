@@ -2380,7 +2380,7 @@ export async function startCivitAIDownload(params: {
   // Checkpoint imports: kind='checkpoint' routes the file into ckpts/ and
   // registers a finetune for target_architecture instead of saving a LoRA.
   // auto_quantize=true sets the finetune to load-time int8 (mmgp).
-  kind?: string; target_architecture?: string; auto_quantize?: boolean
+  kind?: string; target_architecture?: string; auto_quantize?: boolean; h3_qkv_layout?: string
 }): Promise<{ download_id: string }> {
   const res = await fetch(`${BASE}/api/v1/civitai/download`, {
     method: 'POST',
