@@ -370,7 +370,7 @@ def validate_checkpoint_filename(filename: str, architecture: str) -> None:
     """Reject explicitly unsupported H3 exports before opening a download."""
     if architecture not in _H3_ARCHITECTURES:
         return
-    if re.search(r"int4|nvfp4|fp4|4[ _-]?bit|gguf", filename, re.IGNORECASE):
+    if re.search(r"int4|nvfp4|fp4|nf4|4[ _-]?bit|gguf", filename, re.IGNORECASE):
         raise CheckpointCompatibilityError(
             "This H3 file is a packed 4-bit or GGUF export, which Maestro's "
             "CivitAI importer does not yet support. Select a different file or "
@@ -378,6 +378,37 @@ def validate_checkpoint_filename(filename: str, architecture: str) -> None:
             "Changing the base pipeline or enabling INT8 at load time does not "
             "convert this download."
         )
+
+
+def filter_checkpoint_catalog_model(model: dict) -> dict:
+    """Keep import candidates from metadata; never claim tensor verification.
+
+    Copy the edited levels so cached upstream responses remain reusable.
+    Check individual files, not model titles (a title may describe INT4 while
+    another version supplies supported INT8 weights).
+    """
+    versions = []
+    for version in model.get("modelVersions") or []:
+        targets = checkpoint_targets_for_base(version.get("baseModel", ""))
+        if not targets:
+            continue
+        files = []
+        for file in version.get("files") or []:
+            name = file.get("name") or ""
+            if os.path.splitext(name)[1].lower() not in {".safetensors", ".sft"}:
+                continue
+            if file.get("type") not in (None, "Model"):
+                continue
+            try:
+                validate_checkpoint_filename(name, targets[0].architecture)
+                # CivitAI sometimes supplies precision separately from the name.
+                validate_checkpoint_filename(str((file.get("metadata") or {}).get("fp", "")), targets[0].architecture)
+            except CheckpointCompatibilityError:
+                continue
+            files.append(file)
+        if files:
+            versions.append({**version, "files": files})
+    return {**model, "modelVersions": versions}
 
 
 def verified_checkpoint_chunks(chunks, base_model, architecture, *, filename, qkv_layout=""):

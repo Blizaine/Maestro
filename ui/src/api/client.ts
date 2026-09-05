@@ -2274,8 +2274,8 @@ export interface CivitAIModelFilter {
   default_dir?: string
 }
 
-export async function fetchCivitAIModelFilters(): Promise<{ filters: CivitAIModelFilter[] }> {
-  const res = await fetch(`${BASE}/api/v1/civitai/base-models`)
+export async function fetchCivitAIModelFilters(kind: 'lora' | 'checkpoint' = 'lora'): Promise<{ filters: CivitAIModelFilter[] }> {
+  const res = await fetch(`${BASE}/api/v1/civitai/base-models?kind=${kind}`)
   if (!res.ok) throw new Error('Failed to fetch model filters')
   return res.json()
 }

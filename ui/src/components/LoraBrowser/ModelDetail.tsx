@@ -77,7 +77,7 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
   const [architectures, setArchitectures] = useState<CheckpointArchitecture[]>([])
   const [targetArchitecture, setTargetArchitecture] = useState('')
   const isH3Checkpoint = isCheckpoint && baseModel.trim().toLowerCase() === 'minimax h3'
-  const unsupportedH3File = isH3Checkpoint && /int4|nvfp4|fp4|4[ _-]?bit|gguf/i.test(file?.name || '')
+  const unsupportedH3File = isH3Checkpoint && /int4|nvfp4|fp4|nf4|4[ _-]?bit|gguf/i.test(file?.name || '')
   const h3FileReason = unsupportedH3File ? 'This file is an unsupported 4-bit or GGUF export. Choose a different file or version, such as FL2VA Pruned INT8 ConvRot. The base pipeline and INT8 load setting cannot convert this file.' : null
   const [h3QkvLayout, setH3QkvLayout] = useState('')
   useEffect(() => { setH3QkvLayout('') }, [version?.id, file?.id, targetArchitecture])
@@ -230,6 +230,9 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
         )}
 
         <div className="px-4 py-3 space-y-4">
+          {isCheckpoint && versions.length === 0 && (
+            <p className="text-sm text-text-muted">This model has no files in a supported import format. Return to the results and choose another model.</p>
+          )}
           {/* Version selector */}
           {versions.length > 1 && (
             <div>

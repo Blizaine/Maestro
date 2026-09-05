@@ -64,6 +64,7 @@ from services.checkpoint_compatibility import (
     validate_checkpoint_file,
     validate_checkpoint_filename,
     verified_checkpoint_chunks,
+    filter_checkpoint_catalog_model,
 )
 from services.generation_eta import AdaptiveGenerationEta, GenerationEtaHistory
 from services.remote_access import TailscaleManager
@@ -3725,8 +3726,15 @@ def _build_manifest_entry(
 
 
 @api.get("/api/v1/civitai/base-models")
-def civitai_base_models():
+def civitai_base_models(kind: str = "lora"):
     """Return supported model filters for the browser."""
+    if kind == "checkpoint":
+        filters = []
+        for entry in CIVITAI_MODEL_FILTERS:
+            bases = [base for base in entry.get("civitai_base", "").split(",") if _list_checkpoint_architectures(base)]
+            if bases and not entry.get("search_query"):
+                filters.append({**entry, "civitai_base": ",".join(bases)})
+        return {"filters": filters}
     return {"filters": CIVITAI_MODEL_FILTERS}
 
 
@@ -3894,6 +3902,12 @@ def civitai_search(
             params["baseModels"] = base_list
         elif base_list:
             params["baseModels"] = base_list[0]
+    if types.casefold() == "checkpoint" and not baseModels:
+        params["baseModels"] = sorted({
+            base for entry in CIVITAI_MODEL_FILTERS
+            for base in entry.get("civitai_base", "").split(",")
+            if _list_checkpoint_architectures(base)
+        })
     if cursor:
         params["cursor"] = cursor
 
@@ -3921,6 +3935,9 @@ def civitai_search(
         resp.raise_for_status()
         data = resp.json()
         _fix_civitai_images(data)
+        if types.casefold() == "checkpoint":
+            candidates = [filter_checkpoint_catalog_model(model) for model in data.get("items", [])]
+            data = {**data, "items": [model for model in candidates if model["modelVersions"]]}
         _civitai_cache_put(cache_key, data)
         return data
     except HTTPException:
@@ -3973,6 +3990,9 @@ def civitai_model_detail(model_id: int):
         raise
     except requests.RequestException as e:
         raise HTTPException(status_code=502, detail=f"CivitAI request failed: {e}")
+
+    if str(data.get("type", "")).casefold() == "checkpoint":
+        data = filter_checkpoint_catalog_model(data)
 
     # Enrich versions with local arch mapping and fix image URLs
     for version in data.get("modelVersions", []):

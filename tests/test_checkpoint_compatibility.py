@@ -268,6 +268,28 @@ class TestH3CheckpointImports(unittest.TestCase):
             with self.assertRaises(compatibility.CheckpointCompatibilityError):
                 list(compatibility.verified_checkpoint_chunks([data], "MiniMax H3", "minimax_h3", filename="model.safetensors", qkv_layout="grouped"))
 
+    def test_catalog_filters_files_versions_and_preserves_source(self):
+        model = {"name": "INT4 collection", "modelVersions": [
+            {"id": 1, "baseModel": "MiniMax H3", "files": [
+                {"name": "H3_int4.safetensors", "type": "Model"},
+                {"name": "H3_int8.safetensors", "type": "Model"},
+                {"name": "vae.safetensors", "type": "VAE"},
+                {"name": "bundle.zip", "type": "Model"},
+                {"name": "unnamed.safetensors", "metadata": {"fp": "nf4"}},
+            ]},
+            {"id": 2, "baseModel": "MiniMax H3", "files": [{"name": "H3.gguf"}]},
+            {"id": 3, "baseModel": "SDXL 1.0", "files": [{"name": "sdxl.safetensors"}]},
+        ]}
+        original = json.dumps(model)
+        result = compatibility.filter_checkpoint_catalog_model(model)
+        self.assertEqual([v["id"] for v in result["modelVersions"]], [1])
+        self.assertEqual([f["name"] for f in result["modelVersions"][0]["files"]], ["H3_int8.safetensors"])
+        self.assertEqual(json.dumps(model), original)
+
+    def test_catalog_hides_unknown_or_missing_metadata(self):
+        for model in ({}, {"modelVersions": [{"baseModel": "MiniMax H3"}]}, {"modelVersions": [{"files": [{"name": "weights.safetensors"}]}]}):
+            self.assertEqual(compatibility.filter_checkpoint_catalog_model(model)["modelVersions"], [])
+
     def test_unsupported_filename_does_not_start_stream(self):
         def chunks():
             self.fail("Started unsupported download")
