@@ -62,6 +62,7 @@ from services.checkpoint_compatibility import (
     unsupported_checkpoint_reason,
     validate_checkpoint_file,
 )
+from services.resumable_download import ResumableDownload
 from services.generation_eta import AdaptiveGenerationEta, GenerationEtaHistory
 from services.remote_access import TailscaleManager
 from services.web_push import WebPushService, WebPushUnavailable
@@ -4146,6 +4147,7 @@ def _run_civitai_download(download_id: str):
     filename = dl["filename"]
     partial_paths = set()
     reserved_targets = set()
+    resp = None
 
     try:
         # CivitAI's download endpoint sits behind Cloudflare with bot
@@ -4192,22 +4194,12 @@ def _run_civitai_download(download_id: str):
                 sep = "&" if "?" in url else "?"
                 url = f"{url}{sep}token={api_key}"
                 headers["Authorization"] = f"Bearer {api_key}"
-        resp = requests.get(url, headers=headers, stream=True, timeout=30, allow_redirects=True)
-        if resp.status_code >= 400:
-            # Surface CivitAI's actual response body so we can tell whether
-            # it's a Cloudflare challenge, a token issue, an unauthorized
-            # error, etc. — invaluable for diagnosing 500s in the wild.
-            body_preview = ""
-            try:
-                body_preview = resp.text[:500] if hasattr(resp, "text") else ""
-            except Exception:
-                pass
-            print(
-                f"[CivitAI] Download HTTP {resp.status_code} for {url}\n"
-                f"  Response headers: {dict(resp.headers)}\n"
-                f"  Body preview: {body_preview!r}"
+        def report_retry(attempt, offset):
+            _update_download_record(
+                download_id,
+                message=f"Connection interrupted; resuming download (retry {attempt}/4)...",
             )
-        resp.raise_for_status()
+        resp = ResumableDownload(url, headers, on_retry=report_retry)
 
         # Get filename from content-disposition if available
         cd = resp.headers.get("content-disposition", "")
@@ -4402,6 +4394,8 @@ def _run_civitai_download(download_id: str):
         _fail_download_record(download_id, e)
         print(f"[CivitAI] Download failed: {e}")
     finally:
+        if resp is not None:
+            resp.close()
         for cleanup_path in tuple(partial_paths):
             try:
                 if os.path.isfile(cleanup_path):
