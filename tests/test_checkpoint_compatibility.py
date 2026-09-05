@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import ast
+import asyncio
 import json
 import os
 import struct
@@ -338,6 +339,38 @@ class TestH3CheckpointImports(unittest.TestCase):
         with self.assertRaises(compatibility.CheckpointCompatibilityError):
             self.validate(self.header(partition="FL2VA"), "minimax_h3_ref2va")
 
+    def test_h3_load_time_quantization_is_rejected_before_reading_weights(self):
+        for target in compatibility.checkpoint_targets_for_base("MiniMax H3"):
+            with self.subTest(target=target.architecture):
+                with self.assertRaisesRegex(compatibility.CheckpointCompatibilityError, "load-time INT8"):
+                    compatibility.validate_checkpoint_file("/missing/weights.safetensors", "MiniMax H3", target.architecture, qkv_layout="interleaved", auto_quantize=True)
+                self.assertFalse(compatibility.checkpoint_import_options(target.architecture, "interleaved")["auto_quantize"])
+        self.assertEqual(compatibility.checkpoint_import_options("flux", auto_quantize=True), {})
+
+    def test_api_rejects_h3_quantization_before_starting_download(self):
+        source_path = os.path.join(_ROOT, "app", "launch.py")
+        with open(source_path) as handle:
+            tree = ast.parse(handle.read())
+        endpoint = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "civitai_download")
+        endpoint.decorator_list = []
+        class HTTPError(Exception):
+            def __init__(self, status_code, detail):
+                self.status_code = status_code
+                super().__init__(detail)
+        class Request:
+            async def json(self):
+                return {"download_url": "https://civitai.com/api/download/models/1", "filename": "H3_bf16.safetensors", "kind": "checkpoint", "base_model": "MiniMax H3", "target_architecture": "minimax_h3", "h3_qkv_layout": "interleaved", "auto_quantize": True}
+        namespace = {"Request": Request, "HTTPException": HTTPError,
+            "_is_safe_civitai_url": lambda _: True, "_is_safe_path_component": lambda _: True,
+            "ensure_allowed_checkpoint_target": compatibility.ensure_allowed_checkpoint_target,
+            "validate_checkpoint_filename": compatibility.validate_checkpoint_filename,
+            "checkpoint_import_options": compatibility.checkpoint_import_options,
+            "CheckpointCompatibilityError": compatibility.CheckpointCompatibilityError}
+        exec(compile(ast.Module(body=[endpoint], type_ignores=[]), source_path, "exec"), namespace)
+        with self.assertRaisesRegex(HTTPError, "load-time INT8") as caught:
+            asyncio.run(namespace["civitai_download"](Request()))
+        self.assertEqual(caught.exception.status_code, 400)
+
     def test_qkv_order_cannot_be_guessed_from_shapes(self):
         for layout in ("", "auto", "contiguous", None, [], {}):
             with self.subTest(layout=layout), self.assertRaisesRegex(
@@ -406,6 +439,11 @@ class TestH3CheckpointRegistration(unittest.TestCase):
                 self.assertEqual(definition["model"]["minimax_h3_qkv_layout"], "grouped")
                 self.assertEqual(definition["model"]["compatible_model_paths"], {})
                 self.assertEqual(definition["model"]["compatible_model_qkv_layouts"], {})
+                self.assertFalse(definition["model"]["auto_quantize"])
+                with self.assertRaisesRegex(compatibility.CheckpointCompatibilityError, "load-time INT8"):
+                    namespace["_register_checkpoint_finetune"](
+                        path, {"baseModel": "MiniMax H3", "modelId": 124}, architecture,
+                        qkv_layout="interleaved", auto_quantize=True)
                 self.assertIn("num_inference_steps", definition)
                 self.assertEqual(compatibility.quarantine_incompatible_checkpoint_definitions(directory), [])
                 definition["model"].pop("minimax_h3_qkv_layout")

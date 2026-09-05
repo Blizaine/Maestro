@@ -6,9 +6,10 @@ and an individual `.safetensors` file. Choose the pipeline matching its model ca
 - **H3 First / Last — Pruned** or **Full** for FL2VA/T2VA.
 - **H3 Omni — Pruned** or **Full** for Ref2VA.
 
-Choose the publisher's **QKV layout**. Grouped Q/K/V is used by Comfy/ConvRot
-exports; head-interleaved applies to original exports. Check the instructions
-for the specific file: tensor dimensions cannot distinguish these row orders,
+Choose the publisher's **QKV layout** for the specific file. **ConvRot does not
+identify the layout.** Maestro's built-in DeepBeepMeep/WanGP INT8 ConvRot
+definitions use head-interleaved, while other exports may use grouped Q/K/V.
+Check the instructions for the specific file: tensor dimensions cannot distinguish these row orders,
 and selecting the wrong order can corrupt generation. The importer deliberately
 does not guess this setting from the filename or the CivitAI base-model label.
 
@@ -49,3 +50,7 @@ Checkpoint downloads validate the SafeTensor header at the start of the existing
 Checkpoint browsing filters unsupported base families, non-model files, archives, and explicitly unsupported H3 quantizations from filenames or file precision metadata. Filtering is applied per version and file in search and detail responses; models without remaining files are hidden. Upstream pagination cursors are preserved so empty filtered pages can continue to subsequent results. These are metadata candidates, not a guarantee of tensor or runtime compatibility. LoRA browsing is unchanged.
 
 Four-bit filename/precision filtering also recognizes W4A8 and W4A16 spellings, including separators and mixed case. W8A8 is not blocked by this rule.
+
+## H3 memory settings
+
+H3 imports preserve the file’s stored precision. The H3 loader does not apply the generic load-time INT8 conversion flag, so Optimize VRAM is hidden for H3 and requests enabling it are rejected before download or registration. Choose a supported pre-quantized file when lower memory use is needed. This is not a guarantee that any particular model/resolution fits in memory.

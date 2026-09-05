@@ -141,8 +141,8 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
   const LARGE_CKPT_BYTES = 12 * 1024 * 1024 * 1024 // 12 GB
   const [autoQuantize, setAutoQuantize] = useState(false)
   useEffect(() => {
-    if (isCheckpoint) setAutoQuantize(fileBytes > LARGE_CKPT_BYTES)
-  }, [isCheckpoint, fileBytes, LARGE_CKPT_BYTES])
+    if (isCheckpoint) setAutoQuantize(!isH3Checkpoint && fileBytes > LARGE_CKPT_BYTES)
+  }, [isCheckpoint, isH3Checkpoint, fileBytes, LARGE_CKPT_BYTES])
 
   const handleDownload = () => {
     if (!file || !version) return
@@ -179,7 +179,7 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
       published_at: version.publishedAt || undefined,
     }
     if (isCheckpoint) {
-      startDownload({ ...common, target_arch: '', kind: 'checkpoint', target_architecture: targetArchitecture, auto_quantize: autoQuantize, h3_qkv_layout: isH3Checkpoint ? h3QkvLayout : undefined })
+      startDownload({ ...common, target_arch: '', kind: 'checkpoint', target_architecture: targetArchitecture, auto_quantize: isH3Checkpoint ? false : autoQuantize, h3_qkv_layout: isH3Checkpoint ? h3QkvLayout : undefined })
     } else {
       startDownload({ ...common, target_arch: localArch || '', target_dir_name: targetDirOverride || undefined })
     }
@@ -357,11 +357,13 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
                   <label htmlFor="h3-checkpoint-layout" className="text-[11px] text-text-muted uppercase tracking-wider mb-1 block">H3 checkpoint QKV layout</label>
                   <select id="h3-checkpoint-layout" value={h3QkvLayout} onChange={e => setH3QkvLayout(e.target.value)} className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary">
                     <option value="">Select the publisher's export layout…</option>
-                    <option value="grouped">Grouped Q/K/V (Comfy / ConvRot exports)</option>
-                    <option value="interleaved">Head-interleaved (original exports)</option>
+                    <option value="grouped">Grouped Q/K/V — as specified by the publisher</option>
+                    <option value="interleaved">Head-interleaved Q/K/V — as specified by the publisher</option>
                   </select>
                   <p className="text-[10px] text-text-muted mt-1 leading-snug">
                     Match First / Last or Omni and Pruned or Full to the model card.
+                    ConvRot alone does not identify the QKV layout. Maestro’s built-in DeepBeepMeep/WanGP
+                    INT8 ConvRot definitions use head-interleaved; other exports can differ.
                     QKV order cannot be inferred from tensor shapes; a wrong choice can corrupt output.
                     Supports BF16, FP16, FP8 and INT8 single-file transformers, not GGUF or packed 4-bit exports.
                     Fused or distilled checkpoints may also require the publisher's sampling settings.
@@ -393,8 +395,14 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
             )
           )}
 
-          {/* Ask-per-download int8 (checkpoint only) */}
-          {isCheckpoint && architectures.length > 0 && (
+          {isH3Checkpoint && (
+            <p className="text-[11px] text-text-secondary leading-snug">
+              H3 uses the precision stored in the downloaded file. Load-time INT8 conversion is unavailable;
+              choose a supported pre-quantized file to reduce memory use.
+            </p>
+          )}
+          {/* Ask-per-download int8 (supported checkpoint loaders only) */}
+          {isCheckpoint && !isH3Checkpoint && architectures.length > 0 && (
             <label className="flex items-start gap-2 cursor-pointer">
               <input
                 type="checkbox"

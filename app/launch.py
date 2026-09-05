@@ -3004,6 +3004,7 @@ def _register_checkpoint_finetune(save_path: str, sidecar_data: dict,
         target_architecture,
         filename=filename,
         qkv_layout=qkv_layout,
+        auto_quantize=auto_quantize,
     )
     template_model_type = checkpoint_template_model_type(
         base_model, target_architecture
@@ -4086,7 +4087,7 @@ async def civitai_download(request: Request):
         try:
             ensure_allowed_checkpoint_target(base_model, target_architecture)
             validate_checkpoint_filename(filename, target_architecture)
-            checkpoint_import_options(target_architecture, body.get("h3_qkv_layout", ""))
+            checkpoint_import_options(target_architecture, body.get("h3_qkv_layout", ""), auto_quantize=auto_quantize)
         except CheckpointCompatibilityError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         available_targets = {

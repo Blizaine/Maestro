@@ -348,10 +348,16 @@ _H3_ARCHITECTURES = {
 }
 
 
-def checkpoint_import_options(architecture: str, qkv_layout: str = "") -> dict:
+def checkpoint_import_options(architecture: str, qkv_layout: str = "", *, auto_quantize: bool = False) -> dict:
     """Require the H3 export layout: shapes cannot identify Q/K/V row order."""
     if architecture not in _H3_ARCHITECTURES:
         return {}
+    if auto_quantize:
+        raise CheckpointCompatibilityError(
+            "H3 does not support Optimize VRAM / load-time INT8 conversion. "
+            "Disable this option and choose a supported pre-quantized checkpoint "
+            "if needed; H3 loads the precision stored in the file."
+        )
     if not isinstance(qkv_layout, str) or qkv_layout not in {"grouped", "interleaved"}:
         raise CheckpointCompatibilityError(
             "Select the H3 checkpoint's QKV layout from its publisher's instructions: "
@@ -359,6 +365,7 @@ def checkpoint_import_options(architecture: str, qkv_layout: str = "") -> dict:
         )
     return {
         "minimax_h3_qkv_layout": qkv_layout,
+        "auto_quantize": False,
         # Built-in migration aliases must not substitute a different checkpoint
         # or override the explicitly selected layout based on its filename.
         "compatible_model_paths": {},
@@ -530,6 +537,7 @@ def validate_checkpoint_file(
     *,
     filename: str | None = None,
     qkv_layout: str = "",
+    auto_quantize: bool = False,
 ) -> dict:
     """Validate metadata mapping and transformer tensor layout.
 
@@ -538,7 +546,7 @@ def validate_checkpoint_file(
     """
 
     ensure_allowed_checkpoint_target(base_model, target_architecture)
-    options = checkpoint_import_options(target_architecture, qkv_layout)
+    options = checkpoint_import_options(target_architecture, qkv_layout, auto_quantize=auto_quantize)
     validate_checkpoint_filename(filename or path, target_architecture)
     extension = os.path.splitext(filename or path)[1].casefold()
     if extension not in {".safetensors", ".sft"}:
