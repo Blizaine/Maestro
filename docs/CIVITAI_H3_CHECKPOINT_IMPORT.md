@@ -39,3 +39,9 @@ SafeTensor headers referenced by `app/defaults/minimax_h3.json` and
 `fec7846aef352e58a1cfb699455e3d104281e68b`). Regression tests use synthetic headers
 and temporary finetune registrations; they do not allocate model weights or
 require a CUDA GPU. Full inference remains a separate model-specific check.
+
+## Early compatibility checks
+
+The browser blocks H3 filenames explicitly marked INT4, FP4/NVFP4, 4-bit, or GGUF and explains that the user must choose another file/version. The download endpoint enforces the same restriction. Explicit workflow and size hints (FL2VA/T2VA/REF2VA plus Pruned/Full/33B) suggest a pipeline; ambiguous filenames still require a choice. A new model entry is created during import.
+
+Checkpoint downloads validate the SafeTensor header at the start of the existing authenticated stream, before consuming the remaining weights. This also catches incompatible files whose names lack format hints, without depending on HTTP Range support. A failed check closes the response and removes the partial file. Header buffering is bounded to 256 MiB plus one download chunk; the complete file still receives the existing payload/offset validation before publication. QKV order remains an explicit publisher-informed choice.

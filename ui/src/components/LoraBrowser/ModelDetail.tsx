@@ -76,7 +76,9 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
   const baseModel = version?.baseModel || ''
   const [architectures, setArchitectures] = useState<CheckpointArchitecture[]>([])
   const [targetArchitecture, setTargetArchitecture] = useState('')
-  const isH3Checkpoint = isCheckpoint && targetArchitecture.startsWith('minimax_h3')
+  const isH3Checkpoint = isCheckpoint && baseModel.trim().toLowerCase() === 'minimax h3'
+  const unsupportedH3File = isH3Checkpoint && /int4|nvfp4|fp4|4[ _-]?bit|gguf/i.test(file?.name || '')
+  const h3FileReason = unsupportedH3File ? 'This file is an unsupported 4-bit or GGUF export. Choose a different file or version, such as FL2VA Pruned INT8 ConvRot. The base pipeline and INT8 load setting cannot convert this file.' : null
   const [h3QkvLayout, setH3QkvLayout] = useState('')
   useEffect(() => { setH3QkvLayout('') }, [version?.id, file?.id, targetArchitecture])
   const [checkpointSupportReason, setCheckpointSupportReason] = useState<string | null>(null)
@@ -114,6 +116,17 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
     return () => { cancelled = true }
   }, [isCheckpoint, baseModel])
 
+  // Filename hints select only explicit workflow/size pairs; the streamed
+  // tensor header still verifies the selection before downloading weights.
+  useEffect(() => {
+    if (!isH3Checkpoint || !architectures.length) return
+    const name = (file?.name || '').toLowerCase()
+    const workflow = /ref2va/.test(name) ? 'minimax_h3_ref2va' : /fl2va|t2va/.test(name) ? 'minimax_h3' : ''
+    const size = /pruned/.test(name) ? '' : /full|33b/.test(name) ? '_full' : null
+    const suggested = workflow && size !== null ? workflow + size : ''
+    setTargetArchitecture(architectures.some(a => a.architecture === suggested) ? suggested : '')
+  }, [isH3Checkpoint, architectures, file?.name, version?.id])
+
   // Group architectures by family for an <optgroup> picker.
   const groupedArchs = useMemo(() => {
     const groups: Record<string, CheckpointArchitecture[]> = {}
@@ -133,7 +146,7 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
 
   const handleDownload = () => {
     if (!file || !version) return
-    if (isCheckpoint && (checkpointArchitectureLoading || checkpointSupportReason || !targetArchitecture || (isH3Checkpoint && !h3QkvLayout))) return
+    if (isCheckpoint && (checkpointArchitectureLoading || checkpointSupportReason || h3FileReason || !targetArchitecture || (isH3Checkpoint && !h3QkvLayout))) return
 
     // Extract example prompts from image metadata
     const examplePrompts: string[] = []
@@ -313,7 +326,7 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
           {isCheckpoint ? (
             <div>
               <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1 flex items-center gap-1.5">
-                <Boxes size={12} /> Import as model
+                <Boxes size={12} /> Base model / pipeline
               </label>
               <select
                 value={targetArchitecture}
@@ -334,7 +347,7 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
               </select>
               <p className="text-[10px] text-text-muted mt-1 leading-snug">
                 The base model this checkpoint was trained for{baseModel ? ` (CivitAI base: ${baseModel})` : ''}.
-                Compatible SafeTensor shapes are verified before the file is installed.
+                A new model entry is created automatically. The tensor header is checked before downloading the weights.
               </p>
               {isH3Checkpoint && (
                 <div className="mt-3">
@@ -352,10 +365,10 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
                   </p>
                 </div>
               )}
-              {checkpointSupportReason && (
+              {(checkpointSupportReason || h3FileReason) && (
                 <div className="flex items-start gap-2 mt-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-text-primary leading-snug">
                   <AlertTriangle size={13} className="text-indicator-warning shrink-0 mt-0.5" />
-                  <span>{checkpointSupportReason}</span>
+                  <span>{checkpointSupportReason || h3FileReason}</span>
                 </div>
               )}
             </div>
@@ -475,7 +488,7 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
                 )}
                 <button
                   onClick={handleDownload}
-                  disabled={!file || (isCheckpoint && (checkpointArchitectureLoading || !!checkpointSupportReason || !targetArchitecture || (isH3Checkpoint && !h3QkvLayout)))}
+                  disabled={!file || (isCheckpoint && (checkpointArchitectureLoading || !!checkpointSupportReason || !!h3FileReason || !targetArchitecture || (isH3Checkpoint && !h3QkvLayout)))}
                   className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-accent-blue text-white text-sm rounded-lg hover:bg-accent-blue-hover transition-colors disabled:opacity-50"
                 >
                   <Download size={14} />

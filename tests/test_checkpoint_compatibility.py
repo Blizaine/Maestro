@@ -247,6 +247,37 @@ class TestH3CheckpointImports(unittest.TestCase):
             return compatibility.validate_checkpoint_file(
                 path, "MiniMax H3", architecture, qkv_layout=layout)
 
+    def test_stream_rejects_wrong_architecture_without_consuming_weights(self):
+        header = json.dumps(self.header(partition="REF2VA")).encode()
+        def chunks():
+            yield struct.pack("<Q", len(header)) + header
+            self.fail("Read tensor payload after incompatible header")
+        with self.assertRaisesRegex(compatibility.CheckpointCompatibilityError, "matches"):
+            list(compatibility.verified_checkpoint_chunks(chunks(), "MiniMax H3", "minimax_h3", filename="model.safetensors", qkv_layout="grouped"))
+
+    def test_stream_preserves_valid_file_across_header_boundaries(self):
+        header = json.dumps(self.header(partition="FL2VA")).encode()
+        data = struct.pack("<Q", len(header)) + header + b"tensor payload"
+        for split in (1, 8, 20, len(data) - 5):
+            chunks = [data[:split], data[split:]]
+            result = compatibility.verified_checkpoint_chunks(chunks, "MiniMax H3", "minimax_h3", filename="model.safetensors", qkv_layout="grouped")
+            self.assertEqual(b"".join(result), data)
+
+    def test_stream_rejects_corrupt_and_truncated_headers_early(self):
+        for data in (b"short", struct.pack("<Q", 2**40), struct.pack("<Q", 2) + b"[]", struct.pack("<Q", 2) + b"xx"):
+            with self.assertRaises(compatibility.CheckpointCompatibilityError):
+                list(compatibility.verified_checkpoint_chunks([data], "MiniMax H3", "minimax_h3", filename="model.safetensors", qkv_layout="grouped"))
+
+    def test_unsupported_filename_does_not_start_stream(self):
+        def chunks():
+            self.fail("Started unsupported download")
+            yield b""
+        for name in ("minimaxH3INT4Convrot_fl2vaPrunedInt4.safetensors", "H3_NVFP4.safetensors", "H3_4-bit.safetensors", "H3.gguf"):
+            with self.assertRaisesRegex(compatibility.CheckpointCompatibilityError, "different file"):
+                list(compatibility.verified_checkpoint_chunks(chunks(), "MiniMax H3", "minimax_h3", filename=name, qkv_layout="grouped"))
+        compatibility.validate_checkpoint_filename("H3_pruned_int8_convrot.safetensors", "minimax_h3")
+        compatibility.validate_checkpoint_filename("unrelated_int4.safetensors", "flux")
+
     def test_h3_requires_explicit_workflow_and_size_choice(self):
         self.assertEqual(len(compatibility.checkpoint_targets_for_base(" MiniMax H3 ")), 4)
         self.assertIsNone(compatibility.suggested_checkpoint_architecture("MiniMax H3"))

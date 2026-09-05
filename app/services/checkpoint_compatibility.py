@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import glob
 import json
 import os
+import re
 import struct
 from typing import Iterable
 
@@ -365,6 +366,55 @@ def checkpoint_import_options(architecture: str, qkv_layout: str = "") -> dict:
     }
 
 
+def validate_checkpoint_filename(filename: str, architecture: str) -> None:
+    """Reject explicitly unsupported H3 exports before opening a download."""
+    if architecture not in _H3_ARCHITECTURES:
+        return
+    if re.search(r"int4|nvfp4|fp4|4[ _-]?bit|gguf", filename, re.IGNORECASE):
+        raise CheckpointCompatibilityError(
+            "This H3 file is a packed 4-bit or GGUF export, which Maestro's "
+            "CivitAI importer does not yet support. Select a different file or "
+            "version: FL2VA Pruned INT8 ConvRot is a supported export type. "
+            "Changing the base pipeline or enabling INT8 at load time does not "
+            "convert this download."
+        )
+
+
+def verified_checkpoint_chunks(chunks, base_model, architecture, *, filename, qkv_layout=""):
+    """Check the header before consuming the multi-GB tensor payload.
+
+    Works on the existing authenticated stream, including servers that ignore
+    Range requests. The final on-disk validation remains authoritative.
+    """
+    validate_checkpoint_filename(filename, architecture)
+    chunks = iter(chunks)
+    prefix = bytearray()
+    required = None
+    for chunk in chunks:
+        if not chunk:
+            continue
+        prefix.extend(chunk)
+        if required is None and len(prefix) >= 8:
+            length = struct.unpack("<Q", prefix[:8])[0]
+            if length < 2 or length > 256 * 1024 * 1024:
+                raise CheckpointCompatibilityError("Invalid SafeTensor header; download stopped before tensor transfer.")
+            required = 8 + length
+        if required is not None and len(prefix) >= required:
+            try:
+                header = json.loads(prefix[8:required])
+            except (ValueError, UnicodeError) as exc:
+                raise CheckpointCompatibilityError("Invalid SafeTensor JSON header; download stopped.") from exc
+            if not isinstance(header, dict):
+                raise CheckpointCompatibilityError("SafeTensor header is not a tensor index")
+            ensure_allowed_checkpoint_target(base_model, architecture)
+            checkpoint_import_options(architecture, qkv_layout)
+            _validate_checkpoint_matches(_detect_header_architectures(header), architecture)
+            yield bytes(prefix)
+            yield from chunks
+            return
+    raise CheckpointCompatibilityError("SafeTensor header is truncated; download stopped.")
+
+
 def _h3_checkpoint_architectures(header: dict) -> list[str]:
     # Match only namespaces stripped by the H3 loader, not the broader aliases
     # accepted by other families. Packed 4-bit weights need their own verified
@@ -430,6 +480,10 @@ def detect_checkpoint_architectures(path: str) -> list[str]:
     """Return every verified architecture signature matched by ``path``."""
 
     header = read_safetensors_header(path)
+    return _detect_header_architectures(header)
+
+
+def _detect_header_architectures(header: dict) -> list[str]:
     shapes = _tensor_shapes(header)
     matches: list[str] = _h3_checkpoint_architectures(header)
     for architecture, rules in _SIGNATURES.items():
@@ -454,6 +508,7 @@ def validate_checkpoint_file(
 
     ensure_allowed_checkpoint_target(base_model, target_architecture)
     options = checkpoint_import_options(target_architecture, qkv_layout)
+    validate_checkpoint_filename(filename or path, target_architecture)
     extension = os.path.splitext(filename or path)[1].casefold()
     if extension not in {".safetensors", ".sft"}:
         raise CheckpointCompatibilityError(
@@ -461,6 +516,18 @@ def validate_checkpoint_file(
         )
 
     matches = detect_checkpoint_architectures(path)
+    _validate_checkpoint_matches(matches, target_architecture)
+    return {
+        "model_options": options,
+        "status": "verified",
+        "architecture": target_architecture,
+        "base_model": str(base_model or ""),
+        "matched_layouts": sorted(matches),
+        "signature_version": 1,
+    }
+
+
+def _validate_checkpoint_matches(matches: list[str], target_architecture: str) -> None:
     if target_architecture not in matches:
         if matches:
             detected = ", ".join(sorted(matches))
@@ -473,14 +540,6 @@ def validate_checkpoint_file(
             f"{target_architecture} layout. It may be a full Diffusers bundle, "
             "an unsupported architecture, or a mislabeled upload. It cannot be registered."
         )
-    return {
-        "model_options": options,
-        "status": "verified",
-        "architecture": target_architecture,
-        "base_model": str(base_model or ""),
-        "matched_layouts": sorted(matches),
-        "signature_version": 1,
-    }
 
 
 _QUARANTINE_KEY = "maestro_checkpoint_quarantine"

@@ -62,6 +62,8 @@ from services.checkpoint_compatibility import (
     suggested_checkpoint_architecture,
     unsupported_checkpoint_reason,
     validate_checkpoint_file,
+    validate_checkpoint_filename,
+    verified_checkpoint_chunks,
 )
 from services.generation_eta import AdaptiveGenerationEta, GenerationEtaHistory
 from services.remote_access import TailscaleManager
@@ -4063,6 +4065,7 @@ async def civitai_download(request: Request):
         # any architecture that happens to exist in defaults/.
         try:
             ensure_allowed_checkpoint_target(base_model, target_architecture)
+            validate_checkpoint_filename(filename, target_architecture)
             checkpoint_import_options(target_architecture, body.get("h3_qkv_layout", ""))
         except CheckpointCompatibilityError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -4152,6 +4155,7 @@ def _run_civitai_download(download_id: str):
     filename = dl["filename"]
     partial_paths = set()
     reserved_targets = set()
+    resp = None
 
     try:
         # CivitAI's download endpoint sits behind Cloudflare with bot
@@ -4237,8 +4241,15 @@ def _run_civitai_download(download_id: str):
         partial_paths.add(partial_path)
         downloaded = 0
 
+        chunks = resp.iter_content(chunk_size=1024 * 1024)
+        if dl.get("_kind") == "checkpoint":
+            dl["message"] = "Checking checkpoint header before downloading weights..."
+            chunks = verified_checkpoint_chunks(
+                chunks, dl.get("_base_model", ""), dl.get("_target_architecture", ""),
+                filename=filename, qkv_layout=dl.get("_h3_qkv_layout", ""),
+            )
         with open(partial_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=1024 * 1024):  # 1MB chunks
+            for chunk in chunks:
                 if not chunk:
                     continue
                 f.write(chunk)
@@ -4410,6 +4421,8 @@ def _run_civitai_download(download_id: str):
         _fail_download_record(download_id, e)
         print(f"[CivitAI] Download failed: {e}")
     finally:
+        if resp is not None:
+            resp.close()
         for cleanup_path in tuple(partial_paths):
             try:
                 if os.path.isfile(cleanup_path):
