@@ -370,7 +370,7 @@ def validate_checkpoint_filename(filename: str, architecture: str) -> None:
     """Reject explicitly unsupported H3 exports before opening a download."""
     if architecture not in _H3_ARCHITECTURES:
         return
-    if re.search(r"int4|nvfp4|fp4|nf4|4[ _-]?bit|gguf", filename, re.IGNORECASE):
+    if re.search(r"int4|nvfp4|fp4|nf4|w[ _-]?4[ _-]?a[ _-]?\d+|4[ _-]?bit|gguf", filename, re.IGNORECASE):
         raise CheckpointCompatibilityError(
             "This H3 file is a packed 4-bit or GGUF export, which Maestro's "
             "CivitAI importer does not yet support. Select a different file or "

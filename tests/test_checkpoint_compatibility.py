@@ -300,6 +300,18 @@ class TestH3CheckpointImports(unittest.TestCase):
         compatibility.validate_checkpoint_filename("H3_pruned_int8_convrot.safetensors", "minimax_h3")
         compatibility.validate_checkpoint_filename("unrelated_int4.safetensors", "flux")
 
+    def test_w4a_exports_are_hidden_and_rejected_before_transfer(self):
+        for name in ("minimaxH3ComfyNativeRef2vaW4a8_v10.safetensors", "H3_W4A16.safetensors", "H3_w4_a8.safetensors", "H3_W-4-A-8.safetensors"):
+            with self.subTest(name=name):
+                for target in compatibility.checkpoint_targets_for_base("MiniMax H3"):
+                    with self.assertRaisesRegex(compatibility.CheckpointCompatibilityError, "4-bit"):
+                        compatibility.validate_checkpoint_filename(name, target.architecture)
+                model = {"modelVersions": [{"baseModel": "MiniMax H3", "files": [{"name": name}]}]}
+                self.assertEqual(compatibility.filter_checkpoint_catalog_model(model)["modelVersions"], [])
+        metadata_model = {"modelVersions": [{"baseModel": "MiniMax H3", "files": [{"name": "weights.safetensors", "metadata": {"fp": "W4A8"}}]}]}
+        self.assertEqual(compatibility.filter_checkpoint_catalog_model(metadata_model)["modelVersions"], [])
+        compatibility.validate_checkpoint_filename("H3_W8A8.safetensors", "minimax_h3")
+
     def test_h3_requires_explicit_workflow_and_size_choice(self):
         self.assertEqual(len(compatibility.checkpoint_targets_for_base(" MiniMax H3 ")), 4)
         self.assertIsNone(compatibility.suggested_checkpoint_architecture("MiniMax H3"))
