@@ -190,7 +190,7 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
   busy?: boolean
   onTag: (tag: 'good' | 'needs_work' | null) => void
   onRerunImage: (clipIndex: number, prompt?: string) => void
-  onRerunVideo: (clipIndex: number, prompt?: string) => void
+  onRerunVideo: (clipIndex: number, prompt?: string, resolution?: string) => void
   onSavePrompt: (clipIndex: number, field: 'image_prompt' | 'video_prompt', value: string) => void
 }) {
   const [expandImage, setExpandImage] = useState(false)
@@ -198,6 +198,7 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
   const [showPolish, setShowPolish] = useState(false)
   const [editingImage, setEditingImage] = useState(false)
   const [editingVideo, setEditingVideo] = useState(false)
+  const [rerunResolution, setRerunResolution] = useState('')
   const [editWindowPrompts, setEditWindowPrompts] = useState<string[]>(clip.window_prompts || [])
   const [editImagePrompt, setEditImagePrompt] = useState(clip.image_prompt || '')
   const [editVideoPrompt, setEditVideoPrompt] = useState(clip.video_prompt || '')
@@ -373,11 +374,23 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
                 title="Edit prompt">
                 <Pencil size={9} />
               </button>
+              <select
+                value={rerunResolution}
+                onChange={e => setRerunResolution(e.target.value)}
+                disabled={busy}
+                title="Resolution for this re-generation (lower = less VRAM)"
+                className="bg-bg-tertiary border border-border rounded px-1 py-0.5 text-[9px] text-text-secondary focus:outline-none disabled:opacity-40"
+              >
+                <option value="">Project resolution</option>
+                <option value="1280x720">720p</option>
+                <option value="960x544">540p</option>
+                <option value="848x480">480p</option>
+              </select>
               <button onClick={() => {
                 if (editingVideo && editWindowPrompts.length > 1) {
-                  onRerunVideo(clip.index, editWindowPrompts.join('\n'))
+                  onRerunVideo(clip.index, editWindowPrompts.join('\n'), rerunResolution || undefined)
                 } else {
-                  onRerunVideo(clip.index, editingVideo ? editVideoPrompt : undefined)
+                  onRerunVideo(clip.index, editingVideo ? editVideoPrompt : undefined, rerunResolution || undefined)
                 }
               }}
                 disabled={busy || (requiresShotImage && !clip.start_image_filename)}
@@ -893,7 +906,7 @@ function DirectorDashboardInner() {
                     onTag={(tag) => tagClip(selectedPipeline.pipeline_id, clip.index, tag)}
                     onSavePrompt={(idx, field, value) => updateClipPrompt(selectedPipeline.pipeline_id, idx, field, value)}
                     onRerunImage={(idx, prompt) => { setRegenError(null); rerunClipImage(selectedPipeline.pipeline_id, idx, prompt).catch(e => setRegenError(String(e instanceof Error ? e.message : e))) }}
-                    onRerunVideo={(idx, prompt) => { setRegenError(null); rerunClipVideo(selectedPipeline.pipeline_id, idx, prompt).catch(e => setRegenError(String(e instanceof Error ? e.message : e))) }}
+                    onRerunVideo={(idx, prompt, resolution) => { setRegenError(null); rerunClipVideo(selectedPipeline.pipeline_id, idx, prompt, resolution).catch(e => setRegenError(String(e instanceof Error ? e.message : e))) }}
                   />
                 ))}
               </div>

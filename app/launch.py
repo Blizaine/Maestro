@@ -9027,6 +9027,7 @@ async def rerun_pipeline_clip_video(pid: str, clip_index: int, request: Request)
             pid,
             clip_index,
             prompt_override=body.get("prompt"),
+            resolution_override=body.get("resolution"),
         )
         return result
     except PipelineBusyError as e:

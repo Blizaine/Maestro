@@ -2332,12 +2332,45 @@ def _quantize_clip_frame_schedule(
     return carried
 
 
+def _normalized_rerun_resolution(value) -> Optional[str]:
+    """Validate a single-shot rerun resolution override.
+
+    Accepts either a canonical ``WIDTHxHEIGHT`` string or a friendly
+    16:9 preset name (480p/540p/720p/1080p) and returns a canonical
+    ``WIDTHxHEIGHT`` string, or None when the value is missing, empty,
+    or not a valid even multiple of 8. Invalid values are ignored so a
+    malformed override silently falls back to the saved project profile
+    instead of failing the rerun.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    _PRESET_16_9 = {
+        "480p": "848x480",
+        "540p": "960x544",
+        "720p": "1280x720",
+        "1080p": "1920x1088",
+    }
+    lowered = text.lower()
+    if lowered in _PRESET_16_9:
+        return _PRESET_16_9[lowered]
+    match = re.match(r"^(\d{2,5})[xX×](\d{2,5})$", text)
+    if match:
+        width, height = int(match.group(1)), int(match.group(2))
+        if width >= 64 and height >= 64 and width % 8 == 0 and height % 8 == 0:
+            return f"{width}x{height}"
+    print(f"[Pipeline] Ignoring invalid rerun resolution override: {value!r}")
+    return None
+
+
 @_exclusive_pipeline_operation
-def rerun_clip_video(out_dir: str, pid: str, clip_index: int, prompt_override: str = None) -> dict:
-    return _rerun_clip_video_impl(out_dir, pid, clip_index, prompt_override)
+def rerun_clip_video(out_dir: str, pid: str, clip_index: int, prompt_override: str = None, resolution_override: str = None) -> dict:
+    return _rerun_clip_video_impl(out_dir, pid, clip_index, prompt_override, resolution_override)
 
 
-def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_override: str = None) -> dict:
+def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_override: str = None, resolution_override: str = None) -> dict:
     """Re-generate the video for a single clip. Returns {job_id, filename} or raises."""
     state = load_pipeline_state(out_dir, pid)
     if not state:
@@ -2599,7 +2632,8 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
         "guidance_scale": video_params.get("guidance_scale", 1),
         "input_video_strength": video_params.get("input_video_strength", 1.0),
         "resolution": (
-            execution_profile.get("normalized_resolution")
+            _normalized_rerun_resolution(resolution_override)
+            or execution_profile.get("normalized_resolution")
             or video_params.get("resolution", "1280x720")
         ),
         "video_length": video_length,

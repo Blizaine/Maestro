@@ -6756,6 +6756,30 @@ def concatenate_multi_clip_videos(
     except Exception:
         pass
 
+    # Probe the first clip's resolution so every input can be normalized
+    # to it before concat. The concat filter rejects mixed-resolution
+    # inputs, which can now happen when a single shot is re-generated at
+    # a lower resolution than the rest of the project.
+    scale_filter = ""
+    try:
+        ffprobe_bin = ffmpeg_bin.replace("ffmpeg", "ffprobe")
+        size_probe = subprocess.run(
+            [ffprobe_bin, "-i", valid_paths[0].replace("\\", "/"),
+             "-select_streams", "v:0", "-show_entries", "stream=width,height",
+             "-of", "csv=p=0", "-loglevel", "error"],
+            capture_output=True, text=True, timeout=10,
+        )
+        size_line = size_probe.stdout.strip().replace("\r", "")
+        if size_line:
+            pair = size_line.split("\n")[0].split(",")
+            if len(pair) >= 2:
+                target_width = int(pair[0].strip())
+                target_height = int(pair[1].strip())
+                if target_width > 0 and target_height > 0:
+                    scale_filter = f"scale={target_width}:{target_height},setsar=1"
+    except Exception:
+        pass
+
     # Build ffmpeg command with concat filter
     cmd = [ffmpeg_bin, "-y"]
     for p in valid_paths:
@@ -6764,29 +6788,43 @@ def concatenate_multi_clip_videos(
         cmd += ["-i", os.path.abspath(audio_path).replace("\\", "/")]
 
     # Build filter_complex string
+    if scale_filter:
+        # Each per-input scale is its own filter chain, terminated with a
+        # semicolon; ffmpeg rejects concatenated chains without separators
+        # ("Trailing garbage after a filter").
+        video_preamble = "".join(
+            f"[{i}:v]{scale_filter}[sv{i}];" for i in range(n)
+        )
+        video_labels = [f"[sv{i}]" for i in range(n)]
+    else:
+        video_preamble = ""
+        video_labels = [f"[{i}:v]" for i in range(n)]
+
     if use_clip_audio:
         # Concat both video and audio streams from each clip
-        filter_inputs = "".join(f"[{i}:v][{i}:a]" for i in range(n))
+        concat_inputs = "".join(
+            f"{video_labels[i]}[{i}:a]" for i in range(n)
+        )
         if video_duration_sec is not None:
             filter_str = (
-                f"{filter_inputs}concat=n={n}:v=1:a=1[joinedv][joineda];"
+                f"{video_preamble}{concat_inputs}concat=n={n}:v=1:a=1[joinedv][joineda];"
                 f"[joinedv]trim=duration={video_duration_sec:.6f},setpts=PTS-STARTPTS[outv];"
                 f"[joineda]atrim=duration={video_duration_sec:.6f},asetpts=PTS-STARTPTS[outa]"
             )
         else:
-            filter_str = f"{filter_inputs}concat=n={n}:v=1:a=1[outv][outa]"
+            filter_str = f"{video_preamble}{concat_inputs}concat=n={n}:v=1:a=1[outv][outa]"
         cmd += ["-filter_complex", filter_str]
         cmd += ["-map", "[outv]", "-map", "[outa]"]
         cmd += ["-c:a", "aac"]
     else:
-        filter_inputs = "".join(f"[{i}:v]" for i in range(n))
+        concat_inputs = "".join(video_labels)
         if video_duration_sec is not None:
             filter_str = (
-                f"{filter_inputs}concat=n={n}:v=1:a=0[joinedv];"
+                f"{video_preamble}{concat_inputs}concat=n={n}:v=1:a=0[joinedv];"
                 f"[joinedv]trim=duration={video_duration_sec:.6f},setpts=PTS-STARTPTS[outv]"
             )
         else:
-            filter_str = f"{filter_inputs}concat=n={n}:v=1:a=0[outv]"
+            filter_str = f"{video_preamble}{concat_inputs}concat=n={n}:v=1:a=0[outv]"
         if audio_path and (audio_start_sec > 0 or pad_audio):
             audio_filters = []
             if audio_start_sec > 0:

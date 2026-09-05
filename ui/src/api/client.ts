@@ -847,11 +847,11 @@ export async function rerunClipImage(pid: string, clipIndex: number, prompt?: st
   return res.json()
 }
 
-export async function rerunClipVideo(pid: string, clipIndex: number, prompt?: string): Promise<{ filename: string; clip_index: number }> {
+export async function rerunClipVideo(pid: string, clipIndex: number, prompt?: string, resolution?: string): Promise<{ filename: string; clip_index: number }> {
   const res = await fetch(`${BASE}/api/v1/director/pipelines/${encodeURIComponent(pid)}/clips/${clipIndex}/rerun-video`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt: prompt || undefined }),
+    body: JSON.stringify({ prompt: prompt || undefined, resolution: resolution || undefined }),
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: 'Re-run failed' }))

@@ -1249,7 +1249,7 @@ interface AppState {
   cancelPipelineRepair: (pid: string) => Promise<PipelineRepairState>
   pollPipelineRepair: (pid: string, operationId: string) => void
   rerunClipImage: (pid: string, clipIndex: number, prompt?: string) => Promise<unknown>
-  rerunClipVideo: (pid: string, clipIndex: number, prompt?: string) => Promise<unknown>
+  rerunClipVideo: (pid: string, clipIndex: number, prompt?: string, resolution?: string) => Promise<unknown>
   rejoinPipelineClips: (pid: string) => Promise<unknown>
   resumePipeline: (pid: string) => Promise<void>
   deletePipeline: (pid: string) => Promise<void>
@@ -3213,10 +3213,10 @@ export const useStore = create<AppState>((set, get) => ({
       throw e
     }
   },
-  rerunClipVideo: async (pid: string, clipIndex: number, prompt?: string) => {
+  rerunClipVideo: async (pid: string, clipIndex: number, prompt?: string, resolution?: string) => {
     set({ dashboardLoading: true })
     try {
-      const result = await api.rerunClipVideo(pid, clipIndex, prompt)
+      const result = await api.rerunClipVideo(pid, clipIndex, prompt, resolution)
       const pipeline = await api.fetchSavedPipeline(pid)
       set({ dashboardSelectedPipeline: pipeline, dashboardLoading: false })
       // New files (rerun clip / rejoin video) land in the outputs folder —
