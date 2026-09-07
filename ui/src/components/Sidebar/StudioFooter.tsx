@@ -14,10 +14,10 @@ export function StudioFooter({onCharacterSlot, onAnchor}: {
   const [librariesOpen, setLibrariesOpen] = useState(false)
   const modelType = useStore(s => s.params.model_type)
   const isOutpaint = useStore(s => s.generationMode === 'avatar' && s.editSubMode === 'outpaint')
-  return <div ref={onAnchor} data-studio-footer className="shrink-0 bg-bg-secondary px-3 pb-2 pt-2">
+  return <div ref={onAnchor} data-studio-footer className="studio-footer shrink-0 bg-bg-secondary px-3 pb-2 pt-2">
     <div data-testid="studio-settings-strip" className="flex min-w-0 items-center gap-1 pb-2">
       <div ref={onCharacterSlot} className="shrink-0 empty:hidden" />
-      <div data-testid="studio-output-settings" className="ml-auto flex min-w-0 items-center justify-end gap-1">
+      <div data-testid="studio-output-settings" className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1">
         <OutputFormatControls />
         <AdvancedSettings compact />
       </div>

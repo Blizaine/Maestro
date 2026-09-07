@@ -545,13 +545,15 @@ export function PromptInput() {
               <button
                 onClick={() => setTtsMenuOpen(!ttsMenuOpen)}
                 disabled={isEnhancing}
+                aria-label="Speech enhancement options"
+                aria-expanded={ttsMenuOpen}
                 className="p-1.5 rounded-r-md text-text-muted hover:text-accent-blue hover:bg-bg-hover transition-colors disabled:opacity-50 border-l border-border"
               >
                 <ChevronUp size={10} />
               </button>
             </div>
             {ttsMenuOpen && (
-              <div className={`absolute ${composer ? 'top-full mt-1' : 'bottom-full mb-1'} right-0 bg-bg-secondary border border-border rounded-lg shadow-lg overflow-hidden min-w-[220px] z-50`}>
+              <div className="absolute bottom-full mb-1 right-0 bg-bg-secondary border border-border rounded-lg shadow-lg overflow-hidden min-w-[220px] z-50">
                 <button
                   onClick={() => { setTtsMenuOpen(false); enhancePrompt('monologue') }}
                   className="w-full text-left px-3 py-2 text-[11px] text-text-secondary hover:bg-bg-hover transition-colors"

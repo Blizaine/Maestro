@@ -2,7 +2,7 @@
 
 Choose Video, Image or Audio and a workflow at the top of Studio. The complete workflow list opens over the editor. References sit at the top of the large composition area, and the prompt fills the remaining space. Choose the model beside Generate at the bottom.
 
-The fixed settings strip keeps Characters on the left and groups Resolution, Aspect, Duration and Advanced together on the right. Indicators show the current choices; Auto duration is labeled Auto. Settings open upward on desktop and as sheets on mobile. The options still come from the selected model, including Auto and model-specific tiers. Opening a setting does not resize the prompt or move Generate. Click another indicator to switch panels, click outside to dismiss, or use the close button or Escape.
+The fixed settings strip keeps Characters on the left and groups Resolution, Aspect, Duration and Advanced together on the right. Advanced becomes an icon with its active count when the sidebar is narrow. In the smallest layouts, Characters also uses its icon so the controls remain separate and tappable. Indicators show the current choices; Auto duration is labeled Auto. Settings open upward on desktop and as sheets on mobile. The options still come from the selected model, including Auto and model-specific tiers. Opening a setting does not resize the prompt or move Generate. Click another indicator to switch panels, click outside to dismiss, or use the close button or Escape.
 
 Duration contains Time, Window and Auto planning, the native-duration slider, presets and window settings. Time stops at five minutes; existing presets can still reach an hour where supported. Automatic window sizing continues while the panel is collapsed. Window overrides and saved GPU/model preferences work as before. H3 Reference sequences keep their **Carry motion and sound between windows** option here.
 
@@ -27,7 +27,7 @@ The closed Advanced button shows its active count; its tooltip lists those setti
 
 ## Prompt and actions
 
-The prompt fills the available composition area. Its size and text width stay steady as you type or background status updates arrive, including when a scrollbar becomes necessary. Long scripts scroll inside the editor; **Expand prompt editor** opens a full writing view using the same source text and state. H3's reviewed window prompts remain editable there. AI Faithful, AI Creative and Manual retain their existing behavior, and Enhance is next to the prompt controls.
+The prompt fills the available composition area without a redundant label above it. Manual, AI Faithful and AI Creative sit with Enhance and Expand at the bottom-right, below the text so they cannot cover your writing. Its size and text width stay steady as you type or background status updates arrive, including when a scrollbar becomes necessary. Long scripts scroll inside the editor; **Expand prompt editor** opens a full writing view using the same source text and state. H3's reviewed window prompts remain editable there. Speech enhancement choices open upward from the same toolbar.
 
 The **…** menu beside the model selector opens **Recipes** and **Model Browser**. Browse is also available inside the model picker. Generate keeps its two-part action: the left side generates now, and the right third adds the current settings to the held queue when supported. Transform and Blend retain their existing queue limitations. Specialized audio and finishing tools retain their dedicated composers or Run actions.
 

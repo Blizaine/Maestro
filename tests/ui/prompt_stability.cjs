@@ -32,8 +32,13 @@ exports.assertPromptStability = async (page, sidebar) => {
       assert.equal(await sidebar.getByTitle('Collapse', {exact: true}).count(), 1, 'Exercise the expanded hardware bar');
       await page.waitForTimeout(150);
       const empty = await prompt.evaluate(geometry);
+      const toolbar = sidebar.getByRole('group', {name: 'Prompt controls', exact: true});
+      const toolbarBounds = await toolbar.boundingBox();
+      assert.ok(toolbarBounds.y >= empty[1] + empty[3], 'Prompt tools sit below the writing area: ' + fixture[0]);
+      assert.equal(await sidebar.locator('.studio-composer').getByText('Prompt', {exact: true}).count(), 0, 'The dock has no redundant Prompt heading');
       await prompt.pressSequentially('this is a test', {delay: 30});
       assert.deepEqual(await prompt.evaluate(geometry), empty, 'First keystrokes keep the prompt frame steady: ' + fixture[0]);
+      assert.deepEqual(await toolbar.boundingBox(), toolbarBounds, 'Enhancement controls appear without moving the toolbar');
 
       await prompt.evaluate(node => {
         const host = document.createElement('grammarly-extension');

@@ -298,7 +298,7 @@ const read = async endpoint => {
     console.log('Generate vs held queue payloads, reference preservation, Recipes and Browser routing passed');
 
     // All six palettes at desktop and mobile; the actual theme function is used.
-    for (const viewport of [{width: 1360, height: 900}, {width: 390, height: 844}, {width: 320, height: 568}]) {
+    for (const viewport of [{width: 1360, height: 900}, {width: 767, height: 844}, {width: 440, height: 844}, {width: 390, height: 844}, {width: 320, height: 568}]) {
       await page.setViewportSize(viewport);
       await page.evaluate(() => window.store.setState({sidebarOpen: true}));
       for (const family of ['default', 'golden-hour', 'onyx']) for (const mode of ['dark', 'light']) {
@@ -308,6 +308,18 @@ const read = async endpoint => {
         assert.ok(await sidebar.evaluate(node => node.scrollWidth <= node.clientWidth + 1), 'Sidebar has no horizontal overflow');
         assert.ok(await controls.evaluate(node => node.scrollWidth <= node.clientWidth + 1), 'Controls fit width ' + viewport.width);
         assert.ok(await page.getByTestId('studio-settings-strip').evaluate(node => node.scrollWidth <= node.clientWidth + 1), 'Every settings indicator fits width ' + viewport.width);
+        assert.ok(await page.getByTestId('studio-settings-strip').evaluate(node => {
+          const buttons = [...node.querySelectorAll('button')].map(button => button.getBoundingClientRect()).filter(box => box.width > 0);
+          return buttons.every((a, index) => buttons.slice(index + 1).every(b =>
+            a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top));
+        }), 'Characters and output settings never overlap at width ' + viewport.width);
+        assert.equal(await sidebar.locator('.studio-advanced-label').isVisible(), viewport.width >= 768, 'Advanced compacts to the sidebar width, including wider mobile viewports');
+        const toolbarBounds = await sidebar.getByRole('group', {name: 'Prompt controls', exact: true}).boundingBox();
+        const promptBounds = await prompt.boundingBox();
+        const writingModeBounds = await sidebar.getByRole('combobox', {name: 'Prompt writing mode'}).boundingBox();
+        assert.ok(writingModeBounds.y >= promptBounds.y + promptBounds.height && writingModeBounds.y >= toolbarBounds.y, 'Prompt mode stays below the text');
+        const expandBounds = await sidebar.getByRole('button', {name: 'Expand prompt editor'}).boundingBox();
+        assert.ok(Math.abs(expandBounds.x + expandBounds.width - toolbarBounds.x - toolbarBounds.width) < 1, 'Prompt tools align to the bottom-right');
         const stripBounds = await page.getByTestId('studio-settings-strip').boundingBox();
         const settingsBounds = await page.getByTestId('studio-output-settings').boundingBox();
         assert.ok(Math.abs(settingsBounds.x + settingsBounds.width - stripBounds.x - stripBounds.width) < 1, 'Settings group aligns to the right edge');
@@ -357,7 +369,7 @@ const read = async endpoint => {
     assert.ok(bar.y + bar.height <= 371, 'Expanded editor follows the available visual viewport too');
     await page.getByRole('dialog', {name: 'Expanded prompt editor'}).press('Escape');
     await page.evaluate(() => { delete window.visualViewport.height; window.visualViewport.dispatchEvent(new Event('resize')); });
-    console.log('Six theme variants at 1360px, 390px and 320px, mobile character scrolling and simulated keyboard viewport passed');
+    console.log('Six theme variants at 1360px, 767px, 440px, 390px and 320px: no overlapping indicators, bottom prompt tools, mobile character scrolling and simulated keyboard viewport passed');
 
     // Recreate the original Extend model transition against real model metadata.
     await page.setViewportSize({width: 1360, height: 900});
@@ -407,6 +419,14 @@ const read = async endpoint => {
         const library = page.getByRole('dialog', {name: mode === 'image' ? 'Choose a character' : 'Voice characters'});
         assert.ok((await library.boundingBox()).x > (await sidebar.boundingBox()).width, mode + ' characters use the desktop side library');
         await library.press('Escape');
+        if (mode === 'audio') {
+          const speechTools = sidebar.getByRole('button', {name: 'Speech enhancement options'});
+          await speechTools.click();
+          const speechChoice = sidebar.getByRole('button', {name: /Write Speech/}).first();
+          assert.ok((await speechChoice.boundingBox()).y < (await speechTools.boundingBox()).y, 'Speech enhancement menu opens upward from the bottom toolbar');
+          assert.ok((await speechChoice.boundingBox()).y >= 0, 'Speech choices fit the viewport');
+          await speechTools.click();
+        }
       }
     }
     assert.deepEqual(errors, []);

@@ -142,8 +142,9 @@ export function PromptDock({ children }: { children: ReactNode }) {
       <div ref={panel} tabIndex={expanded ? -1 : undefined} role={expanded ? 'dialog' : undefined}
         aria-modal={expanded ? true : undefined} aria-label={expanded ? 'Expanded prompt editor' : 'Prompt composer'}
         data-expanded={expanded} className={`studio-composer outline-none ${expanded ? 'fixed inset-0 z-[100] flex flex-col bg-bg-secondary p-4 sm:p-8' : 'flex min-h-0 flex-1 flex-col px-3 pb-3 pt-2'}`}>
-        <div className="mb-2 flex shrink-0 flex-wrap items-center gap-2">
-          <span className="studio-composer-title mr-auto text-xs font-medium text-text-primary">{expanded ? 'Prompt editor' : 'Prompt'}</span>
+        {expanded && <div className="mb-2 shrink-0 text-xs font-medium text-text-primary">Prompt editor</div>}
+        <div className={expanded ? 'min-h-0 flex-1 overflow-y-auto overscroll-contain' : 'studio-composer-content flex min-h-0 flex-1 flex-col'}>{children}</div>
+        <div role="group" aria-label="Prompt controls" className="studio-prompt-toolbar mt-2 flex shrink-0 items-center justify-end gap-2">
           <H3MultiWindowControls section="prompt" compact />
           <div ref={setEnhanceSlot} className="relative empty:hidden"/>
           <button type="button" aria-label={expanded ? 'Collapse prompt editor' : 'Expand prompt editor'}
@@ -153,7 +154,6 @@ export function PromptDock({ children }: { children: ReactNode }) {
             {expanded ? <Minimize2 size={15}/> : <Maximize2 size={15}/>}
           </button>
         </div>
-        <div className={expanded ? 'min-h-0 flex-1 overflow-y-auto overscroll-contain' : 'studio-composer-content flex min-h-0 flex-1 flex-col'}>{children}</div>
         {expanded && <div className="flex shrink-0 justify-end border-t border-border pt-3 mt-3">
           <button type="button" onClick={() => setExpanded(false)} className="min-h-10 rounded-xl bg-accent-blue px-5 text-xs text-white">Done</button>
         </div>}
