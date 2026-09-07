@@ -1,8 +1,10 @@
 import { useState, useCallback, useEffect } from 'react'
-import { Image as ImageIcon, Upload, X } from 'lucide-react'
+import { Image as ImageIcon, X } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
 import { CharacterImagePickerButton } from '../Characters/CharacterImagePicker'
+import { CharacterToolbarItem } from './SidebarPanels'
+import { MediaAddTile } from './MediaInputCard'
 
 export function ImageRefSection() {
   const modelOptions = useStore(s => s.modelOptions)
@@ -55,26 +57,6 @@ export function ImageRefSection() {
     }
   }, [config, defaultRefType, imageRefs.length, imageRefType, setImageRefType])
 
-  const handleDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-    // If it's a reorder drag (has our index data), ignore — handled by item onDrop
-    if (e.dataTransfer.getData('ref-index')) return
-    const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'))
-    addFiles(files)
-  }, [addFiles])
-
-  const handleFileSelect = useCallback(() => {
-    const input = document.createElement('input')
-    input.type = 'file'
-    input.accept = '.png,.jpg,.jpeg,.webp,.bmp'
-    input.multiple = true
-    input.onchange = () => {
-      const files = Array.from(input.files || [])
-      addFiles(files)
-    }
-    input.click()
-  }, [addFiles])
-
   const addSelectedGalleryImage = useCallback(async () => {
     if (!selectedGalleryImage || !canAddMore) return
     setCopyingGalleryImage(true)
@@ -108,7 +90,7 @@ export function ImageRefSection() {
       </label>
 
       {/* Thumbnails + add button in a unified row */}
-      <div className="flex flex-wrap gap-1.5">
+      <div className="grid grid-cols-2 gap-2">
         {imageRefs.map((file, i) => (
           <div
             key={`${i}-${file.name}`}
@@ -130,7 +112,7 @@ export function ImageRefSection() {
               const from = parseInt(e.dataTransfer.getData('ref-index'), 10)
               if (!isNaN(from) && from !== i) reorderImageRefs(from, i)
             }}
-            className={`relative w-[90px] h-[90px] rounded-lg overflow-hidden border group cursor-grab active:cursor-grabbing transition-colors ${
+            className={`relative h-[128px] min-w-0 rounded-xl overflow-hidden border group cursor-grab active:cursor-grabbing transition-colors ${
               dragOverIndex === i ? 'border-accent-blue border-2' : 'border-border'
             }`}
           >
@@ -154,8 +136,9 @@ export function ImageRefSection() {
               {i + 1}
             </span>
             <button
+              type="button" aria-label={`Remove reference image ${i + 1}`}
               onClick={() => removeImageRef(i)}
-              className="absolute top-0.5 right-0.5 bg-bg-primary/80 rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-bg-hover"
+              className="absolute top-1 right-1 rounded-full bg-black/65 p-2 text-white hover:bg-black/85"
             >
               <X size={10} />
             </button>
@@ -164,24 +147,17 @@ export function ImageRefSection() {
 
         {/* Add button / drop zone */}
         {canAddMore && (
-          <div
-            className="w-[90px] h-[90px] border border-dashed border-border rounded-lg flex flex-col items-center justify-center gap-0.5 cursor-pointer hover:border-border-light transition-colors"
-            onDrop={handleDrop}
-            onDragOver={e => e.preventDefault()}
-            onClick={handleFileSelect}
-          >
-            <Upload size={14} className="text-text-muted" />
-            <span className="text-[8px] text-text-muted">Add</span>
-          </div>
+          <MediaAddTile label={isAdaptiveImageGenerate && !imageRefs.length ? 'Add source image' : 'Add reference'} hint="Drop or choose an image"
+            accept=".png,.jpg,.jpeg,.webp,.bmp" onFiles={files => addFiles(files.filter(file => file.type.startsWith('image/') || /\.(png|jpe?g|webp|bmp)$/i.test(file.name)))}/>
         )}
       </div>
 
-      {generationMode === 'image' && <CharacterImagePickerButton disabled={!canAddMore}
+      {generationMode === 'image' && <CharacterToolbarItem><CharacterImagePickerButton label="Characters" disabled={!canAddMore}
         maxImages={maxRefs == null ? null : Math.max(0, maxRefs - imageRefs.length)}
         onSelect={async (character, images) => {
           const files = await Promise.all(images.map(image => api.characterImageFile(character, image)))
           addFiles(files)
-        }}/>}
+        }}/></CharacterToolbarItem>}
 
       {isAdaptiveImageGenerate && (
         <button

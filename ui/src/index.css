@@ -719,6 +719,31 @@ input[type="range"]::-webkit-slider-thumb {
   border: 2px solid var(--color-bg-primary);
 }
 
+.studio-media-grid > * { width: 100%; height: 128px; min-width: 0; }
+.media-input-card[open] { grid-column: 1 / -1; }
+.media-input-card[open] > summary > div:first-child { height: 64px; }
+.studio-composer[data-expanded="false"] .studio-composer-content {
+  max-height: min(32dvh, 280px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.studio-composer[data-expanded="false"] textarea {
+  max-height: 144px;
+  overflow-y: auto;
+}
+.studio-composer[data-expanded="true"] {
+  height: var(--studio-visual-viewport-height, 100dvh);
+}
+@media (max-width: 767px) {
+  .maestro-sidebar[data-keyboard-open="true"] .studio-hardware { display: none; }
+  .studio-composer[data-expanded="false"] .studio-composer-content { max-height: 30dvh; }
+  .studio-action-label { display: none; }
+  .studio-composer[data-expanded="true"] { padding: 12px; }
+}
+@media (max-height: 600px) {
+  .studio-composer[data-expanded="false"] .studio-prompt-textarea { min-height: 76px; max-height: 100px; }
+}
+
 @media (max-width: 767px) {
   /* Prevent iOS auto-zoom on input focus (triggers at font-size < 16px) */
   input[type="text"],

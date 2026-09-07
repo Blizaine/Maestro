@@ -27,7 +27,7 @@ const flashvsrOptions = [
   { value: 'flashvsr2pass4', label: 'FlashVSR Two Pass 4x' },
 ]
 
-export function PostProcessing() {
+export function PostProcessing({ expanded = false }: { expanded?: boolean }) {
   const [open, setOpen] = useState(false)
   const spatialUpsampling = useStore(s => s.spatialUpsampling)
   const setSpatialUpsampling = useStore(s => s.setSpatialUpsampling)
@@ -82,16 +82,16 @@ export function PostProcessing() {
 
   return (
     <div>
-      <button
+      {!expanded && <button
         onClick={() => setOpen(!open)}
         className="flex items-center gap-1.5 text-[11px] text-text-muted uppercase tracking-wider w-full hover:text-text-primary transition-colors"
       >
         {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         <span className="flex-1 text-left">Post Processing</span>
         {hasAny && <span className="w-1.5 h-1.5 rounded-full bg-accent-blue" />}
-      </button>
+      </button>}
 
-      {open && (
+      {(expanded || open) && (
         <div className="mt-3 space-y-4">
           {/* Spatial Upsampling */}
           <div>

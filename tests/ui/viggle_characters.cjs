@@ -86,7 +86,7 @@ const playwright = require(process.env.MAESTRO_PLAYWRIGHT ||
       window.mount();
     });
     await page.getByRole('button', {name: 'Use a character', exact: true}).click();
-    await page.getByRole('button', {name: 'Saved character', exact: true}).click();
+    await page.getByRole('button', {name: 'Characters', exact: true}).click();
     let dialog = page.getByRole('dialog');
     await dialog.getByRole('button', {name: 'Choose Person 14', exact: true}).scrollIntoViewIfNeeded();
     assert.ok(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth), 'Library fits mobile');
@@ -147,7 +147,7 @@ const playwright = require(process.env.MAESTRO_PLAYWRIGHT ||
       modelOptions: {model_type: 'flux2_klein_9b', architecture: 'flux2_klein_9b', max_image_refs: 3,
         image_ref_choices: {choices: [['Main and people', 'KI']]}},
       models: [{model_type: 'flux2_klein_9b', architecture: 'flux2_klein_9b', supports_image_edit: true, supports_ref_images: true}]}));
-    await page.getByRole('button', {name: 'Add character', exact: true}).click();
+    await page.getByRole('button', {name: 'Characters', exact: true}).click();
     dialog = page.getByRole('dialog');
     await dialog.getByRole('button', {name: 'Choose Recovered Person', exact: true}).click();
     await dialog.getByRole('button', {name: 'Use character view 1', exact: true}).click();
@@ -159,14 +159,14 @@ const playwright = require(process.env.MAESTRO_PLAYWRIGHT ||
     const refs = await page.evaluate(() => window.store.getState().imageRefs.map(file => file.name));
     assert.equal(refs[0], 'source.png');
     assert.ok(refs[1].includes('view-0002') && refs[2].includes('view-0001'), 'Selected reference order is preserved');
-    assert.equal(await page.getByRole('button', {name: 'Add character', exact: true}).isDisabled(), true);
+    assert.equal(await page.getByRole('button', {name: 'Characters', exact: true}).isDisabled(), true);
     await page.evaluate(() => window.store.getState().startGeneration('queue'));
     assert.equal(requests.at(-1).image_refs.length, 3);
     assert.equal(requests.at(-1).viggle_character, undefined);
     assert.equal(requests.at(-1)._viggle_prepared, undefined);
     await page.evaluate(() => window.store.setState({studioImageWorkflow: 'inpaint', imageWorkflowSourcePath: '/source.png', imageWorkflowMaskPath: '/mask.png',
       imageRefs: window.store.getState().imageRefs.slice(1), params: {...window.store.getState().params, image_mode: 2}}));
-    assert.equal(await page.getByRole('button', {name: 'Add character', exact: true}).isDisabled(), true, 'Inpaint source consumes one reference slot');
+    assert.equal(await page.getByRole('button', {name: 'Characters', exact: true}).isDisabled(), true, 'Inpaint source consumes one reference slot');
     await page.evaluate(() => window.store.getState().startGeneration('queue'));
     assert.equal(requests.at(-1).image_guide, '/source.png');
     assert.equal(requests.at(-1).image_refs.length, 2, 'Reference-capable inpaint submits the selected character images');

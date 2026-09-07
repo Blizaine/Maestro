@@ -4,6 +4,7 @@ import * as api from '../../api/client'
 import type { SavedOmniCharacter } from '../../types'
 import { characterDisplayName } from '../../lib/characters'
 import { ExportCharacterButton, ImportCharacterButton } from '../Characters/CharacterFileActions'
+import { CharacterToolbarItem, SidebarDialog } from './SidebarPanels'
 
 export function TtsCharacterLibrary({ onSelect, onCharactersChange, selectedIds, canAdd, disabled, switchToClone }: {
   onSelect: (character: SavedOmniCharacter) => void
@@ -14,7 +15,7 @@ export function TtsCharacterLibrary({ onSelect, onCharactersChange, selectedIds,
   switchToClone: boolean
 }) {
   const [characters, setCharacters] = useState<SavedOmniCharacter[]>([])
-  const [open, setOpen] = useState(true)
+  const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [refresh, setRefresh] = useState(0)
@@ -84,16 +85,18 @@ export function TtsCharacterLibrary({ onSelect, onCharactersChange, selectedIds,
   }
 
   return (
-    <div className="rounded-lg border border-border bg-bg-tertiary/50 overflow-hidden">
+    <>
+      <CharacterToolbarItem>
       <button type="button" aria-expanded={open} onClick={() => setOpen(value => !value)}
-        className="w-full flex items-center justify-between px-2.5 py-2 text-left hover:bg-bg-tertiary">
-        <span className="flex items-center gap-1.5 text-[10px] font-medium text-text-primary">
-          <BookUser size={13} className="text-accent-blue" /> Saved characters
-          <span className="text-text-muted">{characters.length}</span>
+        className="min-h-12 w-full flex items-center justify-between rounded-xl border border-border bg-bg-tertiary px-3 py-2 text-left hover:border-border-light">
+        <span className="flex items-center gap-2 text-xs font-medium text-text-primary">
+          <BookUser size={15} className="text-accent-blue" />
+          <span>Characters<span className="block text-[10px] font-normal text-text-muted">{selectedIds.length ? `${selectedIds.length} voices` : 'Saved voices'}</span></span>
         </span>
         <ChevronDown size={13} className={`text-text-muted ${open ? 'rotate-180' : ''}`} />
       </button>
-      {open && (
+      </CharacterToolbarItem>
+      <SidebarDialog open={open} title="Voice characters" onClose={() => setOpen(false)}>
         <div className="border-t border-border p-2 space-y-2">
           <p className="text-[10px] text-text-muted">
             Use a character's saved voice from Reference mode. Write their name before each line of dialogue, or use Speaker 1 and Speaker 2.
@@ -101,7 +104,7 @@ export function TtsCharacterLibrary({ onSelect, onCharactersChange, selectedIds,
           {switchToClone && <p className="text-[10px] text-text-secondary">Saved voices use Qwen3 Voice Cloning. Choosing a character switches to that model and keeps your script.</p>}
           {loading && <p className="text-[10px] text-text-muted">Loading characters…</p>}
           {!loading && characters.length === 0 && <p className="text-[10px] text-text-muted">No saved characters yet. Save one below or in Reference mode.</p>}
-          <div className="space-y-1.5 max-h-64 overflow-y-auto">
+          <div className="space-y-1.5">
             {characters.map(character => {
               const selected = selectedIds.includes(character.id)
               return (
@@ -152,7 +155,7 @@ export function TtsCharacterLibrary({ onSelect, onCharactersChange, selectedIds,
           )}
           {error && <p role="alert" className="text-[10px] text-indicator-error">{error}</p>}
         </div>
-      )}
-    </div>
+      </SidebarDialog>
+    </>
   )
 }

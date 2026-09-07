@@ -281,7 +281,7 @@ export function DurationSlider() {
             ? `For ${totalVramGb.toFixed(0)} GB, H3 Omni Auto recommends ${windowRecommendation?.fallbackResolution ?? 'a lower resolution'} instead of ${resolution}. Multi-window sequence can divide longer output into VRAM-aware windows.`
             : locked
             ? `Manual VRAM override: ${resolution} may run out of memory on this ${totalVramGb.toFixed(0)} GB GPU.`
-            : `For ${totalVramGb.toFixed(0)} GB, H3 Auto recommends ${windowRecommendation?.fallbackResolution ?? 'a lower resolution'} instead of ${resolution}. Lock Window Length in Advanced to override.`}
+            : `For ${totalVramGb.toFixed(0)} GB, H3 Auto recommends ${windowRecommendation?.fallbackResolution ?? 'a lower resolution'} instead of ${resolution}. Open Duration and lock Window Length to override.`}
         </div>
       )}
       {directOmni && !unsupportedAutoResolution && safeWindowFrames != null && nativeMaxSeconds != null && safeWindowFrames / fps < nativeMaxSeconds && (
@@ -293,7 +293,7 @@ export function DurationSlider() {
   )
 }
 
-/** Exposed for Advanced Settings popup */
+/** Shared by the Duration panel and specialized Transform settings. */
 export function WindowSettings() {
   const studioDuration = useStore(s => s.durationSeconds)
   const generationMode = useStore(s => s.generationMode)

@@ -6,7 +6,7 @@ import {
   useStore,
 } from '../../stores/useStore'
 
-export function GenerateButton() {
+export function GenerateButton({ stretch = false }: { stretch?: boolean }) {
   const startGeneration = useStore(s => s.startGeneration)
   const setSidebarOpen = useStore(s => s.setSidebarOpen)
   const [pendingAction, setPendingAction] = useState<'generate' | 'queue' | null>(null)
@@ -170,7 +170,7 @@ export function GenerateButton() {
           ? 'Expand at least one side of the source canvas.'
         : undefined
     return (
-      <div className="grid w-[132px] shrink-0 grid-cols-[2fr_1fr] overflow-hidden rounded-lg bg-amber-500/20 text-indicator-warning">
+      <div className={`grid ${stretch ? 'w-full min-h-11' : 'w-[132px]'} shrink-0 grid-cols-[2fr_1fr] overflow-hidden rounded-xl bg-amber-500/20 text-indicator-warning`}>
         <button
           type="button"
           disabled
@@ -196,7 +196,7 @@ export function GenerateButton() {
   const pending = pendingAction !== null
 
   return (
-    <div className={`grid w-[132px] shrink-0 grid-cols-[2fr_1fr] overflow-hidden rounded-lg font-medium text-white shadow-accent-glow transition-all ${
+    <div className={`grid ${stretch ? 'w-full min-h-11' : 'w-[132px]'} shrink-0 grid-cols-[2fr_1fr] overflow-hidden rounded-xl font-medium text-white shadow-accent-glow transition-all ${
       pending ? 'bg-bg-active text-text-muted' : 'bg-cta'
     }`}>
       <button

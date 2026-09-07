@@ -9,7 +9,7 @@ import {
 } from '../../stores/useStore'
 import { InfoTooltip } from './InfoTooltip'
 
-export function ModelSelector() {
+export function ModelSelector({ placement = 'above' }: { placement?: 'above' | 'below' }) {
   const models = useStore(s => s.models)
   const families = useStore(s => s.families)
   const enabledModels = useStore(s => s.enabledModels)
@@ -135,9 +135,10 @@ export function ModelSelector() {
   }, 0)
 
   return (
-    <div className="relative flex-1 min-w-0" ref={containerRef}>
+    <div className={`relative min-w-0 ${placement === 'above' ? 'flex-1' : ''}`} ref={containerRef}>
       {/* Trigger button */}
       <button
+        aria-label="Choose model" aria-expanded={open}
         onClick={() => setOpen(!open)}
         title={currentModelCompatible
           ? currentModel?.selector_help || currentModel?.description
@@ -150,9 +151,9 @@ export function ModelSelector() {
         <ChevronDown size={14} className={`shrink-0 text-text-muted transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
 
-      {/* Dropdown (opens upward) */}
+      {/* Main sidebar opens downward; compact embedded callers keep upward. */}
       {open && (
-        <div className="absolute bottom-full left-0 mb-1 w-[360px] max-w-[90vw] bg-bg-secondary border border-border rounded-lg shadow-xl overflow-hidden z-50">
+        <div className={`${placement === 'below' ? 'relative mt-2 w-full' : 'absolute bottom-full left-0 mb-1 w-[360px] max-w-[90vw]'} bg-bg-secondary border border-border rounded-xl shadow-xl overflow-hidden z-50`}>
           {/* Enable-more entry — sits above the enabled model list; opens
               Settings → Enabled Models expanded to this mode. */}
           {disabledCount > 0 && (

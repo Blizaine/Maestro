@@ -1,11 +1,13 @@
-import { useEffect, useRef, useState } from 'react'
-import { BookUser, ChevronDown, FileAudio, GripVertical, Image as ImageIcon, Info, Loader2, Plus, UserPlus, Video, X } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { BookUser, ChevronDown, FileAudio, GripVertical, Image as ImageIcon, Info, Loader2, UserPlus, Video, X } from 'lucide-react'
 import * as api from '../../api/client'
 import { useStore } from '../../stores/useStore'
 import { readPersistentDisclosure, writePersistentDisclosure } from '../../lib/persistentDisclosure'
 import { ImportCharacterButton } from '../Characters/CharacterFileActions'
 import { ReferenceCharacterPicker } from '../Characters/ReferenceCharacterPicker'
 import { characterDisplayName } from '../../lib/characters'
+import { CharacterToolbarItem, SidebarDialog } from './SidebarPanels'
+import { MediaAddTile, MediaInputCard } from './MediaInputCard'
 import type { MiniMaxH3AudioIntent, MiniMaxH3Reference, MiniMaxH3ReferenceType, ModelOptions, SavedOmniCharacter } from '../../types'
 
 const IMAGE_RE = /\.(png|jpe?g|webp|bmp|tiff?)$/i
@@ -97,7 +99,6 @@ export function OmniReferenceSection({
   const setDirectorDetail = useStore(s => s.setDirectorH3ReferenceDetail)
   const directorVideoModel = useStore(s => s.selectedModelPerMode.video || '')
   const setDirectorTargetDuration = useStore(s => s.shortFilmSetTargetDuration)
-  const inputRef = useRef<HTMLInputElement>(null)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState('')
   const [dragIndices, setDragIndices] = useState<number[] | null>(null)
@@ -225,12 +226,27 @@ export function OmniReferenceSection({
       setError(uploadError instanceof Error ? uploadError.message : 'Reference upload failed.')
     } finally {
       setUploading(false)
-      if (inputRef.current) inputRef.current.value = ''
     }
   }
 
   const patchReference = (index: number, patch: Partial<MiniMaxH3Reference>) => {
     update(references.map((reference, itemIndex) => itemIndex === index ? { ...reference, ...patch } : reference))
+  }
+
+  const replaceReference = async (reference: MiniMaxH3Reference, file?: File) => {
+    if (!file || disabled || uploading) return
+    if (mediaType(file) !== reference.type) { setError(`Choose a ${reference.type} to replace this reference.`); return }
+    setUploading(true)
+    setError('')
+    try {
+      const uploaded = reference.type === 'audio' ? await api.uploadAudio(file) : await api.uploadImage(file)
+      update(currentReferences().map(item => item.id === reference.id ? {
+        ...item, path: uploaded.path, filename: file.name, url: uploaded.url,
+        duration_seconds: uploaded.duration_seconds ?? null,
+        has_audio: reference.type === 'video' ? Boolean('has_audio' in uploaded && uploaded.has_audio) : reference.type === 'audio',
+      } : item))
+    } catch (error) { setError(error instanceof Error ? error.message : 'Could not replace reference.') }
+    finally { setUploading(false) }
   }
 
   const addCharacter = (character: SavedOmniCharacter) => {
@@ -423,6 +439,15 @@ export function OmniReferenceSection({
   }
 
   const activeItems = groupActiveReferences(references)
+  const canAddMore = references.length < limits.total && (['image', 'video', 'audio'] as const)
+    .some(type => references.filter(reference => reference.type === type).length < limits[type])
+  const moveItem = (itemIndex: number, direction: -1 | 1) => {
+    const ordered = [...activeItems]
+    const target = itemIndex + direction
+    if (target < 0 || target >= ordered.length) return
+    ;[ordered[itemIndex], ordered[target]] = [ordered[target], ordered[itemIndex]]
+    update(ordered.flatMap(item => item.kind === 'character' ? item.entries.map(entry => entry.reference) : [item.reference]))
+  }
   const addedCharacterIds = characters.filter(character => {
     const bound = references.filter(reference => reference.library_character_id === character.id)
     return bound.some(reference => reference.type !== 'audio')
@@ -434,7 +459,7 @@ export function OmniReferenceSection({
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5">
           <label className="text-[11px] text-text-muted uppercase tracking-wider">
-            {scope === 'director' ? 'Omni References' : 'References & Characters'}
+            {scope === 'director' ? 'Omni References' : 'Scene references'}
           </label>
           <span
             title={scope === 'director'
@@ -448,32 +473,32 @@ export function OmniReferenceSection({
         <span className="text-[9px] text-text-muted">{references.length}/{limits.total}</span>
       </div>
 
-      <div className="rounded-xl border border-border bg-bg-tertiary/30 overflow-hidden">
+      <CharacterToolbarItem>
         <button
           type="button"
           disabled={disabled}
           aria-expanded={libraryOpen}
           onClick={() => setLibraryOpen(open => !open)}
-          className="w-full flex items-center justify-between gap-2 px-3 py-3 text-left hover:bg-bg-tertiary disabled:opacity-50"
+          className="min-h-12 w-full flex items-center justify-between gap-2 rounded-xl border border-border bg-bg-tertiary px-3 py-2 text-left hover:border-border-light disabled:opacity-50"
         >
           <span className="flex items-center gap-2 text-xs font-semibold text-text-primary">
             <BookUser size={15} className="text-accent-blue" />
-            Characters
-            <span className="rounded-md bg-bg-active px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-text-secondary">{characters.length}</span>
+            <span>Characters<span className="block text-[10px] font-normal text-text-muted">{addedCharacterIds.length ? `${addedCharacterIds.length} selected` : 'Choose saved'}</span></span>
           </span>
           <span className="flex items-center gap-2">
-            {addedCharacterIds.length > 0 && <span className="text-[10px] font-medium text-accent-blue">{addedCharacterIds.length} added</span>}
             <ChevronDown size={14} className={`text-text-muted transition-transform ${libraryOpen ? 'rotate-180' : ''}`} />
           </span>
         </button>
-
-        {libraryOpen && (
+      </CharacterToolbarItem>
+      <SidebarDialog open={libraryOpen} title="Characters" onClose={() => setLibraryOpen(false)}>
           <div className="border-t border-border p-2.5 space-y-3">
             <p className="text-[11px] leading-relaxed text-text-secondary">
               Choose who appears in your scene. Their saved voice comes with them.
             </p>
-            <ReferenceCharacterPicker characters={characters} addedIds={addedCharacterIds} disabled={disabled}
+            <ReferenceCharacterPicker characters={characters} addedIds={addedCharacterIds} disabled={disabled} scroll={false}
               onAdd={addCharacter} onDelete={character => void removeCharacter(character)} />
+            {scope === 'studio' && <button type="button" onClick={() => { setLibraryOpen(false); window.dispatchEvent(new Event('maestro-open-finishing')) }}
+              className="min-h-10 w-full rounded-lg border border-border px-3 text-left text-xs text-text-secondary hover:bg-bg-hover">Face refinement & character mapping…</button>}
             <div className="grid grid-cols-2 gap-2 border-t border-border pt-3">
               <ImportCharacterButton disabled={disabled} label="Import file"
                 className="flex min-h-10 w-full items-center justify-center gap-1.5 rounded-lg border border-border text-[11px] font-medium text-text-secondary hover:bg-bg-hover hover:text-text-primary disabled:opacity-40" />
@@ -544,39 +569,12 @@ export function OmniReferenceSection({
                 </button>
               </div>
             )}
+            {error && <p role="alert" className="text-xs text-indicator-error">{error}</p>}
           </div>
-        )}
-      </div>
+      </SidebarDialog>
 
-      <div
-        className={`rounded-lg border border-dashed border-border px-3 py-2.5 flex items-center justify-center gap-2 transition-colors ${disabled ? 'opacity-50 cursor-not-allowed' : 'hover:border-border-light cursor-pointer'}`}
-        onClick={() => { if (!disabled) inputRef.current?.click() }}
-        onDragOver={event => { if (!disabled) event.preventDefault() }}
-        onDrop={event => {
-          event.preventDefault()
-          if (disabled) return
-          void addFiles(Array.from(event.dataTransfer.files))
-        }}
-        aria-disabled={disabled}
-      >
-        {uploading ? <Loader2 size={14} className="animate-spin text-accent-blue" /> : <Plus size={14} className="text-text-muted" />}
-        <span className="text-[10px] text-text-secondary">{uploading ? 'Uploading references…' : 'Add images, videos, or audio'}</span>
-        {/* Do not add a mixed-media `accept` filter here. iOS/WebKit can
-            grey out valid audio files when audio, image, and video types are
-            combined. Maestro validates the selected files in addFiles(). */}
-        <input
-          ref={inputRef}
-          type="file"
-          multiple
-          disabled={disabled}
-          className="hidden"
-          onChange={event => void addFiles(Array.from(event.target.files ?? []))}
-        />
-      </div>
-
-      {references.length > 0 && (
-        <div className="space-y-1.5">
-          {activeItems.map(item => {
+        <div className="grid grid-cols-2 items-start gap-2">
+          {activeItems.map((item, itemIndex) => {
             if (item.kind === 'character') {
               const character = characters.find(candidate => candidate.id === item.characterId)
               const visualEntry = item.entries.find(entry => entry.reference.type !== 'audio')
@@ -594,6 +592,17 @@ export function OmniReferenceSection({
               const firstIndex = entryIndices[0]
               const active = dragIndices?.some(index => entryIndices.includes(index)) === true
               return (
+                <MediaInputCard key={`character-${item.characterId}`} title={characterName} disabled={disabled}
+                  draggable={!disabled} onDragStart={() => setDragIndices(entryIndices)} onDragEnd={() => setDragIndices(null)}
+                  onDragOver={event => event.preventDefault()} onDrop={event => {
+                    event.preventDefault(); if (dragIndices) reorder(dragIndices, firstIndex); setDragIndices(null)
+                  }}
+                  subtitle={`${item.entries.map(entry => labels[entry.index]).join(' + ')}${voiceEntry ? ' · Voice' : ''}`}
+                  kind={visual?.type || 'image'} mediaUrl={visual?.url}
+                  preview={character?.visual.thumbnail_url || (visual?.type === 'image' ? visual.url : `/api/v1/characters/${encodeURIComponent(item.characterId)}/media/thumbnail`)}
+                  onRemove={() => update(references.filter(reference => reference.library_character_id !== item.characterId))}
+                  onEarlier={itemIndex > 0 && !disabled ? () => moveItem(itemIndex, -1) : undefined}
+                  onLater={itemIndex < activeItems.length - 1 && !disabled ? () => moveItem(itemIndex, 1) : undefined}>
                 <div
                   key={`character-${item.characterId}`}
                   draggable={!disabled}
@@ -663,11 +672,27 @@ export function OmniReferenceSection({
                     <X size={13} />
                   </button>
                 </div>
+                </MediaInputCard>
               )
             }
 
             const { reference, index } = item
             return (
+              <MediaInputCard key={reference.id || `${reference.path}-${index}`} title={labels[index]} disabled={disabled}
+                draggable={!disabled} onDragStart={() => setDragIndices([index])} onDragEnd={() => setDragIndices(null)}
+                onDragOver={event => event.preventDefault()} onDrop={event => {
+                  event.preventDefault(); if (dragIndices) reorder(dragIndices, index); setDragIndices(null)
+                }}
+                subtitle={reference.role || reference.filename} kind={reference.type} mediaUrl={reference.url}
+                preview={reference.type === 'image' ? reference.url : undefined}
+                onRemove={() => update(references.filter((_, itemIndex) => itemIndex !== index))}
+                onEarlier={itemIndex > 0 && !disabled ? () => moveItem(itemIndex, -1) : undefined}
+                onLater={itemIndex < activeItems.length - 1 && !disabled ? () => moveItem(itemIndex, 1) : undefined}>
+              <label className="block cursor-pointer rounded-lg border border-border px-2 py-1.5 text-xs text-text-secondary hover:bg-bg-hover">
+                Replace {reference.type}
+                <input type="file" disabled={disabled || uploading} aria-label={`Replace ${labels[index]}`} className="hidden"
+                  onChange={event => { void replaceReference(reference, event.target.files?.[0]); event.currentTarget.value = '' }}/>
+              </label>
               <div
                 key={reference.id || `${reference.path}-${index}`}
                 draggable={!disabled}
@@ -707,6 +732,11 @@ export function OmniReferenceSection({
                     placeholder="Who or what is this? (helps Enhance)"
                     className="w-full bg-bg-primary border border-border rounded px-2 py-1 text-[10px] text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue"
                   />
+                  {reference.type === 'image' && <select aria-label={`${labels[index]} use`} value={reference.image_intent ?? 'identity'} disabled={disabled}
+                    onChange={event => patchReference(index, { image_intent: event.target.value as MiniMaxH3Reference['image_intent'] })}
+                    className="w-full rounded border border-border bg-bg-primary px-2 py-1 text-[10px] text-text-secondary">
+                    <option value="identity">Character / identity</option><option value="scene">Scene</option><option value="composition">Composition</option><option value="style">Style reference</option>
+                  </select>}
                   {reference.type === 'audio' && (
                     <select
                       value={reference.audio_intent ?? 'voice'}
@@ -794,10 +824,14 @@ export function OmniReferenceSection({
                   <X size={13} />
                 </button>
               </div>
+              </MediaInputCard>
             )
           })}
+          {/* No mixed-media accept filter: iOS greys out valid audio files.
+              addFiles validates type and both per-type and total budgets. */}
+          {canAddMore && <MediaAddTile disabled={disabled} busy={uploading} hint="Image, video or audio" onFiles={files => void addFiles(files)}/>}
         </div>
-      )}
+      {!canAddMore && <p className="text-[10px] text-text-muted">All reference slots are filled. Remove or replace an input to change this scene.</p>}
 
       {references.length > 0 && (
         <div className="flex items-center justify-end gap-2">

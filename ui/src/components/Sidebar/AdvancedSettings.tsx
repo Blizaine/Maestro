@@ -1,5 +1,6 @@
 /* eslint-disable react-refresh/only-export-components -- the advanced badge hooks share this settings contract */
 import { useState, useEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { X, Save, Trash2, FolderOpen, SlidersHorizontal } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { PostProcessing } from './PostProcessing'
@@ -8,6 +9,9 @@ import { LoraSelector } from '../SettingsDrawer/LoraSelector'
 import { WindowSettings } from './DurationSlider'
 import { DirectorH3Optimizations } from './DirectorH3Optimizations'
 import { H3MediaControls } from './H3MediaControls'
+import { MiniMaxH3Optimizations } from './MiniMaxH3Optimizations'
+import { AutomaticFaceRefiner } from '../Characters/FaceRefiner'
+import { usePanelFocus } from './SidebarPanels'
 import type { GenerateParams } from '../../types'
 
 const H3_LONG_SEQUENCE_EXPERIMENTS = [
@@ -255,6 +259,7 @@ export function useAdvancedActiveItems(): string[] {
   const slidingWindowLocked = useStore(s => s.slidingWindowLocked)
   const servicesConfig = useStore(s => s.servicesConfig)
   const studioVideoWorkflow = useStore(s => s.studioVideoWorkflow)
+  const hasVoiceClone = useStore(s => s.voiceCloneEnabled && s.voiceCloneRefs.some(reference => !!reference?.path))
   const selectedModel = useStore(s => s.models.find(model => model.model_type === s.params.model_type))
   const isScailEdit = (
     generationMode === 'avatar'
@@ -276,6 +281,16 @@ export function useAdvancedActiveItems(): string[] {
     return items
   }
   if (params.seed !== -1) items.push(`Seed ${params.seed}`)
+  if (String(modelOptions?.architecture || '').startsWith('minimax_h3')) {
+    if (params.minimax_h3_turbo_mode && modelOptions?.minimax_h3_turbo) items.push('H3 Turbo')
+    if (params.override_attention === 'sol') items.push('H3 Sol Engine')
+    if (params.override_attention === 'sla') items.push('H3 SLA')
+    if (params.skip_steps_cache_type === 'first_block') items.push('First Block Cache')
+    if (params.custom_settings?.audio_refinement === 'enabled') items.push('Audio refinement')
+  }
+  if (generationMode === 'video' && params.face_refiner?.enabled) items.push('Face refinement')
+  if (generationMode === 'video' && params.temporal_upsampling) items.push(`Smoothing (${params.temporal_upsampling})`)
+  if ((generationMode === 'video' || generationMode === 'avatar') && hasVoiceClone && !isScailEdit) items.push('Voice replacement')
   const selectedFamily = String(selectedModel?.family || '').toLowerCase()
   const selectedArchitecture = String(selectedModel?.architecture || '').toLowerCase()
   const isLtxFrames = generationMode === 'video'
@@ -381,8 +396,9 @@ export function useAdvancedCount(): number {
   return useAdvancedActiveItems().length
 }
 
-export function AdvancedSettings() {
+export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
   const [open, setOpen] = useState(false)
+  const [section, setSection] = useState<'performance' | 'finishing' | 'loras' | 'generation'>('generation')
   const params = useStore(s => s.params)
   const setParam = useStore(s => s.setParam)
   const modelOptions = useStore(s => s.modelOptions)
@@ -461,13 +477,12 @@ export function AdvancedSettings() {
   const advancedItems = useAdvancedActiveItems()
   const advancedCount = advancedItems.length
 
-  // Close on escape
+  usePanelFocus(open, panelRef, () => setOpen(false))
   useEffect(() => {
-    if (!open) return
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
-    document.addEventListener('keydown', handler)
-    return () => document.removeEventListener('keydown', handler)
-  }, [open])
+    const finishing = () => { setSection('finishing'); setOpen(true) }
+    window.addEventListener('maestro-open-finishing', finishing)
+    return () => window.removeEventListener('maestro-open-finishing', finishing)
+  }, [])
 
   return (
     <>
@@ -480,12 +495,13 @@ export function AdvancedSettings() {
           : 'Advanced settings'}
         aria-label={`Advanced settings${advancedCount > 0 ? `, ${advancedCount} active` : ''}`}
         aria-expanded={open}
-        className={`relative flex shrink-0 items-center justify-center rounded-lg border p-2 transition-colors ${
+        className={`relative flex shrink-0 items-center justify-center gap-2 rounded-xl border p-2 transition-colors ${compact ? 'min-h-12 flex-1 bg-bg-tertiary px-3' : ''} ${
           open ? 'border-accent-blue text-accent-blue' : 'border-border text-text-secondary hover:text-text-primary hover:border-border-light'
         }`}
       >
         <SlidersHorizontal size={14} />
-        {advancedCount > 0 && (
+        {compact && <span className="min-w-0 text-left"><span className="block text-xs font-medium">Advanced</span><span className="block text-[10px] text-text-muted">{advancedCount ? `${advancedCount} active` : 'Defaults'}</span></span>}
+        {!compact && advancedCount > 0 && (
           <span
             title={advancedItems.join('\n')}
             className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-accent-blue px-0.5 text-[8px] font-bold leading-none text-white shadow-sm"
@@ -496,25 +512,33 @@ export function AdvancedSettings() {
       </button>
 
       {/* Popup overlay — always mounted to preserve state (frames injection, etc.) */}
-      {open && <div className="fixed inset-0 bg-black/30 z-50" onClick={() => setOpen(false)} />}
+      {createPortal(<>
+      {open && <div className="fixed inset-0 bg-black/40 z-[55]" onClick={() => setOpen(false)} />}
       <div
         ref={panelRef}
-        className={`fixed top-0 h-full bg-bg-secondary border-r border-border z-50 flex flex-col shadow-2xl overflow-hidden transition-transform duration-200
+        role="dialog" aria-modal={open ? true : undefined} aria-label="Advanced settings" aria-hidden={!open} inert={!open} tabIndex={-1}
+        className={`fixed top-0 h-dvh bg-bg-secondary border-r border-border z-[55] flex flex-col shadow-2xl overflow-hidden outline-none transition-transform duration-200
           left-0 w-full md:left-[420px] md:w-[380px] md:max-w-[90vw] ${
           open ? 'translate-x-0' : '-translate-x-full md:-translate-x-[800px] pointer-events-none'
         }`}
-        style={{ maxHeight: '100vh' }}
       >
             {/* Header */}
             <div className="px-4 py-3 border-b border-border flex items-center justify-between shrink-0">
               <span className="text-sm font-semibold text-text-primary">Advanced Settings</span>
-              <button onClick={() => setOpen(false)} className="p-1 rounded-lg hover:bg-bg-hover text-text-secondary">
+              <button aria-label="Close Advanced settings" onClick={() => setOpen(false)} className="p-2 rounded-lg hover:bg-bg-hover text-text-secondary">
                 <X size={16} />
               </button>
             </div>
+            {!isDirector && <div className="grid grid-cols-2 gap-2 border-b border-border p-3">
+              {(['performance', 'finishing', 'loras', 'generation'] as const).map(key => <button key={key} type="button"
+                aria-pressed={section === key} onClick={() => setSection(key)}
+                className={`min-h-11 rounded-xl border px-3 text-xs ${section === key ? 'border-accent-blue bg-accent-blue/10 text-text-primary' : 'border-border bg-bg-tertiary text-text-secondary hover:border-border-light'}`}>
+                {{ performance: 'Performance', finishing: 'Finishing', loras: 'LoRAs & presets', generation: 'Generation' }[key]}
+              </button>)}
+            </div>}
 
             {/* Scrollable content */}
-            <div className="flex-1 overflow-y-auto px-4 py-4 space-y-5">
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 space-y-5">
               {isDirector ? (
                 <>
                   <DirectorH3Optimizations />
@@ -530,6 +554,7 @@ export function AdvancedSettings() {
 
               {/* Presets belong with the creative adapter controls so users can
                   save or restore a setup before adjusting its LoRAs. */}
+              <div hidden={section !== 'loras'} className="space-y-5">
               <PresetManager />
 
               {/* Keep creative adapters near the top so users can choose them
@@ -541,8 +566,12 @@ export function AdvancedSettings() {
                   H3 LoRAs are experimental with Fused 4-Step. Start with one adapter at low strength and compare a short clip using the same seed. Extra acceleration adapters are excluded; Mystic remains baked in at 0.7.
                 </p>
               )}
+              {modelOptions?.loras_disabled && <p className="text-xs text-text-muted">This model does not support additional LoRAs.</p>}
+              </div>
 
-              <LtxFramesExperimentalControls />
+              <div hidden={section !== 'performance'} className="space-y-5">
+              {isVideo && <MiniMaxH3Optimizations />}
+              <p className="text-[10px] text-text-muted">Performance settings keep their saved values for compatible models.</p>
 
               {/* The Qwen conditioner is shared by every H3 transformer.
                   Expose it once here instead of multiplying model entries. */}
@@ -572,8 +601,6 @@ export function AdvancedSettings() {
                   </p>
                 </div>
               ) : null}
-
-              {isH3 && !isAudio && <H3MediaControls />}
 
               {modelOptions?.ltx25_video_vae_choices?.length ? (
                 <div>
@@ -605,7 +632,7 @@ export function AdvancedSettings() {
                     <span className="text-[11px] text-text-muted uppercase tracking-wider">
                       First Block Cache Tuning
                     </span>
-                    <span className="text-[9px] text-accent-blue">Enabled in Studio</span>
+                    <span className="text-[9px] text-accent-blue">Enabled</span>
                   </div>
                   <div className="space-y-2 pl-1 border-l border-border ml-1">
                     <div>
@@ -646,8 +673,17 @@ export function AdvancedSettings() {
                 </div>
               )}
 
-              {/* Window Settings */}
-              {(isVideo || (isAvatar && !isScailEdit))
+              </div>
+              <div hidden={section !== 'finishing'} className="space-y-5">
+                {isVideo && <AutomaticFaceRefiner />}
+                {isH3 && !isAudio && <H3MediaControls />}
+                {!isAudio && !isScailEdit && <PostProcessing expanded />}
+                {(isAudio || isScailEdit) && <p className="text-xs text-text-muted">This workflow manages its finishing in its own controls and the Gallery.</p>}
+              </div>
+              <div hidden={section !== 'generation'} className="space-y-5">
+              <LtxFramesExperimentalControls />
+              {/* Studio video windows now live with Duration. */}
+              {(isAvatar && !isScailEdit)
                 && (
                   modelOptions?.sliding_window
                   || isH3
@@ -840,7 +876,6 @@ export function AdvancedSettings() {
               )}
 
               {/* Post Processing */}
-              {!isAudio && !isScailEdit && <PostProcessing />}
 
               {/* Seed */}
               {
@@ -862,7 +897,7 @@ export function AdvancedSettings() {
               }
 
               {/* Self Refiner */}
-              {!isScailEdit && modelOptions?.self_refiner && (
+              {!isScailEdit && !!modelOptions?.self_refiner && (
                 <div>
                   <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">Self Refiner</label>
                   <select
@@ -1036,7 +1071,7 @@ export function AdvancedSettings() {
                   2.0/1.5 then off, STG on blocks 14+19 for the first 4
                   steps, RF euler_ancestral). Shown only for models whose
                   def declares reference_pipeline support. */}
-              {!isScailEdit && (modelOptions as Record<string, unknown> | null)?.reference_pipeline && (
+              {!isScailEdit && !!modelOptions?.reference_pipeline && (
                 <div className="space-y-1">
                   <label className="flex items-center gap-2 cursor-pointer group">
                     <input type="checkbox"
@@ -1123,7 +1158,7 @@ export function AdvancedSettings() {
               )}
 
               {/* LTX-2 Dev Pipeline Controls — only for models with perturbation/CFG-Star support */}
-              {!isScailEdit && (modelOptions as Record<string, unknown> | null)?.perturbation && (
+              {!isScailEdit && !!modelOptions?.perturbation && (
                 <>
                   {/* STG Scale */}
                   <div>
@@ -1348,10 +1383,12 @@ export function AdvancedSettings() {
                   </div>
                 </div>
               )}
+              </div>
                 </>
               )}
             </div>
           </div>
+      </>, document.body)}
     </>
   )
 }

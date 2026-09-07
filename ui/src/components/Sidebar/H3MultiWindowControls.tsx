@@ -10,14 +10,15 @@ import type { WindowPromptMode } from '../../types'
  * motion/audio overlap or create independent hard-cut clips. LTX uses its
  * existing native rolling-window path with the same explicit UX contract.
  */
-export function H3MultiWindowControls() {
+export function H3MultiWindowControls({ section = 'all', compact = false }: { section?: 'all' | 'prompt' | 'continuity'; compact?: boolean }) {
   const params = useStore(s => s.params)
   const modelOptions = useStore(s => s.modelOptions)
   const setParam = useStore(s => s.setParam)
+  const generationMode = useStore(s => s.generationMode)
 
   const isH3 = String(modelOptions?.architecture || '').startsWith('minimax_h3')
   const isLtx = modelOptions?.multi_window_sequence_controls === true
-  if (!isH3 && !isLtx) return null
+  if (generationMode !== 'video' || (!isH3 && !isLtx)) return null
 
   const isOmni = isH3 && modelOptions?.omni_reference === true
   const enabled = isLtx
@@ -59,9 +60,11 @@ export function H3MultiWindowControls() {
     }
   }
 
+  if (section === 'continuity' && (!enabled || !isOmni)) return null
   return (
-    <div className="rounded-lg border border-border bg-bg-tertiary/50 px-2.5 py-2 space-y-1.5">
-      <div className="flex items-center gap-2">
+    <div className={compact ? 'min-w-0' : 'rounded-lg border border-border bg-bg-tertiary/50 px-2.5 py-2 space-y-1.5'}>
+      {section !== 'continuity' && <>
+      {!compact && <div className="flex items-center gap-2">
         <span className="text-[10px] text-text-secondary">
           {enabled ? 'Long sequence · automatic' : 'Prompt writing'}
         </span>
@@ -75,10 +78,10 @@ export function H3MultiWindowControls() {
         >
           <Info size={11} />
         </span>
-      </div>
+      </div>}
 
       <label className="flex items-center justify-between gap-2 text-[9px] text-text-muted">
-        <span className="flex items-center gap-1">
+        {!compact && <span className="flex items-center gap-1">
           {enabled ? 'Window prompts' : 'Prompt writing'}
           <span
             title={enabled
@@ -88,8 +91,9 @@ export function H3MultiWindowControls() {
           >
             <Info size={10} />
           </span>
-        </span>
+        </span>}
         <select
+          aria-label="Prompt writing mode"
           value={promptMode}
           onChange={event => setPromptMode(
             event.target.value === 'manual'
@@ -98,15 +102,16 @@ export function H3MultiWindowControls() {
                 ? 'creative'
                 : 'auto',
           )}
-          className="min-w-[158px] rounded border border-border bg-bg-secondary px-2 py-1 text-[9px] text-text-secondary focus:outline-none focus:border-accent-blue"
+          title={enabled ? 'Manual uses one non-empty line per window. AI Faithful preserves your events and dialogue; AI Creative can write additional story and dialogue.' : 'AI Faithful preserves your events and dialogue. AI Creative can add story and dialogue. Manual sends your prompt as written.'}
+          className="min-w-0 max-w-[170px] rounded-lg border border-border bg-bg-tertiary px-2 py-1.5 text-[11px] text-text-secondary focus:outline-none focus:border-accent-blue"
         >
           <option value="auto">AI - Faithful</option>
-          <option value="creative">AI - Creative story + dialogue</option>
-          <option value="manual">{enabled ? 'Manual - one per line' : 'Manual'}</option>
+          <option value="creative">{compact ? 'AI - Creative' : 'AI - Creative story + dialogue'}</option>
+          <option value="manual">{enabled && !compact ? 'Manual - one per line' : 'Manual'}</option>
         </select>
       </label>
 
-      {!enabled && promptMode !== 'manual' && (
+      {!compact && !enabled && promptMode !== 'manual' && (
         <p className="text-[8px] leading-relaxed text-text-muted">
           {promptMode === 'creative'
             ? 'Maestro treats your prompt as a creative brief and writes the scene automatically. Exact quoted lines stay locked; add “only these lines” when no extra dialogue should be written.'
@@ -114,8 +119,9 @@ export function H3MultiWindowControls() {
           Queued prompts wait for their own turn so the LLM never competes with an active generation. Use the sparkle button first only when you want to review the result.
         </p>
       )}
+      </>}
 
-      {enabled && isOmni && (
+      {section !== 'prompt' && enabled && isOmni && (
         <label className="flex items-start gap-2 text-[9px] text-text-muted cursor-pointer">
           <input
             type="checkbox"

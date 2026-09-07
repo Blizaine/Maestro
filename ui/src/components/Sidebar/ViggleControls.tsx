@@ -3,6 +3,7 @@ import { ImagePlus, Loader2, Video, WandSparkles, X } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
 import { CharacterImagePickerButton } from '../Characters/CharacterImagePicker'
+import { CharacterToolbarItem } from './SidebarPanels'
 import { newViggleCharacter, vigglePreparationKey, VIGGLE_SWAP_PROMPT } from '../../lib/viggle'
 import { characterDisplayName } from '../../lib/characters'
 import type { ViggleCharacterOptions } from '../../types'
@@ -59,7 +60,11 @@ export function ViggleControls() {
     finally { setBusy(false) }
   }
   const input = (kind: 'video' | 'image' | 'audio' | 'character', label: string) => (
-    <label className={`flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-border px-3 py-3 text-xs text-text-secondary hover:border-accent-blue ${locked ? 'pointer-events-none opacity-50' : ''}`}>
+    <label onDragOver={event => event.preventDefault()} onDrop={event => {
+      event.preventDefault()
+      const file = event.dataTransfer.files[0]
+      if (file && file.type.startsWith(`${kind === 'character' ? 'image' : kind}/`)) void upload(file, kind)
+    }} className={`flex min-h-24 cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-border bg-bg-tertiary/30 px-3 py-3 text-xs text-text-secondary hover:border-accent-blue ${locked ? 'pointer-events-none opacity-50' : ''}`}>
       {kind === 'video' ? <Video size={17} /> : kind !== 'audio' ? <ImagePlus size={17} /> : null}
       <span>{label}</span>
       <input className="sr-only" type="file" accept={`${kind === 'character' ? 'image' : kind}/*`} disabled={locked}
@@ -104,6 +109,13 @@ export function ViggleControls() {
   }
   return (
     <div className="space-y-3 min-w-0" aria-label="Viggle Animate inputs">
+      <CharacterToolbarItem><CharacterImagePickerButton maxImages={1} disabled={locked} label="Characters"
+        onSelect={async (selected, images) => {
+          const file = await api.characterImageFile(selected, images[0])
+          const uploaded = await api.uploadImage(file)
+          changeCharacter({reference_path: uploaded.path, reference_url: uploaded.url,
+            character_id: selected.id, character_name: selected.name, view_id: images[0].id})
+        }}/></CharacterToolbarItem>
       <p className="text-[11px] leading-relaxed text-text-secondary">Replace a person or object in one frame, then animate that edit through the source video.</p>
       <div className="space-y-2">
         <div className="flex items-center justify-between text-xs text-text-primary"><span>1 · Control video</span>
@@ -134,14 +146,7 @@ export function ViggleControls() {
             <img src={character.reference_url || mediaUrl(character.reference_path)} alt="Character reference" className="h-20 w-20 shrink-0 rounded-lg object-contain bg-black"/>
             <span className="min-w-0 flex-1 break-words text-xs text-text-primary">{character.character_name ? characterDisplayName(character.character_name) : 'Character image'}</span>
           </div>}
-          <div className="grid grid-cols-2 gap-2">
-            <CharacterImagePickerButton maxImages={1} disabled={locked} label={character.reference_path ? 'Change character' : 'Saved character'}
-              onSelect={async (selected, images) => {
-                const file = await api.characterImageFile(selected, images[0])
-                const uploaded = await api.uploadImage(file)
-                changeCharacter({reference_path: uploaded.path, reference_url: uploaded.url,
-                  character_id: selected.id, character_name: selected.name, view_id: images[0].id})
-              }}/>
+          <div>
             {input('character', 'Upload image')}
           </div>
           <label htmlFor="viggle-appearance" className="block text-[11px] text-text-muted">Appearance (optional)</label>

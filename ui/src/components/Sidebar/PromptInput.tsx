@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useLayoutEffect } from 'react'
+import { useState, useRef, useEffect, useLayoutEffect, useContext, useCallback } from 'react'
 import { Sparkles, Loader2, ChevronDown, ChevronUp, Brain, PenLine, RefreshCw } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import {
@@ -10,6 +10,7 @@ import {
   continuationFirstWindowFrames,
   durationWindowPlan,
 } from '../../lib/durationPlanning'
+import { ComposerContext, ComposerToolbarItem } from './SidebarPanels'
 
 const placeholders: Record<string, string> = {
   image: 'Describe your image...',
@@ -24,23 +25,24 @@ function estimateH3TextTokens(value: string): number {
   return Math.ceil(lexical * 1.25) + (value.trim() ? 8 : 0)
 }
 
-function useAutoGrowingTextarea(value: string) {
+function useAutoGrowingTextarea(value: string, maximum = Infinity) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-  const fitToContent = () => {
+  const fitToContent = useCallback(() => {
     const textarea = textareaRef.current
     if (!textarea) return
     textarea.style.height = 'auto'
     // scrollHeight includes padding but not the two one-pixel borders used
     // by these border-box textareas. Include them so the final line is visible.
-    textarea.style.height = `${textarea.scrollHeight + 2}px`
-  }
+    textarea.style.height = `${Math.min(textarea.scrollHeight + 2, maximum)}px`
+    textarea.style.overflowY = textarea.scrollHeight + 2 > maximum ? 'auto' : 'hidden'
+  }, [maximum])
 
-  useLayoutEffect(fitToContent, [value])
+  useLayoutEffect(fitToContent, [value, fitToContent])
   useEffect(() => {
     window.addEventListener('resize', fitToContent)
     return () => window.removeEventListener('resize', fitToContent)
-  }, [])
+  }, [fitToContent])
 
   return textareaRef
 }
@@ -128,8 +130,10 @@ function useEnhanceStatus(isEnhancing: boolean) {
 }
 
 export function PromptInput() {
+  const composer = useContext(ComposerContext)
+  const compact = !!composer && !composer.expanded
   const prompt = useStore(s => s.params.prompt)
-  const promptTextareaRef = useAutoGrowingTextarea(prompt)
+  const promptTextareaRef = useAutoGrowingTextarea(prompt, compact ? 144 : Infinity)
   const setParam = useStore(s => s.setParam)
   const generationMode = useStore(s => s.generationMode)
   const editSubMode = useStore(s => s.editSubMode)
@@ -342,9 +346,8 @@ export function PromptInput() {
     && closedWindowPlanSignature !== h3WindowPlan.signature
   )
 
-  // Keep the prompt area at the bottom when the sidebar has spare room. The
-  // textarea itself grows to its complete content height, and the sidebar's
-  // outer scroller handles prompts taller than the viewport.
+  // The dock bounds the main textarea; the expanded editor keeps the complete
+  // source and editable window plan without mounting a second prompt instance.
   return (
     <div className="relative grow shrink-0 flex flex-col">
       {/* Enhance status indicator */}
@@ -381,7 +384,7 @@ export function PromptInput() {
           <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-border bg-bg-tertiary/70">
             <button
               type="button"
-              onClick={() => setClosedWindowPlanSignature(current => (
+              onClick={() => compact ? composer?.expand() : setClosedWindowPlanSignature(current => (
                 current === h3WindowPlan?.signature ? null : (h3WindowPlan?.signature ?? null)
               ))}
               className="flex-1 min-w-0 flex items-center gap-1.5 text-left"
@@ -410,7 +413,7 @@ export function PromptInput() {
               <RefreshCw size={11} className={isEnhancing ? 'animate-spin' : ''} />
             </button>
           </div>
-          {!!h3WindowPlan.planning_warnings?.length && (
+          {!compact && !!h3WindowPlan.planning_warnings?.length && (
             <div
               role="alert"
               className="mt-1.5 rounded-lg border border-amber-400/35 bg-amber-400/10 px-2.5 py-2 text-[10px] leading-relaxed text-amber-300"
@@ -436,7 +439,7 @@ export function PromptInput() {
               </div>
             </div>
           )}
-          {!!h3WindowPlan.planning_notes?.length && (
+          {!compact && !!h3WindowPlan.planning_notes?.length && (
             <div
               role="status"
               className="mt-1.5 rounded-lg border border-border bg-bg-tertiary/70 px-2.5 py-2 text-[10px] leading-relaxed text-text-muted"
@@ -449,7 +452,7 @@ export function PromptInput() {
               ))}
             </div>
           )}
-          {windowPlanOpen && (
+          {!compact && windowPlanOpen && (
             <div className="mt-2 space-y-3">
               {h3WindowPlan.windows.map((window, index) => (
                 <div
@@ -494,6 +497,7 @@ export function PromptInput() {
       <div className="relative mt-auto">
         <textarea
           ref={promptTextareaRef}
+          aria-label="Generation prompt"
           rows={1}
           value={prompt}
           onChange={e => setParam('prompt', e.target.value)}
@@ -506,9 +510,9 @@ export function PromptInput() {
                   ? `Describe the complete video idea - Maestro will plan ${windowCount} LTX windows.`
                   : `Line 1 = window 1, line 2 = window 2... (${windowCount} windows)`)
             : modePlaceholder}
-          className="block w-full min-h-[112px] resize-none overflow-hidden bg-bg-tertiary border border-border rounded-lg px-3 py-2 pr-10 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue transition-colors"
+          className={`studio-prompt-textarea block w-full resize-none bg-bg-tertiary border border-border rounded-xl px-3 py-2 pr-10 text-base md:text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue transition-colors ${composer?.expanded ? 'min-h-[260px]' : 'min-h-[104px]'}`}
         />
-        {prompt.trim() && !usesManualWindowPrompts && (
+        <ComposerToolbarItem>{prompt.trim() && !usesManualWindowPrompts && (
         isAudioOnly ? (
           /* TTS: mode-aware split button. Main button uses default mode based
              on voice-slot count; dropdown exposes both Speech and Dialogue
@@ -518,7 +522,7 @@ export function PromptInput() {
              slots — bad UX trap especially with audio_mode_from_voice_count
              models like Scenema where the user may want a generated-voice
              dialogue script as a starting point. */
-          <div ref={menuRef} className="absolute right-2 bottom-2">
+          <div ref={menuRef} className={composer ? 'relative' : 'absolute right-2 bottom-2'}>
             <div className="flex items-center">
               <button
                 onClick={() => enhancePrompt(defaultMode)}
@@ -539,7 +543,7 @@ export function PromptInput() {
               </button>
             </div>
             {ttsMenuOpen && (
-              <div className="absolute bottom-full right-0 mb-1 bg-bg-secondary border border-border rounded-lg shadow-lg overflow-hidden min-w-[220px] z-50">
+              <div className={`absolute ${composer?.expanded ? 'top-full mt-1' : 'bottom-full mb-1'} right-0 bg-bg-secondary border border-border rounded-lg shadow-lg overflow-hidden min-w-[220px] z-50`}>
                 <button
                   onClick={() => { setTtsMenuOpen(false); enhancePrompt('monologue') }}
                   className="w-full text-left px-3 py-2 text-[11px] text-text-secondary hover:bg-bg-hover transition-colors"
@@ -580,7 +584,7 @@ export function PromptInput() {
             onClick={() => enhancePrompt()}
             disabled={isEnhancing}
             title="Enhance prompt with AI"
-            className="absolute right-2 bottom-2 p-1.5 rounded-md text-text-muted hover:text-accent-blue hover:bg-bg-hover transition-colors disabled:opacity-50"
+            className={`${composer ? 'relative p-2' : 'absolute right-2 bottom-2 p-1.5'} rounded-lg text-text-muted hover:text-accent-blue hover:bg-bg-hover transition-colors disabled:opacity-50`}
           >
             {isEnhancing ? (
               <Loader2 size={14} className="animate-spin" />
@@ -589,7 +593,7 @@ export function PromptInput() {
             )}
           </button>
         )
-        )}
+        )}</ComposerToolbarItem>
       </div>
     </div>
   )

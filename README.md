@@ -32,7 +32,7 @@ Direct access to every model and every knob:
 - **Frames Injection (KFI)** for character continuity in long videos
 - **Sliding window** for arbitrarily long generations
 - **Viggle Animate:** select a saved character or image, describe its appearance, and let Flux 2 Klein prepare the replacement frame before three-step H3 animation. Preview the frame first or run both steps together; manual edited frames remain supported. See [Viggle Animate](docs/Viggle-Animate.md).
-- **Compact Studio controls:** resolution and aspect buttons on the main panel; Time includes a model-aligned slider through five minutes, with the existing presets through one hour. Automatic window size follows the timeline up to the GPU recommendation or a saved/manual cap.
+- **Compact Studio controls:** expandable Resolution, Aspect and Duration buttons; Characters beside Advanced; visible media drop zones; and a docked prompt with a full-size script editor. Advanced groups Performance, Finishing, LoRAs and Generation. Recipes, Model Browser and the Generate / Add to Queue split stay within reach. Time retains model-aligned steps through five minutes and presets through one hour. See [Studio controls](docs/Studio-controls.md).
 - **Spatial upsampling, film grain, codec selection** as post-processing options
 - **H3 VDN**, an optional trained hybrid-attention model with dedicated Full/Pruned and eight-step presets; requires Triton and additional VRAM.
 - **H3 Voice Audio** for speech, one/two-reference voice cloning and general audio: up to 45 seconds per segment and five minutes per assembled output. See the [H3 audio guide](docs/H3-Voice-Audio.md). **H3 Outpaint** extends video borders; an optional six-step **H3 Audio Refinement** pass holds the generated video fixed.

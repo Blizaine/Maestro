@@ -623,7 +623,7 @@ export function InputsPanel() {
   return (
     <div>
       <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">Inputs</label>
-      <div className="flex gap-2 overflow-x-auto pb-1">
+      <div className="studio-media-grid grid grid-cols-2 gap-2 pb-1">
         {/* Extend-from source video (Extend mode only) — the timeline anchor. */}
         {isExtend && (continueVideo ? (
           <div onClick={() => setSelected(selected === 'extend' ? null : 'extend')}
@@ -636,7 +636,7 @@ export function InputsPanel() {
             </div>
           </div>
         ) : (
-          <AddTile label="Extend from" icon={<Film size={18} />} onClick={() => pickFile('video/*', handleAddExtendSource)} onDropFile={handleAddExtendSource} dropAccept="video" />
+          <AddTile label="Video to extend" icon={<Film size={18} />} onClick={() => pickFile('video/*', handleAddExtendSource)} onDropFile={handleAddExtendSource} dropAccept="video" />
         ))}
 
         {/* Unified "Frame" tiles — start / end / injected keyframes, one concept,
@@ -668,7 +668,7 @@ export function InputsPanel() {
           </div>
         ))}
         {canAddFrame && (
-          <AddTile label={frameUploading ? 'Uploading…' : 'Frame'} icon={<Plus size={18} />}
+          <AddTile label={frameUploading ? 'Uploading…' : frameTiles.length ? 'Add frame' : supportsEndFrame ? 'Start / end frame' : 'Start frame'} icon={<Plus size={18} />}
             onClick={() => pickImage(handleAddFrameSmart)} onDropFile={handleAddFrameSmart} dropAccept="image" />
         )}
 

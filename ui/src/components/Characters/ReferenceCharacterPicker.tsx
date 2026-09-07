@@ -10,9 +10,10 @@ interface Props {
   disabled: boolean
   onAdd: (character: SavedOmniCharacter) => void
   onDelete: (character: SavedOmniCharacter) => void
+  scroll?: boolean
 }
 
-export function ReferenceCharacterPicker({ characters, addedIds, disabled, onAdd, onDelete }: Props) {
+export function ReferenceCharacterPicker({ characters, addedIds, disabled, onAdd, onDelete, scroll = true }: Props) {
   const [query, setQuery] = useState('')
   const [optionsId, setOptionsId] = useState<string | null>(null)
   const optionsCard = useRef<HTMLElement>(null)
@@ -61,7 +62,7 @@ export function ReferenceCharacterPicker({ characters, addedIds, disabled, onAdd
     </div>
 
     <div role="group" aria-label="Saved character choices" tabIndex={0}
-      className="max-h-[min(26rem,50dvh)] overflow-y-auto rounded-xl p-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue/50">
+      className={`${scroll ? 'max-h-[min(26rem,50dvh)] overflow-y-auto' : ''} rounded-xl p-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue/50`}>
       <div className="grid grid-cols-2 gap-2.5">
         {visible.map(character => {
           const name = characterDisplayName(character.name)
