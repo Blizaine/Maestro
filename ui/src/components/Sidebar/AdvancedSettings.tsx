@@ -1,7 +1,6 @@
 /* eslint-disable react-refresh/only-export-components -- the advanced badge hooks share this settings contract */
-import { useState, useEffect, useRef } from 'react'
-import { createPortal } from 'react-dom'
-import { X, Save, Trash2, FolderOpen, SlidersHorizontal } from 'lucide-react'
+import { useState, useEffect, useRef, useId, type ReactNode } from 'react'
+import { X, Save, Trash2, FolderOpen, SlidersHorizontal, ChevronDown } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { PostProcessing } from './PostProcessing'
 import { ControlVideoSection } from './ControlVideoSection'
@@ -11,7 +10,6 @@ import { DirectorH3Optimizations } from './DirectorH3Optimizations'
 import { H3MediaControls } from './H3MediaControls'
 import { MiniMaxH3Optimizations } from './MiniMaxH3Optimizations'
 import { AutomaticFaceRefiner } from '../Characters/FaceRefiner'
-import { usePanelFocus } from './SidebarPanels'
 import type { GenerateParams } from '../../types'
 
 const H3_LONG_SEQUENCE_EXPERIMENTS = [
@@ -396,7 +394,7 @@ export function useAdvancedCount(): number {
   return useAdvancedActiveItems().length
 }
 
-export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
+export function AdvancedSettings({ compact = false, toolbarStart }: { compact?: boolean; toolbarStart?: ReactNode }) {
   const [open, setOpen] = useState(false)
   const [section, setSection] = useState<'performance' | 'finishing' | 'loras' | 'generation'>('generation')
   const params = useStore(s => s.params)
@@ -474,20 +472,42 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
     return refs && refs.length > 0
   })
   const panelRef = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const panelId = useId()
   const advancedItems = useAdvancedActiveItems()
   const advancedCount = advancedItems.length
 
-  usePanelFocus(open, panelRef, () => setOpen(false))
+  const closePanel = () => {
+    setOpen(false)
+    triggerRef.current?.focus()
+  }
   useEffect(() => {
-    const finishing = () => { setSection('finishing'); setOpen(true) }
+    let focusFrame = 0
+    const finishing = () => {
+      setSection('finishing')
+      setOpen(true)
+      // The character library closes before revealing its inline destination.
+      // Wait for that render so its dialog focus cleanup cannot steal focus.
+      cancelAnimationFrame(focusFrame)
+      focusFrame = requestAnimationFrame(() => {
+        panelRef.current?.focus({ preventScroll: true })
+        panelRef.current?.scrollIntoView({ block: 'start' })
+      })
+    }
     window.addEventListener('maestro-open-finishing', finishing)
-    return () => window.removeEventListener('maestro-open-finishing', finishing)
+    return () => {
+      window.removeEventListener('maestro-open-finishing', finishing)
+      cancelAnimationFrame(focusFrame)
+    }
   }, [])
 
   return (
-    <>
+    <div className="flex min-w-0 flex-col gap-2">
+      <div className="flex items-stretch gap-2" aria-label="Characters and advanced controls">
+      {toolbarStart}
       {/* Trigger button */}
       <button
+        ref={triggerRef}
         type="button"
         onClick={() => setOpen(!open)}
         title={advancedCount > 0
@@ -495,12 +515,14 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
           : 'Advanced settings'}
         aria-label={`Advanced settings${advancedCount > 0 ? `, ${advancedCount} active` : ''}`}
         aria-expanded={open}
+        aria-controls={panelId}
         className={`relative flex shrink-0 items-center justify-center gap-2 rounded-xl border p-2 transition-colors ${compact ? 'min-h-12 flex-1 bg-bg-tertiary px-3' : ''} ${
           open ? 'border-accent-blue text-accent-blue' : 'border-border text-text-secondary hover:text-text-primary hover:border-border-light'
         }`}
       >
         <SlidersHorizontal size={14} />
         {compact && <span className="min-w-0 text-left"><span className="block text-xs font-medium">Advanced</span><span className="block text-[10px] text-text-muted">{advancedCount ? `${advancedCount} active` : 'Defaults'}</span></span>}
+        {compact && <ChevronDown size={12} className={`shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />}
         {!compact && advancedCount > 0 && (
           <span
             title={advancedItems.join('\n')}
@@ -510,22 +532,26 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
           </span>
         )}
       </button>
+      </div>
 
-      {/* Popup overlay — always mounted to preserve state (frames injection, etc.) */}
-      {createPortal(<>
-      {open && <div className="fixed inset-0 bg-black/40 z-[55]" onClick={() => setOpen(false)} />}
+      {/* Keep controls mounted while collapsed so drafts and input state survive.
+          Separate rows let the character button fill its row, not this section. */}
       <div
         ref={panelRef}
-        role="dialog" aria-modal={open ? true : undefined} aria-label="Advanced settings" aria-hidden={!open} inert={!open} tabIndex={-1}
-        className={`fixed top-0 h-dvh bg-bg-secondary border-r border-border z-[55] flex flex-col shadow-2xl overflow-hidden outline-none transition-transform duration-200
-          left-0 w-full md:left-[420px] md:w-[380px] md:max-w-[90vw] ${
-          open ? 'translate-x-0' : '-translate-x-full md:-translate-x-[800px] pointer-events-none'
-        }`}
+        id={panelId}
+        role="region" aria-label="Advanced settings" hidden={!open} tabIndex={-1}
+        onKeyDown={event => {
+          if (event.key !== 'Escape' || event.defaultPrevented || !event.currentTarget.contains(event.target as Node)) return
+          event.preventDefault()
+          event.stopPropagation()
+          closePanel()
+        }}
+        className={`${open ? 'block' : 'hidden'} min-w-0 w-full rounded-xl border border-border bg-bg-secondary outline-none`}
       >
             {/* Header */}
             <div className="px-4 py-3 border-b border-border flex items-center justify-between shrink-0">
               <span className="text-sm font-semibold text-text-primary">Advanced Settings</span>
-              <button aria-label="Close Advanced settings" onClick={() => setOpen(false)} className="p-2 rounded-lg hover:bg-bg-hover text-text-secondary">
+              <button type="button" aria-label="Close Advanced settings" onClick={closePanel} className="p-2 rounded-lg hover:bg-bg-hover text-text-secondary">
                 <X size={16} />
               </button>
             </div>
@@ -537,8 +563,8 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
               </button>)}
             </div>}
 
-            {/* Scrollable content */}
-            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 space-y-5">
+            {/* Use the sidebar's existing scroller rather than a nested panel. */}
+            <div className="min-w-0 px-4 py-4 space-y-5">
               {isDirector ? (
                 <>
                   <DirectorH3Optimizations />
@@ -1388,7 +1414,6 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
               )}
             </div>
           </div>
-      </>, document.body)}
-    </>
+    </div>
   )
 }

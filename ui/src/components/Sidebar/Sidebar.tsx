@@ -157,10 +157,9 @@ export function Sidebar() {
         {isAudioWorkspace && <AudioSubModeToggle />}
         {!isStandaloneTool && <ModelSelector placement="below" />}
         {!isStandaloneTool && <OutputFormatControls />}
-        {!isStandaloneTool && <div className="flex items-stretch gap-2" aria-label="Characters and advanced controls">
+        {!isStandaloneTool && <AdvancedSettings compact toolbarStart={
           <div ref={setCharacterSlot} className="min-w-0 flex-1 empty:hidden [&>button]:h-full [&>button]:w-full"/>
-          <AdvancedSettings compact />
-        </div>}
+        } />}
 
         {isUpscale ? (
           <ToolsPanel forcedTool="upscale" mediaKind={toolsUpscaleMedia} embedded />

@@ -14,6 +14,8 @@ Frames and Extend keep their specific input roles: source video, start/end/timed
 
 ## Advanced
 
+**Advanced** expands a full-width section directly below the Characters / Advanced row. It scrolls with the upper settings area; the prompt and Generate / Queue bar stay in place. Press Advanced again or the section's close button to collapse it. Its selected group and settings are retained.
+
 - **Performance:** H3 optimizations, applicable text encoders/decoders and cache tuning. Existing compatible settings and defaults are retained.
 - **Finishing:** face refinement, H3 audio refinement and supported post-processing, including scaling, temporal upsampling, grain and voice replacement.
 - **LoRAs & presets:** creative adapters, strengths and saved setups.

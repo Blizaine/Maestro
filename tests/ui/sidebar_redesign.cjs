@@ -199,20 +199,48 @@ const read = async endpoint => {
     console.log('Exact H3 window-plan review, editing and retention passed');
 
     await controls.evaluate(node => {node.scrollTop = 0});
-    await sidebar.getByRole('button', {name: /^Advanced settings/}).click();
-    dialog = page.getByRole('dialog', {name: 'Advanced settings', exact: true});
-    await dialog.getByRole('button', {name: 'Finishing', exact: true}).click();
-    await dialog.getByRole('checkbox', {name: 'Refine faces after generation'}).check();
-    await dialog.getByRole('button', {name: 'Performance', exact: true}).click();
-    assert.equal(await dialog.getByRole('checkbox', {name: 'Refine faces after generation'}).isVisible(), false);
-    await dialog.getByRole('button', {name: 'LoRAs & presets', exact: true}).click();
-    await dialog.getByRole('button', {name: 'Close Advanced settings'}).click();
+    const advancedTrigger = sidebar.getByRole('button', {name: /^Advanced settings/});
+    const advanced = controls.getByRole('region', {name: 'Advanced settings', exact: true});
+    const assertInlineAdvanced = async () => {
+      const triggerBox = await advancedTrigger.boundingBox(), panelBox = await advanced.boundingBox();
+      const toolbarBox = await sidebar.locator('[aria-label="Characters and advanced controls"]').boundingBox();
+      assert.ok(triggerBox.height <= 64, 'Toolbar buttons keep their compact height while Advanced is open');
+      assert.ok(panelBox.y >= triggerBox.y + triggerBox.height, 'Advanced expands below its button');
+      assert.ok(Math.abs(panelBox.x - toolbarBox.x) <= 1 && Math.abs(panelBox.width - toolbarBox.width) <= 1, 'Advanced spans the toolbar width');
+      assert.equal(await page.getByRole('dialog', {name: 'Advanced settings', exact: true}).count(), 0, 'Advanced is not a modal overlay');
+      assert.equal(await advancedTrigger.getAttribute('aria-controls'), await advanced.getAttribute('id'));
+    };
+    const dockBeforeAdvanced = await page.getByTestId('studio-generate-bar').boundingBox();
+    await advancedTrigger.click();
+    await assertInlineAdvanced();
+    assert.deepEqual(await page.getByTestId('studio-generate-bar').boundingBox(), dockBeforeAdvanced, 'Expanding Advanced leaves Generate anchored');
+    await advanced.getByRole('button', {name: 'Close Advanced settings'}).focus();
+    await page.keyboard.press('Shift+Tab');
+    assert.equal(await advancedTrigger.evaluate(node => document.activeElement === node), true, 'Inline settings do not trap keyboard focus');
+    await advanced.getByRole('button', {name: 'Finishing', exact: true}).click();
+    await advanced.getByRole('checkbox', {name: 'Refine faces after generation'}).check();
+    await advanced.getByRole('button', {name: 'Performance', exact: true}).click();
+    assert.equal(await advanced.getByRole('checkbox', {name: 'Refine faces after generation'}).isVisible(), false);
+    await advanced.getByRole('button', {name: 'LoRAs & presets', exact: true}).click();
+    await advanced.getByRole('button', {name: 'Save Current'}).click();
+    await advanced.getByPlaceholder('Preset name...').fill('Unfinished setup');
+    await advancedTrigger.click();
+    assert.equal(await advanced.isVisible(), false, 'Pressing Advanced again collapses it');
+    await advancedTrigger.click();
+    assert.equal(await advanced.getByRole('button', {name: 'LoRAs & presets', exact: true}).getAttribute('aria-pressed'), 'true');
+    assert.equal(await advanced.getByPlaceholder('Preset name...').inputValue(), 'Unfinished setup', 'Collapsing preserves an unsaved preset draft');
+    await advanced.getByPlaceholder('Preset name...').press('Escape');
+    assert.equal(await advanced.isVisible(), false);
+    assert.equal(await advancedTrigger.evaluate(node => document.activeElement === node), true, 'Escape restores the Advanced trigger');
     assert.match(await page.getByTestId('studio-generate-bar').innerText(), /Face refinement/);
     await sidebar.getByRole('button', {name: /Characters/}).click();
     await page.getByRole('dialog', {name: 'Characters', exact: true}).getByRole('button', {name: /Face refinement & character mapping/}).click();
-    assert.equal(await page.getByRole('dialog', {name: 'Advanced settings', exact: true}).getByRole('checkbox', {name: 'Refine faces after generation'}).isChecked(), true);
-    await page.getByRole('button', {name: 'Close Advanced settings'}).click();
-    console.log('Advanced groups, active summary and shared character/face-refinement settings passed');
+    assert.equal(await advanced.getByRole('checkbox', {name: 'Refine faces after generation'}).isChecked(), true);
+    await pause();
+    assert.equal(await advanced.evaluate(node => document.activeElement === node), true, 'Character shortcut focuses the inline finishing section');
+    assert.ok(await controls.evaluate(node => node.scrollTop > 0), 'Character shortcut reveals the inline section in the settings scroller');
+    await advanced.getByRole('button', {name: 'Close Advanced settings'}).click();
+    console.log('Inline Advanced layout, keyboard navigation, drafts, active summary and shared face-refinement settings passed');
 
     // Real submission routing, intercepted before it can create any work.
     await page.evaluate(() => window.store.getState().setParam('face_refiner', {enabled: false}));
@@ -242,6 +270,16 @@ const read = async endpoint => {
         const bar = await page.getByTestId('studio-generate-bar').boundingBox();
         assert.ok(bar.y >= 0 && bar.y + bar.height <= viewport.height, 'Generate stays in viewport');
         await page.screenshot({path: path.join(output, viewport.width + '-' + family + '-' + mode + '.png')});
+        await advancedTrigger.click();
+        await assertInlineAdvanced();
+        await advanced.getByRole('button', {name: 'Generation', exact: true}).click();
+        assert.ok(await controls.evaluate(node => node.scrollWidth <= node.clientWidth + 1), 'Expanded Advanced fits width ' + viewport.width);
+        const beforeScroll = await page.getByTestId('studio-generate-bar').boundingBox();
+        await controls.evaluate(node => {node.scrollTop = node.scrollHeight});
+        assert.deepEqual(await page.getByTestId('studio-generate-bar').boundingBox(), beforeScroll, 'Scrolling Advanced leaves Generate in place');
+        await advanced.evaluate(node => node.scrollIntoView({block: 'start'}));
+        await page.screenshot({path: path.join(output, viewport.width + '-' + family + '-' + mode + '-advanced.png')});
+        await advanced.getByRole('button', {name: 'Close Advanced settings'}).click();
       }
     }
     await sidebar.getByRole('button', {name: /Characters/}).click();
