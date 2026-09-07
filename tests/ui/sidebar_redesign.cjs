@@ -218,6 +218,12 @@ const read = async endpoint => {
     await controls.evaluate(node => {node.scrollTop = 0});
     const advancedTrigger = sidebar.getByRole('button', {name: /^Advanced settings/});
     const advanced = page.getByRole('dialog', {name: 'Advanced settings', exact: true});
+    const advancedSection = key => advanced.getByTestId('advanced-' + key);
+    const disclose = async (key, expanded = true) => {
+      const section = advancedSection(key);
+      if (await section.evaluate(node => node.open) !== expanded) await section.locator(':scope > summary').click();
+      assert.equal(await section.evaluate(node => node.open), expanded);
+    };
     const assertSettingsOverlay = async () => {
       const triggerBox = await advancedTrigger.boundingBox(), panelBox = await advanced.boundingBox();
       const viewport = page.viewportSize();
@@ -232,19 +238,28 @@ const read = async endpoint => {
     await assertSettingsOverlay();
     assert.deepEqual(await page.getByTestId('studio-generate-bar').boundingBox(), dockBeforeAdvanced, 'Expanding Advanced leaves Generate anchored');
     assert.deepEqual(await prompt.boundingBox(), promptBeforeAdvanced, 'Opening Advanced does not move the prompt');
-    await advanced.getByRole('button', {name: 'Finishing', exact: true}).click();
+    for (const key of ['loras', 'performance', 'finishing', 'generation']) {
+      assert.equal(await advancedSection(key).evaluate(node => node.open), false, 'Advanced initially shows collapsed section headings');
+    }
+    await disclose('finishing');
     await advanced.getByRole('checkbox', {name: 'Refine faces after generation'}).check();
-    await advanced.getByRole('button', {name: 'Performance', exact: true}).click();
+    await disclose('performance');
+    assert.equal(await advanced.getByRole('checkbox', {name: 'Refine faces after generation'}).isVisible(), true, 'Sections expand independently');
+    await disclose('finishing', false);
     assert.equal(await advanced.getByRole('checkbox', {name: 'Refine faces after generation'}).isVisible(), false);
     await advanced.getByLabel('Reference detail', {exact: true}).selectOption('max');
     assert.equal(await page.evaluate(() => window.store.getState().params.minimax_h3_reference_detail), 'max');
-    await advanced.getByRole('button', {name: 'LoRAs & presets', exact: true}).click();
+    await disclose('loras');
     await advanced.getByRole('button', {name: 'Save Current'}).click();
     await advanced.getByPlaceholder('Preset name...').fill('Unfinished setup');
+    await disclose('loras', false);
+    assert.equal(await advanced.getByPlaceholder('Preset name...').isVisible(), false);
+    await advancedSection('loras').locator(':scope > summary').press('Enter');
+    assert.equal(await advanced.getByPlaceholder('Preset name...').inputValue(), 'Unfinished setup', 'Keyboard expansion retains the draft');
     await advancedTrigger.click();
     assert.equal(await advanced.isVisible(), false, 'Pressing Advanced again collapses it');
     await advancedTrigger.click();
-    assert.equal(await advanced.getByRole('button', {name: 'LoRAs & presets', exact: true}).getAttribute('aria-pressed'), 'true');
+    assert.equal(await advancedSection('loras').evaluate(node => node.open), true);
     assert.equal(await advanced.getByPlaceholder('Preset name...').inputValue(), 'Unfinished setup', 'Collapsing preserves an unsaved preset draft');
     assert.equal(await page.evaluate(() => window.store.getState().params.minimax_h3_reference_detail), 'max', 'Reference preparation choice survives closing the overlay');
     await advanced.getByPlaceholder('Preset name...').press('Escape');
@@ -253,6 +268,8 @@ const read = async endpoint => {
     assert.match(await advancedTrigger.getAttribute('title'), /Face refinement/);
     await sidebar.getByRole('button', {name: /Characters/}).click();
     await page.getByRole('dialog', {name: 'Characters', exact: true}).getByRole('button', {name: /Face refinement & character mapping/}).click();
+    assert.equal(await advancedSection('finishing').evaluate(node => node.open), true, 'Character shortcut expands Finishing');
+    assert.equal(await advancedSection('loras').evaluate(node => node.open), false, 'Shortcut brings finishing into view');
     assert.equal(await advanced.getByRole('checkbox', {name: 'Refine faces after generation'}).isChecked(), true);
     await pause();
     assert.equal(await advanced.evaluate(node => document.activeElement === node), true, 'Character shortcut focuses Finishing in the settings overlay');
@@ -291,6 +308,13 @@ const read = async endpoint => {
         assert.ok(await sidebar.evaluate(node => node.scrollWidth <= node.clientWidth + 1), 'Sidebar has no horizontal overflow');
         assert.ok(await controls.evaluate(node => node.scrollWidth <= node.clientWidth + 1), 'Controls fit width ' + viewport.width);
         assert.ok(await page.getByTestId('studio-settings-strip').evaluate(node => node.scrollWidth <= node.clientWidth + 1), 'Every settings indicator fits width ' + viewport.width);
+        const stripBounds = await page.getByTestId('studio-settings-strip').boundingBox();
+        const settingsBounds = await page.getByTestId('studio-output-settings').boundingBox();
+        assert.ok(Math.abs(settingsBounds.x + settingsBounds.width - stripBounds.x - stripBounds.width) < 1, 'Settings group aligns to the right edge');
+        assert.ok(await page.getByTestId('studio-output-settings').evaluate(node => {
+          const boxes = [...node.children].map(child => child.getBoundingClientRect());
+          return boxes.slice(1).every((box, i) => Math.abs(box.left - boxes[i].right - 4) < 1);
+        }), 'Settings keep compact, even gaps instead of spreading out');
         const modelBox = await sidebar.getByRole('button', {name: 'Choose model'}).boundingBox();
         const bar = await page.getByTestId('studio-generate-bar').boundingBox();
         assert.ok(modelBox.y >= bar.y && modelBox.y + modelBox.height <= bar.y + bar.height, 'Model selector is beside Generate');
@@ -298,7 +322,7 @@ const read = async endpoint => {
         await page.screenshot({path: path.join(output, viewport.width + '-' + family + '-' + mode + '.png')});
         await advancedTrigger.click();
         await assertSettingsOverlay();
-        await advanced.getByRole('button', {name: 'Generation', exact: true}).click();
+        await disclose('generation');
         assert.ok(await advanced.evaluate(node => node.scrollWidth <= node.clientWidth + 1), 'Advanced content fits width ' + viewport.width);
         const beforeScroll = await page.getByTestId('studio-generate-bar').boundingBox();
         await advanced.locator(':scope > div').last().evaluate(node => {node.scrollTop = node.scrollHeight});
@@ -344,6 +368,26 @@ const read = async endpoint => {
     await pause();
     assert.equal(await page.evaluate(() => window.store.getState().params.model_type), 'minimax_h3');
     assert.deepEqual(errors, [], 'Extend switch must not reproduce React #185');
+    for (const width of [1360, 390, 320]) {
+      await page.setViewportSize({width, height: 844});
+      await page.evaluate(() => window.resetFixture('minimax_h3', 'video', 'frames'));
+      await pause();
+      const frameTiles = await controls.locator('.studio-media-grid').evaluate(node => [...node.children].map(child => {
+        const bounds = child.getBoundingClientRect();
+        return {x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height};
+      }));
+      assert.ok(frameTiles.length >= 3);
+      assert.ok(frameTiles.slice(0, 3).every(tile => tile.y === frameTiles[0].y), 'Frames inputs are three across at ' + width);
+      assert.ok(frameTiles.slice(0, 3).every(tile => Math.abs(tile.width - frameTiles[0].width) < 1 && tile.height === frameTiles[0].height));
+      await page.screenshot({path: path.join(output, width + '-frames-tiles.png')});
+      await page.evaluate(() => window.resetFixture('minimax_h3_ref2va', 'video', 'references'));
+      await pause();
+      const referenceTile = await sidebar.getByRole('button', {name: 'Add reference', exact: true}).evaluate(node => {
+        const bounds = node.parentElement.getBoundingClientRect(); return {width: bounds.width, height: bounds.height};
+      });
+      assert.ok(Math.abs(referenceTile.width - frameTiles[0].width) < 1 && referenceTile.height === frameTiles[0].height, 'Frames and Reference share compact tile dimensions at ' + width);
+    }
+    await page.setViewportSize({width: 1360, height: 900});
     for (const [id, mode, workflow] of [['minimax_h3', 'video', 'frames'], ['viggle_animate', 'video', 'animate'], ['flux2_klein_9b', 'image', 'frames'], ['minimax_h3_voice_audio', 'audio', 'frames']]) {
       await page.evaluate(args => window.resetFixture(...args), [id, mode, workflow]);
       await pause();
@@ -352,6 +396,13 @@ const read = async endpoint => {
       assert.ok(await controls.evaluate(node => node.scrollWidth <= node.clientWidth + 1), id + ' fits');
       await page.screenshot({path: path.join(output, id + '.png')});
       if (mode === 'image' || mode === 'audio') {
+        await advancedTrigger.click();
+        assert.equal(await advancedSection('generation').isVisible(), true, 'Applicable generation controls remain available');
+        assert.equal(await advancedSection('loras').isVisible(), true, 'Presets remain available even without installed LoRAs');
+        if (mode === 'image') assert.equal(await advancedSection('performance').isVisible(), false, 'Flux has no empty Performance section');
+        if (mode === 'audio') assert.equal(await advancedSection('finishing').isVisible(), false, 'Speech has no empty Finishing section');
+        await page.screenshot({path: path.join(output, id + '-advanced.png')});
+        await advanced.press('Escape');
         await sidebar.getByRole('button', {name: 'Characters', exact: true}).click();
         const library = page.getByRole('dialog', {name: mode === 'image' ? 'Choose a character' : 'Voice characters'});
         assert.ok((await library.boundingBox()).x > (await sidebar.boundingBox()).width, mode + ' characters use the desktop side library');

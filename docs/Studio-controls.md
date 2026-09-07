@@ -2,7 +2,7 @@
 
 Choose Video, Image or Audio and a workflow at the top of Studio. The complete workflow list opens over the editor. References sit at the top of the large composition area, and the prompt fills the remaining space. Choose the model beside Generate at the bottom.
 
-The fixed settings strip contains Characters, Resolution, Aspect, Duration and Advanced. Indicators show the current choices; Auto duration is labeled Auto. Settings open upward on desktop and as sheets on mobile. The options still come from the selected model, including Auto and model-specific tiers. Opening a setting does not resize the prompt or move Generate. Click another indicator to switch panels, click outside to dismiss, or use the close button or Escape.
+The fixed settings strip keeps Characters on the left and groups Resolution, Aspect, Duration and Advanced together on the right. Indicators show the current choices; Auto duration is labeled Auto. Settings open upward on desktop and as sheets on mobile. The options still come from the selected model, including Auto and model-specific tiers. Opening a setting does not resize the prompt or move Generate. Click another indicator to switch panels, click outside to dismiss, or use the close button or Escape.
 
 Duration contains Time, Window and Auto planning, the native-duration slider, presets and window settings. Time stops at five minutes; existing presets can still reach an hour where supported. Automatic window sizing continues while the panel is collapsed. Window overrides and saved GPU/model preferences work as before. H3 Reference sequences keep their **Carry motion and sound between windows** option here.
 
@@ -12,11 +12,11 @@ Duration contains Time, Window and Auto planning, the native-duration slider, pr
 
 Reference mode shows compact input cards and keeps one **Add reference** drop zone while the selected model has room. Drop files or tap to choose them. Click a card to open its detailed settings: preview, replace or describe a reference, choose an image/audio role, attach a video soundtrack, or adjust background isolation. These controls open over the editor. The arrow controls reorder inputs on touch screens; reference labels update with their order. Saved character appearance and voice move together. Larger input collections scroll within their area while the prompt remains available.
 
-Frames and Extend keep their specific input roles: source video, start/end/timed frames, control video, soundtrack and supported references. Tiles wrap instead of scrolling sideways. Frame positions and per-input settings stay with their inputs. Image and Viggle keep their model-specific source/mask and preparation controls. Files still count against each model's real limits.
+Frames and Extend use the same compact, three-column tile layout as Reference mode, including on mobile. They keep their specific input roles: source video, start/end/timed frames, control video, soundtrack and supported references. Tiles wrap instead of scrolling sideways. Frame positions and per-input settings stay with their inputs. Image and Viggle keep their model-specific source/mask and preparation controls. Files still count against each model's real limits.
 
 ## Advanced
 
-**Advanced** opens a settings overlay from the bottom strip. Its selected group, settings and unfinished preset drafts are retained when closed.
+**Advanced** opens a settings overlay with collapsible section headings. Expand any combination of sections; their open state, settings and unfinished preset drafts are retained when the overlay is closed. Sections with no applicable controls are hidden. Available options still appear when switched off. When a model does not accept additional LoRAs, **Presets** remains available to save and restore its settings.
 
 - **Performance:** H3 optimizations, reference preparation detail, applicable text encoders/decoders and cache tuning. Existing compatible settings and defaults are retained.
 - **Finishing:** face refinement, H3 audio refinement and supported post-processing, including scaling, temporal upsampling, grain and voice replacement.

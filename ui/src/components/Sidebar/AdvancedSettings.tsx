@@ -1,6 +1,6 @@
 /* eslint-disable react-refresh/only-export-components -- the advanced badge hooks share this settings contract */
-import { useState, useEffect, useId } from 'react'
-import { Save, Trash2, FolderOpen, SlidersHorizontal } from 'lucide-react'
+import { useState, useEffect, useId, type ReactNode } from 'react'
+import { Save, Trash2, FolderOpen, SlidersHorizontal, ChevronDown } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { PostProcessing } from './PostProcessing'
 import { ControlVideoSection } from './ControlVideoSection'
@@ -395,9 +395,33 @@ export function useAdvancedCount(): number {
   return useAdvancedActiveItems().length
 }
 
+type AdvancedSectionKey = 'performance' | 'finishing' | 'loras' | 'generation'
+const CLOSED_SECTIONS: Record<AdvancedSectionKey, boolean> = {
+  performance: false, finishing: false, loras: false, generation: false,
+}
+
+function AdvancedSection({ section, title, available = true, open, onToggle, children }: {
+  section: AdvancedSectionKey; title: string; available?: boolean; open: boolean
+  onToggle: (open: boolean) => void; children: ReactNode
+}) {
+  return <details hidden={!available} open={open} data-testid={`advanced-${section}`}
+    onToggle={event => onToggle(event.currentTarget.open)}
+    className="group/advanced border-b border-border last:border-b-0">
+    <summary className="flex min-h-11 cursor-pointer list-none items-center gap-3 rounded-lg px-1 text-xs font-medium text-text-primary hover:bg-bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-blue [&::-webkit-details-marker]:hidden">
+      <span>{title}</span>
+      <ChevronDown size={15} className="ml-auto shrink-0 text-text-muted transition-transform group-open/advanced:rotate-180" />
+    </summary>
+    {/* Native disclosure hides its content without unmounting drafts or effects. */}
+    <div className="space-y-5 pb-4 pt-2">{children}</div>
+  </details>
+}
+
 export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
   const [open, setOpen] = useState(false)
-  const [section, setSection] = useState<'performance' | 'finishing' | 'loras' | 'generation'>('generation')
+  const [sections, setSections] = useState(CLOSED_SECTIONS)
+  const toggleSection = (key: AdvancedSectionKey, expanded: boolean) => {
+    setSections(current => current[key] === expanded ? current : { ...current, [key]: expanded })
+  }
   const params = useStore(s => s.params)
   const setParam = useStore(s => s.setParam)
   const modelOptions = useStore(s => s.modelOptions)
@@ -428,6 +452,16 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
     && modelOptions?.minimax_h3_turbo != null
   )
   const isH3 = String(modelOptions?.architecture || '').startsWith('minimax_h3')
+  const showH3Optimizations = isVideo && (isH3 || !!modelOptions?.minimax_h3_runtime_advisory) && Boolean(
+    modelOptions?.minimax_h3_runtime_advisory || modelOptions?.minimax_h3_turbo
+    || modelOptions?.sol_attention || modelOptions?.sla_attention || modelOptions?.first_block_cache,
+  )
+  const showReferenceDetail = isVideo && !!modelOptions?.omni_reference
+  const showCacheTuning = !!modelOptions?.first_block_cache && params.skip_steps_cache_type === 'first_block'
+  const hasPerformance = showH3Optimizations || showReferenceDetail || showCacheTuning
+    || !!modelOptions?.minimax_h3_text_encoder_choices?.length || !!modelOptions?.ltx25_video_vae_choices?.length
+  const hasFinishing = !isAudio && (!isScailEdit || (isH3 && !modelOptions?.audio_only))
+  const canUseLoras = !isOutpaint && !modelOptions?.loras_disabled
   const showH3LongSequenceExperiments = (
     H3_LONG_SEQUENCE_TESTS_VISIBLE
     && isVideo
@@ -479,7 +513,7 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
   const closePanel = () => setOpen(false)
   useEffect(() => {
     const finishing = () => {
-      setSection('finishing')
+      setSections({ ...CLOSED_SECTIONS, finishing: true })
       setOpen(true)
     }
     window.addEventListener('maestro-open-finishing', finishing)
@@ -518,15 +552,7 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
 
       {/* Keep all controls mounted while the overlay is closed. */}
       <SidebarDialog id={panelId} variant="settings" title="Advanced settings" open={open} onClose={closePanel}>
-            {!isDirector && <div className="grid grid-cols-2 gap-2 border-b border-border pb-3">
-              {(['performance', 'finishing', 'loras', 'generation'] as const).map(key => <button key={key} type="button"
-                aria-pressed={section === key} onClick={() => setSection(key)}
-                className={`min-h-11 rounded-xl border px-3 text-xs ${section === key ? 'border-accent-blue bg-accent-blue/10 text-text-primary' : 'border-border bg-bg-tertiary text-text-secondary hover:border-border-light'}`}>
-                {{ performance: 'Performance', finishing: 'Finishing', loras: 'LoRAs & presets', generation: 'Generation' }[key]}
-              </button>)}
-            </div>}
-
-            <div className="min-w-0 pt-4 space-y-5">
+            <div className={`min-w-0 ${isDirector ? 'space-y-5' : ''}`}>
               {isDirector ? (
                 <>
                   <DirectorH3Optimizations />
@@ -542,26 +568,24 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
 
               {/* Presets belong with the creative adapter controls so users can
                   save or restore a setup before adjusting its LoRAs. */}
-              <div hidden={section !== 'loras'} className="space-y-5">
+              <AdvancedSection section="loras" title={canUseLoras ? 'LoRAs & presets' : 'Presets'} open={sections.loras} onToggle={expanded => toggleSection('loras', expanded)}>
               <PresetManager />
 
               {/* Keep creative adapters near the top so users can choose them
                   before working through the lower-level tuning controls.
                   Official Outpaint owns its stage-one-only IC-LoRA schedule. */}
-              {!isOutpaint && !modelOptions?.loras_disabled && <LoraSelector />}
-              {!isOutpaint && modelOptions?.minimax_h3_fused_turbo && (
+              {canUseLoras && <LoraSelector />}
+              {canUseLoras && modelOptions?.minimax_h3_fused_turbo && (
                 <p className="rounded-lg border border-amber-500/25 bg-amber-500/8 px-3 py-2 text-[9px] leading-relaxed text-text-muted">
                   H3 LoRAs are experimental with Fused 4-Step. Start with one adapter at low strength and compare a short clip using the same seed. Extra acceleration adapters are excluded; Mystic remains baked in at 0.7.
                 </p>
               )}
-              {modelOptions?.loras_disabled && <p className="text-xs text-text-muted">This model does not support additional LoRAs.</p>}
-              </div>
+              </AdvancedSection>
 
-              <div hidden={section !== 'performance'} className="space-y-5">
-              {isVideo && <MiniMaxH3Optimizations />}
-              <p className="text-[10px] text-text-muted">Performance settings keep their saved values for compatible models.</p>
+              <AdvancedSection section="performance" title="Performance" available={hasPerformance} open={sections.performance} onToggle={expanded => toggleSection('performance', expanded)}>
+              {showH3Optimizations && <MiniMaxH3Optimizations />}
 
-              {isVideo && modelOptions?.omni_reference && <label className="block space-y-1.5 text-xs text-text-secondary">
+              {showReferenceDetail && modelOptions && <label className="block space-y-1.5 text-xs text-text-secondary">
                 <span>Reference detail</span>
                 <select aria-label="Reference detail" value={params.minimax_h3_reference_detail ?? modelOptions.omni_reference_detail_default ?? 'match'}
                   onChange={event => setParam('minimax_h3_reference_detail', event.target.value as 'match' | 'max')}
@@ -624,7 +648,7 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
                 </div>
               ) : null}
 
-              {modelOptions?.first_block_cache && params.skip_steps_cache_type === 'first_block' && (
+              {showCacheTuning && modelOptions && (
                 <div className="space-y-2 p-2.5 bg-bg-tertiary/40 rounded-lg border border-border/60">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-[11px] text-text-muted uppercase tracking-wider">
@@ -671,14 +695,13 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
                 </div>
               )}
 
-              </div>
-              <div hidden={section !== 'finishing'} className="space-y-5">
+              </AdvancedSection>
+              <AdvancedSection section="finishing" title="Finishing" available={hasFinishing} open={sections.finishing} onToggle={expanded => toggleSection('finishing', expanded)}>
                 {isVideo && <AutomaticFaceRefiner />}
                 {isH3 && !isAudio && <H3MediaControls />}
                 {!isAudio && !isScailEdit && <PostProcessing expanded />}
-                {(isAudio || isScailEdit) && <p className="text-xs text-text-muted">This workflow manages its finishing in its own controls and the Gallery.</p>}
-              </div>
-              <div hidden={section !== 'generation'} className="space-y-5">
+              </AdvancedSection>
+              <AdvancedSection section="generation" title="Generation" open={sections.generation} onToggle={expanded => toggleSection('generation', expanded)}>
               <LtxFramesExperimentalControls />
               {/* Studio video windows now live with Duration. */}
               {(isAvatar && !isScailEdit)
@@ -1381,7 +1404,7 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
                   </div>
                 </div>
               )}
-              </div>
+              </AdvancedSection>
                 </>
               )}
             </div>
