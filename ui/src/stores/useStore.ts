@@ -1,4 +1,7 @@
 import { create } from 'zustand'
+import type { SavedOmniCharacter, TtsVoice } from '../types'
+import { applyTtsVoices, ttsAudioModeForCount, ttsCharacterEnhancePrompt, ttsSpeakingVoiceCount, ttsVoiceLimit, ttsVoicePaths } from '../lib/ttsVoices'
+import { vigglePreparationKey } from '../lib/viggle'
 import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, StudioVideoWorkflow, StudioVideoCreateRoute, StudioVideoEffectiveCreateRoute, StudioImageWorkflow, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, DirectorShotImageGuidance, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineClipState, PipelineRepairState, SavedPipelineState, DirectorQueueState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping, H3WindowPlan, MiniMaxH3Reference, AppMode } from '../types'
 import * as api from '../api/client'
 import { applyThemePrefs, getStoredPrefs, type FamilyId, type ThemeMode, type ThemePrefs } from '../lib/theme'
@@ -516,6 +519,12 @@ const EPHEMERAL_PARAM_FIELDS: ReadonlyArray<keyof SavedModeParams> = [
   'image_guide',
   'image_mask',
   'video_guide',
+  '_viggle_edited_frame',
+  '_viggle_source_seconds',
+  '_viggle_frame_seconds',
+  'viggle_character',
+  '_viggle_prepared',
+  '_viggle_prepare_only',
   'video_mask',
   'video_source',
   'audio_guide',
@@ -881,6 +890,10 @@ const DEFAULT_ENABLED_MODELS = new Set([
   // MiniMax H3 Base: text, first/last-frame video, and native stereo audio.
   'minimax_h3',
   'minimax_h3_full',
+  'minimax_h3_vdn',
+  'minimax_h3_vdn_full',
+  'minimax_h3_voice_audio',
+  'viggle_animate',
   // Experimental fused four-step Frames checkpoint. It is visible by
   // default, but the ordinary H3/LTX selections below remain the active
   // workflow defaults until a user explicitly chooses it.
@@ -914,7 +927,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
  * a user who then disables them stays disabled forever. (This is
  * deliberately narrower than auto-enabling every unknown model — only
  * the curated list's own additions are pushed.) */
-const DEFAULTS_VERSION = 11
+const DEFAULTS_VERSION = 13
 const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   // v1.2.0: the ACE-Step XL SFT pair; LM_4B becomes the music default.
   2: ['ace_step_v1_5_xl_sft', 'ace_step_v1_5_xl_sft_lm_4b'],
@@ -936,6 +949,8 @@ const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   10: ['minimax_music3'],
   // Experimental MATLOWAI fused four-step H3 Frames + References variants.
   11: ['minimax_h3_fused_turbo', 'minimax_h3_ref2va_fused_turbo'],
+  12: ['minimax_h3_vdn', 'minimax_h3_vdn_full', 'minimax_h3_voice_audio'],
+  13: ['viggle_animate'],
 }
 const DEFAULTS_VERSION_KEY = 'maestro_defaults_version'
 
@@ -1056,6 +1071,7 @@ export function getFamiliesForMode(mode: GenerationMode, allFamilies: ModelFamil
     if (editSubMode === 'recast' || editSubMode === 'restyle') {
       return allFamilies.filter(f => f.id === 'wan')
     }
+    if (editSubMode === 'outpaint') return allFamilies.filter(f => ['ltx2', 'ltxv', 'minimax_h3'].includes(f.id))
     return allFamilies.filter(f => f.id === 'ltx2' || f.id === 'ltxv')
   }
   if (mode === 'audio') {
@@ -1081,6 +1097,9 @@ export function getModelsForFamily(familyId: string, allModels: ModelDef[], mode
     return allModels.filter(m => m.family === 'tts' && sfxModelTypes.has(m.model_type))
   }
   const familyModels = allModels.filter(m => m.family === familyId)
+  if (mode === 'avatar' && editSubMode === 'outpaint' && familyId === 'minimax_h3') {
+    return familyModels.filter(m => ['minimax_h3', 'minimax_h3_full'].includes(m.model_type))
+  }
   // When mode is specified and the family spans multiple modes, filter to matching models
   if (mode === 'avatar') {
     // Recast exposes its dedicated native-replacement Fast recipe plus HQ.
@@ -1137,6 +1156,7 @@ function _normalizeStudioVideoWorkflow(
   model?: ModelDef,
 ): StudioVideoWorkflow | null {
   if (value === 'generate') return 'frames'
+  if (value === 'animate' || model?.model_type === 'viggle_animate') return 'animate'
   if (
     value === 'frames'
     || value === 'references'
@@ -1166,6 +1186,7 @@ export function getDisplayFamily(model: ModelDef): string {
 // Transient: the LTX model selected before entering either SCAIL-2 edit
 // workflow, so leaving Recast/Repaint restores the user's prior edit model.
 let _preScail2AvatarModel = ''
+let _preViggleVideoModel = ''
 
 const DEFAULT_RECAST_MAPPING: RecastCharacterMapping = {
   id: 'recast-a',
@@ -1305,7 +1326,9 @@ interface AppState {
    *  the user does them sequentially. */
   editReturnTarget: {
     /** Which anchor slot we're populating on return. */
-    anchor: 'start' | 'end' | 'recast' | 'repaint'
+    anchor: 'start' | 'end' | 'recast' | 'repaint' | 'animate'
+      previousImages?: string[]
+      savedResolutionPreset?: ResolutionPreset
     /** The pre-extracted source frame at the corresponding trim handle.
      *  This is the frame the user is editing in Image mode; if they
      *  cancel without applying, no anchor is set and the model falls
@@ -1327,7 +1350,7 @@ interface AppState {
    *  sidebar to Studio Image mode (using the proper setGenerationMode
    *  so the model + LoRA + image-mode params all swap correctly) with
    *  that frame loaded as image_start. */
-  sendFrameToImageMode: (which: 'start' | 'end' | 'recast' | 'repaint') => Promise<void>
+  sendFrameToImageMode: (which: 'start' | 'end' | 'recast' | 'repaint' | 'animate') => Promise<void>
   /** Apply the latest Image-mode output to the requested anchor/reference,
    *  then return to Edit Anything or Recast. */
   applyOutputAsAnchor: () => Promise<void>
@@ -1723,10 +1746,11 @@ interface AppState {
   _autoParseSpkeakerNames: (text: string, force?: boolean) => void
   // Dynamic multi-speaker (1-6 voices)
   ttsVoiceCount: number  // 0=text only, 1-6=voice clone count
-  ttsVoices: { name: string; filename: string | null; path: string | null }[]
+  ttsVoices: TtsVoice[]
   setTtsVoiceCount: (count: number) => void
   setTtsVoiceName: (index: number, name: string) => void
   setTtsVoiceFile: (index: number, filename: string | null, path: string | null) => void
+  setTtsVoiceCharacter: (index: number, character: SavedOmniCharacter) => void
   addTtsVoice: () => void
   removeTtsVoice: (index: number) => void
 
@@ -2946,8 +2970,29 @@ export const useStore = create<AppState>((set, get) => ({
     set({ studioVideoWorkflow: workflow })
     const persist = () => _persistStickyStudioPreferences(get())
 
+    if (workflow === 'animate') {
+      if (get().generationMode !== 'video') get().setGenerationMode('video')
+      if (!get().enabledModels.has('viggle_animate')) get().toggleModelEnabled('viggle_animate')
+      if (get().params.model_type !== 'viggle_animate') _preViggleVideoModel = get().params.model_type
+      set(state => ({studioVideoWorkflow: workflow, params: {...state.params,
+        image_mode: 0, _studio_video_workflow: workflow,
+        _duration_planning_mode: state.params._studio_video_workflow === 'animate'
+          ? state.params._duration_planning_mode ?? 'auto' : 'auto',
+        audio_prompt_type: ['', 'K', 'A'].includes(state.params.audio_prompt_type || '') ? state.params.audio_prompt_type : ''}}))
+      if (get().params.model_type !== 'viggle_animate') get().selectModel('viggle_animate')
+      get().setAspectRatio('auto')
+      persist()
+      return
+    }
+
     if (workflow === 'frames' || workflow === 'references' || workflow === 'extend' || workflow === 'blend') {
       if (get().generationMode !== 'video') get().setGenerationMode('video')
+      if (get().params.model_type === 'viggle_animate') {
+        const restore = [_preViggleVideoModel, get().studioVideoModelPerCreateRoute.omni,
+          'minimax_h3_ref2va_fused_turbo', 'minimax_h3_ref2va'].find(type =>
+          type && type !== 'viggle_animate' && get().models.some(model => model.model_type === type))
+        if (restore) get().selectModel(restore)
+      }
       const imageMode = workflow === 'extend' ? 3 : workflow === 'blend' ? 4 : 0
       if (Number(get().params.image_mode) !== imageMode) {
         get().setParam('image_mode', imageMode)
@@ -3036,7 +3081,21 @@ export const useStore = create<AppState>((set, get) => ({
     const s = get()
     const prev = s.editSubMode
     set({ editSubMode: mode })
-    if (mode === prev || s.generationMode !== 'avatar') return
+    if (s.generationMode !== 'avatar') return
+    if (mode === 'outpaint') {
+      // Entering the edit workspace can restore its last Repaint/Recast model.
+      // Reconcile against the same choices shown by the Outpaint selector.
+      const compatible = getFamiliesForMode('avatar', s.families, mode).flatMap(family =>
+        getModelsForFamily(family.id, s.models, 'avatar', mode))
+      if (!compatible.some(model => model.model_type === s.params.model_type)) {
+        const preferred = compatible.find(model => model.model_type === _preScail2AvatarModel)
+          || compatible.find(model => s.enabledModels.has(model.model_type))
+          || compatible[0]
+        if (preferred) get().selectModel(preferred.model_type)
+      }
+      return
+    }
+    if (mode === prev) return
     // Recast uses SCAIL-2 Replace; Repaint uses the proven SCAIL-2 Animate
     // path from Studio Video/Frames. Swap recipes when moving between those
     // modes and restore the previous LTX edit model when leaving both.
@@ -3136,15 +3195,15 @@ export const useStore = create<AppState>((set, get) => ({
   editReturnTarget: null,
   setEditAnythingStartAnchor: (path: string | null) => set({ editAnythingStartAnchor: path }),
   setEditAnythingEndAnchor: (path: string | null) => set({ editAnythingEndAnchor: path }),
-  sendFrameToImageMode: async (which: 'start' | 'end' | 'recast' | 'repaint') => {
+  sendFrameToImageMode: async (which: 'start' | 'end' | 'recast' | 'repaint' | 'animate') => {
     const state = get()
-    const clipPath = state.editVideoPath
+    const clipPath = which === 'animate' ? state.params.video_guide : state.editVideoPath
     if (!clipPath) {
       console.error('Edit Anything: no source video loaded')
       return
     }
-    const startTime = state.editStartTime || 0
-    const endTime = state.editEndTime || state.editVideoDuration || 0
+    const startTime = which === 'animate' ? state.params._viggle_frame_seconds || 0 : state.editStartTime || 0
+    const endTime = which === 'animate' ? state.params._viggle_source_seconds || startTime + 1 : state.editEndTime || state.editVideoDuration || 0
     if (endTime <= startTime) {
       console.error('Edit Anything: invalid trim range')
       return
@@ -3209,7 +3268,8 @@ export const useStore = create<AppState>((set, get) => ({
         // Make sure no stale i2v fields are populated — those would land
         // in video mode's i2v slot, which isn't what we want here.
         startImage: null,
-        params: { ...s.params, image_start: '', image_mode: 1 },
+        params: { ...s.params, image_start: '', image_mode: 1,
+          ...(which === 'animate' ? {prompt: 'Replace the character with [describe the replacement]. Preserve the exact pose, body orientation, hands, props, background, camera framing, lighting and image dimensions.'} : {}) },
         editReturnTarget: {
           anchor: which,
           framePath,
@@ -3218,10 +3278,13 @@ export const useStore = create<AppState>((set, get) => ({
           endTime,
           savedImageRefs,
           savedImageRefType,
+          previousImages: state.outputs.filter(output => output.type === 'image').map(output => output.name),
+          ...(which === 'animate' ? {savedResolutionPreset: state.resolutionPreset} : {}),
         },
       }))
     } catch (e) {
       console.error('Failed to send frame to Image mode:', e)
+      if (which === 'animate') throw e
     }
   },
   applyOutputAsAnchor: async () => {
@@ -3229,7 +3292,8 @@ export const useStore = create<AppState>((set, get) => ({
     const target = state.editReturnTarget
     if (!target) return
     // Find the latest image-mode output (newest first in the outputs list).
-    const latestImage = state.outputs.find(o => o.type === 'image')
+    const latestImage = state.outputs.find(o => o.type === 'image'
+      && (target.anchor !== 'animate' || !target.previousImages?.includes(o.name)))
     if (!latestImage) {
       console.error('Edit Anything return: no image-mode output yet to apply')
       return
@@ -3238,6 +3302,22 @@ export const useStore = create<AppState>((set, get) => ({
     // active workspace's outputs/ for a bare filename, so passing the
     // gallery name is enough.
     const outputPath = latestImage.name
+
+    if (target.anchor === 'animate') {
+      const blob = await fetch(latestImage.url).then(response => {
+        if (!response.ok) throw new Error('Could not read the edited image')
+        return response.blob()
+      })
+      const uploaded = await api.uploadImage(new File([blob], latestImage.name, {type: blob.type || 'image/png'}))
+      get().setGenerationMode('video')
+      get().setStudioVideoWorkflow('animate')
+      get().setResolutionPreset(target.savedResolutionPreset ?? '480p')
+      get().setParam('_viggle_edited_frame', uploaded.path)
+      get().setParam('viggle_character', undefined)
+      get().setParam('_viggle_prepared', undefined)
+      set({editReturnTarget: null, imageRefs: target.savedImageRefs, imageRefType: target.savedImageRefType})
+      return
+    }
 
     if (target.anchor === 'recast') {
       set(s => ({
@@ -3288,6 +3368,13 @@ export const useStore = create<AppState>((set, get) => ({
     // slot → ltx2.py falls back to the source-extracted frame at
     // generation time (the morph-from-source default).
     const target = get().editReturnTarget
+    if (target?.anchor === 'animate') {
+      get().setGenerationMode('video')
+      get().setStudioVideoWorkflow('animate')
+      get().setResolutionPreset(target.savedResolutionPreset ?? '480p')
+      set({editReturnTarget: null, imageRefs: target.savedImageRefs, imageRefType: target.savedImageRefType})
+      return
+    }
     get().setGenerationMode('avatar')
     set({
       editSubMode: target?.anchor === 'recast'
@@ -3301,6 +3388,7 @@ export const useStore = create<AppState>((set, get) => ({
   },
   cancelAnchorReturn: () => {
     const target = get().editReturnTarget
+    if (target?.anchor === 'animate') { get().skipAnchorPhase(); return }
     get().setGenerationMode('avatar')
     set({
       editSubMode: target?.anchor === 'recast'
@@ -5127,119 +5215,78 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   durationSeconds: 5,
-  setDurationSeconds: (s) => {
-    const options = get().modelOptions
-    const fps = options?.fps ?? 16
-    const nativeMinimumFrames = options?.frames_minimum || fps
-    const isVideoExtend = (
-      get().studioVideoWorkflow === 'extend'
-      && options?.sliding_window === true
-    )
-    const continuationContextFrames = isVideoExtend
-      ? Math.max(0, get().slidingWindowOverlap - 1)
-      : 0
-    const requestedMinimumFrames = Math.max(
-      1,
-      nativeMinimumFrames - continuationContextFrames,
-    )
-    const minimum = Math.max(1, requestedMinimumFrames / fps)
-    const nativeMaximum = options?.frames_maximum
-      ? options.frames_maximum / fps
-      : null
-    const isH3 = String(options?.architecture || '').startsWith('minimax_h3')
-    const isLtxSequence = options?.multi_window_sequence_controls === true
-    const ltxWindowDefaults = options?.sliding_window_defaults
-    const ltxSinglePassMaximum = isLtxSequence
-      ? (ltxWindowDefaults?.window_max ?? Math.round(20 * fps)) / fps
-      : null
-    const currentWindow = Math.max(minimum, get().slidingWindowSeconds)
-    const currentWindowFrames = Math.round(currentWindow * fps)
-    const firstWindowFrames = isVideoExtend
-      ? continuationFirstWindowFrames(
-          currentWindowFrames,
-          get().slidingWindowOverlap,
-        )
-      : currentWindowFrames
-    const sequenceCapable = isH3 || isLtxSequence
-    const wantsSequence = sequenceCapable && s > firstWindowFrames / fps + 0.05
-    const h3ReferenceSequence = isH3 && options?.omni_reference === true && wantsSequence
-    const h3FirstLastMultiWindow = isH3 && options?.omni_reference !== true && wantsSequence
-    const ltxMultiWindow = isLtxSequence && wantsSequence
-    const h3SingleNativePass = (
-      isH3
-      && !wantsSequence
-    )
-    const maximum = isH3
-      ? (h3ReferenceSequence || h3FirstLastMultiWindow
-          ? 60 * 60
-          : (nativeMaximum ?? Number.POSITIVE_INFINITY))
-      : isLtxSequence
-        ? (ltxMultiWindow
-            ? 60 * 60
-            : (ltxSinglePassMaximum ?? Number.POSITIVE_INFINITY))
-      : (options?.sliding_window || nativeMaximum == null
-          ? Number.POSITIVE_INFINITY
-          : nativeMaximum)
-    let seconds = Math.min(maximum, Math.max(minimum, s))
-    if (
-      options?.sliding_window
-      && nativeMaximum
-      && seconds <= Math.round(nativeMaximum * 10) / 10
-    ) {
-      seconds = Math.min(seconds, nativeMaximum)
+  setDurationSeconds: (requested) => {
+    const state = get()
+    const options = state.modelOptions
+    if (options?.audio_only && options.audio_segment_max_seconds && options.duration_slider) {
+      const ds = options.duration_slider
+      const seconds = Math.max(ds.min, Math.min(ds.max,
+        Number.isFinite(requested) ? requested : ds.default ?? ds.min))
+      if (state.durationSeconds === seconds && state.params.duration_seconds === seconds) return
+      set({ durationSeconds: seconds, params: { ...state.params, duration_seconds: seconds,
+        minimax_h3_multi_window: false, minimax_h3_reference_sequence: false } })
+      return
     }
+    if (!Number.isFinite(requested)) return
+    const fps = options?.fps || 16
+    const isH3 = String(options?.architecture || '').startsWith('minimax_h3')
+    const isLtx = options?.multi_window_sequence_controls === true
+    const sw = options?.sliding_window_defaults
+    const minimumFrames = options?.frames_minimum || fps
+    const maximumFrames = options?.frames_maximum || Math.round(3600 * fps)
+    const step = Math.max(1, options?.frames_steps || 1)
+    const context = state.studioVideoWorkflow === 'extend' && options?.sliding_window
+      ? Math.max(0, state.slidingWindowOverlap - 1) : 0
+    const minimum = Math.max(1, (minimumFrames - context) / fps)
+    const canSequence = isH3 || isLtx || options?.sliding_window
+    const maximum = canSequence ? 3600 : maximumFrames / fps
+    let seconds = Math.max(minimum, Math.min(maximum, requested))
     let frames = Math.round(seconds * fps)
-    if (h3SingleNativePass) {
-      const normalizedPassFrames = normalizeH3NativeFrames(
-        frames + continuationContextFrames,
-        options?.frames_minimum ?? 124,
-        options?.frames_maximum ?? 345,
-        options?.frames_steps ?? 17,
-      )
-      frames = Math.max(
-        requestedMinimumFrames,
-        normalizedPassFrames - continuationContextFrames,
-      )
+    const policy = options?.omni_reference ? options.omni_sequence_memory_policy : options?.sliding_window_memory_policy
+    // Ref2VA uses one stable capacity, regardless of whether this particular
+    // timeline needs one or several passes. A sequence-dependent recommendation
+    // used to toggle itself forever when Extend consumed source-tail context.
+    const recommendation = options?.omni_reference
+      ? recommendedH3OmniSequenceProfile(policy, state.params.resolution,
+          state.systemStats?.gpu.vram_total_gb ?? 0, minimumFrames, maximumFrames, step)
+      : recommendedH3PassProfile(policy, state.params.resolution, state.systemStats?.gpu.vram_total_gb ?? 0)
+    const windowMin = sw?.window_min ?? minimumFrames
+    const windowMax = sw?.window_max ?? maximumFrames
+    const capFrames = Math.max(windowMin, Math.min(windowMax,
+      state.slidingWindowLocked ? Math.round(state.slidingWindowSeconds * fps)
+        : recommendation?.frames ?? (recommendation?.supported === false ? windowMin : windowMax)))
+    if (isH3 && frames + context <= capFrames) {
+      frames = Math.max(Math.round(minimum * fps), normalizeH3NativeFrames(
+        frames + context, minimumFrames, maximumFrames, step) - context)
       seconds = frames / fps
     }
-    set(state => {
-      const selectedWindowFrames = Math.round(state.slidingWindowSeconds * fps)
-      const requestedPassFrames = frames + continuationContextFrames
-      const expandNativeWindow = h3SingleNativePass && requestedPassFrames > selectedWindowFrames
-      const nextParams = {
-        ...state.params,
-        video_length: frames,
-        ...(isLtxSequence ? { ltx_multi_window: ltxMultiWindow } : {}),
-        ...(isH3 && options?.omni_reference === true
-          ? { minimax_h3_reference_sequence: h3ReferenceSequence }
-          : {}),
-        ...(isH3 && options?.omni_reference !== true
-          ? { minimax_h3_multi_window: h3FirstLastMultiWindow }
-          : {}),
-        ...(expandNativeWindow
-          ? {
-              sliding_window_size: requestedPassFrames,
-              sliding_window_memory_override: true,
-              ...(state.modelOptions?.omni_reference === true
-                ? { minimax_h3_sequence_memory_override: true }
-                : {}),
-            }
-          : {}),
-      }
-      delete nextParams.ltx_window_prompts
-      return {
-        durationSeconds: seconds,
-        ...(expandNativeWindow
-          ? {
-              slidingWindowSeconds: requestedPassFrames / fps,
-              slidingWindowLocked: true,
-            }
-          : {}),
-        params: nextParams,
-        h3WindowPlan: null,
-        promptEnhanceError: null,
-      }
-    })
+    // Container metadata often differs by a millisecond from its frame count.
+    // Keep UI planning on the same integer timeline used by the backend.
+    seconds = frames / fps
+    let windowFrames = Math.round(state.slidingWindowSeconds * fps)
+    if (canSequence && !state.slidingWindowLocked) {
+      const windowStep = Math.max(1, sw?.window_step ?? step)
+      const needed = windowMin + Math.ceil((frames + context - windowMin) / windowStep) * windowStep
+      windowFrames = state.params._duration_planning_mode === 'windows'
+        ? capFrames : Math.max(windowMin, Math.min(capFrames, needed))
+    }
+    const wantsSequence = (isH3 || isLtx) && frames > windowFrames - context
+    const sequenceKey = isLtx ? 'ltx_multi_window'
+      : options?.omni_reference ? 'minimax_h3_reference_sequence' : 'minimax_h3_multi_window'
+    // A rounded request is often identical to the stored native duration.
+    // Returning the original state is essential: React effects must not turn
+    // an unrepresentable duration into repeated Zustand notifications.
+    if (Math.abs(state.durationSeconds - seconds) < 1e-8
+      && state.params.video_length === frames
+      && Math.abs(state.slidingWindowSeconds * fps - windowFrames) < 1e-8
+      && state.params.sliding_window_size === windowFrames
+      && (!(isH3 || isLtx) || state.params[sequenceKey] === wantsSequence)) return
+    const nextParams = { ...state.params, video_length: frames, sliding_window_size: windowFrames,
+      ...((isH3 || isLtx) ? { [sequenceKey]: wantsSequence } : {}),
+      ...(options?.omni_reference ? { minimax_h3_sequence_clip_frames: windowFrames } : {}) }
+    delete nextParams.ltx_window_prompts
+    set({ durationSeconds: seconds, slidingWindowSeconds: windowFrames / fps,
+      params: nextParams, h3WindowPlan: null, promptEnhanceError: null })
     get().syncClipCount()
   },
 
@@ -5267,6 +5314,8 @@ export const useStore = create<AppState>((set, get) => ({
       frames = Math.max(minimum, Math.min(maximum, frames))
     }
     const seconds = frames / fps
+    if (Math.abs(get().slidingWindowSeconds - seconds) < 1e-8
+      && get().params.sliding_window_size === frames) return
     set(state => {
       const nextParams = {
         ...state.params,
@@ -5537,6 +5586,10 @@ export const useStore = create<AppState>((set, get) => ({
             media_path: source,
             media_type: s.toolsUpscaleMedia,
             method: s.toolsUpscaleMethod,
+            temporal_upsampling: s.toolsUpscaleMedia === 'video' ? s.params.temporal_upsampling || '' : '',
+            dlss_intensity: Number(s.params.custom_settings?.dlss_intensity ?? 1),
+            dlss_depth: String(s.params.custom_settings?.dlss_depth ?? 'half'),
+            dlss_motion: String(s.params.custom_settings?.dlss_motion ?? 'original'),
             workspace: s.activeWorkspace,
           })
         : tool === 'film_grain'
@@ -5729,12 +5782,12 @@ export const useStore = create<AppState>((set, get) => ({
       voices.push({ name: '', filename: null, path: null })
     }
     for (let i = 0; i < Math.min(names.length, voiceCount); i++) {
-      voices[i] = { ...voices[i], name: names[i] }
+      if (!voices[i].characterId) voices[i] = { ...voices[i], name: names[i] }
     }
     set({
       ttsVoices: voices,
-      ttsSpeakerName1: names[0] || '',
-      ttsSpeakerName2: names[1] || '',
+      ttsSpeakerName1: voices[0]?.name || names[0] || '',
+      ttsSpeakerName2: voices[1]?.name || names[1] || '',
       // Force-call (from enhance) resets the manual flag so subsequent
       // prompt edits can also auto-parse again. Non-force calls preserve
       // the flag (user manually edited a name; keep their state).
@@ -5745,23 +5798,24 @@ export const useStore = create<AppState>((set, get) => ({
   ttsVoiceCount: 0,
   ttsVoices: [],
   setTtsVoiceCount: (count) => {
+    count = Math.max(0, Math.min(ttsVoiceLimit(get().modelOptions), Math.floor(count) || 0))
     const prevCount = get().ttsVoiceCount
     const current = get().ttsVoices
     const voices = [...current]
     while (voices.length < count) {
       voices.push({ name: '', filename: null, path: null })
     }
-    // Derive audio_prompt_type from voice count using the model's own selection
-    // list. KugelAudio's selection = ["", "A", "AB"] → 0→"", 1→"A", 2+→"AB".
-    // Scenema's selection = ["", "A2", "AB2"] → 0→"", 1→"A2", 2+→"AB2".
-    // Other (non-Scenema/Kugel) audio-only models keep the legacy ""/A/AB
-    // mapping for backward compat.
-    const selection = (get().modelOptions?.audio_prompt_type_sources?.selection as string[] | undefined) || ['', 'A', 'AB']
-    const audioType = selection[Math.min(count, selection.length - 1)]
+    // Match reference roles, since required-reference models omit text-only
+    // from their choices and IndexTTS distinguishes emotion from dialogue.
+    const audioType = ttsAudioModeForCount(count, get().modelOptions, String(get().params.audio_prompt_type || ''))
     set(s => ({
       ttsVoiceCount: count,
-      ttsVoices: voices.slice(0, Math.max(count, voices.length)),
-      params: { ...s.params, audio_prompt_type: audioType + ((s.params.audio_prompt_type as string || '').replace(/[^NV]/g, '')) },
+      ttsVoices: voices.slice(0, count),
+      audioGuideFilename: count > 0 ? voices[0]?.filename || null : null,
+      audioGuide2Filename: count > 1 ? voices[1]?.filename || null : null,
+      ttsSpeakerName1: count > 0 ? voices[0]?.name || '' : '',
+      ttsSpeakerName2: count > 1 ? voices[1]?.name || '' : '',
+      params: { ...s.params, ...ttsVoicePaths(voices, count), audio_prompt_type: audioType + ((s.params.audio_prompt_type as string || '').replace(/[^NV]/g, '')) },
     }))
     // If user added voices to an existing prompt (e.g. typed/pasted a
     // dialogue script first, THEN added voice slots), parse the names
@@ -5795,30 +5849,52 @@ export const useStore = create<AppState>((set, get) => ({
   setTtsVoiceFile: (index, filename, path) => {
     set(s => {
       const voices = [...s.ttsVoices]
-      if (index < voices.length) voices[index] = { ...voices[index], filename, path }
+      if (index < 0 || index >= s.ttsVoiceCount) return {}
+      voices[index] = { ...voices[index], filename, path, characterId: undefined, characterName: undefined }
       return {
         ttsVoices: voices,
+        params: { ...s.params, ...ttsVoicePaths(voices, s.ttsVoiceCount) },
         // Keep legacy fields in sync
         ...(index === 0 ? { audioGuideFilename: filename } : {}),
         ...(index === 1 ? { audioGuide2Filename: filename } : {}),
       }
     })
   },
+  setTtsVoiceCharacter: (index, character) => {
+    if (!character.voice?.path) throw new Error(`${character.name} has no saved voice reference.`)
+    if (index < 0 || index >= ttsVoiceLimit(get().modelOptions)) throw new Error('This model has no available voice slot.')
+    if (index >= get().ttsVoiceCount) get().setTtsVoiceCount(index + 1)
+    set(s => {
+      const voices = [...s.ttsVoices]
+      voices[index] = {
+        name: character.name, filename: character.voice!.filename, path: character.voice!.path,
+        characterId: character.id, characterName: character.name,
+      }
+      return {
+        ttsVoices: voices,
+        ttsSpeakerNamesManual: true,
+        ttsSpeakerName1: voices[0]?.name || '',
+        ttsSpeakerName2: voices[1]?.name || '',
+        audioGuideFilename: voices[0]?.filename || null,
+        audioGuide2Filename: voices[1]?.filename || null,
+        params: { ...s.params, ...ttsVoicePaths(voices, s.ttsVoiceCount) },
+      }
+    })
+  },
   addTtsVoice: () => {
     const count = get().ttsVoiceCount
-    // Respect the model's declared max (e.g. Scenema = 2, Kugel = 6).
-    // Defaults to 6 if the model_def doesn't specify max_voice_count.
-    const maxVoiceCount = ((get().modelOptions as { max_voice_count?: number } | null)?.max_voice_count) ?? 6
+    // Respect declared limits and the model's reference capabilities.
+    const maxVoiceCount = ttsVoiceLimit(get().modelOptions)
     if (count >= maxVoiceCount) return
     get().setTtsVoiceCount(count + 1)
   },
   removeTtsVoice: (index) => {
     set(s => {
-      const voices = s.ttsVoices.filter((_, i) => i !== index)
+      if (index < 0 || index >= s.ttsVoiceCount) return {}
+      const voices = s.ttsVoices.slice(0, s.ttsVoiceCount).filter((_, i) => i !== index)
       const newCount = Math.max(0, s.ttsVoiceCount - 1)
       // Same model-aware mapping as setTtsVoiceCount above.
-      const selection = (s.modelOptions?.audio_prompt_type_sources?.selection as string[] | undefined) || ['', 'A', 'AB']
-      const audioType = selection[Math.min(newCount, selection.length - 1)]
+      const audioType = ttsAudioModeForCount(newCount, s.modelOptions, String(s.params.audio_prompt_type || ''))
       return {
         ttsVoices: voices,
         ttsVoiceCount: newCount,
@@ -5826,7 +5902,7 @@ export const useStore = create<AppState>((set, get) => ({
         ttsSpeakerName2: voices[1]?.name || '',
         audioGuideFilename: voices[0]?.filename || null,
         audioGuide2Filename: voices[1]?.filename || null,
-        params: { ...s.params, audio_prompt_type: audioType + ((s.params.audio_prompt_type as string || '').replace(/[^NV]/g, '')) },
+        params: { ...s.params, ...ttsVoicePaths(voices, newCount), audio_prompt_type: audioType + ((s.params.audio_prompt_type as string || '').replace(/[^NV]/g, '')) },
       }
     })
   },
@@ -6698,7 +6774,8 @@ export const useStore = create<AppState>((set, get) => ({
     if (state.generationMode === 'video') {
       params._studio_video_workflow = state.studioVideoWorkflow
     }
-    const useStudioFrameInputs = !primaryStudioCreate || activeCreateRoute === 'guided'
+    const useStudioFrameInputs = state.studioVideoWorkflow !== 'animate'
+      && (!primaryStudioCreate || activeCreateRoute === 'guided')
     if (primaryStudioCreate && activeCreateRoute === 'generate') {
       // Generate is deliberately text-only. Preserve any hidden Guided inputs
       // in Studio state so switching back restores them, but never let those
@@ -7210,7 +7287,10 @@ export const useStore = create<AppState>((set, get) => ({
     }
 
     // Post-processing settings
-    if (state.spatialUpsampling) params.spatial_upsampling = state.spatialUpsampling
+    if (state.generationMode !== 'video' && state.generationMode !== 'avatar') delete params.face_refiner
+    if (state.generationMode !== 'video') params.temporal_upsampling = ''
+    if (state.generationMode === 'audio') params.spatial_upsampling = ''
+    else if (state.spatialUpsampling) params.spatial_upsampling = state.spatialUpsampling
     if (state.filmGrainIntensity > 0) {
       params.film_grain_intensity = state.filmGrainIntensity
       params.film_grain_saturation = state.filmGrainSaturation
@@ -7316,32 +7396,8 @@ export const useStore = create<AppState>((set, get) => ({
         params.video_length = 0
         params.image_mode = 0
         params.multi_prompts_gen_type = 2  // Preserve full text as one prompt (don't split by newlines)
-        // Save original prompt + speaker names before swap (for load settings)
-        params._tts_original_prompt = params.prompt
-        params._tts_speaker_name1 = state.ttsSpeakerName1 || ''
-        params._tts_speaker_name2 = state.ttsSpeakerName2 || ''
-        // Save all voice names for metadata
-        for (let i = 0; i < state.ttsVoices.length; i++) {
-          (params as Record<string, unknown>)[`_tts_speaker_name${i + 1}`] = state.ttsVoices[i]?.name || ''
-        }
-        params._tts_voice_count = state.ttsVoiceCount
-        // Swap character names → Speaker N: for TTS multi-voice mode
-        const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-        let text = params.prompt as string
-        for (let i = 0; i < state.ttsVoices.length; i++) {
-          const name = state.ttsVoices[i]?.name
-          if (name) {
-            text = text.replace(new RegExp(escapeRegex(name) + '\\s*:', 'gi'), `Speaker ${i + 1}:`)
-          }
-        }
-        params.prompt = text
-        // Set audio_guide paths for each voice (audio_guide, audio_guide2, audio_guide3, etc.)
-        for (let i = 0; i < state.ttsVoices.length; i++) {
-          const voice = state.ttsVoices[i]
-          if (voice?.path) {
-            const key = i === 0 ? 'audio_guide' : `audio_guide${i + 1}`
-            params[key as keyof typeof params] = voice.path as never
-          }
+        if (state.audioSubMode === 'speech') {
+          applyTtsVoices(params, state.ttsVoices, state.ttsVoiceCount, state.modelOptions)
         }
         // TTS duration (max duration for the model to generate)
         if (state.modelOptions?.audio_only) {
@@ -7350,7 +7406,9 @@ export const useStore = create<AppState>((set, get) => ({
           // back to `max` then 600.
           const ds = state.modelOptions.duration_slider
           const sliderDefault = ds?.default ?? ds?.max ?? 600
-          params.duration_seconds = state.durationSeconds < 30 ? sliderDefault : state.durationSeconds
+          params.duration_seconds = ds && (state.modelOptions.audio_segment_max_seconds || ds.max <= 15)
+            ? Math.max(ds.min, Math.min(ds.max, state.durationSeconds))
+            : state.durationSeconds < 30 ? sliderDefault : state.durationSeconds
         }
         // Let the TTS model use its own defaults for steps/guidance if ours are video defaults
         if ((params.num_inference_steps as number) > 0 && state.modelOptions?.default_num_inference_steps == null) {
@@ -7562,6 +7620,7 @@ export const useStore = create<AppState>((set, get) => ({
     ) && (
       state.generationMode !== 'image'
       || state.studioImageWorkflow === 'generate'
+      || !!state.modelOptions?.image_ref_choices
     )
     const imageReferenceChoices = state.modelOptions?.image_ref_choices?.choices ?? []
     const effectiveImageRefType = state.imageRefType || (
@@ -7829,6 +7888,27 @@ export const useStore = create<AppState>((set, get) => ({
     }
 
     const clientSubmissionId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    delete params._viggle_prepare_only
+    if (state.params.model_type === 'viggle_animate') {
+      const editedFrame = state.params._viggle_edited_frame
+      const hasCharacter = !!state.params.viggle_character?.reference_path
+      if (!params.video_guide || !(state.params.viggle_character ? hasCharacter : editedFrame)) {
+        set({promptEnhanceError: 'Viggle needs a control video and a character image or an edited frame.'})
+        return
+      }
+      Object.assign(params, {prompt: 'Viggle Animate', image_refs: editedFrame ? [editedFrame] : [],
+        image_start: undefined, image_end: undefined, video_source: undefined, frames_positions: undefined,
+        video_prompt_type: 'IVU', image_prompt_type: '', image_mode: 0,
+        override_attention: '',
+        num_inference_steps: 3, flow_shift: 3, sample_solver: 'euler', guidance_scale: 1,
+        sliding_window_size: 124, sliding_window_overlap: 18, sliding_window_discard_last_frames: 0,
+        multi_prompts_gen_type: 2, activated_loras: [], loras_multipliers: '',
+        remove_background_images_ref: 0, image_refs_relative_size: 100, force_fps: '24',
+        minimax_h3_turbo_mode: false, custom_settings: {}})
+    } else {
+      delete params.viggle_character
+      delete params._viggle_prepared
+    }
     const pendingJobId = `pending-${clientSubmissionId}`
     params._client_submission_id = clientSubmissionId
     const newJob: GenerationJob = {
@@ -7928,6 +8008,17 @@ export const useStore = create<AppState>((set, get) => ({
 
         try {
           const status = await api.fetchJobStatus(job_id)
+
+          const current = get().params
+          if (status.viggle_preparation && current.model_type === 'viggle_animate'
+            && current._viggle_prepared?.signature !== status.viggle_preparation.signature
+            && vigglePreparationKey(current.video_guide, current.viggle_character, current.seed)
+              === vigglePreparationKey(params.video_guide, params.viggle_character, params.seed)) {
+            // An automatic run also exposes its prepared frame, without
+            // replacing newer character/appearance choices made during the job.
+            set(s => ({params: {...s.params, _viggle_prepared: status.viggle_preparation!,
+              _viggle_edited_frame: status.viggle_preparation!.image_path}}))
+          }
 
           set(s => ({
             jobs: s.jobs.map(j => j.id !== job_id ? j : {
@@ -8593,7 +8684,7 @@ export const useStore = create<AppState>((set, get) => ({
         options.omni_reference === true
         && activeState.params.minimax_h3_reference_sequence === true
       )
-      const isH3 = String(options.architecture || '').startsWith('minimax_h3')
+      const isH3 = !options.audio_only && String(options.architecture || '').startsWith('minimax_h3')
       const maximumDuration = options.omni_reference === true
         ? (nativeMaximumDuration && !h3ReferenceSequence
             ? nativeMaximumDuration
@@ -8687,7 +8778,7 @@ export const useStore = create<AppState>((set, get) => ({
         const memoryPolicy = options.omni_reference === true
           ? options.omni_sequence_memory_policy
           : options.sliding_window_memory_policy
-        const recommendation = h3ReferenceSequence
+        const recommendation = options.omni_reference === true
           ? recommendedH3OmniSequenceProfile(
               memoryPolicy,
               selectedResolution,
@@ -8807,23 +8898,32 @@ export const useStore = create<AppState>((set, get) => ({
       const ttsDefaults: Record<string, unknown> = {}
       if (options.audio_only && options.duration_slider) {
         const ds = options.duration_slider
-        ttsDefaults.durationSeconds = ds.default ?? ds.max ?? 600
+        ttsDefaults.durationSeconds = options.audio_segment_max_seconds
+          && activeState.modelOptions?.architecture === options.architecture
+          ? Math.max(ds.min, Math.min(ds.max, durationSeconds))
+          : ds.default ?? ds.max ?? 600
       }
       // Clamp current voice count to the new model's max_voice_count (e.g.
       // user had 5 voices on Kugel, switches to Scenema which caps at 2 —
       // trim slots 3-5 so the UI doesn't show ghost voices that the backend
       // would silently ignore).
-      const newMaxVoiceCount = ((options as { max_voice_count?: number }).max_voice_count) ?? 6
+      const newMaxVoiceCount = options.audio_only ? ttsVoiceLimit(options) : 6
       const currentVoiceCount = get().ttsVoiceCount
-      if (currentVoiceCount > newMaxVoiceCount) {
+      if (options.audio_only && get().audioSubMode === 'speech') {
         const trimmedVoices = get().ttsVoices.slice(0, newMaxVoiceCount)
-        ttsDefaults.ttsVoiceCount = newMaxVoiceCount
+        const nextVoiceCount = Math.min(currentVoiceCount, newMaxVoiceCount)
+        ttsDefaults.ttsVoiceCount = nextVoiceCount
         ttsDefaults.ttsVoices = trimmedVoices
+        ttsDefaults.ttsSpeakerName1 = trimmedVoices[0]?.name || ''
+        ttsDefaults.ttsSpeakerName2 = trimmedVoices[1]?.name || ''
+        ttsDefaults.audioGuideFilename = trimmedVoices[0]?.filename || null
+        ttsDefaults.audioGuide2Filename = trimmedVoices[1]?.filename || null
         // Re-derive audio_prompt_type from the clamped count using the new
         // model's selection list.
-        const selection = (options.audio_prompt_type_sources?.selection as string[] | undefined) || ['', 'A', 'AB']
-        const audioType = selection[Math.min(newMaxVoiceCount, selection.length - 1)]
-        paramUpdates.audio_prompt_type = audioType
+        paramUpdates.audio_prompt_type = newMaxVoiceCount
+          ? ttsAudioModeForCount(nextVoiceCount, options, String(get().params.audio_prompt_type || ''))
+          : ''
+        Object.assign(paramUpdates, ttsVoicePaths(trimmedVoices, nextVoiceCount))
       }
       set(s => ({
         ...ttsDefaults,
@@ -9440,7 +9540,10 @@ export const useStore = create<AppState>((set, get) => ({
       ) ? params._ltx_original_prompt : params.prompt
 
       const result = await api.llmEnhancePrompt({
-        prompt: ltxEnhanceSource,
+        prompt: generationMode === 'audio' && state.audioSubMode === 'speech'
+          ? ttsCharacterEnhancePrompt(ltxEnhanceSource, state.ttsVoices,
+              ttsSpeakingVoiceCount(state.ttsVoiceCount, state.modelOptions, String(params.audio_prompt_type || '')))
+          : ltxEnhanceSource,
         mode: generationMode,
         model_type: params.model_type,
         max_new_tokens: maxTokens,
@@ -9450,7 +9553,7 @@ export const useStore = create<AppState>((set, get) => ({
         window_size_seconds: (generationMode === 'video' || generationMode === 'avatar') ? state.slidingWindowSeconds : undefined,
         activated_loras: params.activated_loras.length > 0 ? params.activated_loras : undefined,
         tts_enhance_mode: ttsMode || undefined,
-        tts_voice_count: state.ttsVoiceCount || undefined,
+        tts_voice_count: ttsSpeakingVoiceCount(state.ttsVoiceCount, state.modelOptions, String(params.audio_prompt_type || '')) || undefined,
         reference_context: referenceContext,
         planning_style: (
           generationMode === 'video'
@@ -11421,7 +11524,7 @@ export const useStore = create<AppState>((set, get) => ({
     // `post_processing` model id. Restore them into the new grouped Studio
     // hierarchy rather than asking model discovery to resolve that id. Older
     // sidecars only carry edit_sub_mode; newer ones also carry top-level tool.
-    const restoredTool = (
+    const restoredTool = selectedOutputMeta.tool === 'media_flow' ? 'upscale' : (
       selectedOutputMeta.tool === 'upscale'
       || selectedOutputMeta.tool === 'film_grain'
       || selectedOutputMeta.tool === 'revoice'
@@ -11465,10 +11568,14 @@ export const useStore = create<AppState>((set, get) => ({
             ...(restoredUpscaleMedia === 'image'
               ? { studioImageWorkflow: 'upscale' as StudioImageWorkflow }
               : { studioVideoWorkflow: 'upscale' as StudioVideoWorkflow }),
-            toolsSourcePath: sourceName || null,
+            toolsSourcePath: String(p.media_path || sourceName) || null,
             toolsSourceName: sourceName || null,
             toolsSourceUrl: sourceUrl,
-            toolsUpscaleMethod: String(p.method || 'flashvsr2'),
+            toolsUpscaleMethod: String(p.method ?? p.spatial_upsampling ?? 'flashvsr2'),
+            params: { ...get().params, temporal_upsampling: String(p.temporal_upsampling || ''),
+              custom_settings: { ...get().params.custom_settings,
+                dlss_intensity: Number(p.dlss_intensity ?? 1), dlss_depth: String(p.dlss_depth ?? 'half'),
+                dlss_motion: String(p.dlss_motion ?? 'original') } },
           }
         : restoredTool === 'film_grain'
           ? {
@@ -11762,6 +11869,15 @@ export const useStore = create<AppState>((set, get) => ({
     // caption can't leak into an unrelated restore.
     newParams.alt_prompt = (p.alt_prompt as string) || ''
     newParams.video_guide = (p.video_guide as string) || ''
+    newParams._viggle_edited_frame = (p._viggle_edited_frame as string)
+      || (p.model_type === 'viggle_animate' && Array.isArray(p.image_refs) ? String(p.image_refs[0] || '') : undefined)
+    newParams._viggle_source_seconds = Number(p._viggle_source_seconds) || undefined
+    newParams._viggle_frame_seconds = Number(p._viggle_frame_seconds) || 0
+    newParams.viggle_character = p.model_type === 'viggle_animate' && p.viggle_character && typeof p.viggle_character === 'object'
+      ? p.viggle_character as import('../types').ViggleCharacterOptions : undefined
+    newParams._viggle_prepared = newParams.viggle_character && p._viggle_prepared && typeof p._viggle_prepared === 'object'
+      ? p._viggle_prepared as import('../types').VigglePreparedFrame : undefined
+    newParams._viggle_prepare_only = undefined
     newParams.video_mask = (p.video_mask as string) || ''
     newParams.image_guide = (p.image_guide as string) || ''
     newParams.image_mask = (p.image_mask as string) || ''
@@ -11794,6 +11910,8 @@ export const useStore = create<AppState>((set, get) => ({
     newParams.tts_comp_makeup = (p.tts_comp_makeup as number) ?? undefined
     newParams.tts_voice_count = (p.tts_voice_count as number) ?? undefined
     newParams.voice_clone_enabled = p.voice_clone_enabled === true
+    newParams.face_refiner = p.face_refiner && typeof p.face_refiner === 'object'
+      ? p.face_refiner as import('../types').FaceRefinerOptions : undefined
     newParams.voice_clone_mode = p.voice_clone_mode === 'two' ? 'two' : 'single'
     newParams.voice_clone_refs = Array.isArray(p.voice_clone_refs)
       ? (p.voice_clone_refs as unknown[])
@@ -11820,7 +11938,7 @@ export const useStore = create<AppState>((set, get) => ({
     for (const key of [
       'alt_guidance_scale', 'audio_flow_shift', 'embedded_guidance_scale',
       'force_fps', 'sample_solver', 'top_k', 'top_p',
-      'spatial_upsampling_model', 'cfg_star_switch', 'apg_switch',
+      'spatial_upsampling_model', 'temporal_upsampling', 'cfg_star_switch', 'apg_switch',
     ]) {
       if (p[key] !== undefined) {
         (newParams as unknown as Record<string, unknown>)[key] = p[key]
@@ -11909,8 +12027,8 @@ export const useStore = create<AppState>((set, get) => ({
         ),
       )
       newParams.guidance_scale = restoredModelOptions.default_guidance_scale ?? 1
-      newParams.activated_loras = []
-      newParams.loras_multipliers = ''
+      // Keep ordinary H3 adapters and their aligned strengths when restoring
+      // fused outputs. The backend validates incompatible acceleration files.
       newParams.minimax_h3_turbo_mode = false
       newParams.minimax_h3_turbo_preset = undefined
       newParams.skip_steps_cache_type = ''
@@ -12254,22 +12372,25 @@ export const useStore = create<AppState>((set, get) => ({
       }
     }
     const restoredVoiceCount = hasTtsRestoreState
-      ? Math.max(0, Math.min(6, Number(p._tts_voice_count) || inferredVoiceCount))
+      ? Math.max(0, Math.min(6, p._tts_voice_count != null ? Number(p._tts_voice_count) || 0 : inferredVoiceCount))
       : 0
-    const restoredVoices: { name: string; filename: string | null; path: string | null }[] = []
-    for (let i = 0; i < Math.max(restoredVoiceCount, hasTtsRestoreState ? 2 : 0); i++) {
+    const restoredVoices: TtsVoice[] = []
+    for (let i = 0; i < restoredVoiceCount; i++) {
       const name = (p[`_tts_speaker_name${i + 1}`] as string) || ''
       const guideKey = i === 0 ? 'audio_guide' : `audio_guide${i + 1}`
       const path = typeof p[guideKey] === 'string' && p[guideKey]
         ? String(p[guideKey])
         : null
-      const filename = (
+      const filename = String(p[`_tts_voice_filename${i + 1}`] || '') || (
         typeof uploadFilenames?.[guideKey] === 'string'
           ? uploadFilenames[guideKey] as string
           : null
       ) || _deriveBase(path)
       if (name || i < restoredVoiceCount) {
-        restoredVoices.push({ name, filename, path })
+        restoredVoices.push({ name, filename, path,
+          characterId: String(p[`_tts_character_id${i + 1}`] || '') || undefined,
+          characterName: String(p[`_tts_character_name${i + 1}`] || '') || undefined,
+        })
       }
     }
 
@@ -12365,7 +12486,7 @@ export const useStore = create<AppState>((set, get) => ({
         },
       } : {}),
       // TTS state
-      ...(restoredSpeakerName1 || restoredSpeakerName2 || restoredVoiceCount > 0 ? {
+      ...(hasTtsRestoreState ? {
         ttsSpeakerName1: restoredSpeakerName1,
         ttsSpeakerName2: restoredSpeakerName2,
         ttsSpeakerNamesManual: true,

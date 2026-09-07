@@ -336,8 +336,8 @@ class H3StoryLedgerTests(unittest.TestCase):
             )
             for segment in (1, 2)
         }
-        self.assertLessEqual(dialogue_by_segment[1], int(durations[0] * 2.1))
-        self.assertLessEqual(dialogue_by_segment[2], int(durations[1] * 2.1))
+        self.assertLessEqual(dialogue_by_segment[1], int(durations[0] * 3.0))
+        self.assertLessEqual(dialogue_by_segment[2], int(durations[1] * 3.0))
         self.assertEqual(
             [
                 event_id
@@ -347,7 +347,7 @@ class H3StoryLedgerTests(unittest.TestCase):
             [item["event_id"] for item in events],
         )
 
-    def test_long_exact_turn_borrows_headroom_for_a_clean_sentence_boundary(self):
+    def test_long_exact_turn_uses_new_capacity_for_a_clean_sentence_boundary(self):
         prompt = (
             "George Costanza walks into the coffee shop and walks up to Joey. "
             'George says "Maestro two is out!" Joey says "What, who?" '
@@ -386,9 +386,9 @@ class H3StoryLedgerTests(unittest.TestCase):
             if item.get("source_dialogue_id") == "D3"
         ]
         self.assertEqual(len(pieces), 2)
-        self.assertTrue(pieces[0].endswith("single prompt!"))
-        self.assertTrue(pieces[1].startswith("You can save and cast Characters"))
-        self.assertIn("Sora 2's Cameos", pieces[1])
+        self.assertTrue(pieces[0].endswith("push notifications."))
+        self.assertTrue(pieces[1].startswith("It even has Qwen"))
+        self.assertIn("Sora 2's Cameos", pieces[0])
         self.assertIn("Qwen 3.8", pieces[1])
         self.assertEqual(" ".join(pieces), locked[2]["text"])
 
@@ -716,6 +716,101 @@ class H3StoryLedgerTests(unittest.TestCase):
         rendered = " ".join(item["text"] for item in extract_source_events(prompt))
         self.assertIn("The One With the Broken Robot", rendered)
 
+    def test_structured_video_brief_counts_only_character_dialogue(self):
+        notes = (
+            'Visual style: "Natural cinematic realism" with warm light.\n'
+            "Sound design: Wind rustles the trees as the camera moves closer.\n"
+            "Lighting: Soft afternoon sunlight falls across the room and the hallway.\n"
+            "Camera movement: The camera follows Mira toward the door and settles behind her.\n"
+            "Negative prompt: No subtitles, watermarks, logos, distorted faces, extra limbs, sudden cuts, or flickering backgrounds.\n"
+            "Duration: Thirty seconds in three consecutive windows.\n"
+        )
+        prompt = notes + "Mira: We should leave now."
+        self.assertEqual(extract_locked_dialogue(notes), [])
+        locked = extract_locked_dialogue(prompt)
+        self.assertEqual(
+            [(line["speaker"], line["text"]) for line in locked],
+            [("Mira", "We should leave now.")],
+        )
+        self.assertEqual(sum(_dialogue_word_count(line["text"]) for line in locked), 4)
+
+        def offline(**_kwargs):
+            raise RuntimeError("offline")
+
+        result = plan_h3_story_segments(
+            prompt,
+            segment_durations=[10.0, 9.25, 9.25],
+            mode="sliding_window",
+            camera_coverage="multi_shot",
+            expect_dialogue=True,
+            planning_style="faithful",
+            llm_generate=offline,
+        )
+        spoken = [
+            line["text"]
+            for segment in result["segments"]
+            for shot in segment["shots"]
+            for line in shot.get("dialogue", [])
+        ]
+        self.assertEqual(spoken, ["We should leave now."])
+
+    def test_space_battle_production_notes_do_not_become_ninety_two_spoken_words(self):
+        prompt = (
+            'The pilot says calmly over comms: “Three on me. Breaking left.”\n'
+            'Later, the pilot quietly says: “That wasn’t the fleet.”\n\n'
+            "Visual direction: premium live-action science-fiction cinematography, "
+            "physically believable spacecraft motion, detailed practical-looking cockpits, "
+            "realistic human skin, convincing alien anatomy, volumetric sunlight through "
+            "dust and debris, restrained lens flare, deep blacks, warm amber planetary "
+            "rim light against cold blue engine light, subtle camera vibration during "
+            "acceleration, crisp spacecraft silhouettes, high dynamic range, fine cinematic grain.\n\n"
+            "Sound: deep engine resonance transmitted through cockpit structure, muffled "
+            "impacts, cockpit alarms, radio compression, breathing, short tactical dialogue, "
+            "distant weapons impacts and powerful low-frequency explosions. No music at "
+            "first; introduce a restrained rising orchestral/electronic pulse during the "
+            "final capital-ship reveal."
+        )
+        locked = extract_locked_dialogue(prompt)
+        self.assertEqual(
+            [line["text"] for line in locked],
+            ["Three on me. Breaking left.", "That wasn’t the fleet."],
+        )
+        self.assertEqual(sum(_dialogue_word_count(line["text"]) for line in locked), 9)
+
+    def test_quoted_screenplay_line_keeps_following_action_out_of_dialogue(self):
+        for opening, closing in [('"', '"'), ('“', '”')]:
+            with self.subTest(opening=opening):
+                prompt = (
+                    f"Mira (quietly): {opening}We should leave now.{closing} "
+                    "She opens the door.\n"
+                    f"Mira: {opening}We should leave now.{closing}"
+                )
+                locked = extract_locked_dialogue(prompt)
+                self.assertEqual(
+                    [line["text"] for line in locked],
+                    ["We should leave now.", "We should leave now."],
+                )
+                self.assertTrue(all(line["speaker"] == "Mira" for line in locked))
+                self.assertEqual(locked[0]["delivery"], "speaks quietly")
+                events = " | ".join(item["text"] for item in extract_source_events(prompt))
+                self.assertIn("opens the door", events)
+                self.assertNotIn("We should leave now", events)
+
+    def test_tagged_screenplay_line_is_counted_once_with_its_speaker(self):
+        prompt = (
+            "Mira (quietly): <d>[English] We should leave now.</d> She opens the door.\n"
+            "Leo: <d>[French] Je viens.</d>"
+        )
+        locked = extract_locked_dialogue(prompt)
+        self.assertEqual(
+            [(line["speaker"], line["text"], line["language"]) for line in locked],
+            [("Mira", "We should leave now.", "English"), ("Leo", "Je viens.", "French")],
+        )
+        self.assertEqual(sum(_dialogue_word_count(line["text"]) for line in locked), 6)
+        self.assertEqual(locked[0]["delivery"], "speaks quietly")
+        events = " | ".join(item["text"] for item in extract_source_events(prompt))
+        self.assertIn("opens the door", events)
+
     def test_pov_identity_and_opening_pose_are_one_source_event(self):
         events = extract_source_events(
             "POV: The viewer is Harry Potter as he stands on top of a scenic mountain. "
@@ -777,7 +872,7 @@ class H3StoryLedgerTests(unittest.TestCase):
             segment_count=2,
             locked_dialogue=self.locked,
             expect_dialogue=True,
-            segment_durations=[4.0, 16.0],
+            segment_durations=[2.0, 18.0],
         )
         self.assertTrue(any("segment 1 dialogue uses" in item for item in violations))
 

@@ -763,6 +763,14 @@ def collect_custom_settings_from_inputs(model_def, inputs, strict=False):
                 and existing_custom_settings[setting_id] is not None
             ):
                 custom_settings_dict[setting_id] = existing_custom_settings[setting_id]
+    finishing_keys = ("dlss_intensity", "dlss_depth", "dlss_motion")
+    if any(key in existing_custom_settings for key in finishing_keys):
+        from services.media_processing import normalize_options
+        try:
+            custom_settings_dict.update(normalize_options(existing_custom_settings))
+        except (TypeError, ValueError) as error:
+            if strict:
+                return None, str(error)
     return custom_settings_dict if len(custom_settings_dict) > 0 else None, None
 
 def clear_custom_setting_slots(inputs):
@@ -2984,11 +2992,13 @@ def align_model_frame_count(
     return (frame_count - 1) // latent_size * latent_size + 1
 
 
-def normalize_model_total_frame_count(frame_count, model_def):
+def normalize_model_total_frame_count(frame_count, model_def, window_size=None):
     """Normalize an output timeline without treating a window cap as total."""
 
     frame_count = int(frame_count)
     maximum = model_def.get("frames_maximum", None)
+    if maximum is not None and window_size is not None and int(window_size) > 0:
+        maximum = min(int(maximum), int(window_size))
     if (
         model_def.get("sliding_window_exact_total_frames", False)
         and maximum is not None
@@ -4051,7 +4061,9 @@ def check_loras_exist(model_type, loras_choices_files, download = False, send_cm
         # (the download target) when the file exists nowhere.
         local_path = resolve_lora_path(model_type, lora_file)
         if not os.path.isfile(local_path):
-            url = loras_url_cache.get(local_path, None)         
+            url = loras_url_cache.get(local_path)
+            if url is None and str(lora_file).startswith(("https://", "http://")):
+                url = lora_file
             if url is not None:
                 if download:
                     if send_cmd is not None:
@@ -5672,6 +5684,11 @@ def extract_faces_from_video_with_mask(input_video_path, input_mask_path, max_fr
     video = get_resampled_video(input_video_path, start_frame, max_frames, target_fps)
     if len(video) == 0: return None
     frame_height, frame_width, _ = video[0].shape
+
+    if outpainting_dims is not None and outpainting_quantize_margins:
+        # H3's requested canvas and protected rectangle were aligned together.
+        # Fitting the percentage-expanded source again can floor away a block.
+        fit_canvas = None
     num_frames = len(video)
     if any_mask:
         mask_video = get_resampled_video(input_mask_path, start_frame, max_frames, target_fps)
@@ -5716,7 +5733,7 @@ def extract_faces_from_video_with_mask(input_video_path, input_mask_path, max_fr
     return face_tensor
 
 
-def preprocess_video_with_mask(pre_video_guide, input_video_path, input_mask_path, height, width,  max_frames, start_frame=0, fit_canvas = None, fit_crop = False, target_fps = 16, block_size= 16, expand_scale = 2, process_type = "inpaint", process_type2 = None, to_bbox = False, RGB_Mask = False, negate_mask = False, process_outside_mask = None, inpaint_color = 127, outpainting_dims = None, outpainting_ratio = "", proc_no = 1):
+def preprocess_video_with_mask(pre_video_guide, input_video_path, input_mask_path, height, width,  max_frames, start_frame=0, fit_canvas = None, fit_crop = False, target_fps = 16, block_size= 16, expand_scale = 2, process_type = "inpaint", process_type2 = None, to_bbox = False, RGB_Mask = False, negate_mask = False, process_outside_mask = None, inpaint_color = 127, outpainting_dims = None, outpainting_ratio = "", proc_no = 1, outpainting_quantize_margins=0):
 
     def mask_to_xyxy_box(mask):
         rows, cols = np.where(mask == 255)
@@ -5784,7 +5801,7 @@ def preprocess_video_with_mask(pre_video_guide, input_video_path, input_mask_pat
 
     if outpainting_dims != None:
         final_height, final_width = height, width
-        height, width, margin_top, margin_left =  get_outpainting_frame_location(final_height, final_width,  outpainting_dims, 1)        
+        height, width, margin_top, margin_left = get_outpainting_frame_location(final_height, final_width, outpainting_dims, 1, quantize_margins=outpainting_quantize_margins)
 
     if any_mask:
         num_frames = min(len(video), len(mask_video))
@@ -6022,43 +6039,20 @@ def parse_keep_frames_video_guide(keep_frames, video_length):
     return  frames, error
 
 
-def perform_temporal_upsampling(sample, previous_last_frame, temporal_upsampling, fps):
-    exp = 0
-    if temporal_upsampling == "rife2":
-        exp = 1
-    elif temporal_upsampling == "rife4":
-        exp = 2
-    output_fps = fps
-    if exp == 0:
-        return sample, previous_last_frame, output_fps
-    rife_version = server_config.get("rife_version", "v4")
-    rife_model_path = None
-    if rife_version == "v4":
-        rife_model_path = fl.locate_file(RIFE_V4_FILENAME)
-    else:
-        rife_model_path = fl.locate_file(RIFE_V3_FILENAME)
-    if previous_last_frame is not None and previous_last_frame.dtype != sample.dtype:
-        if sample.dtype == torch.uint8:
-            previous_last_frame = _video_tensor_to_uint8_chunk_inplace(previous_last_frame)
-        else:
-            previous_last_frame = previous_last_frame.float().div_(127.5).sub_(1.0)
-    if exp > 0: 
-        from postprocessing.rife.inference import temporal_interpolation
-        if previous_last_frame != None:
-            sample = torch.cat([previous_last_frame, sample], dim=1)
-            previous_last_frame = sample[:, -1:].clone()
-            sample = temporal_interpolation(rife_model_path, sample, exp, device=processing_device, rife_version=rife_version)
-            sample = sample[:, 1:]
-        else:
-            sample = temporal_interpolation(rife_model_path, sample, exp, device=processing_device, rife_version=rife_version)
-            previous_last_frame = sample[:, -1:].clone()
-
-        output_fps = output_fps * 2**exp
-    return sample, previous_last_frame, output_fps 
+def perform_temporal_upsampling(sample, previous_last_frame, temporal_upsampling, fps,
+                                abort_callback=None, progress_callback=None, options=None):
+    from services.media_processing import temporal_upsample
+    return temporal_upsample(sample, previous_last_frame, temporal_upsampling, fps,
+        options=options, abort_callback=abort_callback, progress_callback=progress_callback)
 
 
-def perform_spatial_upsampling(sample, spatial_upsampling, seed=0, abort_callback=None, progress_callback=None):
+def perform_spatial_upsampling(sample, spatial_upsampling, seed=0, abort_callback=None, progress_callback=None,
+                              options=None, still_image=False):
     from shared.utils.utils import resize_lanczos
+    if str(spatial_upsampling).startswith("dlss5*"):
+        from services.media_processing import neural_render
+        return neural_render(sample, spatial_upsampling, options=options, still_image=still_image,
+                             abort_callback=abort_callback, progress_callback=progress_callback)
     if spatial_upsampling == "vae2":
         return sample
     # FlashVSR (DiT super-resolution) dispatch — ported from upstream Wan2GP.
@@ -7556,6 +7550,9 @@ def generate_video(
     # published video. Director uses this to give LTX-2.5 a clearer lip-sync
     # target without replacing the user's music with a vocals-only output.
     audio_conditioning_guide=None,
+    # Internal image preparation can request a lossless intermediate without
+    # changing the user's global gallery format.
+    image_output_codec=None,
 ):
 
 
@@ -7998,7 +7995,7 @@ def generate_video(
             and "subject_definitions:" in str(prompt)
             and "detailed_description:" in str(prompt)
         )
-        if multi_prompts_gen_type == 2 or _h3_omni_context_ir:
+        if multi_prompts_gen_type == 2 or _h3_omni_context_ir or model_def.get("minimax_h3_audio_only", False):
             prompts = [prompt]
             if _h3_omni_context_ir:
                 print(
@@ -8145,7 +8142,7 @@ def generate_video(
     model_filename = get_model_filename(base_model_type)  
 
     _, _, latent_size = get_model_min_frames_and_step(model_type)
-    video_length = normalize_model_total_frame_count(video_length, model_def)
+    video_length = normalize_model_total_frame_count(video_length, model_def, window_size=sliding_window_size)
     published_video_length = video_length
     recast_warmup_frames = _resolve_scail2_recast_warmup_frames(
         custom_settings, model_def, video_prompt_type, latent_size,
@@ -9059,9 +9056,9 @@ def generate_video(
                         else:
                             ref_pose_tensor = pre_video_guide
 
-                        video_guide_processed, video_mask_processed = preprocess_video_with_mask(ref_pose_tensor, video_guide if sparse_video_image is None else sparse_video_image, video_mask, height=image_size[0], width = image_size[1], max_frames= guide_frames_extract_count, start_frame = guide_frames_extract_start, fit_canvas = sample_fit_canvas, fit_crop = fit_crop, target_fps = fps,  process_type = preprocess_type, expand_scale = mask_expand, RGB_Mask = True, negate_mask = "N" in video_prompt_type, process_outside_mask = process_outside_mask, outpainting_dims = outpainting_dims, outpainting_ratio = video_guide_outpainting_ratio, proc_no =1, inpaint_color =inpaint_color, block_size = block_size, to_bbox = "H" in video_prompt_type )
+                        video_guide_processed, video_mask_processed = preprocess_video_with_mask(ref_pose_tensor, video_guide if sparse_video_image is None else sparse_video_image, video_mask, height=image_size[0], width = image_size[1], max_frames= guide_frames_extract_count, start_frame = guide_frames_extract_start, fit_canvas = sample_fit_canvas, fit_crop = fit_crop, target_fps = fps,  process_type = preprocess_type, expand_scale = mask_expand, RGB_Mask = True, negate_mask = "N" in video_prompt_type, process_outside_mask = process_outside_mask, outpainting_dims = outpainting_dims, outpainting_ratio = video_guide_outpainting_ratio, outpainting_quantize_margins=model_def.get("outpainting_quantize_margins", 0), proc_no =1, inpaint_color =inpaint_color, block_size = block_size, to_bbox = "H" in video_prompt_type )
                         if preprocess_type2 != None:
-                            video_guide_processed2, video_mask_processed2 = preprocess_video_with_mask(ref_pose_tensor, video_guide, video_mask, height=image_size[0], width = image_size[1], max_frames= guide_frames_extract_count, start_frame = guide_frames_extract_start, fit_canvas = sample_fit_canvas, fit_crop = fit_crop, target_fps = fps,  process_type = preprocess_type2, expand_scale = mask_expand, RGB_Mask = True, negate_mask = "N" in video_prompt_type, process_outside_mask = process_outside_mask, outpainting_dims = outpainting_dims, outpainting_ratio = video_guide_outpainting_ratio, proc_no =2, block_size = block_size, to_bbox = "H" in video_prompt_type )
+                            video_guide_processed2, video_mask_processed2 = preprocess_video_with_mask(ref_pose_tensor, video_guide, video_mask, height=image_size[0], width = image_size[1], max_frames= guide_frames_extract_count, start_frame = guide_frames_extract_start, fit_canvas = sample_fit_canvas, fit_crop = fit_crop, target_fps = fps,  process_type = preprocess_type2, expand_scale = mask_expand, RGB_Mask = True, negate_mask = "N" in video_prompt_type, process_outside_mask = process_outside_mask, outpainting_dims = outpainting_dims, outpainting_ratio = video_guide_outpainting_ratio, outpainting_quantize_margins=model_def.get("outpainting_quantize_margins", 0), proc_no =2, block_size = block_size, to_bbox = "H" in video_prompt_type )
 
                     if video_guide_processed is not None  and sample_fit_canvas is not None:
                         image_size = video_guide_processed.shape[-2:]
@@ -9777,7 +9774,12 @@ def generate_video(
                 
                 output_fps  = fps
                 if len(temporal_upsampling) > 0:
-                    sample, previous_last_frame, output_fps = perform_temporal_upsampling(sample, previous_last_frame if sliding_window and window_no > 1 else None, temporal_upsampling, fps)
+                    sample, previous_last_frame, output_fps = perform_temporal_upsampling(
+                        sample, previous_last_frame if sliding_window and window_no > 1 else None,
+                        temporal_upsampling, fps, options=custom_settings,
+                        abort_callback=lambda: gen.get("abort", False))
+                    if sample is None or gen.get("abort", False):
+                        return
 
                 if len(spatial_upsampling) > 0:
                     # Forward FlashVSR's per-step progress to the job tile. FlashVSR
@@ -9800,6 +9802,8 @@ def generate_video(
                         seed=seed,
                         abort_callback=lambda: gen.get("abort", False),
                         progress_callback=_spatial_progress,
+                        options=custom_settings,
+                        still_image=bool(image_mode),
                     )
                     if sample is None or gen.get("abort", False):
                         abort = True
@@ -9890,7 +9894,7 @@ def generate_video(
                     new_image_path = []
                     for no, img in enumerate(sample):  
                         img_path = os.path.splitext(image_path)[0] + ("" if no==0 else f"_{no}") + ".jpg" 
-                        new_image_path.append(save_image(img, save_file = img_path, quality = server_config.get("image_output_codec", None)))
+                        new_image_path.append(save_image(img, save_file = img_path, quality = image_output_codec or server_config.get("image_output_codec", None)))
 
                     video_path= new_image_path
                 elif len(control_audio_tracks) > 0 or len(source_audio_tracks) > 0 or output_new_audio_filepath is not None or any_mmaudio or output_new_audio_data is not None or audio_source is not None:
@@ -10013,7 +10017,7 @@ def generate_video(
                 inputs["model_type"] = model_type
                 inputs["model_filename"] = get_model_filename(model_type, transformer_quantization, transformer_dtype_policy)
                 if is_image:
-                    inputs["image_quality"] = server_config.get("image_output_codec", None)
+                    inputs["image_quality"] = image_output_codec or server_config.get("image_output_codec", None)
                 else:
                     inputs["video_quality"] = server_config.get("video_output_codec", None)
 
@@ -11362,7 +11366,7 @@ def prepare_inputs_dict(target, inputs, model_type = None, model_filename = None
     model_def = get_model_def(model_type)
     custom_settings = get_model_custom_settings(model_def)
     parsed_custom_settings, _ = collect_custom_settings_from_inputs(model_def, inputs, strict=False)
-    inputs["custom_settings"] = parsed_custom_settings if len(custom_settings) > 0 else None
+    inputs["custom_settings"] = parsed_custom_settings
     clear_custom_setting_slots(inputs)
     inputs.pop("pace", None)
     inputs.pop("exaggeration", None)
@@ -11392,7 +11396,7 @@ def prepare_inputs_dict(target, inputs, model_type = None, model_filename = None
     image_outputs = inputs.get("image_mode",0) > 0
 
     pop=[]    
-    if len(custom_settings) == 0:
+    if not parsed_custom_settings:
         pop += ["custom_settings"]
     if not model_def.get("audio_only", False):
         pop += ["temperature"]
@@ -13894,6 +13898,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                                 choices=[
                                     ("Disabled", ""),
                                     ("Rife x2 frames/s", "rife2"), 
+                                    ("Rife x3 frames/s (v4.26)", "rife3"),
                                     ("Rife x4 frames/s", "rife4"), 
                                 ],
                                 value=temporal_upsampling,

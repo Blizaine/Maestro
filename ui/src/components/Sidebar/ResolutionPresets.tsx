@@ -21,12 +21,14 @@ export function ResolutionPresets() {
   return (
     <div>
       <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">Resolution</label>
-      <div className="flex bg-bg-tertiary rounded-lg p-0.5 border border-border">
+      <div className="grid grid-cols-3 gap-1 bg-bg-tertiary rounded-lg p-0.5 border border-border">
         {presets.map(p => (
           <button
             key={p}
+            type="button"
+            aria-pressed={resolutionPreset === p}
             onClick={() => setResolutionPreset(p)}
-            className={`flex-1 text-xs py-1.5 rounded-md transition-all capitalize ${
+            className={`min-h-10 min-w-0 px-1 text-[10px] rounded-md transition-all ${
               resolutionPreset === p
                 ? 'bg-bg-active text-text-primary'
                 : 'text-text-secondary hover:text-text-primary'

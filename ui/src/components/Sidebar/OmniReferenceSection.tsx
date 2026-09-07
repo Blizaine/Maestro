@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import { BookUser, ChevronDown, FileAudio, GripVertical, Image as ImageIcon, Info, Loader2, Plus, Trash2, UserPlus, Video, X } from 'lucide-react'
+import { BookUser, ChevronDown, FileAudio, GripVertical, Image as ImageIcon, Info, Loader2, Plus, UserPlus, Video, X } from 'lucide-react'
 import * as api from '../../api/client'
 import { useStore } from '../../stores/useStore'
 import { readPersistentDisclosure, writePersistentDisclosure } from '../../lib/persistentDisclosure'
+import { ImportCharacterButton } from '../Characters/CharacterFileActions'
+import { ReferenceCharacterPicker } from '../Characters/ReferenceCharacterPicker'
+import { characterDisplayName } from '../../lib/characters'
 import type { MiniMaxH3AudioIntent, MiniMaxH3Reference, MiniMaxH3ReferenceType, ModelOptions, SavedOmniCharacter } from '../../types'
 
 const IMAGE_RE = /\.(png|jpe?g|webp|bmp|tiff?)$/i
@@ -126,10 +129,17 @@ export function OmniReferenceSection({
 
   useEffect(() => {
     let cancelled = false
-    void api.fetchCharacters()
+    const refresh = () => { void api.fetchCharacters()
       .then(items => { if (!cancelled) setCharacters(items) })
-      .catch(() => { if (!cancelled) setCharacters([]) })
-    return () => { cancelled = true }
+      .catch(() => { if (!cancelled) setCharacters([]) }) }
+    refresh()
+    window.addEventListener('maestro-characters-changed', refresh)
+    window.addEventListener('focus', refresh)
+    return () => {
+      cancelled = true
+      window.removeEventListener('maestro-characters-changed', refresh)
+      window.removeEventListener('focus', refresh)
+    }
   }, [])
 
   useEffect(() => {
@@ -238,6 +248,7 @@ export function OmniReferenceSection({
       role: character.name,
       character_name: character.name,
       library_character_id: character.id,
+      refmod_path: character.refmod?.path,
       image_intent: character.visual.type === 'image' ? 'identity' : undefined,
       remove_background: character.visual.type === 'image' ? false : undefined,
       video_intent: character.visual.type === 'video' ? 'character' : undefined,
@@ -273,7 +284,7 @@ export function OmniReferenceSection({
       || counts.video > limits.video
       || counts.audio > limits.audio
     ) {
-      setError(`Adding ${character.name} would exceed this model's Omni reference limits.`)
+      setError(`Adding ${characterDisplayName(character.name)} would exceed this model's Omni reference limits.`)
       return
     }
     setError('')
@@ -322,10 +333,10 @@ export function OmniReferenceSection({
 
   const removeCharacter = async (character: SavedOmniCharacter) => {
     if (references.some(reference => reference.library_character_id === character.id)) {
-      setError(`Remove ${character.name} from the current Omni references before deleting it.`)
+      setError(`Remove ${characterDisplayName(character.name)} from the current Omni references before deleting it.`)
       return
     }
-    if (!window.confirm(`Delete saved character “${character.name}”?`)) return
+    if (!window.confirm(`Delete saved character “${characterDisplayName(character.name)}”?`)) return
     try {
       await api.deleteCharacter(character.id)
       setCharacters(current => current.filter(item => item.id !== character.id))
@@ -412,6 +423,11 @@ export function OmniReferenceSection({
   }
 
   const activeItems = groupActiveReferences(references)
+  const addedCharacterIds = characters.filter(character => {
+    const bound = references.filter(reference => reference.library_character_id === character.id)
+    return bound.some(reference => reference.type !== 'audio')
+      && (!character.voice || bound.some(reference => reference.type === 'audio'))
+  }).map(character => character.id)
 
   return (
     <section className="space-y-2">
@@ -432,84 +448,40 @@ export function OmniReferenceSection({
         <span className="text-[9px] text-text-muted">{references.length}/{limits.total}</span>
       </div>
 
-      <div className="rounded-lg border border-border bg-bg-tertiary/50 overflow-hidden">
+      <div className="rounded-xl border border-border bg-bg-tertiary/30 overflow-hidden">
         <button
           type="button"
           disabled={disabled}
           aria-expanded={libraryOpen}
           onClick={() => setLibraryOpen(open => !open)}
-          className="w-full flex items-center justify-between gap-2 px-2.5 py-2 text-left hover:bg-bg-tertiary disabled:opacity-50"
+          className="w-full flex items-center justify-between gap-2 px-3 py-3 text-left hover:bg-bg-tertiary disabled:opacity-50"
         >
-          <span className="flex items-center gap-1.5 text-[10px] font-medium text-text-primary">
-            <BookUser size={13} className="text-accent-blue" />
+          <span className="flex items-center gap-2 text-xs font-semibold text-text-primary">
+            <BookUser size={15} className="text-accent-blue" />
             Characters
-            <span className="text-[9px] font-normal text-text-muted">{characters.length}</span>
+            <span className="rounded-md bg-bg-active px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-text-secondary">{characters.length}</span>
           </span>
-          <ChevronDown size={13} className={`text-text-muted transition-transform ${libraryOpen ? 'rotate-180' : ''}`} />
+          <span className="flex items-center gap-2">
+            {addedCharacterIds.length > 0 && <span className="text-[10px] font-medium text-accent-blue">{addedCharacterIds.length} added</span>}
+            <ChevronDown size={14} className={`text-text-muted transition-transform ${libraryOpen ? 'rotate-180' : ''}`} />
+          </span>
         </button>
 
         {libraryOpen && (
-          <div className="border-t border-border p-2 space-y-2">
-            <p className="text-[9px] leading-relaxed text-text-muted">
-              Add a saved name to your prompt normally. Maestro binds its picture or video and voice to one H3 Subject automatically.
+          <div className="border-t border-border p-2.5 space-y-3">
+            <p className="text-[11px] leading-relaxed text-text-secondary">
+              Choose who appears in your scene. Their saved voice comes with them.
             </p>
-
-            {characters.length > 0 && (
-              <div className="grid grid-cols-2 gap-1.5">
-                {characters.map(character => {
-                  const characterReferences = references.filter(
-                    reference => reference.library_character_id === character.id,
-                  )
-                  const added = (
-                    characterReferences.some(reference => reference.type !== 'audio')
-                    && (!character.voice || characterReferences.some(reference => reference.type === 'audio'))
-                  )
-                  return (
-                    <div key={character.id} className="rounded-md border border-border bg-bg-primary p-1.5 flex items-center gap-1.5 min-w-0">
-                      <div className="w-9 h-9 rounded border border-border overflow-hidden bg-bg-tertiary shrink-0 flex items-center justify-center">
-                        {character.visual.type === 'image' ? (
-                          <img src={character.visual.url} alt="" className="w-full h-full object-cover" />
-                        ) : (
-                          <video src={character.visual.url} muted preload="metadata" className="w-full h-full object-cover" />
-                        )}
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <p className="text-[10px] text-text-primary truncate" title={character.name}>{character.name}</p>
-                        <p className="text-[8px] text-text-muted truncate">
-                          {character.visual.type === 'video' ? 'video' : 'image'}{character.voice ? ' + voice' : ''}
-                        </p>
-                        <button
-                          type="button"
-                          disabled={disabled || added}
-                          onClick={() => addCharacter(character)}
-                          className={`text-[9px] ${added ? 'text-indicator-success' : 'text-accent-blue hover:text-text-primary'}`}
-                        >
-                          {added ? 'Added' : 'Add to run'}
-                        </button>
-                      </div>
-                      <button
-                        type="button"
-                        disabled={disabled}
-                        onClick={() => void removeCharacter(character)}
-                        title="Delete saved character"
-                        className="self-start p-0.5 text-text-muted hover:text-indicator-error"
-                      >
-                        <Trash2 size={11} />
-                      </button>
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-
-            <button
-              type="button"
-              disabled={disabled}
-              onClick={() => setCharacterFormOpen(open => !open)}
-              className="flex items-center gap-1 text-[9px] text-accent-blue hover:text-text-primary"
-            >
-              <UserPlus size={11} /> {characterFormOpen ? 'Close new character' : 'Save a new character'}
-            </button>
+            <ReferenceCharacterPicker characters={characters} addedIds={addedCharacterIds} disabled={disabled}
+              onAdd={addCharacter} onDelete={character => void removeCharacter(character)} />
+            <div className="grid grid-cols-2 gap-2 border-t border-border pt-3">
+              <ImportCharacterButton disabled={disabled} label="Import file"
+                className="flex min-h-10 w-full items-center justify-center gap-1.5 rounded-lg border border-border text-[11px] font-medium text-text-secondary hover:bg-bg-hover hover:text-text-primary disabled:opacity-40" />
+              <button type="button" disabled={disabled} onClick={() => setCharacterFormOpen(open => !open)}
+                className="flex min-h-10 items-center justify-center gap-1.5 rounded-lg border border-border text-[11px] font-medium text-text-secondary hover:bg-bg-hover hover:text-text-primary disabled:opacity-40">
+                <UserPlus size={13} /> {characterFormOpen ? 'Close form' : 'New character'}
+              </button>
+            </div>
 
             {characterFormOpen && (
               <div className="rounded-md border border-border bg-bg-primary p-2 space-y-1.5">
@@ -609,7 +581,7 @@ export function OmniReferenceSection({
               const character = characters.find(candidate => candidate.id === item.characterId)
               const visualEntry = item.entries.find(entry => entry.reference.type !== 'audio')
               const voiceEntry = item.entries.find(entry => entry.reference.type === 'audio')
-              const characterName = (
+              const characterName = characterDisplayName(
                 character?.name
                 || visualEntry?.reference.character_name
                 || voiceEntry?.reference.character_name
@@ -633,27 +605,25 @@ export function OmniReferenceSection({
                     setDragIndices(null)
                   }}
                   onDragEnd={() => setDragIndices(null)}
-                  className={`rounded-lg border bg-bg-tertiary p-2 flex gap-2 transition-colors ${active ? 'border-accent-blue' : 'border-border'}`}
+                  className={`rounded-xl border bg-bg-tertiary p-2.5 flex gap-2.5 transition-colors ${active ? 'border-accent-blue' : 'border-border'}`}
                 >
                   <GripVertical size={14} className="mt-2 text-text-muted cursor-grab shrink-0" />
-                  <div className="w-12 h-12 rounded-md border border-border overflow-hidden bg-bg-primary flex items-center justify-center shrink-0">
-                    {visual?.type === 'image' && visual.url ? (
+                  <div className="w-16 h-20 rounded-lg border border-border overflow-hidden bg-bg-primary flex items-center justify-center shrink-0">
+                    {character?.visual.thumbnail_url ? (
+                      <img src={character.visual.thumbnail_url} alt="" className="w-full h-full object-cover" />
+                    ) : visual?.type === 'image' && visual.url ? (
                       <img src={visual.url} alt="" className="w-full h-full object-cover" />
                     ) : visual?.type === 'video' && visual.url ? (
-                      <video src={visual.url} muted preload="metadata" className="w-full h-full object-cover" />
+                      <img src={`/api/v1/characters/${encodeURIComponent(item.characterId)}/media/thumbnail`} alt="" className="w-full h-full object-cover" />
                     ) : visual?.type === 'video' ? (
                       <Video size={18} className="text-accent-blue" />
                     ) : (
                       <ImageIcon size={18} className="text-accent-blue" />
                     )}
                   </div>
-                  <div className="min-w-0 flex-1 space-y-1">
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      <BookUser size={12} className="text-accent-blue shrink-0" />
-                      <span className="text-[10px] font-medium text-text-primary truncate" title={characterName}>{characterName}</span>
-                      <span className="rounded-full bg-accent-blue/10 px-1.5 py-0.5 text-[8px] text-accent-blue shrink-0">Character</span>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[9px] text-text-muted">
+                  <div className="min-w-0 flex-1 space-y-1.5">
+                    <p className="text-xs font-semibold leading-snug text-text-primary break-words line-clamp-2" title={characterName}>{characterName}</p>
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-text-muted">
                       <span>{visual?.type === 'video' ? 'Video identity' : 'Image identity'}</span>
                       {voiceEntry && (
                         <span
@@ -664,10 +634,11 @@ export function OmniReferenceSection({
                         </span>
                       )}
                     </div>
-                    <p className="text-[8px] text-text-muted truncate" title={item.entries.map(entry => labels[entry.index]).join(' + ')}>
+                    <p className="text-[9px] text-text-muted truncate" title={item.entries.map(entry => labels[entry.index]).join(' + ')}>
                       {item.entries.map(entry => labels[entry.index]).join(' + ')} · Bound together as one H3 subject
                     </p>
-                    {visualEntry?.reference.type === 'image' && (
+                    {visualEntry?.reference.refmod_path && <p className="text-[9px] text-text-muted">Uses the saved H3 RefMod appearance.</p>}
+                    {visualEntry?.reference.type === 'image' && !visualEntry.reference.refmod_path && (
                       <label
                         className="flex items-center gap-1.5 text-[9px] text-text-secondary cursor-pointer"
                         title="Remove the portrait's source background on CPU and place the character on neutral white before H3 sees it. Enable this when the source background leaks into the scene; leave it off to preserve more natural lighting context."
@@ -687,7 +658,7 @@ export function OmniReferenceSection({
                     disabled={disabled}
                     onClick={() => update(references.filter(reference => reference.library_character_id !== item.characterId))}
                     title={`Remove ${characterName} from this run`}
-                    className="p-1 self-start text-text-muted hover:text-indicator-error"
+                    className="p-1.5 -mr-1 self-start rounded-md text-text-muted hover:bg-bg-hover hover:text-indicator-error"
                   >
                     <X size={13} />
                   </button>
@@ -752,7 +723,7 @@ export function OmniReferenceSection({
                       <option value="style">Music / sound style only</option>
                     </select>
                   )}
-                  {reference.type === 'image' && (reference.image_intent ?? 'identity') === 'identity' && (
+                  {reference.type === 'image' && !reference.refmod_path && (reference.image_intent ?? 'identity') === 'identity' && (
                     <label
                       className="flex items-center gap-1.5 text-[9px] text-text-secondary cursor-pointer"
                       title="Remove this identity portrait's source background on CPU before H3 sees it. Enable this when the source background leaks into the scene; leave it off to preserve more natural lighting context. Scene, style, and composition references are never altered."

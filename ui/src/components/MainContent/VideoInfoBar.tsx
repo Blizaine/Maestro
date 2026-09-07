@@ -4,6 +4,7 @@ import { useStore } from '../../stores/useStore'
 import { getUploadUrl } from '../../api/client'
 import { formatGenerationDuration } from '../../lib/format'
 import { modelDisplayName } from '../../lib/modelDisplay'
+import { FaceRefinerButton } from '../Characters/FaceRefiner'
 
 export function VideoInfoBar() {
   const outputs = useStore(s => s.filteredOutputs())
@@ -202,6 +203,7 @@ export function VideoInfoBar() {
             Replace voice opens the Tools panel (it needs voice references). */}
         {selected.type === 'video' && (
           <>
+            <FaceRefinerButton source={{ path: selected.name, name: selected.name, url: selected.url }} />
             <button
               onClick={handleUpscale}
               disabled={upscaling}

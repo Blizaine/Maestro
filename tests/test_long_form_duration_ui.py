@@ -52,7 +52,7 @@ class LongFormDurationUiTests(unittest.TestCase):
         self.assertIn("productionHeadingOnly", planning)
         self.assertIn("looksLikeSpeakerLabel", planning)
         self.assertIn("analyzePromptTiming", planning)
-        self.assertIn("dialogueWords / 2.15", planning)
+        self.assertIn("dialogueWords / 2.8", planning)
         self.assertIn("timing.hasScreenplayDialogue", planning)
         self.assertIn("dialogueRequiredWindows", planning)
         self.assertIn("Vague inferred concepts are capped", control)
@@ -77,10 +77,10 @@ class LongFormDurationUiTests(unittest.TestCase):
         self.assertIn("s.params._ltx_original_prompt", studio)
         self.assertIn("autoPrompt={durationPlanningPrompt}", studio)
         self.assertNotIn("autoPrompt={prompt}", studio)
-        self.assertIn("durationPlanningMode === 'auto'", studio)
-        self.assertIn("duration <= windowSize + 0.05", studio)
-        self.assertIn("? automaticWindowMax", studio)
-        self.assertIn("duration, durationPlanningMode, locked", studio)
+        # State convergence and native window growth are exercised by the
+        # real React/Zustand browser regression in tests/ui/studio_duration.cjs.
+        self.assertIn("autoWindowSeconds={planningWindowSeconds}", studio)
+        self.assertIn("nativeTiming=", studio)
         self.assertNotIn("s.params.minimax_h3_references ?? []", studio)
         self.assertIn("s.params.minimax_h3_references)", studio)
         self.assertIn("enablePlanningModes", director)

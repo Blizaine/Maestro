@@ -108,6 +108,9 @@ export function ModelSelector() {
   //   1. enabledModels (Settings → System → Model Visibility),
   //   2. nsfw_only gate (Mature Mode must be on for those to appear).
   const workflowFilter = (model: typeof models[number]) => (
+    (generationMode !== 'video' || (studioVideoWorkflow === 'animate'
+      ? model.model_type === 'viggle_animate' : model.model_type !== 'viggle_animate'))
+    &&
     (generationMode !== 'image' || modelSupportsImageWorkflow(model, imageWorkflow, hasImageReferences))
     && (
       !isPrimaryStudioCreate

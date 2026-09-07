@@ -1,13 +1,15 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { X, Search, Loader2, BookOpen, HardDrive, Tag, Link2, ArrowUpCircle, RefreshCw, KeyRound, ExternalLink, Boxes, Trash2 } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
-import { fetchCivitAIModelFilters, startLoraScan, fetchLoraScanStatus, fetchInstalledLoras, importHuggingFaceLora, checkLoraUpdates, deleteLoraFile } from '../../api/client'
+import { fetchCivitAIModelFilters, fetchLoraDirectories, startLoraScan, fetchLoraScanStatus, fetchInstalledLoras, importHuggingFaceLora, checkLoraUpdates, deleteLoraFile } from '../../api/client'
 import { formatBytes } from '../../lib/format'
+import { resolveLoraImportDirectory, suggestLoraImportDirectory } from '../../lib/loraImport'
 import type { CivitAIModelFilter, InstalledLora } from '../../api/client'
 import { ModelCard } from './ModelCard'
 import { ModelDetail } from './ModelDetail'
 import { DownloadBar } from './DownloadBar'
 import { InstalledCheckpoints } from './InstalledCheckpoints'
+import { CharacterBrowser } from '../Characters/CharacterBrowser'
 
 const SORT_OPTIONS = [
   { value: 'Highest Rated', label: 'Highest Rated' },
@@ -57,7 +59,7 @@ export function LoraBrowser() {
   const [selectedFilter, setSelectedFilter] = useState('')
   // LoRA (adapter) vs Checkpoint (full model) browse mode. Checkpoint mode
   // searches CivitAI Checkpoints and imports them as finetune model variants.
-  const [browseKind, setBrowseKind] = useState<'lora' | 'checkpoint'>('lora')
+  const [browseKind, setBrowseKind] = useState<'lora' | 'checkpoint' | 'character'>('lora')
   // Sticky across sessions (localStorage) — the master nsfw_mode gate below
   // still applies, so a persisted "on" is inert until Mature Mode is enabled.
   const [nsfw, setNsfw] = useState(() => {
@@ -88,6 +90,10 @@ export function LoraBrowser() {
   const [installedLoading, setInstalledLoading] = useState(false)
   const [showUrlImport, setShowUrlImport] = useState(false)
   const [importUrl, setImportUrl] = useState('')
+  const [importTargetDir, setImportTargetDir] = useState('')
+  const [importDirectories, setImportDirectories] = useState<string[]>([])
+  const [importDirectoriesError, setImportDirectoriesError] = useState('')
+  const [importDirectoriesLoading, setImportDirectoriesLoading] = useState(false)
   const [importing, setImporting] = useState(false)
   const [importStatus, setImportStatus] = useState('')
   // Filter for the My LoRAs view: when true, hide everything except
@@ -158,6 +164,33 @@ export function LoraBrowser() {
   // Get the active filter object
   const activeFilter = modelFilters.find(f => f.label === selectedFilter)
 
+  const suggestedImportDir = suggestLoraImportDirectory(importUrl)
+  const destinationDirectories = [...new Set([
+    ...importDirectories,
+    suggestedImportDir,
+    importTargetDir,
+  ])].filter(Boolean).sort((a, b) => a.localeCompare(b))
+  const directoryLabel = (directory: string) => {
+    const label = modelFilters.find(f => f.default_dir === directory)?.label
+    return label ? `${label} — ${directory}` : directory
+  }
+  const loadImportDirectories = useCallback(async () => {
+    setImportDirectoriesLoading(true)
+    setImportDirectoriesError('')
+    try {
+      const result = await fetchLoraDirectories()
+      setImportDirectories(result.directories)
+    } catch {
+      setImportDirectoriesError('Could not load all destination folders.')
+    } finally {
+      setImportDirectoriesLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (open && showUrlImport) void loadImportDirectories()
+  }, [open, showUrlImport, loadImportDirectories])
+
   // Load model filters from backend
   useEffect(() => {
     if (open && modelFilters.length === 0) {
@@ -179,6 +212,7 @@ export function LoraBrowser() {
   }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const doSearch = useCallback((append = false) => {
+    if (browseKind === 'character') return
     const params: Record<string, unknown> = {
       sort, period,
       // Send the effective NSFW value (false when master gate is off,
@@ -231,9 +265,10 @@ export function LoraBrowser() {
       // Backend endpoint dispatches by URL type — both HuggingFace and
       // CivitAI URLs route through the same /huggingface/import-lora
       // endpoint (historical name; now handles both).
-      const result = await importHuggingFaceLora(trimmed)
+      const result = await importHuggingFaceLora(trimmed, resolveLoraImportDirectory(trimmed, importTargetDir))
       setImportStatus(`Downloading ${result.filename} → ${result.target_dir}/ (base: ${result.base_model || 'auto-detected'})`)
       setImportUrl('')
+      setImportTargetDir('')
       pollDownloads()
       // The download runs in background on the server — it'll appear in the download bar
       setTimeout(() => setImportStatus(''), 10000)
@@ -243,19 +278,28 @@ export function LoraBrowser() {
     } finally {
       setImporting(false)
     }
-  }, [importUrl, importing, pollDownloads])
+  }, [importUrl, importTargetDir, importing, pollDownloads])
 
   if (!open) return null
 
   return (
     <div className="fixed inset-0 z-[60] flex flex-col bg-bg-primary">
       {/* Top bar */}
-      <div className="px-4 py-3 border-b border-border flex items-center gap-3 shrink-0">
-        <h1 className="text-sm font-semibold text-text-primary shrink-0">Model Browser</h1>
+      <div className="px-3 py-3 sm:px-4 border-b border-border flex flex-wrap items-center gap-2 sm:gap-3 shrink-0">
+        <h1 className="min-w-0 flex-1 lg:flex-none text-sm font-semibold text-text-primary">Model Browser</h1>
 
+        <button
+          onClick={() => setOpen(false)}
+          aria-label="Close Model Browser"
+          className="order-1 lg:order-4 ml-auto shrink-0 p-1.5 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors"
+        >
+          <X size={18} />
+        </button>
+
+        <div className="order-2 flex w-full min-w-0 flex-wrap items-center gap-2 lg:w-auto lg:gap-3">
         {/* LoRA (adapter) vs Checkpoint (full model) mode */}
-        <div className="flex items-center rounded-lg border border-border overflow-hidden shrink-0 text-xs">
-          {(['lora', 'checkpoint'] as const).map(k => (
+        <div className="flex flex-wrap max-w-full items-center rounded-lg border border-border overflow-hidden text-xs">
+          {(['lora', 'checkpoint', 'character'] as const).map(k => (
             <button
               key={k}
               onClick={() => {
@@ -271,7 +315,7 @@ export function LoraBrowser() {
                   : 'bg-bg-tertiary text-text-secondary hover:text-text-primary'
               }`}
             >
-              {k === 'lora' ? 'LoRAs' : 'Checkpoints'}
+              {k === 'lora' ? 'LoRAs' : k === 'checkpoint' ? 'Checkpoints' : 'Characters / RefMods'}
             </button>
           ))}
         </div>
@@ -302,7 +346,7 @@ export function LoraBrowser() {
                   setTimeout(() => { setScanning(false); setScanProgress('') }, 5000)
                 }
               }}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs bg-bg-tertiary border border-border rounded-lg hover:border-accent-blue text-text-secondary hover:text-accent-blue transition-colors shrink-0"
+              className="flex items-center gap-1.5 px-2 sm:px-2.5 py-1.5 text-xs bg-bg-tertiary border border-border rounded-lg hover:border-accent-blue text-text-secondary hover:text-accent-blue transition-colors shrink-0"
               title="Scan new LoRAs without guides"
             >
               <BookOpen size={12} />
@@ -331,7 +375,7 @@ export function LoraBrowser() {
                   setTimeout(() => { setScanning(false); setScanProgress('') }, 5000)
                 }
               }}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs bg-bg-tertiary border border-border rounded-lg hover:border-indicator-warning text-text-secondary hover:text-indicator-warning transition-colors shrink-0"
+              className="flex items-center gap-1.5 px-2 sm:px-2.5 py-1.5 text-xs bg-bg-tertiary border border-border rounded-lg hover:border-indicator-warning text-text-secondary hover:text-indicator-warning transition-colors shrink-0"
               title="Regenerate ALL guides (overwrites existing)"
             >
               <span className="hidden sm:inline">Regenerate All</span>
@@ -339,33 +383,38 @@ export function LoraBrowser() {
             </button>
             <button
               onClick={() => setShowUrlImport(!showUrlImport)}
-              className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs bg-bg-tertiary border rounded-lg transition-colors shrink-0 ${
+              className={`flex items-center gap-1.5 px-2 sm:px-2.5 py-1.5 text-xs bg-bg-tertiary border rounded-lg transition-colors shrink-0 ${
                 showUrlImport ? 'border-accent-blue text-accent-blue' : 'border-border text-text-secondary hover:border-accent-blue hover:text-accent-blue'
               }`}
               title="Import LoRA from HuggingFace or CivitAI URL"
+              aria-expanded={showUrlImport}
+              aria-controls="model-browser-url-import"
             >
               <Link2 size={12} />
-              <span className="hidden sm:inline">Import URL</span>
+              <span>Import URL</span>
             </button>
           </div>
         )}
         {scanning && (
-          <div className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-accent-blue shrink-0">
-            <Loader2 size={12} className="animate-spin" />
-            <span>{scanProgress}</span>
+          <div className="flex min-w-0 flex-1 items-center gap-1.5 px-2.5 py-1.5 text-xs text-accent-blue">
+            <Loader2 size={12} className="animate-spin shrink-0" />
+            <span className="break-words">{scanProgress}</span>
           </div>
         )}
+        </div>
 
         {/* URL Import panel */}
-        {showUrlImport && (
-          <div className="w-full bg-bg-tertiary border border-border rounded-lg p-3 space-y-2">
+        {showUrlImport && browseKind === 'lora' && (
+          <div id="model-browser-url-import" className="order-5 w-full min-w-0 bg-bg-tertiary border border-border rounded-lg p-3 space-y-2">
             <div className="flex items-center gap-2">
               <input
                 type="text"
                 value={importUrl}
                 onChange={e => setImportUrl(e.target.value)}
+                disabled={importing}
                 placeholder="HuggingFace repo or CivitAI model URL"
-                className="flex-1 bg-bg-secondary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue"
+                aria-label="Model URL"
+                className="min-w-0 flex-1 bg-bg-secondary border border-border rounded-lg px-3 py-1.5 text-base sm:text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue"
                 onKeyDown={e => {
                   if (e.key === 'Enter' && importUrl.trim() && !importing) {
                     e.preventDefault()
@@ -381,11 +430,44 @@ export function LoraBrowser() {
                 {importing ? <Loader2 size={12} className="animate-spin" /> : 'Import'}
               </button>
             </div>
+            <div className="min-w-0 space-y-1">
+              <label htmlFor="model-browser-import-directory" className="block text-xs text-text-secondary">
+                Destination LoRA folder
+              </label>
+              <select
+                id="model-browser-import-directory"
+                value={importTargetDir}
+                onChange={e => setImportTargetDir(e.target.value)}
+                disabled={importing}
+                className="w-full min-w-0 bg-bg-secondary border border-border rounded-lg px-3 py-1.5 text-base sm:text-sm text-text-primary focus:outline-none focus:border-accent-blue"
+              >
+                <option value="">
+                  {suggestedImportDir ? `Auto: ${directoryLabel(suggestedImportDir)}` : 'Auto: detect from repository metadata'}
+                </option>
+                {destinationDirectories.map(directory => (
+                  <option key={directory} value={directory}>{directoryLabel(directory)}</option>
+                ))}
+              </select>
+              <p className="text-[10px] text-text-muted" aria-live="polite">
+                {importTargetDir
+                  ? `Save to ${importTargetDir}/. Your selection takes priority over automatic detection.`
+                  : suggestedImportDir
+                    ? `Suggested from the URL: ${suggestedImportDir}/. Change the folder if needed.`
+                    : 'The importer will use the model metadata, or you can choose a folder above.'}
+              </p>
+              {importDirectoriesLoading && <p className="text-[10px] text-text-muted">Loading folders…</p>}
+              {importDirectoriesError && (
+                <p className="text-[10px] text-indicator-warning" role="status">
+                  {importDirectoriesError}{' '}
+                  <button onClick={loadImportDirectories} className="underline">Retry</button>
+                </p>
+              )}
+            </div>
             <p className="text-[9px] text-text-muted">
-              Paste a HuggingFace model URL. Downloads the LoRA, saves metadata, example media, and generates a usage guide.
+              Paste a HuggingFace or CivitAI model URL. Downloads the LoRA, saves metadata, example media, and generates a usage guide.
             </p>
             {importStatus && (
-              <div className={`text-[10px] ${importStatus.startsWith('Error') ? 'text-red-400' : 'text-accent-blue'}`}>
+              <div className={`break-words text-[10px] ${importStatus.startsWith('Error') ? 'text-red-400' : 'text-accent-blue'}`}>
                 {importStatus}
               </div>
             )}
@@ -393,30 +475,22 @@ export function LoraBrowser() {
         )}
 
         {/* Search input */}
-        {!selectedModel && (
-          <div className="flex-1 flex items-center gap-2 max-w-2xl">
-            <div className="flex-1 relative">
+        {!selectedModel && browseKind !== 'character' && (
+          <div className="order-3 flex w-full min-w-0 items-center gap-2 lg:w-auto lg:flex-1 lg:min-w-48 lg:max-w-2xl">
+            <div className="min-w-0 flex-1 relative">
               <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted" />
               <input
                 type="text"
                 value={query}
                 onChange={e => setQuery(e.target.value)}
                 placeholder="Search CivitAI..."
-                className="w-full bg-bg-tertiary border border-border rounded-lg pl-8 pr-3 py-1.5 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue"
+                className="w-full min-w-0 bg-bg-tertiary border border-border rounded-lg pl-8 pr-3 py-1.5 text-base sm:text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue"
                 autoFocus
               />
             </div>
           </div>
         )}
 
-        <div className="ml-auto shrink-0">
-          <button
-            onClick={() => setOpen(false)}
-            className="p-1.5 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors"
-          >
-            <X size={18} />
-          </button>
-        </div>
       </div>
 
       {/* CivitAI API key onboarding banner. Renders when no key is
@@ -426,7 +500,7 @@ export function LoraBrowser() {
           pages that we now catch at download time, but it's better to
           warn upfront so the user doesn't have to discover it through
           a failed download. */}
-      {!civitaiKeySet && !apiKeyBannerDismissed && (
+      {browseKind !== 'character' && !civitaiKeySet && !apiKeyBannerDismissed && (
         <div className="px-4 py-2.5 bg-amber-500/10 border-b border-amber-500/30 flex items-start gap-2.5 shrink-0">
           <KeyRound size={14} className="text-indicator-warning shrink-0 mt-0.5" />
           <div className="flex-1 min-w-0 text-xs text-text-primary leading-relaxed">
@@ -467,7 +541,7 @@ export function LoraBrowser() {
       )}
 
       {/* Filter row (only in grid view) */}
-      {!selectedModel && (
+      {!selectedModel && browseKind !== 'character' && (
         <div className="px-4 py-2 border-b border-border flex items-center gap-2 overflow-x-auto shrink-0">
           <select
             value={sort}
@@ -634,8 +708,8 @@ export function LoraBrowser() {
       )}
 
       {/* Main content */}
-      <div className="flex-1 overflow-hidden">
-        {selectedModel ? (
+      <div className="min-h-0 flex-1 overflow-hidden">
+        {browseKind === 'character' ? <CharacterBrowser /> : selectedModel ? (
           <ModelDetail model={selectedModel} onBack={clearSelection} kind={browseKind} />
         ) : (browseKind === 'checkpoint' && showCkptInstalled) ? (
           <InstalledCheckpoints onSelectModel={selectModel} />

@@ -54,6 +54,7 @@ gradio_rangeslider==0.0.8
 
 # Vision & segmentation
 opencv-python==4.13.0.92
+ultralytics==8.3.228  # H3 Face Refiner detector; keep the existing Torch stack
 segment-anything==1.0
 rembg[gpu]==2.0.65
 onnxruntime-gpu==1.22.0; python_version < "3.11"

@@ -102,7 +102,7 @@ export function DurationSlider() {
   const memoryPolicy = isOmniReference
     ? modelOptions?.omni_sequence_memory_policy
     : modelOptions?.sliding_window_memory_policy
-  const windowRecommendation = omniReferenceSequence
+  const windowRecommendation = isOmniReference
     ? recommendedH3OmniSequenceProfile(
         memoryPolicy,
         resolution,
@@ -113,6 +113,13 @@ export function DurationSlider() {
       )
     : recommendedWindowProfile(memoryPolicy, resolution, totalVramGb)
   const safeWindowFrames = windowRecommendation?.frames ?? null
+  const automaticCapFrames = Math.max(minimumFrames, Math.min(
+    swDefaults?.window_max ?? maximumFrames,
+    locked ? Math.round(windowSize * fps)
+      : safeWindowFrames ?? (windowRecommendation?.supported === false
+        ? minimumFrames : swDefaults?.window_max ?? maximumFrames),
+  ))
+  const planningWindowSeconds = automaticCapFrames / fps
   const unsupportedAutoResolution = windowRecommendation?.supported === false
   const nativeMinSeconds = modelOptions?.frames_minimum
     ? modelOptions.frames_minimum / fps
@@ -172,168 +179,21 @@ export function DurationSlider() {
       })
     : 1
   const showOmniSequence = omniReferenceSequence && omniSequenceClipCount > 1
-  const previousH3DefaultSelection = useRef<string | null>(null)
-  const previousH3Recommendation = useRef<number | null>(null)
-  const h3DefaultAppliedThisPass = useRef(false)
-
-  // Sequence mode is a consequence of timeline length, not a separate user
-  // choice. This also repairs older sidecars whose saved duration exceeded a
-  // native pass but whose legacy multi-window checkbox was off.
+  // Native capacity and total duration are reconciled in one store action.
+  // Never derive a new memory recommendation from the sequence flag that this
+  // same reconciliation changes (the v2.0.1 Extend crash).
+  const previousSelection = useRef(overrideKey)
   useEffect(() => {
-    const shouldSequence = durationPlan.windowCount > 1
-    if (isLtx && ltxMultiWindow !== shouldSequence) {
-      setParam('ltx_multi_window', shouldSequence)
-    } else if (isH3 && isOmniReference && omniReferenceSequence !== shouldSequence) {
-      setParam('minimax_h3_reference_sequence', shouldSequence)
-    } else if (isH3 && !isOmniReference && h3FirstLastMultiWindow !== shouldSequence) {
-      setParam('minimax_h3_multi_window', shouldSequence)
+    if (previousSelection.current !== overrideKey) {
+      previousSelection.current = overrideKey
+      setLocked(savedOverrideFrames != null)
+      if (savedOverrideFrames != null) setWindowSize(savedOverrideFrames / fps)
     }
-  }, [durationPlan.windowCount, h3FirstLastMultiWindow, isH3, isLtx, isOmniReference, ltxMultiWindow, omniReferenceSequence, setParam])
-
-  // A saved override belongs to one exact model/canvas pair. Switching model
-  // or resolution starts both the visible Duration and native Window Length
-  // at that saved value, or at Auto's VRAM recommendation. The recommendation
-  // is a starting point, not a ceiling; subsequent user movement does not
-  // retrigger this initialization.
-  useEffect(() => {
-    h3DefaultAppliedThisPass.current = false
-    if (!isH3) {
-      previousH3DefaultSelection.current = null
-      previousH3Recommendation.current = null
-      return
-    }
-    const selectionChanged = previousH3DefaultSelection.current !== overrideKey
-    const recommendationChanged = (
-      savedOverrideFrames == null
-      && previousH3Recommendation.current !== safeWindowFrames
-    )
-    previousH3DefaultSelection.current = overrideKey
-    previousH3Recommendation.current = safeWindowFrames
-    if (!selectionChanged && !recommendationChanged) return
-
-    const preferredFrames = savedOverrideFrames ?? safeWindowFrames
-    if (preferredFrames != null) {
-      const preferredSeconds = preferredFrames / fps
-      if (Math.abs(preferredSeconds - windowSize) > 0.0001) {
-        setWindowSize(preferredSeconds)
-      }
-      // Enabling a long-form H3 sequence changes the memory recommendation,
-      // but that recommendation is the per-window size—not a replacement for
-      // an established total timeline (for example, a drive-audio track).
-      // Model/resolution changes still initialize both values as before.
-      const shouldInitializeTotalDuration = selectionChanged || !h3MultiWindowEnabled
-      if (
-        shouldInitializeTotalDuration
-        && Math.abs(preferredSeconds - duration) > 0.0001
-      ) {
-        setDuration(preferredSeconds)
-      }
-    }
-    setLocked(savedOverrideFrames != null)
-    h3DefaultAppliedThisPass.current = true
-  }, [
-    isH3,
-    overrideKey,
-    savedOverrideFrames,
-    safeWindowFrames,
-    fps,
-    duration,
-    windowSize,
-    setDuration,
-    setWindowSize,
-    setLocked,
-    h3MultiWindowEnabled,
-  ])
-
-  // Auto-track: window size follows duration with a small model-native
-  // buffer until it reaches that model's declared per-window ceiling.
-  //
-  // A one-native-step buffer fixes an observed bug: when duration was
-  // set EXACTLY equal to sliding window size, wgp's internal latent-
-  // step quantization could land video_length one step ABOVE
-  // sliding_window_size after rounding, causing a single-window clip
-  // to split into two windows and produce a stutter at the boundary.
-  // The small buffer guarantees sliding_window stays comfortably
-  // above video_length after quantization. The cost — user sees
-  // "Window: 20s" for a 19s clip — is trivial; the benefit is
-  // single-window generation always works as intended.
-  useEffect(() => {
-    if (h3DefaultAppliedThisPass.current) {
-      h3DefaultAppliedThisPass.current = false
-      return
-    }
-    if (duration > maxDuration) {
-      setDuration(maxDuration)
-      return
-    }
-    if (isH3) {
-      if (locked || savedOverrideFrames != null || safeWindowFrames == null) return
-      const nextWindowSize = safeWindowFrames / fps
-      if (Math.abs(nextWindowSize - windowSize) > 0.0001) {
-        setWindowSize(nextWindowSize)
-      }
-      return
-    }
-    // LTX long-form Auto follows Duration up to the model's native window
-    // ceiling. This keeps a 58-second timeline at roughly three 20-second
-    // passes instead of preserving a short one-window value and creating a
-    // dozen tiny passes. Moving Window Length in Advanced locks it, so an
-    // intentionally shorter user-selected pass still remains untouched.
-    if (omniReferenceSequence) {
-      if (locked || safeWindowFrames == null) return
-      const nextWindowSize = safeWindowFrames / fps
-      if (Math.abs(nextWindowSize - windowSize) > 0.0001) {
-        setWindowSize(nextWindowSize)
-      }
-      return
-    }
-    if (!supportsSlidingWindows || locked) return
-
-    // Auto Duration already derives its recommendation from the current
-    // native window. Feeding a one-window recommendation back into LTX's
-    // duration-following window control creates a circular update:
-    //
-    //   duration = window -> window = duration + one step -> repeat
-    //
-    // LTX-2.5's 10.0s default needs roughly 33 synchronous updates to reach
-    // its 20.9s ceiling, which trips React's maximum-update-depth guard and
-    // blanks the entire UI during startup (GitHub #97). A one-window Auto plan
-    // therefore stays at its stable native default. A genuine multi-window
-    // Auto plan jumps directly to the safe ceiling below, retaining the
-    // efficient long-window behavior without a chain of nested updates.
-    if (
-      durationPlanningMode === 'auto'
-      && duration <= windowSize + 0.05
-    ) return
-
-    let nextWindowSize: number
-    if (swDefaults) {
-      const windowMin = (swDefaults.window_min ?? Math.round(3 * fps)) / fps
-      const windowMax = (swDefaults.window_max ?? Math.round(40 * fps)) / fps
-      const automaticWindowMax = Math.min(
-        windowMax,
-        unsupportedAutoResolution
-          ? windowMin
-          : (safeWindowFrames != null ? safeWindowFrames / fps : windowMax),
-      )
-      const nativeBuffer = (swDefaults.window_step ?? fps) / fps
-      nextWindowSize = durationPlanningMode === 'auto'
-        ? automaticWindowMax
-        : Math.min(
-            automaticWindowMax,
-            Math.max(windowMin, duration + nativeBuffer),
-          )
-    } else if (duration <= 20) {
-      nextWindowSize = duration + 1
-    } else if (windowSize < 10) {
-      nextWindowSize = 20
-    } else {
-      return
-    }
-    if (Math.abs(nextWindowSize - windowSize) > 0.0001) {
-      setWindowSize(nextWindowSize)
-    }
-  }, [duration, durationPlanningMode, locked, supportsSlidingWindows, omniReferenceSequence, maxDuration, fps, swDefaults, safeWindowFrames, unsupportedAutoResolution, windowSize, setDuration, setWindowSize, isH3, isLtx, ltxMultiWindow, savedOverrideFrames, overrideKey])
+    // A child Auto effect may already have changed the timeline this commit.
+    // Reconcile that current value instead of restoring this render's stale one.
+    setDuration(useStore.getState().durationSeconds)
+  }, [duration, durationPlanningMode, windowSize, resolution, modelType, totalVramGb, savedOverrideFrames, locked, overlap,
+    modelOptions, setDuration, overrideKey, setLocked, setWindowSize, fps])
 
   const imageMode = useStore(s => s.params.image_mode)
   const isMultiClip = imageMode === 2
@@ -357,9 +217,11 @@ export function DurationSlider() {
   ))
   const driveDuration = Number(driveReference?.duration_seconds)
   const hasTimedGuide = Boolean(audioGuide || videoGuide)
+  const viggleSourceSeconds = useStore(s => s.params._viggle_source_seconds)
   const autoSourceSeconds = Number.isFinite(driveDuration) && driveDuration > 0
     ? driveDuration
-    : hasTimedGuide ? duration : null
+    : modelType === 'viggle_animate' && viggleSourceSeconds ? viggleSourceSeconds
+      : hasTimedGuide ? duration : null
   const autoSourceLabel = Number.isFinite(driveDuration) && driveDuration > 0
     ? 'music / performance timeline'
     : videoGuide ? 'control video' : audioGuide ? 'audio track' : undefined
@@ -381,14 +243,20 @@ export function DurationSlider() {
         onPlanningModeChange={mode => setParam('_duration_planning_mode', mode)}
         autoPrompt={durationPlanningPrompt}
         autoPlanningStyle={creativeWindowPlanning ? 'creative' : 'faithful'}
-        autoSourceSeconds={autoSourceSeconds}
+        autoSourceSeconds={autoSourceSeconds == null ? null : Math.round(autoSourceSeconds * fps) / fps}
         autoSourceLabel={autoSourceLabel}
+        autoMediaOnly={modelType === 'viggle_animate'}
         autoManualWindowCount={manualWindowPrompts ? Math.max(1, promptLineCount) : null}
+        autoWindowSeconds={planningWindowSeconds}
+        autoFirstWindowSeconds={isVideoExtend
+          ? continuationFirstWindowSeconds(planningWindowSeconds, overlap, fps)
+          : planningWindowSeconds}
+        nativeTiming={{ minimumFrames: Math.round(minDuration * fps), frameStep, fps }}
       />
       {showSlidingWindow && !isMultiClip && (
         <div className="text-[10px] text-text-muted mt-1">
           {windowCount} windows of {formatSeconds(windowSize)} &middot;{' '}
-          {automaticPromptPacing
+          {modelType === 'viggle_animate' ? 'fixed motion-transfer prompt' : automaticPromptPacing
             ? (isLtx ? 'AI-planned window prompts' : 'full prompt auto-paced')
             : <span className={promptLineCount === windowCount ? '' : 'text-amber-400'}>
                 {promptLineCount}/{windowCount} prompts
@@ -520,7 +388,7 @@ export function WindowSettings() {
   const memoryPolicy = isOmniReference
     ? modelOptions?.omni_sequence_memory_policy
     : modelOptions?.sliding_window_memory_policy
-  const windowRecommendation = omniReferenceSequence
+  const windowRecommendation = isOmniReference
     ? recommendedH3OmniSequenceProfile(
         memoryPolicy,
         resolution,
@@ -550,7 +418,8 @@ export function WindowSettings() {
   )
 
   if (
-    !isH3 && !supportsSlidingWindows && !omniReferenceSequence
+    modelType === 'viggle_animate'
+    || (!isH3 && !supportsSlidingWindows && !omniReferenceSequence)
   ) return null
 
   return (

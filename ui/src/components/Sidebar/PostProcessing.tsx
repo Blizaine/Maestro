@@ -2,6 +2,7 @@ import { useState, useMemo, useRef } from 'react'
 import { ChevronDown, ChevronRight, X, Mic } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
+import { MediaFinishingControls, dlssSpatialOptions } from './MediaFinishingControls'
 
 const baseOptions = [
   { value: '', label: 'None' },
@@ -30,6 +31,8 @@ export function PostProcessing() {
   const [open, setOpen] = useState(false)
   const spatialUpsampling = useStore(s => s.spatialUpsampling)
   const setSpatialUpsampling = useStore(s => s.setSpatialUpsampling)
+  const params = useStore(s => s.params)
+  const setParam = useStore(s => s.setParam)
   const filmGrainIntensity = useStore(s => s.filmGrainIntensity)
   const setFilmGrainIntensity = useStore(s => s.setFilmGrainIntensity)
   const filmGrainSaturation = useStore(s => s.filmGrainSaturation)
@@ -70,12 +73,12 @@ export function PostProcessing() {
   })
 
   const upsamplingOptions = useMemo(
-    () => [...baseOptions, ...flashvsrOptions, ...(showVae ? vaeOptions : [])],
+    () => [...baseOptions, ...flashvsrOptions, ...dlssSpatialOptions, ...(showVae ? vaeOptions : [])],
     [showVae],
   )
 
   const hasVoiceClone = voiceCloneEnabled && voiceCloneRefs.some(r => r && r.path)
-  const hasAny = spatialUpsampling !== '' || filmGrainIntensity > 0 || hasVoiceClone
+  const hasAny = spatialUpsampling !== '' || !!params.temporal_upsampling || filmGrainIntensity > 0 || hasVoiceClone
 
   return (
     <div>
@@ -105,6 +108,10 @@ export function PostProcessing() {
               ))}
             </select>
           </div>
+
+          <MediaFinishingControls spatial={spatialUpsampling} temporal={params.temporal_upsampling || ''}
+            onTemporal={value => setParam('temporal_upsampling', value)} options={params.custom_settings || {}}
+            onOptions={value => setParam('custom_settings', value)} image={generationMode === 'image'} />
 
           {/* Film Grain Intensity */}
           <div>

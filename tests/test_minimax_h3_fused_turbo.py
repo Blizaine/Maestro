@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import ast
+import copy
 from pathlib import Path
+import struct
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -64,8 +68,8 @@ class TestFusedH3Definitions(unittest.TestCase):
         self.assertEqual(frames_model["inference_steps_min"], 4)
         self.assertEqual(frames_model["inference_steps_max"], 8)
         self.assertEqual(frames_model["inference_steps_label"], "Total Steps")
-        self.assertTrue(frames_model["loras_disabled"])
-        self.assertTrue(references_model["loras_disabled"])
+        self.assertFalse(frames_model["loras_disabled"])
+        self.assertFalse(references_model["loras_disabled"])
         self.assertEqual(frames_model["architecture"], "minimax_h3")
         self.assertEqual(references_model["architecture"], "minimax_h3_ref2va")
 
@@ -85,6 +89,8 @@ class TestFusedH3Definitions(unittest.TestCase):
         )
 
         self.assertTrue(definition["sla_attention"])
+        self.assertFalse(definition["loras_disabled"])
+        self.assertFalse(reference_definition["loras_disabled"])
         self.assertFalse(definition["sol_attention"])
         self.assertFalse(definition["first_block_cache"])
         self.assertFalse(definition["lock_inference_steps"])
@@ -117,31 +123,28 @@ class TestFusedH3Definitions(unittest.TestCase):
         self.assertIn("LICENSE", flattened)
         self.assertIn("NOTICE", flattened)
 
-    def test_baked_recipe_rejects_user_loras_and_removes_stale_turbo(self):
+    def test_baked_recipe_preserves_user_loras_and_aligned_strengths(self):
         from models.minimax_h3.fused_turbo import normalize_fused_h3_request
 
         body = {
-            "activated_loras": ["MiniMax-H3-FL2VA-Acc-8Step.safetensors"],
-            "loras_multipliers": "1.00",
+            "activated_loras": ["my_character.safetensors", "film_style.safetensors"],
+            "loras_multipliers": "0.35 0.00",
             "num_inference_steps": 6,
             "guidance_scale": 4.0,
             "override_attention": "",
             "skip_steps_cache_type": "first_block",
             "minimax_h3_turbo_mode": True,
         }
-        self.assertEqual(normalize_fused_h3_request(body), 1)
-        self.assertEqual(body["activated_loras"], [])
+        normalize_fused_h3_request(body)
+        self.assertEqual(body["activated_loras"], ["my_character.safetensors", "film_style.safetensors"])
+        self.assertEqual(body["loras_multipliers"], "0.35 0.00")
+        self.assertFalse(body["minimax_h3_turbo_mode"])
         self.assertEqual(body["num_inference_steps"], 6)
         self.assertEqual(body["guidance_scale"], 1.0)
         self.assertEqual(body["flow_shift"], 12.0)
         self.assertEqual(body["audio_flow_shift"], 3.0)
         self.assertEqual(body["override_attention"], "sla")
         self.assertEqual(body["skip_steps_cache_type"], "")
-
-        with self.assertRaisesRegex(ValueError, "additional LoRAs"):
-            normalize_fused_h3_request(
-                {"activated_loras": ["my_character.safetensors"]}
-            )
 
         for invalid_steps in (3, 9, 5.5, "many"):
             with self.subTest(invalid_steps=invalid_steps):
@@ -156,6 +159,72 @@ class TestFusedH3Definitions(unittest.TestCase):
         default_body = {"activated_loras": []}
         normalize_fused_h3_request(default_body)
         self.assertEqual(default_body["num_inference_steps"], 4)
+
+    def test_acceleration_conflicts_fail_without_mutating_selection(self):
+        from models.minimax_h3.fused_turbo import normalize_fused_h3_request
+
+        for name in (
+            "MiniMax-H3-FL2VA-Acc-8Step.safetensors",
+            "MiniMax-H3-Ref2VA-Acc-8Step.safetensors",
+            r"C:\loras\minimax_h3_turbo_v4_step600_ema.safetensors",
+            "MiniMax-H3-VDN-default.safetensors",
+            "MiniMax-H3-VDN-Turbo-8-Steps.safetensors",
+        ):
+            with self.subTest(name=name):
+                body = {"activated_loras": ["character.safetensors", name],
+                        "loras_multipliers": "0.35 1.00", "guidance_scale": 4}
+                before = copy.deepcopy(body)
+                with self.assertRaisesRegex(ValueError, "cannot use"):
+                    normalize_fused_h3_request(body)
+                self.assertEqual(body, before)
+
+    def test_renamed_incompatible_headers_are_blocked_in_catalog_and_requests(self):
+        from models.minimax_h3.fused_turbo import normalize_fused_h3_request
+
+        # Exercise the actual catalog policy without importing the running server.
+        tree = ast.parse((APP / "launch.py").read_text(encoding="utf-8"))
+        policy = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                      and node.name == "_lora_is_compatible_with_model")
+        namespace = {}
+        exec(compile(ast.Module(body=[policy], type_ignores=[]), "launch.py", "exec"), namespace)
+        compatible = namespace[policy.name]
+        ordinary = {"blocks.0.attn.qkv_proj.lora_A.weight": {"shape": [16, 2688]}}
+        headers = {
+            "turbo": {"__metadata__": {"base_model": "minimax-h3", "sampler_steps": "4", "application": "lora_A @ lora_B"}},
+            "pdd": {"proj_out.weight": {"shape": [32, 4, 8]}, "audio_proj_out.weight": {"shape": [32, 2, 8]}},
+            "vdn": {"transformer_blocks.0.attn.linear_attention.to_q.weight": {"shape": [8, 8]}},
+            "dora": {"blocks.0.attn.qkv_proj.lora_magnitude_vector.weight": {"shape": [8]}},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            for label, header in headers.items():
+                with self.subTest(label=label):
+                    path = Path(directory) / f"renamed_{label[0]}.safetensors"
+                    encoded = json.dumps(header).encode("utf-8")
+                    path.write_bytes(struct.pack("<Q", len(encoded)) + encoded)
+                    for architecture in ("minimax_h3", "minimax_h3_ref2va"):
+                        md = {"architecture": architecture, "minimax_h3_fused_turbo": True}
+                        self.assertFalse(compatible(md, str(path)))
+                    body = {"activated_loras": [path.name], "loras_multipliers": "0.5"}
+                    with self.assertRaisesRegex(ValueError, "cannot use"):
+                        normalize_fused_h3_request(body, resolve_lora=lambda _: str(path))
+            ordinary_path = Path(directory) / "character.safetensors"
+            encoded = json.dumps(ordinary).encode("utf-8")
+            ordinary_path.write_bytes(struct.pack("<Q", len(encoded)) + encoded)
+            self.assertTrue(compatible({"architecture": "minimax_h3", "minimax_h3_fused_turbo": True}, str(ordinary_path)))
+
+    def test_handler_accepts_ordinary_loras_and_rejects_accelerators(self):
+        from models.minimax_h3.minimax_h3_handler import family_handler
+
+        for architecture in ("minimax_h3", "minimax_h3_ref2va"):
+            with self.subTest(architecture=architecture):
+                md = family_handler.query_model_def(architecture, {"minimax_h3_fused_turbo": True})
+                body = {"activated_loras": ["character.safetensors"], "loras_multipliers": "0.4",
+                        "video_length": 243, "sliding_window_size": 243}
+                self.assertIsNone(family_handler.validate_generative_settings(architecture, md, body))
+                self.assertEqual(body["activated_loras"], ["character.safetensors"])
+                self.assertEqual(body["loras_multipliers"], "0.4")
+                body["activated_loras"].append("MiniMax-H3-FL2VA-Acc-8Step.safetensors")
+                self.assertIn("cannot use", family_handler.validate_generative_settings(architecture, md, body))
 
     def test_attribution_and_ui_contracts_are_present(self):
         notice = (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
@@ -362,6 +431,94 @@ class TestFusedH3Definitions(unittest.TestCase):
             definition["omni_sequence_memory_policy"]["checkpoint"],
             "fused_4step_references",
         )
+
+
+class TestFusedH3LoraRuntime(unittest.TestCase):
+    def test_pipeline_validation_allows_ordinary_loras_and_clears_special_state(self):
+        from models.minimax_h3.minimax_h3_main import MiniMaxH3Model
+
+        model = MiniMaxH3Model.__new__(MiniMaxH3Model)
+        model._fused_turbo = True
+        model.model_def = {}
+        model.omni_reference = False
+        model._turbo_lora_active = True
+        model._pdd_lora_active = True
+        model.validate_loras(["character.safetensors"])
+        self.assertFalse(model._turbo_lora_active)
+        self.assertFalse(model._pdd_lora_active)
+        self.assertIsNone(model._pdd_lora_path)
+        with self.assertRaisesRegex(ValueError, "cannot use"):
+            model.validate_loras(["MiniMax-H3-VDN-default.safetensors"])
+        model.validate_loras([])
+        self.assertFalse(model._turbo_lora_active)
+
+    def test_mmgp_loads_ordinary_lora_with_native_rotation_and_variable_strength(self):
+        """Use real MMGP loading on a small CPU ConvRot layer, without a GPU model."""
+        import torch
+        from mmgp import offload, quant_router
+        from safetensors.torch import save_file
+        from models.minimax_h3.minimax_h3_main import MiniMaxH3Model
+        from shared.qtypes import int8_convrot
+
+        quant_router.register_handler("shared.qtypes.int8_convrot")
+        descriptor = torch.tensor(list(json.dumps({
+            "format": "int8_tensorwise", "convrot": True, "convrot_groupsize": 4,
+        }).encode("utf-8")), dtype=torch.uint8)
+        weight = torch.tensor([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=torch.int8)
+        model = torch.nn.Module()
+        model.linear = torch.nn.Linear(4, 2, bias=False, dtype=torch.float32)
+        offload.load_model_data(model, ({
+            "linear.weight": weight,
+            "linear.weight_scale": torch.ones(2),
+            "linear.comfy_quant": descriptor,
+        }, None), default_dtype=torch.float32, verboseLevel=0)
+        manager = offload.offload.__new__(offload.offload)
+        model._loras_model_data = {}
+        model._loras_model_shortcuts = {}
+        model.linear._mm_manager = manager
+        model.linear.forward = manager.hook_lora(
+            model.linear, model, "transformer", model._loras_model_data,
+            model._loras_model_shortcuts, "linear",
+        )
+        pipeline = MiniMaxH3Model.__new__(MiniMaxH3Model)
+        pipeline.transformer = model
+        pipeline._fused_turbo = True
+        pipeline._turbo_lora_active = False
+        pipeline._pdd_lora_active = False
+        lora_a = torch.tensor([[1.0, 0.0, -1.0, 0.5]])
+        lora_b = torch.tensor([[0.25], [-0.75]])
+        inputs = torch.tensor([[1.0, 2.0, 4.0, 8.0]])
+        base = torch.nn.functional.linear(int8_convrot._rotate_activation(inputs, 4), weight.float())
+        delta = (inputs @ lora_a.T) @ lora_b.T
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "character.safetensors")
+            save_file({"linear.lora_A.weight": lora_a, "linear.lora_B.weight": lora_b}, path)
+            for strength in (0.35, 0.0, 0.8):
+                with self.subTest(strength=strength):
+                    offload.load_loras_into_model(model, [path], [strength], pinnedLora=False, verboseLevel=0)
+                    self.assertEqual(model._loras_errors, [])
+                    # CPU tensors stand in for device-resident LoRA buffers.
+                    data = model.linear._mm_lora_data
+                    for adapter in model._loras_active_adapters:
+                        data[adapter + "_GPU"] = data[adapter]
+                    pipeline.finalize_loras()
+                    with torch.inference_mode():
+                        self.assertTrue(torch.allclose(model.linear(inputs), base + delta * strength))
+            offload.unload_loras_from_model(model)
+            with torch.inference_mode():
+                self.assertTrue(torch.allclose(model.linear(inputs), base))
+
+    def test_missing_native_hook_fails_for_ordinary_loras(self):
+        import torch
+        from models.minimax_h3.minimax_h3_main import MiniMaxH3Model
+
+        model = MiniMaxH3Model.__new__(MiniMaxH3Model)
+        model.transformer = torch.nn.Linear(4, 2)
+        model.transformer._mm_requires_native_linear_forward = True
+        model.transformer._mm_lora_data = {"ordinary": object()}
+        model._turbo_lora_active = False
+        with self.assertRaisesRegex(RuntimeError, "ConvRot-safe"):
+            model.finalize_loras()
 
 
 class TestFusedH3Scheduler(unittest.TestCase):

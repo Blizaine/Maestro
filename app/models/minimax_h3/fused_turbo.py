@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from .turbo import is_minimax_h3_turbo_lora
+import re
+
+from .turbo import is_minimax_h3_turbo_lora, safetensors_header
 
 
 FUSED_H3_DEFAULT_EVALUATIONS = 4
@@ -42,24 +44,60 @@ def normalize_fused_h3_steps(value) -> int:
     return steps
 
 
-def normalize_fused_h3_request(body: dict) -> int:
-    """Normalize the baked recipe and remove stale managed accelerators.
+def fused_h3_lora_incompatibility(path: str) -> str | None:
+    """Identify adapters that cannot be stacked on the fused checkpoint.
 
-    Returns the number of managed Turbo/PDD selections removed after a model
-    switch. Ordinary user LoRAs are rejected instead of being silently lost.
+    Header inspection also catches renamed PDD/VDN and DoRA files. Ordinary
+    H3 LoRAs continue through the existing format, AdaLN and shape validation
+    in the loader; this is not a guarantee of four-step visual quality.
     """
 
-    selected = list(body.get("activated_loras") or [])
-    stale_managed = [item for item in selected if is_minimax_h3_turbo_lora(item)]
-    ordinary = [item for item in selected if not is_minimax_h3_turbo_lora(item)]
-    if ordinary:
-        names = ", ".join(str(item).rsplit("/", 1)[-1].rsplit("\\", 1)[-1] for item in ordinary)
+    path = str(path)
+    name = path.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    tokens = set(re.split(r"[^a-z0-9]+", name))
+    if is_minimax_h3_turbo_lora(path) or tokens.intersection({"turbo", "pdd", "acc", "acceleration", "accelerator"}):
+        return "Turbo is already baked in; additional acceleration recipes cannot be stacked"
+    header = safetensors_header(path)
+    keys = tuple(str(key).lower() for key in header if key != "__metadata__")
+    if "vdn" in tokens or any(
+        marker in key
+        for key in keys
+        for marker in (".attn.vdn.", ".attn.linear_attention.", ".attn.softmax_gate.", ".attn.to_out_linear.")
+    ):
+        return "VDN adapters require the dedicated H3 VDN model"
+    if any("lora_magnitude_vector" in key or "dora_scale" in key for key in keys):
+        return "DoRA is unsupported on INT8 ConvRot; use a standard H3 LoRA"
+    if all(
+        isinstance(header.get(key), dict)
+        and len(header[key].get("shape", [])) == 3
+        and header[key]["shape"][0] == 32
+        for key in ("proj_out.weight", "audio_proj_out.weight")
+    ):
+        return "PDD interval heads cannot be stacked on the fused Turbo recipe"
+    return None
+
+
+def validate_fused_h3_loras(paths) -> None:
+    """Reject conflicting adapters, preserving the user's selection on error."""
+
+    for path in paths or []:
+        reason = fused_h3_lora_incompatibility(path)
+        if reason is None:
+            continue
+        name = str(path).replace("\\", "/").rsplit("/", 1)[-1]
         raise ValueError(
-            "H3 Fused 4-Step already contains its Turbo and Mystic adapters. "
-            f"Disable these additional LoRAs before generating: {names}."
+            f"H3 Fused 4-Step cannot use {name}: {reason}. "
+            "Disable this adapter or choose its compatible H3 model."
         )
-    body["activated_loras"] = []
-    body["loras_multipliers"] = ""
+
+
+def normalize_fused_h3_request(body: dict, *, resolve_lora=None) -> None:
+    """Keep ordinary adapters and their strengths while enforcing the recipe."""
+
+    selected = body.get("activated_loras") or []
+    validate_fused_h3_loras(selected)
+    if resolve_lora is not None:
+        validate_fused_h3_loras([resolve_lora(path) for path in selected])
     body["minimax_h3_turbo_mode"] = False
     body["minimax_h3_turbo_preset"] = ""
     body["num_inference_steps"] = normalize_fused_h3_steps(
@@ -75,7 +113,6 @@ def normalize_fused_h3_request(body: dict) -> int:
     body["override_attention"] = (
         "sdpa" if requested_attention == "sdpa" else "sla"
     )
-    return len(stale_managed)
 
 
 __all__ = [
@@ -84,6 +121,8 @@ __all__ = [
     "FUSED_H3_MAX_EVALUATIONS",
     "FUSED_H3_MIN_EVALUATIONS",
     "FUSED_H3_SOLVER",
+    "fused_h3_lora_incompatibility",
     "normalize_fused_h3_request",
     "normalize_fused_h3_steps",
+    "validate_fused_h3_loras",
 ]

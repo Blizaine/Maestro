@@ -323,6 +323,8 @@ class TestMiniMaxH3Definition(unittest.TestCase):
                 "minimax_h3_full",
                 "minimax_h3_ref2va",
                 "minimax_h3_ref2va_full",
+                "minimax_h3_voice_audio",
+                "viggle_animate",
             ],
         )
         self.assertEqual((model_def["fps"], model_def["frames_minimum"]), (24, 124))
@@ -1848,7 +1850,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         source = _read(_HANDLER_PATH)
         self.assertIn("_TRANSFORMER_WORKING_VRAM_MB = 10 * 1024", source)
         self.assertIn('"workingVRAM": {', source)
-        self.assertIn('"transformer": _TRANSFORMER_WORKING_VRAM_MB', source)
+        self.assertIn('"transformer": int((model_def or {}).get("minimax_h3_transformer_working_vram_gb", 10) * 1024)', source)
 
     def test_h3_video_references_get_a_dedicated_memory_profile(self):
         launch = _read(_LAUNCH_PATH)
@@ -1880,7 +1882,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
     def test_maestro_registers_the_family_and_uses_its_native_frame_grid(self):
         source = _read(_WGP_PATH)
         self.assertIn('"models.minimax_h3.minimax_h3_handler"', source)
-        self.assertIn("video_length = normalize_model_total_frame_count(video_length, model_def)", source)
+        self.assertIn("video_length = normalize_model_total_frame_count(video_length, model_def, window_size=sliding_window_size)", source)
         self.assertIn(
             "frame_num=align_model_frame_count(current_video_length, model_def, for_generation=True)",
             source,
@@ -1906,20 +1908,15 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             "s.params.minimax_h3_multi_window === true",
             duration,
         )
-        self.assertIn("const shouldSequence = durationPlan.windowCount > 1", duration)
         self.assertIn("continuationFirstWindowSeconds(windowSize, overlap, fps)", duration)
-        self.assertIn("minimax_h3_reference_sequence', shouldSequence", duration)
-        self.assertIn("minimax_h3_multi_window', shouldSequence", duration)
-        self.assertIn("setDuration(preferredSeconds)", duration)
+        # Native duration, sequence transitions and window overrides run in
+        # real React/Zustand tests (tests/ui/studio_duration.cjs).
         self.assertIn("max={isH3 ? maximumFrames : windowMaxSeconds}", duration)
         self.assertIn("value={isH3 ? currentWindowFrames : windowSize}", duration)
         self.assertIn("sliderValue / fps", duration)
         self.assertNotIn("Math.max(minDuration, windowSize)", duration)
         self.assertIn("modelOptions?.sliding_window", advanced)
         self.assertIn("if (!supportsSlidingWindows && maximumFrames != null)", store)
-        self.assertIn("const h3SingleNativePass = (", store)
-        self.assertIn("nativeMaximum ?? Number.POSITIVE_INFINITY", store)
-        self.assertIn("expandNativeWindow", store)
         self.assertIn("delete params.sliding_window_size", store)
         self.assertIn('"frames_maximum": md.get("frames_maximum")', launch)
         self.assertIn("sliding_window_memory_policy", duration)
@@ -1930,7 +1927,6 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("sliding_window_memory_override", store)
         self.assertIn("const h3DirectOmniPass = (", store)
         self.assertIn("let windowFrames = h3DirectOmniPass", store)
-        self.assertIn("directOmniDurationOverride", store)
         self.assertIn("full prompt auto-paced", duration)
         self.assertIn('"sliding_window_memory_policy": md.get(', launch)
         self.assertIn('"omni_sequence_memory_policy": md.get(', launch)
@@ -1990,12 +1986,23 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             "At MM:SS.mmm",
             "says in an off-screen voiceover",
             "voice-timbre reference",
-            "roughly two words per second",
+            "2.8 words per second by default, allowing up to 3 words per second",
             "do not inflate it to a word quota",
         ):
             self.assertIn(official_rule, _read(_H3_REF2VA_GUIDE_PATH))
         self.assertIn("At MM:SS.mmm", enhance_guide)
         self.assertIn("480", enhance_guide)
+
+    def test_h3_enhancer_schedules_exact_dialogue_at_new_default_pace(self):
+        helpers = _load_llm_enhance_helpers()
+        prompt = 'Blaine says "' + ' '.join(['word'] * 25) + '."'
+        duration, start, end = helpers['_h3_dialogue_schedule'](prompt, 10)
+        self.assertEqual(duration, 10)
+        self.assertEqual(start, 0.25)
+        self.assertAlmostEqual(end - start, 25 / 2.8)
+        requirement = helpers['_build_h3_dialogue_requirement']('Blaine talks about Maestro.', 10)
+        self.assertIn('2.8 words per second', requirement)
+        self.assertIn('allowing up to 3', requirement)
 
     def test_h3_enhance_path_preserves_context_ir_contract(self):
         launch = _read(_LAUNCH_PATH)
@@ -2149,7 +2156,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("onChange={event => setAudioIntent(", section)
         self.assertIn("automatically enables a multi-window sequence", section)
         self.assertIn(
-            "const shouldInitializeTotalDuration = selectionChanged || !h3MultiWindowEnabled",
+            "setDuration(useStore.getState().durationSeconds)",
             duration_slider,
         )
 
@@ -2235,7 +2242,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         )
         self.assertIn("REQUIRED VERBATIM", requirement)
         self.assertIn("Run it locally.", requirement)
-        self.assertIn("From 0.00 to 2.00 seconds", requirement)
+        self.assertIn("From 0.00 to 0.25 seconds", requirement)
         self.assertIn("no human voice", requirement)
 
         visible_text_request = (
@@ -2432,7 +2439,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
 class TestMiniMaxH3RuntimeSource(unittest.TestCase):
     def test_runtime_uses_the_official_dual_scheduler_and_audio_output(self):
         main = _read(_MAIN_PATH)
-        self.assertIn("shift=12.0", main)
+        self.assertIn("shift=3.0 if self.viggle else 12.0", main)
         self.assertIn("solver=self.sample_solver", main)
         self.assertIn("MiniMaxH3Scheduler(shift=3.0)", main)
         self.assertIn('"audio_sampling_rate": MINIMAX_H3_AUDIO_SAMPLE_RATE', main)

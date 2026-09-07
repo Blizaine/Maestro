@@ -111,3 +111,11 @@ app/plugins/wan2gp-lora-multipliers-ui/
 # Python bytecode (anywhere)
 __pycache__/
 app/wgp_config.json.bak
+
+# Optional, separately licensed native DLSS runtime installed by the user.
+app/dlss5/
+
+# Keep this reviewed feature-port plan alongside the source changes.
+!docs/development/
+docs/development/*
+!docs/development/wan2gp-12-71-port-plan.md

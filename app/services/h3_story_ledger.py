@@ -17,6 +17,10 @@ import math
 import re
 from typing import Any, Callable
 
+from services.dialogue_timing import (
+    DIALOGUE_DEFAULT_WORDS_PER_SECOND as _H3_DIALOGUE_PREFERRED_WORDS_PER_SECOND,
+    DIALOGUE_MAX_WORDS_PER_SECOND as _H3_DIALOGUE_MAX_WORDS_PER_SECOND,
+)
 from services.director.long_form_story import (
     LONG_FORM_STORY_BIBLE_SCHEMA,
     build_long_form_story_bible_fallback,
@@ -27,14 +31,7 @@ from services.director.long_form_story import (
 )
 
 
-H3_STORY_LEDGER_VERSION = 24
-
-_H3_DIALOGUE_PREFERRED_WORDS_PER_SECOND = 2.1
-# H3 can still deliver a clear line slightly above the conservative planning
-# rate.  The render compiler may use this ceiling only to keep an exact turn
-# on a sentence/clause boundary; the full sequence must continue to fit the
-# conservative budget above.
-_H3_DIALOGUE_MAX_WORDS_PER_SECOND = 2.3
+H3_STORY_LEDGER_VERSION = 26
 
 
 class H3DialogueTimingError(ValueError):
@@ -143,13 +140,19 @@ _FAST_ACTION_RE = re.compile(
 # describe metadata or Context-IR fields rather than speaking characters and
 # must never be converted into H3 dialogue.
 _SCREENPLAY_NON_SPEAKER_LABELS = {
-    "action", "audio", "camera", "cast", "character", "characters",
+    "action", "actions", "ambiance", "ambience", "atmosphere", "audio",
+    "audio design", "audio notes", "camera", "camera movement", "camera notes",
+    "cast", "character", "characters", "cinematography", "color palette",
+    "composition", "constraints", "continuity", "duration", "editing", "effects",
     "detailed description", "dialogue", "director", "end", "ext",
-    "exterior", "fade in", "fade out", "int", "interior", "location",
+    "exterior", "fade in", "fade out", "format", "fps", "framing",
+    "int", "interior", "lighting", "location",
     "integrated multimodal description", "music", "non diegetic music",
-    "notes", "overall soundscape", "pov",
-    "prompt", "retention analysis", "scene", "shot", "style", "summary",
-    "subject definitions", "time", "title", "transition", "visual",
+    "negative prompt", "notes", "overall soundscape", "pacing", "pov",
+    "prompt", "resolution", "retention analysis", "scene", "setting", "sfx",
+    "shot", "sound", "sound design", "sound effects", "soundscape",
+    "style", "subject definitions", "summary", "time", "title", "tone",
+    "transition", "vfx", "visual", "visual direction", "visual style", "visuals",
 }
 _NON_CAST_PROPER_NAMES = {
     "anyone", "beat", "everybody", "everyone", "nobody", "no one",
@@ -164,6 +167,7 @@ _SCREENPLAY_DIALOGUE_RE = re.compile(
     r"(?:\*\*)?[ \t]*:[ \t]*(?:\*\*)?"
     r"(?P<text>[^\r\n]+?)[ \t]*$"
 )
+_DIALOGUE_QUOTE_RE = re.compile(r'"([^"\r\n]{1,600})"|“([^”\r\n]{1,600})”')
 _ENERGETIC_PERFORMANCE_RE = re.compile(
     r"\b(?:animated|animatedly|breathless|breathlessly|burst(?:s|ing)?\s+in|"
     r"eager|eagerly|energetic|energetically|enthusiastic|enthusiastically|"
@@ -1187,6 +1191,17 @@ def _infer_quote_speaker(
     return speaker, delivery
 
 
+def _is_screenplay_speaker_label(value: Any) -> bool:
+    """Keep production headings out of both screenplay and quoted dialogue."""
+
+    key = _normalize_key(value)
+    return bool(
+        key
+        and key not in _SCREENPLAY_NON_SPEAKER_LABELS
+        and not re.fullmatch(r"(?:scene|shot|subject|picture|video|audio|s)\s*\d+", key)
+    )
+
+
 def _screenplay_dialogue_spans(source: str) -> list[dict[str, Any]]:
     """Return unambiguous ``CHARACTER: line`` screenplay rows.
 
@@ -1198,14 +1213,22 @@ def _screenplay_dialogue_spans(source: str) -> list[dict[str, Any]]:
     spans: list[dict[str, Any]] = []
     for match in _SCREENPLAY_DIALOGUE_RE.finditer(source):
         speaker = sanitize_h3_prompt_text(match.group("speaker")).strip(" ,;:.-")
-        speaker_key = _normalize_key(speaker)
-        if (
-            not speaker_key
-            or speaker_key in _SCREENPLAY_NON_SPEAKER_LABELS
-            or re.fullmatch(r"(?:scene|shot|subject|picture|video|audio|s)\s*\d+", speaker_key)
-        ):
+        if not _is_screenplay_speaker_label(speaker):
             continue
-        text = str(match.group("text") or "").strip()
+        raw_text = str(match.group("text") or "")
+        text = raw_text.strip()
+        end = match.end()
+        quoted = _DIALOGUE_QUOTE_RE.match(text)
+        if quoted:
+            # A quoted turn ends at its closing quote. Directions after it
+            # remain source events instead of consuming the speech budget.
+            if text[quoted.end():].strip(" \t*"):
+                end = (
+                    match.start("text")
+                    + len(raw_text) - len(raw_text.lstrip())
+                    + quoted.end()
+                )
+            text = quoted.group(1) or quoted.group(2)
         text = re.sub(r"\*\*\s*$", "", text).strip()
         if len(text) >= 2 and (text[0], text[-1]) in {
             ('"', '"'), ("\u201c", "\u201d"), ("'", "'"), ("\u2018", "\u2019"),
@@ -1236,7 +1259,8 @@ def _screenplay_dialogue_spans(source: str) -> list[dict[str, Any]]:
             delivery = "speaks naturally"
         spans.append({
             "start": match.start(),
-            "end": match.end(),
+            "end": end,
+            "content_start": match.start("text"),
             "text": text,
             "speaker": speaker,
             "language": "English",
@@ -1276,14 +1300,11 @@ def extract_locked_dialogue(prompt: str) -> list[dict[str, Any]]:
         r"<d>\s*(?:\[([^\]\r\n]+)\])?\s*((?:(?!<d>).)*?)\s*</d>",
         flags=re.IGNORECASE | re.DOTALL,
     )
-    quote_pattern = re.compile(r'"([^"\r\n]{1,600})"|“([^”\r\n]{1,600})”')
     spans: list[dict[str, Any]] = []
-    occupied_ranges: list[tuple[int, int]] = []
     for match in tag_pattern.finditer(source):
         text = sanitize_h3_prompt_text(match.group(2) or "").strip()
         if not text or _PLACEHOLDER_DIALOGUE.fullmatch(text):
             continue
-        occupied_ranges.append((match.start(), match.end()))
         spans.append({
             "start": match.start(),
             "end": match.end(),
@@ -1293,12 +1314,30 @@ def extract_locked_dialogue(prompt: str) -> list[dict[str, Any]]:
             "source_form": "tagged",
         })
     for item in _screenplay_dialogue_spans(source):
-        if any(start <= int(item["start"]) < end for start, end in occupied_ranges):
+        tagged = [
+            span for span in spans
+            if span["explicit_tag"]
+            and int(item["start"]) < int(span["end"])
+            and int(span["start"]) < int(item["end"])
+        ]
+        if tagged:
+            # ``Name: <d>line</d>`` is one line, not a screenplay row plus
+            # another tagged line. Retain the leading speaker/delivery cue
+            # without absorbing any action after the closing tag.
+            for span in tagged:
+                if int(span["start"]) == int(item["content_start"]):
+                    span.update({
+                        "start": item["start"],
+                        "speaker": item["speaker"],
+                        "delivery": item["delivery"],
+                        "off_camera": item["off_camera"],
+                        "source_form": "screenplay",
+                    })
             continue
-        occupied_ranges.append((int(item["start"]), int(item["end"])))
         spans.append(item)
-    for match in quote_pattern.finditer(source):
-        if any(start <= match.start() < end for start, end in occupied_ranges):
+    occupied_ranges = [(int(span["start"]), int(span["end"])) for span in spans]
+    for match in _DIALOGUE_QUOTE_RE.finditer(source):
+        if any(match.start() < end and start < match.end() for start, end in occupied_ranges):
             continue
         text = sanitize_h3_prompt_text(match.group(1) or match.group(2) or "").strip()
         if not text or _PLACEHOLDER_DIALOGUE.fullmatch(text):
@@ -1328,7 +1367,7 @@ def extract_locked_dialogue(prompt: str) -> list[dict[str, Any]]:
                 sanitize_h3_prompt_text(span.get("speaker")) or "Speaker",
                 sanitize_h3_prompt_text(span.get("delivery")) or "speaks naturally",
             )
-            if screenplay else _infer_quote_speaker(
+            if span.get("speaker") else _infer_quote_speaker(
                 source,
                 start,
                 context_start=context_start,
@@ -1343,6 +1382,8 @@ def extract_locked_dialogue(prompt: str) -> list[dict[str, Any]]:
             r"([A-Z][A-Za-z0-9_'’-]*(?:\s+[A-Z][A-Za-z0-9_'’-]*){0,3})\s*:\s*$",
             nearby,
         )
+        if label and not _is_screenplay_speaker_label(label.group(1)):
+            label = None
         outside_quote = (source[:start] + source[end:]).strip(" \t\r\n.,;:!?-")
         if (
             not span["explicit_tag"]
@@ -2281,10 +2322,6 @@ def _prepare_render_dialogue_schedule(
 
     durations = [max(0.1, float(value)) for value in segment_durations]
     budgets = [
-        max(1, int(math.floor(value * _H3_DIALOGUE_PREFERRED_WORDS_PER_SECOND)))
-        for value in durations
-    ]
-    maximum_budgets = [
         max(1, int(math.floor(value * _H3_DIALOGUE_MAX_WORDS_PER_SECOND)))
         for value in durations
     ]
@@ -2387,14 +2424,13 @@ def _prepare_render_dialogue_schedule(
                 remaining -= capacity
 
         split_capacities = [capacity for _segment, capacity in selected]
-        # Use a small amount of otherwise-unused local speech headroom only on
-        # the final fragment. This lets a long exact turn break after a full
-        # sentence instead of cutting a product/name phrase in half. Overall
-        # sequence admission still uses the conservative 2.1 words/sec total.
+        # Let the final fragment use the remaining local budget so a long
+        # exact turn can break at a sentence boundary. Both local and full
+        # sequence admission use the same maximum speech rate.
         final_selected_segment = selected[-1][0]
         final_maximum_capacity = max(
             0,
-            maximum_budgets[final_selected_segment - 1]
+            budgets[final_selected_segment - 1]
             - used[final_selected_segment - 1],
         )
         split_capacities[-1] = max(
@@ -2707,7 +2743,7 @@ def _prepare_render_dialogue_schedule(
         rendered_words[int(item.get("segment") or base_segments.get(
             str(item.get("dialogue_id") or "").upper(), 1
         ))] += _dialogue_word_count(item.get("text"))
-    for segment, maximum_budget in enumerate(maximum_budgets, start=1):
+    for segment, maximum_budget in enumerate(budgets, start=1):
         if rendered_words[segment] > maximum_budget:
             raise H3DialogueTimingError(
                 f"MiniMax H3 exact dialogue still exceeds window {segment}'s safe "
@@ -2906,7 +2942,7 @@ def ledger_violations(
             for dialogue_id in (beat.get("dialogue_ids") or [])
         }
         budgets = [
-            max(1, int(math.floor(max(0.0, float(duration)) * 2.1)))
+            max(1, int(math.floor(max(0.0, float(duration)) * _H3_DIALOGUE_MAX_WORDS_PER_SECOND)))
             for duration in segment_durations
         ]
         total_dialogue_words = sum(dialogue_words.values())
@@ -3008,7 +3044,7 @@ def _deterministic_ledger(
                 len(re.findall(r"\b[\w'’-]+\b", str(item.get("text") or "")))
                 for item in dialogue_by_event_source.get(event["event_id"], [])
             )
-            event_costs.append(1.15 + spoken_words / 2.1)
+            event_costs.append(1.15 + spoken_words / _H3_DIALOGUE_PREFERRED_WORDS_PER_SECOND)
         total_cost = max(0.1, sum(event_costs))
         total_duration = max(0.1, sum(durations))
         thresholds: list[float] = []
@@ -3127,7 +3163,7 @@ def _deterministic_ledger(
             prefix = following[:move_end]
             if not prefix or len(following) <= len(prefix):
                 continue
-            dialogue_budget = max(1, int(math.floor(durations[bucket_index] * 2.1)))
+            dialogue_budget = max(1, int(math.floor(durations[bucket_index] * _H3_DIALOGUE_MAX_WORDS_PER_SECOND)))
             if dialogue_words_for(current + prefix) > dialogue_budget:
                 continue
             current.extend(prefix)
@@ -4883,7 +4919,7 @@ def _h3_filmable_timing_weight(
         ))
         for dialogue_id in dialogue_ids
     )
-    spoken_time = dialogue_words / 2.35 + len(dialogue_ids) * 0.35
+    spoken_time = dialogue_words / _H3_DIALOGUE_PREFERRED_WORDS_PER_SECOND + len(dialogue_ids) * 0.35
     action_time = _h3_visible_action_seconds(bucket, event_floor=event_count)
     return max(float(event_count), action_time, spoken_time, 1.0)
 
@@ -5370,7 +5406,7 @@ def _plan_long_form_ledger(
                 ],
                 "dialogue_word_budget": max(
                     0,
-                    int(math.floor(durations[absolute_index] * 2.1))
+                    int(math.floor(durations[absolute_index] * _H3_DIALOGUE_MAX_WORDS_PER_SECOND))
                     - sum(
                         locked_dialogue_words.get(
                             str(dialogue_id or "").upper(),
@@ -5450,7 +5486,7 @@ def _plan_long_form_ledger(
                     "them. Make the last resulting_state flow directly into the "
                     "next chapter.\n\n"
                 + (
-                        "Write short, character-specific dialogue in each segment's dialogue array when it advances the interaction. Respect dialogue_word_budget exactly; use an empty array when no line belongs there. Exact quoted lines are inserted separately and must not be repeated.\n\n"
+                        f"Write character-specific dialogue in each segment's dialogue array when it advances the interaction. Aim for {_H3_DIALOGUE_PREFERRED_WORDS_PER_SECOND:g} words per second during speech, allowing up to {_H3_DIALOGUE_MAX_WORDS_PER_SECOND:g}. Respect dialogue_word_budget as a hard maximum; leave time for action and pauses and use an empty array when no line belongs there. Exact quoted lines are inserted separately and must not be repeated.\n\n"
                         if allow_generated_dialogue else
                         "Every dialogue array must be empty; do not invent spoken words.\n\n"
                     )
@@ -5531,7 +5567,7 @@ def _plan_long_form_ledger(
             local_dialogue_ids: list[str] = []
             remaining_words = max(
                 0,
-                int(math.floor(durations[segment_number - 1] * 2.1))
+                int(math.floor(durations[segment_number - 1] * _H3_DIALOGUE_MAX_WORDS_PER_SECOND))
                 - sum(
                     locked_dialogue_words.get(
                         str(dialogue_id or "").upper(),
@@ -5776,7 +5812,7 @@ def _split_h3_shots_at_speaker_changes(
             max(
                 1.0,
                 sum(_dialogue_word_count(line.get("text")) for line in group)
-                / 2.35
+                / _H3_DIALOGUE_PREFERRED_WORDS_PER_SECOND
                 + len(group) * 0.35,
             )
             for group in groups
@@ -5999,11 +6035,13 @@ def plan_h3_story_segments(
     ) or "- None."
     geometry_lines = "\n".join(
         f"- Segment {index + 1}: {duration:.3f} seconds; total dialogue budget "
-        f"at most {max(1, int(math.floor(duration * 2.1)))} spoken words"
+        f"at most {max(1, int(math.floor(duration * _H3_DIALOGUE_MAX_WORDS_PER_SECOND)))} spoken words; "
+        f"aim for {_H3_DIALOGUE_PREFERRED_WORDS_PER_SECOND:g} words per second during speech, "
+        f"up to {_H3_DIALOGUE_MAX_WORDS_PER_SECOND:g}, leaving time for action and pauses"
         for index, duration in enumerate(durations)
     )
     maximum_window_words = max(
-        [max(1, int(math.floor(duration * 2.1))) for duration in durations]
+        [max(1, int(math.floor(duration * _H3_DIALOGUE_MAX_WORDS_PER_SECOND))) for duration in durations]
         or [1]
     )
     mechanically_continued_dialogue = [

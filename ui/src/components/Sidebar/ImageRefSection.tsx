@@ -1,6 +1,8 @@
 import { useState, useCallback, useEffect } from 'react'
 import { Image as ImageIcon, Upload, X } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
+import * as api from '../../api/client'
+import { CharacterImagePickerButton } from '../Characters/CharacterImagePicker'
 
 export function ImageRefSection() {
   const modelOptions = useStore(s => s.modelOptions)
@@ -173,6 +175,13 @@ export function ImageRefSection() {
           </div>
         )}
       </div>
+
+      {generationMode === 'image' && <CharacterImagePickerButton disabled={!canAddMore}
+        maxImages={maxRefs == null ? null : Math.max(0, maxRefs - imageRefs.length)}
+        onSelect={async (character, images) => {
+          const files = await Promise.all(images.map(image => api.characterImageFile(character, image)))
+          addFiles(files)
+        }}/>}
 
       {isAdaptiveImageGenerate && (
         <button

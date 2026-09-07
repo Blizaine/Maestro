@@ -103,9 +103,10 @@ character's background would never phrase it that way, rewrite it until
 they would.
 
 STILL TRUE: write SUBSTANTIAL dialogue (real conversations, arguments,
-confessions, banter — not one-liners), about 2 words per second of screen
-time, with genuine back-and-forth where each character reacts to what the
-other just said. Use most of the budget; silence is the exception.
+confessions, banter — not one-liners), about 2.8 words per second of speech
+time, allowing up to 3 words per second. Give each character a response to
+what the other just said. Leave room for requested action and pauses; do not
+add dialogue to explicitly silent scenes or merely to fill a word budget.
 
 ACTION LINES — CAMERA-OBSERVABLE PHYSICAL ACTION ONLY:
 The hardest discipline in this screenplay. A traditional screenplay

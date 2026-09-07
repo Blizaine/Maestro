@@ -67,6 +67,13 @@ function DirectorTargetDurationControl() {
       onChange={setDuration}
       minSeconds={10}
       maxSeconds={LONG_FORM_MAX_SECONDS}
+      nativeTiming={{
+        minimumFrames: (options?.frames_minimum ?? fps)
+          + Math.max(0, Math.ceil((10 * fps - (options?.frames_minimum ?? fps))
+            / Math.max(1, options?.frames_steps ?? fps))) * Math.max(1, options?.frames_steps ?? fps),
+        frameStep: options?.frames_steps ?? fps,
+        fps,
+      }}
       windowSeconds={windowSeconds}
       overlapSeconds={(defaults?.overlap_default || 0) / fps}
       discardSeconds={(defaults?.discard_last_frames || 0) / fps}

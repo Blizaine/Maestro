@@ -66,7 +66,8 @@ DIALOGUE
   immediately before that speaker's <d> block.
 - Do not add dialogue, filler words, narration, murmuring, or speech-like vocalizations merely
   to fill time. If conversation is requested without supplied wording, write short purposeful
-  lines that comfortably fit at roughly two words per second across all speakers.
+  lines paced at 2.8 words per second by default, allowing up to 3 words per second
+  across all speakers. Leave time for requested action and pauses.
 - Describe visible lip movement only for the character currently delivering the adjacent line.
   Prefer positive, performable prose over repeated prohibitions about other characters.
 

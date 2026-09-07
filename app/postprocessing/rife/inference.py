@@ -26,7 +26,22 @@ def add_frame(frames, frame, h, w):
     frame = frame.unsqueeze(1)
     frames.append(frame.cpu())
 
-def process_frames(model, device, frames, exp):
+def process_frames(model, device, frames, exp=0, *, multiplier=None,
+                   abort_callback=None, progress_callback=None):
+    """Interpolate each adjacent pair without replacing original frames.
+
+    ``exp`` remains compatible with existing x2/x4 callers. RIFE v4 supports
+    arbitrary timesteps, allowing x3 at exactly one third and two thirds.
+    """
+    factor = multiplier if multiplier is not None else 2 ** exp
+    if factor not in (1, 2, 3, 4):
+        raise ValueError("RIFE supports x2, x3 and x4 interpolation")
+    factor = int(factor)
+    supports_timestep = getattr(model, "supports_timestep", False)
+    if factor == 3 and not supports_timestep:
+        raise ValueError("RIFE x3 requires RIFE v4.26; select RIFE v4")
+    if frames.ndim != 4 or frames.shape[1] < 1:
+        raise ValueError("RIFE expects [channels, frames, height, width] with at least one frame")
     pos = 0
     output_frames = []
 
@@ -65,17 +80,10 @@ def process_frames(model, device, frames, exp):
 
     I1 = lastframe.to(device, non_blocking=True).unsqueeze(0)
     I1 = pad_image(I1)
-    temp = None # save lastframe when processing static frame
-
-    while True:
-        if temp is not None:
-            frame = temp
-            temp = None
-        else:
-            pos += 1
-            frame = get_frame(frames, pos)
-        if frame is None:
-            break
+    for pos in range(1, frames.shape[1]):
+        if abort_callback is not None and abort_callback():
+            return None
+        frame = get_frame(frames, pos)
         I0 = I1
         I1 = frame.to(device, non_blocking=True).unsqueeze(0)
         I1 = pad_image(I1)
@@ -83,43 +91,25 @@ def process_frames(model, device, frames, exp):
         I1_small = F.interpolate(I1, (32, 32), mode='bilinear', align_corners=False)
         ssim = ssim_matlab(I0_small[:, :3], I1_small[:, :3])
 
-        break_flag = False
-        if ssim > 0.996 or pos > 100:        
-            pos += 1
-            frame = get_frame(frames, pos)
-            if frame is None:
-                break_flag = True
-                frame = lastframe
-            else:
-                temp = frame
-            I1 = frame.to(device, non_blocking=True).unsqueeze(0)
-            I1 = pad_image(I1)
-            if supports_timestep:
-                I1 = model.inference(I0, I1, 0.5, scale)
-            else:
-                I1 = model.inference(I0, I1, scale)
-            I1_small = F.interpolate(I1, (32, 32), mode='bilinear', align_corners=False)
-            ssim = ssim_matlab(I0_small[:, :3], I1_small[:, :3])
-            frame = I1[0][:, :h, :w]
-        
-        if ssim < 0.2:
-            output = []
-            for _ in range((2 ** exp) - 1):
-                output.append(I0)
+        if ssim < 0.2 or ssim > 0.996:
+            # Hold across scene cuts or duplicates; never synthesize over a
+            # source frame, including in long videos beyond frame 100.
+            output = [I0] * (factor - 1)
         else:
-            output = make_inference(I0, I1, 2**exp-1) if exp else []
+            output = make_inference(I0, I1, factor - 1)
 
         add_frame(output_frames, lastframe, h, w)
         for mid in output:
             add_frame(output_frames, mid, h, w)
         lastframe = frame
-        if break_flag:
-            break
+        if progress_callback is not None:
+            progress_callback("RIFE interpolation", pos, frames.shape[1] - 1)
 
     add_frame(output_frames, lastframe, h, w)
     return torch.cat( output_frames, dim=1)
 
-def temporal_interpolation(model_path, frames, exp, device ="cuda", rife_version="v3"):
+def temporal_interpolation(model_path, frames, exp=0, device="cuda", rife_version="v3",
+                           *, multiplier=None, abort_callback=None, progress_callback=None):
 
     input_was_uint8 = frames.dtype == torch.uint8
     if rife_version == "v4":
@@ -132,8 +122,9 @@ def temporal_interpolation(model_path, frames, exp, device ="cuda", rife_version
     model.to(device=device)
 
     with torch.no_grad():    
-        output = process_frames(model, device, frames, exp)
+        output = process_frames(model, device, frames, exp, multiplier=multiplier,
+                                abort_callback=abort_callback, progress_callback=progress_callback)
 
-    if input_was_uint8:
+    if output is not None and input_was_uint8:
         output = output.add_(1.0).mul_(127.5).clamp_(0, 255).to(torch.uint8)
     return output

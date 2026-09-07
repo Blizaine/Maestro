@@ -29,10 +29,12 @@ export function AspectRatioGrid() {
   return (
     <div>
       <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">Aspect Ratio</label>
-      <div className="flex gap-1">
+      <div className="grid grid-cols-3 gap-1">
         {ratios.map(r => (
           <button
             key={r.value}
+            type="button"
+            aria-pressed={aspectRatio === r.value}
             onClick={() => setAspectRatio(r.value)}
             className={`flex-1 flex flex-col items-center gap-0.5 py-2 rounded-lg border text-[10px] transition-all ${
               aspectRatio === r.value

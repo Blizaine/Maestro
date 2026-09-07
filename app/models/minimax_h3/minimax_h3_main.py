@@ -74,6 +74,7 @@ from .first_block_cache import MiniMaxH3FirstBlockCache
 from .fused_turbo import (
     FUSED_H3_MAX_EVALUATIONS,
     FUSED_H3_MIN_EVALUATIONS,
+    validate_fused_h3_loras,
 )
 from .transformer import (
     MiniMaxH3Transformer,
@@ -408,6 +409,7 @@ def _reinject_video_source(
     editable_mask_rows: torch.Tensor | None,
     sigma: torch.Tensor | float,
     buffer_rows: torch.Tensor,
+    preserved_sigma=None,
 ) -> None:
     """Re-inject a source video at the next H3 noise level.
 
@@ -416,7 +418,7 @@ def _reinject_video_source(
     the source for the configured masking-strength portion of the schedule.
     """
 
-    torch.lerp(source_rows, noise_rows, sigma, out=buffer_rows)
+    torch.lerp(source_rows, noise_rows, sigma if preserved_sigma is None else preserved_sigma, out=buffer_rows)
     if editable_mask_rows is None:
         video_rows.copy_(buffer_rows)
     else:
@@ -630,7 +632,7 @@ def _strip_transformer_wrappers(
     # [Q, K, V] order. Preserve that order for the grouped MMGP split used by
     # INT8 ConvRot checkpoints. Only older checkpoint definitions that declare
     # the official head-interleaved layout need this physical reorder.
-    if interleave_qkv:
+    if interleave_qkv and any(key.endswith(".qkv_proj.weight") for key in state_dict):
         restore_interleaved_h3_qkv(state_dict)
     prefixes = ("model.diffusion_model.", "diffusion_model.")
 
@@ -643,6 +645,12 @@ def _strip_transformer_wrappers(
                 if key.startswith(prefix):
                     key = key[len(prefix) :]
                     break
+            if key.startswith("transformer_blocks."):
+                for branch in ("linear_attention", "softmax_gate", "to_out_linear"):
+                    if f".attn.{branch}." in key:
+                        key = "blocks." + key[len("transformer_blocks."):]
+                        key = key.replace(f".attn.{branch}.", f".attn.vdn.{branch}.")
+                        break
             normalized[key] = value
         return normalized
 
@@ -742,8 +750,9 @@ def _load_transformer(
     *,
     qkv_layout: str = "contiguous",
     sla_config=None,
+    vdn: bool = False,
 ) -> MiniMaxH3Transformer:
-    checkpoint = probe_h3_checkpoint(filename)
+    checkpoint = probe_h3_checkpoint(_first_path(filename))
     qkv_layout = str(qkv_layout or "contiguous").strip().lower()
     if qkv_layout not in {"contiguous", "grouped", "interleaved"}:
         raise ValueError(f"Unsupported MiniMax H3 QKV layout {qkv_layout!r}")
@@ -753,6 +762,7 @@ def _load_transformer(
             curve_dim=int(checkpoint["time_embed_dim"]),
             dtype=dtype,
             sla_config=sla_config,
+            vdn=vdn,
         )
     inner_size = 56 * 128
     # Comfy's scaled-FP8 pruned checkpoint already stores grouped [Q, K, V]
@@ -925,7 +935,10 @@ def _log_h3_asset_sources(components: dict[str, str]) -> None:
 
 
 class MiniMaxH3Model:
-    """Maestro generation wrapper for the H3 Base FL2VA/Ref2VA checkpoints."""
+    """Maestro generation wrapper for the H3 FL2VA, Ref2VA and audio checkpoints."""
+    audio_only = False
+    vdn = False
+    viggle = False
 
     def __init__(
         self,
@@ -940,7 +953,17 @@ class MiniMaxH3Model:
         self.dtype = dtype
         self.model_def = model_def
         self.assets_root = model_def.get("minimax_h3_assets_root", "minimax_h3")
-        self.omni_reference = bool(model_def.get("omni_reference", False))
+        self.audio_only = bool(model_def.get("minimax_h3_audio_only", False))
+        self.viggle = bool(model_def.get("minimax_h3_viggle", False))
+        self.dialogue_whisper = None
+        self.omni_reference = self.viggle or self.audio_only or bool(model_def.get("omni_reference", False))
+        self.vdn = bool(model_def.get("vdn", False))
+        if self.vdn:
+            from .vdn_attention import triton
+            if triton is None:
+                raise ValueError("H3 VDN requires Triton. Use Maestro's Triton/Sol runtime or install Triton before selecting VDN.")
+            if not isinstance(model_filename, (list, tuple)) or len(model_filename) < 2:
+                raise ValueError("H3 VDN requires its trained module in addition to the FL2VA checkpoint")
         self._fused_turbo = bool(
             model_def.get("minimax_h3_fused_turbo", False)
         )
@@ -951,7 +974,7 @@ class MiniMaxH3Model:
         transformer_path = _first_path(model_filename)
         if not transformer_path:
             raise FileNotFoundError("MiniMax H3 transformer checkpoint is missing.")
-        if not text_encoder_filename:
+        if not text_encoder_filename and not self.viggle:
             raise FileNotFoundError("MiniMax H3 Qwen3-VL conditioner checkpoint is missing.")
 
         video_vae_filename = str(
@@ -983,12 +1006,14 @@ class MiniMaxH3Model:
             )
         )
         self.transformer = _load_transformer(
-            transformer_path,
+            model_filename if self.vdn else transformer_path,
             dtype,
             qkv_layout=qkv_layout,
             sla_config=model_def.get("sla_attention_config"),
+            vdn=self.vdn,
         )
-        self.conditioner = _load_conditioner(
+        from .viggle import load_conditioner
+        self.conditioner = load_conditioner() if self.viggle else _load_conditioner(
             text_encoder_filename,
             self.assets_root,
             dtype,
@@ -997,7 +1022,7 @@ class MiniMaxH3Model:
         self.vae = _load_video_vae(video_vae_path)
         self.audio_vae = _load_audio_vae(audio_vae_path)
         self.scheduler = MiniMaxH3Scheduler(
-            shift=12.0,
+            shift=3.0 if self.viggle else 12.0,
             solver=self.sample_solver,
         )
         self.audio_scheduler = MiniMaxH3Scheduler(shift=3.0)
@@ -1016,17 +1041,7 @@ class MiniMaxH3Model:
         # ordinary heads before inspecting the next job's adapter selection.
         self.release_special_loras()
         if getattr(self, "_fused_turbo", False):
-            selected = [
-                str(path).strip()
-                for path in (loras_selected or [])
-                if str(path).strip()
-            ]
-            if selected:
-                raise ValueError(
-                    "H3 Fused 4-Step already contains its Turbo and Mystic "
-                    "adapters; additional LoRAs are disabled for this model."
-                )
-            return
+            validate_fused_h3_loras(loras_selected)
         turbo_paths = tuple(find_minimax_h3_turbo_loras(loras_selected))
         if len(turbo_paths) > 1:
             raise ValueError(
@@ -1104,9 +1119,14 @@ class MiniMaxH3Model:
             if getattr(module, "_mm_requires_native_linear_forward", False)
         ]
         installed = install_native_lora_forwards(self.transformer)
-        if convrot_layers and self._turbo_lora_active and installed == 0:
+        missing_native_hooks = any(
+            getattr(module, "_mm_lora_data", None)
+            and not callable(getattr(module, "_mm_lora_old_forward", None))
+            for module in convrot_layers
+        )
+        if missing_native_hooks or (convrot_layers and self._turbo_lora_active and installed == 0):
             raise RuntimeError(
-                "MiniMax H3 Turbo could not attach its ConvRot-safe LoRA path."
+                "MiniMax H3 could not attach its ConvRot-safe LoRA path."
             )
         if installed:
             print(
@@ -1147,6 +1167,8 @@ class MiniMaxH3Model:
             self.transformer._interrupt = self.__interrupt
         if hasattr(self, "conditioner"):
             self.conditioner._interrupt = self.__interrupt
+        if getattr(self, "dialogue_whisper", None) is not None:
+            self.dialogue_whisper._interrupt = self.__interrupt
 
     @property
     def patch_size(self) -> tuple[int, int, int]:
@@ -1416,7 +1438,16 @@ class MiniMaxH3Model:
         for reference in references:
             if self._interrupt:
                 return None, None
-            if reference.kind != "audio":
+            if reference.kind != "audio" and getattr(reference, "refmod_latent", None) is not None:
+                # RefMods already contain normalized H3 visual latents. Keep
+                # their native spatial/temporal layout and apply only the usual
+                # generation-time reference noise augmentation below.
+                latents = reference.refmod_latent.float().cpu()
+                reference.num_latent_frames, reference.latent_height, reference.latent_width = (
+                    int(n) for n in latents.shape[2:]
+                )
+                video_rows.append(patchify_video_latents(latents, self.patch_size))
+            elif reference.kind != "audio":
                 if reference.kind == "image":
                     pixels = torch.from_numpy(np.array(reference.image, dtype=np.uint8))
                     pixels = pixels.to(self.device).permute(2, 0, 1)[None, :, None]
@@ -1479,6 +1510,7 @@ class MiniMaxH3Model:
         image_start=None,
         image_end=None,
         input_frames=None,
+        input_ref_images=None,
         input_masks=None,
         input_video=None,
         input_waveform=None,
@@ -1502,16 +1534,53 @@ class MiniMaxH3Model:
         audio_prompt_type: str = "",
         video_prompt_type: str = "",
         window_start_frame_no: int = 0,
+        custom_settings=None,
+        duration_seconds=15,
+        audio_guide=None,
+        audio_guide2=None,
+        outpainting_dims=None,
+        _audio_segment=False,
+        _audio_speaker=None,
+        _face_refinement=None,
         **_kwargs,
     ):
-        self._interrupt = False
+        if not _audio_segment:
+            self._interrupt = False
         if not isinstance(input_prompt, str):
             raise ValueError("MiniMax H3 accepts one text prompt per generation.")
+        if self.audio_only and not _audio_segment:
+            from .dialogue import generate_audio
+            return generate_audio(
+                self, input_prompt, duration_seconds=duration_seconds, audio_guide=audio_guide,
+                audio_guide2=audio_guide2, audio_prompt_type=audio_prompt_type, seed=seed,
+                sampling_steps=sampling_steps, callback=callback, set_progress_status=set_progress_status,
+                fps=fps, custom_settings=custom_settings, minimax_h3_reference_detail=minimax_h3_reference_detail,
+            )
+        if self._interrupt:
+            return None
+        audio_only_duration = None
+        if self.viggle:
+            if int(frame_num) > 124 or int(sampling_steps) != 3:
+                raise ValueError("Viggle requires three evaluations and at most 124 frames per window.")
+        if self.audio_only:
+            from .voice_audio import audio_request
+            guides = ([audio_guide] if "A" in audio_prompt_type else []) + ([audio_guide2] if "B" in audio_prompt_type else [])
+            if any(not guide for guide in guides):
+                raise ValueError("Upload an audio reference for every selected H3 voice")
+            input_prompt, audio_only_duration, minimax_h3_references = audio_request(input_prompt, duration_seconds, guides)
+            if _audio_speaker is not None and len(minimax_h3_references) == 1:
+                minimax_h3_references[0]["role"] = f"Speaker {_audio_speaker}"
+            height = width = 32
+            frame_num = align_num_frames(round(audio_only_duration * MINIMAX_H3_FPS))
+            input_video = image_start = image_end = input_frames = input_masks = None
+            prefix_frames_count = 0
         if height % 32 or width % 32:
             raise ValueError(f"MiniMax H3 dimensions must be multiples of 32, got {width}x{height}.")
 
         fps = float(fps or MINIMAX_H3_FPS)
-        if abs(fps - MINIMAX_H3_FPS) > 1e-6:
+        if not math.isfinite(fps) or fps <= 0:
+            raise ValueError("MiniMax H3 requires a positive finite frame rate")
+        if _face_refinement is None and abs(fps - MINIMAX_H3_FPS) > 1e-6:
             raise ValueError(
                 f"MiniMax H3 generates at {MINIMAX_H3_FPS} fps, got {fps:g}."
             )
@@ -1524,7 +1593,7 @@ class MiniMaxH3Model:
                 "cover up to 10.13s; Maestro will continue, but quality "
                 "beyond that demonstrated envelope is experimental."
             )
-        if not MINIMAX_H3_MIN_DURATION <= duration <= MINIMAX_H3_MAX_DURATION:
+        if _face_refinement is None and not self.audio_only and not MINIMAX_H3_MIN_DURATION <= duration <= MINIMAX_H3_MAX_DURATION:
             raise ValueError(
                 f"MiniMax H3 supports {MINIMAX_H3_MIN_DURATION:g}-{MINIMAX_H3_MAX_DURATION:g}s at 24 fps; "
                 f"the aligned request is {frame_num} frames ({duration:.3f}s)."
@@ -1566,10 +1635,10 @@ class MiniMaxH3Model:
                 "MiniMax H3 masking strength must be between 0 and 1."
             )
         frozen_video_mode = not self.omni_reference and "2" in audio_prompt_type
-        source_audio_mode = (
+        source_audio_mode = (_face_refinement is not None and input_waveform is not None) or (
             any(flag in audio_prompt_type for flag in "AK")
             and (
-                not self.omni_reference
+                not self.omni_reference or self.viggle
                 # ``D`` is Maestro's internal exact-drive marker. Ordinary
                 # Ref2VA voice/style audio remains a creative reference;
                 # Director soundtracks and Studio's Music / Performance
@@ -1577,15 +1646,27 @@ class MiniMaxH3Model:
                 or "D" in audio_prompt_type
             )
         )
-        control_video_mode = (
+        control_video_mode = _face_refinement is not None or (
             not self.omni_reference
             and "G" in video_prompt_type
             and "V" in video_prompt_type
         )
+        from .masked_edit import outpaint_location, outpaint_mask, snap_mask_to_patches, grouped_rows, grouped_timesteps
+        mask_mode = (custom_settings or {}).get("h3_mask_mode", "grouped_rows")
+        if mask_mode not in ("grouped_rows", "shared_timestep"):
+            raise ValueError("Unknown H3 mask denoising mode")
+        outpaint_rect = outpaint_location(height, width, outpainting_dims)
+        if outpaint_rect is not None:
+            if not control_video_mode or input_frames is None:
+                raise ValueError("H3 outpainting requires a Control Video")
+            if mask_mode != "grouped_rows":
+                raise ValueError("H3 outpainting requires Grouped Rows mask denoising")
+            border_mask = outpaint_mask(input_frames, outpainting_dims)
+            input_masks = border_mask if input_masks is None else torch.maximum(border_mask, input_masks.to(border_mask))
         video_to_video_mode = (
             control_video_mode
             and not frozen_video_mode
-            and (denoising_strength < 1.0 or input_masks is not None)
+            and (denoising_strength < 1.0 or input_masks is not None or _face_refinement is not None)
         )
         if self.omni_reference and "2" in audio_prompt_type:
             raise ValueError(
@@ -1597,7 +1678,7 @@ class MiniMaxH3Model:
             raise ValueError(
                 "MiniMax H3 video-to-audio requires Use Control Video."
             )
-        if "K" in audio_prompt_type and not all(
+        if "K" in audio_prompt_type and not self.viggle and not all(
             flag in video_prompt_type for flag in "GV"
         ):
             raise ValueError(
@@ -1607,6 +1688,13 @@ class MiniMaxH3Model:
             raise ValueError(
                 "MiniMax H3 source-audio mode did not receive a readable soundtrack."
             )
+        refine_soundtrack = (custom_settings or {}).get("audio_refinement", "none") == "enabled"
+        if refine_soundtrack:
+            from .audio_refinement import refinement_unavailable
+            reason = refinement_unavailable(audio_only=self.audio_only, pdd=self._pdd_lora_active,
+                                            fused=self._fused_turbo, source_audio=source_audio_mode)
+            if reason:
+                raise ValueError(reason)
         if frozen_video_mode:
             print(
                 "[MiniMax H3] Video-to-audio: freezing Control Video "
@@ -1800,6 +1888,7 @@ class MiniMaxH3Model:
 
         source_video_rows = None
         editable_mask_rows = None
+        outpaint_source_pixels = None
         if video_to_video_mode:
             if set_progress_status is not None:
                 set_progress_status("Encoding H3 control video")
@@ -1841,6 +1930,10 @@ class MiniMaxH3Model:
                 height,
                 width,
             )
+            if outpaint_rect is not None:
+                inner_h, inner_w, top, left = outpaint_rect
+                outpaint_source_pixels = source_video.detach().cpu()
+                source_pixels = source_pixels[..., top:top + inner_h, left:left + inner_w]
             # A V2V source is the clean reconstruction target, not a noised
             # keyframe/reference. Match WanGP's native path by using the VAE
             # posterior mode over the ordinary target-video chunking grid.
@@ -1849,6 +1942,12 @@ class MiniMaxH3Model:
                 return_dict=False,
             )[0]
             source_encoded = source_posterior.mode().float().cpu()
+            if outpaint_rect is not None:
+                ratio = self.vae.spatial_compression_ratio
+                padded = source_encoded.new_zeros((*source_encoded.shape[:-2], latent_height, latent_width))
+                padded[..., top // ratio:top // ratio + source_encoded.shape[-2],
+                       left // ratio:left // ratio + source_encoded.shape[-1]] = source_encoded
+                source_encoded = padded
             if int(source_encoded.shape[2]) < num_latent_frames:
                 raise ValueError(
                     "MiniMax H3 could not align the Control Video to the "
@@ -1896,7 +1995,7 @@ class MiniMaxH3Model:
                     self.vae.temporal_compression_ratio,
                 )
                 editable_mask_rows = patchify_video_latents(
-                    latent_mask.expand(-1, 24, -1, -1, -1),
+                    (snap_mask_to_patches(latent_mask, self.patch_size) if mask_mode == "grouped_rows" else latent_mask).expand(-1, 24, -1, -1, -1),
                     self.patch_size,
                 ).to(self.device)
 
@@ -1922,132 +2021,141 @@ class MiniMaxH3Model:
 
         audio_condition_rows = None
         if self.omni_reference:
-            minimax_h3_reference_detail = str(
-                minimax_h3_reference_detail or "match"
-            ).strip().lower()
-            if minimax_h3_reference_detail not in {"match", "max"}:
-                raise ValueError(
-                    "MiniMax H3 reference detail must be 'match' or 'max'."
-                )
-            if self._pdd_lora_active:
-                reference_preparation = (
-                    "official high detail (2048px short edge)"
-                    if minimax_h3_reference_detail == "max"
-                    else "Match output (no reference upscaling)"
-                )
-                print(
-                    "[MiniMax H3 PDD] Runtime reference preparation: "
-                    f"{reference_preparation}."
-                )
-            if source_audio_mode:
-                input_prompt = apply_exact_drive_audio_prompt_contract(
-                    input_prompt,
-                    minimax_h3_exact_drive_audio_ordinal,
-                )
-            input_prompt, runtime_references, reference_remap = (
-                align_ref2va_voice_reference_order(
-                    input_prompt,
-                    minimax_h3_references,
-                )
-            )
-            if reference_remap:
-                mapping = "; ".join(
-                    f"{kind} " + ", ".join(
-                        f"{old} -> {new}" for old, new in sorted(remap.items())
+            if self.viggle:
+                from .viggle import prepare_window_references
+                references = prepare_window_references(input_frames, input_ref_images,
+                    history_count, frame_num, height, width)
+                prompt_embeds, text_tags = self.conditioner.forward_ref2va('', self.device, references)
+                print(f"[Viggle] Control window at frame {window_start_frame_no}: "
+                      f"{frame_num} frames, {history_count} history; video then edited-frame conditioning.")
+            else:
+                minimax_h3_reference_detail = str(
+                    minimax_h3_reference_detail or "match"
+                ).strip().lower()
+                if minimax_h3_reference_detail not in {"match", "max"}:
+                    raise ValueError(
+                        "MiniMax H3 reference detail must be 'match' or 'max'."
                     )
-                    for kind, remap in reference_remap.items()
+                if self._pdd_lora_active:
+                    reference_preparation = (
+                        "official high detail (2048px short edge)"
+                        if minimax_h3_reference_detail == "max"
+                        else "Match output (no reference upscaling)"
+                    )
+                    print(
+                        "[MiniMax H3 PDD] Runtime reference preparation: "
+                        f"{reference_preparation}."
+                    )
+                if source_audio_mode:
+                    input_prompt = apply_exact_drive_audio_prompt_contract(
+                        input_prompt,
+                        minimax_h3_exact_drive_audio_ordinal,
+                    )
+                input_prompt, runtime_references, reference_remap = (
+                    align_ref2va_voice_reference_order(
+                        input_prompt,
+                        minimax_h3_references,
+                    )
                 )
-                print(
-                    "[MiniMax H3 Ref2VA] Canonicalized physical reference order "
-                    f"and prompt labels ({mapping})."
+                if reference_remap:
+                    mapping = "; ".join(
+                        f"{kind} " + ", ".join(
+                            f"{old} -> {new}" for old, new in sorted(remap.items())
+                        )
+                        for kind, remap in reference_remap.items()
+                    )
+                    print(
+                        "[MiniMax H3 Ref2VA] Canonicalized physical reference order "
+                        f"and prompt labels ({mapping})."
+                    )
+                input_prompt, runtime_references, voice_scope = (
+                    (lambda prompt, refs: (prompt, refs, {"voice_total": 0})) if self.audio_only else select_ref2va_window_voice_references
+                )(
+                        input_prompt,
+                        runtime_references,
                 )
-            input_prompt, runtime_references, voice_scope = (
-                select_ref2va_window_voice_references(
+                if voice_scope["voice_total"]:
+                    kept = ", ".join(voice_scope["kept_roles"]) or "none"
+                    print(
+                        "[MiniMax H3 Ref2VA] Window-scoped voice references: "
+                        f"kept {voice_scope['voice_kept']}/{voice_scope['voice_total']} "
+                        f"({kept})."
+                    )
+                    if voice_scope["voice_omitted"]:
+                        omitted = ", ".join(voice_scope["omitted_roles"])
+                        print(
+                            "[MiniMax H3 Ref2VA] Omitted non-speaking or over-limit "
+                            f"voice references for this window: {omitted}."
+                        )
+                conditioned_prompt = input_prompt if self.audio_only else ensure_ref2va_prompt_relationships(
                     input_prompt,
                     runtime_references,
+                    duration_seconds=target_frame_num / fps,
                 )
-            )
-            if voice_scope["voice_total"]:
-                kept = ", ".join(voice_scope["kept_roles"]) or "none"
-                print(
-                    "[MiniMax H3 Ref2VA] Window-scoped voice references: "
-                    f"kept {voice_scope['voice_kept']}/{voice_scope['voice_total']} "
-                    f"({kept})."
-                )
-                if voice_scope["voice_omitted"]:
-                    omitted = ", ".join(voice_scope["omitted_roles"])
+                if conditioned_prompt != str(input_prompt or "").strip():
                     print(
-                        "[MiniMax H3 Ref2VA] Omitted non-speaking or over-limit "
-                        f"voice references for this window: {omitted}."
+                        "[MiniMax H3 Ref2VA] Applied canonical Subject/Speaker/Audio "
+                        "bindings to the final model prompt."
                     )
-            conditioned_prompt = ensure_ref2va_prompt_relationships(
-                input_prompt,
-                runtime_references,
-                duration_seconds=target_frame_num / fps,
-            )
-            if conditioned_prompt != str(input_prompt or "").strip():
-                print(
-                    "[MiniMax H3 Ref2VA] Applied canonical Subject/Speaker/Audio "
-                    "bindings to the final model prompt."
-                )
-            picture_no = video_no = audio_no = 0
-            presentation_order = []
-            for reference in runtime_references:
-                kind = reference.get("type")
-                role = str(
-                    reference.get("character_name")
-                    or reference.get("role")
-                    or kind
-                ).strip()
-                if kind == "image":
-                    picture_no += 1
-                    presentation_order.append(f"Picture {picture_no}={role}")
-                elif kind == "video":
-                    video_no += 1
-                    presentation_order.append(f"Video {video_no}={role}")
-                    if (
-                        (reference.get("has_audio") or reference.get("audio_path"))
-                        and reference.get("include_audio", True)
-                    ):
+                picture_no = video_no = audio_no = 0
+                presentation_order = []
+                for reference in runtime_references:
+                    kind = reference.get("type")
+                    role = str(
+                        reference.get("character_name")
+                        or reference.get("role")
+                        or kind
+                    ).strip()
+                    if kind == "image":
+                        picture_no += 1
+                        presentation_order.append(f"Picture {picture_no}={role}")
+                    elif kind == "video":
+                        video_no += 1
+                        presentation_order.append(f"Video {video_no}={role}")
+                        if (
+                            (reference.get("has_audio") or reference.get("audio_path"))
+                            and reference.get("include_audio", True)
+                        ):
+                            audio_no += 1
+                            presentation_order.append(f"Audio {audio_no}={role}")
+                    elif kind == "audio":
                         audio_no += 1
                         presentation_order.append(f"Audio {audio_no}={role}")
-                elif kind == "audio":
-                    audio_no += 1
-                    presentation_order.append(f"Audio {audio_no}={role}")
-            print(
-                "[MiniMax H3 Ref2VA] Runtime reference bindings: "
-                + "; ".join(presentation_order)
-            )
-            references = prepare_references(
-                runtime_references,
-                num_frames=frame_num,
-                target_height=height,
-                target_width=width,
-                audio_sample_rate=32000,
-                detail=minimax_h3_reference_detail,
-                timeline_start_frame=window_start_frame_no,
-            )
-            presentation_references = list(references)
-            if continuation_picture is not None:
-                conditioned_prompt = add_ref2va_continuation_context(
+                print(
+                    "[MiniMax H3 Ref2VA] Runtime reference bindings: "
+                    + "; ".join(presentation_order)
+                )
+                references = prepare_references(
+                    runtime_references,
+                    num_frames=frame_num,
+                    target_height=height,
+                    target_width=width,
+                    audio_sample_rate=32000,
+                    detail=minimax_h3_reference_detail,
+                    timeline_start_frame=window_start_frame_no,
+                    audio_only=self.audio_only,
+                )
+                presentation_references = list(references)
+                if continuation_picture is not None:
+                    conditioned_prompt = add_ref2va_continuation_context(
+                        conditioned_prompt,
+                    )
+                    presentation_references.insert(
+                        0,
+                        MiniMaxH3PreparedReference(
+                            kind="image",
+                            image=continuation_picture,
+                            role="previous-window boundary",
+                            image_intent="composition",
+                        ),
+                    )
+                prompt_embeds, text_tags = self.conditioner.forward_ref2va(
                     conditioned_prompt,
+                    self.device,
+                    presentation_references,
                 )
-                presentation_references.insert(
-                    0,
-                    MiniMaxH3PreparedReference(
-                        kind="image",
-                        image=continuation_picture,
-                        role="previous-window boundary",
-                        image_intent="composition",
-                    ),
-                )
-            prompt_embeds, text_tags = self.conditioner.forward_ref2va(
-                conditioned_prompt,
-                self.device,
-                presentation_references,
-            )
-            if prompt_embeds is None or self._interrupt:
-                return None
+                if prompt_embeds is None or self._interrupt:
+                    return None
             keyframe_rows, anchors = self._encode_visual_conditions(
                 visual_conditions,
                 latent_height,
@@ -2216,6 +2324,20 @@ class MiniMaxH3Model:
         self.scheduler.set_solver(self.sample_solver)
         self.scheduler.set_timesteps(scheduler_points, device=self.device)
         self.audio_scheduler.set_timesteps(scheduler_points, device=self.device)
+        if _face_refinement is not None:
+            from postprocessing.h3_face_refiner.runtime import refinement_sigmas
+            if not self.omni_reference or self.audio_only or self._pdd_lora_active or input_masks is not None:
+                raise ValueError("Face refinement requires ordinary H3 Ref2VA without PDD or edit masks")
+            if source_video_rows is None:
+                raise ValueError("Face refinement requires source video latents")
+            video_sigmas, audio_sigmas = refinement_sigmas(int(sampling_steps),
+                float(_face_refinement["denoising_strength"]), float(_face_refinement["strength"]),
+                self.scheduler.shift, self.audio_scheduler.shift)
+            self.scheduler.set_timesteps(sigmas=video_sigmas, device=self.device)
+            self.audio_scheduler.set_timesteps(sigmas=audio_sigmas, device=self.device)
+            start_row = layout.num_condition_video_rows
+            video_rows[start_row:].copy_(torch.lerp(source_video_rows, source_noise_rows,
+                self.scheduler.sigmas[0].to(source_video_rows)))
         timesteps = self.scheduler.timesteps
         audio_timesteps = self.audio_scheduler.timesteps
         model_steps = len(timesteps)
@@ -2266,6 +2388,14 @@ class MiniMaxH3Model:
             for video_timestep, audio_timestep in zip(timesteps, audio_timesteps)
         ]
         token_tags = layout.token_tags.to(self.device)
+        group_order = group_inverse = None
+        fixed_rows = 0
+        if editable_mask_rows is not None and mask_mode == "grouped_rows":
+            if self.vdn:
+                raise ValueError("H3 grouped-mask editing uses ordinary H3 attention; select the First / Last model without VDN")
+            if offload.shared_state.get("_attention") in ("sol", "sla"):
+                raise ValueError("H3 Grouped Rows requires dense attention; select SDPA or SageAttention")
+            group_order, group_inverse, fixed_rows = grouped_rows(editable_mask_rows)
         position_ids = layout.position_ids.to(self.device)
         video_indices = layout.video_indices.to(self.device)
         audio_indices = layout.audio_indices.to(self.device)
@@ -2407,6 +2537,13 @@ class MiniMaxH3Model:
                             )
                         )
                     unique_timesteps, timestep_indices = row_plan[index]
+                    grouped_active = group_order is not None and denoising_start_step <= index < mask_end_step
+                    if grouped_active:
+                        _reinject_video_source(video_rows[layout.num_condition_video_rows:], source_video_rows,
+                            source_noise_rows, editable_mask_rows, self.scheduler.sigmas[index], source_buffer_rows,
+                            preserved_sigma=1.0 - MINIMAX_H3_KEYFRAME_NOISE_AUG)
+                        unique_timesteps, timestep_indices = grouped_timesteps(
+                            unique_timesteps, timestep_indices, layout, fixed_rows)
                     prediction = self.transformer(
                         hidden_states=video_rows[None],
                         audio_hidden_states=audio_rows[None],
@@ -2422,6 +2559,11 @@ class MiniMaxH3Model:
                         first_block_cache=first_block_cache,
                         target_start_index=target_start_index,
                         video_sink_tokens=video_sink_tokens,
+                        packed_layout=layout,
+                        latent_shape=(num_latent_frames, latent_height, latent_width),
+                        target_video_order=group_order,
+                        target_video_inverse_order=group_inverse,
+                        condition_video_rows=layout.num_condition_video_rows,
                     )
                     if prediction is None or self._interrupt:
                         return None
@@ -2450,6 +2592,8 @@ class MiniMaxH3Model:
                                 ),
                                 self.scheduler.sigmas[index + 1],
                                 source_buffer_rows,
+                                preserved_sigma=(1.0 - MINIMAX_H3_KEYFRAME_NOISE_AUG
+                                    if grouped_active and index + 1 < mask_end_step else None),
                             )
                     if generated_audio_local_indices.numel():
                         audio_target = audio_rows[layout.num_condition_audio_rows :]
@@ -2524,7 +2668,14 @@ class MiniMaxH3Model:
 
         if self._interrupt:
             return None
-        if frozen_target_video is None:
+        if refine_soundtrack:
+            from .audio_refinement import refine_audio
+            audio_rows = refine_audio(self, video_rows, audio_rows, layout, input_prompt,
+                (num_latent_frames, latent_height, latent_width), num_audio_latents, request_seed,
+                callback=callback, set_progress_status=set_progress_status)
+            if audio_rows is None or self._interrupt:
+                return None
+        if not self.audio_only and frozen_target_video is None:
             video_latents = unpatchify_video_tokens(
                 video_rows[layout.num_condition_video_rows :],
                 num_latent_frames,
@@ -2547,13 +2698,22 @@ class MiniMaxH3Model:
             pixel_std = torch.tensor(MINIMAX_H3_PIXEL_STD, device=self.device).view(1, -1, 1, 1, 1)
             video = (video.float() * pixel_std + pixel_mean).clamp(0, 1).mul(2).sub(1)
             output_video = video[0, :, :target_frame_num]
-        else:
+        elif not self.audio_only:
             output_video = frozen_target_video[:, :target_frame_num].cpu()
-        if history_video is not None:
+        if outpaint_source_pixels is not None:
+            inner_h, inner_w, top, left = outpaint_rect
+            output_video[:, :, top:top + inner_h, left:left + inner_w] = outpaint_source_pixels[
+                :, :target_frame_num, top:top + inner_h, left:left + inner_w].to(output_video)
+        if not self.audio_only and history_video is not None:
             output_video = torch.cat(
                 [history_video.to(output_video), output_video],
                 dim=1,
             )
+
+        if _face_refinement is not None:
+            # Refinement keeps the original recorded soundtrack. Audio may
+            # condition the face performance, but must never be regenerated.
+            return {"x": output_video}
 
         audio_latents = unpack_audio_tokens(
             audio_rows[layout.num_condition_audio_rows :],
@@ -2591,9 +2751,13 @@ class MiniMaxH3Model:
                 )
             audio = torch.cat([prefix_audio, audio], dim=-1)
         total_samples = int(
-            round(frame_num / fps * MINIMAX_H3_AUDIO_SAMPLE_RATE)
+            round((audio_only_duration if self.audio_only else frame_num / fps) * MINIMAX_H3_AUDIO_SAMPLE_RATE)
         )
         audio = audio[..., :total_samples].transpose(0, 1).cpu().numpy()
+        if self.audio_only:
+            return {"x": torch.from_numpy(audio.T.copy()), "audio_sampling_rate": MINIMAX_H3_AUDIO_SAMPLE_RATE,
+                    "overridden_inputs": {"resolution": "32x32", "video_length": frame_num,
+                                          "duration_seconds": audio_only_duration}}
         return {
             "x": output_video,
             "audio": audio,

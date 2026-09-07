@@ -2,10 +2,15 @@ import { useEffect, useRef, useState } from 'react'
 import { Wrench, Upload, X, Film, Image as ImageIcon, Mic, Play } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
+import { MediaFlowPanel } from './MediaFlowPanel'
+import { MediaFinishingControls, dlssSpatialOptions } from './MediaFinishingControls'
+import { FaceRefinerButton } from '../Characters/FaceRefiner'
 
 // Upscale methods — same set as Post Processing's Spatial Upsampling, minus the
 // VAE options (those are tied to the generation pipeline, not a standalone clip).
 const upscaleMethods = [
+  { value: '', label: 'Original size (temporal only)' },
+  ...dlssSpatialOptions,
   { value: 'flashvsr2', label: 'FlashVSR 2x' },
   { value: 'flashvsr3', label: 'FlashVSR 3x' },
   { value: 'flashvsr4', label: 'FlashVSR 4x' },
@@ -16,6 +21,7 @@ const upscaleMethods = [
 ]
 
 const imageUpscaleMethods = [
+  ...dlssSpatialOptions,
   { value: 'flashvsr2', label: 'FlashVSR 2x (AI detail)' },
   { value: 'lanczos1.5', label: 'Lanczos 1.5x (fast)' },
   { value: 'lanczos2', label: 'Lanczos 2x (fast)' },
@@ -42,6 +48,9 @@ export function ToolsPanel({
   const setSource = useStore(s => s.setToolsSource)
   const method = useStore(s => s.toolsUpscaleMethod)
   const setMethod = useStore(s => s.setToolsUpscaleMethod)
+  const customSettings = useStore(s => s.params.custom_settings)
+  const temporal = useStore(s => s.params.temporal_upsampling || '')
+  const setParam = useStore(s => s.setParam)
   const grainIntensity = useStore(s => s.filmGrainIntensity)
   const setGrainIntensity = useStore(s => s.setFilmGrainIntensity)
   const grainSaturation = useStore(s => s.filmGrainSaturation)
@@ -116,7 +125,7 @@ export function ToolsPanel({
 
   const hasRefs = revoiceRefs.some(r => r && r.path)
   const canRun = !!sourcePath && (
-    tool === 'upscale'
+    (tool === 'upscale' && (!!method || !!temporal))
     || (tool === 'film_grain' && grainIntensity > 0)
     || (tool === 'revoice' && hasRefs)
   )
@@ -131,6 +140,7 @@ export function ToolsPanel({
 
   return (
     <div className="flex flex-col gap-4">
+      {mediaKind === 'video' && <FaceRefinerButton source={sourcePath ? { path: sourcePath, name: sourceName || 'Video', url: sourceUrl } : undefined} />}
       {!embedded && (
       <div>
         <div className="flex items-center gap-1.5 text-[11px] text-text-muted uppercase tracking-wider mb-2">
@@ -213,13 +223,16 @@ export function ToolsPanel({
           <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">Upscale Method</label>
           <select
             value={method}
-            onChange={e => setMethod(e.target.value)}
+            onChange={e => { setMethod(e.target.value); if (e.target.value.startsWith('flashvsr')) setParam('temporal_upsampling', '') }}
             className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
           >
             {(mediaKind === 'image' ? imageUpscaleMethods : upscaleMethods).map(o => (
               <option key={o.value} value={o.value}>{o.label}</option>
             ))}
           </select>
+          {!method.startsWith('flashvsr') && <MediaFinishingControls spatial={method} temporal={temporal}
+            onTemporal={value => setParam('temporal_upsampling', value)} options={customSettings || {}} image={mediaKind === 'image'}
+            onOptions={value => setParam('custom_settings', value)} />}
           {flashvsrOff && (
             <p className="text-[10px] text-indicator-warning mt-1.5 leading-snug">
               FlashVSR is disabled in Settings → Services. Enable it, or pick a Lanczos method.
@@ -321,6 +334,8 @@ export function ToolsPanel({
           })}
         </div>
       )}
+
+      {tool === 'upscale' && <MediaFlowPanel key={mediaKind} image={mediaKind === 'image'} />}
 
       {/* Run */}
       <button

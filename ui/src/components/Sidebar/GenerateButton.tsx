@@ -59,6 +59,9 @@ export function GenerateButton() {
     ),
   ))
   const hasStartImage = useStore(s => !!(s.startImage || s.params.image_start))
+  const viggleMissing = useStore(s => s.generationMode === 'video' && s.studioVideoWorkflow === 'animate'
+    && (!s.params.video_guide || !(s.params.viggle_character ? s.params.viggle_character.reference_path : s.params._viggle_edited_frame)
+      || (s.params.audio_prompt_type === 'A' && !s.params.audio_guide)))
   const createWorkflow = studioVideoWorkflow === 'references' ? 'references' : 'frames'
   const studioMediaIntent = {
     workflow: createWorkflow,
@@ -114,7 +117,7 @@ export function GenerateButton() {
     && Object.values(imagePadding).every(value => value === 0)
   const incompatibleImageModel = generationMode === 'image'
     && !modelSupportsImageWorkflow(currentModel, imageWorkflow, imageRefs.length > 0)
-  const blocked = needsCreateModel || needsGuidance || needsImage || needsReference || needsOutpaintSource || needsOutpaintArea
+  const blocked = viggleMissing || needsCreateModel || needsGuidance || needsImage || needsReference || needsOutpaintSource || needsOutpaintArea
     || needsImageGenerateSource || needsImageWorkflowSource || needsImageMask
     || needsImageOutpaintArea || incompatibleImageModel
   const queueSupported = generationMode !== 'avatar'
@@ -132,7 +135,7 @@ export function GenerateButton() {
   }
 
   if (blocked) {
-    const label = needsCreateModel
+    const label = viggleMissing ? 'Need inputs' : needsCreateModel
       ? 'Need model'
       : needsGuidance
         ? 'Need frame'

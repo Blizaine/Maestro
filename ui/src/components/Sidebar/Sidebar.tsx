@@ -1,5 +1,7 @@
 import { Settings, X, Globe, BookMarked } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
+import { OutputFormatControls } from './OutputFormatControls'
+import { ViggleControls } from './ViggleControls'
 import { useIsMobile } from '../../lib/useIsMobile'
 import { GenerationModeSelector } from './GenerationModeSelector'
 import { InputsPanel } from './InputsPanel'
@@ -35,6 +37,7 @@ import { VideoWorkflowSelector } from './VideoWorkflowSelector'
 import { ImageWorkflowSelector } from './ImageWorkflowSelector'
 import { ImageWorkflowControls } from './ImageWorkflowControls'
 import { AppModeToggle, MaestroBrand } from '../AppModeNavigation'
+import { AutomaticFaceRefiner } from '../Characters/FaceRefiner'
 
 export function Sidebar() {
   const toggleSettings = useStore(s => s.toggleSettings)
@@ -81,6 +84,7 @@ export function Sidebar() {
     || selectedModel?.model_type.toLowerCase().startsWith('minimax_h3_ref2va'),
   )
   const isFramesWorkflow = isVideo && Number(imageMode) === 0 && videoWorkflow === 'frames'
+  const isAnimate = isVideo && videoWorkflow === 'animate'
   const isReferencesWorkflow = isVideo && Number(imageMode) === 0 && videoWorkflow === 'references'
   const isMultiClip = isVideo && imageMode === 2
   const isContinue = isVideo && imageMode === 3
@@ -149,6 +153,7 @@ export function Sidebar() {
         {isVideoWorkspace && <VideoWorkflowSelector />}
         {isImageWorkspace && <ImageWorkflowSelector />}
         {isAudioWorkspace && <AudioSubModeToggle />}
+        {!isStandaloneTool && <OutputFormatControls />}
 
         {isAudio && audioSubMode !== 'sfx' && audioSubMode !== 'mixer' && audioSubMode !== 'revoice' && (
           <AudioDurationControl />
@@ -169,6 +174,7 @@ export function Sidebar() {
             start/end anchors — so the generic Duration slider and
             start/end ImageUpload don't apply there. */}
         {isVideo && !isBlend && <DurationSlider />}
+        {isAnimate && <ViggleControls />}
         {/* Frames (image_mode 0) AND Extend (image_mode 3) both use the unified
             InputsPanel. In Extend mode its first tile is the source video to
             continue from; otherwise it's the start frame. */}
@@ -189,7 +195,7 @@ export function Sidebar() {
 
         {/* Image workflows expose only the inputs their native pipeline uses. */}
         {isImage && <ImageWorkflowControls />}
-        {isImage && imageWorkflow === 'generate' && <ImageRefSection />}
+        {isImage && (imageWorkflow === 'generate' || !!modelOptions?.image_ref_choices) && <ImageRefSection />}
 
         {/* Video/Image mode: audio controls (soundtrack, control video, etc.).
             In Frames mode (video, image_mode 0) the unified InputsPanel routes
@@ -198,13 +204,13 @@ export function Sidebar() {
         {!isEdit && !isAudio && !(isVideo && (imageMode === 0 || imageMode === 3)) && modelOptions?.audio_prompt_type_sources && <AudioModeSection />}
 
         {/* Audio mode: workflow-specific controls */}
-        {isAudio && audioSubMode === 'speech' && modelOptions?.audio_prompt_type_sources && <AudioModeSection />}
+        {isAudio && audioSubMode === 'speech' && modelOptions?.audio_only && <AudioModeSection />}
         {isAudio && audioSubMode === 'sfx' && <SfxControls />}
         {isAudio && audioSubMode === 'mixer' && <MixerControls />}
         {isAudio && audioSubMode === 'music' && <MusicControls />}
 
         {/* Prompt area (non-edit modes, skip for SFX/Mixer/Music which have their own UI) */}
-        {!isEdit && !(isAudio && (audioSubMode === 'sfx' || audioSubMode === 'mixer' || audioSubMode === 'music')) && (isMultiClip ? <MultiClipEditor /> : <PromptInput />)}
+        {!isAnimate && !isEdit && !(isAudio && (audioSubMode === 'sfx' || audioSubMode === 'mixer' || audioSubMode === 'music')) && (isMultiClip ? <MultiClipEditor /> : <PromptInput />)}
 
         {/* Video: reference images below prompt. In Frames mode the InputsPanel
             renders them as ordered tiles instead. */}
@@ -215,6 +221,7 @@ export function Sidebar() {
         {isVideo && !isDirector && !isOmniReference && imageMode !== 0 && imageMode !== 3 && <VoiceRefSection />}
         </>
         )}
+        {isVideo && !isDirector && !isStandaloneTool && <AutomaticFaceRefiner />}
       </div>
 
       {/* Bottom Bar: Advanced + LoRA Browser + Model + Generate.

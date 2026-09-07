@@ -15,6 +15,10 @@ import requests
 from typing import Optional
 
 from services.text_integrity import repair_text
+from services.dialogue_timing import (
+    DIALOGUE_DEFAULT_WORDS_PER_SECOND,
+    DIALOGUE_MAX_WORDS_PER_SECOND,
+)
 from services.h3_story_ledger import normalize_h3_dialogue_tags
 
 logger = logging.getLogger(__name__)
@@ -3418,13 +3422,15 @@ def enhance_prompt(
         and not _extract_h3_quoted_dialogue(prompt)
         and not _h3_dialogue_contract_satisfied(prompt, result)
     ):
-        word_budget = max(4, int(duration_seconds or 8))
+        word_budget = max(1, int(float(duration_seconds or 8) * DIALOGUE_MAX_WORDS_PER_SECOND))
         dialogue_language = _detect_h3_dialogue_language(prompt)
         print("[Enhance] H3 discussion still has no dialogue; generating a focused exchange.")
         dialogue_fragment = generate(
             prompt=(
                 f"Duration: {duration_seconds or 8} seconds. Total dialogue budget: at most "
-                f"{word_budget} spoken words. Request: {prompt}"
+                f"{word_budget} spoken words. Aim for {DIALOGUE_DEFAULT_WORDS_PER_SECOND:g} words "
+                "per second during speech, leaving time for requested action and pauses. "
+                f"Request: {prompt}"
             ),
             system_prompt=(
                 "Write only the concise dialogue requested by the user. Output one to three lines in "
@@ -3727,74 +3733,47 @@ def _extract_h3_source_dialogue_entries(
 
     spans.sort(key=lambda entry: entry["start"])
     manifest = _parse_h3_ref2va_subject_manifest(reference_context)
-    manifest_subjects = {int(subject["index"]) for subject in manifest}
-    declared_speaker_subjects: dict[int, int] = {}
-    for subject_no, speaker_no in re.findall(
-        r"<Subject\s+(\d+)>\s*\(S(\d+)\)",
-        source,
-        flags=re.IGNORECASE,
-    ):
-        speaker = int(speaker_no)
-        subject = int(subject_no)
-        previous = declared_speaker_subjects.get(speaker)
-        if previous is None or previous == subject:
-            declared_speaker_subjects[speaker] = subject
-
-    for index, entry in enumerate(spans, start=1):
-        prefix = source[max(0, int(entry["start"]) - 280):int(entry["start"])]
-        explicit_speakers = re.findall(
-            r"\(S(\d+)\)", prefix[-80:], flags=re.IGNORECASE
-        )
-        explicit_subject = re.findall(
-            r"<Subject\s+(\d+)>", prefix[-120:], flags=re.IGNORECASE
-        )
-        if explicit_subject:
-            entry["subject_id"] = int(explicit_subject[-1])
-            continue
-
-        candidates: list[tuple[int, int]] = []
-        for subject in manifest:
-            name = str(subject.get("name") or "").strip()
-            if not name:
-                continue
-            escaped = re.escape(name)
-            speaker_before_verb = re.compile(
-                rf"(?i)\b{escaped}\b[^.!?\r\n]{{0,100}}\b(?:says?|saying|asks?|"
-                r"replies?|responds?|answers?|yells?|shouts?|whispers?|declares?|"
-                r"announces?|speaks?|tells?)\b[^.!?\r\n]{0,140}$"
-            )
-            matches = list(speaker_before_verb.finditer(prefix))
-            if matches:
-                candidates.append((matches[-1].end(), int(subject["index"])))
-        if candidates:
-            entry["subject_id"] = max(candidates)[1]
-        elif explicit_speakers and manifest:
-            explicit_speaker = int(explicit_speakers[-1])
-            entry["subject_id"] = declared_speaker_subjects.get(explicit_speaker)
-            if entry.get("subject_id") is None and explicit_speaker in manifest_subjects:
-                # Compatibility for old Maestro prompts where S2 meant
-                # Subject 2.  It is renumbered below into official event order.
-                entry["subject_id"] = explicit_speaker
-        elif manifest:
-            # Deterministic fallback for tersely authored dialogue: preserve
-            # source order but never create a speaker outside the manifest.
-            entry["subject_id"] = int(manifest[(index - 1) % len(manifest)]["index"])
-        else:
-            entry["speaker_id"] = (
-                int(explicit_speakers[-1]) if explicit_speakers else index
-            )
-
     if manifest:
-        subject_speakers: dict[int, int] = {}
+        from models.minimax_h3.speakers import (
+            _ambiguous_ref2va_dialogue_error,
+            _ref2va_alias_values,
+            _resolve_ref2va_dialogue_owner_name,
+            _resolve_ref2va_dialogue_speaker,
+        )
+
+        valid_subjects = {int(subject["index"]) for subject in manifest}
+        alias_candidates: dict[str, set[int]] = {}
+        for subject in manifest:
+            for alias in _ref2va_alias_values({"character_name": subject["name"]}):
+                alias_candidates.setdefault(alias, set()).add(int(subject["index"]))
+        aliases = {
+            alias: next(iter(subjects))
+            for alias, subjects in alias_candidates.items() if len(subjects) == 1
+        }
+        vocal_speakers: dict[tuple, int] = {}
         for entry in spans:
-            subject = entry.get("subject_id")
-            if subject is None:
-                continue
-            subject = int(subject)
-            entry["speaker_id"] = subject_speakers.setdefault(
-                subject,
-                len(subject_speakers) + 1,
+            subject = _resolve_ref2va_dialogue_speaker(
+                source, int(entry["start"]), int(entry["end"]), aliases, valid_subjects,
             )
+            owner = _resolve_ref2va_dialogue_owner_name(
+                source, int(entry["start"]), int(entry["end"]),
+            )
+            if subject is None and not owner:
+                if len(valid_subjects) == 1:
+                    subject = next(iter(valid_subjects))
+                else:
+                    raise _ambiguous_ref2va_dialogue_error(entry["words"])
+            if subject is not None:
+                entry["subject_id"] = subject
+            # Guests keep their own voice; neither input order nor an (Sx)
+            # event marker is evidence that they are a referenced character.
+            key = ("subject", subject) if subject is not None else ("name", owner.casefold())
+            entry["speaker_id"] = vocal_speakers.setdefault(key, len(vocal_speakers) + 1)
+    else:
+        for index, entry in enumerate(spans, start=1):
+            prefix = source[max(0, int(entry["start"]) - 80):int(entry["start"])]
+            explicit = re.findall(r"\(S(\d+)\)", prefix, flags=re.IGNORECASE)
+            entry["speaker_id"] = int(explicit[-1]) if explicit else index
     return spans
 
 
@@ -3866,19 +3845,20 @@ def _extract_h3_dialogue_entries(text: str) -> list[tuple[str, str]]:
 
 def _h3_dialogue_schedule(prompt: str, duration_seconds: Optional[float]) -> tuple[float, float, float]:
     """Choose an early bounded speech interval and leave useful silent action around it."""
+    from services.dialogue_timing import (
+        DIALOGUE_DEFAULT_WORDS_PER_SECOND,
+        h3_dialogue_schedule,
+    )
+
     duration = max(2.0, float(duration_seconds or 8.0))
     quotes = _extract_h3_quoted_dialogue(prompt)
     if quotes:
         word_count = sum(len(line.split()) for line in quotes)
     else:
-        # Vague discussion requests still need room for reactions and action.
-        word_count = max(4, int(duration))
-    speech_duration = max(1.0, word_count / 2.0)
-    speech_duration = min(speech_duration, max(1.0, duration * 0.55))
-    start = max(0.5, duration * 0.2)
-    start = min(start, max(0.25, duration - speech_duration - 0.75))
-    end = min(duration - 0.25, start + speech_duration)
-    return duration, start, end
+        # Without a supplied script, allow the default speech pace to use the
+        # available clip. The writing guide reserves any requested action time.
+        word_count = max(1, int(duration * DIALOGUE_DEFAULT_WORDS_PER_SECOND))
+    return h3_dialogue_schedule(word_count, duration)
 
 
 def _build_h3_timed_silence_clause(prompt: str, duration_seconds: Optional[float]) -> str:
@@ -3901,6 +3881,11 @@ def _build_h3_dialogue_requirement(
     prompt: str,
     duration_seconds: Optional[float] = None,
 ) -> str:
+    from services.dialogue_timing import (
+        DIALOGUE_DEFAULT_WORDS_PER_SECOND,
+        DIALOGUE_MAX_WORDS_PER_SECOND,
+    )
+
     quotes = _extract_h3_quoted_dialogue(prompt)
     language = _detect_h3_dialogue_language(prompt)
     timed_clause = _build_h3_timed_silence_clause(prompt, duration_seconds)
@@ -3919,7 +3904,10 @@ def _build_h3_dialogue_requirement(
         return (
             "MANDATORY H3 DIALOGUE CONTRACT: The user explicitly requests speech but supplied no "
             "script. Write concise, meaningful dialogue that communicates the requested subject, "
-            f"using stable speaker IDs and one or more <d>[{language}] literal words</d> blocks. "
+            f"aiming for {DIALOGUE_DEFAULT_WORDS_PER_SECOND:g} words per second during speech and "
+            f"allowing up to {DIALOGUE_MAX_WORDS_PER_SECOND:g}. Leave time for requested action "
+            "and pauses; do not pad dialogue to fill the budget. "
+            f"Use stable speaker IDs and one or more <d>[{language}] literal words</d> blocks. "
             "Writing only 'speaks', 'talks', or 'they discuss' makes the output invalid. "
             f"{timed_clause}"
         )
@@ -4369,17 +4357,22 @@ def _canonicalize_h3_ref2va_dialogue_speakers(
             continue
         prefix_start = max(cursor, match.start() - 180)
         prefix = text[prefix_start:match.start()]
-        ids = list(re.finditer(r"\(S\d+\)", prefix, flags=re.IGNORECASE))
+        subject_id = entry.get("subject_id")
+        binding = (
+            f"<Subject {subject_id}> (S{speaker_id})"
+            if subject_id is not None else f"(S{speaker_id})"
+        )
+        ids = list(re.finditer(r"(?:<Subject\s+\d+>\s*)?\(S\d+\)", prefix, flags=re.IGNORECASE))
         if ids:
             last = ids[-1]
             absolute_start = prefix_start + last.start()
             absolute_end = prefix_start + last.end()
-            text = text[:absolute_start] + f"(S{speaker_id})" + text[absolute_end:]
-            delta = len(f"(S{speaker_id})") - (absolute_end - absolute_start)
+            text = text[:absolute_start] + binding + text[absolute_end:]
+            delta = len(binding) - (absolute_end - absolute_start)
             cursor = match.end() + delta
         else:
-            text = text[:match.start()] + f"(S{speaker_id}) " + text[match.start():]
-            cursor = match.end() + len(f"(S{speaker_id}) ")
+            text = text[:match.start()] + binding + " " + text[match.start():]
+            cursor = match.end() + len(binding) + 1
     if _extract_h3_dialogue_blocks(text) and not re.search(
         r"(?i)no other (?:subject|character).{0,80}(?:repeat|echo|mouth|paraphrase)",
         text,
@@ -4543,16 +4536,18 @@ def _compile_h3_explicit_dialogue(
         start = int(entry["start"])
         end = int(entry["end"])
         speaker_id = int(entry.get("speaker_id") or 1)
+        subject_id = entry.get("subject_id")
+        owner = f"<Subject {subject_id}> " if subject_id is not None else ""
         replacement = (
-            f"(S{speaker_id}) <d>[{entry['language']}] {entry['words']}</d>"
+            f"{owner}(S{speaker_id}) <d>[{entry['language']}] {entry['words']}</d>"
         )
         # Keep the prose around the line, but avoid duplicating an explicit ID
         # immediately preceding an already-tagged source line.
-        prefix = result[max(0, start - 16):start]
+        prefix = result[max(0, start - 60):start]
         import re
-        existing = re.search(r"\(S\d+\)\s*$", prefix, flags=re.IGNORECASE)
+        existing = re.search(r"(?:<Subject\s+\d+>\s*)?\(S\d+\)\s*$", prefix, flags=re.IGNORECASE)
         if existing:
-            absolute = max(0, start - 16) + existing.start()
+            absolute = max(0, start - 60) + existing.start()
             result = result[:absolute] + replacement + result[end:]
         else:
             result = result[:start] + replacement + result[end:]
@@ -6912,10 +6907,10 @@ def plan_short_film_from_story(
         'as quoted text with a speaker cue, woven into the scene description. '
         "The dialogue field is just a metadata summary — the video_prompt is what the "
         "video model actually reads and generates from.\n"
-        "- DIALOGUE LENGTH: People speak at ~2 words per second. Aim for roughly "
-        "duration × 2 words of dialogue per scene (e.g. ~20 words for a 10s scene, "
-        "~30 for 15s). Don't write throwaway one-liners, but don't overpack either. "
-        "The system will adjust if needed."
+        f"- DIALOGUE LENGTH: Aim for {DIALOGUE_DEFAULT_WORDS_PER_SECOND:g} words per second "
+        f"during speech, allowing up to {DIALOGUE_MAX_WORDS_PER_SECOND:g}. A 10s speech "
+        "interval targets 28 words (maximum 30). Leave time for action and reactions; "
+        "do not add dialogue just to fill the budget."
     )
 
     user_prompt = f"Story Concept: {story_description}"
@@ -7029,13 +7024,12 @@ def plan_short_film_from_story(
             scene["dialogue"] = dialogue[:MAX_DIALOGUE_LINES]
 
     # ── Dialogue budget check: ask LLM to rewrite over-budget scenes ──
-    # People speak at ~2-2.5 words per second. If dialogue exceeds that,
-    # ask the LLM to condense just those scenes (it keeps narrative sense).
+    # Apply the shared admission ceiling, not the lower default writing pace.
     over_budget = []
     for i, scene in enumerate(scenes):
         vp = scene.get("video_prompt", "")
         duration = float(scene.get("duration", 15))
-        max_words = int(duration * 2.5)
+        max_words = int(duration * DIALOGUE_MAX_WORDS_PER_SECOND)
         quotes = re.findall(r'"([^"]*)"', vp)
         if not quotes:
             continue
@@ -7055,8 +7049,9 @@ def plan_short_film_from_story(
 
         rewrite_prompt = (
             "The following scenes have too much spoken dialogue for their duration. "
-            "People speak at about 2 words per second — if there are too many words, "
-            "the actor will speak unnaturally fast or get cut off.\n\n"
+            f"Aim for {DIALOGUE_DEFAULT_WORDS_PER_SECOND:g} words per second during speech, "
+            f"with a maximum of {DIALOGUE_MAX_WORDS_PER_SECOND:g}. Leave room for requested "
+            "action and pauses.\n\n"
             "Condense the dialogue in each video_prompt to fit the word budget. "
             "Keep the same meaning and narrative flow — just say it more concisely. "
             "Keep all non-dialogue parts (action, camera, setting) unchanged.\n\n"

@@ -1,9 +1,13 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Plus, X } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { ChoiceControl } from '../shared/ChoiceControl'
 import { FileUploadZone } from '../shared/FileUploadZone'
 import * as api from '../../api/client'
+import type { SavedOmniCharacter } from '../../types'
+import { ttsVoiceLimit } from '../../lib/ttsVoices'
+import { characterDisplayName } from '../../lib/characters'
+import { TtsCharacterLibrary } from './TtsCharacterLibrary'
 
 export function AudioModeSection() {
   const modelOptions = useStore(s => s.modelOptions)
@@ -13,6 +17,11 @@ export function AudioModeSection() {
   const setAudioGuideFilename = useStore(s => s.setAudioGuideFilename)
   const [videoGuideFilename, setVideoGuideFilename] = useState<string | null>(null)
   const [uploading, setUploading] = useState(false)
+  const [error, setError] = useState('')
+  const [characters, setCharacters] = useState<SavedOmniCharacter[]>([])
+  const [pendingCharacter, setPendingCharacter] = useState<SavedOmniCharacter | null>(null)
+  const modelOptionsLoading = useStore(s => s.modelOptionsLoading)
+  const selectModel = useStore(s => s.selectModel)
 
   // Dynamic multi-voice state
   const ttsVoiceCount = useStore(s => s.ttsVoiceCount)
@@ -21,13 +30,25 @@ export function AudioModeSection() {
   const removeTtsVoice = useStore(s => s.removeTtsVoice)
   const setTtsVoiceName = useStore(s => s.setTtsVoiceName)
   const setTtsVoiceFile = useStore(s => s.setTtsVoiceFile)
+  const setTtsVoiceCharacter = useStore(s => s.setTtsVoiceCharacter)
+  const setTtsVoiceCount = useStore(s => s.setTtsVoiceCount)
   const setDurationSeconds = useStore(s => s.setDurationSeconds)
 
-  if (!modelOptions?.audio_prompt_type_sources) return null
+  useEffect(() => {
+    if (!pendingCharacter || modelOptionsLoading) return
+    if (params.model_type === 'qwen3_tts_base' && modelOptions?.architecture === 'qwen3_tts_base') {
+      setTtsVoiceCharacter(0, pendingCharacter)
+    } else if (params.model_type === 'qwen3_tts_base') {
+      setError('Could not load Qwen3 Voice Cloning. Select that model and try again.')
+    }
+    setPendingCharacter(null)
+  }, [pendingCharacter, modelOptionsLoading, modelOptions?.architecture, params.model_type, setTtsVoiceCharacter])
+
+  if (!modelOptions || (!modelOptions.audio_prompt_type_sources && !modelOptions.audio_only)) return null
 
   const isAudioOnly = modelOptions.audio_only
   const config = modelOptions.audio_prompt_type_sources
-  const audioValue = (params.audio_prompt_type || config.default || '') as string
+  const audioValue = (params.audio_prompt_type ?? config?.default ?? '') as string
   const audioBaseMode = audioValue.replace(/[NV]/g, '')
   const needsAudioUpload = audioBaseMode.includes('A') && !isAudioOnly
   const needsVideoGuideUpload = audioValue === 'K' && !modelOptions.guide_preprocessing
@@ -43,11 +64,28 @@ export function AudioModeSection() {
   // models, eliminating the dual-source-of-truth confusion that Phase 6's
   // ChoiceControl unhide (commit 19eda0b) introduced.
   const hideAudioModeChoice = Boolean((modelOptions as { audio_mode_from_voice_count?: boolean }).audio_mode_from_voice_count)
-  // Max voice slots the model accepts. Defaults to 6 (Kugel); Scenema sets 2
-  // since it only consumes slots 1-2 (A2 / AB2 modes). The UI caps the
-  // "Add Voice" button at this limit so users aren't offered slots that
-  // would be silently discarded by the backend.
-  const maxVoiceCount = ((modelOptions as { max_voice_count?: number }).max_voice_count) ?? 6
+  // Show only voice slots that the selected model consumes.
+  const maxVoiceCount = ttsVoiceLimit(modelOptions)
+  const switchToClone = ['qwen3_tts_customvoice', 'qwen3_tts_voicedesign'].includes(modelOptions.architecture)
+  const emptySlot = ttsVoices.slice(0, ttsVoiceCount).findIndex(voice => !voice.path)
+  const canAddCharacter = switchToClone || emptySlot >= 0 || ttsVoiceCount < maxVoiceCount
+
+  const chooseCharacter = (character: SavedOmniCharacter, index?: number) => {
+    setError('')
+    if (switchToClone) {
+      setPendingCharacter(character)
+      // Voice-design instructions and preset speaker IDs are not reference
+      // transcripts or language IDs in Qwen's Base voice-cloning variant.
+      setParam('alt_prompt', '')
+      selectModel('qwen3_tts_base')
+      return
+    }
+    try {
+      setTtsVoiceCharacter(index ?? (emptySlot >= 0 ? emptySlot : ttsVoiceCount), character)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not use this character.')
+    }
+  }
 
   const getAudioDuration = (file: File): Promise<number | null> => {
     // Use HTML5 <video> element for video files and <audio> for audio.
@@ -105,14 +143,14 @@ export function AudioModeSection() {
 
   const handleVoiceUpload = async (file: File, index: number) => {
     setUploading(true)
+    setError('')
+    const uploadModel = params.model_type
     try {
-      const result = await api.uploadImage(file)
+      const result = await api.uploadAudio(file)
+      if (useStore.getState().params.model_type !== uploadModel) return
       setTtsVoiceFile(index, file.name, result.path)
-      // Also set legacy params for backward compat
-      const key = index === 0 ? 'audio_guide' : `audio_guide${index + 1}`
-      setParam(key as keyof import('../../types').GenerateParams, result.path)
     } catch (e) {
-      console.error('Upload failed:', e)
+      setError(e instanceof Error ? e.message : 'Voice upload failed.')
     } finally {
       setUploading(false)
     }
@@ -120,24 +158,29 @@ export function AudioModeSection() {
 
   const clearVoice = (index: number) => {
     setTtsVoiceFile(index, null, null)
-    const key = index === 0 ? 'audio_guide' : `audio_guide${index + 1}`
-    setParam(key as keyof import('../../types').GenerateParams, undefined)
   }
 
   return (
     <div className="space-y-3">
+      {isAudioOnly && <TtsCharacterLibrary
+        onSelect={chooseCharacter} onCharactersChange={setCharacters}
+        selectedIds={ttsVoices.slice(0, ttsVoiceCount).flatMap(voice => voice.characterId ? [voice.characterId] : [])}
+        canAdd={canAddCharacter} disabled={uploading || modelOptionsLoading} switchToClone={switchToClone}
+      />}
+      {error && <p role="alert" className="text-[10px] text-indicator-error">{error}</p>}
       {/* Audio mode selector — shown for any model that exposes audio_prompt_type_sources
           UNLESS the model opted into voice-count-driven mode (KugelAudio). For those,
           the voice-slot buttons below are the only mode UI to eliminate dual-source-
           of-truth drift. Previously gated on !isAudioOnly (Phase 6 commit 19eda0b
           removed that to let Scenema/Index TTS2 show their explicit text/single-ref/
           two-ref choices). */}
-      {!hideAudioModeChoice && (
+      {config && !hideAudioModeChoice && (
         <ChoiceControl
           config={config}
           value={audioBaseMode}
           onChange={val => {
             const flags = audioValue.replace(/[^NV]/g, '')
+            if (isAudioOnly) setTtsVoiceCount(val.includes('B') ? 2 : val.includes('A') ? 1 : 0)
             setParam('audio_prompt_type', val + flags)
             if (!val.includes('A')) {
               setParam('audio_guide', undefined)
@@ -155,8 +198,8 @@ export function AudioModeSection() {
       )}
 
       {/* TTS Voice Cloning — dynamic 1-6 voices */}
-      {isAudioOnly && (
-        <div className="space-y-2">
+      {isAudioOnly && maxVoiceCount > 0 && (
+        <fieldset disabled={uploading || modelOptionsLoading} className="space-y-2 disabled:opacity-50">
           {/* Add Voice button — always at top */}
           {ttsVoiceCount < maxVoiceCount && (
             <button
@@ -170,7 +213,9 @@ export function AudioModeSection() {
 
           {ttsVoiceCount === 0 && (
             <p className="text-[9px] text-text-muted text-center">
-              Text-only mode. Add voices to clone specific speakers.
+              {config?.selection?.includes('') || !config
+                ? 'Text-only mode. Add voices to clone specific speakers.'
+                : 'Add a saved character or upload a voice reference to begin.'}
             </p>
           )}
 
@@ -180,23 +225,36 @@ export function AudioModeSection() {
               {ttsVoices.slice(0, ttsVoiceCount).map((voice, i) => (
                 <div key={i} className="bg-bg-tertiary/50 border border-border rounded-lg p-2 relative">
                   <button
+                    aria-label={`Remove voice ${i + 1}`}
                     onClick={() => removeTtsVoice(i)}
                     className="absolute -top-1.5 -right-1.5 p-0.5 rounded-full bg-bg-secondary border border-border text-text-muted hover:text-red-400 hover:border-red-400/50 transition-colors z-10"
                   >
                     <X size={10} />
                   </button>
                   <label className="text-[9px] text-text-muted uppercase tracking-wider block mb-1">
-                    Voice {i + 1}
+                    {modelOptions.architecture === 'index_tts2' && audioBaseMode === 'AB' && i === 1 ? 'Emotion reference' : `Voice ${i + 1}`}
                   </label>
+                  <select aria-label={`Saved character for voice ${i + 1}`} value={voice.characterId || ''}
+                    onChange={event => {
+                      const character = characters.find(item => item.id === event.target.value)
+                      if (character) chooseCharacter(character, i)
+                      else clearVoice(i)
+                    }}
+                    className="w-full mb-1.5 rounded border border-border bg-bg-tertiary px-1 py-1 text-[10px] text-text-primary">
+                    <option value="">Choose saved character…</option>
+                    {voice.characterId && !characters.some(item => item.id === voice.characterId) && <option value={voice.characterId}>{characterDisplayName(voice.characterName || voice.name)}</option>}
+                    {characters.map(character => <option key={character.id} value={character.id} disabled={!character.voice?.path}>{characterDisplayName(character.name)}{!character.voice ? ' (no voice)' : ''}</option>)}
+                  </select>
                   <FileUploadZone
-                    label={uploading ? '...' : 'Drop audio'}
-                    accept=".wav,.mp3,.flac,.ogg,.m4a"
+                    label={uploading ? '...' : 'Drop voice audio or video'}
+                    accept=".wav,.mp3,.flac,.ogg,.m4a,.aac,.mp4,.mov,.mkv,.webm"
                     filename={voice.filename}
                     onFile={f => handleVoiceUpload(f, i)}
                     onClear={() => clearVoice(i)}
                   />
                   <input
                     type="text"
+                    aria-label={`Speaker name for voice ${i + 1}`}
                     placeholder="Speaker name"
                     value={voice.name}
                     onChange={e => setTtsVoiceName(i, e.target.value)}
@@ -212,7 +270,7 @@ export function AudioModeSection() {
             <div className="space-y-1.5 pt-1">
               {ttsVoiceCount >= 2 && (
                 <p className="text-[9px] text-text-muted">
-                  Names auto-fill from prompt. Each name maps to the voice above it.
+                  Use these names or Speaker 1 / Speaker 2 in your script. Saved character names stay bound to their voices.
                 </p>
               )}
               <label className="flex items-center gap-2 cursor-pointer group">
@@ -252,7 +310,7 @@ export function AudioModeSection() {
               )}
             </div>
           )}
-        </div>
+        </fieldset>
       )}
 
       {/* Non-TTS: Audio file upload (LTX soundtrack mode).

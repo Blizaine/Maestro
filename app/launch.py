@@ -780,7 +780,7 @@ def _normalize_studio_preferences(values, current=None):
         "studio_video_workflow": {
             "frames", "references", "extend", "blend", "retake",
             "prompt_edit", "outpaint", "repaint", "recast", "upscale",
-            "film_grain",
+            "film_grain", "animate",
         },
         "studio_image_workflow": {
             "generate", "inpaint", "outpaint", "upscale",
@@ -1837,6 +1837,9 @@ def list_all_installed_loras():
             _seen_keys.add(_key)
             full_path = os.path.join(dirpath, f)
             own_base = os.path.splitext(full_path)[0]
+            from services.refmod import is_refmod_file
+            if is_refmod_file(full_path):
+                continue
             # Sidecars/guides for linked files live at the primary-mirror
             # base (scan write target); check it first, then beside the file.
             if is_linked:
@@ -2058,11 +2061,19 @@ def delete_lora_file(directory: str, filename: str):
 def _lora_is_compatible_with_model(model_def: dict, path: str) -> bool:
     """Keep special adapters out of model selectors that cannot run them."""
 
+    from services.refmod import is_refmod_file
+    if is_refmod_file(path):
+        return False
+
     # Most MiniMax H3 adapters can cross Full/Pruned through Maestro's AdaLN
     # conversion. Presets may still opt out explicitly when an upstream
     # adapter is tied to one checkpoint shape.
     architecture = str((model_def or {}).get("architecture") or "")
     if architecture.startswith("minimax_h3"):
+        if (model_def or {}).get("minimax_h3_fused_turbo", False):
+            from models.minimax_h3.fused_turbo import fused_h3_lora_incompatibility
+
+            return fused_h3_lora_incompatibility(path) is None
         from models.minimax_h3.turbo import minimax_h3_turbo_preset_for_path
 
         preset = minimax_h3_turbo_preset_for_path(path)
@@ -2089,6 +2100,8 @@ def _minimax_h3_turbo_option(model_def: dict) -> dict | None:
     if (
         not architecture.startswith("minimax_h3")
         or (model_def or {}).get("minimax_h3_fused_turbo", False)
+        or (model_def or {}).get("audio_only", False)
+        or (model_def or {}).get("vdn", False)
     ):
         return None
 
@@ -4274,6 +4287,12 @@ def _run_civitai_download(download_id: str):
                     f"CivitAI API Key."
                 )
 
+        from services.refmod import is_refmod_file
+        if is_refmod_file(partial_path):
+            _import_downloaded_character(partial_path, download_id)
+            _complete_download_record(download_id)
+            return
+
         checkpoint_compatibility = None
         if is_checkpoint:
             dl["message"] = "Verifying checkpoint architecture..."
@@ -4629,6 +4648,7 @@ async def hf_import_lora(request: Request):
     desired_filename = (body.get("filename", "") or "").strip()
 
     import re as _re
+    from urllib.parse import quote as _quote, unquote as _unquote, urlparse as _urlparse
 
     if target_dir_override and not _is_safe_path_component(target_dir_override):
         return JSONResponse({"error": "Invalid target_dir"}, status_code=400)
@@ -4644,10 +4664,20 @@ async def hf_import_lora(request: Request):
     if not match:
         return JSONResponse({"error": "Unrecognized URL. Expected a HuggingFace repo (https://huggingface.co/user/repo) or a CivitAI model (https://civitai.com/models/<id>)."}, status_code=400)
     repo_id = match.group(1)
+    url_parts = _urlparse(url).path.strip("/").split("/")
+    hf_revision = "main"
+    exact_url_file = False
+    if len(url_parts) >= 4 and url_parts[2] in {"blob", "resolve", "tree"}:
+        hf_revision = _unquote(url_parts[3])
+        if len(url_parts) >= 5 and url_parts[2] in {"blob", "resolve"} and not desired_filename:
+            desired_filename = _unquote("/".join(url_parts[4:]))
+            exact_url_file = True
 
     try:
         # 1. Fetch repo metadata
         api_url = f"https://huggingface.co/api/models/{repo_id}"
+        if hf_revision != "main":
+            api_url += f"/revision/{_quote(hf_revision, safe='')}"
         resp = requests.get(api_url, timeout=15)
         if resp.status_code == 404:
             return JSONResponse({"error": f"Repository not found: {repo_id}"}, status_code=404)
@@ -4669,6 +4699,8 @@ async def hf_import_lora(request: Request):
                     lora_filename = f
                     break
         if lora_filename is None:
+            if exact_url_file:
+                return JSONResponse({"error": "The selected file was not found in this repository revision."}, status_code=400)
             # Pick the main LoRA file (prefer the one without 'config' in name)
             lora_filename = lora_files[0]
             for f in lora_files:
@@ -4677,8 +4709,8 @@ async def hf_import_lora(request: Request):
                     break
 
         # 3. Determine target directory from base_model tag
-        card_data = repo.get("cardData", {})
-        base_models = card_data.get("base_model", [])
+        card_data = repo.get("cardData") or {}
+        base_models = card_data.get("base_model") or []
         if isinstance(base_models, str):
             base_models = [base_models]
 
@@ -4740,7 +4772,12 @@ async def hf_import_lora(request: Request):
 
         # 4. Resolve full lora directory path
         app_dir = os.path.dirname(os.path.abspath(__file__))
-        lora_dir = os.path.join(app_dir, "loras", target_dir)
+        lora_root = wgp.server_config.get("loras_root", "loras") if hasattr(wgp, "server_config") else "loras"
+        if not os.path.isabs(lora_root):
+            lora_root = os.path.join(app_dir, lora_root)
+        lora_dir = _safe_join(lora_root, target_dir)
+        if lora_dir is None:
+            return JSONResponse({"error": "Invalid target_dir"}, status_code=400)
         os.makedirs(lora_dir, exist_ok=True)
         # Compute the on-disk filename — generic HF names like
         # "lora_weights.safetensors" get renamed using the repo basename
@@ -4830,7 +4867,7 @@ async def hf_import_lora(request: Request):
         sidecar_path = os.path.splitext(save_path)[0] + ".civitai.json"
 
         # 10. Download the LoRA file
-        download_url = f"https://huggingface.co/{repo_id}/resolve/main/{lora_filename}"
+        download_url = f"https://huggingface.co/{repo_id}/resolve/{_quote(hf_revision, safe='')}/{_quote(lora_filename, safe='/')}"
 
         # Track download progress — use disk_filename so the download bar
         # shows the user-visible name we'll write to disk, not the generic
@@ -4872,6 +4909,12 @@ async def hf_import_lora(request: Request):
                         )
 
                 _require_complete_download(downloaded, total)
+                from services.refmod import is_refmod_file
+                if is_refmod_file(partial_path):
+                    _import_downloaded_character(partial_path, dl_id)
+                    os.remove(partial_path)
+                    _complete_download_record(dl_id)
+                    return
                 os.replace(partial_path, save_path)
 
                 print(f"[HF Import] Downloaded {lora_filename} to {save_path}")
@@ -5626,6 +5669,9 @@ async def scan_and_generate_guides(request: Request):
                 _seen_keys.add(key)
                 full_path = os.path.join(dirpath, f)
                 own_base = os.path.splitext(full_path)[0]
+                from services.refmod import is_refmod_file
+                if is_refmod_file(full_path):
+                    continue
                 mirror_dir = os.path.normpath(os.path.join(mirror_root, rel_dir))
                 write_base = os.path.join(mirror_dir, os.path.splitext(f)[0])
                 # Guides live at the write target; sidecars may exist at the
@@ -6106,6 +6152,7 @@ def get_model_options(model_type: str):
         # TTS-specific
         "audio_only": md.get("audio_only", False),
         "duration_slider": md.get("duration_slider"),
+        "audio_segment_max_seconds": md.get("audio_segment_max_seconds"),
         "pause_between_sentences": md.get("pause_between_sentences", False),
         "temperature_enabled": md.get("temperature", False),
         "custom_settings_def": md.get("custom_settings"),
@@ -6147,10 +6194,30 @@ def _save_presets(presets: list[dict]):
         json.dump(presets, f, indent=2)
 
 
+def _bundled_generation_presets():
+    """Expose shipped VDN profiles alongside the user's saved Studio presets."""
+    presets = []
+    for model_type in ("minimax_h3_vdn", "minimax_h3_vdn_full"):
+        path = os.path.join(os.path.dirname(__file__), "profiles", model_type, "VDN Turbo 8 Steps.json")
+        with open(path, encoding="utf-8") as reader:
+            turbo = json.load(reader)
+        for key, name, recipe in (
+            ("standard", "VDN Standard 50 Steps", {**turbo, "activated_loras": [], "loras_multipliers": "", "num_inference_steps": 50}),
+            ("turbo8", "VDN Turbo 8 Steps", turbo),
+        ):
+            loras = recipe["activated_loras"]
+            presets.append({"id": f"builtin-{model_type}-{key}", "name": name,
+                "mode": "video", "model_type": model_type, "prompt": "", "builtin": True,
+                "activated_loras": loras, "loras_multipliers": recipe["loras_multipliers"],
+                "lora_weights": {lora: [1.0] for lora in loras}, "created_at": 0,
+                "params": {**recipe, "minimax_h3_turbo_mode": False, "minimax_h3_turbo_preset": ""}})
+    return presets
+
+
 @api.get("/api/v1/presets")
 def list_presets():
-    """List all saved generation presets."""
-    return {"presets": _load_presets()}
+    """List saved and shipped generation presets without modifying user files."""
+    return {"presets": _bundled_generation_presets() + _load_presets()}
 
 
 @api.post("/api/v1/presets")
@@ -8859,6 +8926,33 @@ def serve_audio_upload(filename: str):
 # API Routes: Saved Omni characters
 # ============================================================================
 
+def _run_character_codec(operation, update):
+    update("Waiting for the GPU…")
+    with _gen_lock:
+        update("Preparing H3 character references…")
+        if getattr(wgp, "wan_model", None) is not None or getattr(wgp, "offloadobj", None) is not None:
+            wgp.release_model()
+        from services import llm_service
+        if llm_service.is_loaded():
+            llm_service.unload_model()
+        return operation()
+
+
+def _import_downloaded_character(path, download_id):
+    from services.character_library import import_character
+    from services.character_codec import preview_refmod
+    from services.refmod import inspect_refmod
+    metadata = inspect_refmod(path)["refmod"]
+    update = lambda message: _update_download_record(download_id, message=message)
+    character = import_character(path, decode_preview=lambda *args: _run_character_codec(
+        lambda: preview_refmod(*args, metadata=metadata, update=update), update))
+    _update_download_record(download_id, model_name=character["name"], asset_kind="character", character_id=character["id"])
+    return character
+
+
+from services.character_transfer import build_router as _character_transfer_router
+api.include_router(_character_transfer_router(_run_character_codec))
+
 @api.get("/api/v1/characters")
 def list_saved_characters():
     """List reusable local image/video + voice character bundles."""
@@ -8891,7 +8985,11 @@ async def create_saved_character(request: Request):
 def delete_saved_character(character_id: str):
     from services.character_library import delete_character
 
-    if not delete_character(character_id):
+    try:
+        deleted = delete_character(character_id)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    if not deleted:
         raise HTTPException(status_code=404, detail="Saved character not found")
     return {"deleted": character_id}
 
@@ -9980,6 +10078,12 @@ def _enqueue_deferred_generation_preparation(body: dict) -> dict:
     model_type = str(body.get("model_type") or "")
     if not model_type:
         raise HTTPException(status_code=400, detail="model_type is required")
+    if (wgp.get_model_def(model_type) or {}).get("minimax_h3_viggle"):
+        from models.minimax_h3.viggle import normalize_settings
+        try:
+            normalize_settings(body, allow_preparation=True)
+        except (TypeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
     if not is_sfx and not body.get("prompt"):
         raise HTTPException(status_code=400, detail="prompt is required")
     if not is_sfx and wgp.get_model_def(model_type) is None:
@@ -9995,7 +10099,7 @@ def _enqueue_deferred_generation_preparation(body: dict) -> dict:
     initial_status = "held" if hold_for_queue else "queued"
     job = {
         "id": job_id,
-        "show_in_gallery": not hold_for_queue,
+        "show_in_gallery": not hold_for_queue and not body.get("_viggle_prepare_only"),
         "status": initial_status,
         "progress": 0,
         "step": 0,
@@ -10046,6 +10150,17 @@ async def _prepare_generation_submission(
     """Normalize/plan a request, then submit it or return prepared params."""
 
     body = dict(body)
+    if body.get("face_refiner") is not None:
+        from services.face_refiner import normalize_options as normalize_face_options
+        from services.character_library import get_character
+        try:
+            body["face_refiner"] = normalize_face_options(body["face_refiner"])
+            for character_id in body["face_refiner"]["character_ids"]:
+                get_character(character_id)
+            if body["face_refiner"]["enabled"] and (body.get("generation_mode") in ("image", "audio") or int(body.get("image_mode", 0)) == 1):
+                raise ValueError("Face refinement is available for video generation only")
+        except (ValueError, TypeError) as error:
+            raise HTTPException(400, str(error)) from error
     client_submission_id = str(
         body.pop("_client_submission_id", "") or ""
     ).strip()
@@ -10069,6 +10184,12 @@ async def _prepare_generation_submission(
     is_sfx = body.get("sfx_mode")
     if not body.get("model_type"):
         raise HTTPException(status_code=400, detail="model_type is required")
+    if (wgp.get_model_def(body["model_type"]) or {}).get("minimax_h3_viggle"):
+        from models.minimax_h3.viggle import normalize_settings
+        try:
+            normalize_settings(body, allow_preparation=True)
+        except (TypeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
     if not is_sfx and not body.get("prompt"):
         raise HTTPException(status_code=400, detail="prompt is required")
     # SFX virtual models (mmaudio_*) are frontend-only; skip backend model validation
@@ -10139,19 +10260,23 @@ async def _prepare_generation_submission(
                 ),
             )
         body["minimax_h3_text_encoder"] = selected_encoder
+    if _generation_model_def.get("minimax_h3_audio_only"):
+        from models.minimax_h3.voice_audio import normalize_audio_settings
+        try:
+            normalize_audio_settings(body)
+        except (TypeError, ValueError) as error:
+            raise HTTPException(400, str(error)) from error
+    if str(_generation_model_def.get("architecture") or "").startswith("minimax_h3") and not _generation_model_def.get("audio_only"):
         try:
             if _generation_model_def.get("minimax_h3_fused_turbo", False):
                 from models.minimax_h3.fused_turbo import (
                     normalize_fused_h3_request,
                 )
 
-                removed_accelerators = normalize_fused_h3_request(body)
-                if removed_accelerators:
-                    print(
-                        "[MiniMax H3 Fused] Removed "
-                        f"{removed_accelerators} stale managed Turbo/PDD "
-                        "selection(s) after the model switch."
-                    )
+                normalize_fused_h3_request(
+                    body,
+                    resolve_lora=lambda name: wgp.resolve_lora_path(body["model_type"], name),
+                )
             from models.minimax_h3.turbo import (
                 normalize_minimax_h3_turbo_request,
             )
@@ -11371,7 +11496,7 @@ async def _prepare_generation_submission(
     initial_status = "held" if hold_for_queue else "queued"
     job = {
         "id": job_id,
-        "show_in_gallery": not hold_for_queue,
+        "show_in_gallery": not hold_for_queue and not body.get("_viggle_prepare_only"),
         "status": initial_status,
         "progress": 0,
         "step": 0,
@@ -20384,6 +20509,10 @@ async def outpaint_endpoint(request: Request):
     if not model_type:
         raise HTTPException(status_code=400, detail="model_type is required")
     requested_model_type = model_type
+    requested_def = wgp.get_model_def(model_type) or {}
+    is_h3_outpaint = str(wgp.get_base_model_type(model_type)).startswith("minimax_h3")
+    if is_h3_outpaint and (requested_def.get("omni_reference") or requested_def.get("vdn") or requested_def.get("minimax_h3_fused_turbo") or requested_def.get("audio_only")):
+        raise HTTPException(400, "H3 Outpaint uses the ordinary First / Last Pruned or Full model")
 
     pad_top = int(body.get("pad_top", 0))
     pad_bottom = int(body.get("pad_bottom", 0))
@@ -20469,6 +20598,12 @@ async def outpaint_endpoint(request: Request):
         resolution_preset,
         outpaint_alignment,
     )
+    if is_h3_outpaint:
+        if not is_video:
+            raise HTTPException(400, "H3 Outpaint requires a video; use an image Outpaint model for still images")
+        from shared.utils.utils import get_outpainting_frame_location
+        ih, iw, top, left = get_outpainting_frame_location(geometry["final_h"], geometry["final_w"], geometry["dims"], 1, quantize_margins=32)
+        geometry.update(overlay_h=ih, overlay_w=iw, overlay_y=top, overlay_x=left)
     final_w = geometry["final_w"]
     final_h = geometry["final_h"]
     overlay_w = geometry["overlay_w"]
@@ -20507,7 +20642,7 @@ async def outpaint_endpoint(request: Request):
         and is_video
         and base_model_type == "ltx2_22B"
     )
-    if requested_mask_preservation and not mask_preserving_outpaint:
+    if requested_mask_preservation and not mask_preserving_outpaint and not is_h3_outpaint:
         print(
             "[Outpaint] Mask-preserving workflow is currently available "
             "for LTX-2.3 22B video outpainting; using the legacy path."
@@ -20621,6 +20756,7 @@ async def outpaint_endpoint(request: Request):
             source_total_frames,
             source_fps,
             _model_def,
+            reference_fps=24 if is_h3_outpaint else None,
         )
         print(
             "[Outpaint] Timing: "
@@ -20835,6 +20971,20 @@ async def outpaint_endpoint(request: Request):
         "outpaint_trim_start": body.get("start_time"),
         "outpaint_trim_end": body.get("end_time"),
     }
+    if is_h3_outpaint:
+        window = min(345, max(124, 5 + max(0, (sliding_window_size - 5) // 17) * 17))
+        overlap = sliding_window_overlap if sliding_window_overlap % 17 == 1 else 18
+        gen_params.update({"force_fps": "24", "video_length": max(124, round(source_duration * 24)),
+            "minimax_h3_multi_window": round(source_duration * 24) > window,
+            "minimax_h3_window_storyboard": False,
+            "sliding_window_size": window, "sliding_window_overlap": overlap,
+            "sliding_window_discard_last_frames": 0, "_outpaint_trim_smear": False,
+            "denoising_strength": 1.0, "masking_strength": 1.0,
+            "custom_settings": {**dict(body.get("custom_settings") or {}), "h3_mask_mode": "grouped_rows"},
+            "override_attention": "sdpa", "settings_version": wgp.settings_version,
+            "_outpaint_lock_source_pixels": True, "_outpaint_source_video": video_path,
+            "_outpaint_generation_fps": 24, "_outpaint_h3": True,
+            "_outpaint_target_frames": max(1, round(source_duration * 24))})
     # Strip None values so they don't override defaults downstream
     gen_params = {k: v for k, v in gen_params.items() if v is not None}
 
@@ -22281,7 +22431,10 @@ def _apply_per_job_coefficient(job: dict) -> None:
             if isinstance(reference, dict)
             and str(reference.get("type") or reference.get("kind") or "").lower() == "video"
         )
-        _is_h3 = str(_job_model_def.get("architecture") or "").startswith(
+        _is_viggle = bool(_job_model_def.get("minimax_h3_viggle"))
+        if _is_viggle:
+            _h3_video_reference_count = 1
+        _is_h3 = _is_viggle or str(_job_model_def.get("architecture") or "").startswith(
             "minimax_h3"
         )
         _is_music3 = (
@@ -22289,7 +22442,7 @@ def _apply_per_job_coefficient(job: dict) -> None:
             or str(model_type or "") == "minimax_music3"
         )
         _h3_omni_video = bool(
-            _job_model_def.get("omni_reference")
+            (_job_model_def.get("omni_reference") or _is_viggle)
             and _h3_video_reference_count
         )
         # H3 itself is a single denoising pipeline. Treating the ordinary
@@ -23597,6 +23750,315 @@ def _run_tool_revoice(job_id: str):
             unregister_abort_state(job_id, _active_gen_states, abort_state)
 
 
+def _run_face_refiner(job_id):
+    from services.face_refiner import analyze, process_video, public_analysis
+    job = _jobs[job_id]
+    abort_state = {"abort": False}
+    destination = None
+    with generation_slot(_gen_lock, job) as acquired:
+        if not acquired:
+            return False
+        try:
+            if not try_start(job, message="Preparing Face Refiner...", phase="Preparing"):
+                return False
+            if not register_abort_state(job, job_id, _active_gen_states, abort_state):
+                return False
+            started = time.time()
+            params = job["params"]
+            source = _resolve_tool_clip_path(params["video_path"], job["workspace"])
+            if not source:
+                raise ValueError("Source video is no longer available")
+            def abort():
+                return bool(abort_state.get("abort")) or is_cancel_requested(job)
+            def progress(phase, step=None, total=None):
+                update_job(job, message=phase, phase=phase, step=int(step or 0), total_steps=int(total or 0),
+                    progress=min(95, int(100 * (step or 0) / max(1, total or 1))))
+            wgp.release_model()
+            if params["analyze_only"]:
+                result = analyze(source, params["options"], analysis_id=params["analysis_id"], abort=abort, progress=progress)
+                job["face_refiner_result"] = public_analysis(result)
+                message = f"Detected {len(result['faces'])} face(s)"
+            else:
+                os.makedirs(job["out_dir"], exist_ok=True)
+                destination = wgp.get_available_filename(job["out_dir"], os.path.basename(source), "_faces_refined", force_extension=".mp4")
+                result = process_video(source, destination, options=params["options"],
+                    analysis_id=params.get("analysis_id"), assignments=params.get("assignments"), abort=abort, progress=progress)
+                if abort():
+                    return False
+                filename = os.path.basename(destination)
+                _write_tool_sidecar(job["out_dir"], filename, source_name=os.path.basename(source), tool="face_refiner",
+                    params={"model_type": "post_processing", "face_refiner": params["options"], "face_refiner_result": result},
+                    elapsed=time.time() - started, job_id=job_id)
+                record_job_outputs(job, [filename])
+                job["face_refiner_result"] = result
+                message = "No selected faces; saved unchanged copy" if result.get("unchanged") else f"Refined {result['faces_refined']} face(s)"
+            return finish_job(job, "completed", progress=100, phase="", message=message)
+        except Exception as error:
+            if not is_cancel_requested(job):
+                traceback.print_exc()
+                finish_job(job, "failed", error=str(error), message=str(error))
+            return False
+        finally:
+            unregister_abort_state(job_id, _active_gen_states, abort_state)
+            if job.get("status") != "completed" and destination:
+                for path in (destination, os.path.splitext(destination)[0] + ".meta.json"):
+                    if os.path.isfile(path):
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
+
+
+@api.get("/api/v1/face-refiner/analyses/{analysis_id}")
+def face_refiner_analysis(analysis_id: str):
+    from services.face_refiner import load_analysis, public_analysis
+    try:
+        return public_analysis(load_analysis(analysis_id))
+    except (ValueError, OSError) as error:
+        raise HTTPException(404, str(error)) from error
+
+
+@api.get("/api/v1/face-refiner/analyses/{analysis_id}/faces/{track_id}")
+def face_refiner_thumbnail(analysis_id: str, track_id: int):
+    from services.face_refiner import analysis_directory, load_analysis
+    try:
+        data = load_analysis(analysis_id)
+        if track_id not in {face["track_id"] for face in data["faces"]}:
+            raise ValueError("Face not found")
+        return FileResponse(analysis_directory(analysis_id) / f"face-{track_id}.png", media_type="image/png")
+    except (ValueError, OSError) as error:
+        raise HTTPException(404, str(error)) from error
+
+
+@api.post("/api/v1/tools/face-refiner")
+async def tools_face_refiner(request: Request):
+    from services.face_refiner import normalize_options, normalize_assignments, source_characters, load_analysis, resolve_mappings
+    from services.character_library import get_character
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Face Refiner expects a request object")
+    workspace = body.get("workspace") or _get_active_workspace()
+    if not isinstance(body.get("video_path"), str) or not isinstance(workspace, str):
+        raise HTTPException(400, "Choose an existing video and workspace")
+    source = _resolve_tool_clip_path(body.get("video_path"), workspace)
+    if not source or os.path.splitext(source)[1].lower() not in {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}:
+        raise HTTPException(400, "Choose an existing video or upload a video first")
+    try:
+        options = normalize_options(body.get("options"))
+        if not options["character_ids"] and body.get("match_source_characters", True):
+            options["character_ids"] = source_characters(source)
+        assignments = normalize_assignments(body.get("assignments"))
+        analysis_id = body.get("analysis_id") or None
+        analyze_only = body.get("analyze_only", False)
+        if not isinstance(analyze_only, bool):
+            raise ValueError("analyze_only must be true or false")
+        if assignments and not analysis_id:
+            raise ValueError("Detect faces before assigning characters")
+        if analysis_id:
+            resolve_mappings(load_analysis(analysis_id, source, options["face_count"]), assignments)
+        for cid in set(options["character_ids"] + [item["character_id"] for item in assignments if item["character_id"]]):
+            get_character(cid)
+    except (ValueError, TypeError, OSError) as error:
+        raise HTTPException(400, str(error)) from error
+    job_id = uuid.uuid4().hex[:8]
+    if analyze_only:
+        analysis_id = uuid.uuid4().hex
+    _jobs[job_id] = {"id": job_id, "status": "queued", "progress": 0, "step": 0, "total_steps": 0,
+        "phase": "", "message": "Queued (detect faces)" if analyze_only else "Queued (refine faces)",
+        "created_at": time.time(), "output_files": [], "error": None, "workspace": workspace,
+        "kind": "face_analysis" if analyze_only else "face_refiner", "out_dir": _workspace_dir(workspace),
+        "params": {"video_path": source, "options": options, "analysis_id": analysis_id,
+                   "assignments": assignments, "analyze_only": analyze_only}}
+    threading.Thread(target=_run_face_refiner, args=(job_id,), daemon=False).start()
+    return {"job_id": job_id, "analysis_id": analysis_id, "status": "queued"}
+
+
+def _run_media_flow(job_id):
+    from services.media_flow import process_video
+    from services.media_processing import neural_render
+    job = _jobs[job_id]
+    abort_state = {"abort": False}
+    final_path = None
+    with generation_slot(_gen_lock, job) as acquired:
+        if not acquired:
+            return False
+        try:
+            if not try_start(job, message="Preparing Media Flow...", phase="Preparing"):
+                return False
+            started = time.time()
+            if not register_abort_state(job, job_id, _active_gen_states, abort_state):
+                return False
+            params = job["params"]
+            source = _resolve_tool_clip_path(params["media_path"], job["workspace"])
+            if not source:
+                raise ValueError("Source media is no longer available")
+            out_dir = job["out_dir"]
+            os.makedirs(out_dir, exist_ok=True)
+            is_image = params["media_type"] == "image"
+            final_path = wgp.get_available_filename(out_dir, os.path.basename(source),
+                "_media_flow", force_extension=".png" if is_image else ".mp4")
+            def abort():
+                return bool(abort_state.get("abort")) or is_cancel_requested(job)
+            def progress(phase, step=None, total=None):
+                update_job(job, phase=phase, message=phase, step=int(step or 0),
+                    total_steps=int(total or 0), progress=min(95, int(100 * (step or 0) / max(1, total or 1))))
+            wgp.release_model()
+            if is_image:
+                from PIL import Image
+                import numpy as np
+                with Image.open(source) as original:
+                    frame = torch.from_numpy(np.array(original.convert("RGBA"))).permute(2, 0, 1).unsqueeze(1)
+                method = params["spatial_upsampling"]
+                if method.startswith("dlss5*"):
+                    output = neural_render(frame, method, options=params, still_image=True,
+                                           abort_callback=abort, progress_callback=progress)
+                    if output is None or abort():
+                        return False
+                    Image.fromarray(output[:, 0].permute(1, 2, 0).cpu().numpy()).save(final_path)
+                else:
+                    scale = float(method.removeprefix("lanczos"))
+                    image = Image.fromarray(frame[:, 0].permute(1, 2, 0).numpy())
+                    image.resize((round(image.width * scale), round(image.height * scale)), Image.Resampling.LANCZOS).save(final_path)
+            else:
+                process_video(source, final_path, spatial=params["spatial_upsampling"],
+                    temporal=params["temporal_upsampling"], options=params, abort=abort, progress=progress)
+            if abort():
+                return False
+            filename = os.path.basename(final_path)
+            _write_tool_sidecar(out_dir, filename, source_name=os.path.basename(source),
+                tool="media_flow", params={**params, "model_type": "post_processing"},
+                elapsed=time.time() - started, job_id=job_id,
+                media_type="image" if is_image else "video")
+            record_job_outputs(job, [filename])
+            return finish_job(job, "completed", progress=100, phase="", message="Done")
+        except Exception as error:
+            if not is_cancel_requested(job):
+                traceback.print_exc()
+                finish_job(job, "failed", error=str(error), message=str(error))
+            return False
+        finally:
+            unregister_abort_state(job_id, _active_gen_states, abort_state)
+            if job.get("status") != "completed" and final_path:
+                for path in (final_path, os.path.splitext(final_path)[0] + ".meta.json"):
+                    if os.path.isfile(path):
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
+            from postprocessing.dlss5.runtime import release_flow_model
+            release_flow_model()
+
+
+def _enqueue_media_flow(body):
+    from services.media_processing import validate_methods
+    files = body.get("files")
+    if not isinstance(files, list) or not 1 <= len(files) <= 256:
+        raise HTTPException(400, "Choose between 1 and 256 media files")
+    workspace = body.get("workspace") or _get_active_workspace()
+    spatial = str(body.get("spatial_upsampling") or "")
+    temporal = str(body.get("temporal_upsampling") or "")
+    if not spatial and not temporal:
+        raise HTTPException(400, "Select Neural Rendering, a spatial scale, or temporal upsampling")
+    if spatial and not spatial.startswith(("dlss5*", "lanczos")):
+        raise HTTPException(400, "Media Flow supports DLSS Neural Rendering and Lanczos scaling")
+    resolved_files = []
+    for item in files:
+        path = item.get("path") if isinstance(item, dict) else item
+        if not isinstance(path, str):
+            raise HTTPException(400, "Each source must be a media path")
+        resolved = _resolve_tool_clip_path(path, workspace)
+        if not resolved:
+            raise HTTPException(400, f"Media not found: {path}")
+        is_image = wgp.has_image_file_extension(resolved)
+        try:
+            options = validate_methods(spatial, temporal, image=is_image, options=body)
+        except (ValueError, TypeError) as error:
+            raise HTTPException(400, str(error)) from error
+        resolved_files.append((resolved, is_image))
+    batch_id = uuid.uuid4().hex[:12]
+    ids = []
+    for index, (path, is_image) in enumerate(resolved_files):
+        job_id = uuid.uuid4().hex[:8]
+        _jobs[job_id] = {
+            "id": job_id, "status": "queued", "progress": 0, "step": 0, "total_steps": 0,
+            "phase": "", "message": f"Media Flow {index + 1}/{len(resolved_files)}: {os.path.basename(path)}",
+            "created_at": time.time(), "params": {
+                "media_path": path, "media_type": "image" if is_image else "video",
+                "spatial_upsampling": spatial, "temporal_upsampling": temporal,
+                "batch_id": batch_id, **options},
+            "output_files": [], "error": None, "workspace": workspace,
+            "out_dir": _workspace_dir(workspace),
+        }
+        ids.append(job_id)
+    # All inputs are validated before any job starts. Each job acquires the
+    # same generation slot used by Studio, Director and the other media tools.
+    for job_id in ids:
+        threading.Thread(target=_run_media_flow, args=(job_id,), daemon=False).start()
+    return {"batch_id": batch_id, "job_ids": ids, "job_id": ids[0], "status": "queued"}
+
+
+@api.get("/api/v1/media-flow/capabilities")
+async def media_flow_capabilities(refresh: bool = False):
+    from services.media_processing import capabilities
+    return await asyncio.to_thread(capabilities, refresh)
+
+
+@api.post("/api/v1/media-flow")
+async def media_flow_submit(request: Request):
+    return _enqueue_media_flow(await request.json())
+
+
+@api.post("/api/v1/media-flow/outpaint")
+async def media_flow_outpaint(request: Request):
+    """Batch the existing Outpaint workflow, with per-file queue results."""
+    body = await request.json()
+    files = body.get("files")
+    margins = body.get("margins_percent")
+    if not isinstance(files, list) or not 1 <= len(files) <= 256:
+        raise HTTPException(400, "Choose between 1 and 256 videos")
+    try:
+        margins = [float(value) for value in margins]
+        if len(margins) != 4 or any(not math.isfinite(value) or value < 0 for value in margins) or not any(margins):
+            raise ValueError()
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Set a canvas with nonzero, nonnegative top/bottom/left/right margins")
+    workspace = body.get("workspace") or _get_active_workspace()
+    model_type = str(body.get("model_type") or "")
+    if not wgp.get_model_def(model_type):
+        raise HTTPException(400, "Select an Outpaint model")
+    job_ids, errors = [], []
+    batch_id = uuid.uuid4().hex[:12]
+    import cv2
+    class BodyRequest:
+        def __init__(self, value):
+            self.value = value
+        async def json(self):
+            return self.value
+    for item in files:
+        path = item.get("path") if isinstance(item, dict) else item
+        try:
+            resolved = _resolve_tool_clip_path(path, workspace)
+            if not resolved:
+                raise ValueError("Source video not found")
+            cap = cv2.VideoCapture(resolved)
+            try:
+                width, height = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                if not cap.isOpened() or min(width, height) < 1:
+                    raise ValueError("Source is not a readable video")
+            finally:
+                cap.release()
+            one = {**body, "video_path": resolved,
+                   **dict(zip(("pad_top", "pad_bottom", "pad_left", "pad_right"),
+                       [round(margins[0] * height / 100), round(margins[1] * height / 100),
+                        round(margins[2] * width / 100), round(margins[3] * width / 100)]))}
+            result = await asyncio.to_thread(lambda: asyncio.run(outpaint_endpoint(BodyRequest(one))))
+            job_ids.append(result["job_id"])
+            _jobs[result["job_id"]]["params"]["batch_id"] = batch_id
+        except Exception as error:
+            errors.append({"path": str(path), "error": str(getattr(error, "detail", error))})
+    return {"batch_id": batch_id, "job_ids": job_ids, "errors": errors}
+
+
 @api.post("/api/v1/tools/upscale")
 async def tools_upscale(request: Request):
     """Upscale an existing image or clip. Poll /api/v1/status/{job_id}.
@@ -23606,6 +24068,10 @@ async def tools_upscale(request: Request):
     `video_path` remains accepted for older Maestro clients.
     """
     body = await request.json()
+    if str(body.get("method", "")).startswith("dlss5*") or body.get("temporal_upsampling"):
+        return _enqueue_media_flow({**body,
+            "files": [body.get("media_path") or body.get("video_path")],
+            "spatial_upsampling": body.get("method") or ""})
     media_path = body.get("media_path") or body.get("video_path")
     if not media_path:
         raise HTTPException(status_code=400, detail="media_path is required")
@@ -23875,20 +24341,80 @@ def _apply_deferred_generation_preparation(job: dict) -> None:
             )
 
 
-def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
+def _prepare_viggle_character_frame(job: dict) -> bool:
+    """Run Klein as an internal phase of the same cancellable GPU job."""
+    from services.viggle_preparation import prepare
+
+    original_params = job["params"]
+    original_dir = job.get("out_dir")
+    original_save_paths = {key: getattr(wgp, key) for key in
+                           ("save_path", "image_save_path", "audio_save_path") if hasattr(wgp, key)}
+    def resolve(raw):
+        path = _resolve_tool_clip_path(raw, job.get("workspace"))
+        if not path:
+            raise ValueError("The control video or character image is missing. Upload it again.")
+        return path
+
+    def render(params, directory):
+        prepared = asyncio.run(_prepare_generation_submission(
+            {**params, "workspace": job.get("workspace")}, prepare_only=True))
+        if not update_job(job, params=prepared["params"], out_dir=str(directory),
+                          progress=0, phase="Preparing character", output_files=[]):
+            raise InterruptedError("Character preparation cancelled.")
+        try:
+            if not _run_generation(job["id"], finalize=False, _slot_owned=True):
+                raise RuntimeError(job.get("error") or "Character frame generation failed.")
+            files = job.get("_internal_output_files") or []
+            if not files:
+                raise RuntimeError("Klein did not return a replacement image.")
+            return str(directory / os.path.basename(files[-1]))
+        finally:
+            # Restore the frozen video request even if cancellation won.
+            job["params"] = original_params
+            job["out_dir"] = original_dir
+            for key in ("_internal_output_files", "_internal_clip_output_files", "_internal_join_output_file"):
+                job.pop(key, None)
+            for key, value in original_save_paths.items():
+                setattr(wgp, key, value)
+            if wgp.wan_model is not None or wgp.offloadobj is not None:
+                wgp.release_model()
+
+    result = prepare(original_params, resolve_media=resolve, render=render,
+        update=lambda message: update_job(job, phase="Preparing character", message=message),
+        aborted=lambda: is_cancel_requested(job))
+    if is_cancel_requested(job):
+        return False
+    original_params.update(_viggle_prepared=result, _viggle_edited_frame=result["image_path"],
+                           image_refs=[result["image_path"]])
+    update_job(job, viggle_preparation=result, progress=0, step=0, total_steps=0,
+               output_files=[], phase="", message="Preparing Viggle animation…")
+    if original_params.get("_viggle_prepare_only"):
+        return finish_job(job, "completed", progress=100, phase="", message="Character frame ready")
+    from models.minimax_h3.viggle import normalize_settings
+    normalize_settings(original_params)
+    return True
+
+
+def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = False) -> bool:
     """Build and run a job, optionally deferring success finalization."""
     from shared.utils.thread_utils import AsyncStream, async_run
     import inspect
+    from contextlib import nullcontext
 
     job = _jobs[job_id]
     start_time = time.time()
     abort_state = None
 
-    with generation_slot(_gen_lock, job) as acquired:
+    # Internal image preparation runs inside its parent's existing slot.
+    # Keeping one job identity preserves cancellation and avoids a second queue.
+    with (nullcontext(True) if _slot_owned else generation_slot(_gen_lock, job)) as acquired:
         if not acquired:
             return False
         try:
-            if not try_start(job, message="Preparing..."):
+            if _slot_owned:
+                if is_cancel_requested(job) or job.get("status") != "running":
+                    return False
+            elif not try_start(job, message="Preparing..."):
                 return False
 
             # Automatic H3/LTX window planners are intentionally part of the
@@ -23901,6 +24427,13 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                 detail = getattr(error, "detail", None) or str(error)
                 finish_job(job, "failed", error=str(detail), message=str(detail))
                 return False
+
+            if (not _slot_owned and job["params"].get("viggle_character")
+                    and (wgp.get_model_def(job["params"].get("model_type")) or {}).get("minimax_h3_viggle")):
+                if not _prepare_viggle_character_frame(job):
+                    return False
+                if job["params"].get("_viggle_prepare_only"):
+                    return job.get("status") == "completed"
 
             # Director submits child jobs directly to this worker instead of
             # passing through /api/v1/generate. Keep H3 Omni's official
@@ -24090,11 +24623,31 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
             # Lanczos/VAE methods keep the inline per-window path (cheap,
             # stateless), and images keep inline upsampling (single frame).
             pp_spatial_upsampling = ""
-            if gen_mode != "image":
+            pp_media_spatial = ""
+            pp_media_temporal = ""
+            pp_media_options = dict(raw_params.get("custom_settings") or {})
+            from services.face_refiner import normalize_options as normalize_face_options
+            pp_face_refiner = normalize_face_options(raw_params.pop("face_refiner", None))
+            if gen_mode in ("image", "audio"):
+                pp_face_refiner["enabled"] = False
+            if pp_face_refiner["enabled"] and not pp_face_refiner["character_ids"]:
+                pp_face_refiner["character_ids"] = list(dict.fromkeys(
+                    ref["library_character_id"] for ref in raw_params.get("minimax_h3_references", [])
+                    if isinstance(ref, dict) and ref.get("library_character_id")))[:5]
+            if gen_mode == "audio":
+                raw_params.pop("spatial_upsampling", None)
+                raw_params.pop("temporal_upsampling", None)
+            elif gen_mode != "image":
                 _su_val = str(raw_params.get("spatial_upsampling") or "")
                 if "flashvsr" in _su_val:
                     pp_spatial_upsampling = _su_val
                     raw_params.pop("spatial_upsampling", None)
+                elif _su_val.startswith("dlss5*"):
+                    pp_media_spatial = raw_params.pop("spatial_upsampling")
+                pp_media_temporal = str(raw_params.pop("temporal_upsampling", "") or "")
+            if pp_media_spatial or pp_media_temporal:
+                from services.media_processing import validate_methods
+                validate_methods(pp_media_spatial, pp_media_temporal, options=pp_media_options)
 
             # Voice clone postprocessing (SeedVC) — replaces 1 or 2 voices
             # in the generated video's audio with user-supplied reference
@@ -24741,6 +25294,10 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     sidecar_params["spatial_upsampling"] = (
                         pp_spatial_upsampling
                     )
+                if pp_media_spatial:
+                    sidecar_params["spatial_upsampling"] = pp_media_spatial
+                if pp_media_temporal:
+                    sidecar_params["temporal_upsampling"] = pp_media_temporal
                 sidecar = {
                     "params": sidecar_params,
                     "upload_filenames": upload_filenames,
@@ -25696,7 +26253,13 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                                     if fade_bottom: distances.append("(H-Y)")
                                     if fade_left: distances.append("X")
                                     if fade_right: distances.append("(W-X)")
-                                    if distances:
+                                    if raw_params.get("_outpaint_h3"):
+                                        filter_str = (
+                                            f"[0:v]fps=24,tpad=stop_mode=clone:stop_duration={int(raw_params['_outpaint_target_frames']) / 24}[base];"
+                                            f"[1:v]fps=24,scale={ow}:{oh}:flags=lanczos,setsar=1[s];"
+                                            f"[base][s]overlay={ox}:{oy}:eof_action=repeat[outv]"
+                                        )
+                                    elif distances:
                                         d_min = distances[0]
                                         for d in distances[1:]:
                                             d_min = f"min({d_min},{d})"
@@ -25729,7 +26292,12 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                                     else:
                                         cmd += ["-map", "0:a?", "-c:a", "copy"]
 
-                                cmd += ["-shortest", muxed_path]
+                                if raw_params.get("_outpaint_h3"):
+                                    target_frames = int(raw_params["_outpaint_target_frames"])
+                                    cmd += ["-frames:v", str(target_frames), "-t", str(target_frames / 24)]
+                                else:
+                                    cmd += ["-shortest"]
+                                cmd += [muxed_path]
 
                                 # Skip if there's truly nothing to do
                                 if not _do_trim and not _do_overlay and not (_do_audio and src_has_audio):
@@ -25927,6 +26495,61 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                             if adaptive_mask_dir:
                                 import shutil
                                 shutil.rmtree(adaptive_mask_dir, ignore_errors=True)
+
+                # Refine complete clips before enlargement/interpolation.
+                # Originals stay available; refinement produces named copies.
+                if success and pp_face_refiner["enabled"] and not defer_output_publication:
+                    from services.face_refiner import process_video as refine_faces
+                    face_outputs = []
+                    face_reports = {}
+                    # Generation timing does not estimate this separate pass.
+                    job.pop("eta_updated_at", None)
+                    wgp.release_model()
+                    for fname in list(new_files):
+                        if os.path.splitext(fname)[1].lower() not in {".mp4", ".mov", ".mkv", ".webm", ".avi"}:
+                            continue
+                        source = os.path.join(out_dir, fname)
+                        destination = wgp.get_available_filename(out_dir, fname, "_faces_refined", force_extension=".mp4")
+                        def face_progress(phase, step=None, total=None):
+                            update_job(job, phase=phase, message=phase, step=int(step or 0), total_steps=int(total or 0),
+                                progress=min(95, int(100 * (step or 0) / max(1, total or 1))))
+                        report = refine_faces(source, destination, options=pp_face_refiner,
+                            abort=lambda: is_cancel_requested(job), progress=face_progress, seed=int(raw_params.get("seed", 0) or 0))
+                        if is_cancel_requested(job):
+                            try:
+                                os.remove(destination)
+                            except OSError:
+                                pass
+                            return False
+                        refined_name = os.path.basename(destination)
+                        face_outputs.append(refined_name)
+                        face_reports[refined_name] = report
+                    new_files.extend(face_outputs)
+                    job["params"]["face_refiner_results"] = face_reports
+                    record_job_outputs(job, face_outputs)
+
+                # Run temporal and DLSS processing over the assembled clip so
+                # audio timing and native temporal history span H3 windows.
+                if success and (pp_media_spatial or pp_media_temporal):
+                    from services.media_flow import process_video
+                    wgp.release_model()
+                    for fname in new_files:
+                        if os.path.splitext(fname)[1].lower() not in {".mp4", ".webm", ".mkv"}:
+                            continue
+                        video_path = os.path.join(out_dir, fname)
+                        stem, extension = os.path.splitext(video_path)
+                        temporary = stem + ".media-flow" + extension
+                        def media_progress(phase, step=None, total=None):
+                            update_job(job, phase=phase, message=phase, step=int(step or 0),
+                                       total_steps=int(total or 0))
+                        try:
+                            process_video(video_path, temporary, spatial=pp_media_spatial,
+                                temporal=pp_media_temporal, options=pp_media_options,
+                                abort=lambda: is_cancel_requested(job), progress=media_progress)
+                            os.replace(temporary, video_path)
+                        finally:
+                            if os.path.isfile(temporary):
+                                os.remove(temporary)
 
                 # Post-generation FlashVSR pass — whole-file upscale on the
                 # assembled video (see the pop near the top of this function
@@ -26981,6 +27604,7 @@ def get_status(job_id: str):
         "message": j["message"],
         "output_files": j["output_files"],
         "error": j["error"],
+        "viggle_preparation": j.get("viggle_preparation"),
         # Present only on failed jobs that look like CUDA OOMs. UI
         # renders the OOM recovery banner when this is non-null.
         "oom_info": j.get("oom_info"),

@@ -2207,7 +2207,7 @@ class TestH3DirectorDialogueBudget(unittest.TestCase):
         self.assertIn(345 / 24, full)
 
     def test_reports_over_budget_without_mutating_or_truncating_lines(self):
-        spoken = "one two three four five six seven eight nine ten eleven"
+        spoken = "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen"
         shots = [{
             "title": "Crowded exchange",
             "duration_sec": 5,
@@ -2217,14 +2217,14 @@ class TestH3DirectorDialogueBudget(unittest.TestCase):
         violations = h3_dialogue_budget_violations(shots)
 
         self.assertEqual(len(violations), 1)
-        self.assertEqual(violations[0]["word_count"], 11)
-        self.assertEqual(violations[0]["word_budget"], 10)
+        self.assertEqual(violations[0]["word_count"], 16)
+        self.assertEqual(violations[0]["word_budget"], 15)
         self.assertEqual(shots[0]["dialogue_beats"][0]["spoken_text"], spoken)
 
-    def test_accepts_complete_lines_within_two_words_per_second(self):
+    def test_accepts_complete_lines_at_three_words_per_second(self):
         shots = [{
             "duration_sec": 5,
-            "dialogue_beats": [{"spoken_text": "one two three four five six"}],
+            "dialogue_beats": [{"spoken_text": "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen"}],
         }]
 
         self.assertEqual(h3_dialogue_budget_violations(shots), [])
@@ -3511,7 +3511,9 @@ Ross turns toward Joey.
         spoken = (
             "one two three four five six seven eight nine ten eleven twelve "
             "thirteen fourteen fifteen sixteen seventeen eighteen nineteen "
-            "twenty twenty-one twenty-two twenty-three twenty-four twenty-five"
+            "twenty twenty-one twenty-two twenty-three twenty-four twenty-five "
+            "twenty-six twenty-seven twenty-eight twenty-nine thirty thirty-one "
+            "thirty-two thirty-three thirty-four thirty-five thirty-six thirty-seven"
         )
         calls = []
 

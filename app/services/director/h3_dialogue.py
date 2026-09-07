@@ -12,6 +12,10 @@ import math
 import re
 from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 
+from services.dialogue_timing import (
+    DIALOGUE_MAX_WORDS_PER_SECOND,
+    h3_dialogue_schedule,
+)
 from services.h3_prompt_budget import (
     H3_ENHANCED_TEXT_TOKEN_TARGET as _H3_DIRECTOR_TEXT_TOKEN_BUDGET,
     fit_h3_base_prompt,
@@ -539,7 +543,7 @@ def h3_dialogue_budget_violations(
     shot_dicts: Sequence[Mapping[str, Any]],
     durations: Sequence[float] | None = None,
     *,
-    words_per_second: float = 2.1,
+    words_per_second: float = DIALOGUE_MAX_WORDS_PER_SECOND,
 ) -> list[dict[str, Any]]:
     """Describe shots whose complete dialogue cannot fit their duration."""
 
@@ -1597,15 +1601,8 @@ def _h3_dialogue_timing_clause(
     beats: Sequence[Mapping[str, str]],
     duration_seconds: float,
 ) -> str:
-    duration = max(2.0, float(duration_seconds or 8.0))
     word_count = sum(len(beat.get("words", "").split()) for beat in beats)
-    speech_duration = max(0.75, word_count / 2.0)
-    speech_duration = min(speech_duration, max(0.75, duration - 0.75))
-    start = min(
-        max(0.5, duration * 0.10),
-        max(0.25, duration - speech_duration - 0.50),
-    )
-    end = min(duration - 0.25, start + speech_duration)
+    duration, start, end = h3_dialogue_schedule(word_count, duration_seconds)
     return (
         f"Dialogue timing: mouths stay closed with no human voice from 0.00 "
         f"to {start:.2f} seconds; the tagged lines run once in order from "

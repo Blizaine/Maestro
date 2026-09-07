@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback, type CSSProperties } from 'react'
-import { Play, Pencil, RefreshCw, Copy, Trash2, Check, Combine, Loader2, Heart, ArrowLeftToLine, Download, FolderInput, Scissors, FastForward, BookMarked, Info, ChevronDown, ChevronUp, MoreHorizontal } from 'lucide-react'
+import { Play, Pencil, RefreshCw, Copy, Trash2, Check, Combine, Loader2, Heart, ArrowLeftToLine, Download, FolderInput, Scissors, FastForward, BookMarked, Info, ChevronDown, ChevronUp, MoreHorizontal, ScanFace } from 'lucide-react'
 import { SaveRecipeDialog } from '../Recipes/SaveRecipeDialog'
+import { FaceRefinerDialog } from '../Characters/FaceRefiner'
 import { useStore } from '../../stores/useStore'
 import { getUploadUrl, fetchOutputMetadata, getFileUrl, moveOutput, uploadImage } from '../../api/client'
 import type { OutputFile, OutputMetadata } from '../../types'
@@ -105,6 +106,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const [metaLoaded, setMetaLoaded] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [showSaveRecipe, setShowSaveRecipe] = useState(false)
+  const [showFaceRefiner, setShowFaceRefiner] = useState(false)
   const confirmRef = useRef(false)
   const timeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined)
   const [copied, setCopied] = useState(false)
@@ -783,6 +785,16 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
               <div className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
                 Clip actions
               </div>
+              {file.type === 'video' && (
+                <button
+                  role="menuitem"
+                  onClick={() => { setShowActionMenu(false); setShowFaceRefiner(true) }}
+                  className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
+                >
+                  <ScanFace size={14} className="text-accent-blue" />
+                  <span>Refine faces</span>
+                </button>
+              )}
               {params && (
                 <button
                   role="menuitem"
@@ -1241,6 +1253,9 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
             setShowSaveRecipe(false)
           }}
         />
+      )}
+      {showFaceRefiner && (
+        <FaceRefinerDialog initialSource={{ path: file.name, name: file.name, url: file.url }} onClose={() => setShowFaceRefiner(false)} />
       )}
     </div>
   )

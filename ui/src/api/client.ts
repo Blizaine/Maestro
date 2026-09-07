@@ -75,6 +75,7 @@ export interface ApiJobStatus {
   phase: string
   message: string
   output_files: string[]
+  viggle_preparation?: import('../types').VigglePreparedFrame | null
   error: string | null
   /** Present only on failed jobs that look like CUDA OOMs.
    *  See `OomInfo` in types/index.ts. */
@@ -383,6 +384,10 @@ export async function submitToolUpscale(params: {
   method?: string
   seed?: number
   workspace?: string
+  dlss_intensity?: number
+  dlss_depth?: string
+  dlss_motion?: string
+  temporal_upsampling?: string
 }): Promise<{ job_id: string }> {
   const res = await fetch(`${BASE}/api/v1/tools/upscale`, {
     method: 'POST',
@@ -1185,6 +1190,7 @@ export async function directorV2Plan(params: DirectorV2PlanRequest): Promise<Dir
 
 export interface GenerationPreset {
   id: string
+  builtin?: boolean
   name: string
   mode: string
   model_type: string
@@ -1750,6 +1756,26 @@ export async function fetchCharacters(): Promise<SavedOmniCharacter[]> {
   return Array.isArray(data.characters) ? data.characters : []
 }
 
+export async function submitFaceRefiner(params: {
+  video_path: string; workspace: string; options: import('../types').FaceRefinerOptions
+  analyze_only?: boolean; analysis_id?: string; assignments?: import('../types').FaceRefinerAssignment[]
+}): Promise<{ job_id: string; analysis_id: string | null }> {
+  const response = await fetch(`${BASE}/api/v1/tools/face-refiner`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params),
+  })
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}))
+    throw new Error(error.detail || 'Could not start Face Refiner')
+  }
+  return response.json()
+}
+
+export async function fetchFaceAnalysis(id: string): Promise<import('../types').FaceRefinerAnalysis> {
+  const response = await fetch(`${BASE}/api/v1/face-refiner/analyses/${encodeURIComponent(id)}`)
+  if (!response.ok) throw new Error('Face analysis is unavailable. Detect faces again.')
+  return response.json()
+}
+
 export async function createCharacter(params: {
   name: string
   visual_path: string
@@ -1777,6 +1803,89 @@ export async function deleteCharacter(characterId: string): Promise<void> {
     const error = await res.json().catch(() => ({ detail: 'Character delete failed' }))
     throw new Error(error.detail || 'Character delete failed')
   }
+}
+
+export interface CharacterTransferResult {
+  character: SavedOmniCharacter
+  filename?: string
+  url?: string
+}
+
+async function characterRequest(path: string, init?: RequestInit) {
+  const response = await fetch(`${BASE}${path}`, init)
+  const data = await response.json()
+  if (!response.ok) throw new Error(data.detail || data.error || 'Character request failed')
+  return data
+}
+
+async function waitForCharacterTransfer(job: { id: string }, onProgress?: (message: string) => void): Promise<CharacterTransferResult> {
+  for (;;) {
+    const status = await characterRequest(`/api/v1/character-transfers/${encodeURIComponent(job.id)}`)
+    onProgress?.(status.message || 'Preparing character…')
+    if (status.status === 'failed') throw new Error(status.error || 'Character transfer failed')
+    if (status.status === 'completed') {
+      window.dispatchEvent(new Event('maestro-characters-changed'))
+      return status.result
+    }
+    await new Promise(resolve => setTimeout(resolve, 1000))
+  }
+}
+
+export async function importCharacterFile(file: File, onProgress?: (message: string) => void, metadataFile?: File): Promise<SavedOmniCharacter> {
+  const form = new FormData()
+  form.append('file', file)
+  if (metadataFile) form.append('metadata_file', metadataFile)
+  const job = await characterRequest('/api/v1/characters/import', { method: 'POST', body: form })
+  return (await waitForCharacterTransfer(job, onProgress)).character
+}
+
+export async function exportCharacter(characterId: string, onProgress?: (message: string) => void): Promise<CharacterTransferResult> {
+  const job = await characterRequest(`/api/v1/characters/${encodeURIComponent(characterId)}/export`, { method: 'POST' })
+  return waitForCharacterTransfer(job, onProgress)
+}
+
+export async function findCharacterFiles(url: string): Promise<{ files: string[] }> {
+  return characterRequest(`/api/v1/characters/remote-files?url=${encodeURIComponent(url)}`)
+}
+
+export async function importCharacterUrl(url: string, filename: string, onProgress?: (message: string) => void): Promise<SavedOmniCharacter> {
+  const job = await characterRequest('/api/v1/characters/import-url', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, filename }),
+  })
+  return (await waitForCharacterTransfer(job, onProgress)).character
+}
+
+export async function attachCharacterVoice(characterId: string, voicePath: string): Promise<SavedOmniCharacter> {
+  const character = await characterRequest(`/api/v1/characters/${encodeURIComponent(characterId)}/voice`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ voice_path: voicePath }),
+  })
+  window.dispatchEvent(new Event('maestro-characters-changed'))
+  return character
+}
+
+export async function recoverCharacterImages(characterId: string, onProgress?: (message: string) => void, force = false): Promise<SavedOmniCharacter> {
+  const job = await characterRequest(`/api/v1/characters/${encodeURIComponent(characterId)}/images/recover?force=${force}`, { method: 'POST' })
+  return (await waitForCharacterTransfer(job, onProgress)).character
+}
+
+export async function selectCharacterImages(characterId: string, selectedIds: string[], coverId: string): Promise<SavedOmniCharacter> {
+  const character = await characterRequest(`/api/v1/characters/${encodeURIComponent(characterId)}/images`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ selected_ids: selectedIds, cover_id: coverId }),
+  })
+  window.dispatchEvent(new Event('maestro-characters-changed'))
+  return character
+}
+
+export function characterImagesDownloadUrl(characterId: string): string {
+  return `${BASE}/api/v1/characters/${encodeURIComponent(characterId)}/images.zip`
+}
+
+export async function characterImageFile(character: SavedOmniCharacter, image: {id: string; url: string}): Promise<File> {
+  const response = await fetch(image.url)
+  if (!response.ok) throw new Error('The character image is missing. Recover its images again.')
+  const blob = await response.blob()
+  return new File([blob], `${character.name.replace(/[^\p{L}\p{N}_-]+/gu, '_')}_${image.id}.png`, {type: 'image/png'})
 }
 
 export async function testHostNotificationSound(

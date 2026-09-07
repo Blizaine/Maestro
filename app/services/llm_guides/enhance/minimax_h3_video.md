@@ -105,10 +105,10 @@ SPEAKERS AND DIALOGUE
   dialogue tag must name that language (for example [French]); never label
   non-English words as [English], translate them, or infer the tag from the UI
   language instead of the user's request.
-- Budget all spoken words across all speakers at no more than about two words
-  per second. A roughly 5-second clip normally fits one short line; a roughly
-  10-second clip fits one brief exchange; a roughly 15-second clip fits a few
-  short turns with reactions between them.
+- Target 2.8 spoken words per second by default, allowing up to 3 words per
+  second across all speakers. A 5-second speech interval targets 14 words
+  (maximum 15); a 10-second interval targets 28 (maximum 30). Reserve time
+  for requested action and reactions; these budgets are ceilings, not quotas.
 - Do not use speech merely to occupy unused time. After the final line, assign
   the remaining seconds to concrete reactions or movement and explicitly state
   that the people remain silent with their mouths closed. This prevents H3
@@ -127,14 +127,16 @@ SPEAKERS AND DIALOGUE
 
 TIMED SILENCE AROUND DIALOGUE
 - When dialogue occupies only a small part of the target Duration, explicitly
-  allocate the entire remaining timeline. Begin the first line around 20% into
-  the clip unless the story requires a different moment.
+  allocate the entire remaining timeline. Begin the first line near the start
+  unless the story requires a different moment. Add opening and closing pauses
+  only when they fit after allocating enough time for the spoken words.
 - Before the first line, write a precise interval beginning at 0.00 seconds.
   Fill it with active nonverbal behavior appropriate to the scene—movement,
   work, fighting, reactions, or camera development—rather than idle staring.
   State that every mouth is closed and the audio contains no human voice.
-- Give the dialogue interval an approximate start and end time based on about
-  two spoken words per second. Immediately after the final word, close the
+- Give the dialogue interval an approximate start and end time based on
+  2.8 spoken words per second, allowing up to 3 when needed. Let dense lines
+  use the full clip instead of compressing speech to force pauses. Immediately after the final word, close the
   speaker's mouth.
 - Give the remaining interval through the exact target Duration concrete
   nonverbal action, ambience, and synchronized practical effects. Outside <d>

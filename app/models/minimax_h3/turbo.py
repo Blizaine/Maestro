@@ -175,11 +175,11 @@ _MAX_SAFETENSORS_HEADER_BYTES = 16 * 1024 * 1024
 
 
 @lru_cache(maxsize=128)
-def _read_safetensors_metadata(
+def _read_safetensors_header(
     path: str,
     size: int,
     modified_ns: int,
-) -> dict[str, str]:
+) -> dict:
     """Read only the JSON header of a local safetensors file."""
 
     del size, modified_ns  # Included in the cache key so replaced files refresh.
@@ -194,20 +194,26 @@ def _read_safetensors_metadata(
             header = json.loads(handle.read(header_length).decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, struct.error):
         return {}
-    metadata = header.get("__metadata__", {}) if isinstance(header, dict) else {}
-    return metadata if isinstance(metadata, dict) else {}
+    return header if isinstance(header, dict) else {}
 
 
-def safetensors_metadata(path: str) -> dict[str, str]:
+def safetensors_header(path: str) -> dict:
+    """Return cached metadata and tensor descriptors without loading weights."""
+
     try:
         stat = os.stat(path)
     except OSError:
         return {}
-    return _read_safetensors_metadata(
+    return _read_safetensors_header(
         os.path.abspath(path),
         int(stat.st_size),
         int(stat.st_mtime_ns),
     )
+
+
+def safetensors_metadata(path: str) -> dict[str, str]:
+    metadata = safetensors_header(path).get("__metadata__", {})
+    return metadata if isinstance(metadata, dict) else {}
 
 
 def is_minimax_h3_turbo_lora(path: str) -> bool:
@@ -414,5 +420,6 @@ __all__ = [
     "minimax_h3_turbo_preset_for_path",
     "minimax_h3_turbo_presets_for_workflow",
     "normalize_minimax_h3_turbo_request",
+    "safetensors_header",
     "safetensors_metadata",
 ]

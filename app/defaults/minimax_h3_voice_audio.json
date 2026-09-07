@@ -1,0 +1,27 @@
+{
+  "model": {
+    "name": "H3 Voice Audio — Pruned",
+    "architecture": "minimax_h3_voice_audio",
+    "description": "Voice cloning and general audio with MiniMax H3 Ref2VA Pruned. One or two audio references, a hidden 32x32 video, and audio-only 32 kHz stereo output.",
+    "URLs": [
+      "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/fec7846aef352e58a1cfb699455e3d104281e68b/MiniMax-H3-Ref2VA-pruned_rank8_bf16.safetensors",
+      "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/fec7846aef352e58a1cfb699455e3d104281e68b/MiniMax-H3-Ref2VA-pruned_rank8_int8_convrot.safetensors",
+      "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/0543966fbdce5ba05709a8f2031c94bdba629b4a/diffusion_models/minimax_h3_ref2va_pruned_fp8_scaled.safetensors"
+    ],
+    "group": "tts"
+  },
+  "prompt": "Hey, I am Blaine. Let me show you how I use Maestro.",
+  "num_inference_steps": 20,
+  "video_length": 362,
+  "sliding_window_size": 345,
+  "sliding_window_overlap": 18,
+  "sliding_window_discard_last_frames": 0,
+  "resolution": "32x32",
+  "guidance_scale": 1.0,
+  "image_prompt_type": "",
+  "minimax_h3_references": [],
+  "minimax_h3_reference_detail": "match",
+  "duration_seconds": 15,
+  "multi_prompts_gen_type": 2,
+  "audio_prompt_type": ""
+}

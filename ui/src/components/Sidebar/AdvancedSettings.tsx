@@ -5,10 +5,9 @@ import { useStore } from '../../stores/useStore'
 import { PostProcessing } from './PostProcessing'
 import { ControlVideoSection } from './ControlVideoSection'
 import { LoraSelector } from '../SettingsDrawer/LoraSelector'
-import { ResolutionPresets } from './ResolutionPresets'
-import { AspectRatioGrid } from './AspectRatioGrid'
 import { WindowSettings } from './DurationSlider'
 import { DirectorH3Optimizations } from './DirectorH3Optimizations'
+import { H3MediaControls } from './H3MediaControls'
 import type { GenerateParams } from '../../types'
 
 const H3_LONG_SEQUENCE_EXPERIMENTS = [
@@ -128,7 +127,7 @@ function PresetManager() {
                 <FolderOpen size={10} className="shrink-0 text-text-muted" />
                 <span className="truncate">{p.name}</span>
               </button>
-              <button
+              {!p.builtin && <button
                 onClick={() => handleDelete(p.id)}
                 className={`p-1 rounded transition-colors shrink-0 ${
                   confirmDelete === p.id
@@ -137,7 +136,7 @@ function PresetManager() {
                 }`}
               >
                 <Trash2 size={10} />
-              </button>
+              </button>}
             </div>
           ))}
         </div>
@@ -422,7 +421,7 @@ export function AdvancedSettings() {
     && params.minimax_h3_multi_window === true
   )
   const showInferenceSteps = (
-    !isAudioOnly
+    (!isAudioOnly || params.model_type === 'minimax_h3_voice_audio')
     && (isScailEdit || !modelOptions?.lock_inference_steps)
   )
   const inferenceStepsMin = Math.max(
@@ -528,12 +527,6 @@ export function AdvancedSettings() {
               {/* Recast/Repaint own their output-quality profiles in the main
                   workflow. Their dedicated endpoints also choose adaptive
                   windows, so generic controls would be misleading here. */}
-              {!isAudio && !isScailEdit && (
-                <>
-                  {!isOutpaint && !modelOptions?.hide_resolution_presets && <ResolutionPresets />}
-                  {!isAvatar && <AspectRatioGrid />}
-                </>
-              )}
 
               {/* Presets belong with the creative adapter controls so users can
                   save or restore a setup before adjusting its LoRAs. */}
@@ -543,9 +536,9 @@ export function AdvancedSettings() {
                   before working through the lower-level tuning controls.
                   Official Outpaint owns its stage-one-only IC-LoRA schedule. */}
               {!isOutpaint && !modelOptions?.loras_disabled && <LoraSelector />}
-              {!isOutpaint && modelOptions?.loras_disabled && (
+              {!isOutpaint && modelOptions?.minimax_h3_fused_turbo && (
                 <p className="rounded-lg border border-amber-500/25 bg-amber-500/8 px-3 py-2 text-[9px] leading-relaxed text-text-muted">
-                  This fused four-step checkpoint already contains its acceleration and style adapters, so additional LoRAs are disabled.
+                  H3 LoRAs are experimental with Fused 4-Step. Start with one adapter at low strength and compare a short clip using the same seed. Extra acceleration adapters are excluded; Mystic remains baked in at 0.7.
                 </p>
               )}
 
@@ -579,6 +572,8 @@ export function AdvancedSettings() {
                   </p>
                 </div>
               ) : null}
+
+              {isH3 && !isAudio && <H3MediaControls />}
 
               {modelOptions?.ltx25_video_vae_choices?.length ? (
                 <div>
@@ -1277,7 +1272,7 @@ export function AdvancedSettings() {
               {/* Dedicated SCAIL edit endpoints own their source video,
                   edited/reference frames, masks, and process selection. */}
               {(modelOptions?.guide_preprocessing || modelOptions?.guide_custom_choices) &&
-                !isScailEdit && !modelOptions?.minimax_h3_media_sources && (
+                !isScailEdit && params.model_type !== 'viggle_animate' && !modelOptions?.minimax_h3_media_sources && (
                 <ControlVideoSection />
               )}
 

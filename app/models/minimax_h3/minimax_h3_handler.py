@@ -9,6 +9,7 @@ _MODEL_TYPE = "minimax_h3"
 _REF2VA_MODEL_TYPE = "minimax_h3_ref2va"
 _FULL_MODEL_TYPE = "minimax_h3_full"
 _REF2VA_FULL_MODEL_TYPE = "minimax_h3_ref2va_full"
+_TTS_MODEL_TYPE = "minimax_h3_voice_audio"
 _COMFY_REPO = "Comfy-Org/MiniMax-H3"
 _COMFY_REVISION = "0543966fbdce5ba05709a8f2031c94bdba629b4a"
 _OFFICIAL_REPO = "MiniMaxAI/MiniMax-H3"
@@ -880,7 +881,7 @@ _LEGACY_RESOLUTION_ALIASES = {
 }
 
 
-def _normalize_h3_resolution(value) -> str:
+def _normalize_h3_resolution(value, *, preserve_canvas=False) -> str:
     """Preserve requested orientation while snapping old presets to H3."""
 
     resolution = str(value or "864x480").strip().lower()
@@ -899,6 +900,9 @@ def _normalize_h3_resolution(value) -> str:
             raise ValueError
     except (TypeError, ValueError):
         return "864x480"
+
+    if preserve_canvas:
+        return f"{max(32, width // 32 * 32)}x{max(32, height // 32 * 32)}"
 
     orientation = 0 if width == height else (1 if width > height else -1)
     candidates = []
@@ -1630,6 +1634,8 @@ class family_handler:
             _FULL_MODEL_TYPE,
             _REF2VA_MODEL_TYPE,
             _REF2VA_FULL_MODEL_TYPE,
+            _TTS_MODEL_TYPE,
+            "viggle_animate",
         ]
 
     @staticmethod
@@ -1670,6 +1676,12 @@ class family_handler:
 
     @staticmethod
     def query_model_def(base_model_type, model_def):
+        if base_model_type == "viggle_animate":
+            from models.minimax_h3.viggle import model_definition
+            return model_definition(family_handler.query_model_def(_REF2VA_MODEL_TYPE, model_def))
+        audio_only = base_model_type == _TTS_MODEL_TYPE
+        if audio_only:
+            base_model_type = _REF2VA_MODEL_TYPE
         omni_reference = base_model_type in {
             _REF2VA_MODEL_TYPE,
             _REF2VA_FULL_MODEL_TYPE,
@@ -1728,9 +1740,9 @@ class family_handler:
             "LightX2V Turbo, Mystic, and INT8 ConvRot conversion. Maestro "
             "uses its four-evaluation res_multistep recipe by default; "
             "Advanced can experimentally raise Total Steps through eight. "
-            "Maestro "
-            "does not stack ordinary H3 LoRAs, Turbo, Sol, or First Block "
-            "Cache on top of it. SLA is its supported attention accelerator."
+            "Compatible H3 character, style and concept LoRAs are experimental. "
+            "Additional Turbo/PDD and VDN adapters remain blocked, as do Sol "
+            "and First Block Cache. SLA is its supported attention accelerator."
             if fused_turbo
             else
             "FULL 33B\n"
@@ -1943,7 +1955,7 @@ class family_handler:
             "minimax_h3_video_vae_filename": (
                 _VIDEO_VAE_INT8_CONVROT if fused_turbo else _VIDEO_VAE
             ),
-            "loras_disabled": fused_turbo,
+            "loras_disabled": False,
             "minimax_h3_transformer_working_vram_gb": (
                 _TRANSFORMER_WORKING_VRAM_MB / 1024
             ),
@@ -1955,7 +1967,8 @@ class family_handler:
             ),
             "selector_help": f"{workflow_help}\n\n{checkpoint_help}",
             "lora_compatibility_note": (
-                "Turbo and Mystic are baked into this checkpoint; additional LoRAs are disabled."
+                "Experimental H3 LoRA support. Start with one adapter at low strength; "
+                "Turbo/PDD, VDN and DoRA adapters are excluded. Mystic remains baked in at 0.7."
                 if fused_turbo
                 else
                 "H3 LoRAs are supported; Maestro converts Pruned adapters when needed."
@@ -2047,6 +2060,42 @@ class family_handler:
                     "minimax_h3_media_sources": True,
                 }
             )
+        result["custom_settings"] = [
+            {"id": "h3_mask_mode", "name": "Mask Denoising Mode", "label": "Mask Denoising Mode",
+             "type": "dropdown", "default": "grouped_rows",
+             "choices": [("Grouped Rows (clean fixed region)", "grouped_rows"),
+                         ("Shared Timestep (legacy)", "shared_timestep")], "video_prompt_type": "G"},
+            {"id": "audio_refinement", "name": "Audio Refinement Extra Phase", "label": "Audio Refinement Extra Phase",
+             "type": "dropdown", "default": "none",
+             "choices": [("Off", "none"), ("Enabled — 6 extra steps", "enabled")]},
+        ]
+        if fused_turbo or (model_def or {}).get("lock_inference_steps", False):
+            result["custom_settings"] = result["custom_settings"][:1]
+        if not omni_reference:
+            result.update({"video_guide_outpainting": [0], "outpainting_quantize_margins": 32,
+                           "video_guide_outpainting_label": "Extend the H3 Control Video canvas"})
+        if (model_def or {}).get("vdn", False):
+            result.update({"vdn": True, "sol_attention": False, "sla_attention": False,
+                           "minimax_h3_transformer_working_vram_gb": 12,
+                           "selector_help": workflow_help + "\n\nVDN uses trained hybrid attention, its module and default LoRA. Requires Triton and more VRAM. Start with a shorter clip before raising duration."})
+        if audio_only:
+            from models.minimax_h3.voice_audio import MIN_AUDIO_SECONDS, MAX_SEGMENT_SECONDS, MAX_AUDIO_SECONDS
+            result.update({"audio_only": True, "minimax_h3_audio_only": True, "image_outputs": False,
+                "omni_reference": False,
+                "profile_type": "video", "sliding_window": False, "video_continuation": False,
+                "returns_audio": False, "image_prompt_types_allowed": "", "i2v_class": False,
+                "custom_frames_injection": False, "custom_settings": [], "max_voice_count": 2,
+                "sol_attention": False, "sla_attention": False,
+                "audio_mode_from_voice_count": True, "any_audio_prompt": True, "audio_prompt_choices": True,
+                "audio_reference_max_total_duration": 15, "video_length_not_limited_by_audio": True,
+                "audio_guide_label": "Voice / Audio Reference 1", "audio_guide2_label": "Voice / Audio Reference 2",
+                "audio_prompt_type_sources": {"selection": ["", "A", "AB"],
+                    "labels": {"": "No voice reference", "A": "One voice reference", "AB": "Two voice references"},
+                    "letters_filter": "AB", "default": "", "label": "Voice references", "show_label": True},
+                "audio_segment_max_seconds": MAX_SEGMENT_SECONDS,
+                "duration_slider": {"label": "Maximum Audio Duration (seconds)", "min": MIN_AUDIO_SECONDS,
+                    "max": MAX_AUDIO_SECONDS, "increment": 0.1, "default": 15},
+                "selector_help": "H3 Voice Audio saves 32 kHz stereo audio. Generate up to 45 seconds per segment and 5 minutes per output. Long scripts split automatically, with stable speaker references and Whisper boundary trimming. Duration is a maximum; short speech ends when the script finishes. Use plain dialogue, Speaker 1: / Speaker 2: blocks, [language, acting directions], or Sound: for general audio."})
         return result
 
     @staticmethod
@@ -2126,7 +2175,14 @@ class family_handler:
             if fused_turbo
             else []
         )
-        return vae_downloads + attribution_downloads + [
+        dialogue_downloads = ([{"repoId": "DeepBeepMeep/Wan2.1", "sourceFolderList": ["whisper_medium"],
+                               "fileList": [["config.json", "model.safetensors"]]}]
+                              if base_model_type == _TTS_MODEL_TYPE else [])
+        if base_model_type == "viggle_animate":
+            from models.minimax_h3.viggle import REPO, REVISION, PROMPT_FILE
+            return vae_downloads + [{"repoId": REPO, "revision": REVISION,
+                "sourceFolderList": ["viggle_animate"], "fileList": [[PROMPT_FILE]]}]
+        return vae_downloads + attribution_downloads + dialogue_downloads + [
             {
                 "repoId": _OFFICIAL_REPO,
                 "revision": _OFFICIAL_REVISION,
@@ -2152,6 +2208,10 @@ class family_handler:
             dtype = torch.bfloat16
         from .minimax_h3_main import MiniMaxH3Model
 
+        if (model_def or {}).get("minimax_h3_viggle"):
+            from services.managed_preprocessors import ensure_minimax_h3_lora_affine_maps
+            ensure_minimax_h3_lora_affine_maps("viggle", widths=(8,))
+
         model = MiniMaxH3Model(
             model_filename=model_filename,
             model_def=model_def or {},
@@ -2169,20 +2229,30 @@ class family_handler:
             # before the 50-layer language model runs. This mirrors WanGP's
             # H3 memory layout and avoids pinning both large components as a
             # single co-resident conditioner.
-            "text_encoder": model.conditioner.language_model,
-            "vision_encoder": model.conditioner.visual,
             "vae": model.vae,
             "audio_vae": model.audio_vae,
         }
+        if not model.viggle:
+            pipe.update({"text_encoder": model.conditioner.language_model,
+                         "vision_encoder": model.conditioner.visual})
+        if model.audio_only:
+            from .dialogue import load_dialogue_whisper
+            model.dialogue_whisper = load_dialogue_whisper()
+            pipe["dialogue_whisper"] = model.dialogue_whisper
         return model, {
             "pipe": pipe,
             "workingVRAM": {
-                "transformer": _TRANSFORMER_WORKING_VRAM_MB,
+                "transformer": int((model_def or {}).get("minimax_h3_transformer_working_vram_gb", 10) * 1024),
             },
         }
 
     @staticmethod
     def update_default_settings(base_model_type, model_def, ui_defaults):
+        if base_model_type == "viggle_animate":
+            from models.minimax_h3.viggle import normalize_settings
+            normalize_settings(ui_defaults, validate_media=False)
+            ui_defaults.setdefault("resolution", "auto480p")
+            return
         omni_reference = base_model_type in {
             _REF2VA_MODEL_TYPE,
             _REF2VA_FULL_MODEL_TYPE,
@@ -2220,12 +2290,31 @@ class family_handler:
                 "override_attention": "sla" if fused_turbo else "",
             }
         )
+        if base_model_type == _TTS_MODEL_TYPE:
+            ui_defaults.update({"resolution": "32x32", "duration_seconds": 15, "video_length": 362,
+                                "sliding_window_size": 362, "audio_prompt_type": "", "multi_prompts_gen_type": 2})
 
     @staticmethod
     def fix_settings(base_model_type, settings_version, model_def, ui_defaults):
+        if base_model_type == "viggle_animate":
+            from models.minimax_h3.viggle import normalize_settings
+            normalize_settings(ui_defaults, validate_media=False)
+            return
         # Saved settings created before this family existed cannot need a
         # migration, but imported presets still need valid H3 geometry.
         from .packing import align_num_frames
+
+        if base_model_type == _TTS_MODEL_TYPE:
+            import math
+            from .voice_audio import MIN_AUDIO_SECONDS, MAX_AUDIO_SECONDS, normalize_audio_settings
+            try:
+                seconds = float(ui_defaults.get("duration_seconds", 15))
+            except (TypeError, ValueError):
+                seconds = 15.0
+            seconds = min(MAX_AUDIO_SECONDS, max(MIN_AUDIO_SECONDS, seconds)) if math.isfinite(seconds) else 15.0
+            ui_defaults["duration_seconds"] = seconds
+            normalize_audio_settings(ui_defaults, validate_prompt=False)
+            return
 
         try:
             requested_frames = int(ui_defaults.get("video_length", 124))
@@ -2240,7 +2329,10 @@ class family_handler:
             omni_reference
             and ui_defaults.get("minimax_h3_reference_sequence") is True
         )
-        if requested_frames <= _H3_MAX_FRAMES + 1:
+        outpaint_text = str(ui_defaults.get("video_guide_outpainting") or "").strip()
+        outpainting = bool(outpaint_text) and not outpaint_text.startswith("#")
+        exact_outpaint_timeline = outpainting and ui_defaults.get("minimax_h3_multi_window") is True
+        if requested_frames <= _H3_MAX_FRAMES + 1 and not exact_outpaint_timeline:
             ui_defaults["video_length"] = min(
                 _H3_MAX_FRAMES,
                 max(_H3_MIN_FRAMES, aligned_frames),
@@ -2288,7 +2380,7 @@ class family_handler:
         )
         ui_defaults["sliding_window_discard_last_frames"] = 0
         ui_defaults["resolution"] = _normalize_h3_resolution(
-            ui_defaults.get("resolution", "864x480")
+            ui_defaults.get("resolution", "864x480"), preserve_canvas=outpainting,
         )
         ui_defaults["guidance_scale"] = 1.0
         if (model_def or {}).get("minimax_h3_fused_turbo", False):
@@ -2333,6 +2425,10 @@ class family_handler:
     ):
         """Pace one full H3 shot prompt across automatic continuations."""
 
+        if (model_def or {}).get("minimax_h3_viggle", False):
+            from models.minimax_h3.viggle import PROMPT
+            return PROMPT
+
         is_source_extension = (
             int(window_no or 1) == 1
             and kwargs.get("video_source") is not None
@@ -2372,9 +2468,39 @@ class family_handler:
     @staticmethod
     def validate_generative_settings(base_model_type, model_def, inputs):
         """Enforce H3's single-pass and continuation geometry server-side."""
+        if base_model_type == "viggle_animate":
+            from models.minimax_h3.viggle import normalize_settings
+            try:
+                normalize_settings(inputs)
+            except (ValueError, TypeError) as error:
+                return str(error)
+            return None
+        if base_model_type == _TTS_MODEL_TYPE:
+            from .voice_audio import normalize_audio_settings
+            try:
+                normalize_audio_settings(inputs)
+                if int(inputs.get("num_inference_steps", 20)) < 2:
+                    return "H3 Voice Audio requires at least two denoising steps"
+            except (ValueError, TypeError) as error:
+                return str(error)
+            return None
+        custom = inputs.get("custom_settings") or {}
+        if custom.get("audio_refinement") == "enabled":
+            if (model_def or {}).get("lock_inference_steps") or (model_def or {}).get("minimax_h3_fused_turbo"):
+                return "Audio refinement is unavailable for fixed-step PDD and fused Turbo variants"
+            source = str(inputs.get("audio_prompt_type") or "")
+            if (not (model_def or {}).get("omni_reference") and any(flag in source for flag in "AK")) or "D" in source:
+                return "Audio refinement is unavailable while a source soundtrack controls generation"
+        if (model_def or {}).get("vdn"):
+            if inputs.get("minimax_h3_turbo_mode"):
+                return "Use the dedicated VDN Turbo 8 Steps preset with H3 VDN"
+            inputs["override_attention"] = "sdpa"
 
         if (model_def or {}).get("minimax_h3_fused_turbo", False):
+            from models.minimax_h3.fused_turbo import validate_fused_h3_loras
+
             try:
+                validate_fused_h3_loras(inputs.get("activated_loras"))
                 inputs["num_inference_steps"] = _normalize_h3_fused_steps(
                     inputs.get("num_inference_steps")
                 )
@@ -2388,19 +2514,6 @@ class family_handler:
             inputs["skip_steps_cache_type"] = ""
             attention = str(inputs.get("override_attention") or "").strip().lower()
             inputs["override_attention"] = "sdpa" if attention == "sdpa" else "sla"
-            selected_loras = [
-                str(item).strip()
-                for item in (inputs.get("activated_loras") or [])
-                if str(item).strip()
-            ]
-            if selected_loras:
-                return (
-                    "H3 Fused 4-Step already contains its Turbo and Mystic "
-                    "adapters. Additional LoRAs cannot be stacked on this "
-                    "experimental checkpoint."
-                )
-            inputs["activated_loras"] = []
-            inputs["loras_multipliers"] = ""
 
         omni_reference = base_model_type in {
             _REF2VA_MODEL_TYPE,
@@ -2543,7 +2656,12 @@ class family_handler:
             )
             inputs["sliding_window_size"] = inputs["video_length"]
         else:
-            if requested_frames <= _H3_MAX_FRAMES + 1:
+            exact_outpaint_timeline = (
+                inputs.get("minimax_h3_multi_window") is True
+                and bool(str(inputs.get("video_guide_outpainting") or "").strip())
+                and not str(inputs.get("video_guide_outpainting") or "").strip().startswith("#")
+            )
+            if requested_frames <= _H3_MAX_FRAMES + 1 and not exact_outpaint_timeline:
                 requested_frames = min(
                     _H3_MAX_FRAMES,
                     max(
