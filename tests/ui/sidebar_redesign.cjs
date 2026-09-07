@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {assertPromptStability} = require('./prompt_stability.cjs');
 const {assertExplicitEnhancement} = require('./studio_enhancement.cjs');
+const {assertDurationPopup} = require('./duration_popup.cjs');
 const root = path.resolve(__dirname, '../..');
 const base = process.argv[2];
 if (!base) throw new Error('Pass the running Maestro URL; browser actions never reach it.');
@@ -115,6 +116,11 @@ const read = async endpoint => {
     assert.deepEqual(errors, [], 'StrictMode renders the full sidebar without a loop');
     if (process.env.MAESTRO_UI_ENHANCE_ONLY) {
       await assertExplicitEnhancement(page, sidebar, requests, llmRequests);
+      assert.deepEqual(errors, []);
+      return;
+    }
+    await assertDurationPopup(page, sidebar, output);
+    if (process.env.MAESTRO_UI_DURATION_ONLY) {
       assert.deepEqual(errors, []);
       return;
     }

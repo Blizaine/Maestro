@@ -26,7 +26,7 @@ export const formatSeconds = (seconds: number) => {
 // Kept as a public alias because Director shares the same pass-level table.
 export const recommendedWindowProfile = recommendedH3PassProfile
 
-export function DurationSlider() {
+export function DurationSlider({ includeWindowSettings = false }: { includeWindowSettings?: boolean }) {
   const duration = useStore(s => s.durationSeconds)
   const setDuration = useStore(s => s.setDurationSeconds)
   const setParam = useStore(s => s.setParam)
@@ -209,7 +209,7 @@ export function DurationSlider() {
     : videoGuide ? 'control video' : audioGuide ? 'audio track' : undefined
 
   return (
-    <div>
+    <div className={includeWindowSettings ? 'space-y-3' : undefined}>
       <DurationPresetControl
         value={duration}
         onChange={setDuration}
@@ -233,42 +233,47 @@ export function DurationSlider() {
           : planningWindowSeconds}
         nativeTiming={{ minimumFrames: Math.round(minDuration * fps), frameStep, fps }}
       />
-      {showSlidingWindow && !isMultiClip && (
-        <div className="text-[10px] text-text-muted mt-1">
-          {windowCount} windows of {formatSeconds(windowSize)} &middot;{' '}
-          {modelType === 'viggle_animate' ? 'fixed motion-transfer prompt' : hasReviewedWindowPrompts
-            ? 'Reviewed window prompts'
-            : <span className={promptLineCount === windowCount ? '' : 'text-amber-400'}>
-                {promptLineCount}/{windowCount} prompts
-              </span>}
-        </div>
-      )}
-      {showOmniSequence && (
-        <div className="text-[10px] text-text-muted mt-1">
-          {omniSequenceClipCount} {nativeOmniContinuation ? 'native Omni windows' : 'independent Omni clips'} &middot;{' '}
-          {locked ? 'manual' : 'Auto'} max {formatSeconds(omniSequenceClipFrames / fps)} &middot;{' '}
-          {nativeOmniContinuation ? 'motion + audio carried' : 'hard cuts joined'} &middot;{' '}
-          {!h3WindowPlan
-            ? <span className={promptLineCount === omniSequenceClipCount ? '' : 'text-amber-400'}>
-                {promptLineCount}/{omniSequenceClipCount} prompts · use Enhance to plan
-              </span>
-            : 'Reviewed window prompts'}
-        </div>
-      )}
-      {unsupportedAutoResolution && (
-        <div className="text-[10px] text-amber-400 mt-1">
-          {directOmni
-            ? `For ${totalVramGb.toFixed(0)} GB, H3 Omni Auto recommends ${windowRecommendation?.fallbackResolution ?? 'a lower resolution'} instead of ${resolution}. Multi-window sequence can divide longer output into VRAM-aware windows.`
-            : locked
-            ? `Manual VRAM override: ${resolution} may run out of memory on this ${totalVramGb.toFixed(0)} GB GPU.`
-            : `For ${totalVramGb.toFixed(0)} GB, H3 Auto recommends ${windowRecommendation?.fallbackResolution ?? 'a lower resolution'} instead of ${resolution}. Open Duration and lock Window Length to override.`}
-        </div>
-      )}
-      {directOmni && !unsupportedAutoResolution && safeWindowFrames != null && nativeMaxSeconds != null && safeWindowFrames / fps < nativeMaxSeconds && (
-        <div className="text-[10px] text-text-muted mt-1">
-          VRAM-aware default: {formatSeconds(safeWindowFrames / fps)}. You can manually raise the native pass to {formatSeconds(nativeMaxSeconds)}; longer timelines use Multi-window sequence.
-        </div>
-      )}
+      {/* Keep changing sequence notes after the sliders so their wrapping
+          cannot move Window Length while its thumb is being dragged. */}
+      {includeWindowSettings && <WindowSettings/>}
+      <div className="empty:hidden">
+        {showSlidingWindow && !isMultiClip && (
+          <div className="text-[10px] text-text-muted mt-1">
+            {windowCount} windows of {formatSeconds(windowSize)} &middot;{' '}
+            {modelType === 'viggle_animate' ? 'fixed motion-transfer prompt' : hasReviewedWindowPrompts
+              ? 'Reviewed window prompts'
+              : <span className={promptLineCount === windowCount ? '' : 'text-amber-400'}>
+                  {promptLineCount}/{windowCount} prompts
+                </span>}
+          </div>
+        )}
+        {showOmniSequence && (
+          <div className="text-[10px] text-text-muted mt-1">
+            {omniSequenceClipCount} {nativeOmniContinuation ? 'native Omni windows' : 'independent Omni clips'} &middot;{' '}
+            {locked ? 'manual' : 'Auto'} max {formatSeconds(omniSequenceClipFrames / fps)} &middot;{' '}
+            {nativeOmniContinuation ? 'motion + audio carried' : 'hard cuts joined'} &middot;{' '}
+            {!h3WindowPlan
+              ? <span className={promptLineCount === omniSequenceClipCount ? '' : 'text-amber-400'}>
+                  {promptLineCount}/{omniSequenceClipCount} prompts · use Enhance to plan
+                </span>
+              : 'Reviewed window prompts'}
+          </div>
+        )}
+        {unsupportedAutoResolution && (
+          <div className="text-[10px] text-amber-400 mt-1">
+            {directOmni
+              ? `For ${totalVramGb.toFixed(0)} GB, H3 Omni Auto recommends ${windowRecommendation?.fallbackResolution ?? 'a lower resolution'} instead of ${resolution}. Multi-window sequence can divide longer output into VRAM-aware windows.`
+              : locked
+              ? `Manual VRAM override: ${resolution} may run out of memory on this ${totalVramGb.toFixed(0)} GB GPU.`
+              : `For ${totalVramGb.toFixed(0)} GB, H3 Auto recommends ${windowRecommendation?.fallbackResolution ?? 'a lower resolution'} instead of ${resolution}. Open Duration and lock Window Length to override.`}
+          </div>
+        )}
+        {directOmni && !unsupportedAutoResolution && safeWindowFrames != null && nativeMaxSeconds != null && safeWindowFrames / fps < nativeMaxSeconds && (
+          <div className="text-[10px] text-text-muted mt-1">
+            VRAM-aware default: {formatSeconds(safeWindowFrames / fps)}. You can manually raise the native pass to {formatSeconds(nativeMaxSeconds)}; longer timelines use Multi-window sequence.
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -410,11 +415,6 @@ export function WindowSettings() {
             <label className="text-[11px] text-text-muted uppercase tracking-wider">
               {isH3 || isLtx ? 'Window Length' : 'Window Size'}
             </label>
-            {isH3 && safeWindowSeconds != null && (
-              <span className="text-[9px] text-text-muted normal-case">
-                Recommended {formatSeconds(safeWindowSeconds)}
-              </span>
-            )}
             <button
               onClick={() => {
                 if (locked) {
@@ -457,7 +457,7 @@ export function WindowSettings() {
               </button>
             )}
           </div>
-          <span className="text-xs text-text-secondary">
+          <span className="shrink-0 whitespace-nowrap text-xs text-text-secondary tabular-nums">
             {formatSeconds(windowSize)}
             {savedOverrideFrames === currentWindowFrames
               ? <span className="text-emerald-400/70 ml-1 text-[9px]">saved</span>
@@ -466,6 +466,7 @@ export function WindowSettings() {
         </div>
         <input
           type="range"
+          aria-label={isH3 || isLtx ? 'Window length' : 'Window size'}
           min={isH3 ? minimumFrames : windowMinSeconds}
           max={isH3 ? maximumFrames : windowMaxSeconds}
           step={isH3 ? frameStep : windowStepSeconds}
@@ -503,6 +504,7 @@ export function WindowSettings() {
           </div>
           <input
             type="range"
+            aria-label="Window overlap"
             min={overlapMin}
             max={overlapMax}
             step={overlapStep || 1}

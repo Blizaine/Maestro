@@ -6,6 +6,8 @@ The fixed settings strip keeps Characters on the left and groups Resolution, Asp
 
 Duration contains Time, Window and Auto planning, the native-duration slider, presets and window settings. Time stops at five minutes; existing presets can still reach an hour where supported. Automatic window sizing continues while the panel is collapsed. Window overrides and saved GPU/model preferences work as before. H3 Reference sequences keep their **Carry motion and sound between windows** option here.
 
+On mobile, settings overlays fit within the sidebar. The video Duration popup keeps a steady height while values change, with additional controls scrolling inside it. Sequence details sit below the sliders, so switching between one window and a longer sequence does not move the slider you are adjusting. The panel still adapts when the keyboard or available screen size changes.
+
 ## Characters and media
 
 **Characters** opens the saved library beside the sidebar on desktop and in a sheet on mobile, in Reference, supported Image, Viggle and Speech workflows. A Reference character remains one card containing its appearance and voice. Speech uses its saved voice; Image uses chosen original or recovered views. Viggle can prepare a character replacement frame or accept a manually edited frame.
@@ -44,3 +46,5 @@ All three theme families, their light/dark variants and Auto appearance remain a
 After building `ui`, run `node tests/ui/sidebar_redesign.cjs http://127.0.0.1:<Maestro port>`. The suite reads only the running app's model catalogue and model options. All browser writes, uploads, generations and enhancements are intercepted at an isolated test origin. It checks layouts, menus, simulated keyboard height/offset changes, and explicit enhancement/submission behavior. Screenshots are saved under `.codex-tmp/sidebar-validation/`. Set `MAESTRO_UI_ENHANCE_ONLY=1` to run just the enhancement checks during development. Keyboard geometry is simulated in Chromium; real iOS keyboard animation still needs device validation.
 
 Additional existing checks cover Studio duration convergence, saved H3 LoRA settings, character recovery/picking, and automatic/manual Viggle submissions. These UI checks do not run a GPU generation.
+
+Set `MAESTRO_UI_DURATION_ONLY=1` to run the duration popup checks alone. They drag the sliders across single/multiple-window boundaries with manual and automatic window sizing, verify sidebar bounds at desktop and mobile widths, and exercise scrolling and a simulated keyboard viewport.

@@ -3,7 +3,7 @@ import { Clock, Monitor, RectangleHorizontal } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { ResolutionPresets } from './ResolutionPresets'
 import { AspectRatioGrid } from './AspectRatioGrid'
-import { DurationSlider, WindowSettings } from './DurationSlider'
+import { DurationSlider } from './DurationSlider'
 import { AudioDurationControl } from './AudioDurationControl'
 import { H3MultiWindowControls } from './H3MultiWindowControls'
 import { formatDuration } from '../../lib/durationPlanning'
@@ -63,8 +63,8 @@ export function OutputFormatControls() {
         <AspectRatioGrid menu onSelect={() => setExpanded(null)} />
       </SidebarMenu>
       {/* Duration owns automatic window sizing. Keep it mounted while hidden. */}
-      {hasDuration && <SidebarDialog id={`${id}-duration`} variant="settings" open={expanded === 'duration'} title="Duration & windows" onClose={() => setExpanded(null)}><div className="space-y-3">
-        {mode === 'audio' ? <AudioDurationControl/> : <><DurationSlider/><WindowSettings/><H3MultiWindowControls section="continuity"/></>}
+      {hasDuration && <SidebarDialog id={`${id}-duration`} variant="settings" fixedHeight={mode === 'video' ? 640 : undefined} open={expanded === 'duration'} title="Duration & windows" onClose={() => setExpanded(null)}><div className="space-y-3">
+        {mode === 'audio' ? <AudioDurationControl/> : <><DurationSlider includeWindowSettings/><H3MultiWindowControls section="continuity"/></>}
       </div></SidebarDialog>}
     </>
   )
