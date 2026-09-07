@@ -25,12 +25,17 @@ function estimateH3TextTokens(value: string): number {
   return Math.ceil(lexical * 1.25) + (value.trim() ? 8 : 0)
 }
 
-function useAutoGrowingTextarea(value: string, maximum = Infinity) {
+function useAutoGrowingTextarea(value: string, maximum: number | null = Infinity) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   const fitToContent = useCallback(() => {
     const textarea = textareaRef.current
     if (!textarea) return
+    if (maximum === null) {
+      textarea.style.height = '100%'
+      textarea.style.overflowY = 'auto'
+      return
+    }
     textarea.style.height = 'auto'
     // scrollHeight includes padding but not the two one-pixel borders used
     // by these border-box textareas. Include them so the final line is visible.
@@ -133,7 +138,7 @@ export function PromptInput() {
   const composer = useContext(ComposerContext)
   const compact = !!composer && !composer.expanded
   const prompt = useStore(s => s.params.prompt)
-  const promptTextareaRef = useAutoGrowingTextarea(prompt, compact ? 144 : Infinity)
+  const promptTextareaRef = useAutoGrowingTextarea(prompt, compact ? null : Infinity)
   const setParam = useStore(s => s.setParam)
   const generationMode = useStore(s => s.generationMode)
   const editSubMode = useStore(s => s.editSubMode)
@@ -349,7 +354,7 @@ export function PromptInput() {
   // The dock bounds the main textarea; the expanded editor keeps the complete
   // source and editable window plan without mounting a second prompt instance.
   return (
-    <div className="relative grow shrink-0 flex flex-col">
+    <div className={`relative flex flex-col ${compact ? 'min-h-0 flex-1' : 'grow shrink-0'}`}>
       {/* Enhance status indicator */}
       {isEnhancing && enhanceStatus.phase !== 'idle' && (
         <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-text-muted bg-bg-tertiary/80 rounded-t-lg border border-b-0 border-border">
@@ -494,7 +499,7 @@ export function PromptInput() {
           </span>
         </div>
       )}
-      <div className="relative mt-auto">
+      <div className={compact ? 'studio-prompt-field relative min-h-0 flex-1' : 'relative mt-auto'}>
         <textarea
           ref={promptTextareaRef}
           aria-label="Generation prompt"
@@ -510,7 +515,7 @@ export function PromptInput() {
                   ? `Describe the complete video idea - Maestro will plan ${windowCount} LTX windows.`
                   : `Line 1 = window 1, line 2 = window 2... (${windowCount} windows)`)
             : modePlaceholder}
-          className={`studio-prompt-textarea block w-full resize-none bg-bg-tertiary border border-border rounded-xl px-3 py-2 pr-10 text-base md:text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue transition-colors ${composer?.expanded ? 'min-h-[260px]' : 'min-h-[104px]'}`}
+          className={`studio-prompt-textarea block w-full resize-none px-3 py-2 text-base md:text-sm text-text-primary placeholder:text-text-muted focus:outline-none transition-colors ${compact ? 'min-h-[72px] bg-transparent border border-transparent rounded-lg focus:border-border-light' : `${composer?.expanded ? 'min-h-[260px]' : 'min-h-[104px]'} bg-bg-tertiary border border-border rounded-xl focus:border-accent-blue`}`}
         />
         <ComposerToolbarItem>{prompt.trim() && !usesManualWindowPrompts && (
         isAudioOnly ? (
@@ -543,7 +548,7 @@ export function PromptInput() {
               </button>
             </div>
             {ttsMenuOpen && (
-              <div className={`absolute ${composer?.expanded ? 'top-full mt-1' : 'bottom-full mb-1'} right-0 bg-bg-secondary border border-border rounded-lg shadow-lg overflow-hidden min-w-[220px] z-50`}>
+              <div className={`absolute ${composer ? 'top-full mt-1' : 'bottom-full mb-1'} right-0 bg-bg-secondary border border-border rounded-lg shadow-lg overflow-hidden min-w-[220px] z-50`}>
                 <button
                   onClick={() => { setTtsMenuOpen(false); enhancePrompt('monologue') }}
                   className="w-full text-left px-3 py-2 text-[11px] text-text-secondary hover:bg-bg-hover transition-colors"

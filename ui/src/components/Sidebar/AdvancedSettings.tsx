@@ -1,6 +1,6 @@
 /* eslint-disable react-refresh/only-export-components -- the advanced badge hooks share this settings contract */
-import { useState, useEffect, useRef, useId, type ReactNode } from 'react'
-import { X, Save, Trash2, FolderOpen, SlidersHorizontal, ChevronDown } from 'lucide-react'
+import { useState, useEffect, useId } from 'react'
+import { Save, Trash2, FolderOpen, SlidersHorizontal } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { PostProcessing } from './PostProcessing'
 import { ControlVideoSection } from './ControlVideoSection'
@@ -10,6 +10,7 @@ import { DirectorH3Optimizations } from './DirectorH3Optimizations'
 import { H3MediaControls } from './H3MediaControls'
 import { MiniMaxH3Optimizations } from './MiniMaxH3Optimizations'
 import { AutomaticFaceRefiner } from '../Characters/FaceRefiner'
+import { SidebarDialog } from './SidebarPanels'
 import type { GenerateParams } from '../../types'
 
 const H3_LONG_SEQUENCE_EXPERIMENTS = [
@@ -394,7 +395,7 @@ export function useAdvancedCount(): number {
   return useAdvancedActiveItems().length
 }
 
-export function AdvancedSettings({ compact = false, toolbarStart }: { compact?: boolean; toolbarStart?: ReactNode }) {
+export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
   const [open, setOpen] = useState(false)
   const [section, setSection] = useState<'performance' | 'finishing' | 'loras' | 'generation'>('generation')
   const params = useStore(s => s.params)
@@ -471,43 +472,26 @@ export function AdvancedSettings({ compact = false, toolbarStart }: { compact?: 
     const refs = s.params.image_refs
     return refs && refs.length > 0
   })
-  const panelRef = useRef<HTMLDivElement>(null)
-  const triggerRef = useRef<HTMLButtonElement>(null)
   const panelId = useId()
   const advancedItems = useAdvancedActiveItems()
   const advancedCount = advancedItems.length
 
-  const closePanel = () => {
-    setOpen(false)
-    triggerRef.current?.focus()
-  }
+  const closePanel = () => setOpen(false)
   useEffect(() => {
-    let focusFrame = 0
     const finishing = () => {
       setSection('finishing')
       setOpen(true)
-      // The character library closes before revealing its inline destination.
-      // Wait for that render so its dialog focus cleanup cannot steal focus.
-      cancelAnimationFrame(focusFrame)
-      focusFrame = requestAnimationFrame(() => {
-        panelRef.current?.focus({ preventScroll: true })
-        panelRef.current?.scrollIntoView({ block: 'start' })
-      })
     }
     window.addEventListener('maestro-open-finishing', finishing)
     return () => {
       window.removeEventListener('maestro-open-finishing', finishing)
-      cancelAnimationFrame(focusFrame)
     }
   }, [])
 
   return (
-    <div className="flex min-w-0 flex-col gap-2">
-      <div className="flex items-stretch gap-2" aria-label="Characters and advanced controls">
-      {toolbarStart}
+    <>
       {/* Trigger button */}
       <button
-        ref={triggerRef}
         type="button"
         onClick={() => setOpen(!open)}
         title={advancedCount > 0
@@ -516,46 +500,25 @@ export function AdvancedSettings({ compact = false, toolbarStart }: { compact?: 
         aria-label={`Advanced settings${advancedCount > 0 ? `, ${advancedCount} active` : ''}`}
         aria-expanded={open}
         aria-controls={panelId}
-        className={`relative flex shrink-0 items-center justify-center gap-2 rounded-xl border p-2 transition-colors ${compact ? 'min-h-12 flex-1 bg-bg-tertiary px-3' : ''} ${
+        className={`studio-setting-chip relative ${
           open ? 'border-accent-blue text-accent-blue' : 'border-border text-text-secondary hover:text-text-primary hover:border-border-light'
         }`}
       >
         <SlidersHorizontal size={14} />
-        {compact && <span className="min-w-0 text-left"><span className="block text-xs font-medium">Advanced</span><span className="block text-[10px] text-text-muted">{advancedCount ? `${advancedCount} active` : 'Defaults'}</span></span>}
-        {compact && <ChevronDown size={12} className={`shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />}
-        {!compact && advancedCount > 0 && (
+        {compact && <span className="studio-advanced-label">Advanced</span>}
+        {advancedCount > 0 && (
           <span
             title={advancedItems.join('\n')}
-            className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-accent-blue px-0.5 text-[8px] font-bold leading-none text-white shadow-sm"
+            className="rounded bg-accent-blue/15 px-1 text-[9px] font-semibold text-accent-blue"
           >
             {advancedCount}
           </span>
         )}
       </button>
-      </div>
 
-      {/* Keep controls mounted while collapsed so drafts and input state survive.
-          Separate rows let the character button fill its row, not this section. */}
-      <div
-        ref={panelRef}
-        id={panelId}
-        role="region" aria-label="Advanced settings" hidden={!open} tabIndex={-1}
-        onKeyDown={event => {
-          if (event.key !== 'Escape' || event.defaultPrevented || !event.currentTarget.contains(event.target as Node)) return
-          event.preventDefault()
-          event.stopPropagation()
-          closePanel()
-        }}
-        className={`${open ? 'block' : 'hidden'} min-w-0 w-full rounded-xl border border-border bg-bg-secondary outline-none`}
-      >
-            {/* Header */}
-            <div className="px-4 py-3 border-b border-border flex items-center justify-between shrink-0">
-              <span className="text-sm font-semibold text-text-primary">Advanced Settings</span>
-              <button type="button" aria-label="Close Advanced settings" onClick={closePanel} className="p-2 rounded-lg hover:bg-bg-hover text-text-secondary">
-                <X size={16} />
-              </button>
-            </div>
-            {!isDirector && <div className="grid grid-cols-2 gap-2 border-b border-border p-3">
+      {/* Keep all controls mounted while the overlay is closed. */}
+      <SidebarDialog id={panelId} variant="settings" title="Advanced settings" open={open} onClose={closePanel}>
+            {!isDirector && <div className="grid grid-cols-2 gap-2 border-b border-border pb-3">
               {(['performance', 'finishing', 'loras', 'generation'] as const).map(key => <button key={key} type="button"
                 aria-pressed={section === key} onClick={() => setSection(key)}
                 className={`min-h-11 rounded-xl border px-3 text-xs ${section === key ? 'border-accent-blue bg-accent-blue/10 text-text-primary' : 'border-border bg-bg-tertiary text-text-secondary hover:border-border-light'}`}>
@@ -563,8 +526,7 @@ export function AdvancedSettings({ compact = false, toolbarStart }: { compact?: 
               </button>)}
             </div>}
 
-            {/* Use the sidebar's existing scroller rather than a nested panel. */}
-            <div className="min-w-0 px-4 py-4 space-y-5">
+            <div className="min-w-0 pt-4 space-y-5">
               {isDirector ? (
                 <>
                   <DirectorH3Optimizations />
@@ -598,6 +560,16 @@ export function AdvancedSettings({ compact = false, toolbarStart }: { compact?: 
               <div hidden={section !== 'performance'} className="space-y-5">
               {isVideo && <MiniMaxH3Optimizations />}
               <p className="text-[10px] text-text-muted">Performance settings keep their saved values for compatible models.</p>
+
+              {isVideo && modelOptions?.omni_reference && <label className="block space-y-1.5 text-xs text-text-secondary">
+                <span>Reference detail</span>
+                <select aria-label="Reference detail" value={params.minimax_h3_reference_detail ?? modelOptions.omni_reference_detail_default ?? 'match'}
+                  onChange={event => setParam('minimax_h3_reference_detail', event.target.value as 'match' | 'max')}
+                  className="w-full rounded-lg border border-border bg-bg-tertiary px-2 py-2 text-xs">
+                  {(modelOptions.omni_reference_detail_choices ?? [['Match output (faster)', 'match'], ['High detail (official PDD recipe)', 'max']]).map(([label, value]) => <option key={value} value={value}>{label}</option>)}
+                </select>
+                <span className="block text-[10px] text-text-muted">Match output avoids reference upscaling. High detail uses the official 2048px short-edge preparation and can require more memory and time.</span>
+              </label>}
 
               {/* The Qwen conditioner is shared by every H3 transformer.
                   Expose it once here instead of multiplying model entries. */}
@@ -1413,7 +1385,7 @@ export function AdvancedSettings({ compact = false, toolbarStart }: { compact?: 
                 </>
               )}
             </div>
-          </div>
-    </div>
+      </SidebarDialog>
+    </>
   )
 }

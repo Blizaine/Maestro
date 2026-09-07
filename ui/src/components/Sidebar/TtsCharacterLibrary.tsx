@@ -87,16 +87,16 @@ export function TtsCharacterLibrary({ onSelect, onCharactersChange, selectedIds,
   return (
     <>
       <CharacterToolbarItem>
-      <button type="button" aria-expanded={open} onClick={() => setOpen(value => !value)}
+      <button type="button" aria-label="Characters" title={`${selectedIds.length} saved voices selected`} aria-expanded={open} onClick={() => setOpen(value => !value)}
         className="min-h-12 w-full flex items-center justify-between rounded-xl border border-border bg-bg-tertiary px-3 py-2 text-left hover:border-border-light">
         <span className="flex items-center gap-2 text-xs font-medium text-text-primary">
           <BookUser size={15} className="text-accent-blue" />
-          <span>Characters<span className="block text-[10px] font-normal text-text-muted">{selectedIds.length ? `${selectedIds.length} voices` : 'Saved voices'}</span></span>
+          <span className="studio-character-label">Characters<span className="studio-character-detail block text-[10px] font-normal text-text-muted">{selectedIds.length ? `${selectedIds.length} voices` : 'Saved voices'}</span></span>
         </span>
         <ChevronDown size={13} className={`text-text-muted ${open ? 'rotate-180' : ''}`} />
       </button>
       </CharacterToolbarItem>
-      <SidebarDialog open={open} title="Voice characters" onClose={() => setOpen(false)}>
+      <SidebarDialog open={open} title="Voice characters" variant="library" onClose={() => setOpen(false)}>
         <div className="border-t border-border p-2 space-y-2">
           <p className="text-[10px] text-text-muted">
             Use a character's saved voice from Reference mode. Write their name before each line of dialogue, or use Speaker 1 and Speaker 2.

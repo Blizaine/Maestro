@@ -1,5 +1,5 @@
-import { ChevronDown, Check, Plus } from 'lucide-react'
-import { useState, useRef, useEffect } from 'react'
+import { ChevronDown, Check, Plus, Globe } from 'lucide-react'
+import { useState, useRef, useEffect, type ReactNode } from 'react'
 import {
   useStore,
   getFamiliesForMode,
@@ -8,8 +8,16 @@ import {
   modelSupportsStudioVideoMediaIntent,
 } from '../../stores/useStore'
 import { InfoTooltip } from './InfoTooltip'
+import { SidebarDialog } from './SidebarPanels'
 
-export function ModelSelector({ placement = 'above' }: { placement?: 'above' | 'below' }) {
+type Placement = 'above' | 'below' | 'footer'
+
+function ModelChoicesPanel({open, placement, onClose, children}: {open: boolean; placement: Placement; onClose: () => void; children: ReactNode}) {
+  if (placement === 'footer') return <SidebarDialog open={open} title="Choose a model" variant="settings" onClose={onClose}>{open && children}</SidebarDialog>
+  return open ? <div className={`${placement === 'below' ? 'relative mt-2 w-full' : 'absolute bottom-full left-0 mb-1 w-[360px] max-w-[90vw]'} bg-bg-secondary border border-border rounded-xl shadow-xl overflow-hidden z-50`}>{children}</div> : null
+}
+
+export function ModelSelector({ placement = 'above' }: { placement?: Placement }) {
   const models = useStore(s => s.models)
   const families = useStore(s => s.families)
   const enabledModels = useStore(s => s.enabledModels)
@@ -57,7 +65,7 @@ export function ModelSelector({ placement = 'above' }: { placement?: 'above' | '
 
   // Close on click outside
   useEffect(() => {
-    if (!open) return
+    if (!open || placement === 'footer') return
     function handleClick(e: MouseEvent) {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
         setOpen(false)
@@ -65,7 +73,7 @@ export function ModelSelector({ placement = 'above' }: { placement?: 'above' | '
     }
     document.addEventListener('mousedown', handleClick)
     return () => document.removeEventListener('mousedown', handleClick)
-  }, [open])
+  }, [open, placement])
 
   const audioSubMode = useStore(s => s.audioSubMode)
 
@@ -135,25 +143,27 @@ export function ModelSelector({ placement = 'above' }: { placement?: 'above' | '
   }, 0)
 
   return (
-    <div className={`relative min-w-0 ${placement === 'above' ? 'flex-1' : ''}`} ref={containerRef}>
+    <div className={`relative min-w-0 ${placement !== 'below' ? 'flex-1' : ''}`} ref={containerRef}>
       {/* Trigger button */}
       <button
         aria-label="Choose model" aria-expanded={open}
         onClick={() => setOpen(!open)}
         title={currentModelCompatible
-          ? currentModel?.selector_help || currentModel?.description
+          ? `${currentModel?.name || 'Select model'}\n${currentModel?.selector_help || currentModel?.description || ''}`
           : compatibilityDescription}
-        className="w-full flex items-center gap-1.5 bg-bg-tertiary border border-border rounded-lg px-2.5 py-2 text-left hover:border-border-light transition-colors"
+        className={`w-full flex items-center gap-1.5 bg-bg-tertiary border border-border rounded-lg px-2 py-2 text-left hover:border-border-light transition-colors ${placement === 'footer' ? 'min-h-11' : ''}`}
       >
-        <span className="flex-1 min-w-0 truncate text-xs text-text-primary">
+        <span className={`flex-1 min-w-0 text-text-primary ${placement === 'footer' ? 'line-clamp-2 text-[11px] leading-tight' : 'truncate text-xs'}`}>
           {currentModelCompatible ? (currentModel?.name ?? 'Select model') : 'No compatible model'}
         </span>
         <ChevronDown size={14} className={`shrink-0 text-text-muted transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
 
-      {/* Main sidebar opens downward; compact embedded callers keep upward. */}
-      {open && (
-        <div className={`${placement === 'below' ? 'relative mt-2 w-full' : 'absolute bottom-full left-0 mb-1 w-[360px] max-w-[90vw]'} bg-bg-secondary border border-border rounded-xl shadow-xl overflow-hidden z-50`}>
+      <ModelChoicesPanel open={open} placement={placement} onClose={() => setOpen(false)}>
+          {placement === 'footer' && <button type="button" onClick={() => { setOpen(false); useStore.getState().setLoraBrowserOpen(true, currentModelType) }}
+            className="mb-2 flex min-h-10 w-full items-center gap-2 rounded-lg border border-border px-3 text-xs text-text-secondary hover:bg-bg-hover">
+            <Globe size={14}/> Browse models, LoRAs & characters
+          </button>}
           {/* Enable-more entry — sits above the enabled model list; opens
               Settings → Enabled Models expanded to this mode. */}
           {disabledCount > 0 && (
@@ -166,7 +176,7 @@ export function ModelSelector({ placement = 'above' }: { placement?: 'above' | '
               <span className="text-[10px] text-text-muted shrink-0">{disabledCount} available</span>
             </button>
           )}
-          <div className="max-h-[360px] overflow-y-auto py-1">
+          <div className={placement === 'footer' ? 'py-1' : 'max-h-[360px] overflow-y-auto py-1'}>
             {groups.length === 0 && (
               <p className="px-3 py-3 text-[10px] leading-relaxed text-text-muted">
                 {compatibilityDescription}
@@ -221,8 +231,7 @@ export function ModelSelector({ placement = 'above' }: { placement?: 'above' | '
               </div>
             ))}
           </div>
-        </div>
-      )}
+      </ModelChoicesPanel>
     </div>
   )
 }

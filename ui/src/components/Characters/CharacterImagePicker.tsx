@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
-import { ArrowLeft, Check, Loader2, Search, UserRound, X } from 'lucide-react'
+import { ArrowLeft, Check, Loader2, Search, UserRound } from 'lucide-react'
 import * as api from '../../api/client'
 import type { CharacterImageViews, SavedOmniCharacter } from '../../types'
 import { characterDisplayName } from '../../lib/characters'
 import { ImportCharacterButton } from './CharacterFileActions'
+import { SidebarDialog } from '../Sidebar/SidebarPanels'
 
 type ImageView = CharacterImageViews['items'][number]
 type Props = {
@@ -17,9 +17,9 @@ type Props = {
 export function CharacterImagePickerButton({maxImages, disabled, label = 'Add character', onSelect}: Props) {
   const [open, setOpen] = useState(false)
   return <>
-    <button type="button" disabled={disabled || maxImages === 0} onClick={() => setOpen(true)}
+    <button type="button" aria-label={label} aria-expanded={open} title={label} disabled={disabled || maxImages === 0} onClick={() => setOpen(true)}
       className="flex min-h-10 items-center justify-center gap-2 rounded-xl border border-border px-3 text-xs text-text-secondary hover:border-accent-blue disabled:opacity-40">
-      <UserRound size={15}/>{label}
+      <UserRound size={15}/><span className="studio-character-label">{label}</span>
     </button>
     {open && <CharacterImagePicker maxImages={maxImages} onSelect={onSelect} onClose={() => setOpen(false)}/>}
   </>
@@ -33,19 +33,16 @@ function CharacterImagePicker({maxImages, onSelect, onClose}: Props & {onClose: 
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('Loading characters…')
   const [error, setError] = useState('')
-  const dialog = useRef<HTMLDivElement>(null)
   const alive = useRef(true)
   const limit = maxImages == null ? 128 : Math.max(0, maxImages)
   useEffect(() => {
     alive.current = true
-    const trigger = document.activeElement as HTMLElement | null
-    dialog.current?.focus()
     const refresh = () => void api.fetchCharacters().then(items => {
       if (alive.current) {setCharacters(items); setMessage('')}
     }).catch(err => {if (alive.current) {setError(String(err)); setMessage('')}})
     refresh()
     window.addEventListener('maestro-characters-changed', refresh)
-    return () => {alive.current = false; window.removeEventListener('maestro-characters-changed', refresh); trigger?.focus()}
+    return () => {alive.current = false; window.removeEventListener('maestro-characters-changed', refresh)}
   }, [])
   const choose = async (item: SavedOmniCharacter) => {
     setBusy(true); setError(''); setMessage('Preparing character images…')
@@ -69,26 +66,13 @@ function CharacterImagePicker({maxImages, onSelect, onClose}: Props & {onClose: 
     finally {if (alive.current) {setBusy(false); setMessage('')}}
   }
   const visible = characters.filter(item => `${item.name} ${characterDisplayName(item.name)}`.toLocaleLowerCase().includes(query.toLocaleLowerCase()))
-  return createPortal(<div className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/75 p-2 sm:p-6"
-    onClick={event => {if (event.target === event.currentTarget) onClose()}}>
-    <div role="dialog" aria-modal="true" aria-labelledby="character-image-picker-title" tabIndex={-1} ref={dialog}
-      className="flex max-h-[90dvh] w-full max-w-2xl min-w-0 flex-col overflow-hidden rounded-2xl border border-border bg-bg-primary shadow-2xl outline-none"
-      onKeyDown={event => {
-        if (event.key === 'Escape') {event.stopPropagation(); onClose()}
-        if (event.key === 'Tab') {
-          const nodes = dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), a[href]')
-          if (!nodes?.length) return
-          const first = nodes[0], last = nodes[nodes.length - 1]
-          if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog.current)) {event.preventDefault(); last.focus()}
-          else if (!event.shiftKey && document.activeElement === last) {event.preventDefault(); first.focus()}
-        }
-      }}>
-      <div className="flex shrink-0 items-center gap-2 border-b border-border p-3">
-        {character && <button type="button" disabled={busy} aria-label="Back to characters" onClick={() => {setCharacter(null); setError('')}} className="p-2 text-text-secondary"><ArrowLeft size={18}/></button>}
-        <h2 id="character-image-picker-title" className="min-w-0 flex-1 break-words text-sm font-semibold text-text-primary">{character ? characterDisplayName(character.name) : 'Choose a character'}</h2>
-        <button type="button" aria-label="Close character picker" onClick={onClose} className="p-2 text-text-secondary"><X size={20}/></button>
-      </div>
-      <div className="min-h-0 overflow-y-auto overscroll-contain space-y-3 p-3 sm:p-4">
+  return <SidebarDialog open title={character ? characterDisplayName(character.name) : 'Choose a character'} variant="library" onClose={onClose} closeLabel="Close character picker"
+    headerStart={character && <button type="button" disabled={busy} aria-label="Back to characters" onClick={() => {setCharacter(null); setError('')}} className="p-2 text-text-secondary"><ArrowLeft size={18}/></button>}
+    footer={character && <div className="flex items-center justify-between gap-2">
+      <span className="text-xs text-text-muted">{selected.length} selected</span>
+      <button type="button" disabled={busy || !selected.length || selected.length > limit} onClick={() => void add()} className="min-h-11 rounded-xl bg-accent-blue px-4 text-xs text-white disabled:opacity-40">Use {selected.length === 1 ? 'this image' : `${selected.length} images`}</button>
+    </div>}>
+      <div className="space-y-3">
         {message && <p role="status" className="flex items-center gap-2 text-xs text-text-secondary"><Loader2 size={14} className="animate-spin"/>{message}</p>}
         {error && <p role="alert" className="text-xs text-indicator-error">{error}</p>}
         {character?.image_views ? <>
@@ -115,10 +99,5 @@ function CharacterImagePicker({maxImages, onSelect, onClose}: Props & {onClose: 
           <ImportCharacterButton disabled={busy}/>
         </>}
       </div>
-      {character && <div className="flex shrink-0 items-center justify-between gap-2 border-t border-border p-3">
-        <span className="text-xs text-text-muted">{selected.length} selected</span>
-        <button type="button" disabled={busy || !selected.length || selected.length > limit} onClick={() => void add()} className="min-h-11 rounded-xl bg-accent-blue px-4 text-xs text-white disabled:opacity-40">Use {selected.length === 1 ? 'this image' : `${selected.length} images`}</button>
-      </div>}
-    </div>
-  </div>, document.body)
+  </SidebarDialog>
 }

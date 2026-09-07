@@ -719,29 +719,52 @@ input[type="range"]::-webkit-slider-thumb {
   border: 2px solid var(--color-bg-primary);
 }
 
-.studio-media-grid > * { width: 100%; height: 128px; min-width: 0; }
-.media-input-card[open] { grid-column: 1 / -1; }
-.media-input-card[open] > summary > div:first-child { height: 64px; }
+.studio-media-grid > * { width: 100%; height: 100px; min-width: 0; }
+.studio-inputs { max-height: min(48%, 260px); }
+.studio-inputs:empty { display: none; }
+.studio-setting-chip,
+.studio-character-trigger > button {
+  display: inline-flex;
+  min-height: 38px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 6px 7px;
+  border: 1px solid var(--color-border);
+  border-radius: 9px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.studio-character-trigger > button { width: auto; }
+.studio-character-trigger .studio-character-detail,
+.studio-character-trigger .lucide-chevron-down { display: none; }
+.studio-character-trigger .text-xs { font-size: 11px; font-weight: 500; }
+.studio-character-trigger svg { width: 14px; height: 14px; }
 .studio-composer[data-expanded="false"] .studio-composer-content {
-  max-height: min(32dvh, 280px);
   overflow-y: auto;
   overscroll-behavior: contain;
-}
-.studio-composer[data-expanded="false"] textarea {
-  max-height: 144px;
-  overflow-y: auto;
 }
 .studio-composer[data-expanded="true"] {
   height: var(--studio-visual-viewport-height, 100dvh);
 }
 @media (max-width: 767px) {
-  .maestro-sidebar[data-keyboard-open="true"] .studio-hardware { display: none; }
-  .studio-composer[data-expanded="false"] .studio-composer-content { max-height: 30dvh; }
-  .studio-action-label { display: none; }
+  .maestro-sidebar[data-keyboard-open="true"] .studio-hardware,
+  .maestro-sidebar[data-keyboard-open="true"] .studio-workflow-header,
+  .maestro-sidebar[data-keyboard-open="true"] .studio-inputs { display: none; }
   .studio-composer[data-expanded="true"] { padding: 12px; }
 }
-@media (max-height: 600px) {
-  .studio-composer[data-expanded="false"] .studio-prompt-textarea { min-height: 76px; max-height: 100px; }
+@media (max-width: 420px) {
+  .studio-advanced-label { display: none; }
+}
+@media (max-width: 360px) {
+  .studio-character-trigger .studio-character-label,
+  .studio-composer[data-expanded="false"] .studio-composer-title,
+  .studio-setting-icon { display: none; }
+  .studio-inputs .media-input-card > button > p { display: none; }
+  .studio-inputs .studio-media-add,
+  .studio-inputs .studio-media-add > button { min-height: 88px; }
+  .studio-inputs .studio-media-add > button > span:last-child:not(:first-of-type) { display: none; }
 }
 
 @media (max-width: 767px) {

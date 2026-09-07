@@ -478,19 +478,21 @@ export function OmniReferenceSection({
           type="button"
           disabled={disabled}
           aria-expanded={libraryOpen}
+          aria-label={`Characters${addedCharacterIds.length ? `, ${addedCharacterIds.length} selected` : ''}`}
+          title={`${addedCharacterIds.length} saved characters selected`}
           onClick={() => setLibraryOpen(open => !open)}
           className="min-h-12 w-full flex items-center justify-between gap-2 rounded-xl border border-border bg-bg-tertiary px-3 py-2 text-left hover:border-border-light disabled:opacity-50"
         >
           <span className="flex items-center gap-2 text-xs font-semibold text-text-primary">
             <BookUser size={15} className="text-accent-blue" />
-            <span>Characters<span className="block text-[10px] font-normal text-text-muted">{addedCharacterIds.length ? `${addedCharacterIds.length} selected` : 'Choose saved'}</span></span>
+            <span className="studio-character-label">Characters<span className="studio-character-detail block text-[10px] font-normal text-text-muted">{addedCharacterIds.length ? `${addedCharacterIds.length} selected` : 'Choose saved'}</span></span>
           </span>
           <span className="flex items-center gap-2">
             <ChevronDown size={14} className={`text-text-muted transition-transform ${libraryOpen ? 'rotate-180' : ''}`} />
           </span>
         </button>
       </CharacterToolbarItem>
-      <SidebarDialog open={libraryOpen} title="Characters" onClose={() => setLibraryOpen(false)}>
+      <SidebarDialog open={libraryOpen} title="Characters" variant="library" onClose={() => setLibraryOpen(false)}>
           <div className="border-t border-border p-2.5 space-y-3">
             <p className="text-[11px] leading-relaxed text-text-secondary">
               Choose who appears in your scene. Their saved voice comes with them.
@@ -573,7 +575,7 @@ export function OmniReferenceSection({
           </div>
       </SidebarDialog>
 
-        <div className="grid grid-cols-2 items-start gap-2">
+        <div className="grid grid-cols-3 items-start gap-2">
           {activeItems.map((item, itemIndex) => {
             if (item.kind === 'character') {
               const character = characters.find(candidate => candidate.id === item.characterId)
@@ -833,7 +835,7 @@ export function OmniReferenceSection({
         </div>
       {!canAddMore && <p className="text-[10px] text-text-muted">All reference slots are filled. Remove or replace an input to change this scene.</p>}
 
-      {references.length > 0 && (
+      {references.length > 0 && scope !== 'studio' && (
         <div className="flex items-center justify-end gap-2">
           <select
             value={detail}

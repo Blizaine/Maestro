@@ -90,24 +90,35 @@ const read = async endpoint => {
     await pause();
     assert.deepEqual(errors, [], 'StrictMode renders the full sidebar without a loop');
 
+    // Long workflow lists overlay the editor; the full catalogue remains reachable.
+    const footerBeforeWorkflow = await page.getByTestId('studio-generate-bar').boundingBox();
+    await sidebar.getByRole('button', {name: /^Workflow:/}).click();
+    const workflows = page.getByRole('dialog', {name: 'Choose a workflow'});
+    for (const label of ['Frames', 'References', 'Extend', 'Blend', 'Animate', 'Retake', 'Prompt Edit', 'Outpaint', 'Repaint', 'Recast']) {
+      assert.equal(await workflows.getByRole('button', {name: new RegExp('^' + label + ' ')}).count(), 1, 'Workflow remains available: ' + label);
+    }
+    assert.deepEqual(await page.getByTestId('studio-generate-bar').boundingBox(), footerBeforeWorkflow, 'Workflow menu cannot push Generate offscreen');
+    await workflows.getByRole('button', {name: /^References /}).click();
+
     // Full backend-provided option lists and selected values, including custom tiers.
     await sidebar.getByRole('button', {name: /^Resolution:/}).click();
     for (const preset of options[ids[0]].resolution_preset_order || ['480p', '540p', '720p', '1080p']) {
       const label = preset === 'auto' ? 'Auto' : options[ids[0]].resolution_presets?.[preset]?.label || preset;
-      assert.equal(await sidebar.getByRole('button', {name: label, exact: true}).count(), 1, 'Full resolution option: ' + label);
+      assert.equal(await page.getByRole('dialog', {name: 'Resolution', exact: true}).getByRole('button', {name: label, exact: true}).count(), 1, 'Full resolution option: ' + label);
     }
     await sidebar.getByRole('button', {name: /^Aspect ratio:/}).click();
-    for (const ratio of ['16:9', '9:16', '1:1', '4:3', '3:4']) assert.equal(await sidebar.locator('button[aria-pressed]').filter({hasText: ratio}).count(), 1);
-    await sidebar.getByRole('button', {name: /3:4$/}).click();
+    assert.equal(await page.getByRole('dialog', {name: 'Resolution', exact: true}).isVisible(), false, 'Switching settings opens only one overlay');
+    for (const ratio of ['16:9', '9:16', '1:1', '4:3', '3:4']) assert.equal(await page.getByRole('dialog', {name: 'Aspect ratio', exact: true}).locator('button[aria-pressed]').filter({hasText: ratio}).count(), 1);
+    await page.getByRole('dialog', {name: 'Aspect ratio', exact: true}).getByRole('button', {name: /3:4$/}).click();
     await sidebar.getByRole('button', {name: /^Aspect ratio:/}).click();
     assert.match(await sidebar.getByRole('button', {name: /^Aspect ratio:/}).innerText(), /3:4/);
     await durationChip().click();
-    const native = sidebar.getByRole('slider', {name: 'Duration model duration'});
+    const native = page.getByRole('dialog', {name: 'Duration & windows'}).getByRole('slider', {name: 'Duration model duration'});
     await native.focus(); await native.press('ArrowRight');
     assert.match(await durationChip().innerText(), /5\.9/);
     await native.press('End');
     assert.ok(await page.evaluate(() => window.store.getState().durationSeconds <= 300));
-    await sidebar.getByRole('button', {name: '60m', exact: true}).click();
+    await page.getByRole('dialog', {name: 'Duration & windows'}).getByRole('button', {name: '60m', exact: true}).click();
     assert.ok(await page.evaluate(() => window.store.getState().durationSeconds > 3590));
     await durationChip().click();
     await page.evaluate(() => window.store.getState().setDurationSeconds(124 / 24));
@@ -118,6 +129,8 @@ const read = async endpoint => {
     // Saved character adds one grouped tile with both media entries.
     await sidebar.getByRole('button', {name: /Characters/}).click();
     let dialog = page.getByRole('dialog', {name: 'Characters', exact: true});
+    assert.ok((await dialog.boundingBox()).x > (await sidebar.boundingBox()).width, 'Desktop character library opens beside the sidebar');
+    await page.screenshot({path: path.join(output, 'desktop-characters.png')});
     await dialog.getByRole('button', {name: 'Add Blaine to references'}).click();
     await dialog.getByRole('button', {name: 'Close Characters', exact: true}).click();
     assert.equal(await sidebar.locator('.media-input-card').count(), 1);
@@ -127,12 +140,12 @@ const read = async endpoint => {
     await pause();
     assert.equal(await sidebar.locator('.media-input-card').count(), 2);
     assert.equal(await sidebar.getByRole('button', {name: 'Add reference', exact: true}).count(), 1);
-    await sidebar.locator('.media-input-card').nth(1).locator('summary').click();
-    await sidebar.getByLabel('Picture 2 use').selectOption('style');
-    await sidebar.getByRole('button', {name: 'Move Picture 2 earlier'}).click();
+    await sidebar.locator('.media-input-card').nth(1).getByRole('button', {name: /^Edit /}).click();
+    await page.getByLabel('Picture 2 use').selectOption('style');
+    await page.getByRole('button', {name: 'Move Picture 2 earlier'}).click();
     assert.equal(await page.evaluate(() => window.store.getState().params.minimax_h3_references[0].image_intent), 'style');
     assert.equal(await page.evaluate(() => window.store.getState().params.minimax_h3_references.slice(1).every(ref => ref.library_character_id === 'blaine')), true);
-    await sidebar.locator('.media-input-card[open] summary').click();
+    await page.getByRole('dialog', {name: /settings$/}).press('Escape');
     await page.evaluate(() => {
       const s = window.store.getState();
       window.store.setState({modelOptions: {...s.modelOptions, omni_reference_limits: {image: 2, video: 0, audio: 1, total: 3}}});
@@ -142,13 +155,13 @@ const read = async endpoint => {
     assert.equal(await sidebar.getByRole('button', {name: 'Add reference', exact: true}).count(), 1, 'Removing media frees a slot');
     await sidebar.getByLabel('Add reference files').setInputFiles({name: 'scene.png', mimeType: 'image/png', buffer: Buffer.from('test')});
     await pause();
-    await sidebar.locator('.media-input-card').nth(1).locator('summary').click();
-    await sidebar.getByLabel('Picture 2 use').selectOption('style');
-    await sidebar.getByLabel('Replace Picture 2', {exact: true}).setInputFiles({name: 'replacement.png', mimeType: 'image/png', buffer: Buffer.from('test')});
+    await sidebar.locator('.media-input-card').nth(1).getByRole('button', {name: /^Edit /}).click();
+    await page.getByLabel('Picture 2 use').selectOption('style');
+    await page.getByLabel('Replace Picture 2', {exact: true}).setInputFiles({name: 'replacement.png', mimeType: 'image/png', buffer: Buffer.from('test')});
     await pause();
     assert.equal(await page.evaluate(() => window.store.getState().params.minimax_h3_references[2].image_intent), 'style', 'Replace retains the role and order');
     assert.equal(await page.evaluate(() => window.store.getState().params.minimax_h3_references[2].filename), 'replacement.png');
-    await sidebar.locator('.media-input-card[open] summary').click();
+    await page.getByRole('dialog', {name: /settings$/}).press('Escape');
     await page.evaluate(() => window.store.setState({modelOptions: window.options.minimax_h3_ref2va_fused_turbo}));
     console.log('Character appearance/voice grouping, uploads, trailing add tile, roles and accessible reference ordering passed');
 
@@ -160,7 +173,8 @@ const read = async endpoint => {
     const generateY = (await page.getByTestId('studio-generate-bar').boundingBox()).y;
     await controls.evaluate(node => {node.scrollTop = node.scrollHeight});
     assert.equal((await page.getByTestId('studio-generate-bar').boundingBox()).y, generateY);
-    assert.ok((await prompt.boundingBox()).height <= 146, 'Long prompt is bounded');
+    assert.ok((await prompt.boundingBox()).height >= 240, 'Prompt fills the desktop composition area');
+    assert.ok(await prompt.evaluate(node => node.scrollHeight > node.clientHeight), 'Long scripts scroll inside the editor');
     await sidebar.getByRole('button', {name: 'Expand prompt editor'}).click();
     assert.equal(await page.evaluate(() => window.originalTextarea === document.querySelector('[aria-label="Generation prompt"]')), true);
     await page.getByRole('dialog', {name: 'Expanded prompt editor'}).getByRole('button', {name: 'Done', exact: true}).click();
@@ -200,27 +214,27 @@ const read = async endpoint => {
 
     await controls.evaluate(node => {node.scrollTop = 0});
     const advancedTrigger = sidebar.getByRole('button', {name: /^Advanced settings/});
-    const advanced = controls.getByRole('region', {name: 'Advanced settings', exact: true});
-    const assertInlineAdvanced = async () => {
+    const advanced = page.getByRole('dialog', {name: 'Advanced settings', exact: true});
+    const assertSettingsOverlay = async () => {
       const triggerBox = await advancedTrigger.boundingBox(), panelBox = await advanced.boundingBox();
-      const toolbarBox = await sidebar.locator('[aria-label="Characters and advanced controls"]').boundingBox();
-      assert.ok(triggerBox.height <= 64, 'Toolbar buttons keep their compact height while Advanced is open');
-      assert.ok(panelBox.y >= triggerBox.y + triggerBox.height, 'Advanced expands below its button');
-      assert.ok(Math.abs(panelBox.x - toolbarBox.x) <= 1 && Math.abs(panelBox.width - toolbarBox.width) <= 1, 'Advanced spans the toolbar width');
-      assert.equal(await page.getByRole('dialog', {name: 'Advanced settings', exact: true}).count(), 0, 'Advanced is not a modal overlay');
+      const viewport = page.viewportSize();
+      assert.ok(triggerBox.height <= 44, 'Settings indicators keep their compact height');
+      assert.ok(panelBox.x >= 0 && panelBox.x + panelBox.width <= viewport.width && panelBox.y >= 0 && panelBox.y + panelBox.height <= viewport.height, 'Settings overlay fits the viewport');
+      if (viewport.width >= 768) assert.ok(panelBox.y + panelBox.height < triggerBox.y, 'Desktop settings open upward from the indicator strip');
       assert.equal(await advancedTrigger.getAttribute('aria-controls'), await advanced.getAttribute('id'));
     };
     const dockBeforeAdvanced = await page.getByTestId('studio-generate-bar').boundingBox();
     await advancedTrigger.click();
-    await assertInlineAdvanced();
+    const promptBeforeAdvanced = await prompt.boundingBox();
+    await assertSettingsOverlay();
     assert.deepEqual(await page.getByTestId('studio-generate-bar').boundingBox(), dockBeforeAdvanced, 'Expanding Advanced leaves Generate anchored');
-    await advanced.getByRole('button', {name: 'Close Advanced settings'}).focus();
-    await page.keyboard.press('Shift+Tab');
-    assert.equal(await advancedTrigger.evaluate(node => document.activeElement === node), true, 'Inline settings do not trap keyboard focus');
+    assert.deepEqual(await prompt.boundingBox(), promptBeforeAdvanced, 'Opening Advanced does not move the prompt');
     await advanced.getByRole('button', {name: 'Finishing', exact: true}).click();
     await advanced.getByRole('checkbox', {name: 'Refine faces after generation'}).check();
     await advanced.getByRole('button', {name: 'Performance', exact: true}).click();
     assert.equal(await advanced.getByRole('checkbox', {name: 'Refine faces after generation'}).isVisible(), false);
+    await advanced.getByLabel('Reference detail', {exact: true}).selectOption('max');
+    assert.equal(await page.evaluate(() => window.store.getState().params.minimax_h3_reference_detail), 'max');
     await advanced.getByRole('button', {name: 'LoRAs & presets', exact: true}).click();
     await advanced.getByRole('button', {name: 'Save Current'}).click();
     await advanced.getByPlaceholder('Preset name...').fill('Unfinished setup');
@@ -229,18 +243,19 @@ const read = async endpoint => {
     await advancedTrigger.click();
     assert.equal(await advanced.getByRole('button', {name: 'LoRAs & presets', exact: true}).getAttribute('aria-pressed'), 'true');
     assert.equal(await advanced.getByPlaceholder('Preset name...').inputValue(), 'Unfinished setup', 'Collapsing preserves an unsaved preset draft');
+    assert.equal(await page.evaluate(() => window.store.getState().params.minimax_h3_reference_detail), 'max', 'Reference preparation choice survives closing the overlay');
     await advanced.getByPlaceholder('Preset name...').press('Escape');
     assert.equal(await advanced.isVisible(), false);
     assert.equal(await advancedTrigger.evaluate(node => document.activeElement === node), true, 'Escape restores the Advanced trigger');
-    assert.match(await page.getByTestId('studio-generate-bar').innerText(), /Face refinement/);
+    assert.match(await advancedTrigger.getAttribute('title'), /Face refinement/);
     await sidebar.getByRole('button', {name: /Characters/}).click();
     await page.getByRole('dialog', {name: 'Characters', exact: true}).getByRole('button', {name: /Face refinement & character mapping/}).click();
     assert.equal(await advanced.getByRole('checkbox', {name: 'Refine faces after generation'}).isChecked(), true);
     await pause();
-    assert.equal(await advanced.evaluate(node => document.activeElement === node), true, 'Character shortcut focuses the inline finishing section');
-    assert.ok(await controls.evaluate(node => node.scrollTop > 0), 'Character shortcut reveals the inline section in the settings scroller');
+    assert.equal(await advanced.evaluate(node => document.activeElement === node), true, 'Character shortcut focuses Finishing in the settings overlay');
+    assert.equal(await page.getByRole('dialog', {name: 'Characters', exact: true}).isVisible(), false);
     await advanced.getByRole('button', {name: 'Close Advanced settings'}).click();
-    console.log('Inline Advanced layout, keyboard navigation, drafts, active summary and shared face-refinement settings passed');
+    console.log('Settings overlays, drafts, active indicators and shared face-refinement settings passed');
 
     // Real submission routing, intercepted before it can create any work.
     await page.evaluate(() => window.store.getState().setParam('face_refiner', {enabled: false}));
@@ -251,10 +266,15 @@ const read = async endpoint => {
     await pause();
     assert.notEqual(requests.at(-1)._queue_mode, 'held');
     assert.equal(requests.at(-1).minimax_h3_references.length, 3);
-    await sidebar.getByRole('button', {name: 'Open recipes'}).click();
+    await sidebar.getByRole('button', {name: 'Recipes and model browser'}).click();
+    await page.getByRole('dialog', {name: 'Studio libraries'}).getByRole('button', {name: 'Open recipes'}).click();
     assert.equal(await page.evaluate(() => window.store.getState().recipesOpen), true);
-    await sidebar.getByRole('button', {name: 'Open model browser'}).click();
+    await sidebar.getByRole('button', {name: 'Recipes and model browser'}).click();
+    await page.getByRole('dialog', {name: 'Studio libraries'}).getByRole('button', {name: 'Open model browser'}).click();
     assert.equal(await page.evaluate(() => window.store.getState().loraBrowserOpen), true);
+    await sidebar.getByRole('button', {name: 'Choose model'}).click();
+    await page.getByRole('dialog', {name: 'Choose a model'}).getByRole('button', {name: 'Browse models, LoRAs & characters'}).click();
+    assert.equal(await page.evaluate(() => window.store.getState().loraBrowserOpen), true, 'Model picker also exposes the browser');
     console.log('Generate vs held queue payloads, reference preservation, Recipes and Browser routing passed');
 
     // All six palettes at desktop and mobile; the actual theme function is used.
@@ -267,17 +287,19 @@ const read = async endpoint => {
         await pause();
         assert.ok(await sidebar.evaluate(node => node.scrollWidth <= node.clientWidth + 1), 'Sidebar has no horizontal overflow');
         assert.ok(await controls.evaluate(node => node.scrollWidth <= node.clientWidth + 1), 'Controls fit width ' + viewport.width);
+        assert.ok(await page.getByTestId('studio-settings-strip').evaluate(node => node.scrollWidth <= node.clientWidth + 1), 'Every settings indicator fits width ' + viewport.width);
+        const modelBox = await sidebar.getByRole('button', {name: 'Choose model'}).boundingBox();
         const bar = await page.getByTestId('studio-generate-bar').boundingBox();
+        assert.ok(modelBox.y >= bar.y && modelBox.y + modelBox.height <= bar.y + bar.height, 'Model selector is beside Generate');
         assert.ok(bar.y >= 0 && bar.y + bar.height <= viewport.height, 'Generate stays in viewport');
         await page.screenshot({path: path.join(output, viewport.width + '-' + family + '-' + mode + '.png')});
         await advancedTrigger.click();
-        await assertInlineAdvanced();
+        await assertSettingsOverlay();
         await advanced.getByRole('button', {name: 'Generation', exact: true}).click();
-        assert.ok(await controls.evaluate(node => node.scrollWidth <= node.clientWidth + 1), 'Expanded Advanced fits width ' + viewport.width);
+        assert.ok(await advanced.evaluate(node => node.scrollWidth <= node.clientWidth + 1), 'Advanced content fits width ' + viewport.width);
         const beforeScroll = await page.getByTestId('studio-generate-bar').boundingBox();
-        await controls.evaluate(node => {node.scrollTop = node.scrollHeight});
+        await advanced.locator(':scope > div').last().evaluate(node => {node.scrollTop = node.scrollHeight});
         assert.deepEqual(await page.getByTestId('studio-generate-bar').boundingBox(), beforeScroll, 'Scrolling Advanced leaves Generate in place');
-        await advanced.evaluate(node => node.scrollIntoView({block: 'start'}));
         await page.screenshot({path: path.join(output, viewport.width + '-' + family + '-' + mode + '-advanced.png')});
         await advanced.getByRole('button', {name: 'Close Advanced settings'}).click();
       }
@@ -286,6 +308,7 @@ const read = async endpoint => {
     dialog = page.getByRole('dialog', {name: 'Characters', exact: true});
     await dialog.getByRole('button', {name: 'Add Person 14 to references'}).scrollIntoViewIfNeeded();
     assert.ok(await dialog.evaluate(node => node.scrollWidth <= node.clientWidth + 1));
+    await page.screenshot({path: path.join(output, 'mobile-characters.png')});
     await dialog.getByRole('button', {name: 'Close Characters'}).click();
     await prompt.focus();
     await page.evaluate(() => {
@@ -296,7 +319,12 @@ const read = async endpoint => {
     let bar = await page.getByTestId('studio-generate-bar').boundingBox();
     assert.ok(bar.y + bar.height <= 371, 'Generate follows the visual viewport when the keyboard opens');
     assert.equal(await sidebar.locator('.studio-hardware').isVisible(), false);
+    assert.ok((await prompt.boundingBox()).height >= 100, 'Typing has a usable prompt area above the keyboard');
     assert.equal(await page.evaluate(() => localStorage.getItem('hwbar_collapsed')), '1', 'Keyboard does not change the saved hardware preference');
+    await advancedTrigger.click();
+    const keyboardOverlay = await advanced.boundingBox();
+    assert.ok(keyboardOverlay.y >= 0 && keyboardOverlay.y + keyboardOverlay.height <= 370, 'Settings sheet follows the keyboard viewport');
+    await advanced.getByRole('button', {name: 'Close Advanced settings'}).click();
     await sidebar.getByRole('button', {name: 'Expand prompt editor'}).click();
     bar = await page.getByRole('dialog', {name: 'Expanded prompt editor'}).getByRole('button', {name: 'Done', exact: true}).boundingBox();
     assert.ok(bar.y + bar.height <= 371, 'Expanded editor follows the available visual viewport too');
@@ -309,7 +337,7 @@ const read = async endpoint => {
     await page.evaluate(() => window.resetFixture('minimax_h3_fused_turbo', 'video', 'extend'));
     await sidebar.getByRole('button', {name: 'Choose model'}).click();
     const fullName = catalogue.models.find(model => model.model_type === 'minimax_h3').name;
-    await sidebar.getByRole('button', {name: fullName, exact: false}).first().click();
+    await page.getByRole('dialog', {name: 'Choose a model'}).getByRole('button', {name: fullName, exact: false}).first().click();
     await pause();
     assert.equal(await page.evaluate(() => window.store.getState().params.model_type), 'minimax_h3');
     assert.deepEqual(errors, [], 'Extend switch must not reproduce React #185');
@@ -320,6 +348,12 @@ const read = async endpoint => {
       assert.ok(await sidebar.getByRole('button', {name: 'Choose model'}).evaluate(node => node.parentElement.getBoundingClientRect().height < 70), 'Closed model control does not stretch the column');
       assert.ok(await controls.evaluate(node => node.scrollWidth <= node.clientWidth + 1), id + ' fits');
       await page.screenshot({path: path.join(output, id + '.png')});
+      if (mode === 'image' || mode === 'audio') {
+        await sidebar.getByRole('button', {name: 'Characters', exact: true}).click();
+        const library = page.getByRole('dialog', {name: mode === 'image' ? 'Choose a character' : 'Voice characters'});
+        assert.ok((await library.boundingBox()).x > (await sidebar.boundingBox()).width, mode + ' characters use the desktop side library');
+        await library.press('Escape');
+      }
     }
     assert.deepEqual(errors, []);
     console.log('Extend full-model transition plus Frames, Viggle, Image and H3 Speech rendered without errors');

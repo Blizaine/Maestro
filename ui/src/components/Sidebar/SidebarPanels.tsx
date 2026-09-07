@@ -1,13 +1,14 @@
 /* eslint-disable react-refresh/only-export-components -- shared sidebar presentation contexts */
-import { createContext, useContext, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
+import { createContext, useContext, useEffect, useLayoutEffect, useId, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import { Maximize2, Minimize2, X } from 'lucide-react'
 import { H3MultiWindowControls } from './H3MultiWindowControls'
 
 export const CharacterToolbarContext = createContext<HTMLElement | null>(null)
+export const SidebarLayoutContext = createContext<{ sidebar: HTMLElement | null; settings: HTMLElement | null } | null>(null)
 export function CharacterToolbarItem({ children }: { children: ReactNode }) {
   const target = useContext(CharacterToolbarContext)
-  return target ? createPortal(children, target) : children
+  return target ? createPortal(<div className="studio-character-trigger">{children}</div>, target) : children
 }
 
 // Keep the same editor mounted when expanding, including its reviewed window
@@ -19,7 +20,7 @@ export function ComposerToolbarItem({ children }: { children: ReactNode }) {
   return target ? createPortal(children, target) : children
 }
 
-export function usePanelFocus(open: boolean, ref: RefObject<HTMLDivElement | null>, close: () => void) {
+export function usePanelFocus(open: boolean, ref: RefObject<HTMLDivElement | null>, close: () => void, trapFocus = true) {
   const closeRef = useRef(close)
   useEffect(() => { closeRef.current = close }, [close])
   useEffect(() => {
@@ -30,7 +31,7 @@ export function usePanelFocus(open: boolean, ref: RefObject<HTMLDivElement | nul
     const handleKey = (event: KeyboardEvent) => {
       if (!panel?.contains(event.target as Node)) return
       if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeRef.current() }
-      if (event.key !== 'Tab') return
+      if (event.key !== 'Tab' || !trapFocus) return
       const nodes = Array.from(panel.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href], summary, [tabindex="0"]'))
         .filter(node => node.getClientRects().length > 0 && !node.closest('[inert]'))
       const first = nodes[0], last = nodes[nodes.length - 1]
@@ -41,24 +42,90 @@ export function usePanelFocus(open: boolean, ref: RefObject<HTMLDivElement | nul
     panel?.addEventListener('keydown', handleKey)
     return () => {
       panel?.removeEventListener('keydown', handleKey)
-      if (previous?.isConnected) previous.focus({ preventScroll: true })
+      if (previous?.isConnected && (panel?.contains(document.activeElement) || document.activeElement === document.body)) previous.focus({ preventScroll: true })
     }
-  }, [open, ref])
+  }, [open, ref, trapFocus])
 }
 
-export function SidebarDialog({ open, title, onClose, children }: { open: boolean; title: string; onClose: () => void; children: ReactNode }) {
+export function SidebarDialog({ open, title, onClose, children, variant = 'center', id, headerStart, footer, closeLabel, anchor }: {
+  open: boolean; title: string; onClose: () => void; children: ReactNode
+  variant?: 'center' | 'settings' | 'library' | 'workflow'; id?: string
+  headerStart?: ReactNode; footer?: ReactNode; closeLabel?: string
+  anchor?: HTMLElement | null
+}) {
   const ref = useRef<HTMLDivElement>(null)
-  usePanelFocus(open, ref, onClose)
+  const layout = useContext(SidebarLayoutContext)
+  const panelKey = useId()
+  const closeRef = useRef(onClose)
+  const [position, setPosition] = useState<CSSProperties>({})
+  const anchored = !!layout && variant !== 'center'
+  const popover = anchored && variant !== 'library'
+  useEffect(() => { closeRef.current = onClose }, [onClose])
+  useEffect(() => {
+    if (!open || !anchored) return
+    // Settings and libraries share one overlay at a time. Nested media previews
+    // use the centered variant and return to their parent panel when closed.
+    const eventName = 'maestro-studio-panel-open'
+    const dismiss = (event: Event) => {
+      if ((event as CustomEvent<string>).detail !== panelKey) closeRef.current()
+    }
+    window.dispatchEvent(new CustomEvent(eventName, { detail: panelKey }))
+    window.addEventListener(eventName, dismiss)
+    return () => window.removeEventListener(eventName, dismiss)
+  }, [open, anchored, panelKey])
+  useEffect(() => {
+    if (!open || !popover) return
+    const outside = (event: PointerEvent) => {
+      const target = event.target as Node
+      if (!ref.current?.contains(target) && !layout?.settings?.contains(target) && !anchor?.contains(target)) closeRef.current()
+    }
+    document.addEventListener('pointerdown', outside)
+    return () => document.removeEventListener('pointerdown', outside)
+  }, [open, popover, layout, anchor])
+  useLayoutEffect(() => {
+    if (!open || !anchored) return
+    const measure = () => {
+      const viewport = window.visualViewport
+      const top = viewport?.offsetTop || 0
+      const height = viewport?.height || window.innerHeight
+      const sidebar = layout?.sidebar?.getBoundingClientRect()
+      const settingsBounds = layout?.settings?.getBoundingClientRect()
+      const triggerBounds = anchor?.getBoundingClientRect()
+      if (window.innerWidth < 768) {
+        setPosition({ left: 8, right: 8, bottom: Math.max(0, window.innerHeight - height - top) + 8, maxHeight: height - 16 })
+      } else if (variant === 'workflow' && triggerBounds) {
+        setPosition({ left: triggerBounds.left, top: triggerBounds.bottom + 6, width: triggerBounds.width, maxHeight: Math.max(120, height + top - triggerBounds.bottom - 18) })
+      } else if (variant === 'library' && sidebar && window.innerWidth - sidebar.right >= 324) {
+        setPosition({ left: sidebar.right + 12, top: top + 12, width: Math.min(520, window.innerWidth - sidebar.right - 24), maxHeight: height - 24 })
+      } else {
+        const bottomEdge = Math.max(top + 180, Math.min(settingsBounds?.top ?? height - 80, top + height - 8))
+        setPosition({ left: (sidebar?.left || 0) + 12, bottom: window.innerHeight - bottomEdge + 8, width: Math.min((sidebar?.width || 420) - 24, window.innerWidth - 24), maxHeight: bottomEdge - top - 20 })
+      }
+    }
+    measure()
+    window.addEventListener('resize', measure)
+    window.visualViewport?.addEventListener('resize', measure)
+    window.visualViewport?.addEventListener('scroll', measure)
+    return () => {
+      window.removeEventListener('resize', measure)
+      window.visualViewport?.removeEventListener('resize', measure)
+      window.visualViewport?.removeEventListener('scroll', measure)
+    }
+  }, [open, anchored, layout, variant, anchor])
+  usePanelFocus(open, ref, onClose, !popover)
   return createPortal(
-    <div hidden={!open} className={open ? 'fixed inset-0 z-[55] flex items-center justify-center bg-black/50 p-2 sm:p-6' : 'hidden'}
+    <div hidden={!open} className={open ? `fixed inset-0 z-[55] ${popover ? 'pointer-events-none' : anchored ? 'bg-black/25' : 'flex items-center justify-center bg-black/50 p-2 sm:p-6'}` : 'hidden'}
       onClick={event => { if (event.target === event.currentTarget) onClose() }}>
-      <div ref={ref} role="dialog" aria-modal="true" aria-label={title} tabIndex={-1}
-        className="flex max-h-[90dvh] w-full max-w-xl min-w-0 flex-col overflow-hidden rounded-2xl border border-border bg-bg-secondary shadow-2xl outline-none">
+      <div ref={ref} id={id} role="dialog" aria-modal={popover ? undefined : true} aria-label={title} tabIndex={-1} style={anchored ? position : undefined}
+        data-sidebar-overlay={anchored ? variant : undefined}
+        className={`pointer-events-auto flex min-w-0 flex-col overflow-hidden rounded-2xl border border-border bg-bg-secondary shadow-2xl outline-none ${anchored ? 'fixed' : 'max-h-[90dvh] w-full max-w-xl'}`}>
         <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-3">
-          <h2 className="text-sm font-semibold text-text-primary">{title}</h2>
-          <button type="button" aria-label={`Close ${title}`} onClick={onClose} className="rounded-lg p-2 text-text-secondary hover:bg-bg-hover"><X size={18}/></button>
+          {headerStart}
+          <h2 className="min-w-0 flex-1 break-words text-sm font-semibold text-text-primary">{title}</h2>
+          <button type="button" aria-label={closeLabel || `Close ${title}`} onClick={onClose} className="shrink-0 rounded-lg p-2 text-text-secondary hover:bg-bg-hover"><X size={18}/></button>
         </div>
         <div className="min-h-0 overflow-y-auto overscroll-contain p-3 sm:p-4">{children}</div>
+        {footer && <div className="shrink-0 border-t border-border p-3">{footer}</div>}
       </div>
     </div>, document.body,
   )
@@ -74,9 +141,9 @@ export function PromptDock({ children }: { children: ReactNode }) {
     <ComposerToolbarContext.Provider value={enhanceSlot}>
       <div ref={panel} tabIndex={expanded ? -1 : undefined} role={expanded ? 'dialog' : undefined}
         aria-modal={expanded ? true : undefined} aria-label={expanded ? 'Expanded prompt editor' : 'Prompt composer'}
-        data-expanded={expanded} className={`studio-composer outline-none ${expanded ? 'fixed inset-0 z-[100] flex flex-col bg-bg-secondary p-4 sm:p-8' : 'shrink-0 border-t border-border bg-bg-secondary px-3 pt-2 pb-2'}`}>
+        data-expanded={expanded} className={`studio-composer outline-none ${expanded ? 'fixed inset-0 z-[100] flex flex-col bg-bg-secondary p-4 sm:p-8' : 'flex min-h-0 flex-1 flex-col px-3 pb-3 pt-2'}`}>
         <div className="mb-2 flex shrink-0 flex-wrap items-center gap-2">
-          <span className="mr-auto text-xs font-medium text-text-primary">{expanded ? 'Prompt editor' : 'Prompt'}</span>
+          <span className="studio-composer-title mr-auto text-xs font-medium text-text-primary">{expanded ? 'Prompt editor' : 'Prompt'}</span>
           <H3MultiWindowControls section="prompt" compact />
           <div ref={setEnhanceSlot} className="relative empty:hidden"/>
           <button type="button" aria-label={expanded ? 'Collapse prompt editor' : 'Expand prompt editor'}
@@ -86,7 +153,7 @@ export function PromptDock({ children }: { children: ReactNode }) {
             {expanded ? <Minimize2 size={15}/> : <Maximize2 size={15}/>}
           </button>
         </div>
-        <div className={expanded ? 'min-h-0 flex-1 overflow-y-auto overscroll-contain' : 'studio-composer-content min-h-0'}>{children}</div>
+        <div className={expanded ? 'min-h-0 flex-1 overflow-y-auto overscroll-contain' : 'studio-composer-content flex min-h-0 flex-1 flex-col'}>{children}</div>
         {expanded && <div className="flex shrink-0 justify-end border-t border-border pt-3 mt-3">
           <button type="button" onClick={() => setExpanded(false)} className="min-h-10 rounded-xl bg-accent-blue px-5 text-xs text-white">Done</button>
         </div>}
