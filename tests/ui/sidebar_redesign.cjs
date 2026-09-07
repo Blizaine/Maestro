@@ -4,6 +4,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const {assertPromptStability} = require('./prompt_stability.cjs');
 const root = path.resolve(__dirname, '../..');
 const base = process.argv[2];
 if (!base) throw new Error('Pass the running Maestro URL; browser actions never reach it.');
@@ -31,7 +32,8 @@ const read = async endpoint => {
     jsx: 'automatic', define: {'process.env.NODE_ENV': '"development"'}, logLevel: 'silent'});
   const assets = path.join(root, 'ui/dist/assets');
   const css = fs.readFileSync(path.join(assets, fs.readdirSync(assets).find(name => name.endsWith('.css'))), 'utf8');
-  const browser = await playwright.chromium.launch({headless: true,
+  // Headless Chromium normally hides scrollbars, concealing width/reflow bugs.
+  const browser = await playwright.chromium.launch({headless: true, ignoreDefaultArgs: ['--hide-scrollbars'],
     ...(process.platform === 'win32' ? {executablePath: process.env.MAESTRO_CHROME || 'C:/Program Files/Google/Chrome/Application/chrome.exe'} : {})});
   try {
     const page = await browser.newPage({viewport: {width: 1360, height: 900}});
@@ -89,6 +91,7 @@ const read = async endpoint => {
     await sidebar.getByRole('button', {name: /Characters/}).waitFor();
     await pause();
     assert.deepEqual(errors, [], 'StrictMode renders the full sidebar without a loop');
+    await assertPromptStability(page, sidebar);
 
     // Long workflow lists overlay the editor; the full catalogue remains reachable.
     const footerBeforeWorkflow = await page.getByTestId('studio-generate-bar').boundingBox();

@@ -742,8 +742,23 @@ input[type="range"]::-webkit-slider-thumb {
 .studio-character-trigger .text-xs { font-size: 11px; font-weight: 500; }
 .studio-character-trigger svg { width: 14px; height: 14px; }
 .studio-composer[data-expanded="false"] .studio-composer-content {
+  overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+/* Writing extensions insert measured overlays beside the textarea. Keep their
+ * transient bounds from adding outer scrollbars and feeding back into sizing. */
+.studio-prompt-field { overflow: clip; }
+/* Keep the dock's text out of flex intrinsic sizing. Its frame owns the size;
+ * content scrolls inside it without changing the surrounding layout. Reserve
+ * scrollbar space so adding/removing a line cannot rewrap existing text. */
+.studio-prompt-field > .studio-prompt-textarea {
+  position: absolute;
+  inset: 0;
+  height: 100%;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 .studio-composer[data-expanded="true"] {
   height: var(--studio-visual-viewport-height, 100dvh);

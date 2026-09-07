@@ -25,29 +25,32 @@ function estimateH3TextTokens(value: string): number {
   return Math.ceil(lexical * 1.25) + (value.trim() ? 8 : 0)
 }
 
-function useAutoGrowingTextarea(value: string, maximum: number | null = Infinity) {
+function useAutoGrowingTextarea(value: string, enabled = true) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   const fitToContent = useCallback(() => {
     const textarea = textareaRef.current
-    if (!textarea) return
-    if (maximum === null) {
-      textarea.style.height = '100%'
-      textarea.style.overflowY = 'auto'
-      return
-    }
+    if (!textarea || !enabled) return
+    textarea.style.overflowY = 'hidden'
     textarea.style.height = 'auto'
     // scrollHeight includes padding but not the two one-pixel borders used
     // by these border-box textareas. Include them so the final line is visible.
-    textarea.style.height = `${Math.min(textarea.scrollHeight + 2, maximum)}px`
-    textarea.style.overflowY = textarea.scrollHeight + 2 > maximum ? 'auto' : 'hidden'
-  }, [maximum])
+    textarea.style.height = `${textarea.scrollHeight + 2}px`
+  }, [enabled])
 
   useLayoutEffect(fitToContent, [value, fitToContent])
+  // The dock uses CSS to fill its allocated space. Clear the expanded editor's
+  // measurements when returning to it; typing and polling never size the dock.
+  useLayoutEffect(() => {
+    if (enabled) return
+    textareaRef.current?.style.removeProperty('height')
+    textareaRef.current?.style.removeProperty('overflow-y')
+  }, [enabled])
   useEffect(() => {
+    if (!enabled) return
     window.addEventListener('resize', fitToContent)
     return () => window.removeEventListener('resize', fitToContent)
-  }, [fitToContent])
+  }, [enabled, fitToContent])
 
   return textareaRef
 }
@@ -138,7 +141,7 @@ export function PromptInput() {
   const composer = useContext(ComposerContext)
   const compact = !!composer && !composer.expanded
   const prompt = useStore(s => s.params.prompt)
-  const promptTextareaRef = useAutoGrowingTextarea(prompt, compact ? null : Infinity)
+  const promptTextareaRef = useAutoGrowingTextarea(prompt, !compact)
   const setParam = useStore(s => s.setParam)
   const generationMode = useStore(s => s.generationMode)
   const editSubMode = useStore(s => s.editSubMode)
@@ -499,7 +502,7 @@ export function PromptInput() {
           </span>
         </div>
       )}
-      <div className={compact ? 'studio-prompt-field relative min-h-0 flex-1' : 'relative mt-auto'}>
+      <div className={compact ? 'studio-prompt-field relative min-h-[72px] flex-1' : 'relative mt-auto'}>
         <textarea
           ref={promptTextareaRef}
           aria-label="Generation prompt"

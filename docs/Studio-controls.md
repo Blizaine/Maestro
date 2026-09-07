@@ -27,7 +27,7 @@ The closed Advanced button shows its active count; its tooltip lists those setti
 
 ## Prompt and actions
 
-The prompt fills the available composition area. Long scripts scroll inside the editor; **Expand prompt editor** opens a full writing view using the same source text and state. H3's reviewed window prompts remain editable there. AI Faithful, AI Creative and Manual retain their existing behavior, and Enhance is next to the prompt controls.
+The prompt fills the available composition area. Its size and text width stay steady as you type or background status updates arrive, including when a scrollbar becomes necessary. Long scripts scroll inside the editor; **Expand prompt editor** opens a full writing view using the same source text and state. H3's reviewed window prompts remain editable there. AI Faithful, AI Creative and Manual retain their existing behavior, and Enhance is next to the prompt controls.
 
 The **…** menu beside the model selector opens **Recipes** and **Model Browser**. Browse is also available inside the model picker. Generate keeps its two-part action: the left side generates now, and the right third adds the current settings to the held queue when supported. Transform and Blend retain their existing queue limitations. Specialized audio and finishing tools retain their dedicated composers or Run actions.
 
