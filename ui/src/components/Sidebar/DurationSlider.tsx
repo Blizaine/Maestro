@@ -43,9 +43,8 @@ export function DurationSlider() {
   const nativeOmniContinuation = useStore(s => (
     s.params.minimax_h3_sequence_continuity !== false
   ))
-  const manualOmniPrompts = useStore(s => (
-    s.params.minimax_h3_sequence_prompt_mode === 'manual'
-  ))
+  const h3WindowPlan = useStore(s => s.h3WindowPlan)
+  const ltxWindowPrompts = useStore(s => s.params.ltx_window_prompts)
   const resolution = useStore(s => s.params.resolution)
   const modelType = useStore(s => s.params.model_type)
   const studioVideoWorkflow = useStore(s => s.studioVideoWorkflow)
@@ -59,12 +58,8 @@ export function DurationSlider() {
   const h3References = useStore(s => s.params.minimax_h3_references)
   const audioGuide = useStore(s => s.params.audio_guide)
   const videoGuide = useStore(s => s.params.video_guide)
-  const h3SequencePromptMode = useStore(s => s.params.minimax_h3_sequence_prompt_mode)
-  const ltxWindowPromptMode = useStore(s => s.params.ltx_window_prompt_mode)
   const h3FirstLastMultiWindow = useStore(s => s.params.minimax_h3_multi_window === true)
-  const manualFirstLastPrompts = useStore(s => s.params.minimax_h3_window_storyboard === false)
   const ltxMultiWindow = useStore(s => s.params.ltx_multi_window === true)
-  const manualLtxPrompts = useStore(s => s.params.ltx_window_prompt_mode === 'manual')
   const h3WindowOverrides = useStore(s => s.h3WindowOverrides)
   const totalVramGb = useStore(s => s.systemStats?.gpu.vram_total_gb ?? 0)
   const fps = modelOptions?.fps ?? 16
@@ -198,20 +193,7 @@ export function DurationSlider() {
   const imageMode = useStore(s => s.params.image_mode)
   const isMultiClip = imageMode === 2
   const promptLineCount = prompt.split('\n').filter((line: string) => line.trim()).length
-  const automaticPromptPacing = (
-    (modelOptions?.sliding_window_auto_prompt_pacing === true
-      && !manualFirstLastPrompts)
-    || (isLtx && ltxMultiWindow && !manualLtxPrompts)
-  )
-  const manualWindowPrompts = (
-    (isOmniReference && manualOmniPrompts)
-    || (!isOmniReference && isH3 && manualFirstLastPrompts)
-    || (isLtx && manualLtxPrompts)
-  )
-  const creativeWindowPlanning = (
-    (isH3 && h3SequencePromptMode === 'creative')
-    || (isLtx && ltxWindowPromptMode === 'creative')
-  )
+  const hasReviewedWindowPrompts = !!h3WindowPlan || (isLtx && !!ltxWindowPrompts?.length)
   const driveReference = h3References?.find(reference => (
     reference.type === 'audio' && reference.audio_intent === 'drive'
   ))
@@ -242,11 +224,9 @@ export function DurationSlider() {
         planningMode={durationPlanningMode}
         onPlanningModeChange={mode => setParam('_duration_planning_mode', mode)}
         autoPrompt={durationPlanningPrompt}
-        autoPlanningStyle={creativeWindowPlanning ? 'creative' : 'faithful'}
         autoSourceSeconds={autoSourceSeconds == null ? null : Math.round(autoSourceSeconds * fps) / fps}
         autoSourceLabel={autoSourceLabel}
         autoMediaOnly={modelType === 'viggle_animate'}
-        autoManualWindowCount={manualWindowPrompts ? Math.max(1, promptLineCount) : null}
         autoWindowSeconds={planningWindowSeconds}
         autoFirstWindowSeconds={isVideoExtend
           ? continuationFirstWindowSeconds(planningWindowSeconds, overlap, fps)
@@ -256,8 +236,8 @@ export function DurationSlider() {
       {showSlidingWindow && !isMultiClip && (
         <div className="text-[10px] text-text-muted mt-1">
           {windowCount} windows of {formatSeconds(windowSize)} &middot;{' '}
-          {modelType === 'viggle_animate' ? 'fixed motion-transfer prompt' : automaticPromptPacing
-            ? (isLtx ? 'AI-planned window prompts' : 'full prompt auto-paced')
+          {modelType === 'viggle_animate' ? 'fixed motion-transfer prompt' : hasReviewedWindowPrompts
+            ? 'Reviewed window prompts'
             : <span className={promptLineCount === windowCount ? '' : 'text-amber-400'}>
                 {promptLineCount}/{windowCount} prompts
               </span>}
@@ -268,11 +248,11 @@ export function DurationSlider() {
           {omniSequenceClipCount} {nativeOmniContinuation ? 'native Omni windows' : 'independent Omni clips'} &middot;{' '}
           {locked ? 'manual' : 'Auto'} max {formatSeconds(omniSequenceClipFrames / fps)} &middot;{' '}
           {nativeOmniContinuation ? 'motion + audio carried' : 'hard cuts joined'} &middot;{' '}
-          {manualOmniPrompts
+          {!h3WindowPlan
             ? <span className={promptLineCount === omniSequenceClipCount ? '' : 'text-amber-400'}>
-                {promptLineCount}/{omniSequenceClipCount} manual prompts
+                {promptLineCount}/{omniSequenceClipCount} prompts · use Enhance to plan
               </span>
-            : 'AI-planned prompts'}
+            : 'Reviewed window prompts'}
         </div>
       )}
       {unsupportedAutoResolution && (

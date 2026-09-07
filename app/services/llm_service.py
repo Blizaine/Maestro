@@ -2745,6 +2745,22 @@ def _build_enhance_user_prompt(
         if str(planning_style or "").strip().casefold() == "creative"
         else "faithful"
     )
+    if mode == "image":
+        # The Studio split button also applies to still images. Carry the
+        # choice through both guided and dedicated raw-enhancer paths.
+        style_instruction = (
+            "CREATIVE IMAGE WRITING: Treat the user's text as a visual brief. "
+            "Add complementary composition, lighting, material and environmental "
+            "details to make a compelling still image."
+            if planning_style == "creative" else
+            "FAITHFUL IMAGE WRITING: Clarify the supplied visual description "
+            "without inventing new subjects, objects, actions or story events."
+        )
+        return (
+            f"[{style_instruction} Preserve all explicit facts, identities, "
+            "requested text, reference constraints and edit boundaries. "
+            f"Describe one still image, not a sequence.]\n\n{prompt}"
+        )
     if duration_seconds and mode in ("video", "avatar"):
         parts = [f"Duration: {duration_seconds} seconds"]
         if window_count and window_count > 1:

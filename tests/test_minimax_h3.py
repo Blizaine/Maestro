@@ -1500,7 +1500,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
 
     def test_shared_h3_window_ui_and_durable_overrides_are_wired(self):
         controls = _read(_H3_MULTI_WINDOW_CONTROLS_PATH)
-        sidebar = _read(_SIDEBAR_PATH)
+        output_controls = _read(_ROOT / "ui/src/components/Sidebar/OutputFormatControls.tsx")
         advanced = _read(_ADVANCED_SETTINGS_PATH)
         duration = _read(_DURATION_SLIDER_PATH)
         store = _read(_STORE_PATH)
@@ -1516,7 +1516,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("minimax_h3_multi_window", controls)
         self.assertIn("minimax_h3_reference_sequence", controls)
         self.assertIn("Window prompts", controls)
-        self.assertIn("<H3MultiWindowControls />", sidebar)
+        self.assertIn('<H3MultiWindowControls section="continuity"/>', output_controls)
         self.assertNotIn("Plan Prompt Across Windows", advanced)
         self.assertIn("Window Length", duration)
         self.assertIn("Recommended", duration)
@@ -1528,21 +1528,11 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn('@api.put("/api/v1/h3-window-overrides")', launch)
         self.assertIn("updateH3WindowOverrides", client)
 
-    def test_single_window_h3_auto_enhance_defers_while_generation_is_busy(self):
-        controls = _read(_H3_MULTI_WINDOW_CONTROLS_PATH)
-        store = _read(_STORE_PATH)
+    def test_legacy_deferred_enhancement_still_waits_for_generation_slot(self):
+        # Studio now enhances only on an explicit click (browser coverage in
+        # tests/ui/studio_enhancement.cjs). Previously saved/API jobs retain
+        # their deferred worker contract.
         launch = _read(_LAUNCH_PATH)
-
-        self.assertIn("enabled ? 'auto' : 'manual'", controls)
-        self.assertIn("promptMode === 'auto'", store)
-        self.assertIn("!usesMultiplePasses", store)
-        self.assertIn("await state.enhancePrompt()", store)
-        self.assertIn("typeof state.params._h3_original_prompt", store)
-        self.assertIn("const deferAutoEnhance", store)
-        self.assertIn("submissionMode === 'queue' || generationWorkInFlight", store)
-        self.assertIn("const active = await api.fetchActiveJobs()", store)
-        self.assertIn("params._deferred_prompt_enhance", store)
-        self.assertIn("Ready - AI planning will run when queue starts", store)
         activity = _read(_PROMPT_ACTIVITY_PATH)
         queue = _read(_GLOBAL_QUEUE_PATH)
         gallery = _read(_MAIN_CONTENT_PATH)
@@ -1559,7 +1549,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         worker_start = launch.index("def _run_generation(")
         worker = launch[worker_start:]
         self.assertLess(
-            worker.index("with generation_slot(_gen_lock, job) as acquired:"),
+            worker.index("generation_slot(_gen_lock, job)) as acquired:"),
             worker.index("_apply_deferred_prompt_enhancement(job, raw_params)"),
         )
         self.assertLess(

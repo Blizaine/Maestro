@@ -9,7 +9,7 @@ const standardRatios: { value: AspectRatio; icon: string }[] = [
   { value: '3:4', icon: '▯' },
 ]
 
-export function AspectRatioGrid() {
+export function AspectRatioGrid({ menu = false, onSelect }: { menu?: boolean; onSelect?: () => void }) {
   const aspectRatio = useStore(s => s.aspectRatio)
   const setAspectRatio = useStore(s => s.setAspectRatio)
   const generationMode = useStore(s => s.generationMode)
@@ -28,22 +28,26 @@ export function AspectRatioGrid() {
 
   return (
     <div>
-      <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">Aspect Ratio</label>
-      <div className="grid grid-cols-3 gap-1">
+      {!menu && <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">Aspect Ratio</label>}
+      <div className={menu ? 'flex flex-col gap-0.5' : 'grid grid-cols-3 gap-1'}>
         {ratios.map(r => (
           <button
             key={r.value}
             type="button"
-            aria-pressed={aspectRatio === r.value}
-            onClick={() => setAspectRatio(r.value)}
-            className={`flex-1 flex flex-col items-center gap-0.5 py-2 rounded-lg border text-[10px] transition-all ${
+            role={menu ? 'menuitemradio' : undefined}
+            aria-label={r.value === 'auto' ? 'Auto' : r.value}
+            aria-checked={menu ? aspectRatio === r.value : undefined}
+            aria-pressed={menu ? undefined : aspectRatio === r.value}
+            onClick={() => { setAspectRatio(r.value); onSelect?.() }}
+            className={`flex items-center rounded-lg transition-colors ${menu ? 'min-h-11 gap-3 px-3 text-xs' : 'flex-1 flex-col gap-0.5 py-2 border text-[10px]'} ${
               aspectRatio === r.value
                 ? 'border-accent-blue bg-bg-active text-text-primary'
                 : 'border-border text-text-muted hover:border-border-light hover:text-text-secondary'
             }`}
           >
-            <span className="text-sm leading-none">{r.icon}</span>
+            <span aria-hidden="true" className="text-sm leading-none">{r.icon}</span>
             <span>{r.value === 'auto' ? 'Auto' : r.value}</span>
+            {menu && aspectRatio === r.value && <span aria-hidden="true" className="ml-auto">✓</span>}
           </button>
         ))}
       </div>

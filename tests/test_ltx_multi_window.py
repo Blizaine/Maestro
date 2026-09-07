@@ -297,11 +297,11 @@ class LtxMultiWindowWiringTests(unittest.TestCase):
         self.assertIn("ltx_window_prompt_mode", controls)
         self.assertIn('value="creative"', controls)
         self.assertIn("AI - Creative story + dialogue", controls)
-        self.assertIn("AI-planned window prompts", duration)
-        self.assertIn("LTX long-form Auto follows Duration", duration)
+        self.assertIn("Reviewed window prompts", duration)
+        self.assertIn("autoWindowSeconds={planningWindowSeconds}", duration)
         self.assertNotIn("if (isLtx && ltxMultiWindow) return", duration)
         self.assertIn("usesLtxManualPrompts", prompt)
-        self.assertIn("Manual LTX sequence needs exactly", store)
+        self.assertIn("This LTX sequence needs", store)
 
     def test_ltx_guide_distributes_actions_chronologically(self):
         guide = (

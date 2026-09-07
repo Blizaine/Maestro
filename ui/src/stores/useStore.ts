@@ -1901,7 +1901,7 @@ interface AppState {
   // Prompt enhancement
   isEnhancing: boolean
   promptEnhanceError: string | null
-  enhancePrompt: (ttsMode?: string) => Promise<void>
+  enhancePrompt: (ttsMode?: string, planningStyle?: 'faithful' | 'creative') => Promise<void>
   h3WindowPlan: H3WindowPlan | null
   updateH3WindowPrompt: (index: number, prompt: string) => void
   clearH3WindowPlan: () => void
@@ -6033,95 +6033,11 @@ export const useStore = create<AppState>((set, get) => ({
       || '',
     )
     const isH3PromptModel = architecture.startsWith('minimax_h3')
-    const isLtxPromptModel = state.modelOptions?.multi_window_sequence_controls === true
     const isOmniPromptModel = isH3PromptModel && (
       activeCreateRoute === 'omni'
       || state.modelOptions?.omni_reference === true
       || selectedModelIsOmni
     )
-    const promptMode = isLtxPromptModel
-      ? state.params.ltx_window_prompt_mode
-      : state.params.minimax_h3_sequence_prompt_mode
-    const multiWindowEnabled = isLtxPromptModel
-      ? state.params.ltx_multi_window === true
-      : isOmniPromptModel
-        ? state.params.minimax_h3_reference_sequence === true
-        : state.params.minimax_h3_multi_window === true
-    const promptFps = state.modelOptions?.fps ?? 16
-    const promptSlidingDefaults = state.modelOptions?.sliding_window_defaults
-    const promptOverlapSeconds = state.slidingWindowOverlap / promptFps
-    const promptDiscardSeconds = (
-      promptSlidingDefaults?.discard_last_frames ?? 0
-    ) / promptFps
-    const promptFirstWindowSeconds = (
-      state.studioVideoWorkflow === 'extend'
-      && state.modelOptions?.sliding_window === true
-    )
-      ? continuationFirstWindowFrames(
-          Math.round(state.slidingWindowSeconds * promptFps),
-          state.slidingWindowOverlap,
-        ) / promptFps
-      : state.slidingWindowSeconds
-    const usesMultiplePasses = (
-      multiWindowEnabled
-      && durationWindowPlan(
-        state.durationSeconds,
-        state.slidingWindowSeconds,
-        promptOverlapSeconds,
-        promptDiscardSeconds,
-        promptFirstWindowSeconds,
-      ).windowCount > 1
-    )
-    const alreadyEnhanced = isLtxPromptModel
-      ? Boolean(
-          typeof state.params._ltx_original_prompt === 'string'
-          && state.params._ltx_original_prompt.trim(),
-        )
-      : Boolean(
-          typeof state.params._h3_original_prompt === 'string'
-          && state.params._h3_original_prompt.trim(),
-        )
-
-    const automaticSinglePromptEnhance = (
-      state.generationMode === 'video'
-      && (isH3PromptModel || isLtxPromptModel)
-      && (promptMode === 'auto' || promptMode === 'creative')
-      && !usesMultiplePasses
-      && !alreadyEnhanced
-      && String(state.params.prompt || '').trim()
-    )
-    let generationWorkInFlight = (
-      state.isGenerating
-      || state.jobs.some(job => job.status === 'running' || job.status === 'queued')
-    )
-    if (
-      automaticSinglePromptEnhance
-      && submissionMode !== 'queue'
-      && !generationWorkInFlight
-    ) {
-      try {
-        const active = await api.fetchActiveJobs()
-        generationWorkInFlight = active.jobs.some(job => (
-          job.status === 'running' || job.status === 'queued'
-        ))
-      } catch { /* reconnect polling remains the normal source of truth */ }
-    }
-    const deferAutoEnhance = Boolean(
-      automaticSinglePromptEnhance
-      && (submissionMode === 'queue' || generationWorkInFlight)
-    )
-
-    // Interactive Generate on an idle GPU still enhances first so the result
-    // is visible in Studio. Held queue entries, and Generate clicks made while
-    // another render is active, freeze the raw idea now and carry an enhancer
-    // request inside the job instead. The backend executes it only after that
-    // job owns the generation lock, avoiding an LLM/diffusion VRAM collision.
-    if (automaticSinglePromptEnhance && !deferAutoEnhance) {
-      await state.enhancePrompt()
-      state = get()
-      if (state.isEnhancing || state.promptEnhanceError) return
-    }
-
     // Freeze the Studio configuration at click time. This matters for the
     // split Add to Queue action: later UI edits must belong to a new job.
     const holdForQueue = submissionMode === 'queue'
@@ -6771,6 +6687,19 @@ export const useStore = create<AppState>((set, get) => ({
     }
 
     const params: Record<string, unknown> = { ...state.params, generation_mode: state.generationMode, workspace: state.activeWorkspace }
+    // Generate and Add to Queue consume the text/plan already visible in Studio.
+    // Older saved Auto/Creative settings must not schedule an unseen LLM pass.
+    delete params._deferred_prompt_enhance
+    if (state.generationMode === 'video') {
+      const reviewedH3Plan = state.h3WindowPlan && (
+        isOmniReference ? state.h3WindowPlan.plan_kind === 'reference_sequence'
+          : state.h3WindowPlan.plan_kind !== 'reference_sequence'
+      ) ? state.h3WindowPlan : null
+      params.minimax_h3_sequence_prompt_mode = reviewedH3Plan
+        ? (reviewedH3Plan.planning_style === 'creative' ? 'creative' : 'auto') : 'manual'
+      params.minimax_h3_window_storyboard = !!reviewedH3Plan
+      params.ltx_window_prompt_mode = 'manual'
+    }
     if (state.generationMode === 'video') {
       params._studio_video_workflow = state.studioVideoWorkflow
     }
@@ -6940,6 +6869,12 @@ export const useStore = create<AppState>((set, get) => ({
         ) - continuationSourceContextFrames
       }
       params.video_length = requestedFrames
+      if (h3ReferenceSequenceRequested && effectiveH3SequenceClipFrames != null
+        && requestedFrames <= effectiveH3SequenceClipFrames) {
+        // A single pass accepts paragraphs as written, even if a loaded
+        // recipe still has sequence mode enabled.
+        params.minimax_h3_reference_sequence = false
+      }
 
       if (supportsSlidingWindows) {
         const swDefaults = state.modelOptions?.sliding_window_defaults
@@ -7016,7 +6951,7 @@ export const useStore = create<AppState>((set, get) => ({
         })
         if (h3ManualFirstLastPrompts.length !== expectedPromptCount) {
           set({
-            promptEnhanceError: `Manual First / Last sequence needs exactly ${expectedPromptCount} non-empty prompt ${expectedPromptCount === 1 ? 'line' : 'lines'} (window 1 through window ${expectedPromptCount}); found ${h3ManualFirstLastPrompts.length}.`,
+            promptEnhanceError: `This First / Last sequence needs ${expectedPromptCount} prompt lines, one per window; found ${h3ManualFirstLastPrompts.length}. Adjust the prompt lines or press Enhance to plan the sequence before generating.`,
           })
           return
         }
@@ -7041,7 +6976,7 @@ export const useStore = create<AppState>((set, get) => ({
         })
         if (ltxManualPrompts.length !== expectedPromptCount) {
           set({
-            promptEnhanceError: `Manual LTX sequence needs exactly ${expectedPromptCount} non-empty prompt ${expectedPromptCount === 1 ? 'line' : 'lines'} (window 1 through window ${expectedPromptCount}); found ${ltxManualPrompts.length}.`,
+            promptEnhanceError: `This LTX sequence needs ${expectedPromptCount} prompt lines, one per window; found ${ltxManualPrompts.length}. Adjust the prompt lines or press Enhance to plan the sequence before generating.`,
           })
           return
         }
@@ -7049,7 +6984,7 @@ export const useStore = create<AppState>((set, get) => ({
       }
 
       if (
-        h3ReferenceSequenceRequested
+        params.minimax_h3_reference_sequence === true
         && params.minimax_h3_sequence_prompt_mode === 'manual'
         && effectiveH3SequenceClipFrames != null
       ) {
@@ -7068,7 +7003,7 @@ export const useStore = create<AppState>((set, get) => ({
         if (h3ManualSequencePrompts.length !== expectedPromptCount) {
           const unit = nativeContinuation ? 'window' : 'clip'
           set({
-            promptEnhanceError: `Manual Omni sequence needs exactly ${expectedPromptCount} non-empty prompt ${expectedPromptCount === 1 ? 'line' : 'lines'} (${unit} 1 through ${unit} ${expectedPromptCount}); found ${h3ManualSequencePrompts.length}.`,
+            promptEnhanceError: `This Reference sequence needs ${expectedPromptCount} prompt lines, one per ${unit}; found ${h3ManualSequencePrompts.length}. Adjust the prompt lines or press Enhance to plan the sequence before generating.`,
           })
           return
         }
@@ -7711,93 +7646,6 @@ export const useStore = create<AppState>((set, get) => ({
       delete params.identity_guidance_scale
     }
 
-    if (deferAutoEnhance) {
-      // Deferred H3 enhancement replaces this one-line idea with one
-      // multiline Context-IR document. Mark it atomic before submission too;
-      // the backend repeats this normalization after enhancement for cached
-      // web assets and direct API callers.
-      if (isH3Model && !usesMultiplePasses) {
-        params.multi_prompts_gen_type = 2
-      }
-      let deferredImagePaths: string[] = []
-      let deferredReferenceContext: string | undefined
-      if (isOmniReference) {
-        const inventory = _omniEnhanceInventory(
-          (params.minimax_h3_references as MiniMaxH3Reference[] | undefined) ?? [],
-        )
-        deferredImagePaths = inventory.imagePaths
-        deferredReferenceContext = inventory.referenceContext
-      } else {
-        const appendPaths = (value: unknown) => {
-          if (typeof value === 'string' && value.trim()) deferredImagePaths.push(value)
-          else if (Array.isArray(value)) {
-            deferredImagePaths.push(...value.filter(
-              (item): item is string => typeof item === 'string' && Boolean(item.trim()),
-            ))
-          }
-        }
-        appendPaths(params.image_start)
-
-        if (isH3Model) {
-          const hasStart = deferredImagePaths.length > 0
-          const beforeEnd = deferredImagePaths.length
-          appendPaths(params.image_end)
-          const hasEnd = deferredImagePaths.length > beforeEnd
-          const injectedPositions = String(params.frames_positions || '')
-            .split(/[\s,]+/)
-            .filter(Boolean)
-          const injectedPaths = (
-            String(params.video_prompt_type || '').includes('KFI')
-            && Array.isArray(params.image_refs)
-          ) ? (params.image_refs as unknown[])
-              .map((path, index) => ({
-                path: typeof path === 'string' ? path : '',
-                position: injectedPositions[index] || '',
-              }))
-              .filter(item => Boolean(item.path && item.position))
-            : []
-          deferredImagePaths.push(...injectedPaths.map(item => item.path))
-
-          let pictureIndex = 0
-          const alignmentLines: string[] = []
-          const fps = state.modelOptions?.fps ?? 24
-          const duration = Number(params.video_length || 0) / fps
-          if (hasStart) {
-            alignmentLines.push(`For the target video, at 0.00 seconds into the target video, <Picture ${++pictureIndex}> (from [Shot 1]) is fully referenced.`)
-          }
-          if (hasEnd) {
-            alignmentLines.push(`At ${duration.toFixed(2)} seconds, <Picture ${++pictureIndex}> is the required final-frame destination.`)
-          }
-          for (const keyframe of injectedPaths) {
-            const match = /^W1:(\d{1,3})$/i.exec(keyframe.position)
-            let localSeconds: number | null = null
-            if (match) localSeconds = duration * Math.min(100, Number(match[1])) / 100
-            else if (/^\d+$/.test(keyframe.position)) localSeconds = Math.max(0, Number(keyframe.position) - 1) / fps
-            else if (/^l$/i.test(keyframe.position)) localSeconds = duration
-            const timing = localSeconds == null
-              ? `at timeline position ${keyframe.position}`
-              : `at ${localSeconds.toFixed(2)} seconds into the target video`
-            alignmentLines.push(`${timing}, <Picture ${++pictureIndex}> is fully referenced as an exact injected frame; reach it naturally and continue from it.`)
-          }
-          deferredReferenceContext = alignmentLines.join('\n') || undefined
-        }
-      }
-
-      params._deferred_prompt_enhance = {
-        prompt: String(params.prompt || ''),
-        mode: state.generationMode,
-        model_type: String(params.model_type || ''),
-        image_paths: deferredImagePaths.length > 0 ? deferredImagePaths : undefined,
-        duration_seconds: state.durationSeconds,
-        window_count: 1,
-        window_size_seconds: state.slidingWindowSeconds,
-        activated_loras: Array.isArray(params.activated_loras) && params.activated_loras.length > 0
-          ? params.activated_loras
-          : undefined,
-        reference_context: deferredReferenceContext,
-      }
-    }
-
     const continuationRuntimeFrames = (
       Number(params.video_length || 0) + continuationSourceContextFrames
     )
@@ -7832,16 +7680,6 @@ export const useStore = create<AppState>((set, get) => ({
       && params.minimax_h3_multi_window === true
       && params.minimax_h3_window_storyboard === false
       && continuationRuntimeFrames > Number(params.sliding_window_size || 0)
-    )
-    const ltxWindowSequenceActive = (
-      state.generationMode === 'video'
-      && isLtxSequenceModel
-      && params.ltx_multi_window === true
-      && continuationRuntimeFrames > Number(params.sliding_window_size || 0)
-    )
-    const ltxAutoPlanActive = (
-      ltxWindowSequenceActive
-      && params.ltx_window_prompt_mode !== 'manual'
     )
     const h3PlanActive = h3WindowStoryboardActive || (
       h3ReferenceSequenceActive && !h3ManualReferenceSequence
@@ -7922,9 +7760,7 @@ export const useStore = create<AppState>((set, get) => ({
       message: holdForQueue
         ? 'Preparing queue entry...'
         : h3PlanActive
-        ? `Planning H3 ${h3ReferenceSequenceActive ? 'reference sequence' : 'windows'}...`
-        : ltxAutoPlanActive
-          ? 'Planning LTX windows...'
+        ? 'Submitting reviewed H3 prompts...'
         : h3ManualReferenceSequence
           ? 'Preparing H3 manual sequence...'
           : 'Submitting...',
@@ -7987,13 +7823,7 @@ export const useStore = create<AppState>((set, get) => ({
           ...j,
           id: job_id,
           status: submittedStatus,
-          message: submittedStatus === 'held'
-            ? (deferAutoEnhance || h3PlanActive || ltxAutoPlanActive
-                ? 'Ready - AI planning will run when queue starts'
-                : 'Ready - waiting for Start Queue')
-            : (h3PlanActive || ltxAutoPlanActive
-                ? 'Queued - AI planning waits for generation resources'
-                : 'Queued...'),
+          message: submittedStatus === 'held' ? 'Ready - waiting for Start Queue' : 'Queued...',
           h3WindowPlan: h3_window_plan ?? null,
         } : j),
       }))
@@ -9116,7 +8946,7 @@ export const useStore = create<AppState>((set, get) => ({
     }
   }),
   clearH3WindowPlan: () => set({ h3WindowPlan: null }),
-  enhancePrompt: async (ttsMode?: string) => {
+  enhancePrompt: async (ttsMode?: string, planningStyle: 'faithful' | 'creative' = 'faithful') => {
     let state = get()
     const primaryStudioCreate = (
       state.generationMode === 'video'
@@ -9160,8 +8990,16 @@ export const useStore = create<AppState>((set, get) => ({
       })
       return
     }
-    const { params, generationMode, startImage, endImage, imageRefs } = state
-    if (!params.prompt.trim()) return
+    const { generationMode, startImage, endImage, imageRefs } = state
+    // Enhancement style belongs to this explicit click, not a future Generate.
+    const params = { ...state.params,
+      ...(generationMode === 'video' ? {
+        minimax_h3_sequence_prompt_mode: planningStyle === 'creative' ? 'creative' as const : 'auto' as const,
+        minimax_h3_window_storyboard: true,
+        ltx_window_prompt_mode: planningStyle === 'creative' ? 'creative' as const : 'auto' as const,
+      } : {}),
+    }
+    if (!params.prompt.trim() || state.isEnhancing) return
     let generationWorkInFlight = (
       state.isGenerating
       || state.jobs.some(job => job.status === 'running' || job.status === 'queued')
@@ -9177,38 +9015,7 @@ export const useStore = create<AppState>((set, get) => ({
     if (generationWorkInFlight) {
       set({
         isEnhancing: false,
-        promptEnhanceError: 'A generation is already using or waiting for the GPU. Prompt Enhance was not started. Add this setup to the queue and Maestro will run AI planning safely when its turn begins.',
-      })
-      return
-    }
-    if (
-      state.modelOptions?.omni_reference === true
-      && params.minimax_h3_reference_sequence === true
-      && params.minimax_h3_sequence_prompt_mode === 'manual'
-    ) {
-      set({
-        promptEnhanceError: 'Manual Omni sequence mode uses each prompt line exactly as written. Switch Window prompts to AI - Faithful or AI - Creative to use the LLM planner.',
-      })
-      return
-    }
-    if (
-      String(state.modelOptions?.architecture || '').startsWith('minimax_h3')
-      && state.modelOptions?.omni_reference !== true
-      && params.minimax_h3_multi_window === true
-      && params.minimax_h3_window_storyboard === false
-    ) {
-      set({
-        promptEnhanceError: 'Manual H3 multi-window mode uses each prompt line as written. Switch Window prompts to Auto plan to use the LLM planner.',
-      })
-      return
-    }
-    if (
-      state.modelOptions?.multi_window_sequence_controls === true
-      && params.ltx_multi_window === true
-      && params.ltx_window_prompt_mode === 'manual'
-    ) {
-      set({
-        promptEnhanceError: 'Manual LTX multi-window mode uses each prompt line exactly as written. Switch Window prompts to AI - Faithful or AI - Creative to use the LLM planner.',
+        promptEnhanceError: 'A generation is already using or waiting for the GPU. Wait for it to finish, then press Enhance to review the improved prompt before generating.',
       })
       return
     }
@@ -9246,67 +9053,9 @@ export const useStore = create<AppState>((set, get) => ({
         : []
 
       if (isOmniReference) {
-        let pictureIndex = 0
-        let videoIndex = 0
-        let audioIndex = 0
-        const labelLines: string[] = []
-        const savedCharacterMedia = new Map<string, { name: string; labels: string[] }>()
-        const bindSavedCharacter = (reference: MiniMaxH3Reference, label: string) => {
-          if (!reference.library_character_id) return
-          const name = (reference.character_name || reference.role || 'Saved character').trim()
-          const binding = savedCharacterMedia.get(reference.library_character_id) ?? { name, labels: [] }
-          binding.labels.push(label)
-          savedCharacterMedia.set(reference.library_character_id, binding)
-        }
-        for (const reference of params.minimax_h3_references ?? []) {
-          const note = (reference.role || reference.filename || 'reference').trim()
-          if (reference.type === 'audio') {
-            const intent = reference.audio_intent ?? 'voice'
-            if (intent === 'drive') {
-              labelLines.push(`Exact target soundtrack: ${note}; intent=AUDIO REUSE / PERFORMANCE DRIVER; retention=fully_preserved; preserve its waveform and audible timeline exactly and synchronize visible action and lip movement to it; this is target conditioning rather than a numbered Omni audio reference`)
-            } else if (intent === 'style') {
-              const label = `<Audio ${++audioIndex}>`
-              labelLines.push(`${label}: ${note}; intent=AUDIO REFERENCE; retention=weak_reference; borrow only rhythm/style/texture and do not copy the source signal or words`)
-            } else {
-              const label = `<Audio ${++audioIndex}>`
-              labelLines.push(`${label}: ${note}; intent=VOICE REFERENCE; retention=reference; use vocal identity/timbre/emotion/delivery for new scripted dialogue without copying source words, timing, waveform, room tone, reverberation, echo, background noise, microphone coloration, or source spatial acoustics; render the voice acoustically inside the target environment`)
-              bindSavedCharacter(reference, label)
-            }
-          } else if (reference.type === 'image') {
-            const label = `<Picture ${++pictureIndex}>`
-            labelLines.push(`${label}: visual identity/appearance reference for ${note}; retention=reference for identity only; do not reproduce its background, framing, composition, or pose`)
-            bindSavedCharacter(reference, label)
-            if (reference.path) imagePaths.push(reference.path)
-          } else {
-            const nextVideoIndex = videoIndex + 1
-            if ((reference.has_audio || reference.audio_path) && reference.include_audio !== false) {
-              labelLines.push(`<Audio ${++audioIndex}>: soundtrack paired with <Video ${nextVideoIndex}>; intent=AUDIO REUSE / PERFORMANCE DRIVER; retention=partially_copy; preserve its audible timeline and synchronize action to it`)
-            }
-            videoIndex = nextVideoIndex
-            const label = `<Video ${videoIndex}>`
-            if (reference.video_intent === 'character') {
-              labelLines.push(`${label}: identity, appearance, and characteristic-motion evidence for ${note}; compile it into that character's Subject; reject its source background, framing, camera, edit rhythm, opening frame, and action`)
-              bindSavedCharacter(reference, label)
-            } else if (reference.video_intent === 'scene') {
-              labelLines.push(`${label}: environment, lighting, and scene-continuity reference for ${note}; do not copy incidental people as target identities`)
-            } else {
-              labelLines.push(`${label}: motion/camera/scene/timing reference for ${note}`)
-            }
-          }
-        }
-        const savedCharacterLines = Array.from(savedCharacterMedia.values()).map((binding, index) => {
-          const subjectNumber = index + 1
-          const subjectLabel = `<Subject ${subjectNumber}>`
-          return (
-            `Saved character "${binding.name}" is exactly ${subjectLabel}: `
-            + `${binding.labels.join(' + ')} all define this one stable character. `
-            + `Whenever the user names ${binding.name}, use ${subjectLabel}. Subject numbering follows `
-            + `this reference inventory, while speaker IDs are assigned independently in first-vocal-event order. `
-            + `Bind every listed voice Audio to this Subject and its event-ordered speaker ID. Do not create another Subject for `
-            + 'a repeated media label, do not renumber this mapping, and do not emit an @ token.'
-          )
-        })
-        referenceContext = [...savedCharacterLines, ...labelLines].join('\n')
+        const inventory = _omniEnhanceInventory(params.minimax_h3_references ?? [])
+        imagePaths.push(...inventory.imagePaths)
+        referenceContext = inventory.referenceContext
       } else if (generationMode === 'image') {
         if (
           (state.studioImageWorkflow === 'inpaint' || state.studioImageWorkflow === 'outpaint')
@@ -9467,6 +9216,7 @@ export const useStore = create<AppState>((set, get) => ({
             prompt: plan.source_prompt || h3PlanningSource,
             _h3_original_prompt: undefined,
             minimax_h3_sequence_clip_frames: effectiveClipFrames,
+            minimax_h3_sequence_prompt_mode: params.minimax_h3_sequence_prompt_mode,
             minimax_h3_sequence_memory_override: state.slidingWindowLocked,
           },
           isEnhancing: false,
@@ -9520,6 +9270,7 @@ export const useStore = create<AppState>((set, get) => ({
             prompt: plan.source_prompt || h3PlanningSource,
             _h3_original_prompt: undefined,
             sliding_window_size: effectiveWindowFrames,
+            minimax_h3_sequence_prompt_mode: params.minimax_h3_sequence_prompt_mode,
             minimax_h3_multi_window: true,
             minimax_h3_window_storyboard: true,
           },
@@ -9555,14 +9306,7 @@ export const useStore = create<AppState>((set, get) => ({
         tts_enhance_mode: ttsMode || undefined,
         tts_voice_count: ttsSpeakingVoiceCount(state.ttsVoiceCount, state.modelOptions, String(params.audio_prompt_type || '')) || undefined,
         reference_context: referenceContext,
-        planning_style: (
-          generationMode === 'video'
-          && (
-            isLtxSequence
-              ? params.ltx_window_prompt_mode === 'creative'
-              : params.minimax_h3_sequence_prompt_mode === 'creative'
-          )
-        ) ? 'creative' : 'faithful',
+        planning_style: planningStyle,
       })
       const preserveH3Source = (
         generationMode === 'video'

@@ -11,6 +11,7 @@ import {
   durationWindowPlan,
 } from '../../lib/durationPlanning'
 import { ComposerContext, ComposerToolbarItem } from './SidebarPanels'
+import { SidebarMenu } from './SidebarMenu'
 
 const placeholders: Record<string, string> = {
   image: 'Describe your image...',
@@ -159,12 +160,9 @@ export function PromptInput() {
   const studioVideoWorkflow = useStore(s => s.studioVideoWorkflow)
   const h3CameraCoverage = useStore(s => s.params.minimax_h3_camera_coverage || 'auto')
   const h3FirstLastMultiWindow = useStore(s => s.params.minimax_h3_multi_window === true)
-  const h3WindowPlanningEnabled = useStore(s => s.params.minimax_h3_window_storyboard !== false)
   const h3ReferenceSequenceEnabled = useStore(s => s.params.minimax_h3_reference_sequence === true)
-  const h3ManualSequencePrompts = useStore(s => s.params.minimax_h3_sequence_prompt_mode === 'manual')
   const h3NativeSequence = useStore(s => s.params.minimax_h3_sequence_continuity !== false)
   const ltxMultiWindow = useStore(s => s.params.ltx_multi_window === true)
-  const ltxManualWindowPrompts = useStore(s => s.params.ltx_window_prompt_mode === 'manual')
   const h3WindowPlan = useStore(s => s.h3WindowPlan)
   const updateH3WindowPrompt = useStore(s => s.updateH3WindowPrompt)
   const activeH3JobPhase = useStore(s => {
@@ -179,6 +177,8 @@ export function PromptInput() {
     && !!item.h3WindowPlan
   ))?.h3WindowPlan?.signature || '')
   const [ttsMenuOpen, setTtsMenuOpen] = useState(false)
+  const [enhanceMenuOpen, setEnhanceMenuOpen] = useState(false)
+  const [enhanceAnchor, setEnhanceAnchor] = useState<HTMLDivElement | null>(null)
   const [closedWindowPlanSignature, setClosedWindowPlanSignature] = useState<string | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
 
@@ -234,7 +234,6 @@ export function PromptInput() {
   const usesH3WindowPlanner = (
     usesWindows
     && modelOptions?.sliding_window_auto_prompt_pacing === true
-    && h3WindowPlanningEnabled
   )
   const nativeMaximumFrames = modelOptions?.frames_maximum ?? null
   const sequenceClipFrames = nativeMaximumFrames != null
@@ -265,22 +264,21 @@ export function PromptInput() {
     && sequenceClipFrames != null
     && h3SequenceTotalFrames > sequenceClipFrames
   )
-  const usesH3ManualSequence = h3SequenceEnabled && h3ManualSequencePrompts
+  const usesH3ManualSequence = h3SequenceNeedsMultiplePasses && !h3WindowPlan
   const usesH3ManualFirstLast = (
     usesWindows
     && isH3FirstLast
     && h3FirstLastMultiWindow
-    && !h3WindowPlanningEnabled
+    && !h3WindowPlan
   )
   const usesH3ManualPrompts = usesH3ManualSequence || usesH3ManualFirstLast
   const usesLtxManualPrompts = (
     usesWindows
     && isLtxSequence
     && ltxMultiWindow
-    && ltxManualWindowPrompts
   )
   const usesManualWindowPrompts = usesH3ManualPrompts || usesLtxManualPrompts
-  const usesH3SequencePlanner = h3SequenceNeedsMultiplePasses && !h3ManualSequencePrompts
+  const usesH3SequencePlanner = h3SequenceNeedsMultiplePasses
   const sequenceClipCount = h3SequenceEnabled && sequenceClipFrames
     ? h3OmniSequenceWindowCount({
         totalFrames: h3SequenceTotalFrames,
@@ -496,7 +494,7 @@ export function PromptInput() {
       )}
       {usesManualWindowPrompts && (
         <div className="mb-1.5 flex items-center justify-between gap-2 text-[10px] text-text-muted">
-          <span>One non-empty line per {manualPromptUnit}</span>
+          <span>One line per {manualPromptUnit}, or press Enhance</span>
           <span className={manualPromptLineCount === manualPromptCount ? 'text-text-secondary' : 'text-amber-400'}>
             {manualPromptLineCount}/{manualPromptCount} prompts
           </span>
@@ -512,16 +510,15 @@ export function PromptInput() {
           placeholder={usesManualWindowPrompts
             ? `Line 1 = ${manualPromptUnit} 1, line 2 = ${manualPromptUnit} 2... (${manualPromptCount} total)`
             : usesH3Plan
-            ? `Describe the complete video idea—Maestro will plan ${expectedPlanCount} H3 ${usesH3SequencePlanner ? 'reference clips' : 'windows'}.`
+            ? `Describe your complete video, then press Enhance to plan ${expectedPlanCount} H3 ${usesH3SequencePlanner ? 'reference clips' : 'windows'}.`
             : usesWindows
               ? (isLtxSequence
-                  ? `Describe the complete video idea - Maestro will plan ${windowCount} LTX windows.`
+                  ? `Describe your complete video, then press Enhance to plan ${windowCount} LTX windows.`
                   : `Line 1 = window 1, line 2 = window 2... (${windowCount} windows)`)
             : modePlaceholder}
           className={`studio-prompt-textarea block w-full resize-none px-3 py-2 text-base md:text-sm text-text-primary placeholder:text-text-muted focus:outline-none transition-colors ${compact ? 'min-h-[72px] bg-transparent border border-transparent rounded-lg focus:border-border-light' : `${composer?.expanded ? 'min-h-[260px]' : 'min-h-[104px]'} bg-bg-tertiary border border-border rounded-xl focus:border-accent-blue`}`}
         />
-        <ComposerToolbarItem>{prompt.trim() && !usesManualWindowPrompts && (
-        isAudioOnly ? (
+        <ComposerToolbarItem>{isAudioOnly ? (
           /* TTS: mode-aware split button. Main button uses default mode based
              on voice-slot count; dropdown exposes both Speech and Dialogue
              explicitly so the user can override regardless of voice count.
@@ -534,7 +531,7 @@ export function PromptInput() {
             <div className="flex items-center">
               <button
                 onClick={() => enhancePrompt(defaultMode)}
-                disabled={isEnhancing}
+                disabled={isEnhancing || !prompt.trim()}
                 title={isMultiVoice
                   ? `Write ${voiceCount}-person dialogue (use dropdown to switch to speech)`
                   : 'Write a speech (use dropdown to switch to dialogue)'}
@@ -544,7 +541,7 @@ export function PromptInput() {
               </button>
               <button
                 onClick={() => setTtsMenuOpen(!ttsMenuOpen)}
-                disabled={isEnhancing}
+                disabled={isEnhancing || !prompt.trim()}
                 aria-label="Speech enhancement options"
                 aria-expanded={ttsMenuOpen}
                 className="p-1.5 rounded-r-md text-text-muted hover:text-accent-blue hover:bg-bg-hover transition-colors disabled:opacity-50 border-l border-border"
@@ -590,19 +587,23 @@ export function PromptInput() {
             )}
           </div>
         ) : (
-          <button
-            onClick={() => enhancePrompt()}
-            disabled={isEnhancing}
-            title="Enhance prompt with AI"
-            className={`${composer ? 'relative p-2' : 'absolute right-2 bottom-2 p-1.5'} rounded-lg text-text-muted hover:text-accent-blue hover:bg-bg-hover transition-colors disabled:opacity-50`}
-          >
-            {isEnhancing ? (
-              <Loader2 size={14} className="animate-spin" />
-            ) : (
-              <Sparkles size={14} />
-            )}
-          </button>
-        )
+          <div ref={setEnhanceAnchor} className={`${composer ? 'relative' : 'absolute right-2 bottom-2'} flex items-center`}>
+            <button type="button" onClick={() => enhancePrompt(undefined, 'faithful')}
+              disabled={isEnhancing || !prompt.trim()} aria-label="Enhance prompt with AI Faithful" title="AI Faithful — enhance your prompt while preserving your events and dialogue"
+              className="min-h-8 rounded-l-md p-2 text-text-muted hover:text-accent-blue hover:bg-bg-hover disabled:opacity-40">
+              {isEnhancing ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+            </button>
+            <button type="button" onClick={() => setEnhanceMenuOpen(value => !value)} disabled={isEnhancing || !prompt.trim()}
+              aria-label="Prompt enhancement options" aria-haspopup="menu" aria-expanded={enhanceMenuOpen}
+              className="min-h-8 rounded-r-md border-l border-border px-1.5 text-text-muted hover:text-accent-blue hover:bg-bg-hover disabled:opacity-40"><ChevronUp size={12}/></button>
+            <SidebarMenu open={enhanceMenuOpen} anchor={enhanceAnchor} label="Enhance prompt" onClose={() => setEnhanceMenuOpen(false)} width={184}>
+              {(['faithful', 'creative'] as const).map(style => <button key={style} type="button" role="menuitem"
+                onClick={() => { setEnhanceMenuOpen(false); void enhancePrompt(undefined, style) }}
+                className="flex min-h-11 w-full items-center rounded-lg px-3 text-left text-xs text-text-secondary hover:bg-bg-hover hover:text-text-primary">
+                {style === 'faithful' ? 'AI Faithful' : 'AI Creative'}
+              </button>)}
+            </SidebarMenu>
+          </div>
         )}</ComposerToolbarItem>
       </div>
     </div>

@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const {assertPromptStability} = require('./prompt_stability.cjs');
+const {assertExplicitEnhancement} = require('./studio_enhancement.cjs');
 const root = path.resolve(__dirname, '../..');
 const base = process.argv[2];
 if (!base) throw new Error('Pass the running Maestro URL; browser actions never reach it.');
@@ -20,7 +21,7 @@ const read = async endpoint => {
 
 (async () => {
   const catalogue = await read('/api/v1/models');
-  const ids = ['minimax_h3_ref2va_fused_turbo', 'minimax_h3_ref2va', 'minimax_h3_fused_turbo', 'minimax_h3', 'viggle_animate', 'flux2_klein_9b', 'minimax_h3_voice_audio'];
+  const ids = ['minimax_h3_ref2va_fused_turbo', 'minimax_h3_ref2va', 'minimax_h3_fused_turbo', 'minimax_h3', 'viggle_animate', 'flux2_klein_9b', 'minimax_h3_voice_audio', 'ltx2_22B_distilled_1_1'];
   const options = Object.fromEntries(await Promise.all(ids.map(async id => [id, await read('/api/v1/model-options/' + id)])));
   const bundle = await esbuild.build({stdin: {contents: [
     "import React from 'react'; import {createRoot} from 'react-dom/client';",
@@ -37,7 +38,7 @@ const read = async endpoint => {
     ...(process.platform === 'win32' ? {executablePath: process.env.MAESTRO_CHROME || 'C:/Program Files/Google/Chrome/Application/chrome.exe'} : {})});
   try {
     const page = await browser.newPage({viewport: {width: 1360, height: 900}});
-    const errors = [], requests = [];
+    const errors = [], requests = [], llmRequests = [];
     page.on('pageerror', error => { errors.push(error.message); console.error(error.stack); });
     const character = {id: 'blaine', name: 'Blaine', visual: {type: 'image', path: '/uploads/portrait.png', url: '/picture.svg', thumbnail_url: '/picture.svg'},
       voice: {path: '/uploads/voice.wav', url: '/voice.wav', duration_seconds: 3}};
@@ -52,13 +53,34 @@ const read = async endpoint => {
       if (endpoint === '/api/v1/characters') return json({characters});
       if (endpoint.includes('/media-flow/capabilities')) return json({neural_rendering: {available: false, reason: 'Isolated test'}, frame_generation: {available: false, factors: [], reason: 'Isolated test'}});
       if (endpoint.includes('/upload')) return json({path: '/uploads/reference.png', url: '/picture.svg', duration_seconds: 3});
+      if (endpoint === '/api/v1/llm/enhance-prompt') {
+        const body = route.request().postDataJSON();
+        llmRequests.push({endpoint, ...body});
+        return json({original: body.prompt, enhanced: body.tts_enhance_mode ? 'Blaine: Welcome to Maestro.'
+          : Array.from({length: body.window_count || 1}, (_, i) => `Enhanced ${body.planning_style} window ${i + 1}.`).join('\n')});
+      }
+      if (endpoint === '/api/v1/llm/plan-h3-sequence' || endpoint === '/api/v1/llm/plan-h3-windows') {
+        const body = route.request().postDataJSON();
+        llmRequests.push({endpoint, ...body});
+        const windowFrames = body.sequence_clip_frames || body.window_frames;
+        const overlap = body.overlap_frames || 0;
+        const count = Math.max(1, Math.ceil((body.total_frames - windowFrames) / (windowFrames - overlap)) + 1);
+        const windows = Array.from({length: count}, (_, i) => {
+          const start = i * (windowFrames - overlap), end = Math.min(body.total_frames, start + windowFrames);
+          return {index: i + 1, title: `Scene ${i + 1}`, start_frame: start, end_frame: end, start_seconds: start / 24,
+            end_seconds: end / 24, opening_state: '', closing_state: '', prompt: `Planned ${body.planning_style} window ${i + 1}.`};
+        });
+        return json({...body, source_prompt: body.prompt, signature: `plan-${llmRequests.length}`, planned_by: 'llm',
+          plan_kind: endpoint.endsWith('sequence') ? 'reference_sequence' : 'sliding_window', native_continuation: body.sequence_continuity,
+          window_frames: windowFrames, window_count: count, windows, window_prompts: windows.map(window => window.prompt)});
+      }
       if (endpoint === '/api/v1/generate') {
         requests.push(route.request().postDataJSON());
         return json({job_id: String(requests.length), status: 'held'});
       }
       if (endpoint.includes('/status/')) return json({status: 'completed', output_files: []});
       if (endpoint === '/api/v1/outputs') return json({outputs: [], total: 0});
-      if (endpoint.startsWith('/api/')) return json({presets: [], loras: [], recipes: [], items: [], downloads: [], configured: true});
+      if (endpoint.startsWith('/api/')) return json({presets: [], loras: [], recipes: [], items: [], downloads: [], jobs: [], configured: true});
       if (endpoint === '/picture.svg') return route.fulfill({contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400"><rect width="400" height="400" fill="#334155"/><circle cx="200" cy="140" r="90" fill="#c9a280"/><path d="M30 400Q200 90 370 400" fill="#8099aa"/></svg>'});
       if (endpoint !== '/') return route.fulfill({status: 404, body: ''});
       return route.fulfill({contentType: 'text/html', body: '<meta name="viewport" content="width=device-width,initial-scale=1"><div id="root" style="height:100dvh;display:flex"></div>'});
@@ -75,7 +97,7 @@ const read = async endpoint => {
           studioVideoWorkflow: workflow, studioImageWorkflow: 'generate', audioSubMode: 'speech',
           selectedModelPerMode: {[mode]: id}, durationSeconds: 124 / 24, slidingWindowSeconds: 243 / 24, slidingWindowOverlap: 18,
           slidingWindowLocked: false, h3WindowOverrides: {}, systemStats: stats, startImage: null, endImage: null, imageRefs: [],
-          h3WindowPlan: null, spatialUpsampling: '', filmGrainIntensity: 0, jobs: [],
+          h3WindowPlan: null, spatialUpsampling: '', filmGrainIntensity: 0, jobs: [], isGenerating: false, isEnhancing: false, promptEnhanceError: null,
           params: {...window.baseParams, model_type: id, resolution: '864x480', prompt: 'A calm scene.', image_mode: workflow === 'extend' ? 3 : 0,
             _duration_planning_mode: 'duration', minimax_h3_sequence_prompt_mode: 'manual', minimax_h3_window_storyboard: false, minimax_h3_references: [],
             num_inference_steps: options.default_num_inference_steps || 4, guidance_scale: 1, seed: 42},
@@ -91,6 +113,11 @@ const read = async endpoint => {
     await sidebar.getByRole('button', {name: /Characters/}).waitFor();
     await pause();
     assert.deepEqual(errors, [], 'StrictMode renders the full sidebar without a loop');
+    if (process.env.MAESTRO_UI_ENHANCE_ONLY) {
+      await assertExplicitEnhancement(page, sidebar, requests, llmRequests);
+      assert.deepEqual(errors, []);
+      return;
+    }
     await assertPromptStability(page, sidebar);
 
     // Long workflow lists overlay the editor; the full catalogue remains reachable.
@@ -107,13 +134,21 @@ const read = async endpoint => {
     await sidebar.getByRole('button', {name: /^Resolution:/}).click();
     for (const preset of options[ids[0]].resolution_preset_order || ['480p', '540p', '720p', '1080p']) {
       const label = preset === 'auto' ? 'Auto' : options[ids[0]].resolution_presets?.[preset]?.label || preset;
-      assert.equal(await page.getByRole('dialog', {name: 'Resolution', exact: true}).getByRole('button', {name: label, exact: true}).count(), 1, 'Full resolution option: ' + label);
+      assert.equal(await page.getByRole('menu', {name: 'Resolution', exact: true}).getByRole('menuitemradio', {name: label, exact: true}).count(), 1, 'Full resolution option: ' + label);
     }
+    const resolutionMenu = page.getByRole('menu', {name: 'Resolution', exact: true});
+    assert.ok((await resolutionMenu.boundingBox()).width <= 200);
+    assert.equal(await resolutionMenu.getByRole('heading').count(), 0, 'Simple choices have no redundant header');
+    assert.ok((await resolutionMenu.boundingBox()).y + (await resolutionMenu.boundingBox()).height < (await sidebar.getByRole('button', {name: /^Resolution:/}).boundingBox()).y, 'Resolution opens upward');
+    await resolutionMenu.press('ArrowUp');
+    assert.equal(await resolutionMenu.getByRole('menuitemradio').last().evaluate(node => node === document.activeElement), true, 'ArrowUp from the menu focuses its last choice');
+    await resolutionMenu.press('Home');
+    assert.equal(await resolutionMenu.getByRole('menuitemradio').first().evaluate(node => node === document.activeElement), true);
     await sidebar.getByRole('button', {name: /^Aspect ratio:/}).click();
-    assert.equal(await page.getByRole('dialog', {name: 'Resolution', exact: true}).isVisible(), false, 'Switching settings opens only one overlay');
-    for (const ratio of ['16:9', '9:16', '1:1', '4:3', '3:4']) assert.equal(await page.getByRole('dialog', {name: 'Aspect ratio', exact: true}).locator('button[aria-pressed]').filter({hasText: ratio}).count(), 1);
-    await page.getByRole('dialog', {name: 'Aspect ratio', exact: true}).getByRole('button', {name: /3:4$/}).click();
-    await sidebar.getByRole('button', {name: /^Aspect ratio:/}).click();
+    assert.equal(await resolutionMenu.isVisible(), false, 'Switching settings opens only one overlay');
+    for (const ratio of ['16:9', '9:16', '1:1', '4:3', '3:4']) assert.equal(await page.getByRole('menu', {name: 'Aspect ratio', exact: true}).getByRole('menuitemradio', {name: ratio}).count(), 1);
+    await page.getByRole('menu', {name: 'Aspect ratio', exact: true}).getByRole('menuitemradio', {name: '3:4'}).click();
+    assert.equal(await page.getByRole('menu', {name: 'Aspect ratio', exact: true}).isVisible(), false, 'Selecting an option closes its menu');
     assert.match(await sidebar.getByRole('button', {name: /^Aspect ratio:/}).innerText(), /3:4/);
     await durationChip().click();
     const native = page.getByRole('dialog', {name: 'Duration & windows'}).getByRole('slider', {name: 'Duration model duration'});
@@ -168,7 +203,7 @@ const read = async endpoint => {
     await page.evaluate(() => window.store.setState({modelOptions: window.options.minimax_h3_ref2va_fused_turbo}));
     console.log('Character appearance/voice grouping, uploads, trailing add tile, roles and accessible reference ordering passed');
 
-    // Expansion preserves the actual textarea and its selection; it is not a second editor.
+    // The ordinary editor stays large and scrollable without an expand button.
     const script = Array.from({length: 30}, (_, n) => 'Window ' + (n + 1) + ': Blaine <d>This is my tutorial dialogue.</d>').join('\n');
     const prompt = sidebar.getByRole('textbox', {name: 'Generation prompt'});
     await prompt.fill(script);
@@ -178,9 +213,8 @@ const read = async endpoint => {
     assert.equal((await page.getByTestId('studio-generate-bar').boundingBox()).y, generateY);
     assert.ok((await prompt.boundingBox()).height >= 240, 'Prompt fills the desktop composition area');
     assert.ok(await prompt.evaluate(node => node.scrollHeight > node.clientHeight), 'Long scripts scroll inside the editor');
-    await sidebar.getByRole('button', {name: 'Expand prompt editor'}).click();
-    assert.equal(await page.evaluate(() => window.originalTextarea === document.querySelector('[aria-label="Generation prompt"]')), true);
-    await page.getByRole('dialog', {name: 'Expanded prompt editor'}).getByRole('button', {name: 'Done', exact: true}).click();
+    assert.equal(await sidebar.getByRole('button', {name: 'Expand prompt editor'}).count(), 0);
+    assert.equal(await sidebar.getByRole('combobox', {name: 'Prompt writing mode'}).count(), 0);
     assert.equal(await prompt.inputValue(), script);
     assert.equal(await prompt.evaluate(node => node.selectionStart), 10);
     await prompt.fill('A calm scene.');
@@ -202,12 +236,12 @@ const read = async endpoint => {
         resolution: s.params.resolution, model_type: s.params.model_type, windows, window_prompts: windows.map(window => window.prompt)}});
     });
     await sidebar.getByRole('button', {name: /Exact H3 prompts/}).click();
-    let writing = page.getByRole('dialog', {name: 'Expanded prompt editor'});
+    let writing = page.getByRole('dialog', {name: 'H3 window prompts'});
     await writing.locator('textarea[title]').nth(1).fill('My revised second-window dialogue.');
     await writing.getByRole('button', {name: 'Done', exact: true}).click();
     assert.equal(await page.evaluate(() => window.store.getState().h3WindowPlan.windows[1].prompt), 'My revised second-window dialogue.');
-    await sidebar.getByRole('button', {name: 'Expand prompt editor'}).click();
-    writing = page.getByRole('dialog', {name: 'Expanded prompt editor'});
+    await sidebar.getByRole('button', {name: /Exact H3 prompts/}).click();
+    writing = page.getByRole('dialog', {name: 'H3 window prompts'});
     assert.equal(await writing.locator('textarea[title]').nth(1).inputValue(), 'My revised second-window dialogue.');
     await writing.press('Escape');
     await page.evaluate(() => {
@@ -316,10 +350,10 @@ const read = async endpoint => {
         assert.equal(await sidebar.locator('.studio-advanced-label').isVisible(), viewport.width >= 768, 'Advanced compacts to the sidebar width, including wider mobile viewports');
         const toolbarBounds = await sidebar.getByRole('group', {name: 'Prompt controls', exact: true}).boundingBox();
         const promptBounds = await prompt.boundingBox();
-        const writingModeBounds = await sidebar.getByRole('combobox', {name: 'Prompt writing mode'}).boundingBox();
-        assert.ok(writingModeBounds.y >= promptBounds.y + promptBounds.height && writingModeBounds.y >= toolbarBounds.y, 'Prompt mode stays below the text');
-        const expandBounds = await sidebar.getByRole('button', {name: 'Expand prompt editor'}).boundingBox();
-        assert.ok(Math.abs(expandBounds.x + expandBounds.width - toolbarBounds.x - toolbarBounds.width) < 1, 'Prompt tools align to the bottom-right');
+        const enhanceBounds = await sidebar.getByRole('button', {name: 'Enhance prompt with AI Faithful'}).boundingBox();
+        assert.ok(enhanceBounds.y >= promptBounds.y + promptBounds.height && enhanceBounds.y >= toolbarBounds.y, 'Enhance stays below the text');
+        const menuBounds = await sidebar.getByRole('button', {name: 'Prompt enhancement options'}).boundingBox();
+        assert.ok(Math.abs(menuBounds.x + menuBounds.width - toolbarBounds.x - toolbarBounds.width) < 1, 'Prompt tools align to the bottom-right');
         const stripBounds = await page.getByTestId('studio-settings-strip').boundingBox();
         const settingsBounds = await page.getByTestId('studio-output-settings').boundingBox();
         assert.ok(Math.abs(settingsBounds.x + settingsBounds.width - stripBounds.x - stripBounds.width) < 1, 'Settings group aligns to the right edge');
@@ -352,27 +386,47 @@ const read = async endpoint => {
     await prompt.focus();
     await page.evaluate(() => {
       Object.defineProperty(window.visualViewport, 'height', {configurable: true, value: 370});
+      Object.defineProperty(window.visualViewport, 'offsetTop', {configurable: true, value: 180});
       window.visualViewport.dispatchEvent(new Event('resize'));
+      window.visualViewport.dispatchEvent(new Event('scroll'));
     });
     await pause();
     let bar = await page.getByTestId('studio-generate-bar').boundingBox();
-    assert.ok(bar.y + bar.height <= 371, 'Generate follows the visual viewport when the keyboard opens');
+    assert.ok(bar.y >= 180 && bar.y + bar.height <= 551, 'Generate follows keyboard height and viewport shift');
+    assert.equal((await sidebar.boundingBox()).y, 180, 'Drawer stays inside the shifted visual viewport');
+    assert.equal(await page.evaluate(() => document.body.style.position), 'fixed', 'Underlying gallery is locked while the mobile drawer is open');
+    assert.ok((await prompt.boundingBox()).y >= 180);
     assert.equal(await sidebar.locator('.studio-hardware').isVisible(), false);
     assert.ok((await prompt.boundingBox()).height >= 100, 'Typing has a usable prompt area above the keyboard');
     assert.equal(await page.evaluate(() => localStorage.getItem('hwbar_collapsed')), '1', 'Keyboard does not change the saved hardware preference');
     await advancedTrigger.click();
     const keyboardOverlay = await advanced.boundingBox();
-    assert.ok(keyboardOverlay.y >= 0 && keyboardOverlay.y + keyboardOverlay.height <= 370, 'Settings sheet follows the keyboard viewport');
+    assert.ok(keyboardOverlay.y >= 180 && keyboardOverlay.y + keyboardOverlay.height <= 550, 'Settings sheet follows the shifted keyboard viewport');
     await advanced.getByRole('button', {name: 'Close Advanced settings'}).click();
-    await sidebar.getByRole('button', {name: 'Expand prompt editor'}).click();
-    bar = await page.getByRole('dialog', {name: 'Expanded prompt editor'}).getByRole('button', {name: 'Done', exact: true}).boundingBox();
-    assert.ok(bar.y + bar.height <= 371, 'Expanded editor follows the available visual viewport too');
-    await page.getByRole('dialog', {name: 'Expanded prompt editor'}).press('Escape');
-    await page.evaluate(() => { delete window.visualViewport.height; window.visualViewport.dispatchEvent(new Event('resize')); });
+    await sidebar.getByRole('button', {name: /^Resolution:/}).click();
+    await page.evaluate(() => {
+      Object.defineProperty(window.visualViewport, 'offsetTop', {configurable: true, value: 120});
+      window.visualViewport.dispatchEvent(new Event('scroll'));
+    });
+    await pause();
+    assert.equal((await sidebar.boundingBox()).y, 120, 'Offset-only viewport scroll also repositions the drawer');
+    const keyboardMenu = await resolutionMenu.boundingBox();
+    const keyboardTrigger = await sidebar.getByRole('button', {name: /^Resolution:/}).boundingBox();
+    assert.ok(keyboardMenu.y >= 120 && keyboardMenu.y + keyboardMenu.height < keyboardTrigger.y, 'Compact menu follows its trigger after the viewport moves');
+    await page.screenshot({path: path.join(output, 'mobile-keyboard-menu.png')});
+    await resolutionMenu.press('Escape');
+    assert.equal(await sidebar.getByRole('button', {name: /^Resolution:/}).evaluate(node => document.activeElement === node), true);
+    await page.screenshot({path: path.join(output, 'mobile-keyboard-shift.png')});
+    await page.evaluate(() => {
+      delete window.visualViewport.height; delete window.visualViewport.offsetTop;
+      window.visualViewport.dispatchEvent(new Event('resize')); window.visualViewport.dispatchEvent(new Event('scroll'));
+    });
     console.log('Six theme variants at 1360px, 767px, 440px, 390px and 320px: no overlapping indicators, bottom prompt tools, mobile character scrolling and simulated keyboard viewport passed');
 
     // Recreate the original Extend model transition against real model metadata.
     await page.setViewportSize({width: 1360, height: 900});
+    await pause();
+    assert.equal(await page.evaluate(() => document.body.style.position), '', 'Returning to desktop restores normal document positioning');
     await page.evaluate(() => window.resetFixture('minimax_h3_fused_turbo', 'video', 'extend'));
     await sidebar.getByRole('button', {name: 'Choose model'}).click();
     const fullName = catalogue.models.find(model => model.model_type === 'minimax_h3').name;
@@ -431,6 +485,8 @@ const read = async endpoint => {
     }
     assert.deepEqual(errors, []);
     console.log('Extend full-model transition plus Frames, Viggle, Image and H3 Speech rendered without errors');
+    await assertExplicitEnhancement(page, sidebar, requests, llmRequests);
+    assert.deepEqual(errors, []);
     console.log('Sidebar regression checks passed. Screenshots: ' + output);
   } catch (error) {
     for (const context of browser.contexts()) for (const page of context.pages()) await page.screenshot({path: path.join(output, 'failure.png')}).catch(() => {});

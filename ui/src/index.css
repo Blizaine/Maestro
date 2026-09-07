@@ -765,7 +765,9 @@ input[type="range"]::-webkit-slider-thumb {
 }
 .studio-composer[data-expanded="true"] {
   height: var(--studio-visual-viewport-height, 100dvh);
+  top: var(--studio-visual-viewport-top, 0px);
 }
+.studio-prompt-toolbar { min-height: 32px; }
 @media (max-width: 767px) {
   .maestro-sidebar[data-keyboard-open="true"] .studio-hardware,
   .maestro-sidebar[data-keyboard-open="true"] .studio-workflow-header,

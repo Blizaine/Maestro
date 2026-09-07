@@ -48,15 +48,35 @@ export function Sidebar() {
   const [sidebarElement, setSidebarElement] = useState<HTMLElement | null>(null)
   const [settingsElement, setSettingsElement] = useState<HTMLDivElement | null>(null)
   const layout = useMemo(() => ({ sidebar: sidebarElement, settings: settingsElement }), [sidebarElement, settingsElement])
-  const [viewportHeight, setViewportHeight] = useState<number | undefined>(undefined)
+  const [visibleViewport, setVisibleViewport] = useState<{ height: number; top: number } | null>(null)
   useEffect(() => {
     if (!isMobile || !window.visualViewport) return
     const viewport = window.visualViewport
-    const resize = () => setViewportHeight(viewport.height)
+    const resize = () => setVisibleViewport(previous => (
+      previous?.height === viewport.height && previous.top === viewport.offsetTop
+        ? previous : { height: viewport.height, top: viewport.offsetTop }
+    ))
     resize()
     viewport.addEventListener('resize', resize)
-    return () => viewport.removeEventListener('resize', resize)
+    viewport.addEventListener('scroll', resize)
+    return () => {
+      viewport.removeEventListener('resize', resize)
+      viewport.removeEventListener('scroll', resize)
+    }
   }, [isMobile])
+  useEffect(() => {
+    if (!isMobile || !sidebarOpen) return
+    // iOS can scroll the document to an old caret position while opening the
+    // keyboard. Lock the gallery underneath the drawer, retaining its position.
+    const body = document.body
+    const { position, top, left, width } = body.style
+    const { scrollX, scrollY } = window
+    Object.assign(body.style, { position: 'fixed', top: `${-scrollY}px`, left: `${-scrollX}px`, width: '100%' })
+    return () => {
+      Object.assign(body.style, { position, top, left, width })
+      window.scrollTo(scrollX, scrollY)
+    }
+  }, [isMobile, sidebarOpen])
 
   const isVideo = generationMode === 'video'
   const isImage = generationMode === 'image'
@@ -230,8 +250,8 @@ export function Sidebar() {
             onClick={() => setSidebarOpen(false)}
           />
         )}
-        <aside ref={setSidebarElement} style={{ height: viewportHeight, '--studio-visual-viewport-height': viewportHeight ? `${viewportHeight}px` : undefined } as CSSProperties} inert={!sidebarOpen} aria-hidden={!sidebarOpen}
-          data-keyboard-open={viewportHeight != null && viewportHeight < window.innerHeight - 100}
+        <aside ref={setSidebarElement} style={{ top: visibleViewport?.top, height: visibleViewport?.height, '--studio-visual-viewport-height': visibleViewport ? `${visibleViewport.height}px` : undefined, '--studio-visual-viewport-top': `${visibleViewport?.top || 0}px` } as CSSProperties} inert={!sidebarOpen} aria-hidden={!sidebarOpen}
+          data-keyboard-open={visibleViewport != null && visibleViewport.height < window.innerHeight - 100}
           className={`maestro-sidebar fixed top-0 h-dvh w-[380px] max-w-[94vw] bg-bg-secondary border-r border-border z-50 flex flex-col transition-[left] duration-300 ease-in-out ${sidebarOpen ? 'left-0' : '-left-full'}`}>
           {/* Header */}
           <div className="shrink-0 px-4 py-3 border-b border-border flex items-center justify-between">
