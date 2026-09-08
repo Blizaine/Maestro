@@ -30,6 +30,7 @@ exports.assertPromptStability = async (page, sidebar) => {
       const hardware = sidebar.getByTitle('Show hardware status', {exact: true});
       if (await hardware.count()) await hardware.click();
       assert.equal(await sidebar.getByTitle('Collapse', {exact: true}).count(), 1, 'Exercise the expanded hardware bar');
+      await prompt.focus();
       await page.waitForTimeout(150);
       const empty = await prompt.evaluate(geometry);
       const toolbar = sidebar.getByRole('group', {name: 'Prompt controls', exact: true});
@@ -53,10 +54,14 @@ exports.assertPromptStability = async (page, sidebar) => {
         for (const long of [false, true]) {
           if (long) {
             await prompt.fill(Array.from({length: 40}, (_, n) => 'Line ' + n + ': Preserve the pose, framing, lighting, materials and detailed scenery.').join('\n'));
-            assert.ok(await prompt.evaluate(node => node.scrollHeight > node.clientHeight), 'Long prompt scrolls internally');
-            await prompt.evaluate(node => {node.setSelectionRange(10, 25); node.scrollTop = 100;});
+            assert.ok(await prompt.evaluate(node => node.scrollHeight <= node.clientHeight + 1), 'Long prompt grows without an internal scroller');
+            assert.ok((await prompt.boundingBox()).height > empty[3], 'Long text expands the prompt');
+            await prompt.evaluate(node => {node.setSelectionRange(10, 25);});
           }
-          assert.deepEqual(await prompt.evaluate(geometry), empty, 'Scrollbar appearance must not rewrap the prompt or change its frame');
+          await page.waitForTimeout(150);
+          const expected = await prompt.evaluate(geometry);
+          assert.equal(expected[2], empty[2], 'Prompt growth cannot change the text width');
+          assert.equal(expected[4], empty[4], 'The editor never adds its own scrollbar gutter');
           const before = await prompt.evaluate(node => [node.selectionStart, node.selectionEnd, node.scrollTop]);
           const measurements = await page.evaluate(async () => {
             const node = document.querySelector('[aria-label="Generation prompt"]');
@@ -70,7 +75,7 @@ exports.assertPromptStability = async (page, sidebar) => {
               const s = window.store.getState();
               window.store.setState({systemStats: {...s.systemStats, cpu: {percent: tick * 17}}});
               await new Promise(resolve => setTimeout(resolve, 250));
-              const rect = node.getBoundingClientRect(), scroller = document.querySelector('.studio-composer-content');
+              const rect = node.getBoundingClientRect(), scroller = document.querySelector('.studio-scroll-body');
               samples.push({geometry: [rect.x, rect.y, rect.width, rect.height, node.clientWidth, node.clientHeight],
                 outerWidth: scroller.scrollWidth, outerClientWidth: scroller.clientWidth,
                 selection: [node.selectionStart, node.selectionEnd, node.scrollTop]});
@@ -78,7 +83,7 @@ exports.assertPromptStability = async (page, sidebar) => {
             return samples;
           });
           for (const sample of measurements) {
-            assert.deepEqual(sample.geometry, empty, 'Writing overlay and status polling must not resize the prompt: ' + fixture[0]);
+            assert.deepEqual(sample.geometry, expected, 'Writing overlay and status polling must not resize the prompt: ' + fixture[0]);
             assert.ok(sample.outerWidth <= sample.outerClientWidth + 1, 'Injected overlays must not add an outer horizontal scrollbar');
             assert.deepEqual(sample.selection, before, 'Background updates preserve the caret, selection and scroll position');
           }
@@ -87,7 +92,8 @@ exports.assertPromptStability = async (page, sidebar) => {
         await page.evaluate(() => document.getElementById('test-writing-overlay')?.remove());
       }
       await prompt.fill('this is a test');
-      assert.deepEqual(await prompt.evaluate(geometry), empty, 'Removing the scrollbar keeps the text width steady');
+      await page.waitForTimeout(150);
+      assert.deepEqual((await prompt.evaluate(geometry)).slice(2), empty.slice(2), 'Deleting long text restores the original prompt size and width');
     }
   }
   await sidebar.getByTitle('Collapse', {exact: true}).click();

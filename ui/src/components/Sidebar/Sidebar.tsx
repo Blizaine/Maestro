@@ -33,6 +33,22 @@ import { ImageWorkflowControls } from './ImageWorkflowControls'
 import { AppModeToggle, MaestroBrand } from '../AppModeNavigation'
 import { CharacterToolbarContext, PromptDock, SidebarLayoutContext } from './SidebarPanels'
 
+function inputRevealBounds(input: HTMLElement) {
+  if (input instanceof HTMLTextAreaElement) {
+    const mirror = input.parentElement?.querySelector('[data-prompt-mirror]')?.firstChild
+    if (mirror instanceof Text) {
+      // The prompt grows with its text. Reveal the actual caret line instead
+      // of jumping to the top of a textarea that can span several screens.
+      const offset = input.selectionDirection === 'backward' ? input.selectionStart : input.selectionEnd
+      const range = document.createRange()
+      range.setStart(mirror, Math.min(offset, mirror.length - 1))
+      range.setEnd(mirror, Math.min(offset + 1, mirror.length))
+      return range.getBoundingClientRect()
+    }
+  }
+  return input.getBoundingClientRect()
+}
+
 export function Sidebar() {
   const toggleSettings = useStore(s => s.toggleSettings)
   const generationMode = useStore(s => s.generationMode)
@@ -87,7 +103,7 @@ export function Sidebar() {
     }
   }, [isMobile, sidebarOpen])
   useLayoutEffect(() => {
-    if (!isMobile || !sidebarElement) return
+    if (!sidebarElement) return
     let frame = 0
     const revealInput = () => {
       const input = document.activeElement
@@ -98,7 +114,7 @@ export function Sidebar() {
       for (let parent = input.parentElement; parent && parent !== sidebarElement; parent = parent.parentElement) {
         if (parent.scrollHeight <= parent.clientHeight || !['auto', 'scroll'].includes(getComputedStyle(parent).overflowY)) continue
         const bounds = parent.getBoundingClientRect()
-        const field = input.getBoundingClientRect()
+        const field = inputRevealBounds(input)
         const visibleHeight = Math.min(field.height, Math.max(0, parent.clientHeight - 16))
         const delta = field.top < bounds.top + 8 ? field.top - bounds.top - 8
           : field.top + visibleHeight > bounds.bottom - 8 ? field.top + visibleHeight - bounds.bottom + 8 : 0
@@ -111,9 +127,17 @@ export function Sidebar() {
     }
     scheduleReveal()
     sidebarElement.addEventListener('focusin', scheduleReveal)
+    sidebarElement.addEventListener('input', scheduleReveal)
+    sidebarElement.addEventListener('keyup', scheduleReveal)
+    sidebarElement.addEventListener('select', scheduleReveal)
+    window.addEventListener('resize', scheduleReveal)
     return () => {
       cancelAnimationFrame(frame)
       sidebarElement.removeEventListener('focusin', scheduleReveal)
+      sidebarElement.removeEventListener('input', scheduleReveal)
+      sidebarElement.removeEventListener('keyup', scheduleReveal)
+      sidebarElement.removeEventListener('select', scheduleReveal)
+      window.removeEventListener('resize', scheduleReveal)
     }
   }, [isMobile, sidebarElement, visibleViewport])
 
@@ -211,8 +235,8 @@ export function Sidebar() {
         {isImageWorkspace && <ImageWorkflowSelector />}
         {isAudioWorkspace && <AudioSubModeToggle />}
       </div>
-      <div className="studio-composition mx-3 flex min-h-0 flex-1 flex-col rounded-2xl border border-border bg-bg-primary/30" data-has-prompt={hasPrompt}>
-      <div data-testid="studio-controls-scroll" className={`${hasPrompt ? 'studio-inputs shrink-0' : 'flex-1'} flex min-h-0 flex-col gap-3 overflow-y-auto overflow-x-hidden overscroll-contain p-2.5 [&>*]:shrink-0`}>
+      <div className="studio-composition mx-3 flex grow shrink-0 basis-auto flex-col rounded-2xl border border-border bg-bg-primary/30" data-has-prompt={hasPrompt}>
+      <div data-testid="studio-controls-scroll" className={`${hasPrompt ? 'studio-inputs shrink-0' : 'grow shrink-0'} flex min-w-0 flex-col gap-3 p-2.5 [&>*]:shrink-0`}>
         {isUpscale ? (
           <ToolsPanel forcedTool="upscale" mediaKind={toolsUpscaleMedia} embedded />
         ) : isFilmGrain ? (
@@ -318,7 +342,7 @@ export function Sidebar() {
   return (
     <aside ref={setSidebarElement} className="maestro-sidebar w-[420px] h-full bg-bg-secondary border-r border-border flex flex-col shrink-0">
       {/* Header */}
-      <div className="flex h-14 items-center justify-between border-b border-border px-4">
+      <div className="flex h-14 shrink-0 items-center justify-between border-b border-border px-4">
         <MaestroBrand />
         <div className="flex items-center gap-2">
           <AppModeToggle />

@@ -40,8 +40,8 @@ function useAutoGrowingTextarea(value: string, enabled = true) {
   }, [enabled])
 
   useLayoutEffect(fitToContent, [value, fitToContent])
-  // The dock uses CSS to fill its allocated space. Clear the expanded editor's
-  // measurements when returning to it; typing and polling never size the dock.
+  // The dock's hidden text mirror owns its height. Clear the expanded editor's
+  // measurements on return so the ordinary prompt follows that CSS layout.
   useLayoutEffect(() => {
     if (enabled) return
     textareaRef.current?.style.removeProperty('height')
@@ -352,10 +352,10 @@ export function PromptInput() {
     && closedWindowPlanSignature !== h3WindowPlan.signature
   )
 
-  // The dock bounds the main textarea; the expanded editor keeps the complete
-  // source and editable window plan without mounting a second prompt instance.
+  // The dock grows with its text; the expanded editor keeps the complete source
+  // and editable window plan without mounting a second prompt instance.
   return (
-    <div className={`relative flex flex-col ${compact ? 'min-h-0 flex-1' : 'grow shrink-0'}`}>
+    <div className="relative flex grow shrink-0 basis-auto flex-col">
       {/* Enhance status indicator */}
       {isEnhancing && enhanceStatus.phase !== 'idle' && (
         <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-text-muted bg-bg-tertiary/80 rounded-t-lg border border-b-0 border-border">
@@ -500,7 +500,10 @@ export function PromptInput() {
           </span>
         </div>
       )}
-      <div className={compact ? 'studio-prompt-field relative min-h-[72px] flex-1' : 'relative mt-auto'}>
+      <div className={compact ? 'studio-prompt-field relative min-h-[120px] grow shrink-0 basis-auto' : 'relative mt-auto'}>
+        {compact && (
+          <div data-prompt-mirror aria-hidden="true" className="studio-prompt-mirror invisible select-none whitespace-pre-wrap break-words border border-transparent px-3 py-2 text-base md:text-sm">{prompt + ' '}</div>
+        )}
         <textarea
           ref={promptTextareaRef}
           aria-label="Generation prompt"

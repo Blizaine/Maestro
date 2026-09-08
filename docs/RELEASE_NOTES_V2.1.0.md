@@ -12,6 +12,11 @@ public v2.0.1 update.
 - Video, Image and Audio keep their complete workflow lists at the top.
   Compact media inputs sit above a large prompt field that fills the available
   space. Frames and References use consistent three-column input tiles.
+- Media tabs, workflow selection, references and prompt share one vertical
+  scroller, so short windows can reach every input. Long scripts expand the
+  prompt without a second scrollbar; short prompts still fill the available
+  writing space. Settings and Generate stay pinned, and typing keeps the
+  active line visible as the mobile keyboard moves.
 - Characters stays on the left of the bottom settings strip. Recipes,
   Resolution, Aspect, Duration and Advanced form a compact group on the right.
   Recipes sits immediately beside Resolution. Character buttons use the same

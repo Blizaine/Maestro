@@ -39,12 +39,14 @@ export function SidebarMenu({ open, anchor, label, id, onClose, children, width 
     const observer = new ResizeObserver(scheduleMeasure)
     observer.observe(anchor)
     window.addEventListener('resize', scheduleMeasure)
+    window.addEventListener('scroll', scheduleMeasure, true)
     window.visualViewport?.addEventListener('resize', scheduleMeasure)
     window.visualViewport?.addEventListener('scroll', scheduleMeasure)
     return () => {
       cancelAnimationFrame(frame)
       observer.disconnect()
       window.removeEventListener('resize', scheduleMeasure)
+      window.removeEventListener('scroll', scheduleMeasure, true)
       window.visualViewport?.removeEventListener('resize', scheduleMeasure)
       window.visualViewport?.removeEventListener('scroll', scheduleMeasure)
     }

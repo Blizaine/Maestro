@@ -9,6 +9,7 @@ const {assertExplicitEnhancement} = require('./studio_enhancement.cjs');
 const {assertDurationPopup} = require('./duration_popup.cjs');
 const {assertAnimateKeyboard} = require('./animate_keyboard.cjs');
 const {assertDirectorLayout} = require('./director_layout.cjs');
+const {assertComposerScrolling} = require('./composer_scrolling.cjs');
 const root = path.resolve(__dirname, '../..');
 const base = process.argv[2];
 if (!base) throw new Error('Pass the running Maestro URL; browser actions never reach it.');
@@ -132,6 +133,13 @@ const read = async endpoint => {
       assert.deepEqual(errors, []);
       return;
     }
+    if (process.env.MAESTRO_UI_SCROLL_ONLY) {
+      await assertComposerScrolling(page, sidebar, output);
+      await assertPromptStability(page, sidebar);
+      await assertAnimateKeyboard(page, sidebar, output);
+      assert.deepEqual(errors, []);
+      return;
+    }
     await assertDurationPopup(page, sidebar, output);
     if (process.env.MAESTRO_UI_DURATION_ONLY) {
       assert.deepEqual(errors, []);
@@ -140,6 +148,7 @@ const read = async endpoint => {
     await assertAnimateKeyboard(page, sidebar, output);
     await assertDirectorLayout(page, sidebar, output);
     await assertPromptStability(page, sidebar);
+    await assertComposerScrolling(page, sidebar, output);
 
     // Long workflow lists overlay the editor; the full catalogue remains reachable.
     const footerBeforeWorkflow = await page.getByTestId('studio-generate-bar').boundingBox();
@@ -224,16 +233,16 @@ const read = async endpoint => {
     await page.evaluate(() => window.store.setState({modelOptions: window.options.minimax_h3_ref2va_fused_turbo}));
     console.log('Character appearance/voice grouping, uploads, trailing add tile, roles and accessible reference ordering passed');
 
-    // The ordinary editor stays large and scrollable without an expand button.
+    // Long text grows within the single sidebar scroller.
     const script = Array.from({length: 30}, (_, n) => 'Window ' + (n + 1) + ': Blaine <d>This is my tutorial dialogue.</d>').join('\n');
     const prompt = sidebar.getByRole('textbox', {name: 'Generation prompt'});
     await prompt.fill(script);
     await prompt.evaluate(node => {window.originalTextarea = node; node.setSelectionRange(10, 25)});
     const generateY = (await page.getByTestId('studio-generate-bar').boundingBox()).y;
-    await controls.evaluate(node => {node.scrollTop = node.scrollHeight});
+    await page.getByTestId('studio-body-scroll').evaluate(node => {node.scrollTop = node.scrollHeight});
     assert.equal((await page.getByTestId('studio-generate-bar').boundingBox()).y, generateY);
     assert.ok((await prompt.boundingBox()).height >= 240, 'Prompt fills the desktop composition area');
-    assert.ok(await prompt.evaluate(node => node.scrollHeight > node.clientHeight), 'Long scripts scroll inside the editor');
+    assert.ok(await prompt.evaluate(node => node.scrollHeight <= node.clientHeight + 1), 'Long scripts fit without scrolling inside the editor');
     assert.equal(await sidebar.getByRole('button', {name: 'Expand prompt editor'}).count(), 0);
     assert.equal(await sidebar.getByRole('combobox', {name: 'Prompt writing mode'}).count(), 0);
     assert.equal(await prompt.inputValue(), script);

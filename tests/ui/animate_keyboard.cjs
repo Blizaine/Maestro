@@ -8,13 +8,24 @@ async function assertAnimateKeyboard(page, sidebar, output) {
   const prompt = sidebar.getByRole('textbox', {name: 'Generation prompt', exact: true});
   const visibleInput = async (input, name, minimumHeight = 100) => {
     const box = await input.boundingBox(), footer = await page.getByTestId('studio-settings-strip').boundingBox();
+    const body = await page.getByTestId('studio-body-scroll').boundingBox();
     const visible = await page.evaluate(() => ({top: window.visualViewport.offsetTop, bottom: window.visualViewport.offsetTop + window.visualViewport.height}));
     assert.ok(box.height >= minimumHeight, `${name} has room to write (${box.height}px)`);
-    assert.ok(box.y >= visible.top && box.y + box.height <= Math.min(footer.y, visible.bottom) + 1, `${name} is visible above the footer and keyboard`);
-    assert.equal(await input.evaluate(node => {
+    const top = Math.max(box.y, body.y, visible.top), bottom = Math.min(box.y + box.height, body.y + body.height, footer.y, visible.bottom);
+    assert.ok(bottom - top >= minimumHeight, `${name} has a usable visible writing area above the keyboard (${bottom - top}px)`);
+    assert.equal(await input.evaluate((node, y) => {
       const box = node.getBoundingClientRect();
-      return document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2) === node;
-    }), true, `${name} can be tapped, rather than clipped behind another panel`);
+      return document.elementFromPoint(box.x + box.width / 2, y) === node;
+    }, (top + bottom) / 2), true, `${name} can be tapped, rather than clipped behind another panel`);
+    const caret = await input.evaluate(node => {
+      const text = node.parentElement.querySelector('[data-prompt-mirror]')?.firstChild;
+      if (!text) return null;
+      const range = document.createRange();
+      range.setStart(text, node.selectionEnd); range.setEnd(text, node.selectionEnd + 1);
+      const bounds = range.getBoundingClientRect();
+      return {top: bounds.top, bottom: bounds.bottom};
+    });
+    if (caret) assert.ok(caret.top >= top && caret.bottom <= bottom, `${name} keeps the caret line visible`);
   };
   const keyboard = async (height, top, resizeWindow) => {
     await page.evaluate(({height, top, resizeWindow}) => {
@@ -58,9 +69,10 @@ async function assertAnimateKeyboard(page, sidebar, output) {
     await keyboard(350, 100, true);
     await visibleInput(prompt, `Frame-edit prompt at ${width}px`);
     assert.equal(await prompt.evaluate(node => node === window.testAnimatePrompt && node.selectionStart === 15 && node.selectionEnd === 20), true);
-    await prompt.press('End'); await prompt.pressSequentially(' Keep the coat red.');
+    await prompt.press('Control+End'); await prompt.pressSequentially(' Keep the coat red.');
     assert.match(await page.evaluate(() => window.store.getState().params.prompt), /Keep the coat red\./);
-    assert.equal(await prompt.evaluate(node => node.scrollHeight > node.clientHeight), true, 'Long frame-edit prompts scroll internally');
+    assert.equal(await prompt.evaluate(node => node.scrollHeight <= node.clientHeight + 1 && node.scrollTop === 0), true, 'Long frame-edit prompts grow without scrolling internally');
+    assert.ok(await page.getByTestId('studio-body-scroll').evaluate(node => node.scrollTop > 0), 'The sidebar scrolls to the end of a long prompt');
     await keyboard(330, 140, true);
     await visibleInput(prompt, 'Frame-edit prompt after another viewport shift');
     await page.screenshot({path: path.join(output, `animate-image-keyboard-${width}.png`)});

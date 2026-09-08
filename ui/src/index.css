@@ -720,7 +720,13 @@ input[type="range"]::-webkit-slider-thumb {
 }
 
 .studio-media-grid > * { width: 100%; height: 104px; min-width: 0; }
-.studio-inputs { max-height: min(48%, 260px); }
+.studio-scroll-body {
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.studio-composition[data-has-prompt="true"] { min-height: 280px; }
 .studio-inputs:empty { display: none; }
 /* Mobile drawers stay narrower than the browser, including on wide phones and
  * tablets. Compact the indicators using the space their footer actually has. */
@@ -744,24 +750,23 @@ input[type="range"]::-webkit-slider-thumb {
 .studio-character-trigger .lucide-chevron-down { display: none; }
 .studio-character-trigger .text-xs { font-size: 11px; font-weight: 500; }
 .studio-character-trigger svg { width: 14px; height: 14px; }
-.studio-composer[data-expanded="false"] .studio-composer-content {
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
-}
 /* Writing extensions insert measured overlays beside the textarea. Keep their
  * transient bounds from adding outer scrollbars and feeding back into sizing. */
 .studio-prompt-field { overflow: clip; }
-/* Keep the dock's text out of flex intrinsic sizing. Its frame owns the size;
- * content scrolls inside it without changing the surrounding layout. Reserve
- * scrollbar space so adding/removing a line cannot rewrap existing text. */
+/* A hidden copy with identical typography sizes the prompt in normal flow.
+ * The textarea fills that space without measuring/resetting its height, so
+ * typing and status updates cannot trigger a scrollbar/width feedback loop.
+ * Only the sidebar body scrolls, including its mode controls and references. */
+.studio-prompt-field > .studio-prompt-mirror,
+.studio-prompt-field > .studio-prompt-textarea {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
 .studio-prompt-field > .studio-prompt-textarea {
   position: absolute;
   inset: 0;
   height: 100%;
-  overflow-y: auto;
-  scrollbar-gutter: stable;
+  overflow: hidden;
 }
 .studio-composer[data-expanded="true"] {
   height: var(--studio-visual-viewport-height, 100dvh);
@@ -769,10 +774,8 @@ input[type="range"]::-webkit-slider-thumb {
 }
 .studio-prompt-toolbar { min-height: 32px; }
 @media (max-width: 767px) {
-  /* A return-to-video banner or a short viewport must never squeeze the
-     composer to zero height. Keep it reachable in the drawer's own scroller. */
-  .studio-scroll-body { overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
-  .studio-composition[data-has-prompt="true"] { flex-shrink: 0; min-height: 280px; }
+  /* The keyboard leaves the same body scroller available, with more room for
+     the active field and without changing saved panel preferences. */
   .maestro-sidebar[data-keyboard-open="true"] .studio-composition[data-has-prompt="true"] { min-height: 200px; }
   .maestro-sidebar[data-keyboard-open="true"] .studio-hardware,
   .maestro-sidebar[data-keyboard-open="true"] .studio-workflow-header,

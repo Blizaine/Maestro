@@ -148,9 +148,9 @@ export function PromptDock({ children }: { children: ReactNode }) {
     <ComposerToolbarContext.Provider value={enhanceSlot}>
       <div ref={panel} tabIndex={expanded ? -1 : undefined} role={expanded ? 'dialog' : undefined}
         aria-modal={expanded ? true : undefined} aria-label={expanded ? 'H3 window prompts' : 'Prompt composer'}
-        data-expanded={expanded} className={`studio-composer outline-none ${expanded ? 'fixed inset-0 z-[100] flex flex-col bg-bg-secondary p-4 sm:p-8' : 'flex min-h-0 flex-1 flex-col px-3 pb-3 pt-2'}`}>
+        data-expanded={expanded} className={`studio-composer outline-none ${expanded ? 'fixed inset-0 z-[100] flex flex-col bg-bg-secondary p-4 sm:p-8' : 'flex grow shrink-0 basis-auto flex-col px-3 pb-3 pt-2'}`}>
         {expanded && <div className="mb-2 shrink-0 text-xs font-medium text-text-primary">H3 window prompts</div>}
-        <div className={expanded ? 'min-h-0 flex-1 overflow-y-auto overscroll-contain' : 'studio-composer-content flex min-h-0 flex-1 flex-col'}>{children}</div>
+        <div className={expanded ? 'min-h-0 flex-1 overflow-y-auto overscroll-contain' : 'studio-composer-content flex grow shrink-0 basis-auto flex-col'}>{children}</div>
         <div role="group" aria-label="Prompt controls" className="studio-prompt-toolbar mt-2 flex shrink-0 items-center justify-end gap-2">
           <div ref={setEnhanceSlot} className="relative empty:hidden"/>
         </div>

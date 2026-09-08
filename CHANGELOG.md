@@ -23,6 +23,9 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 - Added model-aligned Time sliders through five minutes, retained long presets,
   and displayed Auto's recommended duration. Fixed unstable prompt resizing,
   iPhone keyboard/scroll handling, overlapping controls and moving duration sliders.
+- Combined Studio's media tabs, workflow selector, inputs and prompt into one
+  scrolling area. Long prompts grow with their text; settings and Generate stay
+  pinned, including in short windows. Typing keeps the active line visible.
 - Added portable `.maestro.safetensors` characters with saved voice and selected
   PNG views, standard RefMod import, Hugging Face browsing, voice filters,
   clearer names, cached video thumbnails and mobile scrolling. Improved native

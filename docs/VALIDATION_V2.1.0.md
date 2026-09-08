@@ -3,7 +3,8 @@
 Prepared on 7 September 2026. This is a local release candidate, not a published
 release. See the [release notes](RELEASE_NOTES_V2.1.0.md) for the user-facing changes.
 
-Updated on 8 September with the Creative dialogue follow-up below.
+Updated on 8 September with the dialogue, shared-guide and Studio scrolling
+follow-ups below.
 
 ## Release boundary
 
@@ -136,6 +137,37 @@ The final unittest and sidebar logs are retained locally as
 - No frontend or launcher changes, application restart, or public push.
   Restart Maestro to load the backend change; restart again after editing a
   guide because guide text is cached. Re-enhance prompts to apply the change.
+
+## Studio scrolling follow-up — 8 September
+
+- Studio's media tabs, workflow selector, inputs and prompt now share one
+  vertical scroller above the fixed settings and generation controls. The main
+  prompt uses a hidden text mirror for intrinsic sizing, grows/shrinks with its
+  contents, and retains its mounted editor and selection. Long scripts have no
+  inner scrollbar. Caret-line tracking keeps typing visible on keyboard changes.
+- Production TypeScript/Vite build and ESLint passed. The existing bundle-size
+  and dynamic-import warnings remain. Build output is local and ignored.
+- All **14 selected Python source regressions passed**. The full isolated
+  sidebar browser suite passed, including six theme variants, duration/menu
+  behavior, H3 prompt review, explicit enhancement, held queues and Director.
+- New browser coverage exercises Frames, References, Image and Speech at
+  1280x520, 1000x420, 390x844 and 320x568 with expanded hardware status. Real
+  mouse-wheel input over the textarea moves the shared scroller while settings
+  and Generate stay fixed. Long scripts grow, short scripts shrink, mode
+  controls and enhancement tools remain reachable, and polling or simulated
+  writing-extension overlays do not change the text layout.
+- Updated mobile keyboard tests check the active caret near the end of a long
+  Animate-to-Image prompt as viewport height/offset changes. The 390px and
+  320px simulations also retain the return action and Animate appearance input.
+  These Chromium checks do not replace a real iPhone/Safari keyboard pass.
+- Logs: `.codex-tmp/composer-scroll-build.log`,
+  `.codex-tmp/composer-scroll-lint.log`,
+  `.codex-tmp/composer-scroll-source-tests.log`,
+  `.codex-tmp/composer-scroll-ui.log` and
+  `.codex-tmp/composer-scroll-full-ui.log`. Screenshots remain under
+  `.codex-tmp/sidebar-validation/`. No backend restart, live generation,
+  launcher changes or public push was performed. Refresh the browser to use
+  the rebuilt UI.
 
 ## Prior model checks and remaining manual validation
 
