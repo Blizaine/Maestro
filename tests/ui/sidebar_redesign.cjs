@@ -8,6 +8,7 @@ const {assertPromptStability} = require('./prompt_stability.cjs');
 const {assertExplicitEnhancement} = require('./studio_enhancement.cjs');
 const {assertDurationPopup} = require('./duration_popup.cjs');
 const {assertAnimateKeyboard} = require('./animate_keyboard.cjs');
+const {assertDirectorLayout} = require('./director_layout.cjs');
 const root = path.resolve(__dirname, '../..');
 const base = process.argv[2];
 if (!base) throw new Error('Pass the running Maestro URL; browser actions never reach it.');
@@ -116,6 +117,11 @@ const read = async endpoint => {
     await sidebar.getByRole('button', {name: /Characters/}).waitFor();
     await pause();
     assert.deepEqual(errors, [], 'StrictMode renders the full sidebar without a loop');
+    if (process.env.MAESTRO_UI_DIRECTOR_ONLY) {
+      await assertDirectorLayout(page, sidebar, output);
+      assert.deepEqual(errors, []);
+      return;
+    }
     if (process.env.MAESTRO_UI_ENHANCE_ONLY) {
       await assertExplicitEnhancement(page, sidebar, requests, llmRequests);
       assert.deepEqual(errors, []);
@@ -132,6 +138,7 @@ const read = async endpoint => {
       return;
     }
     await assertAnimateKeyboard(page, sidebar, output);
+    await assertDirectorLayout(page, sidebar, output);
     await assertPromptStability(page, sidebar);
 
     // Long workflow lists overlay the editor; the full catalogue remains reachable.

@@ -544,7 +544,7 @@ export function DirectorChat() {
   const isMvGenerate = isMusicVideo && musicSource === 'generate'
   const mvGenerateSetup = isMvGenerate && step === 'upload'
 
-  const messagesEndRef = useRef<HTMLDivElement>(null)
+  const messagesRef = useRef<HTMLDivElement>(null)
   const [dragOver, setDragOver] = useState(false)
   const [localBias, setLocalBias] = useState<number | null>(null)
   const [showAnalysisDetails, setShowAnalysisDetails] = useState(false)
@@ -640,7 +640,10 @@ export function DirectorChat() {
   // are included so progress-text updates (e.g. "Generating music track…",
   // analyze phases) and new errors pull the view down to the newest content.
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    // Keep progress scrolling inside Director. scrollIntoView also scrolls
+    // ancestor surfaces, which can move the drawer or the gallery behind it.
+    const messages = messagesRef.current
+    messages?.scrollTo({ top: messages.scrollHeight, left: 0, behavior: 'smooth' })
   }, [step, loading, loadingMessage, error, clipPlans.length, clipImages.length, skill])
 
   const handleChatSubmit = () => {
@@ -728,9 +731,9 @@ export function DirectorChat() {
     : 'Reviewing...'
 
   return (
-    <div className="flex-1 flex flex-col min-h-0">
+    <div data-testid="director-chat" className="director-chat flex-1 flex flex-col min-h-0 min-w-0 [overflow-wrap:anywhere]">
       {/* Message list */}
-      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
+      <div ref={messagesRef} data-testid="director-messages" className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-4 space-y-3">
         {/* Header with Start Over */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-1.5">
@@ -1207,11 +1210,10 @@ export function DirectorChat() {
           </SystemBubble>
         )}
 
-        <div ref={messagesEndRef} />
       </div>
 
       {/* Chat input bar */}
-      <div className="px-4 py-3 border-t border-border space-y-2">
+      <div data-testid="director-composer" className="min-w-0 px-4 py-3 border-t border-border space-y-2">
         <div className="flex items-end gap-2">
           {/* Auto-grows with content (issue #11). The composer bar is the
               last child of the panel's flex column, so extra height is
@@ -1239,7 +1241,7 @@ export function DirectorChat() {
             rows={2}
             minHeight={56}
             maxHeight={240}
-            className="flex-1 bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary placeholder:text-text-muted resize-none focus:outline-none focus:border-accent-blue transition-colors disabled:opacity-50 disabled:cursor-not-allowed scrollbar-visible"
+            className="min-w-0 flex-1 bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary placeholder:text-text-muted resize-none focus:outline-none focus:border-accent-blue transition-colors disabled:opacity-50 disabled:cursor-not-allowed scrollbar-visible"
           />
           <div className="flex shrink-0 overflow-hidden rounded-lg border border-accent-blue/60">
             <button
@@ -1323,14 +1325,14 @@ function CharacterNaming({
               value={char.name}
               onChange={e => updateCharacter(i, 'name', e.target.value)}
               placeholder={`Character ${i + 1} name`}
-              className="flex-1 bg-bg-secondary border border-border rounded px-2 py-1 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue transition-colors"
+              className="min-w-0 flex-1 bg-bg-secondary border border-border rounded px-2 py-1 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue transition-colors"
             />
             <input
               type="text"
               value={char.description}
               onChange={e => updateCharacter(i, 'description', e.target.value)}
               placeholder="brief description"
-              className="flex-1 bg-bg-secondary border border-border rounded px-2 py-1 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue transition-colors"
+              className="min-w-0 flex-1 bg-bg-secondary border border-border rounded px-2 py-1 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue transition-colors"
             />
             <button
               onClick={() => removeCharacter(i)}
@@ -2991,7 +2993,7 @@ function StyleForm({
                     value={mapping.name}
                     onChange={e => setSpeakerMapping(mapping.speakerId, e.target.value, mapping.role)}
                     placeholder="e.g. man in green hoodie"
-                    className="flex-1 bg-bg-secondary border border-border rounded px-2 py-1 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue transition-colors"
+                    className="min-w-0 flex-1 bg-bg-secondary border border-border rounded px-2 py-1 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue transition-colors"
                   />
                   <select
                     value={mapping.role}
