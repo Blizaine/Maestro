@@ -93,7 +93,6 @@ export function DurationPresetControl({
     ? (planningMode ?? internalPlanningMode)
     : 'duration'
   const automatic = effectivePlanningMode === 'auto'
-  const manualDisabled = disabled || automatic
   const visiblePresets = compact
     ? durationPresets.filter(preset => preset.seconds >= 600 && preset.seconds <= maxSeconds)
     : durationPresets
@@ -137,6 +136,7 @@ export function DurationPresetControl({
   )
 
   const selectPreset = (preset: Exclude<PresetSelection, null>) => {
+    activateManualDuration()
     setSelectedPreset(preset)
     const next = preset === 'single'
       ? Math.min(maxSeconds, effectiveFirstWindow)
@@ -187,6 +187,11 @@ export function DurationPresetControl({
     }
   }
 
+  // Auto dims the manual controls without blocking direct manipulation.
+  const activateManualDuration = () => {
+    if (automatic && !disabled) setPlanningMode('duration')
+  }
+
   const setWindowCount = (count: number) => {
     const plan = wholeWindowDuration(
       count,
@@ -200,7 +205,7 @@ export function DurationPresetControl({
   }
 
   const commitCustom = () => {
-    if (manualDisabled) return
+    if (disabled || automatic) return
     const parsed = parseTimecode(customText ?? formatTimecode(value))
     if (parsed == null) {
       setCustomText(null)
@@ -217,7 +222,7 @@ export function DurationPresetControl({
       <div className="flex items-center justify-between gap-2">
         <label className="text-[11px] text-text-muted uppercase tracking-wider">{label}</label>
         <div className="flex items-center gap-2">
-          {compact && enablePlanningModes && effectivePlanningMode !== 'windows' && (
+          {compact && enablePlanningModes && (
             <button type="button" role="switch" aria-label="Automatic duration" aria-checked={automatic} disabled={disabled}
               title={`Auto: ${formatDuration(autoPlan.requestedSeconds, true)} · ${autoMediaOnly ? 'Match the control video duration automatically' : autoPlan.reason}`}
               onClick={() => setPlanningMode(automatic ? 'duration' : 'auto')}
@@ -262,9 +267,16 @@ export function DurationPresetControl({
           {slider && (
             <div className={`space-y-1 rounded-lg border border-border bg-bg-secondary px-3 py-2 ${automatic ? 'opacity-45 grayscale' : ''}`}>
               <input type="range" min={0} max={slider.count} step={1}
-                value={slider.indexAt(value)} disabled={manualDisabled}
+                value={slider.indexAt(value)} disabled={disabled}
                 aria-label={`${label} model duration`} aria-valuetext={formatDuration(value, true)}
+                onPointerDown={event => {
+                  if (event.button === 0) activateManualDuration()
+                }}
+                onKeyDown={event => {
+                  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) activateManualDuration()
+                }}
                 onChange={event => {
+                  activateManualDuration()
                   setSelectedPreset(null)
                   setCustomText(null)
                   onChange(slider.secondsAt(Number(event.target.value)))
@@ -278,9 +290,9 @@ export function DurationPresetControl({
               )}
             </div>
           )}
-          <div className={compact ? 'grid grid-cols-5 gap-1.5' : showSingleWindow
+          <div className={`${compact ? 'grid grid-cols-5 gap-1.5' : showSingleWindow
             ? 'grid grid-cols-[repeat(14,minmax(0,1fr))] gap-1.5'
-            : 'grid grid-cols-6 gap-1.5'}>
+            : 'grid grid-cols-6 gap-1.5'} ${automatic ? 'opacity-45 grayscale' : ''}`}>
             {showSinglePreset && (
               <button
                 type="button"
@@ -317,7 +329,7 @@ export function DurationPresetControl({
                 <button
                   key={preset.label}
                   type="button"
-                  disabled={manualDisabled || unavailable}
+                  disabled={disabled || unavailable}
                   title={unavailable
                     ? `${preset.label} exceeds this model's ${formatDuration(maxSeconds)} native maximum.`
                     : quantizeToWindows
@@ -336,8 +348,9 @@ export function DurationPresetControl({
             })}
             <button
               type="button"
-              disabled={manualDisabled}
+              disabled={disabled}
               onClick={() => {
+                activateManualDuration()
                 setSelectedPreset(null)
                 inputRef.current?.focus()
                 inputRef.current?.select()
@@ -357,10 +370,14 @@ export function DurationPresetControl({
               type="text"
               inputMode="decimal"
               aria-label={`${label} timecode`}
-              disabled={manualDisabled}
+              disabled={disabled}
               value={customText ?? formatTimecode(value)}
-              onChange={event => setCustomText(event.target.value)}
+              onChange={event => {
+                activateManualDuration()
+                setCustomText(event.target.value)
+              }}
               onFocus={() => {
+                activateManualDuration()
                 setSelectedPreset(null)
                 setCustomText(formatTimecode(value))
               }}
@@ -372,7 +389,7 @@ export function DurationPresetControl({
                 }
               }}
               placeholder="HH:MM:SS"
-              className="w-[104px] rounded-md border border-border bg-bg-secondary px-2 py-1.5 text-[10px] text-text-primary tabular-nums focus:outline-none focus:border-accent-blue disabled:opacity-50"
+              className={`w-[104px] rounded-md border border-border bg-bg-secondary px-2 py-1.5 text-[10px] text-text-primary tabular-nums focus:outline-none focus:border-accent-blue disabled:opacity-50 ${automatic ? 'opacity-45' : ''}`}
             />
             <div className={`min-w-0 text-[9px] leading-snug text-text-muted ${compact ? 'h-8' : ''}`}>
               {compact ? (

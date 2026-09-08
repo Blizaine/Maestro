@@ -58,7 +58,9 @@ public v2.0.1 update.
   Ordinary H3 starts at approximately 5.2s, 5.9s and 6.6s. Longer presets and
   editable timecodes still reach 60 minutes on supported video workflows.
 - The compact video Duration popup uses **Time** and **Window** tabs. **Auto**
-  is a toggle in Time, disabling and dimming manual time controls while enabled.
+  and the current duration remain visible above both tabs. Auto dims manual
+  time controls; grabbing the slider, using its arrow keys, choosing a preset
+  or editing the timecode turns Auto off and applies the manual choice.
   Long presets are **10m, 15m, 30m, 60m and Custom**. Window retains its exact
   count controls. Window Length stays visible and adjusts automatically;
   overlap is collapsed by default in both tabs. The popup stays above its

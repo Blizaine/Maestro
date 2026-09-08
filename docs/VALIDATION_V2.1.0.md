@@ -198,6 +198,28 @@ The final unittest and sidebar logs are retained locally as
   `.codex-tmp/sidebar-validation/`. No live generation, backend restart,
   launcher change or public push was performed. Refresh to use the rebuilt UI.
 
+## Auto interaction follow-up — 8 September
+
+- Auto and the current duration now stay visible above both Time and Window,
+  preserving the tabs' vertical position. Enabling Auto from Window returns
+  to the automatic Time recommendation.
+- Auto's manual time controls remain dimmed but interactive. Grabbing the
+  slider turns Auto off on pointer-down, and the same drag sets the duration.
+  Keyboard adjustment, preset selection and custom time entry also take over
+  directly. Model limits and genuinely unavailable controls stay enforced.
+- Production TypeScript/Vite build and ESLint passed. The focused isolated
+  clip-settings browser suite passed at 1360, 767, 440, 390 and 320 pixels,
+  checking immediate activation, preserved drag position, keyboard native
+  increments, preset/custom values, stable tabs and Auto from Window. Existing
+  overlap, window sizing, continuation and keyboard viewport checks also passed.
+- The duration/state integration suite passed, including GPU recommendations,
+  manual 14.4-second limits, 60-minute presets, Extend and Viggle restoration.
+  Logs: `.codex-tmp/auto-duration-build.log`,
+  `.codex-tmp/auto-duration-lint.log`, `.codex-tmp/auto-duration-ui.log` and
+  `.codex-tmp/auto-duration-state.log`. Browser actions used intercepted writes;
+  no live generation, backend restart, launcher changes or public push occurred.
+  Refresh Maestro to load the rebuilt UI.
+
 ## Prior model checks and remaining manual validation
 
 The [H3/media port record](development/wan2gp-12-71-port-plan.md) records earlier

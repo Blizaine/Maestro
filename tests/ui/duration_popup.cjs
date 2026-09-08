@@ -73,14 +73,45 @@ async function assertDurationPopup(page, sidebar, output) {
     const timeBeforeAuto = await duration().boundingBox();
     await auto.click(); await settle();
     assert.equal(await auto.getAttribute('aria-checked'), 'true');
-    assert.equal(await duration().isDisabled(), true, 'Auto disables the Time slider');
-    assert.equal(await dialog.getByRole('textbox', {name: 'Duration timecode'}).isDisabled(), true, 'Auto disables custom time entry');
-    assert.equal(await dialog.getByRole('button', {name: '10m', exact: true}).isDisabled(), true);
+    const timecode = dialog.getByRole('textbox', {name: 'Duration timecode'});
+    const longPreset = dialog.getByRole('button', {name: '10m', exact: true});
+    assert.equal(await duration().isEnabled(), true, 'Auto still allows direct slider manipulation');
+    assert.equal(await timecode.isEnabled(), true, 'Custom time entry can take over from Auto');
+    assert.equal(await longPreset.isEnabled(), true, 'Auto leaves presets clickable');
     assert.ok(await duration().evaluate(node => Number(getComputedStyle(node.parentElement).opacity) < 1), 'Auto dims the slider');
+    assert.ok(await longPreset.evaluate(node => Number(getComputedStyle(node.parentElement).opacity) < 1), 'Auto dims the presets');
     await page.screenshot({path: path.join(output, `clip-duration-auto-${viewport.width}.png`)});
+    // Grab the auto thumb before moving it: the first pointer-down activates Time.
+    const thumbBox = await duration().boundingBox();
+    const thumbValue = Number(await duration().inputValue());
+    const thumbMax = Number(await duration().getAttribute('max'));
+    await page.mouse.move(thumbBox.x + 8 + thumbValue / thumbMax * (thumbBox.width - 16), thumbBox.y + thumbBox.height / 2);
+    await page.mouse.down();
+    try {
+      await settle();
+      assert.equal(await auto.getAttribute('aria-checked'), 'false', 'Grabbing the thumb turns Auto off immediately');
+      assert.equal(await duration().evaluate(node => getComputedStyle(node.parentElement).opacity), '1', 'Grabbed slider becomes active');
+      sameBox(await duration().boundingBox(), timeBeforeAuto, 'Auto takeover keeps the slider under the pointer');
+      await page.mouse.move(thumbBox.x + thumbBox.width * 0.4, thumbBox.y + thumbBox.height / 2);
+      await settle();
+      assert.ok(Number(await duration().inputValue()) > thumbValue, 'The same drag changes duration');
+    } finally { await page.mouse.up(); }
     await auto.click(); await settle();
-    sameBox(await duration().boundingBox(), timeBeforeAuto, 'Auto toggle keeps the Time slider in place');
-    assert.equal(await duration().isDisabled(), false);
+    const autoIndex = Number(await duration().inputValue());
+    await duration().press('ArrowRight'); await settle();
+    assert.equal(await auto.getAttribute('aria-checked'), 'false', 'Keyboard adjustment turns Auto off');
+    assert.equal(Number(await duration().inputValue()), autoIndex + 1, 'Keyboard takeover retains the requested native step');
+    await auto.click(); await settle();
+    await longPreset.click(); await settle();
+    assert.equal(await auto.getAttribute('aria-checked'), 'false', 'Preset selection turns Auto off');
+    assert.ok(await page.evaluate(() => window.store.getState().durationSeconds > 590), 'Manual preset survives automatic-duration reconciliation');
+    assert.equal(await longPreset.evaluate(node => getComputedStyle(node.parentElement).opacity), '1', 'Preset selection restores active styling');
+    await auto.click(); await settle();
+    await dialog.getByRole('button', {name: 'Custom', exact: true}).click(); await settle();
+    assert.equal(await auto.getAttribute('aria-checked'), 'false', 'Custom also takes over from Auto');
+    assert.ok(await timecode.evaluate(node => document.activeElement === node), 'Custom focuses the timecode');
+    await timecode.fill('00:00:40'); await timecode.press('Enter'); await settle();
+    assert.equal(await page.evaluate(() => window.store.getState().durationSeconds), 40, 'Custom time is applied');
     await drag(duration(), `Time slider at ${viewport.width}px`);
     await duration().press('End'); await settle();
     const overlap = dialog.locator('input[aria-label="Window overlap"]');
@@ -115,11 +146,21 @@ async function assertDurationPopup(page, sidebar, output) {
     await settle();
     await fitsSidebar();
     await drag(duration(), `${id} ${workflow} Time slider`);
+    const auto = dialog.getByRole('switch', {name: 'Automatic duration'});
+    const autoBox = await auto.boundingBox();
+    const tabBox = await dialog.getByRole('button', {name: 'Window', exact: true}).boundingBox();
     await dialog.getByRole('button', {name: 'Window', exact: true}).click();
     await settle();
-    assert.equal(await dialog.getByRole('switch', {name: 'Automatic duration'}).count(), 0, 'Window mode keeps its explicit count controls');
+    assert.equal(await auto.isVisible(), true, 'Auto is available in Window mode');
+    const windowAutoBox = await auto.boundingBox();
+    for (const key of ['y', 'height']) assert.ok(Math.abs(windowAutoBox[key] - autoBox[key]) < 1, `Auto header retains its ${key} between Time and Window`);
+    sameBox(await dialog.getByRole('button', {name: 'Window', exact: true}).boundingBox(), tabBox, 'Planning tabs do not shift when switching to Window');
     await drag(dialog.getByRole('slider', {name: 'Exact window count'}), `${id} ${workflow} window count`);
     assert.equal(await dialog.locator('input[aria-label="Window overlap"]').isVisible(), false, 'Overlap also starts collapsed in Window mode');
+    await auto.click(); await settle();
+    assert.equal(await auto.getAttribute('aria-checked'), 'true', 'Window view can return directly to Auto');
+    assert.equal(await duration().isVisible(), true, 'Auto shows its dimmed time recommendation');
+    sameBox(await dialog.getByRole('button', {name: 'Window', exact: true}).boundingBox(), tabBox, 'Planning tabs stay fixed when Auto is enabled from Window');
     await close();
   }
   await page.evaluate(() => window.resetFixture());
@@ -142,7 +183,7 @@ async function assertDurationPopup(page, sidebar, output) {
   await page.setViewportSize({width: 1360, height: 900});
   await page.evaluate(() => window.resetFixture());
   await settle();
-  console.log('Clip settings: compact anchored option lists, Auto toggle, long presets, collapsed overlap, stable range dragging, window controls, continuation and keyboard viewport passed');
+  console.log('Clip settings: anchored menus, stable Auto header in both tabs, direct pointer/keyboard/preset/custom takeover from Auto, collapsed overlap, stable dragging, window controls, continuation and keyboard viewport passed');
 }
 
 module.exports = {assertDurationPopup};

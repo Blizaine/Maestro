@@ -27,7 +27,8 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
   scrolling area. Long prompts grow with their text; settings and Generate stay
   pinned, including in short windows. Typing keeps the active line visible.
 - Refined clip popups with content-sized Resolution/Aspect lists and a compact
-  Duration panel above its indicator. Time uses an Auto toggle and five-minute
+  Duration panel above its indicator. Auto stays visible in both tabs; dimmed
+  Time controls switch to manual on interaction. Time uses a five-minute
   slider with 10m/15m/30m/60m/Custom presets. Window Length stays visible;
   overlap is collapsible in both Time and Window modes.
 - Added portable `.maestro.safetensors` characters with saved voice and selected
