@@ -1,9 +1,5 @@
 import { useEffect, useState } from 'react'
 
-export const dlssSpatialOptions = [1, 1.5, 1.724, 2, 3].map(scale => ({
-  value: `dlss5*${scale}`, label: `DLSS 5 ${scale}x${scale === 1 ? ' (native refinement)' : ''}`,
-}))
-
 type Capabilities = {
   neural_rendering: { available: boolean; reason: string }
   frame_generation: { available: boolean; reason: string; factors: number[] }
@@ -15,13 +11,15 @@ export function MediaFinishingControls({ spatial, temporal, onTemporal, options,
 }) {
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null)
   const [error, setError] = useState('')
-  const refresh = (force = false) => {
-    setError('')
-    fetch(`/api/v1/media-flow/capabilities?refresh=${force}`)
+  const [refreshCount, setRefreshCount] = useState(0)
+  useEffect(() => {
+    let active = true
+    fetch(`/api/v1/media-flow/capabilities?refresh=${refreshCount > 0}`)
       .then(async response => { if (!response.ok) throw new Error('Could not check media capabilities'); return response.json() })
-      .then(setCapabilities).catch(e => setError(String(e.message)))
-  }
-  useEffect(() => { refresh() }, [])
+      .then(result => { if (active) { setCapabilities(result); setError('') } })
+      .catch(e => { if (active) setError(String(e.message)) })
+    return () => { active = false }
+  }, [refreshCount])
   const hasNeural = spatial.startsWith('dlss5*')
   const hasFrameGen = temporal.startsWith('dlssg*') && !image
   const selectClass = 'w-full bg-bg-tertiary border border-border rounded-lg px-2 py-2 text-xs text-text-primary'
@@ -57,6 +55,6 @@ export function MediaFinishingControls({ spatial, temporal, onTemporal, options,
       {hasFrameGen && capabilities && !capabilities.frame_generation.available && <p className="text-indicator-warning">DLSS Frame Generation: {capabilities.frame_generation.reason}.</p>}
     </div>}
     {error && <p className="text-indicator-warning">{error}</p>}
-    <button type="button" className="text-text-muted underline text-[10px]" onClick={() => refresh(true)}>Refresh DLSS availability</button>
+    <button type="button" className="text-text-muted underline text-[10px]" onClick={() => { setError(''); setRefreshCount(count => count + 1) }}>Refresh DLSS availability</button>
   </div>
 }

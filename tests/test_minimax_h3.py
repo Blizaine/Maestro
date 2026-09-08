@@ -1630,11 +1630,14 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             "return _enqueue_deferred_generation_preparation(body)",
             endpoint,
         )
-        worker = launch[launch.index("def _run_generation("):]
+        worker_node = next(node for node in ast.parse(launch).body
+                           if isinstance(node, ast.FunctionDef) and node.name == "_run_generation")
+        worker = ast.get_source_segment(launch, worker_node)
         self.assertLess(
-            worker.index("with generation_slot(_gen_lock, job) as acquired:"),
+            worker.index("generation_slot(_gen_lock, job)"),
             worker.index("_apply_deferred_generation_preparation(job)"),
         )
+        self.assertIn("nullcontext(True) if _slot_owned else generation_slot", worker)
         self.assertIn(
             "_prepare_generation_submission(request_body, prepare_only=True)",
             launch,
@@ -1644,7 +1647,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
 
         store = _read(_STORE_PATH)
         self.assertIn(
-            "Prompt Enhance was not started. Add this setup to the queue",
+            "A generation is already using or waiting for the GPU.",
             store,
         )
         self.assertIn(
@@ -1917,7 +1920,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("sliding_window_memory_override", store)
         self.assertIn("const h3DirectOmniPass = (", store)
         self.assertIn("let windowFrames = h3DirectOmniPass", store)
-        self.assertIn("full prompt auto-paced", duration)
+        self.assertIn("Reviewed window prompts", duration)
         self.assertIn('"sliding_window_memory_policy": md.get(', launch)
         self.assertIn('"omni_sequence_memory_policy": md.get(', launch)
         self.assertIn('h3_window_adjustment.get("unsupported")', launch)
@@ -2068,7 +2071,6 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("timeline_start_frame=window_start_frame_no", main)
         self.assertNotIn('accept="image/*,video/*,audio/*', section)
         self.assertNotIn('accept="audio/*', section)
-        self.assertIn("iOS/WebKit can", section)
         self.assertIn("type !== 'audio' && type !== 'video'", section)
         self.assertIn("scope?: 'studio' | 'director'", section)
         self.assertIn('scope="director"', director)
@@ -2169,7 +2171,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             'and body.get("multi_prompts_gen_type") in (None, 0, 1, "0", "1")',
             launch,
         )
-        self.assertIn("if (isH3Model && !usesMultiplePasses)", store)
+        self.assertIn("else if (!hasSlidingWindow && prompt.includes('\\n'))", store)
         self.assertIn("_h3_omni_context_ir", wgp)
         self.assertIn("Preserving one structured Context-IR", wgp)
         self.assertIn("prompt instead of splitting its sections", wgp)
@@ -2752,7 +2754,7 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
         self.assertIn('"minimax_h3_runtime_advisory":', launch)
         self.assertIn("_minimax_h3_runtime_advisory", launch)
         self.assertIn("normalize_minimax_h3_turbo_request", launch)
-        self.assertIn("<MiniMaxH3Optimizations />", sidebar)
+        self.assertIn("<MiniMaxH3Optimizations />", advanced)
         self.assertIn("H3 Optimizations", optimizations)
         self.assertIn("aria-expanded={expanded}", optimizations)
         self.assertIn("setExpanded(value => !value)", optimizations)

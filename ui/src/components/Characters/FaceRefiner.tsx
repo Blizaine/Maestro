@@ -6,7 +6,7 @@ import * as api from '../../api/client'
 import { characterDisplayName } from '../../lib/characters'
 import type { FaceRefinerOptions, FaceRefinerAnalysis, FaceRefinerAssignment, SavedOmniCharacter } from '../../types'
 
-export const defaultFaceRefiner: FaceRefinerOptions = {
+const defaultFaceRefiner: FaceRefinerOptions = {
   enabled: false, face_count: 0, strength: 0.75, steps: 4,
   window_frames: 243, model: 'auto', character_ids: [],
 }

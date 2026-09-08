@@ -2,7 +2,7 @@
 
 In **Studio → Audio → Speech**, select **H3 Voice Audio — Pruned**.
 
-The **Saved characters** picker includes Blaine and other characters from
+The **Characters** picker includes Blaine and other characters from
 Reference mode. Choose **Add voice** to fill a speaker slot, or save a new
 character directly from Speech. See [saved characters in TTS](TTS-Characters.md)
 for speaker labels, settings restoration, and support across speech models.

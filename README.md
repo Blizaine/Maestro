@@ -32,7 +32,7 @@ Direct access to every model and every knob:
 - **Frames Injection (KFI)** for character continuity in long videos
 - **Sliding window** for arbitrarily long generations
 - **Viggle Animate:** select a saved character or image, describe its appearance, and let Flux 2 Klein prepare the replacement frame before three-step H3 animation. Preview the frame first or run both steps together; manual edited frames remain supported. See [Viggle Animate](docs/Viggle-Animate.md).
-- **Studio composition workspace:** compact reference cards above a large prompt editor, with Characters, Resolution, Aspect, Duration and Advanced overlays in the bottom settings strip. The model selector sits beside Generate / Add to Queue; Recipes and Model Browser remain in the footer menu. Advanced groups Performance, Finishing, LoRAs and Generation. Time retains model-aligned steps through five minutes and presets through one hour. See [Studio controls](docs/Studio-controls.md).
+- **Studio composition workspace:** compact reference cards above a large prompt editor. Characters stays on the left; Recipes, Resolution, Aspect, Duration and Advanced group on the right. The model selector sits beside Generate / Add to Queue, with a direct Model Browser shortcut. The magic button explicitly enhances with AI Faithful or Creative before submission. Advanced groups Performance, Finishing, LoRAs and Generation. Time retains model-aligned steps through five minutes and presets through one hour; Auto shows its recommended duration. See [Studio controls](docs/Studio-controls.md).
 - **Spatial upsampling, film grain, codec selection** as post-processing options
 - **H3 VDN**, an optional trained hybrid-attention model with dedicated Full/Pruned and eight-step presets; requires Triton and additional VRAM.
 - **H3 Voice Audio** for speech, one/two-reference voice cloning and general audio: up to 45 seconds per segment and five minutes per assembled output. See the [H3 audio guide](docs/H3-Voice-Audio.md). **H3 Outpaint** extends video borders; an optional six-step **H3 Audio Refinement** pass holds the generated video fixed.
@@ -93,12 +93,25 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v2.1.0 (prepared locally; not yet published)
+
+**A larger Studio workspace, portable characters and new H3 tools**
+- Redesigned Studio with a large, stable prompt field, consistent reference tiles, compact setting menus, explicit Faithful/Creative enhancement, direct Recipes/Model Browser shortcuts and improved mobile keyboard handling.
+- Added model-aligned duration sliders through five minutes, retained presets through one hour, and made Auto show its recommended duration. Fixed moving duration sliders, overlapping controls, the H3 Extend model-switch crash and Director sideways scrolling.
+- Added portable **`<character>.maestro.safetensors`** exports with saved voice and selected images, standard RefMod/Hugging Face imports, a Character Browser, better image recovery, multi-RefMod speaker matching, and saved characters in supported Image, Animate and all Speech workflows.
+- Added **Viggle Animate**, including optional Flux 2 Klein character replacement from a chosen video frame, editable appearance prompts, preview and manual Image-mode round trips.
+- Added **H3 Voice Audio** with up to 45 seconds per generation and five minutes per assembled output. Shared dialogue planning defaults to 2.8 words/second with a maximum of 3, and no longer counts production headings as speech.
+- Added **H3 VDN**, **H3 Outpaint**, six-step **Audio Refinement**, and **Face Refiner** for up to five tracked faces with easy character mapping.
+- Added **Media Flow** batch finishing, **RIFE 4.26 x3**, and optional **DLSS 5 Neural Rendering / Frame Generation** with separate runtime requirements.
+- Enabled experimental compatible H3 character/style/concept LoRAs for **Fused 4-Step**. Improved mobile Model Browser layout and added a manually selectable URL-import LoRA destination with automatic suggestions.
+
+See the [complete v2.1.0 release notes](docs/RELEASE_NOTES_V2.1.0.md) for every
+feature group, compatibility details and update instructions. Public `dev` and
+`main` remain on v2.0.1 until publication is approved.
+
 ### v2.0.1 (2026-09-04)
 
 **Stability and exact workflow restoration**
-- Fixed the Model Browser toolbar on mobile: model tabs and actions wrap, Import URL stays labeled, and the URL form fits the screen.
-- Added a **Destination LoRA folder** selector to **Import URL**. Recognizable names such as MiniMax suggest a folder automatically; you can override it before importing from HuggingFace or CivitAI. Unrecognized URLs retain metadata-based detection, and HuggingFace imports respect the configured LoRA root.
-- Enabled experimental H3 character, style and concept LoRAs for **H3 Fused 4-Step** Frames and References, including Director and Load Settings. Extra acceleration adapters remain blocked. See [fused H3 LoRA guidance](docs/H3-Fused-LoRAs.md).
 - Fixed GitHub issue #97, where an LTX Auto-duration feedback loop could flash the interface and leave a black screen after updating to v2.0.0.
 - Fixed Video Extend window math so one requested continuation window cannot become a full pass plus a tiny second pass. The duration UI, prompt count, and runtime now agree on how much new footage the source-overlap pass contributes.
 - Fixed **Extend this video** on gallery clips so it opens Studio Extend and places the selected clip in the source drop zone, including on mobile.

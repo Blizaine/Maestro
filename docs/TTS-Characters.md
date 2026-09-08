@@ -1,6 +1,6 @@
 # Saved characters in Speech
 
-In **Studio → Audio → Speech**, open **Saved characters** and choose **Add voice**
+In **Studio → Audio → Speech**, open **Characters** and choose **Add voice**
 beside Blaine or another character. This is the same persistent library used by
 Video Reference mode. Maestro loads the saved voice and fills the speaker name;
 the portrait identifies the character in the picker.

@@ -1,5 +1,9 @@
 # Wan2GP 12.71 feature port into Maestro 2.0.1
 
+This is the historical development and validation record from the v2.0.1
+working copy. These locally developed features are prepared for public release
+in [Maestro v2.1.0](../RELEASE_NOTES_V2.1.0.md).
+
 Source reviewed: [Wan2GP commit 1e1dd2757f24923f008593d9d4ec09062234be20](https://github.com/deepbeepmeep/Wan2GP/tree/1e1dd2757f24923f008593d9d4ec09062234be20), retrieved 5 September 2026. The release announcement is [Wan2GP v12.71](https://github.com/deepbeepmeep/Wan2GP/blob/1e1dd2757f24923f008593d9d4ec09062234be20/README.md). Implementation is local in Maestro's `dev` working copy.
 
 ## Integration approach
@@ -52,14 +56,14 @@ All seven requested integrations are implemented locally. Native DLSS execution 
 
 The initial small H3 smoke tests used four base steps to exercise integration, the extended Voice Audio tests used 20 steps per segment, and the VDN tests used its eight-step recipe. These are functional checks, not a visual-quality evaluation or a speed benchmark. Wan2GP's “at least 20% faster” VDN claim has not been independently measured here. Long 720p/1080p VDN runs and DLSS visual stability still need representative footage and supported runtime testing.
 
-Validation outputs are in the **Wan-Port-Validation** workspace (`app/outputs/Wan-Port-Validation`). Existing dialogue work, Blaine prompts and GPU/window preferences were preserved. VERSION remains **2.0.1**; no release, commit or push was made.
+Validation outputs are in the **Wan-Port-Validation** workspace (`app/outputs/Wan-Port-Validation`). Existing dialogue work, Blaine prompts and GPU/window preferences were preserved. At the end of this initial validation, VERSION was still **2.0.1** and no release, commit or push had been made.
 
 The final verified Outpaint output is `2026-09-05-14h01m11s_seed607_Colorful geometric shapes extend naturally into th.mp4`. Earlier smoke-test iterations and cumulative window previews also remain in that validation workspace. For the audio-refinement comparison use the two seed603 clips; for VDN use seed604 (Pruned) and seed606 (Full); seed608 exercises generation plus RIFE x3.
 
 ## Where to test in Maestro
 
 1. **VDN:** Studio → Video → Frames → model selector → **H3 VDN First / Last — Pruned** or **H3 VDN First / Last — Full**. In Advanced → Presets choose **VDN Turbo 8 Steps** for the accelerated adapter/sampling recipe. Start at 480p and one short window. The trained module and both adapters are already downloaded locally; the checkpoint loader verifies required components. VDN has its own attention path and does not combine with Sol/SLA or ordinary H3 Turbo controls.
-2. **Temporal finishing:** In Advanced → Post Processing choose **RIFE 4.26 ×3**, or use Studio → Video → Upscale → **Original size (temporal only)**. The source duration and soundtrack should remain unchanged while the frame rate triples.
+2. **Temporal finishing:** In Advanced → Finishing choose **RIFE 4.26 ×3**, or use Studio → Video → Upscale → **Original size (temporal only)**. The source duration and soundtrack should remain unchanged while the frame rate triples.
 3. **Media Flow:** Expand **Media Flow — batch processing** in Upscale. Add videos or images, set finishing options, and queue the files. Monitor/cancel individual jobs in the normal queue. Outputs are new files with a `_media_flow` suffix and recoverable processing settings.
 4. **H3 Outpaint:** Studio → Video → Outpaint; select ordinary **H3 First / Last — Pruned** or **Full**. Upload a video and expand the canvas. Margins snap to H3's 32-pixel latent grid. The original central region is restored in the final encode, and Preserve Source Audio defaults on. Expand **Media Flow — batch Outpaint** to apply the same proportional margins and prompt to multiple full videos. VDN, Reference, fused Turbo and image models are excluded from this H3 workflow.
 5. **Voice Audio:** Studio → Audio → Speech → **H3 Voice Audio — Pruned**. Choose a maximum duration of 5–300 seconds (default 15). Individual generations stay within 45 seconds; longer scripts split automatically and assemble into one file. Advanced exposes inference steps. Plain text is spoken dialogue. For two voices, add two audio references and use `Speaker 1: ...` / `Speaker 2: ...` blocks; `[English, calm]` adds unspoken directions. For non-speech audio, start with `Sound:`. Whisper trims surplus speech at script boundaries; actual speech output may be shorter than the selected ceiling. See [the audio guide](../H3-Voice-Audio.md).

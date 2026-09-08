@@ -17,8 +17,9 @@ import sqlite3
 import statistics
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Iterator, Mapping, Optional, Sequence
 
 
 _WINDOW_RE = re.compile(r"(?:sliding\s+)?window\s+(\d+)\s*/\s*(\d+)", re.I)
@@ -383,10 +384,17 @@ class GenerationEtaHistory:
             self._enabled = False
             print(f"[ETA] Local timing history unavailable ({exc}).")
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.path, timeout=5.0)
-        connection.execute("PRAGMA busy_timeout=5000")
-        return connection
+        try:
+            connection.execute("PRAGMA busy_timeout=5000")
+            # SQLite's transaction context commits/rolls back, but does not
+            # close the file. Release every handle explicitly on Windows too.
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def _initialize(self) -> None:
         with self._lock, self._connect() as connection:

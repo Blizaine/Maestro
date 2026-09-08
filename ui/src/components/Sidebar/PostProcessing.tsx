@@ -2,7 +2,8 @@ import { useState, useMemo, useRef } from 'react'
 import { ChevronDown, ChevronRight, X, Mic } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
-import { MediaFinishingControls, dlssSpatialOptions } from './MediaFinishingControls'
+import { MediaFinishingControls } from './MediaFinishingControls'
+import { dlssSpatialOptions } from '../../lib/mediaFlow'
 
 const baseOptions = [
   { value: '', label: 'None' },

@@ -144,13 +144,14 @@ class TestStudioInterfaceQuickWins(unittest.TestCase):
     def test_browser_spellcheck_is_enabled_for_text_inputs(self):
         self.assertIn('<body spellcheck="true">', _read(_INDEX_HTML_PATH))
 
-    def test_main_prompt_grows_automatically_with_its_content(self):
+    def test_main_prompt_only_autogrows_outside_fixed_composer(self):
         source = _read(_PROMPT_PATH)
         self.assertIn(
-            "const promptTextareaRef = useAutoGrowingTextarea(prompt)",
+            "const promptTextareaRef = useAutoGrowingTextarea(prompt, !compact)",
             source,
         )
         self.assertIn("ref={promptTextareaRef}", source)
+        self.assertIn("studio-prompt-textarea", source)
         self.assertIn("resize-none overflow-hidden", source)
         self.assertNotIn("resize: 'vertical'", source)
         self.assertNotIn("maxHeight: '70vh'", source)

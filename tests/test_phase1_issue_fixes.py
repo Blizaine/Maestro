@@ -246,14 +246,14 @@ class TestOutpaintTimingAndWindowUI(unittest.TestCase):
                 "DurationSlider.tsx",
             )
         )
-        advanced = _read(
+        output_format = _read(
             os.path.join(
                 _ROOT,
                 "ui",
                 "src",
                 "components",
                 "Sidebar",
-                "AdvancedSettings.tsx",
+                "OutputFormatControls.tsx",
             )
         )
         self.assertIn("Math.ceil(selectedDuration) + 1", controls)
@@ -264,9 +264,10 @@ class TestOutpaintTimingAndWindowUI(unittest.TestCase):
             duration,
         )
         self.assertIn(
-            "!isOutpaint && !modelOptions?.hide_resolution_presets",
-            advanced,
+            "(mode === 'avatar' && ['outpaint', 'recast', 'restyle'].includes(editMode))",
+            output_format,
         )
+        self.assertIn("!options?.hide_resolution_presets", output_format)
 
 
 class TestOutpaintCurrentModelStack(unittest.TestCase):

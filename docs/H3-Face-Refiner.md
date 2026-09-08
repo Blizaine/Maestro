@@ -8,8 +8,8 @@ codec fits MP4). The original video is never overwritten.
 
 ## Automatic refinement
 
-In Studio Video, enable **Refine faces after generation** beneath the prompt
-and inputs. The default **Auto · up to 5** finds relevant identities. Choose
+In Studio Video, open **Advanced → Finishing** and enable **Refine faces after
+generation**. The default **Auto · up to 5** finds relevant identities. Choose
 1–5 to request a specific maximum, including smaller or briefly visible faces.
 Refinement runs after the complete clip is assembled and before temporal
 interpolation, DLSS/FlashVSR finishing, film grain and voice replacement.

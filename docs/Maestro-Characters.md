@@ -144,7 +144,7 @@ the source RefMod, model and prompt.
 
 ## Use characters in images and Viggle
 
-In **Studio → Image**, use **Add character** beside the image references. Choose
+In **Studio → Image**, open **Characters** in the bottom settings strip. Choose
 a saved character, then one or more views. The saved cover is selected by default.
 Missing RefMod views are recovered once and cached. Reopening the picker uses
 the existing PNGs. You can import a character directly from this picker.

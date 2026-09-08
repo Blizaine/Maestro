@@ -1318,7 +1318,7 @@ class H3ReferenceSequencePlannerTests(unittest.TestCase):
             "{isH3 || isLtx ? 'Window Length' : 'Window Size'}",
             duration,
         )
-        self.assertIn('Recommended {formatSeconds(safeWindowSeconds)}', duration)
+        self.assertIn('recommendedH3OmniSequenceProfile(', duration)
         self.assertIn('native Omni windows', duration)
         self.assertIn('body["multi_prompts_gen_type"] = 0', launch)
         self.assertIn('body["sliding_window_overlap"] = h3_sequence_overlap', launch)

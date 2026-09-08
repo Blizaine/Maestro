@@ -11,12 +11,14 @@ Open [blaine-maestro-reference-manual.txt](blaine-maestro-reference-manual.txt),
 1. In Studio Video, choose Reference and an H3 Reference model.
 2. Add only the saved character Blaine. The prompts bind his image to `<Picture 1>`, visible identity to `<Subject 1>`, and voice to `<Audio 1>` for speaker `(S1)`. Keep the audio assigned as Voice reference.
 3. Choose landscape 16:9. Blaine stays centered; resize and position the presenter video in the corner during editing.
-4. Choose **Manual - one per line** for Window prompts.
-5. In Advanced, set **Sequence Window Length to 14.4 seconds** (345 frames). This is the per-run setting for your GPU; the safe automatic default remains 10.1 seconds.
+4. Keep one complete native prompt on each physical line. These prompts are already structured; the magic-button enhancement is optional and Generate uses the supplied text.
+5. Open **Duration**, lock **Window Length** and set it to **14.4 seconds** (345 frames). This example uses a manual GPU override; Auto recommends a duration for the selected model, resolution and GPU.
 6. In Duration, choose **Window** and set **14 windows**. Confirm the prompt counter reads **14/14**.
-7. Keep **Carry motion and sound between windows** enabled with the default 18-frame overlap, and choose **Continuous take per clip** for Sequence Camera Coverage.
+7. For the continuous timing below, keep **Carry motion and sound between windows** enabled with the default 18-frame overlap. In **Advanced → Generation**, choose **Continuous take per clip** for Sequence Camera Coverage.
 
 The displayed 14.4-second window is exactly 14.375 seconds at 24 fps. The first window contributes 14.375 seconds; each later window contributes 13.625 seconds after overlap. Total: 191.500 seconds. The prompts contain 31–34 words each, spoken in approximately 11.07–12.14 seconds at 2.8 words per second. Their opening pause is 0.25 seconds; the remainder is an explicit silent, closed-mouth hold.
+
+For a static presenter assembled over a screen recording, turn **Carry motion and sound between windows** off if long continuation degrades the appearance. Each clip then starts independently from the saved character reference. Fourteen full 14.375-second clips total 201.250 seconds before any editing, and cuts can be placed between tutorial sections.
 
 For a framing and voice check, use [the first-window prompt](blaine-maestro-reference-first-window.txt) with **one 14.4-second window**. It now includes both the welcome and workspace introduction. For the complete tutorial, use all 14 lines and 14 windows.
 

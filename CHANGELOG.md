@@ -3,7 +3,51 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
-## [Unreleased]
+## [2.1.0] - Unreleased
+
+- Rebuilt Studio around compact reference inputs and a large prompt workspace.
+  Resolution, Aspect, Duration and Advanced use compact controls; Recipes is
+  grouped beside Resolution, Model Browser opens directly, and Generate retains
+  its separate queue action. All themes and model-specific choices remain.
+- Made prompt enhancement explicit: the magic button runs AI Faithful, with
+  Creative in its menu. Results are editable before submission. Added image
+  Faithful/Creative instructions and preserved reviewed H3/LTX window prompts.
+- Added model-aligned Time sliders through five minutes, retained long presets,
+  and displayed Auto's recommended duration. Fixed unstable prompt resizing,
+  iPhone keyboard/scroll handling, overlapping controls and moving duration sliders.
+- Added portable `.maestro.safetensors` characters with saved voice and selected
+  PNG views, standard RefMod import, Hugging Face browsing, voice filters,
+  clearer names, cached video thumbnails and mobile scrolling. Improved native
+  image recovery and multi-character speaker matching. Saved characters now
+  work in supported Image/Animate workflows and across Speech models.
+- Added three-step Viggle Animate with control video and an edited frame from
+  any source time. Optional Flux 2 Klein preparation replaces the character
+  using a saved character/image and editable appearance instructions; preview,
+  manual Image-mode editing, Apply & return and settings restoration are supported.
+- Added H3 Voice Audio with one/two voice references, 45-second generations and
+  five-minute assembly, speaker turns, conservative Whisper trimming and sound
+  prompts. Shared dialogue pacing now defaults to 2.8 words/second with a maximum
+  admission rate of 3. Fixed production prose and mixed dialogue formats being
+  incorrectly counted as speech.
+- Added H3 VDN Full/Pruned and eight-step presets, H3 video/batch outpainting,
+  six-step audio-only refinement, and H3 Face Refiner for up to five tracked
+  faces with saved-character mapping and automatic or gallery processing.
+- Enabled experimental compatible character/style/concept LoRAs on H3 Fused
+  4-Step while excluding incompatible acceleration/VDN/DoRA adapters.
+- Added Media Flow batch finishing, RIFE 4.26 x3, optional DLSS 5 Neural Rendering
+  and native DLSS Frame Generation with hardware-aware availability. Native
+  DLSS has separate Windows 11/runtime requirements and remains unverified on
+  the Windows 10 development machine.
+- Fixed the H3 Extend model-switch React update loop and Director horizontal
+  overflow. Improved mobile Model Browser layout and added manual URL LoRA
+  destination selection with automatic suggestions. Expanded model, dialogue,
+  character, media and UI regression coverage and shared model offloading.
+- Fixed Windows ETA-history file handles remaining open and eager CUDA
+  initialization when importing the Wan/SCAIL model stack for CPU validation.
+
+See [complete v2.1.0 release notes](docs/RELEASE_NOTES_V2.1.0.md) for feature
+details, compatibility limits and update instructions. Prepared locally;
+not yet published.
 
 ## [2.0.1] - 2026-09-04
 

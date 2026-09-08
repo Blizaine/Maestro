@@ -3,7 +3,8 @@ import { Wrench, Upload, X, Film, Image as ImageIcon, Mic, Play } from 'lucide-r
 import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
 import { MediaFlowPanel } from './MediaFlowPanel'
-import { MediaFinishingControls, dlssSpatialOptions } from './MediaFinishingControls'
+import { MediaFinishingControls } from './MediaFinishingControls'
+import { dlssSpatialOptions } from '../../lib/mediaFlow'
 import { FaceRefinerButton } from '../Characters/FaceRefiner'
 
 // Upscale methods — same set as Post Processing's Spatial Upsampling, minus the

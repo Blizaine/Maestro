@@ -83,7 +83,7 @@ the source-tail context. Presets through **60 minutes** and custom timecodes
 remain available.
 
 The automatic window grows with the requested duration up to the model/GPU
-recommendation. Use **Advanced → Window Length** to set a temporary cap or save
+recommendation. Open **Duration → Window Length** to set a temporary cap or save
 an override for that model and resolution. Longer timelines use multiple windows.
 Viggle always uses its fixed 124-frame recipe.
 

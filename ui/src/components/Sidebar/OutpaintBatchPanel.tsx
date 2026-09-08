@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
-import { trackMediaFlowJobs } from './MediaFlowPanel'
+import { trackMediaFlowJobs } from '../../lib/mediaFlow'
 
 export function OutpaintBatchPanel() {
   const [files, setFiles] = useState<Array<{ path: string; name: string }>>([])
