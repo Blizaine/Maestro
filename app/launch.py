@@ -24399,7 +24399,7 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
     """Build and run a job, optionally deferring success finalization."""
     from shared.utils.thread_utils import AsyncStream, async_run
     import inspect
-    from contextlib import nullcontext
+    from contextlib import ExitStack, nullcontext
 
     job = _jobs[job_id]
     start_time = time.time()
@@ -24407,7 +24407,7 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
 
     # Internal image preparation runs inside its parent's existing slot.
     # Keeping one job identity preserves cancellation and avoids a second queue.
-    with (nullcontext(True) if _slot_owned else generation_slot(_gen_lock, job)) as acquired:
+    with ExitStack() as media_resources, (nullcontext(True) if _slot_owned else generation_slot(_gen_lock, job)) as acquired:
         if not acquired:
             return False
         try:
@@ -24476,6 +24476,21 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
             # after the generation lock is held. No model-specific generation
             # work or memory budgeting starts until the prompt LLM is gone.
             raw_params = job["params"].copy()
+            if (wgp.get_model_def(raw_params.get("model_type")) or {}).get("minimax_h3_viggle"):
+                from services.viggle_media import prepare_control_media
+                try:
+                    raw_params.update(media_resources.enter_context(prepare_control_media(
+                        raw_params,
+                        resolve_media=lambda path: _resolve_tool_clip_path(path, job.get("workspace")),
+                        aborted=lambda: is_cancel_requested(job),
+                        update=lambda message: update_job(job, phase="Preparing media", message=message),
+                    )))
+                except InterruptedError as error:
+                    finish_job(job, "cancelled", message=str(error))
+                    return False
+                except Exception as error:
+                    finish_job(job, "failed", error=str(error), message=str(error))
+                    return False
             try:
                 _apply_deferred_prompt_enhancement(job, raw_params)
             except Exception as error:

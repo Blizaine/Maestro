@@ -4,9 +4,10 @@ import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
 import { CharacterImagePickerButton } from '../Characters/CharacterImagePicker'
 import { CharacterToolbarItem } from './SidebarPanels'
-import { newViggleCharacter, vigglePreparationKey, VIGGLE_SWAP_PROMPT } from '../../lib/viggle'
+import { newViggleCharacter, vigglePreparationKey, viggleTimeline, VIGGLE_SWAP_PROMPT } from '../../lib/viggle'
+import { VideoTimelineSelector } from '../shared/VideoTimelineSelector'
 import { characterDisplayName } from '../../lib/characters'
-import type { ViggleCharacterOptions } from '../../types'
+import type { GenerateParams, ViggleCharacterOptions } from '../../types'
 
 const filename = (path: string) => path.replace(/\\/g, '/').split('/').pop() || path
 const mediaUrl = (path: string) => /[/\\]uploads[/\\]/.test(path)
@@ -24,18 +25,39 @@ export function ViggleControls() {
   const [previewJob, setPreviewJob] = useState('')
   const alive = useRef(true)
   useEffect(() => {alive.current = true; return () => {alive.current = false}}, [])
-  const video = useRef<HTMLVideoElement>(null)
   const source = String(params.video_guide || '')
   const edited = String(params._viggle_edited_frame || '')
   const audio = String(params.audio_prompt_type || '')
   const character = params.viggle_character
+  const timeline = viggleTimeline(params)
   const locked = busy || preparing
+  const changeTimeline = (changes: Partial<GenerateParams>) => {
+    useStore.setState(state => {
+      if (state.params.video_guide !== source) return state
+      const next = {...state.params, ...changes}
+      // A frame is always an absolute timestamp in the original source.
+      const selection = viggleTimeline(next)
+      const frameChanged = selection.frame !== viggleTimeline(state.params).frame
+      return {params: {...next, _viggle_trim_start: selection.start, _viggle_trim_end: selection.end,
+        _viggle_frame_seconds: selection.frame,
+        ...(next.viggle_character ? {viggle_character: {...next.viggle_character, frame_seconds: selection.frame},
+          ...(frameChanged ? {_viggle_prepared: undefined, _viggle_edited_frame: undefined} : {})} : {})}}
+    })
+    const current = useStore.getState()
+    const range = viggleTimeline(current.params)
+    if (current.params.video_guide === source && range.length > 0
+      && (current.params._duration_planning_mode ?? 'auto') === 'auto') current.setDurationSeconds(range.length)
+  }
+  const changeFrame = (seconds: number) => changeTimeline({
+    _viggle_frame_seconds: seconds,
+    ...(character ? {viggle_character: {...character, frame_seconds: seconds}} : {}),
+  })
   const clearPrepared = () => {
     setParam('_viggle_prepared', undefined)
     setParam('_viggle_edited_frame', undefined)
   }
   const changeCharacter = (changes: Partial<ViggleCharacterOptions>) => {
-    setParam('viggle_character', {...newViggleCharacter(), ...character, ...changes})
+    setParam('viggle_character', {...newViggleCharacter(), frame_seconds: timeline.frame, ...character, ...changes})
     clearPrepared()
   }
   const upload = async (file: File | undefined, kind: 'video' | 'image' | 'audio' | 'character') => {
@@ -45,10 +67,6 @@ export function ViggleControls() {
       const result = await api.uploadImage(file)
       if (kind === 'video') {
         setParam('video_guide', result.path)
-        clearPrepared()
-        setParam('_viggle_source_seconds', undefined)
-        setParam('_viggle_frame_seconds', 0)
-        if (character) changeCharacter({frame_seconds: 0})
       } else if (kind === 'image') {
         setParam('_viggle_edited_frame', result.path)
         setParam('viggle_character', undefined)
@@ -83,6 +101,8 @@ export function ViggleControls() {
       const submitted = await api.submitGeneration({model_type: 'viggle_animate', prompt: 'Viggle Animate',
         generation_mode: 'video', image_mode: 0, resolution: params.resolution, video_length: 124,
         video_guide: source, seed: params.seed, viggle_character: character,
+        _viggle_trim_start: params._viggle_trim_start, _viggle_trim_end: params._viggle_trim_end,
+        _viggle_source_seconds: params._viggle_source_seconds, _viggle_frame_seconds: timeline.frame,
         _viggle_prepared: params._viggle_prepared, _viggle_prepare_only: true,
         audio_prompt_type: '', workspace: useStore.getState().activeWorkspace})
       if (alive.current) setPreviewJob(submitted.job_id)
@@ -120,16 +140,34 @@ export function ViggleControls() {
       <div className="space-y-2">
         <div className="flex items-center justify-between text-xs text-text-primary"><span>1 · Control video</span>
           {source && <button type="button" disabled={locked} aria-label="Remove control video" onClick={() => {
-            setParam('video_guide', undefined); setParam('_viggle_source_seconds', undefined)
-            clearPrepared()
+            setParam('video_guide', undefined)
           }} className="p-2 text-text-muted"><X size={14} /></button>}
         </div>
-        {source ? <video ref={video} src={mediaUrl(source)} controls playsInline preload="metadata"
-          className="max-h-52 w-full rounded-xl bg-black" onLoadedMetadata={event => {
-            const seconds = event.currentTarget.duration
-            if (Number.isFinite(seconds) && seconds > 0 && params._viggle_source_seconds !== seconds)
-              setParam('_viggle_source_seconds', seconds)
-          }} /> : input('video', 'Upload control video')}
+        {source ? <>
+          <VideoTimelineSelector key={source} videoUrl={mediaUrl(source)} duration={timeline.duration}
+            startTime={timeline.start} endTime={timeline.end} playheadTime={timeline.frame} disabled={locked}
+            onStartChange={seconds => changeTimeline({_viggle_trim_start: seconds})}
+            onEndChange={seconds => changeTimeline({_viggle_trim_end: seconds})}
+            onPlayheadChange={changeFrame} onMetadata={seconds => {
+              if (Number.isFinite(seconds) && seconds > 0) changeTimeline({_viggle_source_seconds: seconds})
+            }}/>
+          <div className="grid grid-cols-3 gap-2">
+            {([
+              ['Start', 'Trim start seconds', timeline.start, 0, Math.max(0, timeline.end - 0.1),
+                (seconds: number) => changeTimeline({_viggle_trim_start: seconds})],
+              ['End', 'Trim end seconds', timeline.end, timeline.start + 0.1, timeline.duration,
+                (seconds: number) => changeTimeline({_viggle_trim_end: seconds})],
+              ['Frame to edit', 'Source frame seconds', timeline.frame, timeline.start, timeline.lastFrame, changeFrame],
+            ] as const).map(([label, ariaLabel, value, min, max, change]) => <label key={label}
+              className="min-w-0 text-[10px] text-text-muted">{label}
+              <input type="number" aria-label={ariaLabel} min={min} max={max} step={0.01}
+                disabled={locked || !timeline.duration} value={Math.round(value * 100) / 100}
+                onChange={event => change(Number(event.target.value) || 0)}
+                className="mt-1 min-h-10 w-full min-w-0 rounded-lg border border-border bg-bg-tertiary px-2 text-base sm:text-xs text-text-primary"/>
+            </label>)}
+          </div>
+          <p className="text-[10px] leading-relaxed text-text-muted">Drag the end handles to trim. Move the white playhead to choose the frame to edit. Times refer to the original video.</p>
+        </> : input('video', 'Upload control video')}
       </div>
       <div className="space-y-2">
         <div className="text-xs text-text-primary">2 · Character replacement</div>
@@ -137,7 +175,8 @@ export function ViggleControls() {
           {['Use a character', 'Use an edited frame'].map((label, index) => <button key={label} type="button" disabled={locked}
             aria-pressed={Boolean(character) === (index === 0)} onClick={() => {
               if (Boolean(character) === (index === 0)) return
-              setParam('viggle_character', index === 0 ? newViggleCharacter() : undefined)
+              setParam('_viggle_frame_seconds', timeline.frame)
+              setParam('viggle_character', index === 0 ? {...newViggleCharacter(), frame_seconds: timeline.frame} : undefined)
               clearPrepared(); setError('')
             }} className={`min-h-10 rounded-lg px-2 text-xs ${Boolean(character) === (index === 0) ? 'bg-bg-primary text-text-primary shadow-sm' : 'text-text-muted'}`}>{label}</button>)}
         </div>
@@ -154,17 +193,6 @@ export function ViggleControls() {
             onChange={event => changeCharacter({appearance_prompt: event.target.value})}
             placeholder="For example: Blaine wearing a dark leather jacket and blue jeans."
             className="w-full rounded-xl border border-border bg-bg-tertiary p-3 text-base sm:text-xs text-text-primary placeholder:text-text-muted"/>
-          <div className="flex flex-wrap items-end gap-2">
-            <label className="min-w-0 flex-1 text-[11px] text-text-muted">Source frame (seconds)
-              <input type="number" aria-label="Source frame seconds" min={0} step={0.1} disabled={locked}
-                max={params._viggle_source_seconds ? Math.max(0, params._viggle_source_seconds - 1 / 24) : 3600}
-                value={character.frame_seconds} onChange={event => changeCharacter({frame_seconds: Math.max(0, Number(event.target.value) || 0)})}
-                className="mt-1 min-h-10 w-full rounded-xl border border-border bg-bg-tertiary px-3 text-base sm:text-xs text-text-primary"/>
-            </label>
-            <button type="button" disabled={!source || locked} onClick={() => changeCharacter({frame_seconds: Math.max(0,
-              Math.min(video.current?.currentTime || 0, (params._viggle_source_seconds || 3600) - 1 / 24))})}
-              className="min-h-10 rounded-xl border border-border px-3 text-xs text-text-secondary disabled:opacity-40">Use paused frame</button>
-          </div>
           <details className="rounded-xl border border-border p-3 text-xs text-text-secondary">
             <summary className="cursor-pointer">Preparation settings</summary>
             <label className="mt-3 block text-[11px]">Image model
@@ -201,14 +229,13 @@ export function ViggleControls() {
         <button type="button" disabled={!source || locked} onClick={async () => {
           setBusy(true); setError('')
           try {
-            setParam('_viggle_frame_seconds', video.current?.currentTime || 0)
             await editFrame('animate')
           } catch (e) { setError(e instanceof Error ? e.message : 'Could not open the frame editor') }
           finally { setBusy(false) }
         }} className="flex w-full min-h-10 items-center justify-center gap-2 rounded-xl border border-border bg-bg-tertiary px-3 py-2 text-xs text-text-secondary disabled:opacity-40 hover:border-accent-blue">
           <WandSparkles size={15} />Edit current video frame in Maestro
         </button>
-        <p className="text-[10px] leading-relaxed text-text-muted">Pause on a clear frame. Change the subject, keeping its pose, background, framing and image dimensions. Any frame from the video can be used.</p>
+        <p className="text-[10px] leading-relaxed text-text-muted">Select a clear frame with the white playhead. Change the subject, keeping its pose, background, framing and image dimensions.</p>
         </>}
       </div>
       <div className="space-y-2">
@@ -221,7 +248,7 @@ export function ViggleControls() {
         {audio === 'A' && input('audio', params.audio_guide ? filename(params.audio_guide) : 'Upload custom audio')}
         <p className="text-[10px] text-text-muted">{audio === ''
           ? 'The default recipe requests silence. Choose the control soundtrack or custom audio to retain sound.'
-          : 'Audio guidance is experimental. Use a track synchronized to the source motion.'}</p>
+          : 'Audio guidance is experimental. Use a track synchronized to the original source; the same trim is applied to its audio.'}</p>
       </div>
       <div className="rounded-xl border border-border bg-bg-tertiary/40 p-2.5 text-[10px] leading-relaxed text-text-muted">3 steps · 5.2s windows · 24 fps. Longer footage continues automatically. The edited image supplies the instructions; this model uses a fixed prompt.</div>
       {preparing && <div className="space-y-2 rounded-xl border border-accent-blue/30 p-3">

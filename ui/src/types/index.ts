@@ -155,6 +155,9 @@ export interface GenerateParams {
   _viggle_edited_frame?: string
   _viggle_source_seconds?: number
   _viggle_frame_seconds?: number
+  /** Absolute source-video trim bounds; end is exclusive. */
+  _viggle_trim_start?: number
+  _viggle_trim_end?: number
   viggle_character?: ViggleCharacterOptions
   _viggle_prepared?: VigglePreparedFrame
   _viggle_prepare_only?: boolean

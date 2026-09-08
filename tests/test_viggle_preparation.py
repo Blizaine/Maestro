@@ -150,6 +150,20 @@ class PreparationTests(unittest.TestCase):
         viggle.normalize_settings(self.body)
         self.assertEqual(self.body['num_inference_steps'], 3)
 
+    def test_trim_does_not_offset_character_frame_or_invalidate_unchanged_preview(self):
+        self.options['frame_seconds'] = 0.75
+        self.body.update(_viggle_trim_start=0.5, _viggle_trim_end=1)
+        viggle.normalize_settings(self.body, allow_preparation=True)
+        result = self.prepare()
+        self.assertEqual(result['frame_seconds'], 0.75)
+        with Image.open(result['image_path']) as image:
+            # Source frame 18 (0.75s), not frame 6 (0.25s after the trim).
+            self.assertAlmostEqual(float(np.asarray(image)[:, :, 2].mean()), 144, delta=5)
+        self.body['_viggle_prepared'] = result
+        self.body['_viggle_trim_start'] = 0.6
+        self.assertEqual(self.prepare()['signature'], result['signature'])
+        self.assertEqual(len(self.calls), 1, 'Same original frame can reuse its Klein preview')
+
     def lifecycle_worker(self, job, *, outcome='success'):
         # Load the actual integration function without importing the web server/models.
         tree = ast.parse((ROOT / 'app/launch.py').read_text(encoding='utf-8'))

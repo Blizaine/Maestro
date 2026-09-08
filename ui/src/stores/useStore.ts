@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import type { SavedOmniCharacter, TtsVoice } from '../types'
 import { applyTtsVoices, ttsAudioModeForCount, ttsCharacterEnhancePrompt, ttsSpeakingVoiceCount, ttsVoiceLimit, ttsVoicePaths } from '../lib/ttsVoices'
-import { vigglePreparationKey } from '../lib/viggle'
+import { vigglePreparationKey, viggleTimeline } from '../lib/viggle'
 import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, StudioVideoWorkflow, StudioVideoCreateRoute, StudioVideoEffectiveCreateRoute, StudioImageWorkflow, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, DirectorShotImageGuidance, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineClipState, PipelineRepairState, SavedPipelineState, DirectorQueueState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping, H3WindowPlan, MiniMaxH3Reference, AppMode } from '../types'
 import * as api from '../api/client'
 import { applyThemePrefs, getStoredPrefs, type FamilyId, type ThemeMode, type ThemePrefs } from '../lib/theme'
@@ -522,6 +522,8 @@ const EPHEMERAL_PARAM_FIELDS: ReadonlyArray<keyof SavedModeParams> = [
   '_viggle_edited_frame',
   '_viggle_source_seconds',
   '_viggle_frame_seconds',
+  '_viggle_trim_start',
+  '_viggle_trim_end',
   'viggle_character',
   '_viggle_prepared',
   '_viggle_prepare_only',
@@ -3202,8 +3204,9 @@ export const useStore = create<AppState>((set, get) => ({
       console.error('Edit Anything: no source video loaded')
       return
     }
-    const startTime = which === 'animate' ? state.params._viggle_frame_seconds || 0 : state.editStartTime || 0
-    const endTime = which === 'animate' ? state.params._viggle_source_seconds || startTime + 1 : state.editEndTime || state.editVideoDuration || 0
+    const animateTimeline = viggleTimeline(state.params)
+    const startTime = which === 'animate' ? animateTimeline.frame : state.editStartTime || 0
+    const endTime = which === 'animate' ? animateTimeline.end || startTime + 1 : state.editEndTime || state.editVideoDuration || 0
     if (endTime <= startTime) {
       console.error('Edit Anything: invalid trim range')
       return
@@ -3738,6 +3741,12 @@ export const useStore = create<AppState>((set, get) => ({
     ].includes(String(key))
     set(s => {
       const nextParams = { ...s.params, [key]: value }
+      if (key === 'video_guide' && value !== s.params.video_guide && s.params.model_type === 'viggle_animate') {
+        Object.assign(nextParams, {_viggle_source_seconds: undefined, _viggle_trim_start: undefined,
+          _viggle_trim_end: undefined, _viggle_frame_seconds: 0,
+          _viggle_prepared: undefined, _viggle_edited_frame: undefined,
+          ...(s.params.viggle_character ? {viggle_character: {...s.params.viggle_character, frame_seconds: 0}} : {})})
+      }
       if (key === 'prompt') {
         delete nextParams._h3_original_prompt
         const editedLines = typeof value === 'string'
@@ -5218,6 +5227,15 @@ export const useStore = create<AppState>((set, get) => ({
   setDurationSeconds: (requested) => {
     const state = get()
     const options = state.modelOptions
+    if (state.params.model_type === 'viggle_animate' && Number.isFinite(requested)) {
+      const range = viggleTimeline(state.params)
+      const frames = Math.max(1, Math.floor(Math.min(requested, range.length || 3600, 3600) * 24 + 1e-6))
+      if (state.params.video_length === frames && state.durationSeconds === frames / 24
+        && state.params.sliding_window_size === 124 && state.slidingWindowSeconds === 124 / 24) return
+      set({durationSeconds: frames / 24, slidingWindowSeconds: 124 / 24,
+        params: {...state.params, video_length: frames, sliding_window_size: 124}})
+      return
+    }
     if (options?.audio_only && options.audio_segment_max_seconds && options.duration_slider) {
       const ds = options.duration_slider
       const seconds = Math.max(ds.min, Math.min(ds.max,
@@ -7733,6 +7751,14 @@ export const useStore = create<AppState>((set, get) => ({
       if (!params.video_guide || !(state.params.viggle_character ? hasCharacter : editedFrame)) {
         set({promptEnhanceError: 'Viggle needs a control video and a character image or an edited frame.'})
         return
+      }
+      const selection = viggleTimeline(state.params)
+      if (selection.length > 0) {
+        Object.assign(params, {_viggle_trim_start: selection.start, _viggle_trim_end: selection.end,
+          _viggle_frame_seconds: selection.frame,
+          video_length: (state.params._duration_planning_mode ?? 'auto') === 'auto'
+            ? Math.max(1, Math.floor(selection.length * 24 + 0.000001))
+            : Math.min(Number(params.video_length) || 124, Math.max(1, Math.floor(selection.length * 24 + 0.000001)))})
       }
       Object.assign(params, {prompt: 'Viggle Animate', image_refs: editedFrame ? [editedFrame] : [],
         image_start: undefined, image_end: undefined, video_source: undefined, frames_positions: undefined,
@@ -11617,6 +11643,10 @@ export const useStore = create<AppState>((set, get) => ({
       || (p.model_type === 'viggle_animate' && Array.isArray(p.image_refs) ? String(p.image_refs[0] || '') : undefined)
     newParams._viggle_source_seconds = Number(p._viggle_source_seconds) || undefined
     newParams._viggle_frame_seconds = Number(p._viggle_frame_seconds) || 0
+    newParams._viggle_trim_start = p.model_type === 'viggle_animate' && p._viggle_trim_start != null
+      ? Number(p._viggle_trim_start) : undefined
+    newParams._viggle_trim_end = p.model_type === 'viggle_animate' && p._viggle_trim_end != null
+      ? Number(p._viggle_trim_end) : undefined
     newParams.viggle_character = p.model_type === 'viggle_animate' && p.viggle_character && typeof p.viggle_character === 'object'
       ? p.viggle_character as import('../types').ViggleCharacterOptions : undefined
     newParams._viggle_prepared = newParams.viggle_character && p._viggle_prepared && typeof p._viggle_prepared === 'object'

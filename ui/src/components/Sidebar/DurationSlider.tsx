@@ -17,6 +17,7 @@ import {
   recommendedH3OmniSequenceProfile,
 } from '../../lib/h3Memory'
 import { DurationPresetControl } from './DurationPresetControl'
+import { viggleTimeline } from '../../lib/viggle'
 
 export const formatSeconds = (seconds: number) => {
   const rounded = Math.round(seconds * 10) / 10
@@ -123,7 +124,7 @@ export function DurationSlider({ includeWindowSettings = false }: { includeWindo
     ? modelOptions.frames_maximum / fps
     : null
   const isVideoExtend = studioVideoWorkflow === 'extend' && supportsSlidingWindows
-  const minDuration = Math.max(
+  const minDuration = modelType === 'viggle_animate' ? 1 / fps : Math.max(
     1,
     isVideoExtend
       ? continuationFirstWindowSeconds(nativeMinSeconds, overlap, fps)
@@ -199,7 +200,7 @@ export function DurationSlider({ includeWindowSettings = false }: { includeWindo
   ))
   const driveDuration = Number(driveReference?.duration_seconds)
   const hasTimedGuide = Boolean(audioGuide || videoGuide)
-  const viggleSourceSeconds = useStore(s => s.params._viggle_source_seconds)
+  const viggleSourceSeconds = useStore(s => viggleTimeline(s.params).length)
   const autoSourceSeconds = Number.isFinite(driveDuration) && driveDuration > 0
     ? driveDuration
     : modelType === 'viggle_animate' && viggleSourceSeconds ? viggleSourceSeconds

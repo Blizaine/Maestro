@@ -76,6 +76,12 @@ def normalize_settings(inputs, *, validate_media=True, allow_preparation=False):
     frames = float(inputs.get("video_length") or WINDOW_FRAMES)
     if not math.isfinite(frames) or not 1 <= frames <= 24 * 3600:
         raise ValueError("Viggle duration must be between one frame and one hour.")
+    from services.viggle_media import selected_range
+    selection = selected_range(inputs)
+    if selection is not None:
+        start, end = selection
+        inputs.update(_viggle_trim_start=start, _viggle_trim_end=end)
+        frames = min(frames, max(1, math.floor((end - start) * 24 + 1e-6)))
     # New recipes must not pass through the legacy pre-2.35 audio migrations.
     inputs["settings_version"] = max(float(inputs.get("settings_version") or 0), 2.58)
     if inputs.get("resolution") == "auto480p":

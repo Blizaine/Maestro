@@ -279,7 +279,9 @@ def get_state_model_type(state):
 
 def compute_sliding_window_no(current_video_length, sliding_window_size, discard_last_frames, reuse_frames):
     left_after_first_window = current_video_length - sliding_window_size + discard_last_frames
-    return 1 + math.ceil(left_after_first_window / (sliding_window_size - discard_last_frames - reuse_frames))
+    # A short Animate selection can be smaller than the overlap itself. It
+    # still needs one native pass before the assembler trims the output.
+    return max(1, 1 + math.ceil(left_after_first_window / (sliding_window_size - discard_last_frames - reuse_frames)))
 
 
 def clean_image_list(gradio_list):
@@ -2996,6 +2998,11 @@ def normalize_model_total_frame_count(frame_count, model_def, window_size=None):
     """Normalize an output timeline without treating a window cap as total."""
 
     frame_count = int(frame_count)
+    if model_def.get("minimax_h3_viggle", False):
+        # Animate's output follows the selected source range, even below one
+        # native window. Individual passes still build 124 frames; the assembler
+        # trims their output using this unrounded total.
+        return max(1, frame_count)
     maximum = model_def.get("frames_maximum", None)
     if maximum is not None and window_size is not None and int(window_size) > 0:
         maximum = min(int(maximum), int(window_size))
