@@ -44,6 +44,10 @@ public v2.0.1 update.
 - Long H3 enhancement prepares reviewable window prompts. **Exact H3 prompts**
   exposes them for editing; LTX retains one prompt line per window. Missing
   window prompts produce an actionable message before submission.
+- H3 multi-window Faithful and Creative planning now share Studio's optional
+  `enhance/nsfw_shared.md` guide when Mature mode is enabled. The same guide
+  reaches story planning, long-form chapters, per-window writing and retries;
+  it is omitted when Mature mode is off. The guide's wording is unchanged.
 - Time mode adds a slider through model-aligned durations up to five minutes.
   Ordinary H3 starts at approximately 5.2s, 5.9s and 6.6s. Longer presets and
   editable timecodes still reach 60 minutes on supported video workflows.

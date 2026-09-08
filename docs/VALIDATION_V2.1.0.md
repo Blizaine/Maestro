@@ -117,6 +117,26 @@ The final unittest and sidebar logs are retained locally as
   scene requesting brief dialogue. Mocked transport verifies scheduling and
   preservation; it does not establish every model's writing or rendered quality.
 
+## Shared H3 content guide follow-up — 8 September
+
+- Replaced H3's separate inline Mature-mode note with conditional loading of
+  Studio's existing `enhance/nsfw_shared.md`. Both planning styles use it for
+  story treatment, chapter planning, segment expansion and bounded retries.
+  The guide's wording and the server-side eligibility checks are unchanged.
+- Bumped the shared H3 planner version so old plans are invalidated. JSON output
+  contracts, timing rules and reference constraints remain in the stage guides.
+- **143 focused tests passed**: 104 shared-guide, Frames planner, story ledger
+  and dialogue tests, plus 39 Reference sequence and prompt-budget tests. Logs:
+  `.codex-tmp/h3-shared-guide-tests.log` and
+  `.codex-tmp/h3-shared-guide-sequence-tests.log`.
+- Three new tests and an updated Frames regression use neutral guide markers
+  and mocked LLM calls to check on/off routing, both styles, long-form chapters,
+  retries, empty-guide behavior and switching Mature mode off in the same
+  process. No explicit-content authoring or live model quality testing was done.
+- No frontend or launcher changes, application restart, or public push.
+  Restart Maestro to load the backend change; restart again after editing a
+  guide because guide text is cached. Re-enhance prompts to apply the change.
+
 ## Prior model checks and remaining manual validation
 
 The [H3/media port record](development/wan2gp-12-71-port-plan.md) records earlier

@@ -38,7 +38,7 @@ from services.director.long_form_story import (
 )
 
 
-H3_STORY_LEDGER_VERSION = 27
+H3_STORY_LEDGER_VERSION = 28
 
 
 class H3DialogueTimingError(ValueError):
@@ -49,6 +49,20 @@ def normalize_h3_planning_style(value: Any) -> str:
     """Return the durable AI-writing contract stored with every H3 plan."""
 
     return "creative" if str(value or "").strip().casefold() == "creative" else "faithful"
+
+
+def _load_h3_planning_guide(name: str, *, nsfw: bool) -> str:
+    """Share Studio's optional content guidance across H3 planning stages."""
+    from services.guide_loader import load_guide
+
+    guide = load_guide("enhance", name)
+    if nsfw:
+        content_guide = load_guide("enhance", "nsfw_shared")
+        if content_guide:
+            # Keep the stage's JSON, timing and reference contract after the
+            # shared writing guidance, as in Studio's final output contract.
+            return f"{content_guide}\n\n{guide}"
+    return guide
 
 
 def _only_supplied_dialogue_requested(prompt: str) -> bool:
@@ -5166,7 +5180,6 @@ def _plan_long_form_ledger(
     supplies new visible progression between those immutable anchors.
     """
 
-    from services.guide_loader import load_guide
     from services.h3_window_planner import _parse_json_object
 
     durations = [max(0.1, float(value)) for value in segment_durations]
@@ -5178,12 +5191,7 @@ def _plan_long_form_ledger(
     chapter_count = len(chapter_ranges)
     warnings: list[str] = []
     planning_style = normalize_h3_planning_style(planning_style)
-    guide = load_guide("enhance", "minimax_h3_story_ledger")
-    if nsfw:
-        guide += (
-            "\n\nMATURE-MODE FIDELITY\nPreserve explicitly requested mature "
-            "material. Do not censor it, add to it, or intensify it."
-        )
+    guide = _load_h3_planning_guide("minimax_h3_story_ledger", nsfw=nsfw)
 
     source_events = extract_source_events(prompt)
     source_cast_names = list(
@@ -6074,7 +6082,6 @@ def plan_h3_story_segments(
     """Create a compact ledger and expand one validated local segment at a time."""
 
     from services import llm_service
-    from services.guide_loader import load_guide
 
     generate = llm_generate or llm_service.generate
     durations = [max(0.1, float(value)) for value in segment_durations]
@@ -6258,17 +6265,12 @@ def plan_h3_story_segments(
             f"Application-owned final outcome:\n{canonical_ledger.get('required_final_outcome')}\n\n"
             f"User concept:\n{prompt}"
         )
-    ledger_guide = load_guide(
-        "enhance",
+    ledger_guide = _load_h3_planning_guide(
         "minimax_h3_story_treatment"
         if faithful_locked_schedule else
         "minimax_h3_story_ledger",
+        nsfw=nsfw,
     )
-    if nsfw:
-        ledger_guide += (
-            "\n\nMATURE-MODE FIDELITY\nPreserve explicitly requested mature material. "
-            "Do not censor it, add to it, or intensify it."
-        )
     ledger_schema = (
         _faithful_treatment_schema()
         if faithful_locked_schedule else
@@ -6600,12 +6602,7 @@ def plan_h3_story_segments(
             "to preserve every user-written word without rushing, repetition, "
             "or paraphrasing."
         )
-    segment_guide = load_guide("enhance", "minimax_h3_story_segment")
-    if nsfw:
-        segment_guide += (
-            "\n\nMATURE-MODE FIDELITY\nPreserve explicitly requested mature material. "
-            "Do not censor it, add to it, or intensify it."
-        )
+    segment_guide = _load_h3_planning_guide("minimax_h3_story_segment", nsfw=nsfw)
     cast_names = list(source_intent.get("cast_names") or [])
     dialogue_by_id = {
         str(item.get("dialogue_id") or "").upper(): item

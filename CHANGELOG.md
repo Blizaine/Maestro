@@ -17,6 +17,9 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
   2.8 words/second pace, with a 3 words/second maximum across all speakers.
   Sparse drafts get a focused writing retry; H3 supports up to six turns per
   window. Exact lines, brief-dialogue requests and explicit silence remain respected.
+- Connected H3 multi-window Faithful/Creative planning to the same optional
+  shared content guide as Studio enhancement. It loads only with Mature mode
+  enabled, including chapter planning, per-window writing and retries.
 - Added model-aligned Time sliders through five minutes, retained long presets,
   and displayed Auto's recommended duration. Fixed unstable prompt resizing,
   iPhone keyboard/scroll handling, overlapping controls and moving duration sliders.

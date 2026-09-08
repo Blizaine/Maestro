@@ -656,22 +656,35 @@ class H3WindowPlannerTests(unittest.TestCase):
         self.assertIn("Immutable chronological events", first_segment_prompt)
 
     @patch("services.llm_service.generate")
-    def test_mature_mode_uses_fidelity_note_not_general_enhancer(self, generate):
+    def test_mature_mode_conditionally_loads_shared_content_guide(self, generate):
+        from services.guide_loader import load_guide
+
+        marker = "TEST CONTENT GUIDE: Use a warm conversational tone."
+
+        def load_fixture(category, name):
+            return marker if name == "nsfw_shared" else load_guide(category, name)
+
         generate.side_effect = RuntimeError("offline")
-        plan_h3_sliding_windows(
-            "A named character completes one requested action",
-            model_type="minimax_h3",
-            resolution="1920x1088",
-            total_frames=345,
-            window_frames=124,
-            overlap_frames=1,
-            fps=24,
-            nsfw=True,
-        )
-        system_prompt = generate.call_args_list[0].kwargs["system_prompt"]
-        self.assertIn("SOURCE FIDELITY", system_prompt)
-        self.assertIn("MATURE-MODE FIDELITY", system_prompt)
-        self.assertIn("Do not censor it, add to it, or intensify it", system_prompt)
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled), patch("services.guide_loader.load_guide", side_effect=load_fixture) as loader:
+                generate.reset_mock()
+                plan_h3_sliding_windows(
+                    "A named character completes one requested action",
+                    model_type="minimax_h3",
+                    resolution="1920x1088",
+                    total_frames=345,
+                    window_frames=124,
+                    overlap_frames=1,
+                    fps=24,
+                    nsfw=enabled,
+                )
+                self.assertGreater(len(generate.call_args_list), 1)
+                self.assertIn("SOURCE FIDELITY", generate.call_args_list[0].kwargs["system_prompt"])
+                for call in generate.call_args_list:
+                    self.assertEqual(call.kwargs["system_prompt"].count(marker), int(enabled))
+                    self.assertNotIn("MATURE-MODE FIDELITY", call.kwargs["system_prompt"])
+                    self.assertIn("json_schema", call.kwargs)
+                self.assertEqual(any(call.args[1] == "nsfw_shared" for call in loader.call_args_list), enabled)
 
     def test_signature_changes_when_timing_or_media_contract_changes(self):
         common = dict(
