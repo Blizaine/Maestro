@@ -3,28 +3,61 @@
 Prepared on 7 September 2026. This is a local release candidate, not a published
 release. See the [release notes](RELEASE_NOTES_V2.1.0.md) for the user-facing changes.
 
-Updated on 8 September with the dialogue, shared-guide and Studio UI
-follow-ups below.
+Final staging completed on 8 September with the dialogue, shared-guide,
+Studio/Director controls and mobile gallery follow-ups below.
 
 ## Release boundary
 
-- Public `dev` and `main` were checked directly against GitHub with read-only
+- Public `dev` and `main` were rechecked on 8 September against GitHub with read-only
   `git ls-remote`. Both point to `a5dddd4faa53e8fa8d76ef528c1074935eded8c0`, whose
   application `VERSION` is `2.0.1`.
 - The feature work before release preparation ended at `a48da84`, 15 commits
   after that public baseline. Release notes cover that complete difference and
   the cleanup performed during this release check.
+- The final application checkpoint is `310d1a9`, 24 commits after the public
+  baseline. Staging reconciles the final documentation after that checkpoint.
 - Root `VERSION` is now `2.1.0`. The isolated application version reader returns
   `2.1.0`; README, changelog and release notes agree. Pinokio's launcher schema
   version and the private frontend package version are separate values.
 - The production UI was rebuilt locally. Build output remains ignored; normal
   installation/update builds it from source.
-- The running backend was not restarted. It reads the version at startup and
-  will display `2.1.0` after the next normal restart. Active projects and jobs
-  were not reset or replaced.
+- The running backend was not restarted during staging. Its read-only
+  system-config endpoint now reports `2.1.0`, matching the source version and
+  rendered Maestro branding. Active projects and jobs were not reset or replaced.
 - No push, remote branch update, release tag, or GitHub release was performed.
 
-## Checks performed for this candidate
+## Final staging checks — 8 September
+
+| Check | Result |
+| --- | --- |
+| Complete Python unittest discovery | 1,426 tests run: 1,425 passed and one CUDA-only test skipped, in 82.325 seconds. |
+| Standalone JSON grammar runner | All five checks passed. |
+| Python syntax | First-party services, launch/runtime entry points, H3, Wan T5, DLSS, Face Refiner, RIFE and release scripts compiled successfully. |
+| Production UI build and ESLint | Both passed; existing bundle-size/dynamic-import warnings remain. |
+| Full Studio/Director browser suite | Passed, including six theme variants and 1360/767/440/390/320px widths. |
+| Five focused UI/settings suites | Duration, character images, Viggle preparation, LoRA URL import and fused-H3 LoRA restoration all passed. |
+| Release version | `VERSION`, isolated application reader and running backend all report `2.1.0`. |
+| Source boundary and documentation | Clean-repo guard passed for 2,181 tracked files; all 38 local links in release/navigation documentation resolve; diff whitespace passed. |
+| Public references | Both branches still point to the v2.0.1 baseline; no public `v2.1.0` tag exists. |
+
+The complete browser run includes the latest Advanced section badges,
+viewport-bounded guides, Director Auto controls, H3 LoRA weights and intercepted
+queue payloads. The final mobile gallery header was separately inspected at
+320/390/440/767px: centered full branding, no repeated mode selector, retained
+sidecar mode controls and unchanged desktop navigation.
+
+Tests used the existing CPU validation environment and isolated browser origins
+with mocked writes/generation. No live generation, LLM call, install, reset or
+backend restart was performed. The manual hardware/device limits below remain.
+Configuration and launcher files are unchanged since their initial syntax checks.
+
+Final logs use the `.codex-tmp/v2.1.0-staging-` prefix: `unittest.log`,
+`grammar.log`, `build.log`, `lint.log`, `sidebar.log`, `duration.log`,
+`characters.log`, `viggle.log`, `lora-import.log` and `lora-restore.log`.
+The local source archive and checksum are kept outside Git under
+`.codex-tmp/releases/v2.1.0/`; publication remains held.
+
+## Initial candidate checks — 7 September
 
 The Python run used the existing Python 3.11.13 environment with
 `CUDA_VISIBLE_DEVICES=-1`. Browser checks used Chromium with isolated test

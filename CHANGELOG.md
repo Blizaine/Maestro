@@ -71,7 +71,7 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
   initialization when importing the Wan/SCAIL model stack for CPU validation.
 
 See [complete v2.1.0 release notes](docs/RELEASE_NOTES_V2.1.0.md) for feature
-details, compatibility limits and update instructions. Prepared locally;
+details, compatibility limits and update instructions. Staged locally;
 not yet published.
 
 ## [2.0.1] - 2026-09-04

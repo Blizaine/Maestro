@@ -93,11 +93,12 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
-### v2.1.0 (prepared locally; not yet published)
+### v2.1.0 (staged locally; not yet published)
 
 **A larger Studio workspace, portable characters and new H3 tools**
 - Redesigned Studio with a large, stable prompt field, consistent reference tiles, compact setting menus, explicit Faithful/Creative enhancement, direct Recipes/Model Browser shortcuts and improved mobile keyboard handling.
 - Added model-aligned duration sliders through five minutes, retained presets through one hour, and made Auto show its recommended duration. Fixed moving duration sliders, overlapping controls, the H3 Extend model-switch crash and Director sideways scrolling.
+- Unified Director's duration controls with Studio, restored H3 Video LoRA weight sliders, added active badges inside Advanced, and simplified mobile gallery navigation.
 - Added portable **`<character>.maestro.safetensors`** exports with saved voice and selected images, standard RefMod/Hugging Face imports, a Character Browser, better image recovery, multi-RefMod speaker matching, and saved characters in supported Image, Animate and all Speech workflows.
 - Added **Viggle Animate**, including optional Flux 2 Klein character replacement from a chosen video frame, editable appearance prompts, preview and manual Image-mode round trips.
 - Added **H3 Voice Audio** with up to 45 seconds per generation and five minutes per assembled output. Shared dialogue planning defaults to 2.8 words/second with a maximum of 3, and no longer counts production headings as speech.

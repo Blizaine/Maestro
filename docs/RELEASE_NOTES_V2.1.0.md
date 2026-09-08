@@ -1,6 +1,6 @@
 # Maestro v2.1.0
 
-Prepared locally on 7 September 2026; not yet published.
+Staged locally on 8 September 2026; publication is pending.
 
 Maestro 2.1.0 brings a larger Studio prompt workspace, portable characters with
 voice, automatic character preparation for Viggle Animate, and new H3 audio,
@@ -12,6 +12,10 @@ public v2.0.1 update.
 - Video, Image and Audio keep their complete workflow lists at the top.
   Compact media inputs sit above a large prompt field that fills the available
   space. Frames and References use consistent three-column input tiles.
+- The mobile gallery header centers Maestro's icon, name and version, with the
+  sidecar menu on the left and Queue/Settings on the right. The Director,
+  Studio and Editor selector stays in the sidecar instead of being repeated
+  above the gallery.
 - Media tabs, workflow selection, references and prompt share one vertical
   scroller, so short windows can reach every input. Long scripts expand the
   prompt without a second scrollbar; short prompts still fill the available
