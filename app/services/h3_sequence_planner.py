@@ -21,6 +21,7 @@ from services.h3_story_ledger import (
     _merge_h3_cast_names,
     _same_h3_cast_identity,
     _source_requests_multiple_cast_instances,
+    canonicalize_h3_reference_names,
     extract_h3_source_intent,
     extract_locked_dialogue,
     normalize_h3_planning_style,
@@ -1246,6 +1247,14 @@ def compile_h3_reference_sequence_prompts(
     # itself; visual prose belongs in the chronological shot description.
     raw_subjects = str(plan.get("subject_definitions") or "").strip()
     canonical_subjects = str(reference_relationships or "").strip()
+    canonical_subjects = canonicalize_h3_reference_names(
+        canonical_subjects,
+        _merge_h3_cast_names(
+            list((plan.get("source_intent") or {}).get("cast_names") or []),
+            extract_h3_source_intent(str(source_prompt or plan.get("source_prompt") or ""))["cast_names"],
+            _h3_plan_dialogue_speakers(plan),
+        ),
+    )
     subjects = (
         canonical_subjects
         if canonical_subjects
@@ -1578,6 +1587,7 @@ def plan_h3_reference_sequence(
             fps=fps,
         )
     relationships, default_retention, task_types = _reference_context(references)
+    relationships = canonicalize_h3_reference_names(relationships, source_intent["cast_names"])
     signature = h3_sequence_plan_signature(
         prompt,
         model_type=model_type,

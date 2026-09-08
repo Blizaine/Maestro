@@ -3,6 +3,23 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [2.1.1] - 2026-09-08
+
+- Fixed underwritten H3 AI Creative conversations: each inadequate window gets
+  an independent dialogue repair and a feedback retry, preserving successful
+  repairs elsewhere. Explicit discussion lists are checked against spoken
+  lines, including requested details, rather than visual descriptions alone.
+- Corrected pronouns being counted as characters and matched unambiguous
+  RefMod filenames to their natural character names throughout planning and
+  Subject/voice compilation. Distinct RefMod versions remain separate.
+- Made H3 plan warnings visible in the normal Studio prompt area, including
+  mobile. Refresh preserves AI Creative/Faithful instead of reverting to Faithful.
+- Corrected bug-report and contributor log paths to include the launcher script
+  folder, and added a README guide to finding logs, older sessions, and terminal
+  output when no log file exists (#118).
+
+See the [v2.1.1 release notes](docs/RELEASE_NOTES_V2.1.1.md) for details.
+
 ## [2.1.0] - 2026-09-08
 
 - Rebuilt Studio around compact reference inputs and a large prompt workspace.

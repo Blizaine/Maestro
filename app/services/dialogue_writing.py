@@ -123,4 +123,74 @@ def creative_dialogue_budget(prompt: str, duration_seconds: float | None) -> Dia
     speech_fraction = 0.25 if brief_speech else (0.85 if conversation_brief(prompt) else 0.5)
     maximum = max(1, math.floor(duration * DIALOGUE_MAX_WORDS_PER_SECOND))
     target = min(maximum, max(1, round(duration * speech_fraction * DIALOGUE_DEFAULT_WORDS_PER_SECOND)))
-    return DialogueBudget(1 if brief_speech else max(1, math.ceil(target * 0.75)), target, maximum)
+    # A conversation draft at 75% of the target was routinely accepted as a
+    # single short reaction per window. Keep sustained speech close to its
+    # allocation while leaving mixed action scenes their wider breathing room.
+    minimum_fraction = 0.9 if conversation_brief(prompt) else 0.75
+    return DialogueBudget(1 if brief_speech else max(1, math.ceil(target * minimum_fraction)), target, maximum)
+
+
+def requested_dialogue_topics(prompt: str) -> list[str]:
+    """Read explicit talking-point lists, excluding visual/style checklists.
+
+    These are coverage hints for authored speech, never extra dialogue for a
+    silent scene or an exact-only script. Free prose remains the writer's job.
+    """
+    if not conversation_brief(prompt) or only_supplied_dialogue_requested(prompt):
+        return []
+    topics: list[str] = []
+    in_topics = False
+    for line in str(prompt or "").splitlines():
+        text = line.strip()
+        if re.match(
+            r"^(?:features?|topics?|talking points?|discussion points?|"
+            r"things to (?:discuss|explain|cover)|(?:discuss|explain|cover)(?: the following)?)"
+            r"(?:\s+(?:include|includes|are))?\s*:\s*$", text, re.IGNORECASE,
+        ):
+            in_topics = True
+            continue
+        bullet = re.match(r"^(?:[•*\-–]|\d+[.)])\s+(.+)$", text)
+        if in_topics and bullet:
+            topic = bullet.group(1).strip(" *.!;:")
+            if topic and topic not in topics:
+                topics.append(topic)
+        elif text:
+            in_topics = False
+    return topics
+
+
+def _dialogue_topic_terms(text: str) -> set[str]:
+    # Expand common spoken equivalents before comparing named talking points.
+    # Only dialogue text enters this check; camera prose cannot satisfy it.
+    text = re.sub(r"\bUI\b", "user interface", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bSFX\b", "sound effects", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:saving|saved|saves)\b", "save", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:sharing|shared|shares)\b", "share", text, flags=re.IGNORECASE)
+    ignored = {
+        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
+        "in", "is", "it", "of", "on", "or", "the", "to", "with", "w",
+        "feature", "features", "support", "supports", "include", "includes",
+        "generate", "generates", "generation",
+    }
+    return {
+        word[:5] if len(word) > 5 else word
+        for word in re.findall(r"[^\W_]+", text.casefold())
+        if word not in ignored
+    }
+
+
+def dialogue_topic_covered(topic: str, spoken_text: str) -> bool:
+    """Conservative lexical check for an explicit named discussion topic.
+
+    Allow ordinary paraphrasing and inflections, but require distinctive
+    acronyms (including their spoken expansions) such as SFX or RefMod.
+    This is a writing aid, not a general semantic/factual judge.
+    """
+    terms = _dialogue_topic_terms(topic)
+    if not terms:
+        return True
+    spoken = _dialogue_topic_terms(spoken_text)
+    named_terms = re.findall(r"\b(?:[A-Z]{2,}[a-z]*|[A-Z][a-z]+[A-Z][A-Za-z]*)\b", topic)
+    if any(not _dialogue_topic_terms(name) <= spoken for name in named_terms):
+        return False
+    return len(terms & spoken) >= max(1, math.ceil(len(terms) * 0.65))

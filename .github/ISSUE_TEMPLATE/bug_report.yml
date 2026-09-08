@@ -41,9 +41,16 @@ body:
       label: Logs
       description: |
         Paste the tail of the relevant log, or drag the file into this box.
-        Logs live in the Pinokio app folder under **`logs/api/latest`** (launcher
-        script runs) or **`logs/shell/latest`**. The last ~50 lines around the
-        failure are usually enough. Redact anything personal.
+        From Maestro's top-level folder (the one containing `start.js`), use
+        **`logs/api/start.js/latest`** for startup or generation problems,
+        **`logs/api/update.js/latest`** for updates, or
+        **`logs/api/install.js/latest`** for installation problems.
+        `latest` is a text file without an extension. Local LLM server output
+        is also saved in **`logs/llm/llama-server.log`**.
+        The last ~50 lines around the failure are usually enough. See
+        [Finding logs](https://github.com/Blizaine/Maestro#finding-logs) for help.
+        If no log was created, copy the terminal error or explain how you
+        launched Maestro and which log folders you found. Redact anything personal.
       render: shell
     validations:
       required: true

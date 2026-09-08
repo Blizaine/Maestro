@@ -403,7 +403,9 @@ export function PromptInput() {
               {h3PlanIsStale && (
                 <span className="text-[9px] text-amber-400">Needs update</span>
               )}
-              {(h3WindowPlan.planned_by === 'deterministic_fallback' || h3WindowPlan.planned_by === 'hybrid_repair') && (
+              {h3WindowPlan.planning_warnings?.length ? (
+                <span className="shrink-0 text-[9px] text-indicator-warning">Review needed</span>
+              ) : (h3WindowPlan.planned_by === 'deterministic_fallback' || h3WindowPlan.planned_by === 'hybrid_repair') && (
                 <span className="text-[9px] text-amber-400">
                   {h3WindowPlan.planned_by === 'hybrid_repair' ? 'Repaired' : 'Fallback'}
                 </span>
@@ -411,7 +413,7 @@ export function PromptInput() {
             </button>
             <button
               type="button"
-              onClick={() => enhancePrompt()}
+              onClick={() => enhancePrompt(undefined, h3WindowPlan.planning_style === 'creative' ? 'creative' : 'faithful')}
               disabled={isEnhancing}
               title={`Rebuild the H3 ${usesH3SequencePlanner ? 'reference sequence' : 'window plan'} from the current idea and timing.`}
               className="p-1 text-text-muted hover:text-accent-blue disabled:opacity-50"
@@ -419,12 +421,12 @@ export function PromptInput() {
               <RefreshCw size={11} className={isEnhancing ? 'animate-spin' : ''} />
             </button>
           </div>
-          {!compact && !!h3WindowPlan.planning_warnings?.length && (
+          {!!h3WindowPlan.planning_warnings?.length && (
             <div
               role="alert"
-              className="mt-1.5 rounded-lg border border-amber-400/35 bg-amber-400/10 px-2.5 py-2 text-[10px] leading-relaxed text-amber-300"
+              className="mt-1.5 rounded-lg border border-indicator-warning/35 bg-indicator-warning/10 px-2.5 py-2 text-[10px] leading-relaxed text-text-secondary"
             >
-              <div className="font-medium">Maestro repaired this H3 plan</div>
+              <div className="font-medium">Review this AI draft before generating</div>
               {h3WindowPlan.planning_warnings.map((warning, index) => (
                 <div key={`${index}-${warning}`} className="mt-0.5">
                   {warning}
@@ -441,7 +443,7 @@ export function PromptInput() {
                 </details>
               )}
               <div className="mt-1 text-text-muted">
-                Review the exact window prompts below or press refresh to try the AI planner again.
+                Open the exact window prompts to review or edit the script, or refresh to retry {h3WindowPlan.planning_style === 'creative' ? 'AI Creative' : 'AI Faithful'}.
               </div>
             </div>
           )}

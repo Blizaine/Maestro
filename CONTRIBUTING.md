@@ -67,8 +67,11 @@ got `git add`-ed).
 ## Reporting bugs
 
 Please use the **Bug report** issue template — it asks for your logs
-(`logs/api/latest` in the Pinokio app folder) and GPU/VRAM/OS, which is almost
-always what's needed to reproduce a local-generation issue.
+and GPU/VRAM/OS, which is almost always what's needed to reproduce a
+local-generation issue. See [Finding logs](README.md#finding-logs) for the
+correct paths and alternatives if no log file exists. For startup or generation
+problems, use `logs/api/start.js/latest`, relative to Maestro's top-level folder
+containing `start.js`. `latest` is a text file without an extension.
 
 ## License
 

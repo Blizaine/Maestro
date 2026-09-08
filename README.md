@@ -93,6 +93,17 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v2.1.1 (2026-09-08)
+
+**Fuller AI Creative dialogue and clearer troubleshooting**
+
+- **More complete conversations:** Creative uses the available speech time for developed exchanges. H3 checks explicit talking-point lists against spoken dialogue and repairs inadequate windows individually, preserving successful repairs elsewhere.
+- **Reliable character names:** H3 ignores pronouns such as "They" when identifying cast, and matches unambiguous RefMod filenames to the character names in your prompt for consistent Subject and voice bindings.
+- **Visible planning feedback:** unresolved H3 warnings appear in the normal Studio prompt area, including mobile. Refresh keeps a plan in AI Creative or AI Faithful instead of silently switching Creative to Faithful.
+- **Correct log instructions:** the bug-report form and contributing guide now point to the correct files. See [Finding logs](#finding-logs) for startup, update, install and local LLM logs, plus alternatives when no log file exists. Fixes issue #118.
+
+See the [v2.1.1 release notes](docs/RELEASE_NOTES_V2.1.1.md). Run AI Creative again on an existing draft to apply the revised dialogue planning.
+
 ### v2.1.0 (2026-09-08)
 
 **A larger Studio workspace, portable characters and new H3 tools**
@@ -909,3 +920,36 @@ Third-party models, weights, and components keep their own licenses — review t
 ## Issues
 
 Bug reports and feature requests: [github.com/Blizaine/Maestro/issues](https://github.com/Blizaine/Maestro/issues).
+
+### Finding logs
+
+Open Maestro's project in Pinokio and use its **Logs** page to find the session
+where the problem occurred. Where available, **Get Help** can prepare a report
+from that session's logs.
+
+To find the files directly, open Maestro's top-level installation folder — the
+folder containing `start.js`, `install.js`, and the `app` and `ui` folders. The
+paths below are relative to that folder:
+
+| Problem | Log file |
+|---|---|
+| Startup, generation, or runtime errors | `logs/api/start.js/latest` |
+| Updating Maestro | `logs/api/update.js/latest` |
+| Installing Maestro | `logs/api/install.js/latest` |
+| Local LLM server loading or crashes | `logs/llm/llama-server.log` |
+
+`latest` is a **plain-text file without an extension**; open it with a text
+editor such as Notepad. Each launcher action has its own folder under
+`logs/api/`, created when that action runs. For an older run, select the relevant
+session in Pinokio or use a timestamped log in the same script folder. The local
+LLM log is refreshed each time its server starts, so save the failing output
+before retrying.
+
+If you launch Maestro outside Pinokio, include the output from the terminal
+where you started it; Pinokio's launcher log folders may not exist. If you still
+cannot find a log, explain how you launched Maestro and which log folders are
+present in your bug report.
+
+Include the last roughly 50 lines around the failure, plus your GPU, VRAM,
+operating system, mode, and model. Review the excerpt and redact personal
+information before sharing it.

@@ -22,8 +22,8 @@ from services import llm_service
 
 
 BRIEF = "Maya and Leo discuss how to organize their film project."
-LINE_A = "Let's organize our source clips by scene first, then save a recipe so we can reuse these settings on tomorrow's shots."
-LINE_B = "Good idea. I'll label the character references too, so neither of us has to guess which version belongs in each scene."
+LINE_A = "Let's organize our source clips by scene first, then save a recipe so we can reuse these exact settings on tomorrow's shots."
+LINE_B = "Good idea. I'll label the character references too, so neither of us has to guess which exact version belongs in each scene."
 
 
 def line(text, segment=1, speaker="Maya"):
@@ -176,7 +176,10 @@ class CreativeDialogueWritingTests(unittest.TestCase):
 
     def test_sequence_completion_writes_each_window_and_keeps_story_events(self):
         canonical, ledger, locked = self.make_ledger()
-        generator = Mock(return_value=json.dumps({"generated_dialogue": [line(LINE_A, 1), line(LINE_B, 2, "Leo")]}))
+        generator = Mock(side_effect=[
+            json.dumps({"generated_dialogue": [line(LINE_A, 1)]}),
+            json.dumps({"generated_dialogue": [line(LINE_B, 2, "Leo")]}),
+        ])
         result, warnings = _complete_creative_dialogue(
             BRIEF, ledger, canonical_ledger=canonical, locked_dialogue=locked,
             durations=[10.1, 10.1], generate=generator, system_prompt="Story guide",
