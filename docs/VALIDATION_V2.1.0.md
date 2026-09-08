@@ -1,15 +1,17 @@
 # Maestro v2.1.0 local release validation
 
-Prepared on 7 September 2026. This is a local release candidate, not a published
-release. See the [release notes](RELEASE_NOTES_V2.1.0.md) for the user-facing changes.
+Prepared on 7 September 2026 and finalized on 8 September before publication.
+This record documents local validation of the release candidate. See the
+[release notes](RELEASE_NOTES_V2.1.0.md) for the user-facing changes.
 
 Final staging completed on 8 September with the dialogue, shared-guide,
 Studio/Director controls and mobile gallery follow-ups below.
 
 ## Release boundary
 
-- Public `dev` and `main` were rechecked on 8 September against GitHub with read-only
-  `git ls-remote`. Both point to `a5dddd4faa53e8fa8d76ef528c1074935eded8c0`, whose
+- Public `dev` and `main` were rechecked before publication on 8 September against
+  GitHub with read-only `git ls-remote`. Both pointed to
+  `a5dddd4faa53e8fa8d76ef528c1074935eded8c0`, whose
   application `VERSION` is `2.0.1`.
 - The feature work before release preparation ended at `a48da84`, 15 commits
   after that public baseline. Release notes cover that complete difference and
@@ -24,7 +26,9 @@ Studio/Director controls and mobile gallery follow-ups below.
 - The running backend was not restarted during staging. Its read-only
   system-config endpoint now reports `2.1.0`, matching the source version and
   rendered Maestro branding. Active projects and jobs were not reset or replaced.
-- No push, remote branch update, release tag, or GitHub release was performed.
+- No push, remote branch update, release tag, or GitHub release was performed
+  during local staging. The maintainer approved publication to `dev` and `main`
+  on 8 September after reviewing the candidate.
 
 ## Final staging checks — 8 September
 
@@ -38,7 +42,7 @@ Studio/Director controls and mobile gallery follow-ups below.
 | Five focused UI/settings suites | Duration, character images, Viggle preparation, LoRA URL import and fused-H3 LoRA restoration all passed. |
 | Release version | `VERSION`, isolated application reader and running backend all report `2.1.0`. |
 | Source boundary and documentation | Clean-repo guard passed for 2,181 tracked files; all 38 local links in release/navigation documentation resolve; diff whitespace passed. |
-| Public references | Both branches still point to the v2.0.1 baseline; no public `v2.1.0` tag exists. |
+| Public references at staging | Both branches pointed to the v2.0.1 baseline; no public `v2.1.0` tag existed. |
 
 The complete browser run includes the latest Advanced section badges,
 viewport-bounded guides, Director Auto controls, H3 LoRA weights and intercepted
@@ -55,7 +59,7 @@ Final logs use the `.codex-tmp/v2.1.0-staging-` prefix: `unittest.log`,
 `grammar.log`, `build.log`, `lint.log`, `sidebar.log`, `duration.log`,
 `characters.log`, `viggle.log`, `lora-import.log` and `lora-restore.log`.
 The local source archive and checksum are kept outside Git under
-`.codex-tmp/releases/v2.1.0/`; publication remains held.
+`.codex-tmp/releases/v2.1.0/`; the staging archive corresponds to commit `99a8e3d`.
 
 ## Initial candidate checks — 7 September
 
@@ -331,6 +335,7 @@ validated across supported hardware:
   quality checks for the intended hardware. No fixed speed improvement is
   claimed from this release validation.
 
-Publication is deliberately held. The local maintainer checklist records the
-remaining manual and publish steps; no public branch or tag should be updated
-until the maintainer authorizes publication.
+The maintainer approved publication to `dev` and `main` on 8 September 2026.
+The local maintainer checklist records publication progress; GitHub Actions
+records branch validation. The remaining manual checks above are separate from
+the completed local automated checks.

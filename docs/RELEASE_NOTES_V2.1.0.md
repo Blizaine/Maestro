@@ -1,6 +1,6 @@
 # Maestro v2.1.0
 
-Staged locally on 8 September 2026; publication is pending.
+Released on 8 September 2026.
 
 Maestro 2.1.0 brings a larger Studio prompt workspace, portable characters with
 voice, automatic character preparation for Viggle Animate, and new H3 audio,
@@ -262,7 +262,7 @@ machine's Windows 10 environment cannot run that path.
 - Added regression coverage for these model, character, dialogue, queue and UI
   paths, and cleaned up finishing-component refresh/state handling for release.
 
-## Updating when the release is published
+## Updating
 
 Use **Update** on Maestro's Pinokio page, then start normally and refresh the
 browser. The application version is **2.1.0**; Pinokio's launcher schema version
@@ -275,6 +275,5 @@ assets download only when their features need them. The optional DLSS runtime
 has its own installation procedure. Existing queued jobs retain their saved
 prompt behavior; newly submitted Studio jobs use explicit enhancement.
 
-This local preparation has not pushed `dev`, `main`, a tag, or a GitHub release.
 See the [release validation record](VALIDATION_V2.1.0.md) for completed checks
 and remaining hardware/device validation.

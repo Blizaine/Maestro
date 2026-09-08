@@ -93,7 +93,7 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
-### v2.1.0 (staged locally; not yet published)
+### v2.1.0 (2026-09-08)
 
 **A larger Studio workspace, portable characters and new H3 tools**
 - Redesigned Studio with a large, stable prompt field, consistent reference tiles, compact setting menus, explicit Faithful/Creative enhancement, direct Recipes/Model Browser shortcuts and improved mobile keyboard handling.
@@ -107,8 +107,8 @@ The version you are running is shown next to the Maestro title in the UI. To upd
 - Enabled experimental compatible H3 character/style/concept LoRAs for **Fused 4-Step**. Improved mobile Model Browser layout and added a manually selectable URL-import LoRA destination with automatic suggestions.
 
 See the [complete v2.1.0 release notes](docs/RELEASE_NOTES_V2.1.0.md) for every
-feature group, compatibility details and update instructions. Public `dev` and
-`main` remain on v2.0.1 until publication is approved.
+feature group, compatibility details and update instructions. Use **Update** on
+Maestro's Pinokio page to install v2.1.0.
 
 ### v2.0.1 (2026-09-04)
 

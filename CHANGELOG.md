@@ -3,7 +3,7 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
-## [2.1.0] - Unreleased
+## [2.1.0] - 2026-09-08
 
 - Rebuilt Studio around compact reference inputs and a large prompt workspace.
   Resolution, Aspect, Duration and Advanced use compact controls; Recipes is
@@ -71,8 +71,7 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
   initialization when importing the Wan/SCAIL model stack for CPU validation.
 
 See [complete v2.1.0 release notes](docs/RELEASE_NOTES_V2.1.0.md) for feature
-details, compatibility limits and update instructions. Staged locally;
-not yet published.
+details, compatibility limits and update instructions.
 
 ## [2.0.1] - 2026-09-04
 
