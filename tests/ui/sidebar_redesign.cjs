@@ -10,6 +10,7 @@ const {assertDurationPopup} = require('./duration_popup.cjs');
 const {assertAnimateKeyboard} = require('./animate_keyboard.cjs');
 const {assertDirectorLayout} = require('./director_layout.cjs');
 const {assertComposerScrolling} = require('./composer_scrolling.cjs');
+const {assertAdvancedPopups} = require('./advanced_popups.cjs');
 const root = path.resolve(__dirname, '../..');
 const base = process.argv[2];
 if (!base) throw new Error('Pass the running Maestro URL; browser actions never reach it.');
@@ -140,11 +141,17 @@ const read = async endpoint => {
       assert.deepEqual(errors, []);
       return;
     }
+    if (process.env.MAESTRO_UI_ADVANCED_ONLY) {
+      await assertAdvancedPopups(page, sidebar, output);
+      assert.deepEqual(errors, []);
+      return;
+    }
     await assertDurationPopup(page, sidebar, output);
     if (process.env.MAESTRO_UI_DURATION_ONLY) {
       assert.deepEqual(errors, []);
       return;
     }
+    await assertAdvancedPopups(page, sidebar, output);
     await assertAnimateKeyboard(page, sidebar, output);
     await assertDirectorLayout(page, sidebar, output);
     await assertPromptStability(page, sidebar);
@@ -293,7 +300,7 @@ const read = async endpoint => {
       const viewport = page.viewportSize();
       assert.ok(triggerBox.height <= 44, 'Settings indicators keep their compact height');
       assert.ok(panelBox.x >= 0 && panelBox.x + panelBox.width <= viewport.width && panelBox.y >= 0 && panelBox.y + panelBox.height <= viewport.height, 'Settings overlay fits the viewport');
-      if (viewport.width >= 768) assert.ok(panelBox.y + panelBox.height < triggerBox.y, 'Desktop settings open upward from the indicator strip');
+      assert.ok(panelBox.y + panelBox.height < triggerBox.y, 'Settings open upward from their indicator on desktop and mobile');
       assert.equal(await advancedTrigger.getAttribute('aria-controls'), await advanced.getAttribute('id'));
     };
     const dockBeforeAdvanced = await page.getByTestId('studio-generate-bar').boundingBox();

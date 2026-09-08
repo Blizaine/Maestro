@@ -30,7 +30,11 @@ public v2.0.1 update.
 - Advanced uses independently collapsible Performance, Finishing, LoRAs and
   Generation sections. Empty sections are hidden; applicable controls remain
   available when disabled. Settings, active counts and unfinished preset
-  drafts survive closing the panel.
+  drafts survive closing the panel. Active settings have circular count badges
+  beside their section headings, and Advanced opens above its button on mobile
+  without covering Generate.
+- LoRA usage guides stay inside the visible screen in Studio and Director.
+  Long guides scroll, and dismissing a guide leaves its parent settings open.
 - Reference inputs retain their media roles, descriptions, ordering,
   background-isolation choices, saved voices and model-specific limits.
   Adding a reference reveals the next available drop zone.

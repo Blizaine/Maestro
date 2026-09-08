@@ -240,10 +240,8 @@ function LtxFramesExperimentalControls() {
   )
 }
 
-/** Active advanced features as human-readable labels. Drives the badge
- *  count AND its hover tooltip, so a surprising number names its source
- *  instead of sending the user hunting through every section. */
-export function useAdvancedActiveItems(): string[] {
+/** One source for section badges, the total count and their help text. */
+function useAdvancedActiveSections(): Record<AdvancedSectionKey, string[]> {
   const params = useStore(s => s.params)
   const modelOptions = useStore(s => s.modelOptions)
   const sidebarMode = useStore(s => s.sidebarMode)
@@ -266,30 +264,30 @@ export function useAdvancedActiveItems(): string[] {
   )
   const isScailHq = isScailEdit && params.model_type === 'scail2_14B'
 
-  const items: string[] = []
+  const items: Record<AdvancedSectionKey, string[]> = { performance: [], finishing: [], loras: [], generation: [] }
   if (sidebarMode === 'director') {
-    if (directorTurboMode[directorVideoModel] === true) items.push('H3 Turbo')
+    if (directorTurboMode[directorVideoModel] === true) items.performance.push('H3 Turbo')
     if (directorSolMode[directorVideoModel] === true) {
-      items.push(
+      items.performance.push(
         directorVideoModel.includes('fused_turbo')
           ? 'H3 SLA'
           : 'H3 Sol Engine',
       )
     }
-    if (directorFirstBlockCache[directorVideoModel] === true) items.push('First Block Cache')
+    if (directorFirstBlockCache[directorVideoModel] === true) items.performance.push('First Block Cache')
     return items
   }
-  if (params.seed !== -1) items.push(`Seed ${params.seed}`)
+  if (params.seed !== -1) items.generation.push(`Seed ${params.seed}`)
   if (String(modelOptions?.architecture || '').startsWith('minimax_h3')) {
-    if (params.minimax_h3_turbo_mode && modelOptions?.minimax_h3_turbo) items.push('H3 Turbo')
-    if (params.override_attention === 'sol') items.push('H3 Sol Engine')
-    if (params.override_attention === 'sla') items.push('H3 SLA')
-    if (params.skip_steps_cache_type === 'first_block') items.push('First Block Cache')
-    if (params.custom_settings?.audio_refinement === 'enabled') items.push('Audio refinement')
+    if (params.minimax_h3_turbo_mode && modelOptions?.minimax_h3_turbo) items.performance.push('H3 Turbo')
+    if (params.override_attention === 'sol') items.performance.push('H3 Sol Engine')
+    if (params.override_attention === 'sla') items.performance.push('H3 SLA')
+    if (params.skip_steps_cache_type === 'first_block') items.performance.push('First Block Cache')
+    if (generationMode !== 'audio' && params.custom_settings?.audio_refinement === 'enabled') items.finishing.push('Audio refinement')
   }
-  if (generationMode === 'video' && params.face_refiner?.enabled) items.push('Face refinement')
-  if (generationMode === 'video' && params.temporal_upsampling) items.push(`Smoothing (${params.temporal_upsampling})`)
-  if ((generationMode === 'video' || generationMode === 'avatar') && hasVoiceClone && !isScailEdit) items.push('Voice replacement')
+  if (generationMode === 'video' && params.face_refiner?.enabled) items.finishing.push('Face refinement')
+  if (generationMode === 'video' && params.temporal_upsampling) items.finishing.push(`Smoothing (${params.temporal_upsampling})`)
+  if ((generationMode === 'video' || generationMode === 'avatar') && hasVoiceClone && !isScailEdit) items.finishing.push('Voice replacement')
   const selectedFamily = String(selectedModel?.family || '').toLowerCase()
   const selectedArchitecture = String(selectedModel?.architecture || '').toLowerCase()
   const isLtxFrames = generationMode === 'video'
@@ -299,12 +297,14 @@ export function useAdvancedActiveItems(): string[] {
       || selectedFamily === 'ltx25'
       || selectedArchitecture.startsWith('ltx2')
     )
-  if (isLtxFrames && servicesConfig?.voice_reference_enabled) items.push('LTX voice reference')
-  if (isLtxFrames && servicesConfig?.director_multishot_lora_mode) items.push('LTX multi-shot prompting')
+  if (isLtxFrames && servicesConfig?.voice_reference_enabled) items.generation.push('LTX voice reference')
+  if (isLtxFrames && servicesConfig?.director_multishot_lora_mode) items.generation.push('LTX multi-shot prompting')
   if (
     String(modelOptions?.architecture || '').startsWith('minimax_h3')
+    // Studio video's window override lives in Duration, outside Advanced.
+    && generationMode === 'avatar' && !isScailEdit
     && slidingWindowLocked
-  ) items.push('H3 window override')
+  ) items.generation.push('H3 window override')
   if (
     H3_LONG_SEQUENCE_TESTS_VISIBLE
     && String(modelOptions?.architecture || '').startsWith('minimax_h3')
@@ -314,7 +314,7 @@ export function useAdvancedActiveItems(): string[] {
     const customSettings = params.custom_settings || {}
     for (const experiment of H3_LONG_SEQUENCE_EXPERIMENTS) {
       if (customSettings[experiment.id] === true) {
-        items.push(experiment.activeLabel)
+        items.generation.push(experiment.activeLabel)
       }
     }
   }
@@ -329,7 +329,7 @@ export function useAdvancedActiveItems(): string[] {
     && params.minimax_h3_camera_coverage
     && params.minimax_h3_camera_coverage !== 'auto'
   ) {
-    items.push(
+    items.generation.push(
       params.minimax_h3_camera_coverage === 'continuous'
         ? 'H3 continuous take'
         : 'H3 multi-shot coverage',
@@ -337,12 +337,19 @@ export function useAdvancedActiveItems(): string[] {
   }
   if (
     (params.negative_prompt?.length ?? 0) > 0
+    && !modelOptions?.no_negative_prompt
     && (!isScailEdit || isScailHq)
-  ) items.push('Negative prompt')
-  for (const l of params.activated_loras) items.push(`LoRA: ${l.replace(/\.(safetensors|sft)$/i, '')}`)
-  if (!isScailEdit && spatialUpsampling) items.push(`Upscaling (${spatialUpsampling})`)
-  if (!isScailEdit && filmGrainIntensity > 0) items.push('Film grain')
-  if (!isScailEdit && (params.self_refiner_setting ?? 0) > 0) items.push('Self refiner')
+  ) items.generation.push('Negative prompt')
+  if (!modelOptions?.loras_disabled && !(generationMode === 'avatar' && editSubMode === 'outpaint')) {
+    for (const l of params.activated_loras) items.loras.push(`LoRA: ${l.replace(/\.(safetensors|sft)$/i, '')}`)
+  }
+  if (!isScailEdit && generationMode !== 'audio' && spatialUpsampling) items.finishing.push(`Upscaling (${spatialUpsampling})`)
+  if (!isScailEdit && generationMode !== 'audio' && filmGrainIntensity > 0) items.finishing.push('Film grain')
+  if (!isScailEdit && modelOptions?.self_refiner && (params.self_refiner_setting ?? 0) > 0) items.generation.push('Self refiner')
+  if (generationMode === 'video' && modelOptions?.omni_reference && params.minimax_h3_reference_detail
+    && params.minimax_h3_reference_detail !== (modelOptions.omni_reference_detail_default ?? 'match')) {
+    items.performance.push('Reference detail')
+  }
   if (
     modelOptions?.minimax_h3_text_encoder_choices?.length
     && params.minimax_h3_text_encoder
@@ -351,13 +358,13 @@ export function useAdvancedActiveItems(): string[] {
     const selected = modelOptions.minimax_h3_text_encoder_choices.find(
       choice => choice.value === params.minimax_h3_text_encoder
     )
-    items.push(`H3 encoder: ${selected?.label || params.minimax_h3_text_encoder}`)
+    items.performance.push(`H3 encoder: ${selected?.label || params.minimax_h3_text_encoder}`)
   }
   if (
     modelOptions?.ltx25_video_vae_choices?.length
     && params.ltx25_video_vae === 'nad'
   ) {
-    items.push('LTX-2.5 NAD VAE')
+    items.performance.push('LTX-2.5 NAD VAE')
   }
   // injection_strength only matters when injected frames actually exist.
   // The persisted snapshot strips image_refs (file paths are ephemeral)
@@ -369,7 +376,7 @@ export function useAdvancedActiveItems(): string[] {
     && params.injection_strength != null
     && params.injection_strength !== 1.0
     && refCount > 0
-  ) items.push('Injection strength')
+  ) items.generation.push('Injection strength')
   // Process letter codes persist by design (the dropdown remembers the
   // user's choice across sessions), but their REQUIRED inputs are
   // ephemeral and stripped from persistence: frames injection ("F")
@@ -385,9 +392,13 @@ export function useAdvancedActiveItems(): string[] {
       : vptVisible.includes('V')
         ? !!params.video_guide
         : true
-    if (effective) items.push(`Process: ${vptVisible}`)
+    if (effective) items.generation.push(`Process: ${vptVisible}`)
   }
   return items
+}
+
+export function useAdvancedActiveItems(): string[] {
+  return Object.values(useAdvancedActiveSections()).flat()
 }
 
 /** Count active advanced features for the badge */
@@ -400,15 +411,19 @@ const CLOSED_SECTIONS: Record<AdvancedSectionKey, boolean> = {
   performance: false, finishing: false, loras: false, generation: false,
 }
 
-function AdvancedSection({ section, title, available = true, open, onToggle, children }: {
+function AdvancedSection({ section, title, available = true, open, onToggle, activeItems, children }: {
   section: AdvancedSectionKey; title: string; available?: boolean; open: boolean
-  onToggle: (open: boolean) => void; children: ReactNode
+  onToggle: (open: boolean) => void; activeItems: string[]; children: ReactNode
 }) {
   return <details hidden={!available} open={open} data-testid={`advanced-${section}`}
     onToggle={event => onToggle(event.currentTarget.open)}
     className="group/advanced border-b border-border last:border-b-0">
     <summary className="flex min-h-11 cursor-pointer list-none items-center gap-3 rounded-lg px-1 text-xs font-medium text-text-primary hover:bg-bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-blue [&::-webkit-details-marker]:hidden">
       <span>{title}</span>
+      {activeItems.length > 0 && <span aria-label={`${activeItems.length} active`} title={activeItems.join('\n')}
+        className="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-accent-blue/15 px-1 text-[9px] font-semibold tabular-nums text-accent-blue">
+        {activeItems.length}
+      </span>}
       <ChevronDown size={15} className="ml-auto shrink-0 text-text-muted transition-transform group-open/advanced:rotate-180" />
     </summary>
     {/* Native disclosure hides its content without unmounting drafts or effects. */}
@@ -418,6 +433,7 @@ function AdvancedSection({ section, title, available = true, open, onToggle, chi
 
 export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
   const [open, setOpen] = useState(false)
+  const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null)
   const [sections, setSections] = useState(CLOSED_SECTIONS)
   const toggleSection = (key: AdvancedSectionKey, expanded: boolean) => {
     setSections(current => current[key] === expanded ? current : { ...current, [key]: expanded })
@@ -507,7 +523,8 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
     return refs && refs.length > 0
   })
   const panelId = useId()
-  const advancedItems = useAdvancedActiveItems()
+  const activeSections = useAdvancedActiveSections()
+  const advancedItems = Object.values(activeSections).flat()
   const advancedCount = advancedItems.length
 
   const closePanel = () => setOpen(false)
@@ -526,6 +543,7 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
     <>
       {/* Trigger button */}
       <button
+        ref={setAnchor}
         type="button"
         onClick={() => setOpen(!open)}
         title={advancedCount > 0
@@ -534,6 +552,7 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
         aria-label={`Advanced settings${advancedCount > 0 ? `, ${advancedCount} active` : ''}`}
         aria-expanded={open}
         aria-controls={panelId}
+        aria-haspopup="dialog"
         className={`studio-setting-chip relative ${
           open ? 'border-accent-blue text-accent-blue' : 'border-border text-text-secondary hover:text-text-primary hover:border-border-light'
         }`}
@@ -551,7 +570,7 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
       </button>
 
       {/* Keep all controls mounted while the overlay is closed. */}
-      <SidebarDialog id={panelId} variant="settings" title="Advanced settings" open={open} onClose={closePanel}>
+      <SidebarDialog id={panelId} variant="settings" anchor={anchor} title="Advanced settings" open={open} onClose={closePanel}>
             <div className={`min-w-0 ${isDirector ? 'space-y-5' : ''}`}>
               {isDirector ? (
                 <>
@@ -568,7 +587,7 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
 
               {/* Presets belong with the creative adapter controls so users can
                   save or restore a setup before adjusting its LoRAs. */}
-              <AdvancedSection section="loras" title={canUseLoras ? 'LoRAs & presets' : 'Presets'} open={sections.loras} onToggle={expanded => toggleSection('loras', expanded)}>
+              <AdvancedSection section="loras" title={canUseLoras ? 'LoRAs & presets' : 'Presets'} activeItems={activeSections.loras} open={sections.loras} onToggle={expanded => toggleSection('loras', expanded)}>
               <PresetManager />
 
               {/* Keep creative adapters near the top so users can choose them
@@ -582,7 +601,7 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
               )}
               </AdvancedSection>
 
-              <AdvancedSection section="performance" title="Performance" available={hasPerformance} open={sections.performance} onToggle={expanded => toggleSection('performance', expanded)}>
+              <AdvancedSection section="performance" title="Performance" available={hasPerformance} activeItems={activeSections.performance} open={sections.performance} onToggle={expanded => toggleSection('performance', expanded)}>
               {showH3Optimizations && <MiniMaxH3Optimizations />}
 
               {showReferenceDetail && modelOptions && <label className="block space-y-1.5 text-xs text-text-secondary">
@@ -696,12 +715,12 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
               )}
 
               </AdvancedSection>
-              <AdvancedSection section="finishing" title="Finishing" available={hasFinishing} open={sections.finishing} onToggle={expanded => toggleSection('finishing', expanded)}>
+              <AdvancedSection section="finishing" title="Finishing" available={hasFinishing} activeItems={activeSections.finishing} open={sections.finishing} onToggle={expanded => toggleSection('finishing', expanded)}>
                 {isVideo && <AutomaticFaceRefiner />}
                 {isH3 && !isAudio && <H3MediaControls />}
                 {!isAudio && !isScailEdit && <PostProcessing expanded />}
               </AdvancedSection>
-              <AdvancedSection section="generation" title="Generation" open={sections.generation} onToggle={expanded => toggleSection('generation', expanded)}>
+              <AdvancedSection section="generation" title="Generation" activeItems={activeSections.generation} open={sections.generation} onToggle={expanded => toggleSection('generation', expanded)}>
               <LtxFramesExperimentalControls />
               {/* Studio video windows now live with Duration. */}
               {(isAvatar && !isScailEdit)

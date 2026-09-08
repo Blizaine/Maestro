@@ -220,6 +220,35 @@ The final unittest and sidebar logs are retained locally as
   no live generation, backend restart, launcher changes or public push occurred.
   Refresh Maestro to load the rebuilt UI.
 
+## Advanced and LoRA guide follow-up — 8 September
+
+- Advanced's section headings now share active-setting groups with the total
+  badge. Nonzero counts appear in small circular badges, even when sections are
+  collapsed. The video window override belongs to Duration and is no longer
+  counted in Advanced; unavailable adapter/finishing controls do not add badges.
+- Advanced uses its actual button as an anchor on mobile and desktop, stays
+  within the sidebar and opens above the generation controls. Expanded settings
+  remain scrollable and unfinished preset drafts stay mounted.
+- The shared Studio/Director LoRA guide uses explicit viewport-bounded
+  positioning, with scrolling for long text and room above or below its button.
+  Pointer, focus, tap, outside-click and Escape handling retain the parent
+  settings panel. Studio's guide button is now a sibling of the adapter toggle
+  instead of an invalid nested button.
+- Production TypeScript/Vite build and ESLint passed. The focused isolated
+  browser checks passed at 1360, 767, 440, 390 and 320 pixels, covering live badge
+  updates, totals, zero-state hiding, popup bounds, guide scrolling, unchanged
+  LoRA selection, nested dismissal and a simulated keyboard viewport.
+- The full sidebar browser suite passed, including all six themes, collapsed
+  and expanded Advanced panels, prompt stability and scrolling, duration,
+  character settings, explicit enhancement, held queues and Director layout.
+  These Chromium checks do not replace real iPhone/Safari testing.
+- Logs: `.codex-tmp/advanced-popups-build.log`,
+  `.codex-tmp/advanced-popups-lint.log`, `.codex-tmp/advanced-popups-ui.log` and
+  `.codex-tmp/advanced-popups-full-ui.log`. Screenshots are under
+  `.codex-tmp/sidebar-validation/`, including `advanced-badges-390.png` and
+  `lora-guide-390.png`. Tests used neutral LoRA fixtures and intercepted writes;
+  no live generation, backend restart, launcher changes or public push occurred.
+
 ## Prior model checks and remaining manual validation
 
 The [H3/media port record](development/wan2gp-12-71-port-plan.md) records earlier

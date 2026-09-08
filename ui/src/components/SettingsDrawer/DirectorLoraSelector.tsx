@@ -354,7 +354,7 @@ export function DirectorLoraSelector({ mode, modelType }: {
               )}
               {guideTexts[filename] && (
                 <span>
-                  <LoraGuideTooltip guide={guideTexts[filename]} />
+                  <LoraGuideTooltip guide={guideTexts[filename]} label={`Guide for ${displayName(filename)}`} />
                 </span>
               )}
               {loraWeightRecs[filename] && (

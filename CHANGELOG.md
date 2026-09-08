@@ -31,6 +31,9 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
   Time controls switch to manual on interaction. Time uses a five-minute
   slider with 10m/15m/30m/60m/Custom presets. Window Length stays visible;
   overlap is collapsible in both Time and Window modes.
+- Added active-count badges to Advanced section headings and anchored Advanced
+  above its mobile button. Fixed LoRA guides appearing off-screen; long guides
+  scroll and can be dismissed without closing their parent settings.
 - Added portable `.maestro.safetensors` characters with saved voice and selected
   PNG views, standard RefMod import, Hugging Face browsing, voice filters,
   clearer names, cached video thumbnails and mobile scrolling. Improved native

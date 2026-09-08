@@ -18,14 +18,16 @@ Frames and Extend use the same compact, three-column tile layout as Reference mo
 
 ## Advanced
 
-**Advanced** opens a settings overlay with collapsible section headings. Expand any combination of sections; their open state, settings and unfinished preset drafts are retained when the overlay is closed. Sections with no applicable controls are hidden. Available options still appear when switched off. When a model does not accept additional LoRAs, **Presets** remains available to save and restore its settings.
+**Advanced** opens directly above its button on desktop and mobile, within the sidebar and clear of Generate. Its contents scroll when necessary. Expand any combination of sections; their open state, settings and unfinished preset drafts are retained when the overlay is closed. Sections with no applicable controls are hidden. Available options still appear when switched off. When a model does not accept additional LoRAs, **Presets** remains available to save and restore its settings.
 
 - **Performance:** H3 optimizations, reference preparation detail, applicable text encoders/decoders and cache tuning. Existing compatible settings and defaults are retained.
 - **Finishing:** face refinement, H3 audio refinement and supported post-processing, including scaling, temporal upsampling, grain and voice replacement.
 - **LoRAs & presets:** creative adapters, strengths and saved setups.
 - **Generation:** seed, guidance, inference steps, output count and other applicable model controls.
 
-The closed Advanced button shows its active count; its tooltip lists those settings. **Face refinement & character mapping** in the Reference character library opens the same Finishing settings. Gallery face refinement remains available for previous videos.
+Each section heading shows a circular badge when it has active settings, including while collapsed. For example, one enabled adapter gives **LoRAs & presets** a **1** badge. The Advanced button totals the same section counts; badge tooltips list the settings. Controls located elsewhere, such as video's Window Length override in Duration, do not add to Advanced's count. **Face refinement & character mapping** in the Reference character library opens the same Finishing settings. Gallery face refinement remains available for previous videos.
+
+The green LoRA info button opens its usage guide. Guides stay within the visible screen, including with the mobile keyboard open, and long text can be scrolled. Hover for a quick look or click/tap to keep the guide open. Escape dismisses the guide first, leaving Advanced open; tapping elsewhere or pressing the info button again also dismisses it. The same guide behavior is shared by Studio and Director's LoRA pickers.
 
 ## Prompt and actions
 
