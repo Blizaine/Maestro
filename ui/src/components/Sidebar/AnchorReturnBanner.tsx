@@ -44,7 +44,7 @@ export function AnchorReturnBanner() {
   const hasLatestImage = !!latestImage
 
   return (
-    <div className="px-3 py-2 bg-accent-blue/10 border-b border-accent-blue/30">
+    <div className="studio-return-banner shrink-0 px-3 py-2 bg-accent-blue/10 border-b border-accent-blue/30">
       <div className="flex items-center gap-2 mb-1.5">
         <ArrowLeft size={12} className="text-accent-blue shrink-0" />
         <span className="text-[10px] font-semibold text-accent-blue">
@@ -66,7 +66,7 @@ export function AnchorReturnBanner() {
           <X size={11} />
         </button>
       </div>
-      <p className="text-[9px] text-text-muted leading-snug mb-2">
+      <p className="studio-return-help text-[9px] text-text-muted leading-snug mb-2">
         {isAnimate ? 'Replace the subject while keeping the source pose, background and framing. Generate the edit, then apply it to Animate.' : isRecast
           ? 'Edit the selected trim-start frame in Image Mode. Apply the result to use it as Recast’s replacement reference, or return unchanged.'
           : isRepaint
@@ -96,7 +96,7 @@ export function AnchorReturnBanner() {
         </button>
       </div>
       {!hasLatestImage && (
-        <p className="text-[9px] text-text-muted mt-1.5 italic">
+        <p className="studio-return-help text-[9px] text-text-muted mt-1.5 italic">
           Generate an image first, then click Apply.
         </p>
       )}

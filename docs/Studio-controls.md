@@ -39,7 +39,9 @@ For a long H3 sequence, Enhance prepares the individual window prompts. **Exact 
 
 The **…** menu beside the model selector opens **Recipes** and **Model Browser**. Browse is also available inside the model picker. Generate keeps its two-part action: the left side generates now, and the right third adds the current settings to the held queue when supported. Transform and Blend retain their existing queue limitations. Specialized audio and finishing tools retain their dedicated composers or Run actions.
 
-All three theme families, their light/dark variants and Auto appearance remain available in Settings. On mobile, the sidebar follows both the height and vertical offset of the visible viewport, and the document behind the open drawer is held in place. The workflow header, reference area and hardware status temporarily tuck away while the keyboard reduces the available height, leaving room to write without changing saved preferences. Compact menus also follow their buttons when the keyboard moves the viewport.
+All three theme families, their light/dark variants and Auto appearance remain available in Settings. On mobile, the sidebar follows both the height and vertical offset of the visible viewport, and the document behind the open drawer is held in place. Keyboard detection also handles browsers that reduce the window height along with the visible viewport. The workflow header, reference area and hardware status temporarily tuck away while the keyboard reduces the available height, leaving room to write without changing saved preferences. An input section containing the focused text field stays visible. Compact menus also follow their buttons when the keyboard moves the viewport.
+
+When editing a video frame in Image mode, the return banner keeps its title and actions while its help text tucks away during typing. On short mobile screens, the composer keeps a usable minimum height and the sidebar body scrolls above the fixed generation controls. Focusing a field or moving the keyboard reveals that field inside the sidebar, including Animate's appearance controls, without scrolling the gallery behind it.
 
 ## Local validation
 
@@ -48,3 +50,5 @@ After building `ui`, run `node tests/ui/sidebar_redesign.cjs http://127.0.0.1:<M
 Additional existing checks cover Studio duration convergence, saved H3 LoRA settings, character recovery/picking, and automatic/manual Viggle submissions. These UI checks do not run a GPU generation.
 
 Set `MAESTRO_UI_DURATION_ONLY=1` to run the duration popup checks alone. They drag the sliders across single/multiple-window boundaries with manual and automatic window sizing, verify sidebar bounds at desktop and mobile widths, and exercise scrolling and a simulated keyboard viewport.
+
+Set `MAESTRO_UI_KEYBOARD_ONLY=1` to check the Animate-to-Image frame editor and Animate appearance field at 390px and 320px widths. It verifies typing, prompt visibility, internal scrolling and the return action while simulating both visual-viewport-only and window-height keyboard changes.

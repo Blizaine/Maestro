@@ -1,5 +1,5 @@
 import { Settings, X } from 'lucide-react'
-import { useEffect, useMemo, useState, type CSSProperties } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useState, type CSSProperties } from 'react'
 import { useStore } from '../../stores/useStore'
 import { ViggleControls } from './ViggleControls'
 import { useIsMobile } from '../../lib/useIsMobile'
@@ -48,14 +48,23 @@ export function Sidebar() {
   const [sidebarElement, setSidebarElement] = useState<HTMLElement | null>(null)
   const [settingsElement, setSettingsElement] = useState<HTMLDivElement | null>(null)
   const layout = useMemo(() => ({ sidebar: sidebarElement, settings: settingsElement }), [sidebarElement, settingsElement])
-  const [visibleViewport, setVisibleViewport] = useState<{ height: number; top: number } | null>(null)
+  const [visibleViewport, setVisibleViewport] = useState<{ height: number; top: number; keyboardOpen: boolean } | null>(null)
   useEffect(() => {
     if (!isMobile || !window.visualViewport) return
     const viewport = window.visualViewport
-    const resize = () => setVisibleViewport(previous => (
-      previous?.height === viewport.height && previous.top === viewport.offsetTop
-        ? previous : { height: viewport.height, top: viewport.offsetTop }
-    ))
+    let fullHeight = viewport.height
+    let width = window.innerWidth
+    const resize = () => {
+      // iOS browsers can shrink innerHeight along with the visual viewport.
+      // Retain the unobscured height; reset it when the orientation changes.
+      fullHeight = width === window.innerWidth ? Math.max(fullHeight, viewport.height) : viewport.height
+      width = window.innerWidth
+      const keyboardOpen = viewport.height < Math.max(fullHeight, window.innerHeight) - 100
+      setVisibleViewport(previous => (
+        previous?.height === viewport.height && previous.top === viewport.offsetTop && previous.keyboardOpen === keyboardOpen
+          ? previous : { height: viewport.height, top: viewport.offsetTop, keyboardOpen }
+      ))
+    }
     resize()
     viewport.addEventListener('resize', resize)
     viewport.addEventListener('scroll', resize)
@@ -77,6 +86,36 @@ export function Sidebar() {
       window.scrollTo(scrollX, scrollY)
     }
   }, [isMobile, sidebarOpen])
+  useLayoutEffect(() => {
+    if (!isMobile || !sidebarElement) return
+    let frame = 0
+    const revealInput = () => {
+      const input = document.activeElement
+      if (!(input instanceof HTMLElement) || !sidebarElement.contains(input)
+        || !input.matches('textarea, input:not([type="range"]):not([type="checkbox"]):not([type="file"]), [contenteditable="true"]')) return
+      // Scroll only inside this drawer, never the gallery/document underneath.
+      // Both the main composer and Animate's embedded text fields need this.
+      for (let parent = input.parentElement; parent && parent !== sidebarElement; parent = parent.parentElement) {
+        if (parent.scrollHeight <= parent.clientHeight || !['auto', 'scroll'].includes(getComputedStyle(parent).overflowY)) continue
+        const bounds = parent.getBoundingClientRect()
+        const field = input.getBoundingClientRect()
+        const visibleHeight = Math.min(field.height, Math.max(0, parent.clientHeight - 16))
+        const delta = field.top < bounds.top + 8 ? field.top - bounds.top - 8
+          : field.top + visibleHeight > bounds.bottom - 8 ? field.top + visibleHeight - bounds.bottom + 8 : 0
+        if (Math.abs(delta) > 1) parent.scrollTop += delta
+      }
+    }
+    const scheduleReveal = () => {
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(revealInput)
+    }
+    scheduleReveal()
+    sidebarElement.addEventListener('focusin', scheduleReveal)
+    return () => {
+      cancelAnimationFrame(frame)
+      sidebarElement.removeEventListener('focusin', scheduleReveal)
+    }
+  }, [isMobile, sidebarElement, visibleViewport])
 
   const isVideo = generationMode === 'video'
   const isImage = generationMode === 'image'
@@ -157,6 +196,7 @@ export function Sidebar() {
   const studioControls = (
     <SidebarLayoutContext.Provider value={layout}>
     <CharacterToolbarContext.Provider value={characterSlot}>
+      <div data-testid="studio-body-scroll" className="studio-scroll-body flex min-h-0 flex-1 flex-col">
       {/* Prompt Edit/Recast → Image Mode round-trip banner. Visible while
           a boundary anchor or Recast reference is being edited; null otherwise. */}
       <AnchorReturnBanner />
@@ -235,6 +275,7 @@ export function Sidebar() {
         <PromptDock>{isMultiClip ? <MultiClipEditor /> : <PromptInput />}</PromptDock>
       )}
       </div>
+      </div>
       {!isStandaloneTool && <StudioFooter onCharacterSlot={setCharacterSlot} onAnchor={setSettingsElement} />}
     </CharacterToolbarContext.Provider>
     </SidebarLayoutContext.Provider>
@@ -251,7 +292,7 @@ export function Sidebar() {
           />
         )}
         <aside ref={setSidebarElement} style={{ top: visibleViewport?.top, height: visibleViewport?.height, '--studio-visual-viewport-height': visibleViewport ? `${visibleViewport.height}px` : undefined, '--studio-visual-viewport-top': `${visibleViewport?.top || 0}px` } as CSSProperties} inert={!sidebarOpen} aria-hidden={!sidebarOpen}
-          data-keyboard-open={visibleViewport != null && visibleViewport.height < window.innerHeight - 100}
+          data-keyboard-open={visibleViewport?.keyboardOpen ?? false}
           className={`maestro-sidebar fixed top-0 h-dvh w-[380px] max-w-[94vw] bg-bg-secondary border-r border-border z-50 flex flex-col transition-[left] duration-300 ease-in-out ${sidebarOpen ? 'left-0' : '-left-full'}`}>
           {/* Header */}
           <div className="shrink-0 px-4 py-3 border-b border-border flex items-center justify-between">

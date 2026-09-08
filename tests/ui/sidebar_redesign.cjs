@@ -7,6 +7,7 @@ const path = require('node:path');
 const {assertPromptStability} = require('./prompt_stability.cjs');
 const {assertExplicitEnhancement} = require('./studio_enhancement.cjs');
 const {assertDurationPopup} = require('./duration_popup.cjs');
+const {assertAnimateKeyboard} = require('./animate_keyboard.cjs');
 const root = path.resolve(__dirname, '../..');
 const base = process.argv[2];
 if (!base) throw new Error('Pass the running Maestro URL; browser actions never reach it.');
@@ -54,6 +55,7 @@ const read = async endpoint => {
       if (endpoint === '/api/v1/characters') return json({characters});
       if (endpoint.includes('/media-flow/capabilities')) return json({neural_rendering: {available: false, reason: 'Isolated test'}, frame_generation: {available: false, factors: [], reason: 'Isolated test'}});
       if (endpoint.includes('/upload')) return json({path: '/uploads/reference.png', url: '/picture.svg', duration_seconds: 3});
+      if (endpoint === '/api/v1/extract-frames') return json({start_path: '/uploads/frame.png', start_url: '/picture.svg'});
       if (endpoint === '/api/v1/llm/enhance-prompt') {
         const body = route.request().postDataJSON();
         llmRequests.push({endpoint, ...body});
@@ -98,7 +100,7 @@ const read = async endpoint => {
           studioVideoWorkflow: workflow, studioImageWorkflow: 'generate', audioSubMode: 'speech',
           selectedModelPerMode: {[mode]: id}, durationSeconds: 124 / 24, slidingWindowSeconds: 243 / 24, slidingWindowOverlap: 18,
           slidingWindowLocked: false, h3WindowOverrides: {}, systemStats: stats, startImage: null, endImage: null, imageRefs: [],
-          h3WindowPlan: null, spatialUpsampling: '', filmGrainIntensity: 0, jobs: [], isGenerating: false, isEnhancing: false, promptEnhanceError: null,
+          h3WindowPlan: null, editReturnTarget: null, outputs: [], spatialUpsampling: '', filmGrainIntensity: 0, jobs: [], isGenerating: false, isEnhancing: false, promptEnhanceError: null,
           params: {...window.baseParams, model_type: id, resolution: '864x480', prompt: 'A calm scene.', image_mode: workflow === 'extend' ? 3 : 0,
             _duration_planning_mode: 'duration', minimax_h3_sequence_prompt_mode: 'manual', minimax_h3_window_storyboard: false, minimax_h3_references: [],
             num_inference_steps: options.default_num_inference_steps || 4, guidance_scale: 1, seed: 42},
@@ -119,11 +121,17 @@ const read = async endpoint => {
       assert.deepEqual(errors, []);
       return;
     }
+    if (process.env.MAESTRO_UI_KEYBOARD_ONLY) {
+      await assertAnimateKeyboard(page, sidebar, output);
+      assert.deepEqual(errors, []);
+      return;
+    }
     await assertDurationPopup(page, sidebar, output);
     if (process.env.MAESTRO_UI_DURATION_ONLY) {
       assert.deepEqual(errors, []);
       return;
     }
+    await assertAnimateKeyboard(page, sidebar, output);
     await assertPromptStability(page, sidebar);
 
     // Long workflow lists overlay the editor; the full catalogue remains reachable.
