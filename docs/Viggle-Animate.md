@@ -22,6 +22,11 @@ distillation adapter. It does not use ordinary H3 text prompting or load Qwen.
 5. Generate. Results appear in the normal gallery and support Load Settings,
    the queue, postprocessing, and optional face refinement.
 
+The manual Image-mode handoff starts with this editable prompt. Add the
+replacement character as the second image:
+
+> Replace the character from source image with character from the second image. Preserve the exact pose, body orientation, props, background, camera framing, lighting and image dimensions from the source image.
+
 The recipe uses **three Euler evaluations**, video/audio flow shift 3, and
 **124-frame windows at 24 fps (5.17 seconds)**. Longer videos continue with
 18-frame overlap, carrying the previous generated motion. The final window is

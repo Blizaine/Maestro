@@ -3269,7 +3269,7 @@ export const useStore = create<AppState>((set, get) => ({
         // in video mode's i2v slot, which isn't what we want here.
         startImage: null,
         params: { ...s.params, image_start: '', image_mode: 1,
-          ...(which === 'animate' ? {prompt: 'Replace the character with [describe the replacement]. Preserve the exact pose, body orientation, hands, props, background, camera framing, lighting and image dimensions.'} : {}) },
+          ...(which === 'animate' ? {prompt: 'Replace the character from source image with character from the second image. Preserve the exact pose, body orientation, props, background, camera framing, lighting and image dimensions from the source image.'} : {}) },
         editReturnTarget: {
           anchor: which,
           framePath,
