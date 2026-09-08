@@ -25,7 +25,7 @@ Detects your GPU, VRAM, and RAM on first launch and picks the right profile, qua
 Direct access to every model and every knob:
 - **Video** — create, extend, blend, retake, edit anything, outpaint, repaint, recast, upscale, and finish clips with MiniMax H3, LTX-2.5/2.3, SCAIL-2, Wan, Hunyuan, and many more.
 - **Image** — create, edit, upscale, or outpaint with Flux 2 Klein 9B, Krea 2 RAW/Turbo and Identity Edit, Qwen Image Edit, and more.
-- **Audio** — generate music with MiniMax-Music3 or ACE-Step, speech with Kugelaudio or Qwen3 TTS, sound effects with MMAudio, and revoice existing clips.
+- **Audio** — generate music with MiniMax-Music3 or ACE-Step, speech and cloned voices with H3 Voice Audio, Kugelaudio or Qwen3 TTS, sound effects with H3 or MMAudio, and revoice existing clips.
 - **Multi-clip generation** with per-clip prompts, seamless overlapping (sliding window) transitions, and shared LoRAs
 - **Long-form planning up to 60 minutes** with one-window, friendly duration, exact timecode, window-count, and Auto controls; Faithful or Creative AI can plan each independent window
 - **Blend video Mode** Remember Sora 1 blend mode, where you could overlap two videos, and use AI to blend them together? 
@@ -96,19 +96,72 @@ The version you are running is shown next to the Maestro title in the UI. To upd
 ### v2.1.0 (2026-09-08)
 
 **A larger Studio workspace, portable characters and new H3 tools**
-- Redesigned Studio with a large, stable prompt field, consistent reference tiles, compact setting menus, explicit Faithful/Creative enhancement, direct Recipes/Model Browser shortcuts and improved mobile keyboard handling.
-- Added model-aligned duration sliders through five minutes, retained presets through one hour, and made Auto show its recommended duration. Fixed moving duration sliders, overlapping controls, the H3 Extend model-switch crash and Director sideways scrolling.
-- Unified Director's duration controls with Studio, restored H3 Video LoRA weight sliders, added active badges inside Advanced, and simplified mobile gallery navigation.
-- Added portable **`<character>.maestro.safetensors`** exports with saved voice and selected images, standard RefMod/Hugging Face imports, a Character Browser, better image recovery, multi-RefMod speaker matching, and saved characters in supported Image, Animate and all Speech workflows.
-- Added **Viggle Animate**, including optional Flux 2 Klein character replacement from a chosen video frame, editable appearance prompts, preview and manual Image-mode round trips.
-- Added **H3 Voice Audio** with up to 45 seconds per generation and five minutes per assembled output. Shared dialogue planning defaults to 2.8 words/second with a maximum of 3, and no longer counts production headings as speech.
-- Added **H3 VDN**, **H3 Outpaint**, six-step **Audio Refinement**, and **Face Refiner** for up to five tracked faces with easy character mapping.
-- Added **Media Flow** batch finishing, **RIFE 4.26 x3**, and optional **DLSS 5 Neural Rendering / Frame Generation** with separate runtime requirements.
-- Enabled experimental compatible H3 character/style/concept LoRAs for **Fused 4-Step**. Improved mobile Model Browser layout and added a manually selectable URL-import LoRA destination with automatic suggestions.
 
-See the [complete v2.1.0 release notes](docs/RELEASE_NOTES_V2.1.0.md) for every
-feature group, compatibility details and update instructions. Use **Update** on
-Maestro's Pinokio page to install v2.1.0.
+#### Studio: more room to create
+
+- **One scrolling workspace:** media tabs, workflow selection, reference tiles and the prompt scroll together. Long prompts grow with their text; settings and **Generate / Add to Queue** stay pinned.
+- **Compact controls:** Characters, Recipes, Resolution, Aspect, Duration and Advanced leave more room to write. Setting lists open above their buttons; the model selector sits beside Generate, with a direct Model Browser shortcut.
+- **Clearer Advanced settings:** collapsible Performance, Finishing, LoRAs and Generation sections show active-count badges and hide empty sections. Director's H3 Video LoRAs regain editable weights, including restored settings.
+- **Consistent mobile layout:** matching input tiles, a centered gallery header and viewport-bounded LoRA guides. All three theme families and their light/dark variants remain supported. [Studio controls](docs/Studio-controls.md).
+
+#### Prompt enhancement and duration
+
+- **Enhance before generating:** the magic button runs **AI Faithful**; its menu also offers **AI Creative**. Review and edit the result before submission. Both support image prompts; long H3 sequences expose editable **Exact H3 prompts** for each window.
+- **Stronger Creative dialogue:** conversations, tutorials and character interactions receive duration-aware dialogue targets, with a focused retry for sparse drafts. Planning targets **2.8 words/second**, allows up to **3**, and supports up to six H3 speaker turns per window. Faithful preserves supplied events and lines.
+- **More accurate speech budgets:** action descriptions, production headings and mixed dialogue formats no longer inflate the spoken-word count. Explicit silence and requests to use only supplied lines remain respected.
+- **Simpler Studio and Director duration controls:** Auto previews its recommendation in both Time and Window views. Moving the dimmed slider or choosing a preset switches to manual. Model-aligned Time steps reach **five minutes**, with **10m, 15m, 30m, 60m and Custom** presets for supported video workflows. Window sizing follows model/GPU limits or saved overrides; overlap is collapsed by default.
+- **Consistent optional guidance:** single- and multi-window enhancement share the optional Mature-mode content guide only when that mode is enabled. A [14.4-second-window Reference tutorial example](docs/prompts/blaine-maestro-tutorial-script.md) includes native dialogue tags and presenter cues.
+
+#### Portable characters, RefMods and better reference images
+
+- **Share complete characters:** export **`<character>.maestro.safetensors`** with appearance, saved voice, name/description and selected images. Import standard H3 RefMods separately from trained LoRAs; compatible upstream loaders can use the visual portion, while embedded voice is a Maestro extension.
+- **Browse and reuse identities:** Model Browser adds **Characters / RefMods**, local and Hugging Face imports, voice filters, a saved **malcolmrey / MiniMax H3** collection and easy export. Multiple RefMods retain separate identities and voice bindings, with improved name/speaker matching.
+- **Recover better images:** decode native-resolution PNG views, choose a cover and download individual images or a ZIP. Original photos/video frames are preferred when available; cached recovery preserves the original latent and audio. Selected views travel with exports and work in Image models that accept references.
+- **Better character browsing:** scrollable mobile galleries, cached video thumbnails and cleaner display names make characters easier to identify. [Character sharing and recovery](docs/Maestro-Characters.md).
+
+#### Viggle Animate and automatic character replacement
+
+- **Three-step H3 animation:** supply a control video and an edited frame from **any point in the source video**. Longer videos use overlapping windows of approximately **5.2 seconds**.
+- **Automatic character preparation:** choose a saved character, recovered RefMod view or uploaded image. Flux 2 Klein replaces the subject in the selected frame, with editable appearance instructions. Preview first or queue preparation and animation together; Klein **9B and 4B** are supported.
+- **Manual editing stays available:** send the frame to Image mode, edit it and use **Apply & return**. Saved settings retain frame time, character view and preparation choices. Appearance prompts control preparation; Viggle uses its fixed motion-transfer recipe. [Viggle Animate guide](docs/Viggle-Animate.md).
+
+#### H3 Voice Audio and saved voices throughout Speech
+
+- **Speech, voice cloning and sound:** H3 Voice Audio — Pruned produces **32 kHz stereo audio**, with up to **45 seconds per generation** and **five minutes per assembled output**. `Sound:` prompts support effects and ambience.
+- **Longer conversations:** one or two voice references, named speaker turns, delivery cues and returning-speaker voice reuse work with boundary trimming. Duration is a ceiling; oversized scripts are checked before queueing, and cancelled jobs do not publish partial audio.
+- **Saved characters across Speech:** reuse character voices, save new characters from Speech and restore names/reference bindings with output settings. Each model retains its speaker limits; Qwen preset/design variants offer a switch to voice cloning. [H3 Voice Audio](docs/H3-Voice-Audio.md) · [TTS characters](docs/TTS-Characters.md).
+
+#### H3 generation and refinement
+
+- **VDN Full/Pruned and eight-step presets:** an optional trained hybrid-attention path requiring **Triton and additional VRAM**, with its own compatible adapters. Performance depends on the hardware and workload.
+- **LoRAs on Fused 4-Step:** compatible H3 character, style and concept LoRAs now work in Frames, References and Director while retaining the four-step recipe. Support remains experimental; acceleration/VDN adapters and unsupported DoRA are excluded. [Fused H3 LoRAs](docs/H3-Fused-LoRAs.md).
+- **H3 Outpaint:** expand video borders with protected source content, preserved source audio, multi-window processing and batch support.
+- **Audio Refinement Extra Phase:** optionally add **six audio-refinement steps** while locking the generated video latents. Fixed PDD/fused recipes and FL2VA source-soundtrack control are excluded.
+- **Face Refiner:** detect, track and refine **up to five faces** automatically through **Advanced → Finishing**, or on an existing gallery video/upload. Map saved characters or RefMods, retain an identity or skip a face. A new copy preserves source resolution, frame count, FPS and soundtrack. [Face Refiner guide](docs/H3-Face-Refiner.md).
+
+#### Media Flow, temporal upsampling and optional DLSS
+
+- **Batch finishing:** Media Flow processes image/video collections through the shared queue with per-file progress, cancellation and saved settings while retaining source files.
+- **Smoother video:** RIFE 4.26 adds **x3** alongside **x2/x4**, preserving duration and soundtrack. Optional DLSS Frame Generation offers **x2–x4** on supported RTX 40/50 systems, and **x5/x6** where supported on RTX 50.
+- **DLSS 5 Neural Rendering:** use **x1** refinement or **x1.5–x3** enlargement with adjustable intensity and depth/motion controls. Native DLSS requires a **separate installation on compatible Windows 11/RTX hardware**; RIFE does not. Native DLSS quality/performance still need validation on supported hardware. [Requirements and installation](docs/DLSS5.md).
+
+#### Fixes and polish
+
+- Fixed the **H3 Extend model-switch crash / React error #185**, prompt resizing and scrollbar flicker, and unintended Director horizontal scrolling.
+- Fixed mobile keyboard access to prompts, overlapping settings, off-screen LoRA guides and duration popups whose sliders jumped while dragging. The gallery stays in place behind the open sidecar.
+- Improved the mobile Model Browser and added a manual **Destination LoRA folder** for URL imports, with an automatic best-match suggestion.
+- Improved shared GPU offloading, cancellation and settings restoration; fixed locked ETA-history databases on Windows and expanded model, character, dialogue and UI regression coverage.
+
+#### Updating
+
+Use **Update** on Maestro's Pinokio page, start normally and refresh the browser.
+Existing models, outputs, workspaces, characters, presets and Director/Editor
+projects stay in place. Update installs the Face Refiner detector dependency;
+new model assets download when needed, and DLSS uses its separate installer.
+
+See the [complete v2.1.0 release notes](docs/RELEASE_NOTES_V2.1.0.md) for detailed
+behavior and compatibility, and the [validation record](docs/VALIDATION_V2.1.0.md)
+for completed checks and remaining hardware/device testing.
 
 ### v2.0.1 (2026-09-04)
 
