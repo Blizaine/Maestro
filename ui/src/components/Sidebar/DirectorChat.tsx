@@ -62,6 +62,7 @@ function DirectorTargetDurationControl() {
 
   return (
     <DurationPresetControl
+      compact
       label="Target duration"
       value={duration}
       onChange={setDuration}

@@ -35,6 +35,9 @@ public v2.0.1 update.
   without covering Generate.
 - LoRA usage guides stay inside the visible screen in Studio and Director.
   Long guides scroll, and dismissing a guide leaves its parent settings open.
+- Director's H3 Video LoRAs now show an editable strength slider and numeric
+  value. Empty saved weights recover their serialized values where available;
+  Image strengths and models with separate phase weights remain independent.
 - Reference inputs retain their media roles, descriptions, ordering,
   background-isolation choices, saved voices and model-specific limits.
   Adding a reference reveals the next available drop zone.
@@ -75,6 +78,9 @@ public v2.0.1 update.
 - Auto shows its recommended duration in the collapsed indicator. The Auto
   option inside Studio and Director duration controls also previews that
   recommendation before selection.
+- Director's Target Duration uses the same compact Auto toggle, Time/Window
+  tabs, interactive dimmed slider and long presets as Studio. It retains
+  Director's ten-second minimum and model/GPU-aware shot planning.
 - Shared dialogue planning targets **2.8 words per second**, with admission up
   to **3 words per second**. Dense but valid lines can use the clip's available
   speech time instead of being compressed to reserve unnecessary silence.

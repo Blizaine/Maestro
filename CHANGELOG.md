@@ -34,6 +34,9 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 - Added active-count badges to Advanced section headings and anchored Advanced
   above its mobile button. Fixed LoRA guides appearing off-screen; long guides
   scroll and can be dismissed without closing their parent settings.
+- Matched Director's Target Duration to Studio's Auto toggle and Time/Window
+  controls. Restored H3 video LoRA strength sliders, repaired empty saved
+  weights, and retained independent Image and multi-phase Video strengths.
 - Added portable `.maestro.safetensors` characters with saved voice and selected
   PNG views, standard RefMod import, Hugging Face browsing, voice filters,
   clearer names, cached video thumbnails and mobile scrolling. Improved native

@@ -9,6 +9,7 @@ const {assertExplicitEnhancement} = require('./studio_enhancement.cjs');
 const {assertDurationPopup} = require('./duration_popup.cjs');
 const {assertAnimateKeyboard} = require('./animate_keyboard.cjs');
 const {assertDirectorLayout} = require('./director_layout.cjs');
+const {assertDirectorSettings} = require('./director_settings.cjs');
 const {assertComposerScrolling} = require('./composer_scrolling.cjs');
 const {assertAdvancedPopups} = require('./advanced_popups.cjs');
 const root = path.resolve(__dirname, '../..');
@@ -120,6 +121,7 @@ const read = async endpoint => {
     await pause();
     assert.deepEqual(errors, [], 'StrictMode renders the full sidebar without a loop');
     if (process.env.MAESTRO_UI_DIRECTOR_ONLY) {
+      await assertDirectorSettings(page, sidebar, output);
       await assertDirectorLayout(page, sidebar, output);
       assert.deepEqual(errors, []);
       return;
@@ -154,6 +156,7 @@ const read = async endpoint => {
     await assertAdvancedPopups(page, sidebar, output);
     await assertAnimateKeyboard(page, sidebar, output);
     await assertDirectorLayout(page, sidebar, output);
+    await assertDirectorSettings(page, sidebar, output);
     await assertPromptStability(page, sidebar);
     await assertComposerScrolling(page, sidebar, output);
 

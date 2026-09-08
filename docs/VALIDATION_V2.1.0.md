@@ -249,6 +249,32 @@ The final unittest and sidebar logs are retained locally as
   `lora-guide-390.png`. Tests used neutral LoRA fixtures and intercepted writes;
   no live generation, backend restart, launcher changes or public push occurred.
 
+## Director duration and LoRA follow-up — 8 September
+
+- Director's Target Duration now opts into Studio's shared compact control:
+  persistent Auto/current-duration header, Time/Window tabs, direct takeover
+  from the dimmed slider/presets, and the reduced long-preset list. Director's
+  existing minimum duration and model/GPU planning rules remain in place.
+- Read-only LoRA metadata confirmed H3 reports zero guidance phases, while
+  Flux 2 Klein reports one and LTX reports two. Director now gives H3 one
+  editable strength, repairs empty stored arrays from saved multipliers, and
+  preserves each phase on multi-phase models. Loading recommendations no
+  longer changes a saved 1.0 strength. Mobile numeric fields show full values.
+- Production TypeScript/Vite build and ESLint passed. The isolated Director
+  settings/layout checks passed at 1360, 390 and 320 pixels, including native
+  time steps, Auto pointer takeover, long presets, custom timecodes, Window
+  counts, H3 zero/1.0 strengths, legacy recovery, multi-phase weights, Image
+  isolation, browser persistence, scrolling and simulated keyboard geometry.
+- An intercepted Director queue request retained the reviewed 85-second
+  target, H3 Video weight 0.45 and independent Image weight 2.0. All browser
+  mutations were intercepted; no live plan, generation or project was created.
+- Logs: `.codex-tmp/director-settings-build.log`,
+  `.codex-tmp/director-settings-lint.log` and
+  `.codex-tmp/director-settings-ui.log`. The mobile screenshot is
+  `.codex-tmp/sidebar-validation/director-lora-390.png`. No backend restart,
+  launcher changes or public push occurred. Real iPhone testing remains a
+  device check; Chromium viewport simulation is the evidence recorded here.
+
 ## Prior model checks and remaining manual validation
 
 The [H3/media port record](development/wan2gp-12-71-port-plan.md) records earlier
