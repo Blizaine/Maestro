@@ -1,5 +1,9 @@
 # Studio controls
 
+On mobile, the gallery header centers the Maestro icon, name and version.
+The sidecar menu stays on the left, with Queue and Settings on the right.
+Open the sidecar to switch between Director, Studio and Editor.
+
 Choose Video, Image or Audio and a workflow at the top of Studio. The complete workflow list opens over the editor. The media tabs, workflow selector, references and prompt share one vertically scrollable area. Short prompts fill the available writing space; long prompts expand with their text. Choose the model beside Generate at the bottom. The app header, settings strip, generation controls and hardware status stay outside this scroller.
 
 The fixed settings strip keeps Characters on the left and groups Recipes, Resolution, Aspect, Duration and Advanced together on the right, with Recipes immediately beside Resolution. Advanced becomes an icon with its active count when the sidebar is narrow, and the output indicators keep their values without decorative icons. In the smallest layouts, Characters also uses its icon so the controls remain separate and tappable. Indicators show the current choices; Auto duration shows its recommended length below a small Auto label and updates as the recommendation changes. The Auto toggle's tooltip also previews the recommendation before enabling it. Resolution and Aspect open lists sized to their labels, directly above the clicked button on desktop and mobile, without redundant headings. Selecting a value closes its list; keyboard users can use the arrow keys, Home/End and Escape. The options still come from the selected model, including Auto and model-specific tiers. Duration and Advanced retain their detailed overlays. Opening a setting does not resize the prompt or move Generate. Click another indicator to switch panels or click outside to dismiss.
