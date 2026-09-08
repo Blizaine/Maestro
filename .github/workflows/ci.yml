@@ -30,6 +30,11 @@ jobs:
         run: >-
           python -m pip install
           "starlette==0.46.1"
+          "fastapi==0.141.1"
+          "pydantic==2.10.6"
+          "python-multipart==0.0.32"
+          "httpx==0.28.1"
+          "soundfile==0.13.1"
           "numpy==2.2.6"
           "opencv-python-headless==4.12.0.88"
           "Pillow==11.3.0"

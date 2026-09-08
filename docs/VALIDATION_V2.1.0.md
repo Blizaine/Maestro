@@ -61,6 +61,17 @@ Final logs use the `.codex-tmp/v2.1.0-staging-` prefix: `unittest.log`,
 The local source archive and checksum are kept outside Git under
 `.codex-tmp/releases/v2.1.0/`; the staging archive corresponds to commit `99a8e3d`.
 
+## Publication CI follow-up — 8 September
+
+The first `dev` CI run passed the source guard, syntax check and production UI
+build, but its isolated Python environment lacked FastAPI and SoundFile. That
+caused two character test modules to fail import and three long-audio tests to
+error. CI now installs pinned FastAPI, Pydantic, HTTPX, multipart-upload and
+SoundFile dependencies for those routes and audio fixtures. Application code
+and the running installation are unchanged by this CI-only correction. Workflow
+YAML parsing and all 49 tests in the affected character-recovery, RefMod and
+long-audio modules passed locally after the correction.
+
 ## Initial candidate checks — 7 September
 
 The Python run used the existing Python 3.11.13 environment with
