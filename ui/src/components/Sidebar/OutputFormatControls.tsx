@@ -50,11 +50,15 @@ export function OutputFormatControls() {
           className={`${chip} ${expanded === 'aspect' && !sourceAspect ? 'border-accent-blue bg-accent-blue/10 text-text-primary' : 'border-border bg-bg-tertiary text-text-secondary hover:border-border-light'}`}>
           <RectangleHorizontal size={13} className="studio-setting-icon" /><span>{sourceAspect ? 'Source' : ratio === 'auto' ? 'Auto' : ratio}</span>
         </button>}
-        {hasDuration && <button type="button" aria-label={`Duration: ${formatDuration(duration, true)}`} aria-expanded={expanded === 'duration'}
+        {hasDuration && <button type="button" aria-label={`Duration: ${durationMode === 'auto' ? 'Auto · ' : ''}${formatDuration(duration, true)}`} aria-expanded={expanded === 'duration'}
           aria-controls={`${id}-duration`}
           onClick={() => toggle('duration')} title={`${durationMode === 'auto' ? 'Auto · ' : ''}${formatDuration(duration, true)} · duration and window settings`}
           className={`${chip} ${expanded === 'duration' ? 'border-accent-blue bg-accent-blue/10 text-text-primary' : 'border-border bg-bg-tertiary text-text-secondary hover:border-border-light'}`}>
-          <Clock size={13} className="studio-setting-icon"/><span className="truncate tabular-nums">{durationMode === 'auto' ? 'Auto' : formatDuration(duration, true)}</span>
+          <Clock size={13} className="studio-setting-icon"/>
+          <span className="flex flex-col items-center tabular-nums leading-3">
+            {durationMode === 'auto' && <span className="text-[9px] leading-[10px] text-text-muted">Auto</span>}
+            <span>{formatDuration(duration, true)}</span>
+          </span>
         </button>}
       <SidebarMenu id={`${id}-resolution`} anchor={resolutionAnchor} open={expanded === 'resolution' && canResolve} label="Resolution" onClose={() => setExpanded(null)}>
         <ResolutionPresets menu onSelect={() => setExpanded(null)} />

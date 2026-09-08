@@ -9,7 +9,8 @@ the Director message area, leaving the surrounding page in place.
 Director already shares Studio's themes, mobile drawer viewport tracking,
 keyboard focus handling and gallery scroll lock. H3 references use the same
 reference component and saved-character support. Target duration uses the
-shared duration planner with model-specific steps.
+shared duration planner with model-specific steps. Its Auto option shows the
+current recommended duration, including before switching from Time or Window.
 
 ## Recommended next UI pass
 

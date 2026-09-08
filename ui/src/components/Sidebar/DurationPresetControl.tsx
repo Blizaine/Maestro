@@ -227,7 +227,12 @@ export function DurationPresetControl({
                   : 'text-text-muted hover:text-text-secondary'
               }`}
             >
-              {mode === 'auto' ? 'Auto' : mode === 'duration' ? 'Time' : 'Window'}
+              {mode === 'auto' ? (
+                <span className="flex flex-col items-center leading-3">
+                  <span>Auto</span>
+                  <span className="text-[9px] normal-case tabular-nums">{formatDuration(autoPlan.requestedSeconds, true)}</span>
+                </span>
+              ) : mode === 'duration' ? 'Time' : 'Window'}
             </button>
           ))}
         </div>
