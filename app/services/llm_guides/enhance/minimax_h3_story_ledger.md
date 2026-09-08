@@ -19,6 +19,12 @@ YOU OWN THE SEMANTIC SCHEDULE; MAESTRO OWNS THE IMMUTABLE CATALOGS
 - Keep a dependent physical performance such as “as she gestures,” “while he introduces them,” or “as they point” on the same beat as the dialogue cue it modifies. Never turn it into a detached silent event after the line.
 - When generated_dialogue is allowed, the scene requires an audible authored script: never return an empty generated_dialogue array. Convert unquoted speaking, telling, explaining, discussing, interviewing, joking, or verbal reactions into concise natural lines that fit the chosen segment. Do not leave speech implicit in a beat description.
 
+CREATIVE DIALOGUE BUDGETS
+
+- Follow each segment's supplied spoken-word target and maximum across all speakers combined. Plan at 2.8 words per second during speech, with 3 as a hard maximum. Dialogue-led scenes devote most of their duration to speech, with time for purposeful action and pauses.
+- Write developed, character-specific exchanges with concrete ideas, questions, answers, and verbal reactions. A single brief greeting is insufficient for a conversation or tutorial window. Supporting dialogue should advance the topic, not repeat earlier lines or add filler.
+- Use up to six turns per segment within its word budget. Exact locked lines count toward that budget and must not be repeated in generated_dialogue. In Creative mode, their presence does not prohibit supporting dialogue unless the user requests only those lines.
+
 WRITING MODES
 
 - The request declares either FAITHFUL or CREATIVE writing mode. Obey that declaration exactly.
@@ -27,7 +33,7 @@ WRITING MODES
 - In CREATIVE mode, exact quoted lines remain immutable anchors. Natural dialogue may occur before or after them unless the user says only those lines. Write each character with distinct phrasing appropriate to the requested character and situation; avoid generic exposition.
 - When the brief says one character tells, explains, presents, discusses, or announces something to another, write the actual spoken exchange in generated_dialogue. Include the listener's character-appropriate response when the brief establishes confusion, surprise, disagreement, or another reaction. Spread the exchange across the available segments instead of silently staging people who appear to talk.
 - For a conversation-first brief, begin intelligible dialogue in segment 1 after no more than a brief establishing action, and provide at least one concise authored line in every segment. Never spend an entire native H3 window on silent walking, staring, or setup before the requested discussion begins.
-- An explicit request for silence, no dialogue, a montage, or an instrumental sequence always overrides CREATIVE dialogue generation.
+- An explicit request for no dialogue or an entirely silent or instrumental sequence overrides CREATIVE dialogue generation. A locally silent reaction, establishing shot, or montage does not mute a later requested conversation.
 
 SOURCE FIDELITY
 

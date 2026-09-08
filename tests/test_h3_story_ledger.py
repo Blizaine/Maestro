@@ -474,6 +474,11 @@ class H3StoryLedgerTests(unittest.TestCase):
             *(json.dumps(_segment(index, duration=10.0)) for index in range(1, 5)),
         ])
 
+        def generate(**kwargs):
+            if kwargs["prompt"].startswith("COMPLETE SPARSE CREATIVE DIALOGUE"):
+                raise RuntimeError("Dialogue writer unavailable in this distribution regression")
+            return next(responses)
+
         result = plan_h3_story_segments(
             prompt,
             segment_durations=[10.0] * 4,
@@ -481,7 +486,7 @@ class H3StoryLedgerTests(unittest.TestCase):
             camera_coverage="multi_shot",
             expect_dialogue=True,
             planning_style="creative",
-            llm_generate=lambda **_kwargs: next(responses),
+            llm_generate=generate,
         )
 
         self.assertEqual(
@@ -1347,6 +1352,11 @@ class H3StoryLedgerTests(unittest.TestCase):
             json.dumps(segment_two),
         ])
 
+        def generate(**kwargs):
+            if kwargs["prompt"].startswith("COMPLETE SPARSE CREATIVE DIALOGUE"):
+                raise RuntimeError("Dialogue writer unavailable in this salvage regression")
+            return next(responses)
+
         result = plan_h3_story_segments(
             prompt,
             segment_durations=[10.0, 10.0],
@@ -1354,7 +1364,7 @@ class H3StoryLedgerTests(unittest.TestCase):
             camera_coverage="multi_shot",
             expect_dialogue=True,
             planning_style="creative",
-            llm_generate=lambda **_kwargs: next(responses),
+            llm_generate=generate,
         )
 
         self.assertEqual(result["planned_by"], "hybrid_repair")

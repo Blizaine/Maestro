@@ -21,6 +21,13 @@ from services.dialogue_timing import (
     DIALOGUE_DEFAULT_WORDS_PER_SECOND as _H3_DIALOGUE_PREFERRED_WORDS_PER_SECOND,
     DIALOGUE_MAX_WORDS_PER_SECOND as _H3_DIALOGUE_MAX_WORDS_PER_SECOND,
 )
+from services.dialogue_writing import (
+    conversation_brief,
+    creative_dialogue_budget,
+    creative_dialogue_expected,
+    dialogue_forbidden,
+    only_supplied_dialogue_requested,
+)
 from services.director.long_form_story import (
     LONG_FORM_STORY_BIBLE_SCHEMA,
     build_long_form_story_bible_fallback,
@@ -31,7 +38,7 @@ from services.director.long_form_story import (
 )
 
 
-H3_STORY_LEDGER_VERSION = 26
+H3_STORY_LEDGER_VERSION = 27
 
 
 class H3DialogueTimingError(ValueError):
@@ -46,15 +53,7 @@ def normalize_h3_planning_style(value: Any) -> str:
 
 def _only_supplied_dialogue_requested(prompt: str) -> bool:
     """Whether creative planning must not add dialogue around quoted lines."""
-
-    return bool(re.search(
-        r"\b(?:only\s+(?:use|speak|say)?\s*(?:these|the supplied|the quoted)?\s*"
-        r"(?:lines?|dialogue)|no\s+(?:extra|additional|other)\s+(?:lines?|dialogue)|"
-        r"do\s+not\s+(?:add|invent|write)\s+(?:any\s+)?(?:extra\s+|additional\s+)?"
-        r"(?:lines?|dialogue))\b",
-        str(prompt or ""),
-        flags=re.IGNORECASE,
-    ))
+    return only_supplied_dialogue_requested(prompt)
 
 
 def _creative_conversation_brief(prompt: str) -> bool:
@@ -67,17 +66,7 @@ def _creative_conversation_brief(prompt: str) -> bool:
     stretches with improvised, unintelligible speech.
     """
 
-    lowered = " ".join(str(prompt or "").split()).casefold()
-    return bool(re.search(
-        r"\b(?:talk(?:s|ed|ing)?(?:\s+(?:to|with|about))?|"
-        r"convers(?:ation|e|es|ed|ing)|chat(?:s|ted|ting)?|"
-        r"discuss(?:es|ed|ing)?|debate(?:s|d|ing)?|"
-        r"argu(?:e|es|ed|ing)|banter(?:s|ed|ing)?|"
-        r"interview(?:s|ed|ing)?|tell(?:s|ing)?|told|"
-        r"explain(?:s|ed|ing)?|present(?:s|ed|ing)?|"
-        r"announce(?:s|d|ing)?)\b",
-        lowered,
-    ))
+    return conversation_brief(prompt)
 
 UNREQUESTED_SPECTACLE_PATTERNS = (
     r"\bgolden\s+energy\b",
@@ -1825,7 +1814,7 @@ def _ledger_schema(
     generated_dialogue: dict[str, Any] = {
         "type": "array",
         "items": dialogue,
-        "maxItems": max(0, segment_count * 2),
+        "maxItems": max(0, segment_count * 6),
     }
     if allow_generated_dialogue:
         # Creative conversational briefs require an audible script. Keeping
@@ -5394,6 +5383,10 @@ def _plan_long_form_ledger(
             obligations.append({
                 "window": segment_number,
                 "duration_seconds": round(durations[absolute_index], 3),
+                "dialogue_writing_target": (
+                    budget.instruction() if allow_generated_dialogue and
+                    (budget := creative_dialogue_budget(prompt, durations[absolute_index])) else ""
+                ),
                 "required_events": [
                     sanitize_h3_prompt_text(item.get("description"))
                     for item in mandatory
@@ -5445,7 +5438,7 @@ def _plan_long_form_ledger(
                             "dialogue": {
                                 "type": "array",
                                 "items": generated_line_schema,
-                                "maxItems": 2 if allow_generated_dialogue else 0,
+                                "maxItems": 6 if allow_generated_dialogue else 0,
                             },
                         },
                         "required": [
@@ -5578,7 +5571,7 @@ def _plan_long_form_ledger(
                 ),
             )
             if allow_generated_dialogue and isinstance(proposed, dict):
-                for raw_line in (proposed.get("dialogue") or [])[:2]:
+                for raw_line in (proposed.get("dialogue") or [])[:6]:
                     if not isinstance(raw_line, dict) or remaining_words <= 0:
                         continue
                     text = sanitize_h3_prompt_text(raw_line.get("text"))
@@ -5935,6 +5928,136 @@ def _split_h3_shots_at_speaker_changes(
     return expanded
 
 
+def _complete_creative_dialogue(
+    prompt: str,
+    ledger: dict[str, Any],
+    *,
+    canonical_ledger: dict[str, Any],
+    locked_dialogue: list[dict[str, Any]],
+    durations: list[float],
+    generate: Callable[..., str],
+    system_prompt: str,
+) -> tuple[dict[str, Any], list[str]]:
+    """Give sparse scripts one focused writing pass without rewriting the story.
+
+    The event schedule and quoted lines are already validated. Ask for only
+    generated dialogue, then recompile its IDs against that immutable schedule.
+    A failed writing pass retains the previous script and reports the shortfall.
+    """
+    from services.h3_window_planner import _parse_json_object
+
+    warnings: list[str] = []
+    cast_names = list(dict.fromkeys(
+        list((canonical_ledger.get("source_intent") or {}).get("cast_names") or [])
+        + [item["speaker"] for item in locked_dialogue + ledger.get("generated_dialogue", []) if item.get("speaker")]
+    ))
+    catalog = {item["dialogue_id"]: item for item in locked_dialogue}
+    catalog.update({item["dialogue_id"]: item for item in ledger.get("generated_dialogue", [])})
+    obligations = []
+    for index, duration in enumerate(durations, 1):
+        budget = creative_dialogue_budget(prompt, duration)
+        if not budget:
+            continue
+        beats = [item for item in ledger.get("beats", []) if item.get("segment") == index]
+        lines = [catalog[did] for beat in beats for did in beat.get("dialogue_ids", []) if did in catalog]
+        if not conversation_brief(prompt) and not lines and len(durations) > 1:
+            continue  # A mixed action scene need not speak in every window.
+        if _dialogue_word_count(" ".join(item["text"] for item in lines)) >= budget.minimum:
+            continue
+        local_locked = [item for item in lines if item in locked_dialogue]
+        obligations.append({
+            "segment": index,
+            "duration_seconds": duration,
+            "writing_budget": budget.instruction(),
+            "locked_lines": local_locked,
+            "generated_word_maximum": max(0, budget.maximum - sum(_dialogue_word_count(item["text"]) for item in local_locked)),
+            "story_beats": [item["description"] for item in beats],
+            "current_dialogue": [item for item in lines if item not in locked_dialogue],
+        })
+
+    dialogue_schema = deepcopy(_ledger_schema(
+        len(durations), source_event_count=1, locked_dialogue_count=len(locked_dialogue),
+        allow_generated_dialogue=True,
+    )["properties"]["generated_dialogue"])
+    for start in range(0, len(obligations), 4):
+        batch = obligations[start:start + 4]
+        selected = {item["segment"] for item in batch}
+        dialogue_schema["maxItems"] = len(batch) * 6
+        try:
+            raw = generate(
+                prompt=(
+                    "COMPLETE SPARSE CREATIVE DIALOGUE. The story below is already scheduled. "
+                    "Replace only the AI-authored dialogue for the listed segments with a developed, "
+                    "character-specific exchange. Advance its topic and reactions; do not recap adjacent windows. "
+                    "Preserve the cast, story, language, and every locked line. Do not repeat locked lines in your output. "
+                    "Budgets include locked lines, across ALL speakers combined. Write up to six turns per segment. "
+                    "Return only {\"generated_dialogue\": [...]} with speaker, language, delivery, text, segment.\n"
+                    f"User brief:\n{prompt}\nCast and continuity:\n{ledger.get('subject_continuity', '')}\n"
+                    f"Adjacent story context:\n{json.dumps([beat for beat in ledger.get('beats', []) if min(selected) - 1 <= beat['segment'] <= max(selected) + 1], ensure_ascii=False)}\n"
+                    f"Windows to complete:\n{json.dumps(batch, ensure_ascii=False)}"
+                ),
+                system_prompt=system_prompt + "\nFor this focused pass use only the supplied dialogue schema; do not return story beats.",
+                max_new_tokens=min(3600, max(1200, len(batch) * 700)),
+                temperature=0.4, top_p=0.88, enable_thinking=False,
+                frequency_penalty=0.2, presence_penalty=0.1,
+                json_schema={
+                    "type": "object", "properties": {"generated_dialogue": dialogue_schema},
+                    "required": ["generated_dialogue"], "additionalProperties": False,
+                },
+            )
+            candidate = _parse_json_object(raw)
+            additions = candidate.get("generated_dialogue") if isinstance(candidate, dict) else None
+            if not isinstance(additions, list) or not additions:
+                raise ValueError("no authored dialogue returned")
+            authored_texts: set[str] = set()
+            for item in additions:
+                if (
+                    not isinstance(item, dict) or item.get("segment") not in selected
+                    or not all(str(item.get(field) or "").strip() for field in ("speaker", "language", "text"))
+                    or any(_normalize_key(item["text"]) == _normalize_key(line["text"]) for line in locked_dialogue)
+                ):
+                    raise ValueError("dialogue returned an invalid segment, speaker, or repeated locked line")
+                speaker = _resolve_h3_cast_name(item["speaker"], cast_names)
+                if (cast_names and speaker.casefold() not in {name.casefold() for name in cast_names}
+                        and not re.search(r"(?<!\w)" + re.escape(speaker) + r"(?!\w)", prompt, re.IGNORECASE)):
+                    raise ValueError("dialogue introduced a speaker outside the requested cast")
+                text_key = _normalize_key(item["text"])
+                if text_key in authored_texts:
+                    raise ValueError("dialogue repeated the same line across the scene")
+                authored_texts.add(text_key)
+            for obligation in batch:
+                local = [item for item in additions if item["segment"] == obligation["segment"]]
+                words = sum(_dialogue_word_count(item["text"]) for item in local)
+                locked_words = sum(_dialogue_word_count(item["text"]) for item in obligation["locked_lines"])
+                budget = creative_dialogue_budget(prompt, obligation["duration_seconds"])
+                if not 1 <= len(local) <= 6 or not budget.minimum <= words + locked_words <= budget.maximum:
+                    raise ValueError(f"segment {obligation['segment']} still falls outside its dialogue budget")
+            replacement = deepcopy(ledger)
+            replacement["generated_dialogue"] = sorted(
+                [item for item in ledger.get("generated_dialogue", []) if item["segment"] not in selected] + additions,
+                key=lambda item: item["segment"],
+            )
+            compiled = _canonicalize_story_ledger(
+                prompt, canonical_ledger, replacement, locked_dialogue=locked_dialogue,
+                segment_count=len(durations), allow_generated_dialogue=True,
+            )
+            violations = ledger_violations(
+                prompt, compiled, segment_count=len(durations), locked_dialogue=locked_dialogue,
+                expect_dialogue=True, allow_generated_dialogue=True, segment_durations=durations,
+            )
+            if violations:
+                raise ValueError("; ".join(violations))
+            ledger = {**ledger, "beats": compiled["beats"], "generated_dialogue": compiled["generated_dialogue"]}
+        except Exception as error:
+            print(f"[MiniMax H3] Creative dialogue completion: {error}")
+            warnings.append(
+                "The AI returned less dialogue than requested in window(s) "
+                + ", ".join(str(item) for item in sorted(selected))
+                + ". A focused writing retry did not produce a valid replacement; the previous script was preserved."
+            )
+    return ledger, warnings
+
+
 def plan_h3_story_segments(
     prompt: str,
     *,
@@ -5962,7 +6085,15 @@ def plan_h3_story_segments(
     # Callers historically detected only quotation marks.  Treat any
     # canonical dialogue form, including ``CHARACTER: line`` screenplay rows,
     # as mandatory even when an older caller passes ``expect_dialogue=False``.
-    expect_dialogue = bool(expect_dialogue or locked_dialogue)
+    expect_dialogue = bool(
+        locked_dialogue or (
+            not dialogue_forbidden(prompt)
+            and (expect_dialogue or (
+                normalize_h3_planning_style(planning_style) == "creative"
+                and creative_dialogue_expected(prompt)
+            ))
+        )
+    )
     source_events = extract_source_events(prompt)
     source_intent = extract_h3_source_intent(prompt)
     source_cast_names = _merge_h3_cast_names(
@@ -5986,6 +6117,7 @@ def plan_h3_story_segments(
     allow_generated_dialogue = bool(
         planning_style == "creative"
         and expect_dialogue
+        and not dialogue_forbidden(prompt)
         and not _only_supplied_dialogue_requested(prompt)
     )
     faithful_locked_schedule = bool(
@@ -6037,7 +6169,9 @@ def plan_h3_story_segments(
         f"- Segment {index + 1}: {duration:.3f} seconds; total dialogue budget "
         f"at most {max(1, int(math.floor(duration * _H3_DIALOGUE_MAX_WORDS_PER_SECOND)))} spoken words; "
         f"aim for {_H3_DIALOGUE_PREFERRED_WORDS_PER_SECOND:g} words per second during speech, "
-        f"up to {_H3_DIALOGUE_MAX_WORDS_PER_SECOND:g}, leaving time for action and pauses"
+        f"up to {_H3_DIALOGUE_MAX_WORDS_PER_SECOND:g}, leaving time for action and pauses. "
+        + (budget.instruction() if allow_generated_dialogue and
+           (budget := creative_dialogue_budget(prompt, duration)) else "")
         for index, duration in enumerate(durations)
     )
     maximum_window_words = max(
@@ -6100,7 +6234,7 @@ def plan_h3_story_segments(
             if planning_style == "creative" else
             "Treat the user concept as locked source material. Distribute and stage only supplied events and exact dialogue; do not invent new plot events, outcomes, or spoken lines. "
         )
-        + f"Dialogue policy: {'Add concise generated_dialogue entries that make the requested interaction feel authored and complete; select exactly one segment for each.' if allow_generated_dialogue else 'Do not add generated dialogue.'} "
+        + f"Dialogue policy: {'Write developed, character-specific generated_dialogue entries; select exactly one segment for each. Use up to six turns per segment within its total word budget.' if allow_generated_dialogue else 'Do not add generated dialogue.'} "
         + (
             "This is a conversation-first brief: begin intelligible tagged dialogue in segment 1 and author at least one concise line for every segment. Do not spend a complete opening segment on silent setup; a brief entrance or establishing action may occupy only the first few seconds before speech begins.\n\n"
             if spread_generated_dialogue else "\n\n"
@@ -6368,8 +6502,8 @@ def plan_h3_story_segments(
                     planned_by = "deterministic_fallback"
                     planning_warnings.append(
                         "The AI story schedule did not satisfy Maestro's fidelity checks after one focused repair. "
-                        "The ordered source story and exact user-written dialogue remain intact, but no safe AI-authored dialogue "
-                        "could be recovered, so Maestro used its duration-aware emergency schedule."
+                        "Maestro restored the ordered source story and exact user-written dialogue using its "
+                        "duration-aware emergency schedule."
                     )
                 else:
                     planned_by = "deterministic_fallback"
@@ -6378,6 +6512,14 @@ def plan_h3_story_segments(
                         "so Maestro used its deterministic duration-aware timing schedule. Every supplied event and exact "
                         "user-written line remains intact."
                     )
+
+    if allow_generated_dialogue:
+        ledger, dialogue_warnings = _complete_creative_dialogue(
+            prompt, ledger, canonical_ledger=canonical_ledger,
+            locked_dialogue=locked_dialogue, durations=durations,
+            generate=generate, system_prompt=ledger_guide,
+        )
+        planning_warnings.extend(dialogue_warnings)
 
     # Camera perspective, requested speed, style, nonverbal reactions, and
     # sequence shape are immutable even when the creative ledger succeeds.

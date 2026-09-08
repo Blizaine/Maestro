@@ -3,6 +3,8 @@
 Prepared on 7 September 2026. This is a local release candidate, not a published
 release. See the [release notes](RELEASE_NOTES_V2.1.0.md) for the user-facing changes.
 
+Updated on 8 September with the Creative dialogue follow-up below.
+
 ## Release boundary
 
 - Public `dev` and `main` were checked directly against GitHub with read-only
@@ -89,6 +91,31 @@ The final unittest and sidebar logs are retained locally as
   composer; browser tests separately exercise its actual size and scrolling.
 - Feature guides now use the current Characters, Duration and Advanced locations.
   The README no longer labels post-public features as part of v2.0.1.
+
+## Creative dialogue follow-up — 8 September
+
+- Replaced stale dialogue examples with duration-specific writing targets using
+  the shared 2.8 words/second speech pace and 3 words/second maximum. Targets
+  account for action, pauses, brief exchanges and explicit silence.
+- Corrected Creative's quoted-line contract, speech detection, and complete-script
+  timing guidance. Raised H3's two-turn planning cap to six turns per window.
+  Added bounded retries for sparse dialogue in single prompts and H3 sequences;
+  sequence retries retain source events, exact lines, and speaker ownership.
+- Full CPU-only Python discovery: **1,423 tests run; 1,422 passed, one CUDA-only
+  test skipped**, in 64.184 seconds. Log:
+  `.codex-tmp/creative-dialogue-full-suite-final.log`.
+- Added 15 neutral-content regression tests, including the real enhancement
+  pipeline with mocked LLM transport, per-window word counts, exact quote/event
+  ownership, unknown speakers, silence, and failure recovery. The focused H3 and
+  dialogue selection contains 101 tests. After a final fallback-message wording
+  correction, all 101 passed again. The five standalone JSON-grammar checks also passed.
+- No frontend or launcher behavior changed in this follow-up. The earlier UI
+  build/browser checks remain the applicable evidence. No live LLM authoring,
+  GPU media generation, application restart, or public push was performed.
+- Before release, review actual AI Creative outputs with the selected local LLM:
+  a 14.4-second tutorial, a conversation over several H3 windows, and an action
+  scene requesting brief dialogue. Mocked transport verifies scheduling and
+  preservation; it does not establish every model's writing or rendered quality.
 
 ## Prior model checks and remaining manual validation
 

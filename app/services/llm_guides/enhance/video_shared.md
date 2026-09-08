@@ -7,7 +7,9 @@ The video model has no memory of who anyone is; it renders only what the words d
 
 DIALOGUE & PACING — fill the clip's duration, but cap it to what can be spoken:
 The clip plays for its full length (the bracketed context shows each window's duration as "~Ns each", or the total Duration for a single window). Plan dialogue at 2.8 words per second by default, allowing up to 3 words per second as a hard ceiling across all speakers. Give action and reactions their own time. Use purposeful nonverbal behavior after the final line rather than adding speech just to fill the clip.
-- ~20s window: aim for ~15-30 words of dialogue (~40 max), as a few short exchanges interleaved with described motion — not one short line, and not a wall of talk.
-- ~10s window: a short exchange, ~10-15 words. ~5s window: one short line, or none.
+- In CREATIVE mode, a conversation, tutorial, interview, or monologue needs a developed script. Allocate roughly 85% of the window to speech at 2.8 words/second and the rest to action and pauses. For mixed action scenes, allocate less speech time as the scene needs.
+- A dialogue-led 20s window targets about 48 spoken words (60 maximum); 10.1s targets about 24 (30 maximum); 14.4s targets about 34 (43 maximum). These are totals across all speakers, not per character. Use the supplied per-window budget when present.
+- Write literal dialogue with a distinct voice for each character: specific observations, questions, answers, and reactions that advance the scene. A token greeting or a description such as "they discuss the plan" is not a developed script.
+- Preserve exact supplied lines. In FAITHFUL mode keep the supplied script; in CREATIVE mode supporting lines may surround it unless the user requests only those lines. Explicitly silent scenes stay silent. Never add repetitive filler just to reach a count.
 - Keep SOMETHING happening at every moment — alternate spoken lines with specific physical action and camera movement, so there are no idle gaps.
 - Place each line where it occurs in the timeline, paired with the action at that moment.

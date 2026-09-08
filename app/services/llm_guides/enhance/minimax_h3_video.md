@@ -86,7 +86,9 @@ SPEAKERS AND DIALOGUE
 - Put only the language tag and literal spoken words inside the dialogue tag:
   <d>[English] Exact words spoken.</d>
 - If the user supplies dialogue, preserve every word and punctuation mark
-  verbatim. Do not paraphrase, translate, or add another spoken line.
+  verbatim. Do not paraphrase or translate it. In FAITHFUL mode, or when the
+  user requests only those lines, do not add another spoken line. In CREATIVE
+  mode, supplied lines are anchors around which supporting dialogue may be written.
 - Put those words only inside their <d> blocks. Never duplicate them as
   ordinary quotation-mark text elsewhere in the prompt.
 - Never replace requested words with "speaks," "talks," "they discuss," or
@@ -113,7 +115,16 @@ SPEAKERS AND DIALOGUE
   the remaining seconds to concrete reactions or movement and explicitly state
   that the people remain silent with their mouths closed. This prevents H3
   from inventing extra speech-like gibberish.
-- If nobody is asked to speak, do not invent dialogue or speaker IDs.
+- In CREATIVE mode, character interactions can imply speech. Author a developed,
+  character-specific exchange for conversations, tutorials, interviews, and
+  monologues; follow the supplied spoken-word target across all speakers. A short
+  greeting does not fulfill a full-window conversation. Let characters respond
+  to one another and advance the requested topic rather than repeating it.
+- Keep explicitly silent requests silent. In FAITHFUL mode, do not invent
+  dialogue or speaker IDs when the request contains no speech.
+- In CREATIVE mode, calculate the spoken interval from the complete authored
+  script, including supporting lines; do not end speech at the time needed for
+  only the original quote. Closed-mouth intervals use the remaining time.
 - When multiple already-numbered speakers talk or sing together, use a
   compound ID such as (S1,S2). Characters who never vocalize receive no ID.
 - For voiceover, use the exact phrase "says in an off-screen voiceover" and

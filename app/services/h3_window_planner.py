@@ -977,18 +977,18 @@ _UNREQUESTED_SPECTACLE_PATTERNS = UNREQUESTED_SPECTACLE_PATTERNS
 
 def _narrative_dialogue_expected(prompt: str, window_count: int) -> bool:
     """Return whether a long character interaction should not be all-mute."""
+    from services.dialogue_writing import conversation_brief, dialogue_forbidden
+    from services.h3_story_ledger import extract_locked_dialogue
 
     source = " ".join(str(prompt or "").split())
     lowered = source.casefold()
     if int(window_count) < 2:
         return False
-    if re.search(
-        r"\b(?:silent|silently|no dialogue|without dialogue|nonverbal|"
-        r"music video|montage|instrumental|landscape|establishing shot)\b",
-        lowered,
-    ):
+    if dialogue_forbidden(source):
         return False
-    if re.search(r"\".+?\"", source):
+    if conversation_brief(source):
+        return True
+    if extract_locked_dialogue(source):
         return True
     # An explicit verbal action is sufficient on its own. Requiring two
     # multi-word proper names missed ordinary briefs such as ``George
@@ -1025,16 +1025,13 @@ def _narrative_dialogue_expected(prompt: str, window_count: int) -> bool:
 
 def _creative_dialogue_expected(prompt: str, window_count: int) -> bool:
     """Let Creative write dialogue for character scenes, never silent briefs."""
+    from services.dialogue_writing import creative_dialogue_expected, dialogue_forbidden
 
     source = " ".join(str(prompt or "").split())
     lowered = source.casefold()
-    if int(window_count) < 2 or re.search(
-        r"\b(?:silent|silently|no dialogue|without dialogue|nonverbal|"
-        r"music video|montage|instrumental|landscape|establishing shot)\b",
-        lowered,
-    ):
+    if int(window_count) < 1 or dialogue_forbidden(source):
         return False
-    if _narrative_dialogue_expected(source, window_count):
+    if creative_dialogue_expected(source) or _narrative_dialogue_expected(source, window_count):
         return True
     return bool(re.search(
         r"\b(?:these|the)\s+(?:two|three|four|five|\d+)\s+characters?\b|"

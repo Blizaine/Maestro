@@ -12,6 +12,11 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 - Made prompt enhancement explicit: the magic button runs AI Faithful, with
   Creative in its menu. Results are editable before submission. Added image
   Faithful/Creative instructions and preserved reviewed H3/LTX window prompts.
+- Improved AI Creative dialogue for conversations, tutorials and character
+  interactions. Writing targets follow each window's duration at the shared
+  2.8 words/second pace, with a 3 words/second maximum across all speakers.
+  Sparse drafts get a focused writing retry; H3 supports up to six turns per
+  window. Exact lines, brief-dialogue requests and explicit silence remain respected.
 - Added model-aligned Time sliders through five minutes, retained long presets,
   and displayed Auto's recommended duration. Fixed unstable prompt resizing,
   iPhone keyboard/scroll handling, overlapping controls and moving duration sliders.

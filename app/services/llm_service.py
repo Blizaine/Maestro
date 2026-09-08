@@ -2773,6 +2773,17 @@ def _build_enhance_user_prompt(
                 "separated by newlines"
             )
         context = f"[{', '.join(parts)}]"
+        if planning_style == "creative":
+            from services.dialogue_writing import creative_dialogue_budget
+
+            budget_duration = window_size_seconds if window_count and window_count > 1 else duration_seconds
+            budget = creative_dialogue_budget(prompt, budget_duration)
+            context += (
+                "\n[CREATIVE WRITING: Develop the requested scene and character interaction. "
+                "Preserve all explicit facts and quoted lines. Supporting dialogue may surround "
+                "those exact lines unless the user requests only them. Keep silent requests silent."
+                + (" For each window: " + budget.instruction() if budget else "") + "]"
+            )
         if window_count and window_count > 1:
             if planning_style == "creative":
                 context += (
@@ -3162,6 +3173,8 @@ def enhance_prompt(
         system += f"\n\n{lora_system_hint}"
 
     if mode in ("video", "avatar") and planning_style == "creative":
+        from services.dialogue_writing import creative_dialogue_budget
+
         system += (
             "\n\nCREATIVE WRITING MODE: The user's prompt is a creative brief. "
             "Author a compelling causal scene with specific filmable progression, "
@@ -3171,6 +3184,9 @@ def enhance_prompt(
             "dialogue may surround them unless the user says only those lines. Never "
             "add speech to an explicitly silent request."
         )
+        writing_budget = creative_dialogue_budget(prompt, duration_seconds)
+        if writing_budget:
+            system += "\nCREATIVE DIALOGUE ALLOCATION: " + writing_budget.instruction()
 
     # Preserve structural elements in image prompts
     if mode == "image":
@@ -3218,7 +3234,7 @@ def enhance_prompt(
         system += "\n\nCRITICAL: Output ONLY the enhanced prompt text. No headers, no labels, no markdown, no explanation, no \"Enhancement Logic\", no \"Edit Prompt:\". No LoRA filenames (.safetensors). Just the raw prompt text."
 
     if is_h3_structured:
-        dialogue_requirement = _build_h3_dialogue_requirement(prompt, duration_seconds)
+        dialogue_requirement = _build_h3_dialogue_requirement(prompt, duration_seconds, planning_style)
         if dialogue_requirement:
             # Keep this adjacent to the output contract so a long vision guide
             # cannot demote literal dialogue into a vague "speaks" action.
@@ -3298,6 +3314,18 @@ def enhance_prompt(
         result = _canonicalize_h3_ref2va_dialogue_speakers(
             result, prompt, reference_context
         )
+
+    if mode in ("video", "avatar") and planning_style == "creative" and result:
+        result = _complete_creative_enhancement(
+            prompt, result, duration_seconds=duration_seconds,
+            structured=is_h3_structured, ref2va=is_h3_ref2va,
+            system_prompt=system, user_prompt=user_prompt,
+            generator=generate, max_new_tokens=effective_max_tokens,
+            temperature=temperature,
+        )
+        if is_h3_ref2va:
+            result = _canonicalize_h3_ref2va_reference_fields(result, reference_context, prompt)
+            result = _canonicalize_h3_ref2va_dialogue_speakers(result, prompt, reference_context)
 
     structure_is_valid = (
         _has_complete_h3_ref2va_structure(result)
@@ -3809,8 +3837,64 @@ def _h3_ref2va_subject_speaker_map(
     }
 
 
+def _complete_creative_enhancement(
+    prompt: str, result: str, *, duration_seconds: Optional[float],
+    structured: bool, ref2va: bool, system_prompt: str, user_prompt: str,
+    generator, max_new_tokens: int, temperature: float,
+) -> str:
+    """Retry an underwritten Creative script once, without discarding a good draft."""
+    from services.dialogue_writing import creative_dialogue_budget, spoken_word_count
+    from services.h3_story_ledger import extract_locked_dialogue
+
+    budget = creative_dialogue_budget(prompt, duration_seconds)
+    if not budget:
+        return result
+
+    def lines(text):
+        return _extract_h3_dialogue_blocks(text) if structured else [
+            item["text"] for item in extract_locked_dialogue(text)
+        ]
+
+    def word_count(text):
+        return sum(spoken_word_count(line) for line in lines(text))
+
+    count = word_count(result)
+    if budget.minimum <= count <= budget.maximum:
+        return result
+    try:
+        replacement = generator(
+            prompt=(
+                user_prompt + "\n\nCOMPLETE CREATIVE DIALOGUE: The draft contains "
+                f"{count} spoken words. {budget.instruction()} "
+                "Return the entire improved prompt in the required format. Develop the requested "
+                "topic through character-specific lines and responses, preserving every supplied line "
+                "verbatim and all scene facts. Recalculate speech intervals from the COMPLETE script, "
+                "including added dialogue, not just the original quotes. Do not force a long silent tail. "
+                "Keep intentional action and silence.\nCURRENT DRAFT:\n" + result
+            ),
+            system_prompt=system_prompt,
+            max_new_tokens=max_new_tokens, temperature=min(float(temperature), 0.5),
+            enable_thinking=False, frequency_penalty=0.3, presence_penalty=0.1,
+        )
+        replacement = _clean_enhance_output(repair_text(replacement), preserve_structure=structured)
+        valid_structure = not structured or (
+            _has_complete_h3_ref2va_structure(replacement) if ref2va
+            else _has_complete_h3_context_structure(replacement)
+        )
+        exact_lines = [item["text"] for item in extract_locked_dialogue(prompt)]
+        if (valid_structure and budget.minimum <= word_count(replacement) <= budget.maximum
+                and all(line in lines(replacement) for line in exact_lines)
+                and (not structured or _h3_dialogue_contract_satisfied(prompt, replacement))):
+            return replacement
+        print("[Enhance] Creative dialogue retry missed its word budget or exact-line contract; keeping the previous draft.")
+    except Exception as error:
+        print(f"[Enhance] Creative dialogue retry unavailable; keeping the previous draft: {error}")
+    return result
+
+
 def _h3_requests_speech(text: str) -> bool:
     import re
+    from services.dialogue_writing import conversation_brief, dialogue_forbidden
     source = normalize_h3_dialogue_tags(text)
     # A sign that "says" something is visible text, not a speaking source.
     # Remove only the narrow visual-text cue before evaluating speech verbs.
@@ -3823,13 +3907,13 @@ def _h3_requests_speech(text: str) -> bool:
     )
     return bool(
         _extract_h3_quoted_dialogue(source)
-        or re.search(
+        or (not dialogue_forbidden(speech_context) and (conversation_brief(speech_context) or re.search(
             r"\b(?:say|says|speak|speaks|talk|talks|discuss|discusses|discussion|"
             r"argue|argues|announce|announces|ask|asks|reply|replies|tell|tells|"
             r"conversation|dialogue)\b",
             speech_context,
             flags=re.IGNORECASE,
-        )
+        )))
     )
 
 
@@ -3896,15 +3980,30 @@ def _build_h3_timed_silence_clause(prompt: str, duration_seconds: Optional[float
 def _build_h3_dialogue_requirement(
     prompt: str,
     duration_seconds: Optional[float] = None,
+    planning_style: str = "faithful",
 ) -> str:
     from services.dialogue_timing import (
         DIALOGUE_DEFAULT_WORDS_PER_SECOND,
         DIALOGUE_MAX_WORDS_PER_SECOND,
     )
 
+    from services.dialogue_writing import dialogue_forbidden, only_supplied_dialogue_requested
+
+    allow_additions = (
+        planning_style == "creative" and not dialogue_forbidden(prompt)
+        and not only_supplied_dialogue_requested(prompt)
+    )
     quotes = _extract_h3_quoted_dialogue(prompt)
     language = _detect_h3_dialogue_language(prompt)
     timed_clause = _build_h3_timed_silence_clause(prompt, duration_seconds)
+    if allow_additions:
+        timed_clause = (
+            f"Use the full {duration_seconds or 8:g}-second clip. Calculate the speech interval from "
+            "ALL authored spoken words at 2.8 words per second, allowing up to 3. "
+            "State approximate start and end times; assign closed mouths and no voices to any "
+            "nonverbal intervals before or after speech. Never calculate the ending from only the "
+            "user's original quotes when additional dialogue has been authored."
+        )
     if quotes:
         required = "\n".join(
             f"- REQUIRED VERBATIM: <d>[{language}] {line}</d>" for line in quotes
@@ -3912,7 +4011,10 @@ def _build_h3_dialogue_requirement(
         return (
             "IMMUTABLE H3 DIALOGUE CONTRACT: The user supplied the spoken lines below. "
             "Every line must appear verbatim inside a <d> block in the output; do not summarize, "
-            "paraphrase, censor, omit, or add speech. Give each line a stable (S1), (S2), etc. "
+            "paraphrase, censor, or omit it. "
+            + ("Creative mode may author supporting dialogue around these exact lines. " if allow_additions
+               else "Do not add speech. ")
+            + "Give each line a stable (S1), (S2), etc. "
             f"speaker outside its tag. Never repeat these words as ordinary quoted text in summary "
             f"or any other field.\n{required}\n{timed_clause}"
         )
@@ -4591,7 +4693,7 @@ def _inject_missing_h3_dialogue(
         for index, entry in enumerate(missing, start=1)
     )
     additions += (
-        " These are the only spoken words in the video; before and after them, everyone remains "
+        " Only the scripted <d> blocks are spoken, including the lines already staged above; outside their intervals, everyone remains "
         "silent with mouths closed, with no other voices or speech-like vocalization."
     )
     field = "detailed_description" if ref2va else "integrated_multimodal_description"

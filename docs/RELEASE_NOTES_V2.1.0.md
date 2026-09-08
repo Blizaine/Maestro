@@ -56,6 +56,16 @@ public v2.0.1 update.
 - Shared dialogue planning targets **2.8 words per second**, with admission up
   to **3 words per second**. Dense but valid lines can use the clip's available
   speech time instead of being compressed to reserve unnecessary silence.
+- AI Creative writes developed character dialogue for conversations, tutorials,
+  interviews and implied interactions. It receives a spoken-word target based
+  on the actual window duration, with action and pauses accounted for. Sparse
+  drafts receive a focused writing retry, and H3 allows up to six turns per
+  window within the shared word budget. Supplied quotes remain exact anchors
+  around which Creative can add supporting dialogue. Faithful, explicit silence
+  and requests to use only the supplied lines retain their original contracts.
+- H3 speech intervals account for the complete authored script, including
+  Creative's supporting lines. A silent establishing shot or reaction no longer
+  suppresses a later requested conversation. Brief tactical dialogue remains brief.
 - Dialogue extraction excludes production headings such as Visual Direction
   and Sound, stops at closing quotes, and avoids double-counting mixed
   screenplay/tagged dialogue. This fixes inflated spoken-word requirements
