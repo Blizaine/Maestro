@@ -334,11 +334,9 @@ const read = async endpoint => {
     await pause();
     assert.notEqual(requests.at(-1)._queue_mode, 'held');
     assert.equal(requests.at(-1).minimax_h3_references.length, 3);
-    await sidebar.getByRole('button', {name: 'Recipes and model browser'}).click();
-    await page.getByRole('dialog', {name: 'Studio libraries'}).getByRole('button', {name: 'Open recipes'}).click();
+    await sidebar.getByRole('button', {name: 'Open recipes'}).click();
     assert.equal(await page.evaluate(() => window.store.getState().recipesOpen), true);
-    await sidebar.getByRole('button', {name: 'Recipes and model browser'}).click();
-    await page.getByRole('dialog', {name: 'Studio libraries'}).getByRole('button', {name: 'Open model browser'}).click();
+    await sidebar.getByRole('button', {name: 'Open model browser'}).click();
     assert.equal(await page.evaluate(() => window.store.getState().loraBrowserOpen), true);
     await sidebar.getByRole('button', {name: 'Choose model'}).click();
     await page.getByRole('dialog', {name: 'Choose a model'}).getByRole('button', {name: 'Browse models, LoRAs & characters'}).click();
@@ -361,7 +359,13 @@ const read = async endpoint => {
           return buttons.every((a, index) => buttons.slice(index + 1).every(b =>
             a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top));
         }), 'Characters and output settings never overlap at width ' + viewport.width);
-        assert.equal(await sidebar.locator('.studio-advanced-label').isVisible(), viewport.width >= 768, 'Advanced compacts to the sidebar width, including wider mobile viewports');
+        assert.equal(await sidebar.locator('.studio-advanced-label').isVisible(), false, 'Advanced compacts to leave room for the direct Recipes shortcut');
+        const characterBox = await sidebar.getByRole('button', {name: /Characters/}).boundingBox();
+        const recipesBox = await sidebar.getByRole('button', {name: 'Open recipes'}).boundingBox();
+        const resolutionBox = await sidebar.getByRole('button', {name: /^Resolution:/}).boundingBox();
+        assert.ok(characterBox.x + characterBox.width <= recipesBox.x && recipesBox.x + recipesBox.width <= resolutionBox.x
+          && Math.abs(characterBox.y - recipesBox.y) < 1 && Math.abs(recipesBox.y - resolutionBox.y) < 1,
+        'Recipes sits between Characters and Resolution on the same row');
         const toolbarBounds = await sidebar.getByRole('group', {name: 'Prompt controls', exact: true}).boundingBox();
         const promptBounds = await prompt.boundingBox();
         const enhanceBounds = await sidebar.getByRole('button', {name: 'Enhance prompt with AI Faithful'}).boundingBox();
@@ -377,6 +381,9 @@ const read = async endpoint => {
         }), 'Settings keep compact, even gaps instead of spreading out');
         const modelBox = await sidebar.getByRole('button', {name: 'Choose model'}).boundingBox();
         const bar = await page.getByTestId('studio-generate-bar').boundingBox();
+        const browserBox = await sidebar.getByRole('button', {name: 'Open model browser'}).boundingBox();
+        assert.ok(browserBox.x + browserBox.width <= modelBox.x && browserBox.y >= bar.y
+          && browserBox.y + browserBox.height <= bar.y + bar.height, 'Direct Model Browser shortcut stays beside the model selector');
         assert.ok(modelBox.y >= bar.y && modelBox.y + modelBox.height <= bar.y + bar.height, 'Model selector is beside Generate');
         assert.ok(bar.y >= 0 && bar.y + bar.height <= viewport.height, 'Generate stays in viewport');
         await page.screenshot({path: path.join(output, viewport.width + '-' + family + '-' + mode + '.png')});

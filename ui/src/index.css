@@ -780,12 +780,14 @@ input[type="range"]::-webkit-slider-thumb {
   .maestro-sidebar[data-keyboard-open="true"] .studio-inputs:not(:focus-within) { display: none; }
   .studio-composer[data-expanded="true"] { padding: 12px; }
 }
-@container studio-footer (max-width: 380px) {
+@container studio-footer (max-width: 400px) {
   .studio-advanced-label { display: none; }
 }
-@container studio-footer (max-width: 320px) {
-  .studio-character-trigger .studio-character-label,
+@container studio-footer (max-width: 380px) {
   .studio-setting-icon { display: none; }
+}
+@container studio-footer (max-width: 320px) {
+  .studio-character-trigger .studio-character-label { display: none; }
 }
 @media (max-width: 360px) {
   .studio-media-grid > * { height: 92px; }
