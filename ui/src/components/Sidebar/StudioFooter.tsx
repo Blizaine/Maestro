@@ -14,12 +14,12 @@ export function StudioFooter({onCharacterSlot, onAnchor}: {
   return <div ref={onAnchor} data-studio-footer className="studio-footer shrink-0 bg-bg-secondary px-3 pb-2 pt-2">
     <div data-testid="studio-settings-strip" className="flex min-w-0 items-center gap-1 pb-2">
       <div ref={onCharacterSlot} className="shrink-0 empty:hidden" />
-      <button type="button" aria-label="Open recipes" aria-haspopup="dialog" title="Recipes"
-        onClick={() => useStore.getState().setRecipesOpen(true)}
-        className="studio-setting-chip border-border bg-bg-tertiary text-text-secondary hover:border-border-light">
-        <BookMarked size={15}/>
-      </button>
       <div data-testid="studio-output-settings" className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1">
+        <button type="button" aria-label="Open recipes" aria-haspopup="dialog" title="Recipes"
+          onClick={() => useStore.getState().setRecipesOpen(true)}
+          className="studio-setting-chip border-border bg-bg-tertiary text-text-secondary hover:border-border-light">
+          <BookMarked size={15}/>
+        </button>
         <OutputFormatControls />
         <AdvancedSettings compact />
       </div>

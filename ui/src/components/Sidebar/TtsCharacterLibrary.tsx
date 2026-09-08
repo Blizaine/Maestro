@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { BookUser, ChevronDown, Loader2, Plus, RefreshCw, UserPlus } from 'lucide-react'
+import { ChevronDown, Loader2, Plus, RefreshCw, UserPlus, UserRound } from 'lucide-react'
 import * as api from '../../api/client'
 import type { SavedOmniCharacter } from '../../types'
 import { characterDisplayName } from '../../lib/characters'
@@ -90,7 +90,7 @@ export function TtsCharacterLibrary({ onSelect, onCharactersChange, selectedIds,
       <button type="button" aria-label="Characters" title={`${selectedIds.length} saved voices selected`} aria-expanded={open} onClick={() => setOpen(value => !value)}
         className="min-h-12 w-full flex items-center justify-between rounded-xl border border-border bg-bg-tertiary px-3 py-2 text-left hover:border-border-light">
         <span className="flex items-center gap-2 text-xs font-medium text-text-primary">
-          <BookUser size={15} className="text-accent-blue" />
+          <UserRound size={15} className="text-accent-blue" />
           <span className="studio-character-label">Characters<span className="studio-character-detail block text-[10px] font-normal text-text-muted">{selectedIds.length ? `${selectedIds.length} voices` : 'Saved voices'}</span></span>
         </span>
         <ChevronDown size={13} className={`text-text-muted ${open ? 'rotate-180' : ''}`} />

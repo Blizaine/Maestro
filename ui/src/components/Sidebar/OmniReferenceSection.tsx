@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { BookUser, ChevronDown, FileAudio, GripVertical, Image as ImageIcon, Info, Loader2, UserPlus, Video, X } from 'lucide-react'
+import { ChevronDown, FileAudio, GripVertical, Image as ImageIcon, Info, Loader2, UserPlus, UserRound, Video, X } from 'lucide-react'
 import * as api from '../../api/client'
 import { useStore } from '../../stores/useStore'
 import { readPersistentDisclosure, writePersistentDisclosure } from '../../lib/persistentDisclosure'
@@ -484,7 +484,7 @@ export function OmniReferenceSection({
           className="min-h-12 w-full flex items-center justify-between gap-2 rounded-xl border border-border bg-bg-tertiary px-3 py-2 text-left hover:border-border-light disabled:opacity-50"
         >
           <span className="flex items-center gap-2 text-xs font-semibold text-text-primary">
-            <BookUser size={15} className="text-accent-blue" />
+            <UserRound size={15} className="text-accent-blue" />
             <span className="studio-character-label">Characters<span className="studio-character-detail block text-[10px] font-normal text-text-muted">{addedCharacterIds.length ? `${addedCharacterIds.length} selected` : 'Choose saved'}</span></span>
           </span>
           <span className="flex items-center gap-2">
