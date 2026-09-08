@@ -39,7 +39,7 @@ export function AspectRatioGrid({ menu = false, onSelect }: { menu?: boolean; on
             aria-checked={menu ? aspectRatio === r.value : undefined}
             aria-pressed={menu ? undefined : aspectRatio === r.value}
             onClick={() => { setAspectRatio(r.value); onSelect?.() }}
-            className={`flex items-center rounded-lg transition-colors ${menu ? 'min-h-11 gap-3 px-3 text-xs' : 'flex-1 flex-col gap-0.5 py-2 border text-[10px]'} ${
+            className={`flex items-center rounded-lg transition-colors ${menu ? 'min-h-9 gap-2.5 px-2.5 text-xs' : 'flex-1 flex-col gap-0.5 py-2 border text-[10px]'} ${
               aspectRatio === r.value
                 ? 'border-accent-blue bg-bg-active text-text-primary'
                 : 'border-border text-text-muted hover:border-border-light hover:text-text-secondary'
@@ -47,7 +47,7 @@ export function AspectRatioGrid({ menu = false, onSelect }: { menu?: boolean; on
           >
             <span aria-hidden="true" className="text-sm leading-none">{r.icon}</span>
             <span>{r.value === 'auto' ? 'Auto' : r.value}</span>
-            {menu && aspectRatio === r.value && <span aria-hidden="true" className="ml-auto">✓</span>}
+            {menu && <span aria-hidden="true" className={`ml-auto ${aspectRatio === r.value ? '' : 'invisible'}`}>✓</span>}
           </button>
         ))}
       </div>

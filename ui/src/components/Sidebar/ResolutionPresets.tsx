@@ -31,7 +31,7 @@ export function ResolutionPresets({ menu = false, onSelect }: { menu?: boolean; 
             aria-pressed={menu ? undefined : resolutionPreset === p}
             title={modelOptions?.resolution_presets?.[p]?.hint}
             onClick={() => { setResolutionPreset(p); onSelect?.() }}
-            className={`${menu ? 'flex min-h-11 items-center justify-between px-3 text-left text-xs' : 'min-h-10 min-w-0 px-1 text-[10px]'} rounded-md transition-colors ${
+            className={`${menu ? 'flex min-h-9 items-center justify-between gap-3 px-2.5 text-left text-xs' : 'min-h-10 min-w-0 px-1 text-[10px]'} rounded-md transition-colors ${
               resolutionPreset === p
                 ? 'bg-bg-active text-text-primary'
                 : 'text-text-secondary hover:text-text-primary'
@@ -40,7 +40,7 @@ export function ResolutionPresets({ menu = false, onSelect }: { menu?: boolean; 
             {p === 'auto'
               ? 'Auto'
               : modelOptions?.resolution_presets?.[p]?.label || p}
-            {menu && resolutionPreset === p && <span aria-hidden="true">✓</span>}
+            {menu && <span aria-hidden="true" className={resolutionPreset === p ? '' : 'invisible'}>✓</span>}
           </button>
         ))}
       </div>

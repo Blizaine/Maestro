@@ -3,9 +3,9 @@ import { createPortal } from 'react-dom'
 import { usePanelFocus } from './SidebarPanels'
 
 /** Compact choices above their trigger, within the visible keyboard viewport. */
-export function SidebarMenu({ open, anchor, label, id, onClose, children, width = 200 }: {
+export function SidebarMenu({ open, anchor, label, id, onClose, children, width = 200, align = 'end' }: {
   open: boolean; anchor: HTMLElement | null; label: string; id?: string
-  onClose: () => void; children: ReactNode; width?: number
+  onClose: () => void; children: ReactNode; width?: number | 'content'; align?: 'start' | 'end'
 }) {
   const ref = useRef<HTMLDivElement>(null)
   const key = useId()
@@ -20,10 +20,15 @@ export function SidebarMenu({ open, anchor, label, id, onClose, children, width 
       const left = viewport?.offsetLeft || 0
       const visibleWidth = viewport?.width || window.innerWidth
       const bounds = anchor.getBoundingClientRect()
-      const menuWidth = Math.min(width, visibleWidth - 16)
+      const sidebar = anchor.closest('.maestro-sidebar')?.getBoundingClientRect()
+      const minLeft = Math.max(left + 8, sidebar ? sidebar.left + 8 : left + 8)
+      const maxRight = Math.min(left + visibleWidth - 8, sidebar ? sidebar.right - 8 : left + visibleWidth - 8)
+      const menuWidth = Math.min(width === 'content' ? Math.max(bounds.width, ref.current?.getBoundingClientRect().width || 96) : width, maxRight - minLeft)
       setPosition({
-        width: menuWidth,
-        left: Math.max(left + 8, Math.min(bounds.right - menuWidth, left + visibleWidth - menuWidth - 8)),
+        width: width === 'content' ? 'max-content' : menuWidth,
+        minWidth: width === 'content' ? bounds.width : undefined,
+        maxWidth: maxRight - minLeft,
+        left: Math.max(minLeft, Math.min(align === 'start' ? bounds.left : bounds.right - menuWidth, maxRight - menuWidth)),
         bottom: window.innerHeight - bounds.top + 6,
         maxHeight: Math.max(44, bounds.top - top - 14),
       })
@@ -38,6 +43,7 @@ export function SidebarMenu({ open, anchor, label, id, onClose, children, width 
     }
     const observer = new ResizeObserver(scheduleMeasure)
     observer.observe(anchor)
+    if (ref.current) observer.observe(ref.current)
     window.addEventListener('resize', scheduleMeasure)
     window.addEventListener('scroll', scheduleMeasure, true)
     window.visualViewport?.addEventListener('resize', scheduleMeasure)
@@ -50,7 +56,7 @@ export function SidebarMenu({ open, anchor, label, id, onClose, children, width 
       window.visualViewport?.removeEventListener('resize', scheduleMeasure)
       window.visualViewport?.removeEventListener('scroll', scheduleMeasure)
     }
-  }, [open, anchor, width])
+  }, [open, anchor, width, align])
   useEffect(() => {
     if (!open) return
     const eventName = 'maestro-studio-panel-open'
@@ -70,7 +76,7 @@ export function SidebarMenu({ open, anchor, label, id, onClose, children, width 
   }, [open, key, anchor])
   usePanelFocus(open, ref, onClose, false)
   return createPortal(<div ref={ref} id={id} role="menu" aria-label={label} hidden={!open} tabIndex={-1}
-    style={position} className={open ? 'fixed z-[110] overflow-y-auto overscroll-contain rounded-xl border border-border bg-bg-secondary p-1 shadow-xl outline-none' : 'hidden'}
+    style={{...position, ...(width === 'content' ? {width: 'max-content'} : {})}} className={open ? 'fixed z-[110] overflow-y-auto overscroll-contain rounded-xl border border-border bg-bg-secondary p-1 shadow-xl outline-none' : 'hidden'}
     onKeyDown={event => {
       if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
       event.preventDefault()

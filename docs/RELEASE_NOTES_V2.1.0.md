@@ -21,7 +21,8 @@ public v2.0.1 update.
   Resolution, Aspect, Duration and Advanced form a compact group on the right.
   Recipes sits immediately beside Resolution. Character buttons use the same
   person icon in Reference, Image, Animate and Speech.
-- Resolution and Aspect open small upward lists without redundant headers.
+- Resolution and Aspect open lists sized to their labels, directly above their
+  buttons without redundant headers.
   All existing model-specific options remain available, including Auto.
 - The model selector sits beside Generate. The Model Browser has its own globe
   shortcut, and Recipes opens directly from its book icon. Generate retains
@@ -56,6 +57,12 @@ public v2.0.1 update.
 - Time mode adds a slider through model-aligned durations up to five minutes.
   Ordinary H3 starts at approximately 5.2s, 5.9s and 6.6s. Longer presets and
   editable timecodes still reach 60 minutes on supported video workflows.
+- The compact video Duration popup uses **Time** and **Window** tabs. **Auto**
+  is a toggle in Time, disabling and dimming manual time controls while enabled.
+  Long presets are **10m, 15m, 30m, 60m and Custom**. Window retains its exact
+  count controls. Window Length stays visible and adjusts automatically;
+  overlap is collapsed by default in both tabs. The popup stays above its
+  indicator as the keyboard moves, and slider dragging keeps a steady layout.
 - Automatic window sizing follows the requested timeline up to the model/GPU
   recommendation or the user's override. Saved model/resolution overrides and
   Reference continuation settings remain available.

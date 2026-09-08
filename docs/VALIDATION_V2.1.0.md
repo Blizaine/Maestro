@@ -3,7 +3,7 @@
 Prepared on 7 September 2026. This is a local release candidate, not a published
 release. See the [release notes](RELEASE_NOTES_V2.1.0.md) for the user-facing changes.
 
-Updated on 8 September with the dialogue, shared-guide and Studio scrolling
+Updated on 8 September with the dialogue, shared-guide and Studio UI
 follow-ups below.
 
 ## Release boundary
@@ -168,6 +168,35 @@ The final unittest and sidebar logs are retained locally as
   `.codex-tmp/sidebar-validation/`. No backend restart, live generation,
   launcher changes or public push was performed. Refresh the browser to use
   the rebuilt UI.
+
+## Clip settings follow-up — 8 September
+
+- Resolution and Aspect menus now size to their option labels and open directly
+  above their indicators, within the sidebar. All model-provided choices remain.
+- Studio video duration now has Time/Window tabs with an Auto toggle. Auto dims
+  and disables manual time controls; Time retains the model-step slider through
+  five minutes and the 10m, 15m, 30m, 60m and Custom choices. Window Length stays
+  visible with automatic sizing, GPU recommendations and manual overrides.
+  Window overlap is collapsed by default in both tabs. The popup keeps a steady
+  height while sliders move and scrolls internally when extra controls need room.
+- Production TypeScript/Vite build and ESLint passed. The focused clip-settings
+  browser checks and the full isolated sidebar suite passed at desktop/mobile
+  widths and across all six themes. Checks cover menu size/alignment, Auto's
+  disabled controls, stable slider position, overlap editing, Window mode,
+  continuity, enhancement actions, queues and the existing shared scroller.
+- The duration/state integration suite passed, including native increments,
+  GPU caps, manual 14.4-second windows, 60-minute output, Extend restoration and
+  Viggle source-duration planning. Existing duration calculations were retained.
+- A simulated keyboard transition exposed stale popup positioning; measuring
+  after the drawer's layout update and observing its size corrected it. The
+  final keyboard viewport checks passed. These Chromium simulations still need
+  the normal real iPhone/Safari check during user testing.
+- Logs: `.codex-tmp/clip-settings-build.log`,
+  `.codex-tmp/clip-settings-lint.log`, `.codex-tmp/clip-settings-ui.log`,
+  `.codex-tmp/clip-settings-full-ui.log` and
+  `.codex-tmp/clip-settings-duration-math.log`. Menu and Auto screenshots are in
+  `.codex-tmp/sidebar-validation/`. No live generation, backend restart,
+  launcher change or public push was performed. Refresh to use the rebuilt UI.
 
 ## Prior model checks and remaining manual validation
 

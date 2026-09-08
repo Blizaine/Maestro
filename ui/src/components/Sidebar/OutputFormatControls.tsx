@@ -15,6 +15,7 @@ export function OutputFormatControls() {
   const [expanded, setExpanded] = useState<'resolution' | 'aspect' | 'duration' | null>(null)
   const [resolutionAnchor, setResolutionAnchor] = useState<HTMLButtonElement | null>(null)
   const [aspectAnchor, setAspectAnchor] = useState<HTMLButtonElement | null>(null)
+  const [durationAnchor, setDurationAnchor] = useState<HTMLButtonElement | null>(null)
   const id = useId()
   const mode = useStore(s => s.generationMode)
   const editMode = useStore(s => s.editSubMode)
@@ -50,7 +51,7 @@ export function OutputFormatControls() {
           className={`${chip} ${expanded === 'aspect' && !sourceAspect ? 'border-accent-blue bg-accent-blue/10 text-text-primary' : 'border-border bg-bg-tertiary text-text-secondary hover:border-border-light'}`}>
           <RectangleHorizontal size={13} className="studio-setting-icon" /><span>{sourceAspect ? 'Source' : ratio === 'auto' ? 'Auto' : ratio}</span>
         </button>}
-        {hasDuration && <button type="button" aria-label={`Duration: ${durationMode === 'auto' ? 'Auto · ' : ''}${formatDuration(duration, true)}`} aria-expanded={expanded === 'duration'}
+        {hasDuration && <button ref={setDurationAnchor} type="button" aria-label={`Duration: ${durationMode === 'auto' ? 'Auto · ' : ''}${formatDuration(duration, true)}`} aria-expanded={expanded === 'duration'} aria-haspopup="dialog"
           aria-controls={`${id}-duration`}
           onClick={() => toggle('duration')} title={`${durationMode === 'auto' ? 'Auto · ' : ''}${formatDuration(duration, true)} · duration and window settings`}
           className={`${chip} ${expanded === 'duration' ? 'border-accent-blue bg-accent-blue/10 text-text-primary' : 'border-border bg-bg-tertiary text-text-secondary hover:border-border-light'}`}>
@@ -60,14 +61,14 @@ export function OutputFormatControls() {
             <span>{formatDuration(duration, true)}</span>
           </span>
         </button>}
-      <SidebarMenu id={`${id}-resolution`} anchor={resolutionAnchor} open={expanded === 'resolution' && canResolve} label="Resolution" onClose={() => setExpanded(null)}>
+      <SidebarMenu id={`${id}-resolution`} anchor={resolutionAnchor} open={expanded === 'resolution' && canResolve} label="Resolution" width="content" align="start" onClose={() => setExpanded(null)}>
         <ResolutionPresets menu onSelect={() => setExpanded(null)} />
       </SidebarMenu>
-      <SidebarMenu id={`${id}-aspect`} anchor={aspectAnchor} open={expanded === 'aspect' && mode !== 'audio' && !sourceAspect} label="Aspect ratio" width={156} onClose={() => setExpanded(null)}>
+      <SidebarMenu id={`${id}-aspect`} anchor={aspectAnchor} open={expanded === 'aspect' && mode !== 'audio' && !sourceAspect} label="Aspect ratio" width="content" align="start" onClose={() => setExpanded(null)}>
         <AspectRatioGrid menu onSelect={() => setExpanded(null)} />
       </SidebarMenu>
       {/* Duration owns automatic window sizing. Keep it mounted while hidden. */}
-      {hasDuration && <SidebarDialog id={`${id}-duration`} variant="settings" fixedHeight={mode === 'video' ? 640 : undefined} open={expanded === 'duration'} title="Duration & windows" onClose={() => setExpanded(null)}><div className="space-y-3">
+      {hasDuration && <SidebarDialog id={`${id}-duration`} variant="settings" anchor={durationAnchor} hideHeader={mode === 'video'} fixedHeight={mode === 'video' ? 360 : undefined} open={expanded === 'duration'} title="Duration & windows" onClose={() => setExpanded(null)}><div className="space-y-3">
         {mode === 'audio' ? <AudioDurationControl/> : <><DurationSlider includeWindowSettings/><H3MultiWindowControls section="continuity"/></>}
       </div></SidebarDialog>}
     </>

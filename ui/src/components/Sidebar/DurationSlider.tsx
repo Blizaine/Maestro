@@ -1,6 +1,6 @@
 /* eslint-disable react-refresh/only-export-components -- Director imports the shared H3 duration helpers */
 import { useEffect, useRef } from 'react'
-import { Lock, Save, Unlock } from 'lucide-react'
+import { ChevronDown, Lock, Save, Unlock } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import {
   continuationFirstWindowSeconds,
@@ -211,6 +211,7 @@ export function DurationSlider({ includeWindowSettings = false }: { includeWindo
   return (
     <div className={includeWindowSettings ? 'space-y-3' : undefined}>
       <DurationPresetControl
+        compact={includeWindowSettings}
         value={duration}
         onChange={setDuration}
         minSeconds={minDuration}
@@ -268,7 +269,7 @@ export function DurationSlider({ includeWindowSettings = false }: { includeWindo
               : `For ${totalVramGb.toFixed(0)} GB, H3 Auto recommends ${windowRecommendation?.fallbackResolution ?? 'a lower resolution'} instead of ${resolution}. Open Duration and lock Window Length to override.`}
           </div>
         )}
-        {directOmni && !unsupportedAutoResolution && safeWindowFrames != null && nativeMaxSeconds != null && safeWindowFrames / fps < nativeMaxSeconds && (
+        {!includeWindowSettings && directOmni && !unsupportedAutoResolution && safeWindowFrames != null && nativeMaxSeconds != null && safeWindowFrames / fps < nativeMaxSeconds && (
           <div className="text-[10px] text-text-muted mt-1">
             VRAM-aware default: {formatSeconds(safeWindowFrames / fps)}. You can manually raise the native pass to {formatSeconds(nativeMaxSeconds)}; longer timelines use Multi-window sequence.
           </div>
@@ -497,11 +498,14 @@ export function WindowSettings() {
       </div>
 
       {supportsSlidingWindows && showSlidingWindow && overlapStep > 0 && (!omniReferenceSequence || nativeOmniContinuation) && (
-        <div>
-          <div className="flex items-center justify-between mb-1.5">
-            <label className="text-[11px] text-text-muted uppercase tracking-wider">Window Overlap</label>
+        <details className="group/overlap rounded-lg border border-border px-2.5 py-2">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-text-muted [&::-webkit-details-marker]:hidden">
+            <span className="flex items-center gap-1.5 text-[11px]">
+              <ChevronDown size={12} className="transition-transform group-open/overlap:rotate-180"/>Window overlap
+            </span>
             <span className="text-xs text-text-secondary">{overlap}f ({formatSeconds(overlapSeconds)})</span>
-          </div>
+          </summary>
+          <div className="pt-2">
           <input
             type="range"
             aria-label="Window overlap"
@@ -516,7 +520,8 @@ export function WindowSettings() {
               Carries recent motion and matching stereo audio into each new window. 18 frames is recommended.
             </div>
           )}
-        </div>
+          </div>
+        </details>
       )}
     </div>
   )

@@ -46,13 +46,14 @@ export function usePanelFocus(open: boolean, ref: RefObject<HTMLDivElement | nul
   }, [open, ref, trapFocus])
 }
 
-export function SidebarDialog({ open, title, onClose, children, variant = 'center', id, headerStart, footer, closeLabel, anchor, fixedHeight }: {
+export function SidebarDialog({ open, title, onClose, children, variant = 'center', id, headerStart, footer, closeLabel, anchor, fixedHeight, hideHeader = false }: {
   open: boolean; title: string; onClose: () => void; children: ReactNode
   variant?: 'center' | 'settings' | 'library' | 'workflow'; id?: string
   headerStart?: ReactNode; footer?: ReactNode; closeLabel?: string
   anchor?: HTMLElement | null
   /** Reserve space for changing controls without moving the anchored panel. */
   fixedHeight?: number
+  hideHeader?: boolean
 }) {
   const ref = useRef<HTMLDivElement>(null)
   const layout = useContext(SidebarLayoutContext)
@@ -93,7 +94,12 @@ export function SidebarDialog({ open, title, onClose, children, variant = 'cente
       const settingsBounds = layout?.settings?.getBoundingClientRect()
       const triggerBounds = anchor?.getBoundingClientRect()
       let bounds: CSSProperties
-      if (window.innerWidth < 768) {
+      if (variant === 'settings' && triggerBounds && sidebar) {
+        const width = Math.min(360, sidebar.width - 24, window.innerWidth - 24)
+        const bottomEdge = Math.min(triggerBounds.top, top + height - 8)
+        bounds = { left: Math.max(sidebar.left + 12, Math.min(triggerBounds.right - width, sidebar.right - width - 12)),
+          bottom: window.innerHeight - bottomEdge + 6, width, maxHeight: Math.max(44, bottomEdge - top - 18) }
+      } else if (window.innerWidth < 768) {
         const left = variant === 'settings' && sidebar ? Math.max(8, sidebar.left + 8) : 8
         const right = variant === 'settings' && sidebar ? Math.min(window.innerWidth - 8, sidebar.right - 8) : window.innerWidth - 8
         bounds = { left, width: right - left, bottom: Math.max(0, window.innerHeight - height - top) + 8, maxHeight: height - 16 }
@@ -109,13 +115,26 @@ export function SidebarDialog({ open, title, onClose, children, variant = 'cente
       setPosition(bounds)
     }
     measure()
-    window.addEventListener('resize', measure)
-    window.visualViewport?.addEventListener('resize', measure)
-    window.visualViewport?.addEventListener('scroll', measure)
+    // The drawer applies keyboard viewport changes in React. Measure after
+    // that commit so an anchored popup follows its button's new position.
+    let frame = 0
+    const scheduleMeasure = () => {
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(measure)
+    }
+    const observer = new ResizeObserver(scheduleMeasure)
+    for (const element of [anchor, layout?.sidebar, layout?.settings]) {
+      if (element) observer.observe(element)
+    }
+    window.addEventListener('resize', scheduleMeasure)
+    window.visualViewport?.addEventListener('resize', scheduleMeasure)
+    window.visualViewport?.addEventListener('scroll', scheduleMeasure)
     return () => {
-      window.removeEventListener('resize', measure)
-      window.visualViewport?.removeEventListener('resize', measure)
-      window.visualViewport?.removeEventListener('scroll', measure)
+      cancelAnimationFrame(frame)
+      observer.disconnect()
+      window.removeEventListener('resize', scheduleMeasure)
+      window.visualViewport?.removeEventListener('resize', scheduleMeasure)
+      window.visualViewport?.removeEventListener('scroll', scheduleMeasure)
     }
   }, [open, anchored, layout, variant, anchor, fixedHeight])
   usePanelFocus(open, ref, onClose, !popover)
@@ -125,11 +144,11 @@ export function SidebarDialog({ open, title, onClose, children, variant = 'cente
       <div ref={ref} id={id} role="dialog" aria-modal={popover ? undefined : true} aria-label={title} tabIndex={-1} style={anchored ? position : undefined}
         data-sidebar-overlay={anchored ? variant : undefined}
         className={`pointer-events-auto flex min-w-0 flex-col overflow-hidden rounded-2xl border border-border bg-bg-secondary shadow-2xl outline-none ${anchored ? 'fixed' : 'max-h-[90dvh] w-full max-w-xl'}`}>
-        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-3">
+        {!hideHeader && <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-3">
           {headerStart}
           <h2 className="min-w-0 flex-1 break-words text-sm font-semibold text-text-primary">{title}</h2>
           <button type="button" aria-label={closeLabel || `Close ${title}`} onClick={onClose} className="shrink-0 rounded-lg p-2 text-text-secondary hover:bg-bg-hover"><X size={18}/></button>
-        </div>
+        </div>}
         <div className={`min-h-0 overflow-y-auto overscroll-contain p-3 sm:p-4 ${fixedHeight != null ? 'flex-1' : ''}`}
           style={fixedHeight != null ? { scrollbarGutter: 'stable', overflowAnchor: 'none' } : undefined}>{children}</div>
         {footer && <div className="shrink-0 border-t border-border p-3">{footer}</div>}
