@@ -3,6 +3,24 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [2.1.2] - 2026-09-09
+
+- Fixed H3 Omni prompt enhancement failing with `name 're' is not defined` (#102).
+- Kept quoted character descriptions, names, styles, and reference metadata out
+  of H3 dialogue; preserved quotations inside existing dialogue tags.
+- Honored music/style audio intent even when reference descriptions mention
+  voices. Silent windows keep music without selecting voices for quoted labels.
+- Routed malformed AI speaker output through validation and repair. Explicit
+  music-only requests reject unwanted speech. Fixed postposed speaker attribution
+  and validation of scenes with more speakers than saved character references;
+  named guests no longer inherit the preceding saved character's identity.
+- Replaced the personal-looking Yoda quotation in the speaker error with a
+  generic example.
+- Fixed uninitialized values in Blend setup and video-inpaint downscaling, and
+  added a CI check for undefined Python names.
+
+See the [v2.1.2 release notes](docs/RELEASE_NOTES_V2.1.2.md) for details.
+
 ## [2.1.1] - 2026-09-08
 
 - Fixed underwritten H3 AI Creative conversations: each inadequate window gets

@@ -93,6 +93,18 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v2.1.2 (2026-09-09)
+
+**H3 prompt enhancement and reference-audio fixes**
+
+- **Omni enhancement works again:** fixed the missing `re` import that could cause an HTTP 500 after the LLM returned its prompt. Fixes issue #102.
+- **Descriptions stay out of dialogue:** quoted character names, styles, and reference metadata no longer become extra spoken lines. Quotations inside existing dialogue stay intact.
+- **Music keeps its selected role:** explicit music/style audio intent takes priority over descriptions containing the word "voice". Music-only requests reject unwanted AI-written speech.
+- **Better speaker handling:** malformed AI speaker assignments go through repair; named guests keep their own identities, and scenes can have more speakers than saved character references.
+- **Additional stability fixes:** corrected initialization errors in Blend and video inpainting, and added an automated check for undefined Python names.
+
+See the [v2.1.2 release notes](docs/RELEASE_NOTES_V2.1.2.md). Update and restart Maestro, then enhance affected prompts again before generating.
+
 ### v2.1.1 (2026-09-08)
 
 **Fuller AI Creative dialogue and clearer troubleshooting**

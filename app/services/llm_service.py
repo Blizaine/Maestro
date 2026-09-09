@@ -3740,6 +3740,7 @@ def _extract_h3_source_dialogue_entries(
     first from stealing a line spoken first by another character.
     """
     import re
+    from models.minimax_h3.speakers import is_h3_spoken_quote
 
     source = normalize_h3_dialogue_tags(text)
     spans: list[dict] = []
@@ -3765,6 +3766,8 @@ def _extract_h3_source_dialogue_entries(
         if any(start <= match.start() < end for start, end in tagged_ranges):
             continue
         if _h3_quote_is_visible_text(source, match):
+            continue
+        if not is_h3_spoken_quote(source, match):
             continue
         words = (match.group(1) or match.group(2) or "").strip()
         if words:
@@ -4029,11 +4032,18 @@ def _build_h3_dialogue_requirement(
             "Writing only 'speaks', 'talks', or 'they discuss' makes the output invalid. "
             f"{timed_clause}"
         )
+    if dialogue_forbidden(prompt):
+        return (
+            "SILENT H3 DIALOGUE CONTRACT: The user requested no dialogue. "
+            "Do not add <d> blocks, spoken lines, speaker descriptions as speech, "
+            "or narration. Preserve the requested music, ambience, and visual action."
+        )
     return ""
 
 
 def _h3_dialogue_contract_satisfied(prompt: str, result: str) -> bool:
     import re
+    from services.dialogue_writing import dialogue_forbidden
     quotes = _extract_h3_quoted_dialogue(prompt)
     blocks = _extract_h3_dialogue_blocks(result)
     entries = _extract_h3_dialogue_entries(result)
@@ -4044,6 +4054,8 @@ def _h3_dialogue_contract_satisfied(prompt: str, result: str) -> bool:
             any(entry_language == language and words == line for entry_language, words in entries)
             for line in quotes
         )
+    if dialogue_forbidden(prompt):
+        return not blocks
     if _h3_requests_speech(prompt):
         return has_speaker_id and bool(blocks) and all(
             entry_language == language for entry_language, _words in entries
@@ -4299,11 +4311,19 @@ def _parse_h3_ref2va_subject_manifest(
             next_index += 1
         attach(existing, label)
 
+    def is_voice_reference(description: str) -> bool:
+        # The selected role is authoritative even when a music file's name
+        # contains "voice". Only legacy inventories need prose inference.
+        intent = re.search(r"(?i)\bintent\s*=\s*([^;\r\n]+)", description)
+        if intent:
+            return intent.group(1).strip().casefold() == "voice reference"
+        return bool(re.search(r"(?i)\bvoice(?:-|\s)?timbre\b|\bvoice\b", description))
+
     voice_rows = [
         (label, description)
         for label, description in rows
         if label.startswith("<Audio")
-        and re.search(r"(?i)intent=VOICE REFERENCE|\bvoice(?:-|\s)?timbre\b|\bvoice\b", description)
+        and is_voice_reference(description)
     ]
     unbound_voice_position = 0
     ordered_subjects = lambda: [subjects[index] for index in sorted(subjects)]
@@ -4430,17 +4450,26 @@ def _canonicalize_h3_ref2va_reference_fields(
     reference_context: Optional[str],
     prompt: Optional[str] = None,
 ) -> str:
+    import re
+    from models.minimax_h3.speakers import H3SpeakerBindingError
+
     dialogue_source = str(prompt or "")
-    if not _extract_h3_source_dialogue_entries(dialogue_source, reference_context):
+    source_has_dialogue = bool(_extract_h3_source_dialogue_entries(dialogue_source, reference_context))
+    if not source_has_dialogue:
         detail_match = re.search(
             r"(?ms)^\s*detailed_description\s*:(.*?)(?=^\s*overall_soundscape\s*:)",
             str(result or ""),
         )
         dialogue_source = detail_match.group(1) if detail_match else str(result or "")
-    speaker_map = _h3_ref2va_subject_speaker_map(
-        dialogue_source,
-        reference_context,
-    )
+    try:
+        speaker_map = _h3_ref2va_subject_speaker_map(dialogue_source, reference_context)
+    except H3SpeakerBindingError:
+        if source_has_dialogue:
+            raise
+        # Invalid AI-authored ownership must reach the existing validation /
+        # retry path, not abort enhancement after an otherwise successful LLM
+        # response. Keep the draft intact for the binding validator to reject.
+        speaker_map = {}
     definitions, retention = _canonical_h3_ref2va_subject_fields(
         reference_context,
         speaker_map,
@@ -4545,7 +4574,12 @@ def _h3_ref2va_reference_contract_satisfied(
     }
     if not expected.issubset(actual_subjects):
         return False
-    if not actual_subjects.issubset(expected) or not actual_speakers.issubset(expected):
+    if not actual_subjects.issubset(expected):
+        return False
+    # Guests may speak without a saved visual reference. Speaker IDs count
+    # vocal participants, not referenced Subjects; only their own contiguous,
+    # positive event ordering is relevant here.
+    if actual_speakers != set(range(1, len(actual_speakers) + 1)):
         return False
     definitions_match = re.search(
         r"(?ms)^\s*subject_definitions\s*:(.*?)(?=^\s*summary\s*:)", text
@@ -4575,7 +4609,15 @@ def _h3_ref2va_dialogue_binding_contract_satisfied(
 ) -> bool:
     """Require every explicit line to use its named character's voice ID."""
     import re
+    from models.minimax_h3.speakers import H3SpeakerBindingError
+
     text = str(result or "")
+    try:
+        # Validate authored lines too, even when the user's request supplied no
+        # script. Otherwise an ambiguous AI speaker fails only at generation.
+        _extract_h3_source_dialogue_entries(text, reference_context)
+    except H3SpeakerBindingError:
+        return False
     definitions_match = re.search(
         r"(?ms)^\s*subject_definitions\s*:(.*?)(?=^\s*summary\s*:)", text
     )

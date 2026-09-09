@@ -1344,6 +1344,8 @@ def _without_locked_dialogue(
 def extract_locked_dialogue(prompt: str) -> list[dict[str, Any]]:
     """Extract tagged, quoted, or screenplay-form dialogue before rewriting."""
 
+    from models.minimax_h3.speakers import is_h3_spoken_quote
+
     source = normalize_h3_dialogue_tags(prompt)
     tag_pattern = re.compile(
         r"<d>\s*(?:\[([^\]\r\n]+)\])?\s*((?:(?!<d>).)*?)\s*</d>",
@@ -1387,6 +1389,8 @@ def extract_locked_dialogue(prompt: str) -> list[dict[str, Any]]:
     occupied_ranges = [(int(span["start"]), int(span["end"])) for span in spans]
     for match in _DIALOGUE_QUOTE_RE.finditer(source):
         if any(match.start() < end and start < match.end() for start, end in occupied_ranges):
+            continue
+        if not is_h3_spoken_quote(source, match):
             continue
         text = sanitize_h3_prompt_text(match.group(1) or match.group(2) or "").strip()
         if not text or _PLACEHOLDER_DIALOGUE.fullmatch(text):

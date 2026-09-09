@@ -19,6 +19,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageOps
 from .speakers import (
+    is_h3_spoken_quote,
     _ambiguous_ref2va_dialogue_error,
     _ref2va_alias_values,
     _resolve_ref2va_dialogue_owner_name,
@@ -441,10 +442,10 @@ def _ref2va_dialogue_subject_order(
     source = str(text or "")
     valid_subjects = set(range(1, character_subject_count + 1))
     events = list(_DIALOGUE_TAG_RE.finditer(source))
-    if not events:
-        events.extend(
-            re.finditer(r'"([^"\r\n]{1,500})"|“([^”\r\n]{1,500})”', source)
-        )
+    events.extend(
+        match for match in re.finditer(r'"([^"\r\n]{1,500})"|“([^”\r\n]{1,500})”', source)
+        if is_h3_spoken_quote(source, match)
+    )
     events.sort(key=lambda match: match.start())
 
     order: list[int] = []
@@ -540,7 +541,9 @@ def select_ref2va_window_voice_references(
     )
     has_dialogue = bool(
         _DIALOGUE_TAG_RE.search(source_prompt)
-        or re.search(r'"[^"\r\n]{1,500}"|“[^”\r\n]{1,500}”', source_prompt)
+        or any(is_h3_spoken_quote(source_prompt, match) for match in re.finditer(
+            r'"[^"\r\n]{1,500}"|“[^”\r\n]{1,500}”', source_prompt,
+        ))
     )
 
     audio_entries: list[tuple[int, int, bool, int | None]] = []
@@ -1111,7 +1114,7 @@ def ensure_ref2va_prompt_relationships(
 
     def compile_dialogue(match):
         nonlocal dialogue_counter, dialogue_word_count
-        if is_visible_text_quote(match):
+        if is_visible_text_quote(match) or not is_h3_spoken_quote(text, match):
             return match.group(0)
         dialogue_counter += 1
         words = (match.group(1) or match.group(2) or "").strip()

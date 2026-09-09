@@ -11,7 +11,11 @@ _SPEECH_VERB_RE = re.compile(
     r"yell|yells|yelled|whisper|whispers|whispered|exclaim|exclaims|exclaimed|"
     r"murmur|murmurs|murmured|call|calls|called|cry|cries|cried|add|adds|added|"
     r"remark|remarks|remarked|state|states|stated|declare|declares|declared|"
-    r"warn|warns|warned|demand|demands|demanded|tell|tells|told)\b",
+    r"warn|warns|warned|demand|demands|demanded|tell|tells|told|telling|"
+    r"saying|speaking|asking|replying|explains?|explained|explaining|"
+    r"informs?|informed|announces?|announced|calls?\s+out|called\s+out|"
+    r"mumbl(?:es?|ed|ing)|murmuring|mutter(?:s|ed|ing)?|muffl(?:es?|ed|ing)|"
+    r"sings?|singing|sang|raps?|rapping|narrat(?:es?|ed|ing))\b",
     re.IGNORECASE,
 )
 _DIALOGUE_OWNER_NAME_RE = re.compile(
@@ -23,6 +27,82 @@ _DIALOGUE_OWNER_LEADING_WORDS = {
     "next", "only", "outside", "she", "the", "their", "then", "they",
     "this", "while", "with",
 }
+
+
+class H3SpeakerBindingError(ValueError):
+    """A real dialogue line lacks an unambiguous referenced speaker."""
+
+
+def is_h3_spoken_quote(source: str, match: re.Match) -> bool:
+    """Recognize speech cues, without turning quoted names/styles into dialogue.
+
+    Explicit <d> blocks are handled separately by callers. Quotes in reference
+    definitions, music directions, and visual descriptions are not a request
+    for another character to say those words.
+    """
+
+    start, end = match.span()
+    if any(tag.start() <= start < tag.end() for tag in _DIALOGUE_TAG_RE.finditer(source)):
+        return False
+    fields = list(re.finditer(
+        r"(?mi)^[ \t]*(subject_definitions|summary|retention_analysis|"
+        r"detailed_description|integrated_multimodal_description|"
+        r"overall_soundscape|non_diegetic_music)\s*:", source[:start],
+    ))
+    if fields and fields[-1].group(1).casefold() not in {
+        "detailed_description", "integrated_multimodal_description",
+    }:
+        return False
+
+    before = source[max(0, start - 220):start]
+    # A previous line's speech cue must not capture the following quotation.
+    before = re.split(r'["“”]|</d>', before, flags=re.IGNORECASE)[-1]
+    after = source[end:end + 120]
+    if re.search(r"(?i)\b(?:titled|entitled|called|named|captioned)\s*[:,-]?\s*$", before):
+        return False
+    if re.search(
+        r"(?i)\b(?:sign|banner|label|subtitle|caption|marquee|poster|billboard|"
+        r"screen|monitor|display|neon|placard|headline|logo|shirt|door|wall|"
+        r"on-screen\s+text)\b[^.!?\r\n]{0,80}"
+        r"\b(?:reads?|reading|shows?|showing|displays?|displaying|bears?|bearing|"
+        r"marked|printed|written|spells?|saying|says?|said|"
+        r"with(?:\s+the)?\s+(?:text|words?|lettering))\s*[:,-]?\s*$", before,
+    ):
+        return False
+    if re.match(
+        r"(?i)^\s*(?:appears?|is\s+(?:visible|written|printed|displayed)|glows?)"
+        r"\b[^.!?\r\n]{0,70}\b(?:on|across|above|below|behind|over)\b", after,
+    ):
+        return False
+
+    clause = re.split(r"[.!?;\n]", before)[-1]
+    if re.search(r"(?i)\b(?:a|an|the|character|role|style)\s*$", clause):
+        return False
+    if _SPEECH_VERB_RE.search(clause) or re.search(
+        r"(?i)\b(?:dialogue|lyrics?|voiceover)\s*:\s*$", clause,
+    ):
+        return True
+    # H3-native ownership and screenplay labels also declare spoken content.
+    if re.search(r"(?:<Subject\s+\d+>|\(S\d+\))\s*[:,]?\s*$", before, re.IGNORECASE):
+        return True
+    label = re.search(r"(?:^|\n)\s*([\w '-]{1,60})\s*:\s*$", before)
+    if label and label.group(1).strip().casefold() not in {
+        "subject", "character", "characters", "cast", "style", "visual style",
+        "music", "sound", "soundtrack", "audio", "voice", "language", "camera",
+        "setting", "scene", "title", "description", "reference", "role",
+    }:
+        return True
+    # Quotation followed by attribution: "Hello," Alex says.
+    attribution = re.split(r'[.!?;"“”\n]', after.lstrip(" ,"))[0]
+    post_verb = _SPEECH_VERB_RE.search(attribution)
+    if post_verb and re.match(r"^[,\s]+", after) and (
+        re.fullmatch(r"\s*(?:[A-Z][\w'’-]*|he|she|they)(?:\s+[\w'’-]+){0,4}\s+",
+                     attribution[:post_verb.start()])
+        or re.match(r"\s+(?:[A-Z][\w'’-]*|he|she|they)\b", attribution[post_verb.end():])
+    ):
+        return True
+    return not (source[:start] + source[end:]).strip(" \t\r\n.,;:!?-")
+
 
 def _normalize_ref2va_speaker_alias(value: Any) -> str:
     alias = re.sub(r"\s+", " ", str(value or "").strip().casefold())
@@ -142,6 +222,14 @@ def _resolve_ref2va_dialogue_owner_name(
         if candidates:
             return min(candidates)[-1]
 
+    # The other ordinary attribution order: ``<d>...</d>, Alex says``.
+    post_clause = re.split(r"[.!?;\r\n]", after)[0]
+    for start, end, name in occurrences(post_clause):
+        if not re.search(r'<d\b|["“”]|\(S\d+\)', post_clause, re.IGNORECASE) and re.fullmatch(r"\s*[,;:\-–—]?\s*", after[:start]) and re.match(
+            rf"\s+(?:\w+ly\s+)?(?:{_SPEECH_VERB_RE.pattern})", after[end:], re.IGNORECASE,
+        ):
+            return name
+
     # Natural prose: ``Blaine turns to Yoda and says, ...``. The last name
     # before the speech verb is not necessarily the speaker, so reject names
     # introduced by object prepositions such as ``to`` or ``at``.
@@ -238,6 +326,13 @@ def _resolve_ref2va_dialogue_speaker(
         if candidates:
             return min(candidates)[-1]
 
+    post_clause = re.split(r"[.!?;\r\n]", after)[0]
+    for start, end, _alias, subject in _ref2va_alias_occurrences(post_clause, speaker_aliases):
+        if not re.search(r'<d\b|["“”]|\(S\d+\)', post_clause, re.IGNORECASE) and re.fullmatch(r"\s*[,;:\-–—]?\s*", after[:start]) and re.match(
+            rf"\s+(?:\w+ly\s+)?(?:{_SPEECH_VERB_RE.pattern})", after[end:], re.IGNORECASE,
+        ):
+            return subject
+
     # Natural syntax before the line: ``Blaine turns to Yoda and says, ...``.
     # Select the last non-object character before the final speech verb.
     verbs = list(_SPEECH_VERB_RE.finditer(clause))
@@ -259,6 +354,18 @@ def _resolve_ref2va_dialogue_speaker(
             return min(non_objects)[-1]
         if candidates:
             return min(candidates)[-1]
+
+    # A named guest starts a new turn. Only unnamed/pronominal continuation
+    # may inherit the preceding character; otherwise "Alex replies ... Jordan
+    # adds ..." incorrectly gives Jordan Alex's saved identity and voice.
+    owner = _resolve_ref2va_dialogue_owner_name(source, dialogue_start, dialogue_end)
+    if owner:
+        owner_subjects = {
+            speaker_aliases[alias]
+            for alias in _ref2va_alias_values({"character_name": owner})
+            if alias in speaker_aliases
+        }
+        return next(iter(owner_subjects)) if len(owner_subjects) == 1 else None
 
     # A manually authored Context-IR prompt may put the <d> tag in the sentence
     # after the named performance cue, for example: ``Yoda nods. He answers.
@@ -309,11 +416,11 @@ def _resolve_ref2va_dialogue_speaker(
     return None
 
 
-def _ambiguous_ref2va_dialogue_error(words: str) -> ValueError:
+def _ambiguous_ref2va_dialogue_error(words: str) -> H3SpeakerBindingError:
     excerpt = re.sub(r"\s+", " ", words).strip()[:80]
-    return ValueError(
+    return H3SpeakerBindingError(
         "MiniMax H3 Omni could not determine which referenced character speaks "
-        f"{excerpt!r}. Name the speaker beside the line (for example, Yoda says, "
-        '"Do or do not.") or place that character\'s explicit <Subject N> tag '
+        f"{excerpt!r}. Name the speaker beside the line (for example, Alex says, "
+        '"Hello.") or place that character\'s explicit <Subject N> tag '
         "beside the line. (Sx) labels only identify vocal-event order."
     )

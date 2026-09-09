@@ -21351,6 +21351,11 @@ async def blend_endpoint(request: Request):
         ):
             base_params.pop(_k, None)
 
+        # Resolve anchor strength before both generation and blend metadata
+        # consume it. A later assignment left every blend request unbound here.
+        input_video_strength = float(body.get("input_video_strength", base_params.get("input_video_strength", 1.0)))
+        input_video_strength = max(0.1, min(1.0, input_video_strength))
+
         gen_params = dict(base_params)  # start with inherited Studio settings
         gen_params.update({
             "prompt": body.get("prompt", default_prompt),
@@ -21426,8 +21431,6 @@ async def blend_endpoint(request: Request):
         # between the anchors instead of interpolating pixels.
         # Handler description: "you may try values lower value than 1 to
         # get more motion" (ltx2_handler.py:181).
-        input_video_strength = float(body.get("input_video_strength", base_params.get("input_video_strength", 1.0)))
-        input_video_strength = max(0.1, min(1.0, input_video_strength))
         gen_params["input_video_strength"] = input_video_strength
 
         if extra_refs:
@@ -21920,6 +21923,18 @@ async def inpaint_endpoint(request: Request):
     mask_padding = int(body.get("mask_padding", 20))
     cached_masks_path = body.get("masks_path")
 
+    # Read source geometry before optional SAM downscaling. The same metadata
+    # is used below to build generation parameters after segmentation.
+    try:
+        import decord
+        vr = decord.VideoReader(video_path)
+        fps = vr.get_avg_fps()
+        total_frames = len(vr)
+        src_h, src_w = vr[0].shape[:2]
+        del vr
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Cannot read video: {e}")
+
     # Step 1: Determine SAM target and LTX prompt
     # If user provided explicit sam_target, use it directly (no LLM parsing needed)
     explicit_sam_target = body.get("sam_target", "").strip()
@@ -22010,16 +22025,6 @@ async def inpaint_endpoint(request: Request):
         pass
 
     # Step 3: Build retake params with spatial mask
-    try:
-        import decord
-        vr = decord.VideoReader(video_path)
-        fps = vr.get_avg_fps()
-        total_frames = len(vr)
-        src_h, src_w = vr[0].shape[:2]
-        del vr
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Cannot read video: {e}")
-
     start_frame = max(0, int(start_time * fps))
     end_frame = int(end_time * fps) if end_time > 0 else total_frames
     end_frame = min(end_frame, total_frames)
