@@ -6790,6 +6790,8 @@ def system_release_model():
             print("[ReleaseModel] Unloading generation model (user request)")
             wgp.release_model()
             released.append("generation model")
+        from services.generation_memory import release_auxiliary_models
+        released.extend(release_auxiliary_models())
         try:
             from services import llm_service
             if llm_service.is_loaded():
@@ -9343,6 +9345,13 @@ async def plan_audio_structure(request: Request):
             frames_minimum=frames_minimum,
             total_duration=body.get("total_duration"),
         )
+        from services.director_pipeline import prepare_director_timeline
+        timeline_params = {
+            **body, "pipeline_type": "music_video",
+            "audio_path": body.get("audio_path") or "analyzed soundtrack",
+            "lyrics": analysis.get("lyrics"),
+        }
+        _, clips = prepare_director_timeline(timeline_params, [{} for _ in clips], clips)
         return {"clips": clips}
     except Exception as e:
         traceback.print_exc()
@@ -9415,6 +9424,8 @@ async def director_plan_prompts_and_images(request: Request):
     ref_image_path = body.get("reference_image_path")
 
     try:
+        from services.director_pipeline import prepare_director_timeline
+        _, clips = prepare_director_timeline(body, [{} for _ in clips], clips)
         clip_plans = llm_service.plan_clip_prompts_and_images(
             clips=clips,
             scene_description=scene_description,
@@ -9425,7 +9436,7 @@ async def director_plan_prompts_and_images(request: Request):
             prompt_type=body.get("prompt_type", "both"),
             existing_image_prompts=body.get("existing_image_prompts"),
         )
-        return {"clip_plans": clip_plans}
+        return {"clip_plans": clip_plans, "planned_clips": clips}
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
@@ -9945,6 +9956,9 @@ async def director_v2_plan(request: Request):
     skill_type = skill_map.get(skill_type, skill_type)
 
     try:
+        from services.director_pipeline import prepare_director_timeline
+        if body.get("clips"):
+            _, body["clips"] = prepare_director_timeline(body, [{} for _ in body["clips"]], body["clips"])
         _ensure_llm_loaded()
 
         from services import llm_service
@@ -9963,7 +9977,9 @@ async def director_v2_plan(request: Request):
                      "reference_image_path", "speaker_mappings", "characters",
                      "audio_path", "target_duration", "target_scenes", "narrative_mode",
                      "fps", "frames_steps", "frames_minimum",
-                     "concept", "visual_style", "platform", "style", "transcript"]:
+                     "concept", "visual_style", "platform", "style", "transcript",
+                     "video_model", "image_model", "character_ref_paths", "character_ref_labels",
+                     "location_ref_paths", "location_ref_labels"]:
             if key in body:
                 planner_kwargs[key] = body[key]
 
@@ -10021,6 +10037,7 @@ async def director_v2_plan(request: Request):
 
         return {
             "clip_plans": clip_plans,
+            "planned_clips": body.get("clips", []),
             "production_plan": plan.to_dict(),
             "skill_type": skill_type,
         }

@@ -1314,18 +1314,93 @@ def _write_llama_runtime_receipt(bin_dir: str, *, tag: str, build) -> None:
                 pass
 
 
+class _LlamaRuntimeLibraryError(RuntimeError):
+    """A cached executable cannot load its packaged shared libraries."""
+
+
+def _llama_server_env(exe_path: str):
+    import sys
+
+    if not sys.platform.startswith("linux"):
+        return None  # Inherit the environment unchanged on Windows.
+    environment = os.environ.copy()
+    library_dir = os.path.dirname(os.path.abspath(exe_path))
+    existing = environment.get("LD_LIBRARY_PATH", "")
+    environment["LD_LIBRARY_PATH"] = library_dir + (os.pathsep + existing if existing else "")
+    return environment
+
+
+def _extract_llama_tar(archive_path: str, bin_dir: str) -> None:
+    """Flatten the runtime, including the SONAME aliases required by Linux.
+
+    Materialize archive-local links as files so extraction also works without
+    symlink privileges. Never follow links into the host filesystem.
+    """
+    import posixpath
+    import shutil
+    import tarfile
+    import tempfile
+
+    def archive_name(name):
+        normalized = posixpath.normpath(name)
+        if (posixpath.isabs(normalized) or normalized == ".."
+                or normalized.startswith("../") or "\\" in normalized):
+            raise ValueError(f"Unsafe llama.cpp archive path: {name}")
+        return normalized
+
+    with tarfile.open(archive_path, "r:gz") as archive:
+        members = {archive_name(member.name): member for member in archive.getmembers()}
+        for name, member in members.items():
+            if not (member.isfile() or member.issym() or member.islnk()):
+                continue
+            source = member
+            source_name = name
+            visited = set()
+            while source.issym() or source.islnk():
+                if source_name in visited:
+                    raise ValueError(f"Cyclic llama.cpp archive link: {name}")
+                visited.add(source_name)
+                target_name = source.linkname
+                if source.issym():
+                    target_name = posixpath.join(posixpath.dirname(source_name), target_name)
+                source_name = archive_name(target_name)
+                source = members.get(source_name)
+                if source is None:
+                    raise ValueError(f"Missing llama.cpp archive link target: {name}")
+            if not source.isfile():
+                raise ValueError(f"Invalid llama.cpp archive link target: {name}")
+            target = os.path.join(bin_dir, posixpath.basename(name))
+            # Replace the entry itself, including any old user-created link,
+            # instead of opening that link's destination for writing.
+            temp_path = None
+            try:
+                with archive.extractfile(source) as src, tempfile.NamedTemporaryFile(dir=bin_dir, delete=False) as dst:
+                    temp_path = dst.name
+                    shutil.copyfileobj(src, dst)
+                os.chmod(temp_path, source.mode & 0o777)
+                os.replace(temp_path, target)
+            finally:
+                if temp_path and os.path.isfile(temp_path):
+                    os.remove(temp_path)
+
+
 def _llama_server_build(exe_path: str):
     """Return the installed llama-server's llama.cpp build number, or None if
     it can't be determined (e.g. unexpected --version format)."""
     try:
         import subprocess
-        kwargs = {}
+        kwargs = {"env": _llama_server_env(exe_path)}
         if os.name == "nt":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         out = subprocess.run(
             [exe_path, "--version"], capture_output=True, text=True, timeout=20, **kwargs
         )
-        return _positive_llama_build((out.stdout or "") + (out.stderr or ""))
+        output = (out.stdout or "") + (out.stderr or "")
+        if out.returncode and "error while loading shared libraries" in output:
+            raise _LlamaRuntimeLibraryError(output.strip())
+        return _positive_llama_build(output)
+    except _LlamaRuntimeLibraryError:
+        raise
     except Exception:
         pass
     return None
@@ -1353,7 +1428,6 @@ def _ensure_llama_server(bin_dir: str) -> None:
     import sys
     import json
     import zipfile
-    import tarfile
     import shutil
     from urllib.parse import quote
     from urllib.request import Request, urlopen
@@ -1364,7 +1438,13 @@ def _ensure_llama_server(bin_dir: str) -> None:
     exe_name = "llama-server.exe" if is_windows else "llama-server"
     exe_path = os.path.join(bin_dir, exe_name)
     exe_exists = os.path.isfile(exe_path)
-    reported_build = _llama_server_build(exe_path) if exe_exists else None
+    broken_libraries = False
+    try:
+        reported_build = _llama_server_build(exe_path) if exe_exists else None
+    except _LlamaRuntimeLibraryError as error:
+        print(f"[LLM] Repairing incomplete llama.cpp runtime: {error}")
+        broken_libraries = True
+        reported_build = None
     receipt = _read_llama_runtime_receipt(bin_dir)
     receipt_build = _llama_release_build(receipt.get("release_tag", ""))
     if receipt_build is None:
@@ -1375,7 +1455,7 @@ def _ensure_llama_server(bin_dir: str) -> None:
         receipt_build = stored_build if stored_build > 0 else None
 
     known_build = reported_build or receipt_build
-    needs_executable = not exe_exists
+    needs_executable = not exe_exists or broken_libraries
     if exe_exists and known_build is not None and known_build < MIN_LLAMA_BUILD:
         needs_executable = True
         print(
@@ -1586,24 +1666,7 @@ def _ensure_llama_server(bin_dir: str) -> None:
                         with z.open(member) as src, open(target, "wb") as dst:
                             shutil.copyfileobj(src, dst)
             else:  # tar.gz
-                with tarfile.open(archive_path, "r:gz") as t:
-                    for member in t.getmembers():
-                        if not member.isfile():
-                            continue
-                        flat_name = os.path.basename(member.name)
-                        if not flat_name:
-                            continue
-                        target = os.path.join(bin_dir, flat_name)
-                        src = t.extractfile(member)
-                        if src is None:
-                            continue
-                        with open(target, "wb") as dst:
-                            shutil.copyfileobj(src, dst)
-                        # Preserve executable bit on Linux
-                        try:
-                            os.chmod(target, member.mode)
-                        except Exception:
-                            pass
+                _extract_llama_tar(archive_path, bin_dir)
         finally:
             try:
                 os.remove(archive_path)
@@ -1790,6 +1853,7 @@ def load_model(
         print(f"[LLM] Starting llama-server on port {_server_port}")
         _process = subprocess.Popen(
             cmd,
+            env=_llama_server_env(server_exe),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
@@ -2253,6 +2317,7 @@ def generate(
         # A dead subprocess surfaces here as a ConnectionError; translate it
         # into an actionable error naming the real cause (see the helper).
         raise _diagnose_llm_request_failure(e) from e
+    resp.encoding = "utf-8"
     data = resp.json()
 
     choice = data["choices"][0]
@@ -2502,7 +2567,12 @@ def generate_streaming(
         resp.raise_for_status()
 
         import json as _json_mod
-        for line in resp.iter_lines(decode_unicode=True):
+        # SSE is UTF-8 regardless of Requests' text/* Latin-1 default.
+        # Split bytes first: Unicode line separators inside JSON strings are
+        # content, not SSE event boundaries (notably Arabic UTF-8 byte 0x85).
+        for line in resp.iter_lines(decode_unicode=False):
+            if isinstance(line, bytes):
+                line = line.decode("utf-8")
             if not line or not line.startswith("data: "):
                 continue
             data_str = line[6:]  # strip "data: "
@@ -2634,6 +2704,7 @@ def _generate_anthropic(messages: list, max_tokens: int, temperature: float, top
         timeout=600,
     )
     resp.raise_for_status()
+    resp.encoding = "utf-8"
     data = resp.json()
 
     # Anthropic response: {"content": [{"type": "text", "text": "..."}], ...}

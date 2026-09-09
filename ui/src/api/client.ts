@@ -1142,7 +1142,17 @@ export async function deletePipeline(pid: string): Promise<{ media_deleted: numb
 
 // --- Director v2 ---
 
-export interface DirectorV2PlanRequest {
+export interface DirectorTimelineOptions {
+  video_model?: string
+  image_model?: string
+  video_params?: Record<string, unknown>
+  director_max_shot_frames?: number
+  director_resolution_preset?: string
+  director_aspect_ratio?: string
+  audio_path?: string
+}
+
+export interface DirectorV2PlanRequest extends DirectorTimelineOptions {
   skill_type: string
   scene_description?: string
   story_description?: string
@@ -1168,7 +1178,8 @@ export interface DirectorV2PlanRequest {
 }
 
 export interface DirectorV2PlanResponse {
-  clip_plans: Array<{ video_prompt: string; image_prompt: string }>
+  clip_plans: import('../types').ClipPlan[]
+  planned_clips?: import('../types').PlannedClip[]
   production_plan: ProductionPlan
   skill_type: string
 }
@@ -2230,7 +2241,7 @@ export async function planClipPrompts(params: {
   return res.json()
 }
 
-export async function planClipStructure(params: {
+export async function planClipStructure(params: DirectorTimelineOptions & {
   analysis: import('../types').AudioAnalysisResult
   energy_bias?: number
   fps?: number
@@ -2274,7 +2285,7 @@ export async function classifySections(params: {
   return res.json()
 }
 
-export async function planClipPromptsAndImages(params: {
+export async function planClipPromptsAndImages(params: DirectorTimelineOptions & {
   clips: import('../types').PlannedClip[]
   scene_description: string
   lyrics?: import('../types').LyricSegment[]
@@ -2283,7 +2294,7 @@ export async function planClipPromptsAndImages(params: {
   speaker_mappings?: Record<string, { name: string; role: string }>
   prompt_type?: 'image' | 'video' | 'both'
   existing_image_prompts?: string[]
-}): Promise<{ clip_plans: import('../types').ClipPlan[] }> {
+}): Promise<{ clip_plans: import('../types').ClipPlan[]; planned_clips?: import('../types').PlannedClip[] }> {
   const res = await fetch(`${BASE}/api/v1/director/plan-prompts-and-images`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

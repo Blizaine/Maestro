@@ -3,6 +3,25 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [2.1.3] - 2026-09-09
+
+- Fixed corrupted non-English LLM output in Director and prompt enhancement.
+  Streaming responses are decoded as UTF-8 without losing text at chunk or
+  Unicode line boundaries; consolidated #96 into #110.
+- Director now shows model-supported music-video shots before prompt review.
+  Long H3 song sections are split instead of shortened, reviewed start images
+  stay assigned, and Cut Speed is available during assisted setup (#84, #117).
+- Saved start images and keyframes are checkpointed as they complete so a later
+  image timeout does not leave the Dashboard without those inputs (#84).
+- Failed generations release resources after inference frames unwind; manual
+  model release also clears FlashVSR and registered post-processors (#79).
+- Added NVFP4 activation-row alignment and a per-shape dequantized fallback for
+  unsupported cuBLAS GEMM algorithms, while preserving other CUDA errors (#105).
+- Fixed Linux llama-server library aliases and runtime library lookup. Incomplete
+  cached installations are repaired automatically when the local LLM starts (#85).
+
+See the [v2.1.3 release notes](docs/RELEASE_NOTES_V2.1.3.md) for details.
+
 ## [2.1.2] - 2026-09-09
 
 - Fixed H3 Omni prompt enhancement failing with `name 're' is not defined` (#102).

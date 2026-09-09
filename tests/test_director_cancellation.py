@@ -528,7 +528,7 @@ class TestDirectorCancellation(unittest.TestCase):
 
     def test_keyframe_timeout_aborts_phase_before_next_generation(self):
         pid = "pipe-keyframe-timeout"
-        self._add_pipeline(pid, "running")
+        record = self._add_pipeline(pid, "running")
         ref_path = os.path.join(self.temp_dir.name, "reference.png")
         with open(ref_path, "wb") as handle:
             handle.write(b"image")
@@ -539,6 +539,7 @@ class TestDirectorCancellation(unittest.TestCase):
             "image_prompt": "start",
             "keyframe_prompts": ["middle", "end"],
         }
+        record["clip_plans"] = [plan]
 
         with patch.object(
             pipeline,
@@ -554,6 +555,10 @@ class TestDirectorCancellation(unittest.TestCase):
                 )
 
         self.assertEqual(submit.call_count, 2)
+        self.assertEqual(record["clip_images"], ["start.png"])
+        saved = pipeline.load_pipeline_state(self.temp_dir.name, pid)
+        self.assertEqual(saved["clips"][0]["start_image_filename"], "start.png")
+        self.assertEqual(saved["clips"][0]["keyframe_filenames"], [])
 
     def test_no_reference_run_persists_anchor_and_conditions_every_start(self):
         pid = "pipe-generated-anchor"

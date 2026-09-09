@@ -36,6 +36,7 @@ type DirectorRepairPoll = {
 }
 const _directorRepairPolls = new Map<string, DirectorRepairPoll>()
 const _directorRepairDiscoveries = new Map<string, object>()
+let _directorStructureRequestToken = 0
 let _dashboardPipelineLoadToken = 0
 let _dashboardPipelineListLoadToken = 0
 let _directorPipelineAttachToken = 0
@@ -2626,6 +2627,21 @@ function computeFilteredOutputs(outputs: OutputFile[], mediaFilter: MediaFilter)
     _foCachedResult = outputs
   }
   return _foCachedResult
+}
+
+/** Use the selected video model even when Studio last loaded an audio model. */
+async function _directorTimelineOptions(state: AppState): Promise<api.DirectorTimelineOptions> {
+  const videoModel = state.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+  const options = await api.fetchModelOptions(videoModel)
+  return {
+    video_model: videoModel,
+    image_model: state.selectedModelPerMode.image || 'flux2_klein_9b',
+    audio_path: state.directorAudioPath || undefined,
+    director_max_shot_frames: state.directorVideoMaxShotFramesByModel[videoModel],
+    director_resolution_preset: state.directorResolution,
+    director_aspect_ratio: state.directorAspectRatio,
+    video_params: { resolution: resolveResolution(options, state.directorResolution, state.directorAspectRatio) },
+  }
 }
 
 /** Resolve whether the current Director selection owns generated per-shot
@@ -9823,14 +9839,11 @@ export const useStore = create<AppState>((set, get) => ({
       set({ directorLoadingMessage: 'Planning clip structure...' })
       const structure = await api.planClipStructure({
         analysis,
+        ...await _directorTimelineOptions(get()),
         energy_bias: get().directorEnergyBias,
         fps: get().modelOptions?.fps ?? 16,
         frames_steps: get().modelOptions?.frames_steps ?? 4,
         frames_minimum: get().modelOptions?.frames_minimum ?? 5,
-        // Authoritative: the Director's video model (modelOptions above may
-        // belong to a music model — e.g. ACE-Step after generating a track —
-        // whose fps fallback of 16 used to shrink clips by 16/25).
-        video_model: get().selectedModelPerMode.video || undefined,
       })
       // Music Video skips the manual clip-structure review step entirely —
       // the beat-aligned clips are used as-is. Short Film keeps it.
@@ -10015,18 +10028,21 @@ export const useStore = create<AppState>((set, get) => ({
   directorSetEnergyBias: async (bias) => {
     const { directorAnalysis } = get()
     if (!directorAnalysis) return
+    const requestToken = ++_directorStructureRequestToken
     set({ directorLoading: true, directorEnergyBias: bias })
     try {
       const structure = await api.planClipStructure({
         analysis: directorAnalysis,
+        ...await _directorTimelineOptions(get()),
         energy_bias: bias,
         fps: get().modelOptions?.fps ?? 16,
         frames_steps: get().modelOptions?.frames_steps ?? 4,
         frames_minimum: get().modelOptions?.frames_minimum ?? 5,
-        video_model: get().selectedModelPerMode.video || undefined,
       })
+      if (requestToken !== _directorStructureRequestToken || get().directorAnalysis !== directorAnalysis) return
       set({ directorPlannedClips: structure.clips, directorLoading: false })
     } catch (e: unknown) {
+      if (requestToken !== _directorStructureRequestToken) return
       const msg = e instanceof Error ? e.message : 'Failed to update structure'
       set({ directorLoading: false, directorError: msg })
     }
@@ -10150,12 +10166,15 @@ export const useStore = create<AppState>((set, get) => ({
       // (legacy v1 path); only fall back to true when servicesConfig
       // hasn't loaded yet or the field is undefined.
       const useV2 = get().servicesConfig?.use_director_v2 ?? true
-      let plans: Array<{ video_prompt: string; image_prompt: string }>
+      const timelineOptions = await _directorTimelineOptions(get())
+      let plans: ClipPlan[]
+      let timeline = directorPlannedClips
 
       if (useV2) {
         // Director v2: structured planning → rendering → validation
         const result = await api.directorV2Plan({
           skill_type: 'music_video',
+          ...timelineOptions,
           clips: directorPlannedClips,
           scene_description: directorSceneDescription,
           lyrics: directorAnalysis?.lyrics ?? undefined,
@@ -10165,14 +10184,13 @@ export const useStore = create<AppState>((set, get) => ({
           speaker_mappings: Object.keys(speakerMappings).length > 0 ? speakerMappings : undefined,
           prompt_type: promptType,
         })
-        plans = result.clip_plans.map(p => ({
-          video_prompt: p.video_prompt || '',
-          image_prompt: p.image_prompt || '',
-        }))
+        plans = result.clip_plans
+        timeline = result.planned_clips || timeline
       } else {
         // Legacy: direct LLM prompt generation
         const result = await api.planClipPromptsAndImages({
           clips: directorPlannedClips,
+          ...timelineOptions,
           scene_description: directorSceneDescription,
           lyrics: directorAnalysis?.lyrics ?? undefined,
           bpm: directorAnalysis?.bpm ?? 120,
@@ -10181,13 +10199,13 @@ export const useStore = create<AppState>((set, get) => ({
           speaker_mappings: Object.keys(speakerMappings).length > 0 ? speakerMappings : undefined,
           prompt_type: promptType,
         })
-        plans = result.clip_plans.map(p => ({
-          video_prompt: p.video_prompt || '',
-          image_prompt: p.image_prompt || '',
-        }))
+        plans = result.clip_plans
+        timeline = result.planned_clips || timeline
       }
       set({
         directorClipPlans: plans,
+        directorPlannedClips: timeline,
+        directorClipImages: [],
         directorStep: generateShotImages ? 'review' : 'review_video',
         directorLoading: false,
       })
@@ -10283,8 +10301,10 @@ export const useStore = create<AppState>((set, get) => ({
     )
     // Director's hardcoded image_model fallback is flux2_klein_9b, which is
     // step-distilled to 4 inference steps (per app/defaults/flux2_klein_9b.json).
-    const imageParams = savedParamsPerMode.image || { num_inference_steps: 4, guidance_scale: 1, resolution: directorRes }
-    imageParams.resolution = directorRes
+    const imageParams = {
+      ...(savedParamsPerMode.image || { num_inference_steps: 4, guidance_scale: 1 }),
+      resolution: directorRes,
+    }
     const imageLora = savedLoraPerMode.image
 
     const buildImgPostProc = (): Record<string, unknown> => {

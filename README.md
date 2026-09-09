@@ -93,6 +93,19 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v2.1.3 (2026-09-09)
+
+**Director timelines, multilingual text and runtime reliability**
+
+- **Readable non-English prompts:** UTF-8 streaming fixes preserve Arabic, Cyrillic, Chinese and other non-ASCII text in Director and enhancement. Consolidates #96 into #110.
+- **Music videos keep the full song:** H3 sections longer than a native window are split into supported shots. Director previews the actual shot count before planning, keeps reviewed images assigned and exposes Cut Speed during assisted setup (#84, #117).
+- **Recoverable image progress:** completed start images and keyframes remain recorded if a later image job fails or times out (#84).
+- **Better memory recovery:** failed generation cleanup runs after temporary inference tensors can be released; manual model release also clears FlashVSR and other registered post-processors (#79).
+- **Blackwell NVFP4 fallback:** unsupported cuBLAS GEMM shapes use dequantized linear computation for that shape; compatible shapes retain acceleration (#105).
+- **Linux local LLM repair:** llama-server installs its required library aliases and searches its runtime directory for them; an incomplete cached runtime is repaired on the next local LLM load (#85).
+
+See the [v2.1.3 release notes](docs/RELEASE_NOTES_V2.1.3.md) and [validation record](docs/VALIDATION_V2.1.3.md). Update and restart Maestro. Replan affected music projects; updating does not reconstruct already shortened renders or corrupted saved text.
+
 ### v2.1.2 (2026-09-09)
 
 **H3 prompt enhancement and reference-audio fixes**

@@ -92,6 +92,7 @@ from shared.llm_engines.nanovllm.vllm_support import resolve_lm_decoder_engine
 from shared import model_dropdowns
 from collections import defaultdict
 from services.job_lifecycle import call_with_sticky_interrupt
+from services.generation_memory import cleanup_failed_generation, release_auxiliary_models
 
 # import torch._dynamo as dynamo
 # dynamo.config.recompile_limit = 2000   # default is 256
@@ -196,16 +197,29 @@ def clear_gen_cache():
 
 def release_model():
     global wan_model, offloadobj, reload_needed
+    reload_needed = True
     wan_model = None
     clear_gen_cache()
-    if "_cache" in offload.shared_state:
-        del offload.shared_state["_cache"]
-    if offloadobj is not None:
-        offloadobj.release()
-        offloadobj = None
-    offload.flush_torch_caches()
-    gc.collect()
-    reload_needed = True
+    previous_offload, offloadobj = offloadobj, None
+    try:
+        if previous_offload is not None:
+            previous_offload.release()
+    finally:
+        previous_offload = None
+        gc.collect()
+        offload.flush_torch_caches()
+
+
+def release_generation_memory():
+    """Run only after the failed generation has relinquished its tensors."""
+    try:
+        release_model()
+    finally:
+        release_auxiliary_models()
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
 def get_unique_id():
     global unique_id  
     with unique_id_lock:
@@ -7355,6 +7369,7 @@ def _resolve_image_ref_fit(model_def, auto_aspect):
         return 1
     return ref_fit
 
+@cleanup_failed_generation(lambda: release_generation_memory())
 def generate_video(
     task,
     send_cmd,

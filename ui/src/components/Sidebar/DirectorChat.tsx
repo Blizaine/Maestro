@@ -485,6 +485,20 @@ export function DirectorChat() {
   const imageGenProgress = useStore(s => s.directorImageGenProgress)
   const uploadAndAnalyze = useStore(s => s.directorUploadAndAnalyze)
   const setEnergyBias = useStore(s => s.directorSetEnergyBias)
+  const timelineSettingsKey = useStore(s => {
+    const model = s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+    return `${model}|${s.directorVideoMaxShotFramesByModel[model] ?? 'auto'}|${s.directorResolution}|${s.directorAspectRatio}`
+  })
+  const previousTimelineSettings = useRef(timelineSettingsKey)
+  useEffect(() => {
+    if (previousTimelineSettings.current === timelineSettingsKey) return
+    previousTimelineSettings.current = timelineSettingsKey
+    const state = useStore.getState()
+    if (state.directorSkill === 'music_video' && state.directorAnalysis
+      && ['structure', 'style'].includes(state.directorStep)) {
+      void state.directorSetEnergyBias(state.directorEnergyBias)
+    }
+  }, [timelineSettingsKey])
   const confirmStructure = useStore(s => s.directorConfirmStructure)
   const setSceneDescription = useStore(s => s.directorSetSceneDescription)
   const setReferenceImage = useStore(s => s.directorSetReferenceImage)
@@ -1027,6 +1041,7 @@ export function DirectorChat() {
                 beatDistribution={beatDistribution}
                 confirmStructure={confirmStructure}
                 isActive={atStep('structure')}
+                canAdjust={atStep('structure') || (!isShortFilm && atStep('style'))}
                 isShortFilm={isShortFilm}
               />
             </SystemBubble>
@@ -2089,7 +2104,7 @@ function AnalysisSummary({
 
 function StructureView({
   plannedClips, energyBias, localBias, setLocalBias, sliderRef, setEnergyBias,
-  loading, totalClipDuration, beatDistribution, confirmStructure, isActive, isShortFilm,
+  loading, totalClipDuration, beatDistribution, confirmStructure, isActive, isShortFilm, canAdjust,
 }: {
   plannedClips: ReturnType<typeof useStore.getState>['directorPlannedClips']
   energyBias: number
@@ -2103,16 +2118,17 @@ function StructureView({
   confirmStructure: () => void
   isActive: boolean
   isShortFilm?: boolean
+  canAdjust?: boolean
 }) {
   return (
     <div className="space-y-3">
       <p className="text-xs text-text-secondary">
         {isShortFilm
           ? 'Here are the scenes based on dialogue pacing. Adjust the scene pacing if needed.'
-          : 'Here\'s the clip structure based on the audio analysis. Adjust the cut speed if needed.'}
+          : 'Shots follow the audio analysis and the selected model’s duration limit. Longer song sections are divided into supported shots.'}
       </p>
 
-      {isActive && (
+      {canAdjust && (
         <div>
           <div className="flex items-center justify-between mb-1.5">
             <label className="text-[11px] text-text-muted uppercase tracking-wider">{isShortFilm ? 'Scene Pacing' : 'Cut Speed'}</label>
@@ -2125,6 +2141,7 @@ function StructureView({
             min={-2}
             max={2}
             step={1}
+            disabled={loading}
             value={localBias ?? energyBias}
             onChange={e => {
               const v = Number(e.target.value)
@@ -2170,9 +2187,7 @@ function StructureView({
               {plannedClips.map((clip, i) => {
                 const clipDur = clip.end - clip.start
                 const totalDur = plannedClips.reduce((s, c) => s + (c.end - c.start), 0)
-                const widthPct = isShortFilm
-                  ? Math.max((clipDur / totalDur) * 100, 1.5)
-                  : Math.max((clip.beat_count / plannedClips.reduce((s, c) => s + c.beat_count, 0)) * 100, 1.5)
+                const widthPct = Math.max((clipDur / Math.max(totalDur, 0.001)) * 100, 1.5)
                 const barColor = sectionBarColors[clip.section_label] || 'bg-gray-500'
                 const tooltipLabel = isShortFilm
                   ? `Scene ${i + 1}: ${clip.section_label} (${clipDur.toFixed(1)}s)`

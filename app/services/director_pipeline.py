@@ -451,6 +451,44 @@ def _director_effective_max_frames(
     return int(value)
 
 
+def prepare_director_timeline(params: dict, clip_plans: list, planned_clips: list):
+    """Share native shot boundaries between analysis, review, and rendering.
+
+    Seconds remain authoritative when the source analysis used another FPS.
+    Reviewed native shots are returned unchanged; overlong sections are split,
+    never clamped to one window (which used to shorten the entire song).
+    """
+    video_model = str(params.get("video_model") or "")
+    getter = getattr(_wgp, "get_model_def", None)
+    model_def = (getter(video_model) if video_model and callable(getter) else {}) or {}
+    strategy = video_strategy(model_def)
+    ltx_max = _ltx25_music_video_max_shot_frames(
+        params, model_def, pipeline_type=params.get("pipeline_type", "music_video"),
+    )
+    if not planned_clips or (strategy not in {BOUNDED_START_END, OMNI_REFERENCE} and ltx_max is None):
+        return clip_plans, planned_clips
+    fps = float(model_def.get("fps") or 24)
+    minimum = int(model_def.get("frames_minimum") or 124)
+    step = int(model_def.get("frames_steps") or 17)
+    maximum = ltx_max if ltx_max is not None else _director_effective_max_frames(params, model_def)
+    maximum = minimum + max(0, (maximum - minimum) // step) * step
+    already_native = len(clip_plans) == len(planned_clips)
+    for clip in planned_clips:
+        duration = float(clip.get("duration_sec") or (clip.get("end", 0) - clip.get("start", 0)))
+        frames = round(duration * fps)
+        already_native = already_native and (
+            minimum <= frames <= maximum and (frames - minimum) % step == 0
+            and abs(duration * fps - frames) < 0.01
+            and clip.get("duration_frames") == frames
+        )
+    if already_native:
+        return clip_plans, planned_clips
+    return adapt_bounded_timeline(
+        clip_plans, planned_clips, fps=fps, minimum_frames=minimum,
+        maximum_frames=maximum, frame_step=step,
+    )
+
+
 def _saved_director_video_execution_profile(
     state: dict,
     *,
@@ -1647,6 +1685,10 @@ def _repair_saved_h3_frame_lattice(state: dict) -> bool:
         requested.append(frame_count)
         metadata_missing.append(missing)
 
+    # A legacy long section needs subdivision with its prompts/images, not
+    # a one-for-one clamp while merely opening the Dashboard.
+    if any(frames > maximum for frames in requested):
+        return False
     repaired = normalize_h3_clip_frame_schedule(
         requested,
         minimum_frames=minimum,
@@ -5258,7 +5300,7 @@ def _run_pipeline(pid: str, resume: bool = False):
         # independent shots. Convert the plan before prompt polish and image
         # generation so every downstream artifact (start images, exact audio
         # slices, repair metadata, and generated clips) shares one timeline.
-        if not reused_plan:
+        if not resume_plans:
             video_model = params.get("video_model") or "ltx2_22B_distilled_1_1"
             try:
                 selected_video_def = _wgp.get_model_def(video_model) or {}
@@ -5274,7 +5316,6 @@ def _run_pipeline(pid: str, resume: bool = False):
                 selected_strategy in {BOUNDED_START_END, OMNI_REFERENCE}
                 or ltx25_max_frames is not None
             ):
-                model_fps = float(selected_video_def.get("fps") or 24)
                 minimum_frames = int(selected_video_def.get("frames_minimum") or 124)
                 maximum_frames = (
                     ltx25_max_frames
@@ -5285,14 +5326,17 @@ def _run_pipeline(pid: str, resume: bool = False):
                 )
                 frame_step = int(selected_video_def.get("frames_steps") or 17)
                 original_count = len(clip_plans)
-                clip_plans, planned_clips = adapt_bounded_timeline(
-                    clip_plans,
-                    planned_clips,
-                    fps=model_fps,
-                    minimum_frames=minimum_frames,
-                    maximum_frames=maximum_frames,
-                    frame_step=frame_step,
-                )
+                original_plans = clip_plans
+                clip_plans, planned_clips = prepare_director_timeline(params, clip_plans, planned_clips)
+                if clip_plans is not original_plans and prepared_plans:
+                    # Keep reviewed source images attached when a model/cap
+                    # change divides their original scenes into native shots.
+                    source_images = params.get("prepared_clip_image_paths") or []
+                    if len(source_images) == original_count:
+                        params["prepared_clip_image_paths"] = [
+                            source_images[plan["_director_source_clip_indices"][0]]
+                            for plan in clip_plans
+                        ]
                 params["_director_video_strategy"] = selected_strategy
                 params["planned_clips"] = planned_clips
                 print(
@@ -6764,6 +6808,11 @@ def _run_image_generation(pid: str, params: dict, clip_plans: list[dict], out_di
             plan.get("keyframe_prompts", []) or []
         ) if supports_frame_injection else []
         shot_keyframes: list[str] = []
+        clip_keyframes.append(shot_keyframes)
+        # Record the start image before attempting optional keyframes. A
+        # timeout in a later image job must not erase an already saved input.
+        _update_pipeline(pid, clip_images=list(clip_images), _clip_keyframes=copy.deepcopy(clip_keyframes))
+        _save_pipeline_state(pid)
 
         if keyframe_prompts and clip_images[-1]:
             # Chain: each keyframe edits from the previous image
@@ -6801,8 +6850,8 @@ def _run_image_generation(pid: str, params: dict, clip_plans: list[dict], out_di
                 except Exception as e:
                     print(f"[Pipeline {pid}] Shot {i+1} keyframe {ki+1} failed: {e}")
                     shot_keyframes.append("")
-
-        clip_keyframes.append(shot_keyframes)
+                _update_pipeline(pid, _clip_keyframes=copy.deepcopy(clip_keyframes))
+                _save_pipeline_state(pid)
 
     _update_pipeline(pid, progress={
         "current": total_images,
@@ -7282,6 +7331,12 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
             )
 
             requested_h3_schedule = list(per_clip_frames)
+            if any(frames > bounded_maximum for frames in requested_h3_schedule):
+                raise RuntimeError(
+                    "This saved Director plan contains shots longer than the selected "
+                    "model limit. Open & Edit the project and generate a new revision "
+                    "to split the shots while preserving the full soundtrack."
+                )
             per_clip_frames = normalize_h3_clip_frame_schedule(
                 requested_h3_schedule,
                 minimum_frames=bounded_minimum,
