@@ -189,6 +189,16 @@ class Attention(torch.nn.Module):
 
         self.to_out = torch.nn.Sequential(torch.nn.Linear(inner_dim, query_dim, bias=True), torch.nn.Identity())
 
+    def _apply_gate(self, out: torch.Tensor, gate_input: torch.Tensor) -> None:
+        # `to_gate_logits` is excluded from quantization (see ltx2.py's exclusion
+        # list), so it stays bf16 while the surrounding linears are quanto int8.
+        # Those int8 layers only emit bf16 while the Triton kernels are injected;
+        # on the exact optimum.quanto path (voice-clone / ID-LoRA runs) they
+        # preserve the fp32 activations instead, so cast to the gate's own dtype.
+        gate_logits = self.to_gate_logits(gate_input.to(self.to_gate_logits.weight.dtype))
+        gates = 2.0 * torch.sigmoid(gate_logits).to(dtype=out.dtype)
+        out.mul_(gates.unsqueeze(-1))
+
     def _resolve_attention_override(self) -> tuple[str | None, int | None]:
         if isinstance(self.attention_function, AttentionFunction):
             if self.attention_function is AttentionFunction.PYTORCH:
@@ -273,9 +283,7 @@ class Attention(torch.nn.Module):
                 out.add_(x_pos)
                 x_pos = None
                 if self.to_gate_logits is not None:
-                    gate_logits = self.to_gate_logits(gate_input)
-                    gates = 2.0 * torch.sigmoid(gate_logits).to(dtype=out.dtype)
-                    out.mul_(gates.unsqueeze(-1))
+                    self._apply_gate(out, gate_input)
                 gate_input = None
                 out = out.flatten(2, 3)
                 out = self.to_out(out)
@@ -291,9 +299,7 @@ class Attention(torch.nn.Module):
             recycle_q= True,
         )
         if self.to_gate_logits is not None:
-            gate_logits = self.to_gate_logits(gate_input)
-            gates = 2.0 * torch.sigmoid(gate_logits).to(dtype=out.dtype)
-            out.mul_(gates.unsqueeze(-1))
+            self._apply_gate(out, gate_input)
         gate_input = None
         out = out.flatten(2, 3)
         out = self.to_out(out)
