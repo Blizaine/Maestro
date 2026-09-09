@@ -3,6 +3,23 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [2.1.4] - 2026-09-09
+
+- Reduced H3/Viggle VAE loading overhead by reading native checkpoint layouts
+  without allocating reordered copies of decoder weights. Existing FP16 and
+  INT8 ConvRot checkpoints remain supported.
+- Matched WanGP's separate H3 video encoder/decoder memory phases. On GPUs
+  with at least 10 GiB VRAM, the decoder stays resident during decoding and
+  unloads when another stage starts; smaller cards retain profile streaming.
+- Fixed memory profiles 3.5 and 4.5 skipping their base profile's budgets.
+  Pinning/transfer variants and explicit preload settings remain respected.
+- Consolidated the README's v2.1.0–v2.1.3 highlights into one cumulative
+  v2.1.4 overview, including the new memory fixes and Animate trim/frame preview.
+
+See the [v2.1.4 release notes](docs/RELEASE_NOTES_V2.1.4.md) and
+[measured validation](docs/VALIDATION_V2.1.4.md). Decoder-stage benchmark gains
+are not a claim about total generation time on every GPU.
+
 ## [2.1.3] - 2026-09-09
 
 - Fixed corrupted non-English LLM output in Director and prompt enhancement.

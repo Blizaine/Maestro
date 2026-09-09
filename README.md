@@ -93,45 +93,17 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
-### v2.1.3 (2026-09-09)
+### v2.1.4 (2026-09-09)
 
-**Director timelines, multilingual text and runtime reliability**
+**The v2.1 update: a larger Studio workspace, portable characters, new H3 tools and improved memory management**
 
-- **Readable non-English prompts:** UTF-8 streaming fixes preserve Arabic, Cyrillic, Chinese and other non-ASCII text in Director and enhancement. Consolidates #96 into #110.
-- **Music videos keep the full song:** H3 sections longer than a native window are split into supported shots. Director previews the actual shot count before planning, keeps reviewed images assigned and exposes Cut Speed during assisted setup (#84, #117).
-- **Recoverable image progress:** completed start images and keyframes remain recorded if a later image job fails or times out (#84).
-- **Better memory recovery:** failed generation cleanup runs after temporary inference tensors can be released; manual model release also clears FlashVSR and other registered post-processors (#79).
-- **Blackwell NVFP4 fallback:** unsupported cuBLAS GEMM shapes use dequantized linear computation for that shape; compatible shapes retain acceleration (#105).
-- **Linux local LLM repair:** llama-server installs its required library aliases and searches its runtime directory for them; an incomplete cached runtime is repaired on the next local LLM load (#85).
+This overview combines the features and fixes from **v2.1.0 through v2.1.4**.
 
-See the [v2.1.3 release notes](docs/RELEASE_NOTES_V2.1.3.md) and [validation record](docs/VALIDATION_V2.1.3.md). Update and restart Maestro. Replan affected music projects; updating does not reconstruct already shortened renders or corrupted saved text.
+#### Lower RAM use and faster H3 decoding — new in v2.1.4
 
-### v2.1.2 (2026-09-09)
-
-**H3 prompt enhancement and reference-audio fixes**
-
-- **Omni enhancement works again:** fixed the missing `re` import that could cause an HTTP 500 after the LLM returned its prompt. Fixes issue #102.
-- **Descriptions stay out of dialogue:** quoted character names, styles, and reference metadata no longer become extra spoken lines. Quotations inside existing dialogue stay intact.
-- **Music keeps its selected role:** explicit music/style audio intent takes priority over descriptions containing the word "voice". Music-only requests reject unwanted AI-written speech.
-- **Better speaker handling:** malformed AI speaker assignments go through repair; named guests keep their own identities, and scenes can have more speakers than saved character references.
-- **Additional stability fixes:** corrected initialization errors in Blend and video inpainting, and added an automated check for undefined Python names.
-
-See the [v2.1.2 release notes](docs/RELEASE_NOTES_V2.1.2.md). Update and restart Maestro, then enhance affected prompts again before generating.
-
-### v2.1.1 (2026-09-08)
-
-**Fuller AI Creative dialogue and clearer troubleshooting**
-
-- **More complete conversations:** Creative uses the available speech time for developed exchanges. H3 checks explicit talking-point lists against spoken dialogue and repairs inadequate windows individually, preserving successful repairs elsewhere.
-- **Reliable character names:** H3 ignores pronouns such as "They" when identifying cast, and matches unambiguous RefMod filenames to the character names in your prompt for consistent Subject and voice bindings.
-- **Visible planning feedback:** unresolved H3 warnings appear in the normal Studio prompt area, including mobile. Refresh keeps a plan in AI Creative or AI Faithful instead of silently switching Creative to Faithful.
-- **Correct log instructions:** the bug-report form and contributing guide now point to the correct files. See [Finding logs](#finding-logs) for startup, update, install and local LLM logs, plus alternatives when no log file exists. Fixes issue #118.
-
-See the [v2.1.1 release notes](docs/RELEASE_NOTES_V2.1.1.md). Run AI Creative again on an existing draft to apply the revised dialogue planning.
-
-### v2.1.0 (2026-09-08)
-
-**A larger Studio workspace, portable characters and new H3 tools**
+- **Lower loading overhead:** H3 and Viggle read the video VAE's native checkpoint layout without repacking its weights into extra RAM. A local component-loading test removed about **4.35 GiB of private allocations**; existing FP16 and INT8 ConvRot checkpoints remain supported.
+- **Faster video decoding:** following WanGP's H3 memory policy, cards with **10 GiB VRAM or more** keep the decoder on the GPU during decoding, then release it when another stage starts. Smaller cards retain streaming. A local FP16 decoder benchmark improved from **8.9s to 2.2s** with identical output; this measures decoding, not total generation speed. [Measurements and validation](docs/VALIDATION_V2.1.4.md).
+- **Correct memory-profile limits:** profiles **3.5 and 4.5** now inherit their intended base budgets while preserving their pinning/transfer settings and explicit preload choices.
 
 #### Studio: more room to create
 
@@ -143,21 +115,30 @@ See the [v2.1.1 release notes](docs/RELEASE_NOTES_V2.1.1.md). Run AI Creative ag
 #### Prompt enhancement and duration
 
 - **Enhance before generating:** the magic button runs **AI Faithful**; its menu also offers **AI Creative**. Review and edit the result before submission. Both support image prompts; long H3 sequences expose editable **Exact H3 prompts** for each window.
-- **Stronger Creative dialogue:** conversations, tutorials and character interactions receive duration-aware dialogue targets, with a focused retry for sparse drafts. Planning targets **2.8 words/second**, allows up to **3**, and supports up to six H3 speaker turns per window. Faithful preserves supplied events and lines.
-- **More accurate speech budgets:** action descriptions, production headings and mixed dialogue formats no longer inflate the spoken-word count. Explicit silence and requests to use only supplied lines remain respected.
+- **Fuller Creative dialogue:** conversations, tutorials and character interactions use duration-aware targets of **2.8 words/second**, with up to **3** and six H3 speaker turns per window. Explicit talking points are checked against spoken lines; sparse windows get independent repairs that preserve successful work elsewhere. Faithful preserves supplied events and lines.
+- **More accurate speech budgets:** action descriptions, production headings, quoted character names/styles and reference metadata stay out of dialogue counts. Quotations inside existing dialogue remain intact. Explicit silence and requests to use only supplied lines remain respected.
+- **Clearer enhancement and audio handling:** fixed Omni's missing-`re` enhancement failure (#102). Music/style references retain their selected role even when descriptions mention voices; music-only requests reject unwanted speech. Malformed speaker assignments receive repair, named guests retain their own identities, and scenes can include more speakers than saved character references.
+- **Visible planning feedback:** unresolved H3 warnings appear beside the normal prompt, including on mobile. Refresh preserves the selected AI Creative or Faithful mode. UTF-8 fixes keep Arabic, Cyrillic, Chinese, accented text and emoji readable in Director and enhancement (#96, #110).
 - **Simpler Studio and Director duration controls:** Auto previews its recommendation in both Time and Window views. Moving the dimmed slider or choosing a preset switches to manual. Model-aligned Time steps reach **five minutes**, with **10m, 15m, 30m, 60m and Custom** presets for supported video workflows. Window sizing follows model/GPU limits or saved overrides; overlap is collapsed by default.
 - **Consistent optional guidance:** single- and multi-window enhancement share the optional Mature-mode content guide only when that mode is enabled. A [14.4-second-window Reference tutorial example](docs/prompts/blaine-maestro-tutorial-script.md) includes native dialogue tags and presenter cues.
+
+#### Director timelines and recoverable progress
+
+- **Music videos keep the full song:** long H3 sections split into supported shots before review, and the structure preview shows the actual shot count. **Cut Speed** is available during assisted setup (#84, #117).
+- **Reviewed images stay assigned:** subdivision retains each source scene's image. Completed start images and keyframes remain recorded if a later job fails or times out; Director image settings stay independent of Studio.
+- **Legacy projects remain editable:** use **Open & Edit** to replan affected music projects. Updating preserves saved work; it does not reconstruct already shortened renders or repair corrupted saved text automatically.
 
 #### Portable characters, RefMods and better reference images
 
 - **Share complete characters:** export **`<character>.maestro.safetensors`** with appearance, saved voice, name/description and selected images. Import standard H3 RefMods separately from trained LoRAs; compatible upstream loaders can use the visual portion, while embedded voice is a Maestro extension.
-- **Browse and reuse identities:** Model Browser adds **Characters / RefMods**, local and Hugging Face imports, voice filters, a saved **malcolmrey / MiniMax H3** collection and easy export. Multiple RefMods retain separate identities and voice bindings, with improved name/speaker matching.
+- **Browse and reuse identities:** Model Browser adds **Characters / RefMods**, local and Hugging Face imports, voice filters, a saved **malcolmrey / MiniMax H3** collection and easy export. Multiple RefMods retain separate identities and voice bindings. H3 matches unambiguous filenames to natural character names and avoids treating pronouns as extra cast members.
 - **Recover better images:** decode native-resolution PNG views, choose a cover and download individual images or a ZIP. Original photos/video frames are preferred when available; cached recovery preserves the original latent and audio. Selected views travel with exports and work in Image models that accept references.
 - **Better character browsing:** scrollable mobile galleries, cached video thumbnails and cleaner display names make characters easier to identify. [Character sharing and recovery](docs/Maestro-Characters.md).
 
 #### Viggle Animate and automatic character replacement
 
 - **Three-step H3 animation:** supply a control video and an edited frame from **any point in the source video**. Longer videos use overlapping windows of approximately **5.2 seconds**.
+- **Trim and select the frame in one preview:** set the source clip's start/end points and move a separate frame-selection playhead to choose the image to edit.
 - **Automatic character preparation:** choose a saved character, recovered RefMod view or uploaded image. Flux 2 Klein replaces the subject in the selected frame, with editable appearance instructions. Preview first or queue preparation and animation together; Klein **9B and 4B** are supported.
 - **Manual editing stays available:** send the frame to Image mode, edit it and use **Apply & return**. Saved settings retain frame time, character view and preparation choices. Appearance prompts control preparation; Viggle uses its fixed motion-transfer recipe. [Viggle Animate guide](docs/Viggle-Animate.md).
 
@@ -187,17 +168,26 @@ See the [v2.1.1 release notes](docs/RELEASE_NOTES_V2.1.1.md). Run AI Creative ag
 - Fixed mobile keyboard access to prompts, overlapping settings, off-screen LoRA guides and duration popups whose sliders jumped while dragging. The gallery stays in place behind the open sidecar.
 - Improved the mobile Model Browser and added a manual **Destination LoRA folder** for URL imports, with an automatic best-match suggestion.
 - Improved shared GPU offloading, cancellation and settings restoration; fixed locked ETA-history databases on Windows and expanded model, character, dialogue and UI regression coverage.
+- **Better memory recovery:** failed-generation cleanup releases temporary inference tensors; manual model release also clears FlashVSR and other registered post-processors (#79).
+- **Blackwell NVFP4 compatibility:** unsupported cuBLAS GEMM shapes use a dequantized fallback while compatible shapes keep acceleration (#105).
+- **Linux local LLM repair:** llama-server installs required library aliases, searches its runtime directory and repairs incomplete cached runtimes on the next local LLM load (#85).
+- Corrected initialization errors in Blend and video inpainting, added undefined-name checks, and corrected the bug-report log paths (#118). See [Finding logs](#finding-logs).
 
 #### Updating
 
-Use **Update** on Maestro's Pinokio page, start normally and refresh the browser.
+Use **Update** on Maestro's Pinokio page, restart Maestro and refresh the browser.
 Existing models, outputs, workspaces, characters, presets and Director/Editor
 projects stay in place. Update installs the Face Refiner detector dependency;
 new model assets download when needed, and DLSS uses its separate installer.
 
-See the [complete v2.1.0 release notes](docs/RELEASE_NOTES_V2.1.0.md) for detailed
-behavior and compatibility, and the [validation record](docs/VALIDATION_V2.1.0.md)
-for completed checks and remaining hardware/device testing.
+Run enhancement again on affected prompts to apply the dialogue and audio fixes.
+The memory update uses existing checkpoints and requires no model conversion.
+
+See the [v2.1.4 release notes](docs/RELEASE_NOTES_V2.1.4.md) and
+[validation record](docs/VALIDATION_V2.1.4.md). Detailed release history remains
+available for [v2.1.0](docs/RELEASE_NOTES_V2.1.0.md),
+[v2.1.1](docs/RELEASE_NOTES_V2.1.1.md), [v2.1.2](docs/RELEASE_NOTES_V2.1.2.md)
+and [v2.1.3](docs/RELEASE_NOTES_V2.1.3.md).
 
 ### v2.0.1 (2026-09-04)
 

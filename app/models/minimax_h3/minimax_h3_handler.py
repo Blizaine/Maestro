@@ -2207,6 +2207,7 @@ class family_handler:
 
             dtype = torch.bfloat16
         from .minimax_h3_main import MiniMaxH3Model
+        from .video_vae import video_vae_offload_models
 
         if (model_def or {}).get("minimax_h3_viggle"):
             from services.managed_preprocessors import ensure_minimax_h3_lora_affine_maps
@@ -2224,15 +2225,15 @@ class family_handler:
         )
         pipe = {
             "transformer": model.transformer,
+            **video_vae_offload_models(model.vae),
+            "audio_vae": model.audio_vae,
+        }
+        if not model.viggle:
             # Profile the two Qwen towers independently. Text-only FL2VA
             # never needs the vision tower, while Ref2VA can release it
             # before the 50-layer language model runs. This mirrors WanGP's
             # H3 memory layout and avoids pinning both large components as a
             # single co-resident conditioner.
-            "vae": model.vae,
-            "audio_vae": model.audio_vae,
-        }
-        if not model.viggle:
             pipe.update({"text_encoder": model.conditioner.language_model,
                          "vision_encoder": model.conditioner.visual})
         if model.audio_only:

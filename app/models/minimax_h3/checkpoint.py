@@ -9,10 +9,11 @@
 
 """Checkpoint adapters for MiniMax H3 consumer weights.
 
-The video VAE conversion follows Hugging Face Diffusers' official H3
-conversion script pinned in ``UPSTREAM.md``.  It is performed lazily by
-MMGP while the checkpoint is loaded, allowing Maestro to use Comfy-Org's
-single 5.2 GB FP16 VAE instead of the 10.4 GB three-shard Diffusers export.
+The native video VAE adapter reads Comfy-Org's compact checkpoint without
+repacking its weights. The legacy conversion to the official Diffusers
+layout remains available and follows the H3 conversion script pinned in
+``UPSTREAM.md``. Both use the single 5.2 GB FP16 VAE instead of the 10.4 GB
+three-shard Diffusers export.
 
 Comfy-Org's audio VAE stores the already-computed convolution weights while
 the reference module keeps PyTorch's legacy weight-normalization parameters.
@@ -155,6 +156,22 @@ def preprocess_video_vae_state_dict(state_dict: dict[str, torch.Tensor]) -> dict
             tensor = torch.cat([value, gate], dim=0).contiguous()
         converted[target_key] = tensor
     return converted
+
+
+def preprocess_native_video_vae_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Keep the compact VAE's mmap-backed QKV and gate/value storage intact.
+
+    The native-layout decoder interprets these rows during its forward pass.
+    Only names change here: physically splitting/reordering all 36 decoder
+    blocks creates gigabytes of private CPU allocations that cannot be evicted
+    like read-only checkpoint pages when a low-RAM machine starts denoising.
+    Quantization descriptors and row scales must keep that same native order.
+    """
+    return {
+        _rename_video_vae_key(key): tensor
+        for key, tensor in state_dict.items()
+        if key not in {"decoder.mask_token", "latents_mean", "latents_std"}
+    }
 
 
 def preprocess_audio_vae_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:

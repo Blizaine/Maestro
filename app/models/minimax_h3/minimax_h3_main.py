@@ -30,7 +30,7 @@ from .audio_vae import AutoencoderKLMiniMaxH3Audio
 from .checkpoint import (
     preprocess_audio_vae_state_dict,
     preprocess_conditioner_state_dict,
-    preprocess_video_vae_state_dict,
+    preprocess_native_video_vae_state_dict,
 )
 from .conditioner import MiniMaxH3Conditioner, MiniMaxH3Qwen3VL, build_h3_processor, load_h3_qwen_config
 from .convrot_layout import has_convrot_layout, restore_interleaved_h3_qkv
@@ -872,15 +872,17 @@ def _load_video_vae(filename: str) -> AutoencoderKLMiniMaxH3:
         vae = AutoencoderKLMiniMaxH3(
             latents_mean=VIDEO_LATENTS_MEAN,
             latents_std=VIDEO_LATENTS_STD,
+            native_checkpoint_layout=True,
         )
     offload.load_model_data(
         vae,
         filename,
         writable_tensors=False,
-        preprocess_sd=preprocess_video_vae_state_dict,
+        preprocess_sd=preprocess_native_video_vae_state_dict,
         default_dtype=torch.float16,
     )
     vae._model_dtype = torch.float16
+    print("[MiniMax H3 VAE] Native checkpoint layout; skipping decoder weight repacking in RAM.")
     return vae.eval().requires_grad_(False)
 
 
