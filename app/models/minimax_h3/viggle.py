@@ -136,25 +136,68 @@ def load_conditioner():
     return FixedConditioner()
 
 
-def prepare_window_references(input_frames, edited_images, history_count, frame_num, height, width):
+def _window_pixels(source, history_count, frame_num, height, width, *, buffer_bytes=32 * 1024**2):
+    """Quantize only this window, bounding the temporary float pixel buffers.
+
+    The old path normalized, padded and quantized whole float32 videos. At
+    720p each extra 124-frame copy costs over a GiB, before any model weights
+    are touched. Keep the input read-only and pad the final uint8 array instead.
+    Preserve the existing range detection, bilinear resize and rounding.
+    """
     import numpy as np
     import torch
-    from .minimax_h3_main import _prepare_control_video_tensor, _tensor_to_pil, prepare_keyframe_image
+    import torch.nn.functional as F
+
+    count = frame_num - history_count
+    pixels = np.empty((count, height, width, source.shape[0]), dtype=np.uint8)
+    unit_range = source.dtype != torch.uint8 and (
+        float(source.amin().float()) >= -0.01 and float(source.amax().float()) <= 1.01
+    )
+    # Include both the source and resized float buffers in the scratch budget.
+    bytes_per_frame = source.shape[0] * 4 * (
+        source.shape[-2] * source.shape[-1] + height * width
+    )
+    chunk_frames = max(1, int(buffer_bytes) // max(1, bytes_per_frame))
+    start = min(history_count, source.shape[1] - 1)
+    available = min(frame_num, source.shape[1]) - start
+    for offset in range(0, available, chunk_frames):
+        end = min(available, offset + chunk_frames)
+        chunk = source[:, start + offset:start + end].detach().to(
+            device="cpu", dtype=torch.float32, copy=True,
+        )
+        if source.dtype == torch.uint8:
+            chunk.div_(127.5).sub_(1.0)
+        else:
+            if unit_range:
+                chunk.mul_(2.0).sub_(1.0)
+            chunk.clamp_(-1.0, 1.0)
+        if chunk.shape[-2:] != (height, width):
+            chunk = F.interpolate(
+                chunk.permute(1, 0, 2, 3), size=(height, width),
+                mode="bilinear", align_corners=False,
+            ).permute(1, 0, 2, 3)
+        chunk.add_(1.0).mul_(127.5).round_().clamp_(0, 255)
+        pixels[offset:end] = chunk.permute(1, 2, 3, 0).to(torch.uint8).numpy()
+    if available < count:
+        pixels[available:] = pixels[available - 1]
+    return pixels
+
+
+def prepare_window_references(input_frames, edited_images, history_count, frame_num, height, width):
+    from .minimax_h3_main import _as_video_tensor, _tensor_to_pil, prepare_keyframe_image
     from .ref2va import MiniMaxH3PreparedReference
-    video = _prepare_control_video_tensor(input_frames, height, width)
+    video = _as_video_tensor(input_frames)
     if video is None or not edited_images or len(edited_images) != 1:
         raise ValueError("Viggle requires a control video window and one edited frame.")
     # WanGP extracts from window_start, including the motion-history prefix.
     # The reference covers only this pass's target, in video-then-image order.
-    if video.shape[1] < frame_num:
-        video = torch.cat([video, video[:, -1:].expand(-1, frame_num - video.shape[1], -1, -1)], dim=1)
-    video = video[:, history_count:frame_num]
-    if video.shape[1] < 5 or (video.shape[1] - 5) % 17:
+    count = frame_num - history_count
+    if history_count < 0 or count < 5 or (count - 5) % 17:
         raise ValueError("Viggle's control window must follow the H3 17n+5 frame alignment.")
-    pixels = video.add(1).mul(127.5).round().clamp(0, 255).permute(1, 2, 3, 0).numpy().astype(np.uint8)
     image = _tensor_to_pil(edited_images[0])
     if image is None:
         raise ValueError("The Viggle edited frame is not a readable image.")
     image = prepare_keyframe_image(image, height, width, stretch=True)
+    pixels = _window_pixels(video, history_count, frame_num, height, width)
     return [MiniMaxH3PreparedReference(kind="video", frames=pixels),
             MiniMaxH3PreparedReference(kind="image", image=image)]

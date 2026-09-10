@@ -5,6 +5,7 @@ from unittest.mock import patch
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'app'))
 import torch
+import numpy as np
 from PIL import Image
 from models.minimax_h3 import viggle
 from models.minimax_h3.minimax_h3_handler import family_handler
@@ -89,6 +90,49 @@ class ViggleTests(unittest.TestCase):
         self.assertEqual(len(refs[0].frames), 107)
         with self.assertRaises(ValueError):
             viggle.prepare_window_references(video, [], 0, 124, 32, 64)
+
+    def test_bounded_pixel_conversion_preserves_existing_frames_and_input(self):
+        from models.minimax_h3.minimax_h3_main import _prepare_control_video_tensor
+
+        rng = torch.Generator().manual_seed(371)
+        full_range = torch.rand(3, 90, 12, 18, generator=rng).mul(2.4).sub(1.2)
+        # Range detection must cover the whole source, not each individual
+        # chunk: later chunks here contain only values in [0, 1].
+        mixed_range = torch.rand(3, 90, 12, 18, generator=rng)
+        mixed_range[:, 0] = -0.5
+        unit_range = torch.rand(3, 90, 12, 18, generator=rng)
+        uint8 = torch.randint(0, 256, (3, 90, 12, 18), generator=rng, dtype=torch.uint8)
+        for source in (full_range, mixed_range, unit_range, uint8, full_range.half(),
+                       full_range[:, :, :, ::2]):
+            original = source.clone()
+            for history in (0, 17, 102):
+                for size in ((12, source.shape[-1]), (16, 24)):
+                    with self.subTest(dtype=source.dtype, history=history, size=size):
+                        expected = _prepare_control_video_tensor(source, *size)
+                        expected = torch.cat([expected, expected[:, -1:].expand(
+                            -1, 124 - expected.shape[1], -1, -1)], dim=1)
+                        expected = expected[:, history:124].add(1).mul(127.5).round().clamp(0, 255)
+                        expected = expected.permute(1, 2, 3, 0).numpy().astype(np.uint8)
+                        actual = viggle._window_pixels(source, history, 124, *size, buffer_bytes=8192)
+                        np.testing.assert_array_equal(actual, expected)
+                        torch.testing.assert_close(source, original, rtol=0, atol=0)
+
+    def test_pixel_resize_scratch_stays_bounded_as_window_grows(self):
+        import torch.nn.functional as F
+
+        source = torch.zeros(3, 124, 32, 48)
+        frame_counts = []
+        resize = F.interpolate
+        def record(input, *args, **kwargs):
+            frame_counts.append(input.shape[0])
+            return resize(input, *args, **kwargs)
+
+        with patch.object(F, 'interpolate', side_effect=record):
+            result = viggle._window_pixels(source, 0, 124, 64, 96, buffer_bytes=256 * 1024)
+        self.assertEqual(result.shape, (124, 64, 96, 3))
+        self.assertGreater(len(frame_counts), 1)
+        self.assertLessEqual(max(frame_counts) * 3 * 4 * (32 * 48 + 64 * 96), 256 * 1024)
+        np.testing.assert_array_equal(result, np.zeros(result.shape, dtype=np.uint8))
 
     def test_euler_three_evaluations_matches_published_sigma_grid(self):
         scheduler = MiniMaxH3Scheduler(shift=3.0, solver='euler')
