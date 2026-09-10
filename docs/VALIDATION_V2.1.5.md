@@ -55,6 +55,16 @@ New or expanded coverage includes:
 The UI build retains its existing nonfatal mixed static/dynamic import and
 large-bundle warnings. No UI dependency or chunking change is part of this patch.
 
+The first main-branch CI attempt exited with a native segmentation fault near
+the CPU INT8 fixtures, despite the same commit passing on dev. The fixtures used
+eight input columns, while [PyTorch 2.7's AVX512 INT8-pack kernel](https://github.com/pytorch/pytorch/blob/v2.7.1/aten/src/ATen/native/cpu/int8mm_kernel.cpp)
+loads aligned blocks of 16 values without a tail path. The dense fixtures now
+use 16 columns, matching the alignment of real H3 projections. Dtype, scale,
+LoRA and noncontiguous-input assertions remain intact; this adjustment does not
+change application inference code. The unchanged main run passed on retry, and
+the aligned fixtures passed a fresh 16-test local run with the explicit CUDA
+case skipped. Both branches also run CI for the fixture correction.
+
 ## Real AI Faithful evaluations
 
 Two installed local models were evaluated through Maestro's production planning

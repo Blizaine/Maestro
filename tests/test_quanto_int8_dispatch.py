@@ -32,7 +32,10 @@ class TestQuantoInt8Dispatch(unittest.TestCase):
     def tearDown(self):
         inject.disable_quanto_int8_kernel()
 
-    def load_layer(self, dtype, bias, in_features=8, out_features=4):
+    def load_layer(self, dtype, bias, in_features=16, out_features=4):
+        # PyTorch 2.7's CPU BF16 INT8-pack kernel uses aligned 16-value loads
+        # on AVX512 (8 on AVX2). Match real H3 projection alignment so this
+        # fixture also works on Linux AVX512 runners, not only Windows/AVX2.
         data = torch.arange(in_features * out_features).remainder(32).sub(16).to(torch.int8).reshape(out_features, in_features)
         scales = torch.linspace(0.00691, 0.03237, out_features).reshape(-1, 1)
         state = {
@@ -55,7 +58,7 @@ class TestQuantoInt8Dispatch(unittest.TestCase):
                 with self.subTest(dtype=dtype, bias=bias), torch.no_grad():
                     layer, data, scales = self.load_layer(dtype, bias)
                     # Batch dimensions and a non-contiguous input exercise the real reshape path.
-                    x = torch.linspace(-2, 2, 96, dtype=dtype).reshape(2, 3, 16)[..., ::2]
+                    x = torch.linspace(-2, 2, 192, dtype=dtype).reshape(2, 3, 32)[..., ::2]
                     rotated = int8_convrot._rotate_activation(x, 4)
                     expected = torch.nn.functional.linear(
                         rotated.float(), data.float() * scales,
@@ -72,10 +75,10 @@ class TestQuantoInt8Dispatch(unittest.TestCase):
     def test_plain_quanto_weight_uses_dense_input_dtype(self):
         for dtype in (torch.float16, torch.bfloat16, torch.float32):
             with self.subTest(dtype=dtype), torch.no_grad():
-                data = torch.arange(-16, 16, dtype=torch.int8).reshape(4, 8)
+                data = torch.arange(-32, 32, dtype=torch.int8).reshape(4, 16)
                 scales = torch.full((4, 1), 0.01357)
                 weight = WeightQBytesTensor.create(qint8, 0, data.shape, data.stride(), data, scales)
-                x = torch.ones(3, 8, dtype=dtype)
+                x = torch.ones(3, 16, dtype=dtype)
                 actual = torch.nn.functional.linear(x, weight)
                 expected = torch.nn.functional.linear(x.float(), data.float() * scales)
                 self.assertEqual(actual.dtype, dtype)
@@ -96,9 +99,9 @@ class TestQuantoInt8Dispatch(unittest.TestCase):
         for dtype in (torch.float16, torch.bfloat16):
             with self.subTest(dtype=dtype), torch.no_grad():
                 layer, _, _ = self.load_layer(dtype, False)
-                x = torch.linspace(-2, 2, 16, dtype=dtype).reshape(2, 8)
+                x = torch.linspace(-2, 2, 32, dtype=dtype).reshape(2, 16)
                 base = layer(x).clone()
-                a = torch.full((2, 8), 0.125, dtype=dtype)
+                a = torch.full((2, 16), 0.125, dtype=dtype)
                 b = torch.full((4, 2), 0.25, dtype=dtype)
                 model = torch.nn.Module()
                 model.linear = layer
