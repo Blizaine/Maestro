@@ -12,6 +12,7 @@ import subprocess
 import threading
 import logging
 import requests
+from contextlib import contextmanager
 from typing import Optional
 
 from services.text_integrity import repair_text
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Singleton state
 _process: Optional[subprocess.Popen] = None
-_lock = threading.Lock()
+_lock = threading.RLock()
 _model_id: str = ""
 _device: str = ""
 _server_port: int = 0
@@ -57,6 +58,8 @@ _api_key: str = ""           # API key for OpenAI/Anthropic
 # Auto-unload idle timer
 _idle_timer: Optional[threading.Timer] = None
 _idle_timeout: float = 60.0  # seconds before auto-unload
+_idle_generation: int = 0
+_active_uses: int = 0
 
 # Streaming state — accumulates tokens during generation
 _stream_buffer: str = ""
@@ -1928,28 +1931,61 @@ def load_model(
 
 def _cancel_idle_timer():
     """Cancel any pending idle-unload timer."""
-    global _idle_timer
-    if _idle_timer is not None:
-        _idle_timer.cancel()
-        _idle_timer = None
+    global _idle_timer, _idle_generation
+    with _lock:
+        _idle_generation += 1
+        if _idle_timer is not None:
+            _idle_timer.cancel()
+            _idle_timer = None
 
 
 def _reset_idle_timer():
-    """Reset the idle-unload timer. Called after each LLM request."""
+    """Start the idle timeout only after all requests/workflows have finished."""
     global _idle_timer
-    _cancel_idle_timer()
-    _idle_timer = threading.Timer(_idle_timeout, _auto_unload)
-    _idle_timer.daemon = True
-    _idle_timer.start()
+    with _lock:
+        _cancel_idle_timer()
+        if _active_uses or not is_loaded():
+            return
+        _idle_timer = threading.Timer(
+            _idle_timeout, _auto_unload, args=(_idle_generation,),
+        )
+        _idle_timer.daemon = True
+        _idle_timer.start()
 
 
-def _auto_unload():
+def _auto_unload(generation: int):
     """Called by the idle timer to unload the LLM after inactivity."""
     global _idle_timer
-    _idle_timer = None
-    if is_loaded():
-        print("[LLM] Auto-unloading after idle timeout")
-        unload_model()
+    with _lock:
+        # cancel() cannot stop a callback already dispatched by its thread.
+        # An old callback must not clear a newer timer or unload a new use.
+        if generation != _idle_generation or _active_uses:
+            return
+        _idle_timer = None
+        if is_loaded():
+            print("[LLM] Auto-unloading after idle timeout")
+            unload_model()
+
+
+@contextmanager
+def keep_loaded():
+    """Protect active calls and multi-pass planning from idle-only unloading.
+
+    Nested/concurrent users share one count. Explicit unloads still work,
+    and the idle timeout resumes after the final user exits, even on error.
+    This does not load a model or hold a mutex during model inference.
+    """
+    global _active_uses
+    with _lock:
+        _cancel_idle_timer()
+        _active_uses += 1
+    try:
+        yield
+    finally:
+        with _lock:
+            _active_uses -= 1
+            if not _active_uses:
+                _reset_idle_timer()
 
 
 def _start_log_reader(proc: subprocess.Popen) -> None:
@@ -2156,6 +2192,7 @@ def _image_to_data_url(image_path: str, max_size: int = 768) -> Optional[str]:
         return f"data:{mime};base64,{data}"
 
 
+@keep_loaded()
 def generate(
     prompt: str,
     system_prompt: str = "",
@@ -2376,6 +2413,7 @@ def get_stream_status() -> dict:
         return {"text": _stream_buffer, "done": _stream_done}
 
 
+@keep_loaded()
 def generate_streaming(
     prompt: str,
     system_prompt: str = "",

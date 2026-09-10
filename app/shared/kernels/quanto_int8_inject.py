@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import os
 import atexit
+import statistics
 import traceback
 from types import SimpleNamespace
 from typing import Optional, Tuple
@@ -21,6 +22,7 @@ _ENV_ALLOW_RUNTIME_FALLBACK = "WAN2GP_QUANTO_INT8_ALLOW_RUNTIME_FALLBACK"
 _ENV_NATIVE_FALLBACK_MAX_M = "WAN2GP_QUANTO_INT8_NATIVE_FALLBACK_MAX_M"
 _ENV_PROFILE_SHAPES = "WAN2GP_QUANTO_INT8_PROFILE_SHAPES"
 _ENV_PROFILE_TIME = "WAN2GP_QUANTO_INT8_PROFILE_TIME"
+_ENV_CONVROT_KERNEL_CHECK = "MAESTRO_CONVROT_KERNEL_CHECK"
 
 _STARTUP_PRINTED = False
 _RUNTIME_DISABLED = False
@@ -53,6 +55,8 @@ _SCALED_LAUNCH_CACHE_FIFO = []
 _QBYTES_TENSOR_CLS = None
 _WEIGHT_QBYTES_CLS = None
 _NATIVE_FALLBACK_MAX_M = 0
+_CONVROT_BACKENDS = {}
+_CONVROT_BACKEND_LIMIT = 32
 
 
 def _encode_dtype(dtype: torch.dtype) -> int:
@@ -194,6 +198,7 @@ def _reset_runtime_state(reset_triton_module: bool = True) -> None:
     _TIME_PROFILE_CPU_MS = 0.0
     _TIME_PROFILE_CALLS = 0
     _NATIVE_FALLBACK_MAX_M = 0
+    _CONVROT_BACKENDS.clear()
 
 
 def _add_bias_in_place_or_fallback(output: torch.Tensor, bias: Optional[torch.Tensor]) -> torch.Tensor:
@@ -213,7 +218,12 @@ def _default_quanto_qbytes_linear_forward(ctx, input, other, bias=None):
         in_features = input.shape[-1]
         out_features = other.shape[0]
         output_shape = input.shape[:-1] + (out_features,)
-        output = torch.ops.quanto.qbytes_mm(input.reshape(-1, in_features), other._data, other._scale)
+        # Quanto chooses the GEMM dtype from the scale. ConvRot checkpoints
+        # retain FP32 scales even when the layer computes in BF16/FP16.
+        scale = other._scale
+        if input.dtype.is_floating_point and scale.dtype != input.dtype:
+            scale = scale.to(input.dtype)
+        output = torch.ops.quanto.qbytes_mm(input.reshape(-1, in_features), other._data, scale)
         output = output.reshape(output_shape)
     return _add_bias_in_place_or_fallback(output, bias)
 
@@ -658,6 +668,95 @@ def _prefer_native_quanto_path(input: torch.Tensor) -> bool:
     return _activation_rows(input.shape) <= _NATIVE_FALLBACK_MAX_M
 
 
+def _native_convrot_has_headroom(input: torch.Tensor, other: torch.Tensor) -> bool:
+    # Native GEMM temporarily dequantizes this layer, not the whole model.
+    # Include a contiguous input, output and 1 GiB for GEMM/runtime workspace.
+    m = _activation_rows(input.shape)
+    n, k = other.shape
+    needed = (n * k + m * n + m * k) * input.element_size() + 1024 ** 3
+    free, _ = torch.cuda.mem_get_info(input.device)
+    reusable = max(0, torch.cuda.memory_reserved(input.device) - torch.cuda.memory_allocated(input.device))
+    return free + reusable >= needed
+
+
+def _time_convrot_forward(call, device: torch.device) -> float:
+    # Warm compilation/allocator caches; compare actual loaded weights and
+    # activation dimensions. Synthetic quantize() weights dispatch differently.
+    output = call()
+    del output
+    torch.cuda.synchronize(device)
+    samples = []
+    with torch.cuda.device(device):
+        for _ in range(3):
+            start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            start.record()
+            output = call()
+            end.record()
+            end.synchronize()
+            samples.append(start.elapsed_time(end))
+            del output
+    return statistics.median(samples)
+
+
+def _convrot_backend_key(input: torch.Tensor, other: torch.Tensor) -> tuple:
+    return (input.device, input.dtype, tuple(input.shape), tuple(input.stride()), tuple(other.shape))
+
+
+def _prefer_native_convrot_path(input: torch.Tensor, other: torch.Tensor, bias=None) -> bool:
+    """Choose on the first real inference call per shape; keep other models alone."""
+    if (
+        getattr(getattr(other, "qtype", None), "name", None) != "qint8_convrot"
+        or not input.is_cuda
+        or input.dtype not in (torch.bfloat16, torch.float16)
+        or not _env_flag(_ENV_CONVROT_KERNEL_CHECK, "1")
+        or torch.is_grad_enabled()
+        or _is_compiling_graph()
+        or _is_fake_tensor(input)
+        or _is_fake_tensor(other)
+        or torch.cuda.is_current_stream_capturing()
+    ):
+        return False
+    key = _convrot_backend_key(input, other)
+    selected = _CONVROT_BACKENDS.get(key)
+    if selected is False or (selected is None and len(_CONVROT_BACKENDS) >= _CONVROT_BACKEND_LIMIT):
+        return False
+    try:
+        if not _native_convrot_has_headroom(input, other):
+            # Recheck a previously selected native path as residency changes.
+            # Never allocate probe temporaries on a nearly-full GPU.
+            if selected is None:
+                _CONVROT_BACKENDS[key] = False
+                _log("ConvRot kernel check skipped: insufficient headroom for native GEMM; retaining Triton.")
+            return False
+        if selected is True:
+            return True
+        ctx = SimpleNamespace(save_for_backward=lambda *args: None)
+        native_ms = _time_convrot_forward(
+            lambda: _default_quanto_qbytes_linear_forward(ctx, input, other, bias), input.device,
+        )
+        triton_ms = _time_convrot_forward(
+            lambda: _int8_linear_forward_triton_dense_fast(ctx, input, other, bias, mark_used=False), input.device,
+        )
+        # Keep the existing path on ties/noisy measurements.
+        use_native = 0 < native_ms < triton_ms * 0.85
+        _CONVROT_BACKENDS[key] = use_native
+        backend = "native" if use_native else "Triton"
+        _log(
+            f"ConvRot kernel check M/K/N={_activation_rows(input.shape)}/{input.shape[-1]}/{other.shape[0]} "
+            f"{input.dtype}: native={native_ms:.2f} ms, Triton={triton_ms:.2f} ms; using {backend}."
+        )
+        return use_native
+    except Exception as exc:
+        if "cuda error:" in str(exc).lower():
+            # A driver/device failure may leave the CUDA context unusable.
+            # Only ordinary allocation/probe failures are safe to fall back from.
+            raise
+        # A failed optional probe must not disable the working backend globally.
+        _CONVROT_BACKENDS[key] = False
+        _log(f"ConvRot kernel check unavailable; retaining Triton. {_summarize_kernel_error(exc)}")
+        return False
+
+
 def _mark_kernel_used() -> None:
     global _KERNEL_USED_PRINTED
     if _KERNEL_USED_PRINTED:
@@ -666,11 +765,12 @@ def _mark_kernel_used() -> None:
     _log("Injected Triton int8 kernels are being used.")
 
 
-def _int8_linear_forward_triton_dense_fast(ctx, input: torch.Tensor, other: torch.Tensor, bias: Optional[torch.Tensor]):
+def _int8_linear_forward_triton_dense_fast(ctx, input: torch.Tensor, other: torch.Tensor, bias: Optional[torch.Tensor], *, mark_used: bool = True):
     ctx.save_for_backward(input, other)
     if _TRITON_MODULE is None:
         raise RuntimeError("Triton backend not initialized")
-    _mark_kernel_used()
+    if mark_used:
+        _mark_kernel_used()
 
     input_shape = input.shape
     in_features = int(input_shape[-1])
@@ -816,6 +916,12 @@ def enable_quanto_int8_kernel(triton_mod=None) -> bool:
         if dense_hot_path:
             if _prefer_native_quanto_path(input):
                 return orig_forward(ctx, input, other, bias)
+            if _prefer_native_convrot_path(input, other, bias):
+                try:
+                    return orig_forward(ctx, input, other, bias)
+                except torch.OutOfMemoryError:
+                    _CONVROT_BACKENDS[_convrot_backend_key(input, other)] = False
+                    _log("ConvRot native GEMM ran out of memory; retrying this layer with Triton.")
             try:
                 return _int8_linear_forward_triton_dense_fast(ctx, input, other, bias)
             except Exception as exc:

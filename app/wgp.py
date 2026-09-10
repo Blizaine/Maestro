@@ -92,7 +92,7 @@ from shared.llm_engines.nanovllm.vllm_support import resolve_lm_decoder_engine
 from shared import model_dropdowns
 from collections import defaultdict
 from services.job_lifecycle import call_with_sticky_interrupt
-from services.generation_memory import cleanup_failed_generation, release_auxiliary_models
+from services.generation_memory import classify_memory_error, cleanup_failed_generation, log_generation_memory, release_auxiliary_models
 
 # import torch._dynamo as dynamo
 # dynamo.config.recompile_limit = 2000   # default is 256
@@ -2710,15 +2710,10 @@ if not Path(config_load_filename).is_file():
     # this block only runs on first install.
     try:
         from services.hardware_detect import detect_hardware
-        from services.perf_recommend import recommend_settings, applied_keys
+        from services.perf_recommend import apply_auto_performance
         _hw = detect_hardware()
-        _rec = recommend_settings(_hw)
-        for _key in applied_keys():
-            if _key in _rec:
-                server_config[_key] = _rec[_key]
-        # Mark the config as auto-tuned so the UI shows the auto card
-        # by default. User can flip it off in Settings later.
-        server_config.setdefault("services", {})["auto_performance"] = True
+        _auto_result = apply_auto_performance(server_config, _hw, force=True)
+        _rec = _auto_result["recommended"]
         print(f"[Maestro] Auto-tuned for {_hw.get('gpu_name', 'CPU')}: {_rec.get('_recommendation_label', 'fallback profile')}")
     except Exception as _e:
         print(f"[Maestro] Auto-tune failed, using conservative defaults: {_e}")
@@ -9509,6 +9504,9 @@ def generate_video(
                     abort = True
                     break
             except Exception as e:
+                crash_type = classify_memory_error(e)
+                if crash_type:
+                    log_generation_memory(torch.cuda)
                 if len(control_audio_tracks) > 0 or len(source_audio_tracks) > 0:
                     cleanup_temp_audio_files(control_audio_tracks + source_audio_tracks)
                 remove_temp_filenames(temp_filenames_list)
@@ -9532,12 +9530,6 @@ def generate_video(
                 gc.collect()
                 torch.cuda.empty_cache()
                 s = str(e)
-                keyword_list = {"CUDA out of memory" : "VRAM", "Tried to allocate":"VRAM", "CUDA error: out of memory": "RAM", "CUDA error: too many resources requested": "RAM"}
-                crash_type = ""
-                for keyword, tp  in keyword_list.items():
-                    if keyword in s:
-                        crash_type = tp 
-                        break
                 state["prompt"] = ""
                 if crash_type == "VRAM":
                     if (
@@ -9563,7 +9555,19 @@ def generate_video(
                             "number of frames."
                         )
                 elif crash_type == "RAM":
-                    new_error = "The generation of the video has encountered an error: it is likely that you have unsufficient RAM and / or Reserved RAM allocation should be reduced using 'perc_reserved_mem_max' or using a different Profile."
+                    new_error = (
+                        "Generation ran out of system RAM. Close other memory-heavy "
+                        "applications or reduce the model workload. If model weights "
+                        "are pinned, a lower reserved-RAM limit or an unpinned profile "
+                        "may help. Check the terminal for the original error."
+                    )
+                elif crash_type == "CUDA":
+                    new_error = (
+                        "CUDA reported an out-of-memory error. This driver message "
+                        "does not identify whether VRAM or host memory caused it. "
+                        "Check the terminal and RAM/VRAM usage, then try restarting "
+                        "Maestro or reducing the model workload."
+                    )
                 else:
                     new_error =  gr.Error(f"The generation of the video has encountered an error, please check your terminal for more information. '{s}'")
                 tb = traceback.format_exc().split('\n')[:-1] 

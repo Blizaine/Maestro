@@ -3,6 +3,32 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [2.1.5] - 2026-09-10
+
+- Includes the post-v2.1.4 Viggle control-frame memory fix: bounded conversion
+  and uint8 padding avoid full-window floating-point copies.
+- Fixed INT8 fallback GEMMs using FP32 checkpoint scales to promote BF16/FP16
+  activations. ConvRot inference compares the corrected native path with Triton
+  on actual loaded weights and shapes, with cached decisions and memory checks.
+- Improved H3 AI Faithful adaptation of detailed timed scripts: retain complete
+  action phases, separate character/production notes from events and speech,
+  preserve source order, relative timing, camera/action pairing and the ending.
+- Removed destructive action/sound truncation from final H3 prompt compilation.
+  Increased camera-writing response budgets and reject incomplete JSON instead
+  of accepting a silently shortened draft. Exact dialogue remains checked.
+- Fixed idle unloading during active or concurrent LLM calls and multi-pass
+  enhancement, including validation, repair and window camera planning.
+- Preserved stereo audio when muxing and joining H3 windows. CPU resampling now
+  keeps torchaudio helper allocations off CUDA, including under MMGP defaults.
+- Fixed Director H3 Seamless validation applying one native shot's limits to an
+  entire multi-window timeline instead of its individual inference windows.
+- Added revision-aware Auto performance migration that preserves manual choices,
+  plus RAM/VRAM diagnostics and more accurate memory-error classification.
+- Documented update behavior, performance comparisons and validation limits.
+
+See the [v2.1.5 release notes](docs/RELEASE_NOTES_V2.1.5.md) and
+[validation record](docs/VALIDATION_V2.1.5.md).
+
 ## [2.1.4] - 2026-09-09
 
 - Reduced H3/Viggle VAE loading overhead by reading native checkpoint layouts

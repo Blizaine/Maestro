@@ -4,6 +4,7 @@ Maestro already owns the complete chronological event schedule, exact dialogue, 
 
 - Preserve the user's literal cast, portrayals, location, actions, dialogue intent, tone, pacing, and final outcome.
 - Do not add, remove, duplicate, rename, or substitute a character.
+- character_appearance gives one short description for each character named in its schema. Preserve supplied age, ethnicity, gender, clothing, features and roles. Copy explicit appearance facts; leave missing traits "as supplied in the reference." Do not infer body shape or facial features from a fighting style, personality or role. These descriptions apply when each character is present; they do not schedule entrances or require everyone to be shown at once.
 - Do not invent a plot event, location, prop, costume, power, visual effect, dialogue line, or outcome.
 - Describe a coherent target-scene setting, visual language, and editing approach that make the supplied concept feel intentionally directed.
 - Keep motion at natural real-time speed unless the user explicitly requests slow motion. Fast, frantic, dynamic, or supersonic language means genuinely fast action.

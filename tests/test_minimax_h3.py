@@ -3263,6 +3263,26 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
         visual.assert_called_once_with(pixels, grid_thw=grid)
         self.assertEqual(result, ("image embeds", []))
 
+    def test_audio_resampling_stays_on_cpu_with_a_non_cpu_default_device(self):
+        from models.minimax_h3.minimax_h3_main import _prepare_stereo_waveform
+
+        # MMGP changes the default device to CUDA. Use meta to expose implicit
+        # helper allocations without reserving VRAM or requiring a GPU.
+        waveform = self.torch.stack([
+            self.torch.linspace(-0.5, 0.5, 960, device="cpu"),
+            self.torch.linspace(0.75, -0.25, 960, device="cpu"),
+        ], dim=1)
+        for sample_rate in (44100, 48000):
+            with self.subTest(sample_rate=sample_rate):
+                expected = _prepare_stereo_waveform(waveform, sample_rate, 720)
+                with self.torch.device("meta"):
+                    actual = _prepare_stereo_waveform(waveform, sample_rate, 720)
+                    self.assertEqual(self.torch.empty(0).device.type, "meta")
+                self.assertEqual(actual.device.type, "cpu")
+                self.assertEqual(tuple(actual.shape), (2, 720))
+                self.assertTrue(self.torch.equal(actual, expected))
+                self.assertFalse(self.torch.equal(actual[0], actual[1]))
+
     def test_fl2va_overlap_splits_motion_history_and_boundary_frame(self):
         from models.minimax_h3.minimax_h3_main import (
             _build_frozen_control_video,

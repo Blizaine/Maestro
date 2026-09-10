@@ -1362,6 +1362,78 @@ class TestDirectorVideoExecutionProfile(unittest.TestCase):
         self.assertEqual(profile["first_block_cache_multiplier"], 0.08)
         self.assertEqual(profile["first_block_cache_warmup"], 25)
 
+    def test_seamless_child_validates_native_window_not_full_timeline(self):
+        profile = build_director_video_execution_profile(
+            "minimax_h3",
+            self._h3_model(),
+            {"resolution": "1280x704"},
+            {"gpu_vram_gb": 24},
+        )
+        # These are the full music/story timelines reported by users. Neither
+        # has to fit the frame lattice of one native H3 inference window.
+        for total_frames in (2639, 6749):
+            with self.subTest(total_frames=total_frames):
+                params = {
+                    "model_type": "minimax_h3",
+                    "video_length": total_frames,
+                    "sliding_window_size": 243,
+                    "sliding_window_overlap": 18,
+                    "minimax_h3_multi_window": True,
+                    "multi_prompts_gen_type": 2,
+                    "_director_video_execution_profile": profile,
+                }
+
+                pipeline._prepare_director_generation_params(params)
+
+                self.assertEqual(params["video_length"], total_frames)
+                self.assertEqual(params["sliding_window_size"], 243)
+                self.assertTrue(params["sliding_window_memory_override"])
+
+    def test_seamless_child_still_rejects_invalid_native_windows(self):
+        profile = build_director_video_execution_profile(
+            "minimax_h3",
+            self._h3_model(),
+            {"resolution": "1280x704"},
+            {"gpu_vram_gb": 24},
+        )
+        for window_frames in (None, 123, 244, 260):
+            with self.subTest(window_frames=window_frames):
+                params = {
+                    "model_type": "minimax_h3",
+                    "video_length": 243,
+                    "sliding_window_size": window_frames,
+                    "minimax_h3_multi_window": True,
+                    "multi_prompts_gen_type": 2,
+                    "_director_video_execution_profile": profile,
+                }
+
+                with self.assertRaisesRegex(ValueError, "Director window"):
+                    pipeline._prepare_director_generation_params(params)
+
+    def test_non_seamless_children_still_validate_each_shot(self):
+        profile = build_director_video_execution_profile(
+            "minimax_h3",
+            self._h3_model(),
+            {"resolution": "1280x704"},
+            {"gpu_vram_gb": 24},
+        )
+        for overrides, label in (
+            ({}, "Director shot 1"),
+            ({"per_clip_frames": [243, 2639]}, "Director shot 2"),
+            ({"per_clip_frames": [243, 2639], "minimax_h3_multi_window": True}, "Director shot 2"),
+        ):
+            with self.subTest(overrides=overrides):
+                params = {
+                    "model_type": "minimax_h3",
+                    "video_length": 2639,
+                    "sliding_window_size": 243,
+                    "_director_video_execution_profile": profile,
+                    **overrides,
+                }
+
+                with self.assertRaisesRegex(ValueError, label):
+                    pipeline._prepare_director_generation_params(params)
+
     def test_h3_optimizations_are_applied_to_every_director_child(self):
         profile = {"is_minimax_h3": True}
         video_params = {
@@ -1655,6 +1727,9 @@ class TestDirectorH3GenerationContract(unittest.TestCase):
         captured = {}
 
         def submit(params, **kwargs):
+            # Exercise the real submission guard; mocking it out hid a failure
+            # that rejected the entire seamless timeline as one H3 shot.
+            pipeline._prepare_director_generation_params(params)
             captured.update(params)
             return ["continuous.mp4"]
 
@@ -1669,6 +1744,8 @@ class TestDirectorH3GenerationContract(unittest.TestCase):
                     "_director_shot_image_policy": SHOT_IMAGE_PROMPT_ONLY,
                     "_director_video_execution_profile": {
                         "is_minimax_h3": True,
+                        "frames_minimum": 124,
+                        "frame_step": 17,
                         "effective_max_frames": 243,
                         "normalized_resolution": "1280x704",
                     },

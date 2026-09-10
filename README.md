@@ -18,6 +18,7 @@ The flagship feature. Drop in an audio track or write a story; a local LLM plans
 ### ⚡ Performance Auto-Tune — zero-config setup
 Detects your GPU, VRAM, and RAM on first launch and picks the right profile, quantization, VAE tiling, and VRAM safety coefficient. No more "Profile 1 vs 2 vs 4.5" guesswork. Power users still have full manual control under "Show advanced settings."
 
+- **Recommendations stay current:** while Auto is enabled, revised recommendations apply once at startup. Manual mode and customized values are preserved. See [Performance Auto-Tune](docs/Performance-auto-tune.md) for memory profiles and controlled performance comparisons.
 - **OOM recovery banner** auto-suggests lowering the VRAM headroom when a generation runs out, with one-click apply.
 - **Live download status** during model setup ("Downloading transcription model (first use downloads ~300MB)..." instead of a vague spinner).
 
@@ -92,6 +93,21 @@ View all past Director runs with their full state — clip plans, generated imag
 ## Updates
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
+
+### v2.1.5 (2026-09-10)
+
+**Better H3 prompt adaptation, smarter Viggle INT8 execution, and audio and Director fixes**
+
+- **More faithful detailed prompts:** pasted timed scripts keep their action phases, character profiles, camera directions and ending together. Production notes and silent action descriptions no longer inflate dialogue budgets. Complete action and sound descriptions survive the final H3 prompt compilation; the selected Maestro duration remains authoritative.
+- **More reliable AI enhancement:** clearer camera-writing requests and larger response budgets reduce incomplete drafts. The LLM stays loaded throughout planning and repairs, fixing mid-enhancement `LLM not loaded` errors. Real Gemma 4 4B and Qwen3.8 27B checks preserved all eight phases of the regression example without repair or fallback; results remain editable.
+- **Viggle / H3 INT8 performance:** corrected a fallback that promoted BF16/FP16 computation to FP32. ConvRot layers now compare the corrected fallback with Triton and retain the faster path when GPU memory allows. A local RTX 4090 layer test made the fallback about **3× faster**, while Triton still won and remained selected. This is a layer measurement, not a promised full-generation speedup.
+- **Stereo audio stays stereo:** H3's 32 kHz stereo output survives video muxing and window joins, including mono prefixes and silent gaps. Shared audio resampling stays on CPU until encoding needs the GPU, avoiding unintended CUDA helper allocations.
+- **Director seamless timelines:** validate each native H3 window against the saved shot limit, allowing the complete planned movie and its trimmed final window to render without being rejected as one oversized shot.
+- **Safer performance updates and diagnostics:** revised Auto recommendations can refresh existing installs once while preserving custom settings and manual mode. Memory failures record RAM/VRAM readings before cleanup, and generic CUDA errors are no longer mislabeled as definite system-RAM exhaustion.
+
+Use Pinokio's **Update**, restart Maestro and refresh the browser. Run **Enhance** again from the original prompt to replace a draft prepared by an older version. Existing models and saved projects stay in place; no new dependencies or model downloads are required.
+
+[Full release notes](docs/RELEASE_NOTES_V2.1.5.md) · [Validation and measured limits](docs/VALIDATION_V2.1.5.md)
 
 ### v2.1.4 (2026-09-09)
 

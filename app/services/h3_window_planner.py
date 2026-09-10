@@ -450,7 +450,7 @@ def _normalized_window_shots(
         if isinstance(shot, dict)
     ]
     if not raw_shots:
-        action = _compact(item.get("action"), 430)
+        action = sanitize_h3_prompt_text(item.get("action"))
         if not action:
             return []
         raw_shots = [{
@@ -492,11 +492,11 @@ def _normalized_window_shots(
                 raw.get("transition") or ("opening composition" if index == 0 else "hard cut"),
                 70,
             ),
-            "framing": _compact(raw.get("framing") or "cinematic medium shot", 130),
-            "camera": _compact(raw.get("camera") or "the camera follows the action", 170),
-            "action": _compact(raw.get("action"), 330),
+            "framing": sanitize_h3_prompt_text(raw.get("framing") or "cinematic medium shot"),
+            "camera": sanitize_h3_prompt_text(raw.get("camera") or "the camera follows the action"),
+            "action": sanitize_h3_prompt_text(raw.get("action")),
             "dialogue": list(raw.get("dialogue") or []),
-            "sound_effects": _compact(raw.get("sound_effects") or "N/A", 130),
+            "sound_effects": sanitize_h3_prompt_text(raw.get("sound_effects") or "N/A"),
         })
         cursor = end
     normalized[-1]["end_seconds"] = round(duration, 3)
@@ -513,9 +513,9 @@ def _shot_prompt_sentence(
     start = float(shot["start_seconds"])
     end = float(shot["end_seconds"])
     transition = _compact(shot.get("transition"), 70)
-    framing = _compact(shot.get("framing"), 130)
-    camera = _compact(shot.get("camera"), 170)
-    action = _compact(shot.get("action"), 330)
+    framing = sanitize_h3_prompt_text(shot.get("framing"))
+    camera = sanitize_h3_prompt_text(shot.get("camera"))
+    action = sanitize_h3_prompt_text(shot.get("action"))
 
     if number == 1:
         lead = f"[Shot 1] {preamble} From {start:.2f} to {end:.2f} seconds, {framing}".strip()
@@ -561,10 +561,10 @@ def compile_h3_window_prompts(
             f"H3 window planner returned {len(windows or [])} windows; expected {len(spans)}."
         )
 
-    subjects = _compact(plan.get("subject_continuity"), 360)
-    setting = _compact(plan.get("setting_continuity"), 260)
-    visual = _compact(plan.get("visual_continuity"), 360)
-    initial_state = _compact(plan.get("initial_state"), 320)
+    subjects = sanitize_h3_prompt_text(plan.get("subject_continuity"))
+    setting = sanitize_h3_prompt_text(plan.get("setting_continuity"))
+    visual = sanitize_h3_prompt_text(plan.get("visual_continuity"))
+    initial_state = sanitize_h3_prompt_text(plan.get("initial_state"))
     ambient = _compact(
         sanitize_h3_nonverbal_audio(
             plan.get("ambient_audio") or "Natural location ambience"
@@ -590,15 +590,14 @@ def compile_h3_window_prompts(
     speaker_ids: dict[str, str] = {}
     compiled: list[dict[str, Any]] = []
     timed_keyframes = list(injected_keyframes or [])
-    previous_closing = _compact(
+    previous_closing = sanitize_h3_prompt_text(
         initial_state or "The requested scene is established in its opening composition",
-        320,
     )
 
     for position, (span, item) in enumerate(zip(spans, windows)):
         if not isinstance(item, dict):
             raise ValueError(f"H3 window {position + 1} is not an object.")
-        closing = _compact(item.get("closing_state"), 320)
+        closing = sanitize_h3_prompt_text(item.get("closing_state"))
         if not closing:
             closing = "The action holds in a concrete state ready to continue" if position + 1 < len(spans) else "The requested final beat settles naturally"
 
@@ -610,7 +609,7 @@ def compile_h3_window_prompts(
         seen_effects: set[str] = set()
         for shot in shots:
             for raw_effect in re.split(r"\s*;\s*", str(shot.get("sound_effects") or "")):
-                effect = _compact(raw_effect, 130)
+                effect = sanitize_h3_prompt_text(raw_effect)
                 key = effect.casefold()
                 if key in {"", "n/a", "none", "no one-time effect"} or key in seen_effects:
                     continue
@@ -805,6 +804,9 @@ def compile_h3_window_prompts(
             for shot_index, shot in enumerate(shots)
         ]
         visual_parts.extend([silence, outcome_instruction])
+        constraints = sanitize_h3_prompt_text(source_intent.get("negative_constraints"))
+        if constraints:
+            visual_parts.append(constraints)
         visual_parts.append(f"The segment ends with {closing}.")
         soundscape = ambient
         if position > 0:
@@ -947,7 +949,7 @@ def _schema(window_count: int) -> dict[str, Any]:
     }
 
 
-def _parse_json_object(text: str) -> dict[str, Any] | None:
+def _parse_json_object(text: str, *, allow_repair: bool = True) -> dict[str, Any] | None:
     cleaned = str(text or "").strip()
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
@@ -963,6 +965,8 @@ def _parse_json_object(text: str) -> dict[str, Any] | None:
                 return value
         except json.JSONDecodeError:
             continue
+    if not allow_repair:
+        return None
     try:
         import json_repair
 

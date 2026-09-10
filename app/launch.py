@@ -223,33 +223,35 @@ if "auto_performance" not in _services:
     except Exception as _e:
         print(f"[Maestro] Migration: failed to persist auto_performance default: {_e}")
 
-# First-boot auto-tune: a fresh install has auto_performance=True but the
-# recommended profile was only ever WRITTEN when the user opened Settings and
-# clicked apply. Until then the first generation ran on wgp's conservative
-# fallback profile — so a capable card could OOM on its very first video with
-# a proactive fix sitting unused. Apply the hardware recommendation ONCE here,
-# before any model loads, so the first generation already uses the right
-# profile. Gated on a sentinel so it's a true one-shot and never fights a user
-# who later tunes manually (that flips auto_performance off).
-if _services.get("auto_performance") and not _services.get("auto_performance_applied"):
+# Apply new recommendation revisions before model loading. Existing automatic
+# values may migrate once; manual mode and individually customized values are
+# preserved. Fresh-config creation and explicit Apply record the same revision.
+from services.perf_recommend import auto_performance_needs_refresh as _auto_perf_needs_refresh
+
+if _auto_perf_needs_refresh(wgp.server_config):
     try:
         from services.hardware_detect import detect_hardware as _detect_hw
-        from services.perf_recommend import recommend_settings as _recommend, applied_keys as _applied_keys
+        from services.perf_recommend import apply_auto_performance as _apply_auto_perf
         _hw = _detect_hw()
-        if _hw.get("cuda_available"):
-            _rec = _recommend(_hw)
-            for _k in _applied_keys():
-                if _k in _rec:
-                    wgp.server_config[_k] = _rec[_k]
-            _services["auto_performance_applied"] = True
+        _auto_result = _apply_auto_perf(wgp.server_config, _hw)
+        if _auto_result is not None:
             with open(wgp.server_config_filename, "w", encoding="utf-8") as _f:
                 _f.write(json.dumps(wgp.server_config, indent=4))
-            print(f"[Maestro] First-boot auto-tune applied: {_rec.get('_recommendation_label', 'recommended profile')} "
-                  f"(video_profile={_rec.get('video_profile')}, vram_safety_coefficient={_rec.get('vram_safety_coefficient')})")
+            # wgp has already imported config-backed runtime values. Refresh
+            # changed automatic values too, so disk and this process agree.
+            for _k in ("attention_mode", "vae_config", "compile", "transformer_quantization"):
+                if _k in _auto_result["updated"]:
+                    setattr(wgp, _k, _auto_result["updated"][_k])
+            if "vram_safety_coefficient" in _auto_result["updated"]:
+                wgp.args.vram_safety_coefficient = float(_auto_result["updated"]["vram_safety_coefficient"])
+            print(f"[Maestro] Auto-tune revision {_services['auto_performance_revision']} applied "
+                  f"(video_profile={wgp.server_config.get('video_profile')}, "
+                  f"image_profile={wgp.server_config.get('image_profile')}; "
+                  f"preserved custom settings: {', '.join(_auto_result['preserved']) or 'none'}).")
         else:
-            print("[Maestro] First-boot auto-tune skipped: no CUDA GPU detected.")
+            print("[Maestro] Auto-tune refresh skipped: no CUDA GPU detected.")
     except Exception as _e:
-        print(f"[Maestro] First-boot auto-tune skipped ({_e}); using defaults until Settings → Performance is applied.")
+        print(f"[Maestro] Auto-tune refresh skipped ({_e}); using saved settings until Settings → Performance is applied.")
 
 # Restore argv
 sys.argv = _original_argv
@@ -6403,8 +6405,14 @@ async def update_system_config(request: Request):
         wgp.server_config["maestro_host_notification_sound_volume"] = volume
         updated["host_notification_sound_volume"] = volume
 
+    from services.perf_recommend import applied_keys
+
     for key, value in body.items():
         if key in ALLOWED_KEYS:
+            if key in applied_keys() and wgp.server_config.get(key) != value:
+                # Protect manual API clients too; the settings UI also turns
+                # Auto off, but a separate frontend request is not sufficient.
+                wgp.server_config.setdefault("services", {})["auto_performance"] = False
             wgp.server_config[key] = value
             updated[key] = value
 
@@ -6675,30 +6683,12 @@ async def apply_system_detect():
         flag noting this so the UI can show the user.
     """
     from services.hardware_detect import detect_hardware
-    from services.perf_recommend import recommend_settings, applied_keys
+    from services.perf_recommend import apply_auto_performance, applied_keys
 
     hw = detect_hardware()
-    rec = recommend_settings(hw)
-
-    # Write only the actual config keys (skip _recommendation_label
-    # and _recommendation_reason which are display-only metadata).
-    profile_changed = False
-    for key in applied_keys():
-        if key in rec:
-            old_value = wgp.server_config.get(key)
-            new_value = rec[key]
-            if old_value != new_value:
-                wgp.server_config[key] = new_value
-                if key.endswith("_profile"):
-                    profile_changed = True
-
-    # Mark auto_performance ON so future PUTs to /system-config can
-    # detect "user manually changed something" and flip it OFF.
-    services = wgp.server_config.setdefault("services", {})
-    services["auto_performance"] = True
-    # Sentinel so the first-boot auto-tune (see startup) treats this as
-    # already-applied and never overwrites what the user just applied.
-    services["auto_performance_applied"] = True
+    result = apply_auto_performance(wgp.server_config, hw, force=True)
+    rec = result["recommended"]
+    profile_changed = any(key.endswith("_profile") for key in result["updated"])
 
     # Persist to disk
     with open(wgp.server_config_filename, "w", encoding="utf-8") as f:
@@ -6711,6 +6701,8 @@ async def apply_system_detect():
         wgp.vae_config = rec["vae_config"]
     if "compile" in rec:
         wgp.compile = rec["compile"]
+    if "transformer_quantization" in rec:
+        wgp.transformer_quantization = rec["transformer_quantization"]
     if "vram_safety_coefficient" in rec:
         wgp.args.vram_safety_coefficient = float(rec["vram_safety_coefficient"])
 

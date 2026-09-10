@@ -954,6 +954,28 @@ class H3WindowPlannerTests(unittest.TestCase):
             self.assertNotRegex(item["prompt"], r"(?i)\bwindow\b")
 
     @patch("services.llm_service.generate", side_effect=RuntimeError("offline"))
+    def test_faithful_imported_silent_duel_fits_two_windows_without_speech_budget_error(self, _generate):
+        prompt = (ROOT / "tests/fixtures/h3_silent_wuxia_prompt.txt").read_text(encoding="utf-8")
+        result = plan_h3_sliding_windows(
+            prompt,
+            model_type="minimax_h3_fl2va_full",
+            resolution="1280x704",
+            total_frames=672,
+            window_frames=345,
+            overlap_frames=18,
+            fps=24,
+            planning_style="faithful",
+        )
+        self.assertEqual(result["window_count"], 2)
+        self.assertEqual(len(result["window_prompts"]), 2)
+        self.assertEqual(result["source_intent"]["cast_names"], ["Character A", "Character B"])
+        self.assertEqual(result["source_prompt"], prompt.strip())
+        joined = "\n".join(result["window_prompts"])
+        self.assertNotIn("<d>", joined)
+        self.assertNotIn("no slow motion", joined)
+        self.assertIn("No spoken words", joined)
+
+    @patch("services.llm_service.generate", side_effect=RuntimeError("offline"))
     def test_studio_faithful_eight_window_screenplay_keeps_cast_and_dialogue(self, _generate):
         prompt = (
             "George Costanza walks into the coffee shop on the TV show Friends. "

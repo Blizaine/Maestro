@@ -23,6 +23,13 @@ Time follows model-specific duration steps through five minutes, with 10m,
 window-count controls. Director retains its ten-second minimum and chooses
 shot capacity from its selected video model, resolution and GPU recommendation.
 
+For H3 First / Last models that support **Seamless**, Director renders the
+full timeline through native continuation windows. The saved maximum shot
+length limits each window, while the full movie keeps its planned duration,
+including the final trimmed window. The total movie length does not have to
+match the frame increments of a single H3 shot. Independent shots still need
+to fit the model's frame increments and the saved maximum.
+
 ## LoRA strengths
 
 Activated Video and Image LoRAs each show a strength slider and numeric input.

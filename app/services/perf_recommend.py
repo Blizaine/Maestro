@@ -1,10 +1,13 @@
 """
 Performance recommendation engine for the Performance Auto-Tune feature.
 
-Single entry point: `recommend_settings(hw)` takes the dict from
+`recommend_settings(hw)` takes the dict from
 `hardware_detect.detect_hardware()` and returns a dict of settings
 to apply to wgp_config.json. Pure function — no side effects, no
 imports beyond stdlib, easy to unit test.
+
+The auto-apply helpers below update a supplied config dict, without disk or
+runtime I/O, and track which recommendation revision owns each setting.
 
 The recommendation table mirrors the design in
 `memory/project_performance_auto.md`. Rationale lives there; this
@@ -45,6 +48,13 @@ PROFILE_DESCRIPTIONS = {
     4.5: "Optimized for very limited VRAM",
     5:   "Maximum offload — slower but works on small machines",
 }
+
+# Revision 1 was tracked only by services.auto_performance_applied.
+# Bump when recommendations change so opted-in existing installs can refresh.
+# Revision 2 was an unpublished trial of Profile 4 on 24-31 GB hosts. It
+# OOM'd on the reported A4500; restore the conservative table pending an A/B
+# test with a smaller pinning cap. Manually selected profiles remain untouched.
+AUTO_PERFORMANCE_REVISION = 3
 
 
 def recommend_h3_reserved_ram_fraction(
@@ -218,6 +228,7 @@ def recommend_settings(hw: dict) -> dict:
     vram_tier = hw.get("vram_tier", "low")
     supports_fp8 = bool(hw.get("supports_fp8", False))
     supports_nvfp4 = bool(hw.get("supports_nvfp4", False))
+    ram_gb = float(hw.get("ram_gb") or 0)
 
     profile = _pick_profile(ram_tier, vram_tier)
     quant = _pick_quantization(vram_tier, supports_fp8, supports_nvfp4)
@@ -228,7 +239,6 @@ def recommend_settings(hw: dict) -> dict:
     # Mentions the actual numbers so support tickets have context.
     gpu_name = hw.get("gpu_name", "GPU")
     vram_gb = hw.get("gpu_vram_gb", 0)
-    ram_gb = hw.get("ram_gb", 0)
     # Audio gets its own tiering. The shared profile table is calibrated
     # for 20+ GB VIDEO models, but the whole ACE-Step 1.5 audio stack
     # (XL transformer int8 ~5.3 GB + LM 4B int8 ~4.4 GB + codec) fits in
@@ -283,6 +293,70 @@ def applied_keys() -> list:
         "attention_mode",
         "compile",
     ]
+
+
+def auto_performance_needs_refresh(config: dict) -> bool:
+    """Refresh only opted-in installs with an unapplied/older recommendation."""
+    services = config.get("services", {})
+    if not services.get("auto_performance", False):
+        return False
+    try:
+        revision = int(services.get("auto_performance_revision") or 0)
+    except (TypeError, ValueError):
+        revision = 0
+    return (
+        not services.get("auto_performance_applied", False)
+        or revision < AUTO_PERFORMANCE_REVISION
+    )
+
+
+def apply_auto_performance(config: dict, hw: dict, *, force: bool = False) -> dict | None:
+    """Apply or migrate recommendations in memory; callers persist the result.
+
+    Startup refreshes only values that still match their previous automatic
+    defaults. Explicit Apply and fresh installs use force=True. Manual mode
+    never migrates, and failed CUDA detection leaves startup eligible to retry.
+    """
+    if not force and (
+        not auto_performance_needs_refresh(config)
+        or not hw.get("cuda_available", False)
+    ):
+        return None
+
+    rec = recommend_settings(hw)
+    recommended = {key: rec[key] for key in applied_keys()}
+    services = config.setdefault("services", {})
+    previous = None
+    if not force and services.get("auto_performance_applied"):
+        previous = services.get("auto_performance_defaults")
+        if not isinstance(previous, dict):
+            # Legacy installs have only the applied boolean. The restored
+            # profile table matches their revision-1 coarse RAM/VRAM tiers.
+            previous = dict(recommended)
+            legacy_profile = _pick_profile(
+                hw.get("ram_tier", "low"), hw.get("vram_tier", "low")
+            )
+            previous.update(video_profile=legacy_profile, image_profile=legacy_profile)
+
+    updated = {}
+    preserved = []
+    for key, value in recommended.items():
+        if previous is not None and key in config and (
+            key not in previous or config[key] != previous[key]
+        ):
+            preserved.append(key)
+            continue
+        if config.get(key) != value:
+            config[key] = value
+            updated[key] = value
+
+    services["auto_performance"] = True
+    services["auto_performance_applied"] = bool(hw.get("cuda_available", False))
+    services["auto_performance_revision"] = (
+        AUTO_PERFORMANCE_REVISION if services["auto_performance_applied"] else 0
+    )
+    services["auto_performance_defaults"] = recommended
+    return {"recommended": rec, "updated": updated, "preserved": preserved}
 
 
 # ── Per-job coefficient adjustment ─────────────────────────────────

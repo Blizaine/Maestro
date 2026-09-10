@@ -15,6 +15,7 @@ if str(APP) not in sys.path:
 
 from services.h3_story_ledger import (  # noqa: E402
     _canonicalize_segment_contract,
+    _camera_phase_beats,
     _canonicalize_story_ledger,
     _coalesce_camera_phases,
     _creative_conversation_brief,
@@ -801,6 +802,95 @@ class H3StoryLedgerTests(unittest.TestCase):
                 self.assertIn("opens the door", events)
                 self.assertNotIn("We should leave now", events)
 
+    def test_imported_wuxia_character_profiles_are_not_spoken_dialogue(self):
+        source = (ROOT / "tests/fixtures/h3_silent_wuxia_prompt.txt").read_text(encoding="utf-8")
+        for prompt in (source, source.replace("no dialogue, ", "")):
+            with self.subTest(silent="no dialogue" in prompt):
+                self.assertEqual(extract_locked_dialogue(prompt), [])
+                events = " | ".join(item["text"] for item in extract_source_events(prompt))
+                intent = extract_h3_source_intent(prompt)
+                self.assertNotIn("Biased toward", events)
+                self.assertIn("Biased toward explosive fist techniques", intent["global_instructions"])
+                self.assertIn("Biased toward leg techniques", intent["global_instructions"])
+                self.assertEqual(intent["cast_names"], ["Character A", "Character B"])
+                self.assertIn("time-dilation", intent["pacing_contract"])
+                self.assertNotIn("no slow motion", intent["pacing_contract"])
+
+    def test_requested_slow_motion_survives_fast_action_but_negated_or_spoken_mentions_do_not(self):
+        intent = extract_h3_source_intent(
+            "Extremely fast martial arts. Brief slow-mo before each impact, then return to full speed."
+        )
+        self.assertIn("specified beats", intent["pacing_contract"])
+        for prompt in (
+            "Extremely fast martial arts, no slow motion.",
+            "Extremely fast martial arts without any slow-motion.",
+            'Extremely fast martial arts. Sam says, "We should watch a slow-motion replay."',
+        ):
+            with self.subTest(prompt=prompt):
+                intent = extract_h3_source_intent(prompt)
+                self.assertIn("no slow motion", intent["pacing_contract"])
+
+    def test_silent_brief_does_not_turn_unquoted_character_notes_into_speech(self):
+        for instruction in ("No dialogue.", "Audio: Music only.", "Silent film."):
+            with self.subTest(instruction=instruction):
+                prompt = (
+                    instruction + "\n"
+                    "Hero: A fighter waits by the waterfall.\n"
+                    "Rival (right side, yellow robes): The other fighter crouches on the platform."
+                )
+                self.assertEqual(extract_locked_dialogue(prompt), [])
+                events = " | ".join(item["text"] for item in extract_source_events(prompt))
+                self.assertIn("waits by the waterfall", events)
+                self.assertIn("crouches on the platform", events)
+
+    def test_character_profiles_can_share_a_brief_with_real_screenplay_lines(self):
+        prompt = (
+            "Character A (left side, gray robes): Biased toward explosive fist techniques.\n"
+            "Character B (right side, yellow robes): Specializes in sweeping kicks.\n"
+            "Character A (left side, gray robes): Stand down.\n"
+            'Character B (quietly): "You first."\n'
+            'Character A (left side, gray robes): "Biased toward fist techniques? Me?"\n'
+            "Character B: <d>[English] Watch this.</d>"
+        )
+        locked = extract_locked_dialogue(prompt)
+        self.assertEqual([line["text"] for line in locked], [
+            "Stand down.", "You first.", "Biased toward fist techniques? Me?", "Watch this.",
+        ])
+        self.assertEqual([line["speaker"] for line in locked], [
+            "Character A", "Character B", "Character A", "Character B",
+        ])
+
+    def test_character_profile_does_not_hide_another_principal_in_an_open_cast(self):
+        prompt = (
+            "Mira: Appearance: Red coat and silver hair.\n"
+            "Leo walks into the room."
+        )
+        self.assertEqual(extract_locked_dialogue(prompt), [])
+        intent = extract_h3_source_intent(prompt)
+        self.assertIn("Mira", intent["cast_names"])
+        self.assertIn("Leo", intent["cast_names"])
+
+    def test_silence_spoken_by_a_character_is_not_a_scene_wide_instruction(self):
+        for line in (
+            "Mira: No dialogue today.",
+            'Mira says, "No dialogue today."',
+            "Mira says <d>[English] No dialogue today.</d>",
+        ):
+            with self.subTest(line=line):
+                locked = extract_locked_dialogue(line + "\nLeo: That cannot be right.")
+                self.assertEqual([item["text"] for item in locked], [
+                    "No dialogue today.", "That cannot be right.",
+                ])
+
+    def test_silent_intro_and_no_extra_dialogue_keep_authored_screenplay(self):
+        for instruction in (
+            "No dialogue until the duel ends.",
+            "No extra dialogue.",
+        ):
+            with self.subTest(instruction=instruction):
+                locked = extract_locked_dialogue(instruction + "\nCharacter A: Stand down.")
+                self.assertEqual([item["text"] for item in locked], ["Stand down."])
+
     def test_tagged_screenplay_line_is_counted_once_with_its_speaker(self):
         prompt = (
             "Mira (quietly): <d>[English] We should leave now.</d> She opens the door.\n"
@@ -1026,6 +1116,161 @@ class H3StoryLedgerTests(unittest.TestCase):
             [["D1"], ["D2"], ["D3"]],
         )
 
+    def test_long_silent_action_groups_stay_balanced_and_keep_every_event_in_order(self):
+        prompt = (ROOT / "tests/fixtures/h3_silent_wuxia_prompt.txt").read_text(encoding="utf-8")
+        events = extract_source_events(prompt)
+        durations = [14.375, 13.625]
+        ledger = _deterministic_ledger(
+            prompt, segment_count=2, segment_durations=durations,
+            locked_dialogue=[], camera_coverage="multi_shot", reference_context="",
+        )
+        for number in (1, 2):
+            phases = _camera_phase_beats(
+                [beat for beat in ledger["beats"] if beat["segment"] == number],
+                source_events=events, expected_dialogue_events={},
+            )
+            original = json.loads(json.dumps(phases))
+            grouped = _coalesce_camera_phases(phases, target_count=4)
+            with self.subTest(number=number):
+                counts = [len(beat["source_event_ids"]) for beat in grouped]
+                self.assertEqual(len(grouped), 4)
+                self.assertLessEqual(max(counts), 2 * min(counts))
+                self.assertEqual(
+                    [event for beat in grouped for event in beat["source_event_ids"]],
+                    [event for beat in phases for event in beat["source_event_ids"]],
+                )
+                self.assertEqual(grouped[-1]["state_after"], phases[-1]["state_after"])
+                for phase in phases:
+                    owner = next(beat for beat in grouped if phase["source_event_ids"][0] in beat["source_event_ids"])
+                    self.assertIn(phase["description"], owner["description"])
+                self.assertEqual(phases, original)
+
+    def test_filmable_clock_does_not_create_tiny_tails_from_uneven_locked_actions(self):
+        beats = [{
+            "beat_id": f"B{index + 1}",
+            "source_event_ids": [f"E{index}_{event}" for event in range(count)],
+            "description": "The fighter advances through the courtyard" if index == 0 else "The fighter holds the resulting stance",
+            "dialogue_ids": [], "state_after": "The fighter holds position",
+        } for index, count in enumerate((54, 1, 1, 1))]
+        intent = {"fast_action": True, "pacing_contract": "Fast physical action"}
+        for duration in (5.167, 13.625, 14.375):
+            raw = _segment(2, duration=duration)
+            raw["shots"] = [{
+                "end_seconds": duration * (index + 1) / 4,
+                "framing": "wide action coverage", "camera": "a tracking shot",
+                "action": "The fighter advances",
+            } for index in range(4)]
+            canonical = _canonicalize_segment_contract(
+                raw, segment_number=2, duration=duration, assigned_beats=beats,
+                dialogue_catalog=[], opening_state="The fighter stands in the courtyard", source_intent=intent,
+            )
+            fallback = _fallback_segment(
+                2, duration=duration, beats=beats, opening_state="The fighter stands in the courtyard",
+                camera_coverage="multi_shot", dialogue_catalog=[], source_intent=intent,
+            )
+            for kind, segment in (("canonical", canonical), ("fallback", fallback)):
+                with self.subTest(duration=duration, kind=kind):
+                    self.assertEqual(segment_violations(
+                        "The fighter advances and holds his stance.", segment,
+                        segment_number=2, duration=duration, assigned_beats=beats, dialogue_catalog=[],
+                    ), [])
+                    self.assertEqual(segment["shots"][0]["start_seconds"], 0)
+                    self.assertEqual(segment["shots"][-1]["end_seconds"], duration)
+                    for previous, following in zip(segment["shots"], segment["shots"][1:]):
+                        self.assertEqual(previous["end_seconds"], following["start_seconds"])
+
+    def test_faithful_long_silent_duel_keeps_ai_camera_plan_without_retry_or_fallback(self):
+        prompt = (ROOT / "tests/fixtures/h3_silent_wuxia_prompt.txt").read_text(encoding="utf-8")
+        durations = [14.375, 13.625]
+        ledger = _deterministic_ledger(
+            prompt, segment_count=2, segment_durations=durations,
+            locked_dialogue=[], camera_coverage="multi_shot", reference_context="",
+        )
+        cameras = ["low-angle push in", "lateral tracking shot", "wide pull back", "locked impact composition"]
+        for mode in ("sliding_window", "reference_sequence", "reference_sequence_continuation"):
+            calls = []
+
+            def generate(**kwargs):
+                calls.append(kwargs)
+                self.assertFalse("REPAIR ONLY THIS SEGMENT" in kwargs["prompt"], "Unexpected camera repair")
+                schema = kwargs["json_schema"]["properties"]
+                if "setting_continuity" in schema:
+                    # Reproduce the reported model putting the ending in the
+                    # first window. Faithful must only use the cinematic
+                    # treatment and keep event ownership application-owned.
+                    return json.dumps({
+                        **ledger,
+                        "beats": [{**beat, "segment": 1} for beat in ledger["beats"]],
+                    })
+                number = schema["segment"]["minimum"]
+                duration = durations[number - 1]
+                result = _segment(number, duration=duration)
+                result["shots"] = [{
+                    "shot": index + 1, "start_seconds": duration * index / 4,
+                    "end_seconds": duration * (index + 1) / 4,
+                    "framing": "Readable wide coverage of Character A and Character B",
+                    "camera": camera, "action": "The assigned martial-arts action unfolds",
+                    "sound_effects": "Wind and stone impacts",
+                } for index, camera in enumerate(cameras)]
+                return json.dumps(result)
+
+            with self.subTest(mode=mode):
+                result = plan_h3_story_segments(
+                    prompt, segment_durations=durations, mode=mode, camera_coverage="multi_shot",
+                    expect_dialogue=False, planning_style="faithful", llm_generate=generate,
+                )
+                self.assertEqual(result["planned_by"], "llm")
+                self.assertEqual(result["planning_warnings"], [])
+                self.assertEqual(len(calls), 3)
+                self.assertNotIn("beats", calls[0]["json_schema"]["properties"])
+                self.assertNotIn("MANDATORY OUTPUT CHECKSUM", calls[0]["prompt"])
+                self.assertEqual(result["source_intent"]["cast_names"], ["Character A", "Character B"])
+                self.assertEqual(result["ledger"]["beats"], ledger["beats"])
+                for segment, duration in zip(result["segments"], durations):
+                    self.assertEqual([shot["camera"] for shot in segment["shots"]], cameras)
+                    self.assertEqual(segment["shots"][0]["start_seconds"], 0)
+                    self.assertEqual(segment["shots"][-1]["end_seconds"], duration)
+                    self.assertTrue(all(shot["end_seconds"] - shot["start_seconds"] >= 0.67 for shot in segment["shots"]))
+                    self.assertTrue(all(not shot.get("dialogue") for shot in segment["shots"]))
+                self.assertEqual(result["segments"][1]["opening_state"], result["segments"][0]["closing_state"])
+
+    def test_invalid_camera_still_requires_review_and_explains_which_check_failed(self):
+        prompt = "A fighter crosses the courtyard. The fighter holds a final stance. No dialogue."
+        ledger = _deterministic_ledger(
+            prompt, segment_count=2, segment_durations=[10.0, 10.0],
+            locked_dialogue=[], camera_coverage="multi_shot", reference_context="",
+        )
+        calls = []
+
+        def generate(**kwargs):
+            calls.append(kwargs)
+            schema = kwargs["json_schema"]["properties"]
+            if "setting_continuity" in schema:
+                return json.dumps(ledger)
+            number = schema["segment"]["minimum"]
+            segment = _segment(number)
+            segment["shots"][0]["framing"] = "wide view of the fighter"
+            segment["shots"][0]["camera"] = (
+                "tracking through a window" if number == 2 else "a slow tracking shot"
+            )
+            return json.dumps(segment)
+
+        result = plan_h3_story_segments(
+            prompt, segment_durations=[10.0, 10.0], mode="sliding_window",
+            camera_coverage="multi_shot", expect_dialogue=False,
+            planning_style="faithful", llm_generate=generate,
+        )
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(result["planned_by"], "deterministic_fallback")
+        self.assertEqual(len(result["planning_warnings"]), 1)
+        self.assertIn("Window 2's camera plan", result["planning_warnings"][0])
+        self.assertIn(
+            "Window 2: introduced the internal term 'window' as visible scene content",
+            result["planning_diagnostics"],
+        )
+        self.assertEqual(result["segments"][0]["shots"][0]["camera"], "a slow tracking shot")
+        self.assertNotIn("tracking through a window", json.dumps(result["segments"][1]))
+
     def test_reported_george_joey_dwight_faithful_plan_has_no_id_repair(self):
         prompt = (
             "George Costanza walks into the coffee shop on the TV show Friends, "
@@ -1165,7 +1410,7 @@ class H3StoryLedgerTests(unittest.TestCase):
         self.assertNotIn("beats", calls[0]["json_schema"]["properties"])
         self.assertIn("Maestro has already parsed", calls[0]["prompt"])
         self.assertIn("dialogue_performances", calls[1]["prompt"])
-        self.assertIn("SPEAKER-CAMERA LOCK", calls[1]["prompt"])
+        self.assertIn("align the shot with its named speaker", calls[1]["prompt"])
 
     def test_faithful_treatment_never_asks_llm_to_copy_internal_story_ids(self):
         candidate = _ledger()

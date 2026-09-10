@@ -592,17 +592,25 @@ def _prepare_director_generation_params(params: dict) -> None:
     profile = params.get("_director_video_execution_profile")
     if isinstance(profile, dict):
         frame_values = params.get("per_clip_frames")
+        frame_label = "Director shot"
         if not isinstance(frame_values, (list, tuple)):
-            frame_values = [params.get("video_length")]
+            if params.get("minimax_h3_multi_window") is True:
+                # A seamless child spans the full timeline. Only its native
+                # inference window must fit the saved frame lattice and cap;
+                # overlap and the final trimmed tail need not align the total.
+                frame_values = [params.get("sliding_window_size")]
+                frame_label = "Director window"
+            else:
+                frame_values = [params.get("video_length")]
         for index, frames in enumerate(frame_values):
             validate_director_execution_frames(
                 profile,
                 frames,
-                label=f"Director shot {index + 1}",
+                label=f"{frame_label} {index + 1}",
             )
-        # Director has already planned every H3 child as one hardware-safe
-        # native pass. Prevent the generic runtime policy from silently
-        # shrinking it into prompt-unaware continuation windows.
+        # Director has already planned each H3 shot or continuation window
+        # against the saved hardware profile. Keep the native pass size so
+        # runtime policy cannot silently change the planned prompt boundaries.
         params["sliding_window_memory_override"] = True
 
     if params.get("minimax_h3_turbo_mode") is True:

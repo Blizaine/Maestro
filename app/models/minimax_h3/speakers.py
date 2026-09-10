@@ -60,14 +60,19 @@ def is_h3_spoken_quote(source: str, match: re.Match) -> bool:
     after = source[end:end + 120]
     if re.search(r"(?i)\b(?:titled|entitled|called|named|captioned)\s*[:,-]?\s*$", before):
         return False
-    if re.search(
+    written_text = re.search(
         r"(?i)\b(?:sign|banner|label|subtitle|caption|marquee|poster|billboard|"
         r"screen|monitor|display|neon|placard|headline|logo|shirt|door|wall|"
         r"on-screen\s+text)\b[^.!?\r\n]{0,80}"
         r"\b(?:reads?|reading|shows?|showing|displays?|displaying|bears?|bearing|"
         r"marked|printed|written|spells?|saying|says?|said|"
         r"with(?:\s+the)?\s+(?:text|words?|lettering))\s*[:,-]?\s*$", before,
+    )
+    if written_text and not re.search(
+        r"(?i)\b(?:and|then|while|before|after|as)\b", written_text.group(0),
     ):
+        # "Alice opens the door and says ..." is human dialogue, not text
+        # printed on the door. A coordinated action breaks object ownership.
         return False
     if re.match(
         r"(?i)^\s*(?:appears?|is\s+(?:visible|written|printed|displayed)|glows?)"

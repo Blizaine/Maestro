@@ -610,11 +610,15 @@ def _prepare_stereo_waveform(
     if sample_rate != MINIMAX_H3_AUDIO_SAMPLE_RATE:
         import torchaudio.functional as audio_functional
 
-        audio = audio_functional.resample(
-            audio,
-            sample_rate,
-            MINIMAX_H3_AUDIO_SAMPLE_RATE,
-        )
+        # MMGP sets the default device to CUDA. Torchaudio also creates
+        # scalar helpers without an explicit device, even for a CPU waveform.
+        # Keep those allocations on CPU until the audio encoder needs CUDA.
+        with torch.device("cpu"):
+            audio = audio_functional.resample(
+                audio,
+                sample_rate,
+                MINIMAX_H3_AUDIO_SAMPLE_RATE,
+            )
     audio = audio[..., :sample_count]
     if pad and audio.shape[-1] < sample_count:
         audio = F.pad(audio, (0, sample_count - audio.shape[-1]))
