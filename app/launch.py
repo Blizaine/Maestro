@@ -55,12 +55,16 @@ from services import safe_download  # noqa: F401 (side-effect import)
 from services.checkpoint_compatibility import (
     CheckpointCompatibilityError,
     checkpoint_targets_for_base,
+    checkpoint_import_options,
     checkpoint_template_model_type,
     ensure_allowed_checkpoint_target,
     quarantine_incompatible_checkpoint_definitions,
     suggested_checkpoint_architecture,
     unsupported_checkpoint_reason,
     validate_checkpoint_file,
+    validate_checkpoint_filename,
+    verified_checkpoint_chunks,
+    filter_checkpoint_catalog_model,
 )
 from services.generation_eta import AdaptiveGenerationEta, GenerationEtaHistory
 from services.remote_access import TailscaleManager
@@ -3015,7 +3019,8 @@ def _checkpoint_download_dir() -> str:
 
 def _register_checkpoint_finetune(save_path: str, sidecar_data: dict,
                                   target_architecture: str,
-                                  auto_quantize: bool = False) -> tuple:
+                                  auto_quantize: bool = False,
+                                  qkv_layout: str = "") -> tuple:
     """Write app/finetunes/<slug>.json registering the downloaded checkpoint as
     a variant of `target_architecture`. Returns (model_type, finetune_path).
 
@@ -3031,6 +3036,8 @@ def _register_checkpoint_finetune(save_path: str, sidecar_data: dict,
         base_model,
         target_architecture,
         filename=filename,
+        qkv_layout=qkv_layout,
+        auto_quantize=auto_quantize,
     )
     template_model_type = checkpoint_template_model_type(
         base_model, target_architecture
@@ -3073,6 +3080,7 @@ def _register_checkpoint_finetune(save_path: str, sidecar_data: dict,
     if desc:
         new_model["description"] = desc[:500]
     new_model["URLs"] = [filename]
+    new_model.update(compatibility["model_options"])
     new_model["civitai"] = {
         "modelId": model_id,
         "versionId": version_id,
@@ -3752,8 +3760,15 @@ def _build_manifest_entry(
 
 
 @api.get("/api/v1/civitai/base-models")
-def civitai_base_models():
+def civitai_base_models(kind: str = "lora"):
     """Return supported model filters for the browser."""
+    if kind == "checkpoint":
+        filters = []
+        for entry in CIVITAI_MODEL_FILTERS:
+            bases = [base for base in entry.get("civitai_base", "").split(",") if _list_checkpoint_architectures(base)]
+            if bases and not entry.get("search_query"):
+                filters.append({**entry, "civitai_base": ",".join(bases)})
+        return {"filters": filters}
     return {"filters": CIVITAI_MODEL_FILTERS}
 
 
@@ -3921,6 +3936,12 @@ def civitai_search(
             params["baseModels"] = base_list
         elif base_list:
             params["baseModels"] = base_list[0]
+    if types.casefold() == "checkpoint" and not baseModels:
+        params["baseModels"] = sorted({
+            base for entry in CIVITAI_MODEL_FILTERS
+            for base in entry.get("civitai_base", "").split(",")
+            if _list_checkpoint_architectures(base)
+        })
     if cursor:
         params["cursor"] = cursor
 
@@ -3948,6 +3969,9 @@ def civitai_search(
         resp.raise_for_status()
         data = resp.json()
         _fix_civitai_images(data)
+        if types.casefold() == "checkpoint":
+            candidates = [filter_checkpoint_catalog_model(model) for model in data.get("items", [])]
+            data = {**data, "items": [model for model in candidates if model["modelVersions"]]}
         _civitai_cache_put(cache_key, data)
         return data
     except HTTPException:
@@ -4000,6 +4024,9 @@ def civitai_model_detail(model_id: int):
         raise
     except requests.RequestException as e:
         raise HTTPException(status_code=502, detail=f"CivitAI request failed: {e}")
+
+    if str(data.get("type", "")).casefold() == "checkpoint":
+        data = filter_checkpoint_catalog_model(data)
 
     # Enrich versions with local arch mapping and fix image URLs
     for version in data.get("modelVersions", []):
@@ -4092,6 +4119,8 @@ async def civitai_download(request: Request):
         # any architecture that happens to exist in defaults/.
         try:
             ensure_allowed_checkpoint_target(base_model, target_architecture)
+            validate_checkpoint_filename(filename, target_architecture)
+            checkpoint_import_options(target_architecture, body.get("h3_qkv_layout", ""), auto_quantize=auto_quantize)
         except CheckpointCompatibilityError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         available_targets = {
@@ -4158,6 +4187,7 @@ async def civitai_download(request: Request):
         # LoRAs so users can tell which of a creator's renamed variants
         # is actually current.
         "_published_at": body.get("published_at"),
+        "_h3_qkv_layout": body.get("h3_qkv_layout", ""),
         "_kind": kind,
         "_target_architecture": target_architecture,
         "_auto_quantize": auto_quantize,
@@ -4179,6 +4209,7 @@ def _run_civitai_download(download_id: str):
     filename = dl["filename"]
     partial_paths = set()
     reserved_targets = set()
+    resp = None
 
     try:
         # CivitAI's download endpoint sits behind Cloudflare with bot
@@ -4264,8 +4295,15 @@ def _run_civitai_download(download_id: str):
         partial_paths.add(partial_path)
         downloaded = 0
 
+        chunks = resp.iter_content(chunk_size=1024 * 1024)
+        if dl.get("_kind") == "checkpoint":
+            dl["message"] = "Checking checkpoint header before downloading weights..."
+            chunks = verified_checkpoint_chunks(
+                chunks, dl.get("_base_model", ""), dl.get("_target_architecture", ""),
+                filename=filename, qkv_layout=dl.get("_h3_qkv_layout", ""),
+            )
         with open(partial_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=1024 * 1024):  # 1MB chunks
+            for chunk in chunks:
                 if not chunk:
                     continue
                 f.write(chunk)
@@ -4321,6 +4359,7 @@ def _run_civitai_download(download_id: str):
                 dl.get("_base_model", ""),
                 dl.get("_target_architecture", ""),
                 filename=filename,
+                qkv_layout=dl.get("_h3_qkv_layout", ""),
             )
             dl["_checkpoint_compatibility"] = checkpoint_compatibility
 
@@ -4397,6 +4436,7 @@ def _run_civitai_download(download_id: str):
                 model_type, finetune_path = _register_checkpoint_finetune(
                     save_path, sidecar_data, dl.get("_target_architecture", ""),
                     auto_quantize=dl.get("_auto_quantize", False),
+                    qkv_layout=dl.get("_h3_qkv_layout", ""),
                 )
                 dl["model_type"] = model_type
                 dl["message"] = f"Registered as model '{model_type}'"
@@ -4441,6 +4481,8 @@ def _run_civitai_download(download_id: str):
         _fail_download_record(download_id, e)
         print(f"[CivitAI] Download failed: {e}")
     finally:
+        if resp is not None:
+            resp.close()
         for cleanup_path in tuple(partial_paths):
             try:
                 if os.path.isfile(cleanup_path):
