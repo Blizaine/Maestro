@@ -65,7 +65,7 @@ _H3_MAX_FRAMES = 345
 _H3_FUSED_RECOMMENDED_FRAMES = 243
 _H3_FUSED_DEFAULT_EVALUATIONS = 4
 _H3_FUSED_MIN_EVALUATIONS = 4
-_H3_FUSED_MAX_EVALUATIONS = 8
+_H3_FUSED_MAX_EVALUATIONS = 12
 _H3_FRAME_STEP = 17
 _H3_OVERLAP_DEFAULT = 18
 _H3_OVERLAP_MAX = 103
@@ -124,7 +124,7 @@ def _normalize_h3_fused_steps(value) -> int:
     steps = int(numeric)
     if not _H3_FUSED_MIN_EVALUATIONS <= steps <= _H3_FUSED_MAX_EVALUATIONS:
         raise ValueError(
-            "H3 Fused Turbo supports 4-8 total denoising steps; "
+            f"H3 Fused Turbo supports {_H3_FUSED_MIN_EVALUATIONS}-{_H3_FUSED_MAX_EVALUATIONS} total denoising steps; "
             f"received {steps}. Four is the published default."
         )
     return steps
@@ -1940,7 +1940,7 @@ class family_handler:
                 "Total Steps" if fused_turbo else "Inference Steps"
             ),
             "inference_steps_help": (
-                "4 is the published speed preset. Try 5-6 for a little more refinement; 8 is the checkpoint's slower high end. Extra steps may sharpen detail but are not guaranteed to improve every take."
+                "4 is the default speed preset. Choose up to 12 total steps for optional extra refinement; more steps take longer."
                 if fused_turbo
                 else ""
             ),

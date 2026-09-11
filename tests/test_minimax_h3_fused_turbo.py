@@ -66,7 +66,7 @@ class TestFusedH3Definitions(unittest.TestCase):
         self.assertFalse(frames_model["lock_inference_steps"])
         self.assertFalse(references_model["lock_inference_steps"])
         self.assertEqual(frames_model["inference_steps_min"], 4)
-        self.assertEqual(frames_model["inference_steps_max"], 8)
+        self.assertEqual(frames_model["inference_steps_max"], 12)
         self.assertEqual(frames_model["inference_steps_label"], "Total Steps")
         self.assertFalse(frames_model["loras_disabled"])
         self.assertFalse(references_model["loras_disabled"])
@@ -95,7 +95,8 @@ class TestFusedH3Definitions(unittest.TestCase):
         self.assertFalse(definition["first_block_cache"])
         self.assertFalse(definition["lock_inference_steps"])
         self.assertEqual(definition["inference_steps_min"], 4)
-        self.assertEqual(definition["inference_steps_max"], 8)
+        self.assertEqual(definition["inference_steps_max"], 12)
+        self.assertEqual(reference_definition["inference_steps_max"], 12)
         self.assertEqual(definition["minimax_h3_qkv_layout"], "grouped")
         self.assertEqual(
             definition["sliding_window_defaults"]["window_default"],
@@ -146,7 +147,7 @@ class TestFusedH3Definitions(unittest.TestCase):
         self.assertEqual(body["override_attention"], "sla")
         self.assertEqual(body["skip_steps_cache_type"], "")
 
-        for invalid_steps in (3, 9, 5.5, "many"):
+        for invalid_steps in (3, 13, 5.5, True, "many"):
             with self.subTest(invalid_steps=invalid_steps):
                 with self.assertRaisesRegex(ValueError, "steps"):
                     normalize_fused_h3_request(
@@ -159,6 +160,24 @@ class TestFusedH3Definitions(unittest.TestCase):
         default_body = {"activated_loras": []}
         normalize_fused_h3_request(default_body)
         self.assertEqual(default_body["num_inference_steps"], 4)
+
+    def test_full_step_range_survives_request_and_handler_validation(self):
+        from models.minimax_h3.fused_turbo import normalize_fused_h3_request
+        from models.minimax_h3.minimax_h3_handler import family_handler
+
+        for path in (FRAMES_DEFAULT, REFERENCES_DEFAULT):
+            preset = _load_default(path)
+            architecture = preset["model"]["architecture"]
+            definition = family_handler.query_model_def(architecture, preset["model"])
+            self.assertEqual(preset["model"]["inference_steps_max"], 12)
+            for steps in range(4, 13):
+                with self.subTest(architecture=architecture, steps=steps):
+                    body = {"num_inference_steps": steps, "video_length": 243, "sliding_window_size": 243}
+                    normalize_fused_h3_request(body)
+                    self.assertIsNone(family_handler.validate_generative_settings(architecture, definition, body))
+                    self.assertEqual(body["num_inference_steps"], steps)
+            body["num_inference_steps"] = 13
+            self.assertIn("4-12", family_handler.validate_generative_settings(architecture, definition, body))
 
     def test_acceleration_conflicts_fail_without_mutating_selection(self):
         from models.minimax_h3.fused_turbo import normalize_fused_h3_request
@@ -263,7 +282,7 @@ class TestFusedH3Definitions(unittest.TestCase):
         self.assertIn("MATLOWAI MiniMax H3 fused four-step checkpoint", notice)
         self.assertIn("fd26ffb89dee294ca740a59632e5b3423b9a9d2a", notice)
         self.assertIn("Fused Turbo Recipe", ui)
-        self.assertIn("Total Steps can be adjusted from 4-8", ui)
+        self.assertIn("Total Steps can be adjusted from 4-12", ui)
         self.assertIn("SLA Sparse Attention", ui)
         self.assertIn("inference_steps_min", advanced)
         self.assertIn("inference_steps_max", advanced)
@@ -545,11 +564,11 @@ class TestFusedH3Scheduler(unittest.TestCase):
         self.assertEqual(len(scheduler._res_coefficients), 4)
         self.assertEqual(scheduler.coefficients_for_step(3)[2], 0.0)
 
-    def test_six_and_eight_requested_evaluations_build_complete_res_schedules(self):
+    def test_extended_evaluations_build_complete_res_schedules(self):
         from models.minimax_h3.scheduler import MiniMaxH3Scheduler
         from models.minimax_h3.turbo import h3_scheduler_grid_points
 
-        for evaluations in (6, 8):
+        for evaluations in (6, 8, 9, 10, 11, 12):
             with self.subTest(evaluations=evaluations):
                 scheduler = MiniMaxH3Scheduler(
                     shift=12.0,

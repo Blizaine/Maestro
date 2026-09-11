@@ -1,6 +1,7 @@
 """Regression coverage for durable, non-project Studio preferences."""
 
 import ast
+import json
 import os
 import unittest
 
@@ -60,6 +61,21 @@ class TestStudioPreferencePersistence(unittest.TestCase):
             normalize({"audio_sub_mode": "video"})
         with self.assertRaises(ValueError):
             normalize({"h3_optimizations": {"override_attention": "unknown"}})
+
+    def test_step_counts_round_trip_independently_without_project_inputs(self):
+        normalize = _load_normalizers()["_normalize_studio_preferences"]
+        steps = {"minimax_h3_fused_turbo": 12, "minimax_h3_ref2va_fused_turbo": 9}
+        saved = normalize({"inference_steps_per_model": steps, "prompt": "Temporary scene", "seed": 42})
+        restored = normalize(json.loads(json.dumps(saved)))
+        self.assertEqual(restored, {"inference_steps_per_model": steps})
+        # Older clients that save navigation alone must not erase step choices.
+        self.assertEqual(normalize({"generation_mode": "image"}, current=restored)["inference_steps_per_model"], steps)
+
+    def test_invalid_step_preferences_are_rejected(self):
+        normalize = _load_normalizers()["_normalize_studio_preferences"]
+        for bad in (None, [], {"": 8}, {"model": True}, {"model": 5.5}, {"model": 0}, {"model": 1001}, {"model": "12"}, {"model": float("nan")}, {"model": float("inf")}):
+            with self.subTest(value=bad), self.assertRaises(ValueError):
+                normalize({"inference_steps_per_model": bad})
 
     def test_api_and_store_restore_requested_choices(self):
         launch = _read(_LAUNCH_PATH)

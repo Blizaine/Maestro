@@ -769,7 +769,7 @@ def _normalize_studio_preferences(values, current=None):
 
     Prompt text, seeds, LoRAs, uploaded paths, and other job inputs are
     intentionally excluded. This record only remembers navigation/model
-    choices and the two opt-in H3 acceleration switches.
+    choices, per-model inference steps and the opt-in H3 accelerations.
     """
     if values is None:
         values = {}
@@ -802,6 +802,24 @@ def _normalize_studio_preferences(values, current=None):
             normalized[key] = _normalize_studio_model_map(
                 values.get(key), field_name=key,
             )
+
+    if "inference_steps_per_model" in values:
+        raw_steps = values["inference_steps_per_model"]
+        if not isinstance(raw_steps, dict) or len(raw_steps) > 1000:
+            raise ValueError("inference_steps_per_model must be a model-to-step-count object.")
+        steps = {}
+        for model, count in raw_steps.items():
+            if not isinstance(model, str) or not model.strip() or len(model.strip()) > 200:
+                raise ValueError("An inference step model is invalid.")
+            if (
+                isinstance(count, bool)
+                or not isinstance(count, (int, float))
+                or not 1 <= count <= 1000
+                or int(count) != count
+            ):
+                raise ValueError("Remembered inference steps must be whole numbers between 1 and 1000.")
+            steps[model.strip()] = int(count)
+        normalized["inference_steps_per_model"] = steps
 
     if "h3_optimizations" in values:
         raw_h3 = values.get("h3_optimizations")
@@ -22331,11 +22349,18 @@ def _stage_count_from_params(params: dict) -> int:
     return 2
 
 
+# Restore the transformer budget after each job, including failure/cancel,
+# so an H3 residency override cannot affect the next model loaded.
+_BASE_TRANSFORMER_BUDGET_MB = None
+# Leave margin below MMGP's coefficient ceiling before rounding to MB.
+_H3_RESIDENCY_HEADROOM = 0.97
+
+
 def _apply_per_job_coefficient(job: dict) -> None:
     """Compute and apply a per-job VRAM safety coefficient.
 
-    Mutates `wgp.args.vram_safety_coefficient` for the duration of the
-    job so wgp's offload profile uses the tighter cap. Restored by
+    Sets the VRAM ceiling and, for streaming H3 profiles, the transformer
+    residency budget for this job. Both are restored by
     `_restore_base_coefficient()` in the job's finally block.
 
     Records the result on `job` so the API/UI can surface it:
@@ -22344,6 +22369,7 @@ def _apply_per_job_coefficient(job: dict) -> None:
           lora_penalty, pass_penalty, stage_count, reasons
       }
     """
+    global _BASE_TRANSFORMER_BUDGET_MB
     try:
         from services.perf_recommend import (
             compute_h3_weight_budget,
@@ -22669,6 +22695,34 @@ def _apply_per_job_coefficient(job: dict) -> None:
         effective = adjustment["effective_coef"]
         if abs(effective - base_coef) > 1e-6 or _is_h3 or _is_music3:
             wgp.args.vram_safety_coefficient = effective
+            h3_residency_mb = None
+            if _is_h3:
+                profile = wgp.compute_profile(
+                    params.get("override_profile", -1),
+                    wgp.get_output_type_for_model(model_type, params.get("image_mode", 0)),
+                )
+                preload = int(getattr(wgp.args, "preload", 0) or 0)
+                if preload == 0:
+                    preload = int(wgp.server_config.get("preload_in_VRAM", 0) or 0)
+                if int(profile) in (2, 4, 5) and preload == 0:
+                    # MMGP's coefficient only caps residency; it cannot raise
+                    # the default 100 MB transformer budget. Pass the computed
+                    # allowance through, also respecting any tighter ceiling.
+                    h3_residency_mb = int(
+                        min(h3_weight_budget_gb, effective * total_vram_gb)
+                        * 1024 * _H3_RESIDENCY_HEADROOM
+                    )
+                    if _BASE_TRANSFORMER_BUDGET_MB is None:
+                        _BASE_TRANSFORMER_BUDGET_MB = int(
+                            getattr(wgp.args, "transformer_budget", 0) or 0
+                        )
+                    wgp.args.transformer_budget = h3_residency_mb
+                    adjustment["h3_residency_mb"] = h3_residency_mb
+                    adjustment["reasons"].append(
+                        f"- MMGP transformer residency requested: "
+                        f"{h3_residency_mb / 1024:.1f} GB; remaining weights stream "
+                        "within the existing workspace limits"
+                    )
             if (
                 (_is_h3 or _is_music3)
                 and getattr(wgp, "wan_model", None) is not None
@@ -22681,6 +22735,12 @@ def _apply_per_job_coefficient(job: dict) -> None:
                 if (
                     loaded_coefficient is None
                     or float(loaded_coefficient) > effective + 1e-6
+                    or (
+                        h3_residency_mb is not None
+                        and getattr(
+                            wgp.wan_model, "_maestro_profile_transformer_budget_mb", None
+                        ) != h3_residency_mb
+                    )
                 ):
                     wgp.reload_needed = True
                     if _is_music3:
@@ -22690,7 +22750,8 @@ def _apply_per_job_coefficient(job: dict) -> None:
                         )
                     else:
                         adjustment["reasons"].append(
-                            "- resident H3 profile will reload with packed-sequence headroom"
+                            "- resident H3 profile will reload with packed-sequence headroom "
+                            "and the current transformer residency budget"
                         )
             cap_gb = effective * total_vram_gb
             base_cap_gb = base_coef * total_vram_gb
@@ -22719,17 +22780,24 @@ def _apply_per_job_coefficient(job: dict) -> None:
 
 
 def _restore_base_coefficient() -> None:
-    """Restore wgp.args.vram_safety_coefficient to the persisted base.
+    """Restore the base VRAM coefficient and transformer residency budget.
 
     Called from the finally block in `_run_generation` and
     `_run_sfx_generation` so subsequent jobs start from the user's
     auto-tuned base, not a previous job's adjusted value.
     """
+    global _BASE_TRANSFORMER_BUDGET_MB
     try:
         base = float(wgp.server_config.get("vram_safety_coefficient", 0.80))
         wgp.args.vram_safety_coefficient = base
     except Exception:
         pass  # Never fail teardown
+    try:
+        if _BASE_TRANSFORMER_BUDGET_MB is not None:
+            wgp.args.transformer_budget = _BASE_TRANSFORMER_BUDGET_MB
+            _BASE_TRANSFORMER_BUDGET_MB = None
+    except Exception:
+        pass  # Budget restoration must also run if coefficient restore fails.
 
 
 def _run_sfx_generation(job: dict, raw_params: dict, start_time: float):
@@ -26755,9 +26823,8 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
         finally:
             if abort_state is not None:
                 unregister_abort_state(job_id, _active_gen_states, abort_state)
-            # Restore the persisted base coefficient so the next job
-            # starts from the user's auto-tuned value, not whatever
-            # this job's adjustment left it at.
+            # Restore the base coefficient and transformer budget so the
+            # next job starts with its own memory plan.
             _restore_base_coefficient()
             # If no other jobs are running, sync save_path to the current active
             # workspace (which may have changed while this job was running).

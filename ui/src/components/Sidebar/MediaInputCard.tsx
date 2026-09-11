@@ -1,20 +1,27 @@
-import { ArrowDown, ArrowUp, FileAudio, Image as ImageIcon, Plus, X } from 'lucide-react'
-import { useRef, useState, type HTMLAttributes, type ReactNode } from 'react'
+import { Eye, FileAudio, Image as ImageIcon, Plus, X } from 'lucide-react'
+import { useRef, useState, type HTMLAttributes } from 'react'
 import { SidebarDialog } from './SidebarPanels'
 
-/** A visible media role with its detailed settings kept beside the input. */
-export function MediaInputCard({ title, subtitle, preview, mediaUrl, kind = 'image', disabled, onRemove, onEarlier, onLater, children, ...drag }: {
+/** A reference thumbnail; its parent places the editor below the active row. */
+export function MediaInputCard({ title, subtitle, preview, mediaUrl, kind = 'image', disabled, onRemove, onEarlier, onLater, expanded, onEdit, editorId, ...drag }: {
   title: string; subtitle?: string; preview?: string; mediaUrl?: string
   kind?: 'image' | 'video' | 'audio'; onRemove: () => void
   disabled?: boolean
-  onEarlier?: () => void; onLater?: () => void; children: ReactNode
+  onEarlier?: () => void; onLater?: () => void
+  expanded: boolean; onEdit: () => void; editorId: string
 } & Omit<HTMLAttributes<HTMLDivElement>, 'title' | 'children'>) {
   const [viewing, setViewing] = useState(false)
-  const [editing, setEditing] = useState(false)
-  return <div {...drag} className="media-input-card group relative min-w-0 overflow-hidden rounded-xl border border-border bg-bg-tertiary">
-    <button type="button" aria-label={`Edit ${title} reference`} aria-expanded={editing} onClick={() => setEditing(true)} className="block w-full p-1.5 text-left hover:bg-bg-hover">
+  return <div {...drag} className={`media-input-card group relative min-w-0 overflow-hidden rounded-xl border bg-bg-tertiary ${expanded ? 'border-accent-blue' : 'border-border'}`}>
+    <button type="button" aria-label={`Edit ${title} reference`} aria-expanded={expanded} aria-controls={expanded ? editorId : undefined}
+      aria-keyshortcuts="Alt+ArrowLeft Alt+ArrowRight" title="Edit reference · Drag to reorder, or use Alt + Left/Right"
+      onClick={onEdit} onKeyDown={event => {
+        if (!event.altKey || !['ArrowLeft', 'ArrowRight'].includes(event.key)) return
+        event.preventDefault()
+        if (event.key === 'ArrowLeft') onEarlier?.()
+        else onLater?.()
+      }} className="block w-full rounded-xl p-1.5 text-left hover:bg-bg-hover focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent-blue">
       <div className="flex h-14 items-center justify-center overflow-hidden rounded-lg bg-bg-primary text-text-muted">
-        {preview ? <img src={preview} alt="" loading="lazy" className="h-full w-full object-cover"/>
+        {preview ? <img src={preview} alt="" draggable={false} loading="lazy" className="h-full w-full object-cover"/>
           : kind === 'video' && mediaUrl ? <video src={`${mediaUrl}#t=0.1`} muted playsInline preload="metadata" className="h-full w-full object-cover"/>
           : kind === 'audio' ? <FileAudio size={25}/> : <ImageIcon size={25}/>}
       </div>
@@ -23,16 +30,8 @@ export function MediaInputCard({ title, subtitle, preview, mediaUrl, kind = 'ima
     </button>
     <button type="button" disabled={disabled} aria-label={`Remove ${title}`} onClick={event => { event.stopPropagation(); onRemove() }}
       className="absolute right-1.5 top-1.5 rounded-full bg-black/65 p-1.5 text-white hover:bg-black/85"><X size={12}/></button>
-    <SidebarDialog open={editing} title={`${title} settings`} variant="settings" onClose={() => setEditing(false)}>
-    <div className="space-y-2">
-      <div className="flex flex-wrap items-center gap-2 text-[10px] text-text-secondary">
-        {mediaUrl && <button type="button" onClick={() => setViewing(true)} className="mr-auto rounded-lg border border-border px-2 py-1.5 hover:bg-bg-hover">Preview</button>}
-        <button type="button" disabled={!onEarlier} onClick={onEarlier} aria-label={`Move ${title} earlier`} className="rounded-lg p-1.5 hover:bg-bg-hover disabled:opacity-30"><ArrowUp size={13}/></button>
-        <button type="button" disabled={!onLater} onClick={onLater} aria-label={`Move ${title} later`} className="rounded-lg p-1.5 hover:bg-bg-hover disabled:opacity-30"><ArrowDown size={13}/></button>
-      </div>
-      {children}
-    </div>
-    </SidebarDialog>
+    {mediaUrl && <button type="button" aria-label={`Preview ${title}`} title={`Preview ${title}`} onClick={() => setViewing(true)}
+      className="absolute left-1.5 top-1.5 rounded-full bg-black/65 p-1.5 text-white hover:bg-black/85"><Eye size={12}/></button>}
     <SidebarDialog open={viewing} title={`${title} preview`} onClose={() => setViewing(false)}>
       {kind === 'video' ? <video src={viewing ? mediaUrl : undefined} controls playsInline className="w-full max-h-[65dvh]"/>
         : kind === 'audio' ? <audio src={viewing ? mediaUrl : undefined} controls className="w-full"/>

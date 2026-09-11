@@ -17,10 +17,13 @@ import math
 import re
 from typing import Any, Callable
 
+from models.minimax_h3.speakers import is_h3_production_label
+
 from services.h3_authored_brief import (
     authored_timed_brief,
     explicit_character_profiles,
     explicit_negative_constraints,
+    production_note_spans,
 )
 
 from services.dialogue_timing import (
@@ -45,7 +48,7 @@ from services.director.long_form_story import (
 )
 
 
-H3_STORY_LEDGER_VERSION = 33
+H3_STORY_LEDGER_VERSION = 34
 
 
 class H3DialogueTimingError(ValueError):
@@ -146,24 +149,6 @@ _FAST_ACTION_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
-# Screenplay-style dialogue is common in pasted Studio prompts.  These labels
-# describe metadata or Context-IR fields rather than speaking characters and
-# must never be converted into H3 dialogue.
-_SCREENPLAY_NON_SPEAKER_LABELS = {
-    "action", "actions", "ambiance", "ambience", "atmosphere", "audio",
-    "audio design", "audio notes", "camera", "camera movement", "camera notes",
-    "cast", "character", "characters", "cinematography", "color palette",
-    "composition", "constraints", "continuity", "duration", "editing", "effects",
-    "detailed description", "dialogue", "director", "end", "ext",
-    "exterior", "fade in", "fade out", "format", "fps", "framing",
-    "int", "interior", "lighting", "location",
-    "integrated multimodal description", "music", "non diegetic music",
-    "negative prompt", "notes", "overall soundscape", "pacing", "pov",
-    "prompt", "resolution", "retention analysis", "scene", "setting", "sfx",
-    "shot", "sound", "sound design", "sound effects", "soundscape",
-    "style", "subject definitions", "summary", "time", "title", "tone",
-    "transition", "vfx", "visual", "visual direction", "visual style", "visuals",
-}
 _NON_CAST_PROPER_NAMES = {
     "anyone", "beat", "everybody", "everyone", "nobody", "no one",
     "camera", "okay", "ok", "someone", "starts", "that", "there", "these", "this",
@@ -182,7 +167,9 @@ _DIALOGUE_QUOTE_RE = re.compile(r'"([^"\r\n]{1,600})"|“([^”\r\n]{1,600})”'
 _SCREENPLAY_PROFILE_TEXT_RE = re.compile(
     r"^(?:biased\s+towards?\b|speciali[sz](?:es?|ed|ing)\s+in\b|"
     r"(?:appearance|wardrobe|outfit|clothing|hairstyle|facial\s+features|"
-    r"body\s+proportions|personality|fighting\s+style)\s*:)",
+    r"body\s+proportions|personality|fighting\s+style)\s*:|"
+    r"(?:[A-Za-z][A-Za-z-]*\s+){0,4}[A-Za-z][A-Za-z-]*-"
+    r"(?:clothed|robed|haired|skinned)\b)",
     flags=re.IGNORECASE,
 )
 _ENERGETIC_PERFORMANCE_RE = re.compile(
@@ -771,9 +758,16 @@ def _derive_h3_cast_names(source: str, proper_names: list[str]) -> list[str]:
     # evidence than incidental capitalized camera/VFX prose ("Lens", "Fist",
     # "Massive Mach", etc.). Keep real authored speakers, including silent
     # profile owners who would otherwise be missed by the name heuristics.
+    profile_count = len({name.casefold() for name in profile_names})
+    count_words = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten")
+    quantity = str(profile_count)
+    if profile_count < len(count_words):
+        quantity += "|" + count_words[profile_count]
     if profile_names and re.search(
         r"\bno\s+(?:third\s+parties|(?:other|extra|additional)\s+"
-        r"(?:characters|people|persons|cast\s+members))\b",
+        r"(?:characters|people|persons|cast\s+members))\b|"
+        rf"\bonly\s+(?:{quantity})\s+[^.!?\r\n]{{0,80}}"
+        r"\b(?:characters|people|persons|men|women|males|females|artists|fighters|monks)\b",
         source, flags=re.IGNORECASE,
     ):
         return _canonicalize_h3_cast_names(profile_names + spoken_names, prompt=source)
@@ -1083,8 +1077,9 @@ def extract_h3_source_intent(prompt: str) -> dict[str, Any]:
     )
     requested_slow_motion = any(
         not re.search(
-            r"\b(?:no|not|without|never|avoid)\s+(?:any\s+)?$",
-            directive_source[max(0, match.start() - 40):match.start()],
+            r"\b(?:no|not|without|never|avoid)\s+(?:any\s+)?$|"
+            r"\b(?:prohibited|forbidden|disallowed)\s*:[^.!?]*$",
+            directive_source[:match.start()],
             flags=re.IGNORECASE,
         )
         for match in re.finditer(
@@ -1294,11 +1289,7 @@ def _is_screenplay_speaker_label(value: Any) -> bool:
     """Keep production headings out of both screenplay and quoted dialogue."""
 
     key = _normalize_key(value)
-    return bool(
-        key
-        and key not in _SCREENPLAY_NON_SPEAKER_LABELS
-        and not re.fullmatch(r"(?:scene|shot|subject|picture|video|audio|s)\s*\d+", key)
-    )
+    return bool(key and not is_h3_production_label(key))
 
 
 def _screenplay_dialogue_spans(source: str) -> list[dict[str, Any]]:
@@ -1313,6 +1304,11 @@ def _screenplay_dialogue_spans(source: str) -> list[dict[str, Any]]:
         match for match in _SCREENPLAY_DIALOGUE_RE.finditer(source)
         if _is_screenplay_speaker_label(match.group("speaker"))
     ]
+    notes = production_note_spans(source)
+    narrative = source
+    for start, end in reversed(notes):
+        narrative = narrative[:start] + "\n" + narrative[end:]
+    profile_names = {item["name"].casefold() for item in explicit_character_profiles(source)}
     # A brief can label character descriptions exactly like screenplay turns.
     # Honor scene-wide silence for ambiguous, unquoted rows, but do not infer
     # silence from words a character actually says ("No dialogue today.").
@@ -1330,8 +1326,20 @@ def _screenplay_dialogue_spans(source: str) -> list[dict[str, Any]]:
         end = match.end()
         quoted = _DIALOGUE_QUOTE_RE.match(text)
         tagged = re.match(r"<d>", text, flags=re.IGNORECASE)
+        in_notes = any(start <= match.start() < stop for start, stop in notes)
+        # A notes subheading such as "Ordinary punch" is a setting, not a
+        # speaker. Known cast may still have screenplay turns in these
+        # sections, and explicit quotes/tags remain eligible below.
+        known_character = (
+            speaker.casefold() in profile_names
+            or bool(
+                _PROPER_NAME.fullmatch(speaker)
+                and re.search(rf"(?<!\w){re.escape(speaker)}(?!\w)", narrative)
+            )
+        )
         if not quoted and not tagged and (
             silent_brief or _SCREENPLAY_PROFILE_TEXT_RE.match(text)
+            or (in_notes and not known_character)
         ):
             # Keep cast/profile prose in the visual story. Explicit quoted or
             # tagged lines still belong to the user and retain timing checks.

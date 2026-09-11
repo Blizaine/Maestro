@@ -9,7 +9,7 @@ from .turbo import is_minimax_h3_turbo_lora, safetensors_header
 
 FUSED_H3_DEFAULT_EVALUATIONS = 4
 FUSED_H3_MIN_EVALUATIONS = 4
-FUSED_H3_MAX_EVALUATIONS = 8
+FUSED_H3_MAX_EVALUATIONS = 12
 # Compatibility alias for callers/tests written while the recipe was fixed.
 FUSED_H3_EVALUATIONS = FUSED_H3_DEFAULT_EVALUATIONS
 FUSED_H3_SOLVER = "res_multistep"
@@ -18,9 +18,8 @@ FUSED_H3_SOLVER = "res_multistep"
 def normalize_fused_h3_steps(value) -> int:
     """Return a supported experimental evaluation count.
 
-    The publisher recommends four evaluations and also documents successful
-    six- and eight-evaluation single-pass runs. Keep Maestro's control inside
-    that measured ladder rather than exposing the generic 1-50 step range.
+    Four evaluations remains the default. Allow optional refinement up to
+    twelve evaluations without exposing the generic 1-50 step range.
     """
 
     if value in (None, ""):
@@ -38,7 +37,7 @@ def normalize_fused_h3_steps(value) -> int:
     steps = int(numeric)
     if not FUSED_H3_MIN_EVALUATIONS <= steps <= FUSED_H3_MAX_EVALUATIONS:
         raise ValueError(
-            "H3 Fused Turbo supports 4-8 total denoising steps; "
+            f"H3 Fused Turbo supports {FUSED_H3_MIN_EVALUATIONS}-{FUSED_H3_MAX_EVALUATIONS} total denoising steps; "
             f"received {steps}. Four is the published default."
         )
     return steps

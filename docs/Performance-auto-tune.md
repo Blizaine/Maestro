@@ -5,6 +5,23 @@ and system RAM. Changing a performance setting manually turns Auto off;
 the system-config API does the same. Explicitly applying Auto again replaces
 the performance settings with the current recommendations.
 
+## Per-job H3 transformer residency
+
+H3 and Viggle jobs reserve space for their packed video/audio sequence, then
+pass the remaining transformer allowance to MMGP on profiles 2, 4, 4.5 and 5.
+The safety coefficient caps residency; setting the transformer budget is what
+lets MMGP retain more weights instead of repeatedly streaming them from RAM.
+The requested allowance leaves margin under the effective coefficient ceiling.
+
+This changes only the transformer budget. VAE, encoder and catch-all budgets,
+manual preload choices and the automatic profile table retain their existing
+behavior. A cached H3 model reloads when the requested budget changes, and the
+job restores the base budget on completion, failure or cancellation.
+
+A contributed RTX A4500 / 28 GB RAM Viggle test reported approximately 75 to
+60 seconds per denoising step after this fix, compared with v2.1.5. This is a
+specific workload measurement; see [v2.1.6 validation](VALIDATION_V2.1.6.md).
+
 ## RAM and streamed model weights
 
 On machines with 12–23 GB VRAM, video and image generation use Profile 5 below
@@ -16,11 +33,13 @@ physical RAM. Profile 5 disables pinning to reduce that pressure.
 A proposed Profile 4 recommendation for 24–31 GB hosts was held back after
 the reported 28 GB RAM / RTX A4500 test failed before denoising. That test
 confirmed partial pinning, but could not measure its effect on Maestro's
-step time. The conservative automatic profile remains in place while a lower
-pinning limit is evaluated. Manual Profile 4 remains available.
+step time. Subsequent testing identified INT8 dispatch and insufficient
+transformer residency as measurable contributors, addressed in v2.1.5 and
+v2.1.6. The conservative automatic profile remains in place; manual Profile 4
+remains available.
 
-VRAM safety coefficients, per-job workspace budgets, quantization and MMGP's
-pinning ceiling are unchanged.
+The residency change retains the existing VRAM safety coefficient calculations,
+per-job workspace reserves, quantization and MMGP pinning ceiling.
 
 MMGP can fall back to partial pinning. Its usual ceiling is 40% of physical
 RAM on Windows and 50% elsewhere, unless overridden. That ceiling bounds its

@@ -10,11 +10,14 @@ from __future__ import annotations
 from functools import lru_cache
 import re
 
+from models.minimax_h3.speakers import is_h3_production_label
+
 
 _CLOCK = r"(?:\d{1,2}:)?\d{1,3}(?:\.\d+)?"
 _TIMED_HEADING = re.compile(
     rf"(?:【|\[|\()\s*(?P<start>{_CLOCK})\s*(?:s|sec(?:onds?)?)?\s*"
-    rf"[-–—]\s*(?P<end>{_CLOCK})\s*(?:s|sec(?:onds?)?)?\s*(?:】|\]|\))",
+    rf"[-–—]\s*(?P<end>{_CLOCK})\s*(?:s|sec(?:onds?)?)?\s*"
+    r"(?:[|｜:：]\s*(?P<title>[^】\]\)\r\n]{1,200}))?\s*(?:】|\]|\))",
     re.IGNORECASE,
 )
 _NOTES_LABEL = (
@@ -28,9 +31,28 @@ _NOTES_HEADING = re.compile(
     re.IGNORECASE,
 )
 _PROFILE = re.compile(
-    r"\b(?P<name>(?:Character|Subject|Actor)\s+(?:[A-Z](?![a-z])|\d+))"
+    r"\b(?P<name>(?:Character|Subject|Actor|Role)\s+(?:[A-Z](?![a-z])|\d+))"
     r"\s*(?:\((?P<details>[^)\r\n]{1,160})\))?\s*:\s*",
 )
+_SECTION_HEADING = re.compile(r"【([^】\r\n]{1,200})】|\[([^\]\r\n]{1,200})\]")
+
+
+@lru_cache(maxsize=8)
+def production_note_spans(source: str) -> tuple[tuple[int, int], ...]:
+    """Identify explicitly headed production sections, ending at the next heading.
+
+    Labels within an effects/lighting/cinematography section explain that
+    section's settings; their subheadings do not introduce speaking characters.
+    A timed shot or a dialogue section ends this context immediately.
+    """
+    headings = list(_SECTION_HEADING.finditer(source))
+    return tuple(
+        (heading.start(), headings[index + 1].start() if index + 1 < len(headings) else len(source))
+        for index, heading in enumerate(headings)
+        if is_h3_production_label(heading.group(1) or heading.group(2))
+        and (heading.group(1) or heading.group(2)).strip().casefold() != "dialogue"
+        and not re.search(r"\d", heading.group(1) or heading.group(2))
+    )
 
 
 def _seconds(value: str) -> float:
@@ -39,7 +61,7 @@ def _seconds(value: str) -> float:
 
 
 def explicit_character_profiles(source: str) -> list[dict[str, str]]:
-    """Recognize inline or multiline Character A / Subject 1 definitions."""
+    """Recognize inline or multiline Character A / Subject 1 / Role A definitions."""
     result = []
     seen = set()
     for match in _PROFILE.finditer(source):
@@ -52,7 +74,7 @@ def explicit_character_profiles(source: str) -> list[dict[str, str]]:
 
 
 @lru_cache(maxsize=8)
-def _timed_brief(source: str) -> tuple[str, tuple[tuple[float, float, str, int, int], ...]]:
+def _timed_brief(source: str) -> tuple[str, tuple[tuple[float, float, str, int, int, str], ...]]:
     matches = list(_TIMED_HEADING.finditer(source))
     if len(matches) < 2:
         return "", ()
@@ -83,7 +105,7 @@ def _timed_brief(source: str) -> tuple[str, tuple[tuple[float, float, str, int, 
             body = body[:note.start()].strip()
         if not body:
             return "", ()
-        blocks.append((*ranges[index], body, body_offset, body_end))
+        blocks.append((*ranges[index], body, body_offset, body_end, (match.group("title") or "").strip()))
     return "\n\n".join(item for item in context if item), tuple(blocks)
 
 
@@ -94,8 +116,9 @@ def authored_timed_brief(source: str) -> dict:
         "context": context,
         "events": [
             {"text": text, "source_start_seconds": start, "source_end_seconds": end,
-             "source_offset": offset, "source_end": stop}
-            for start, end, text, offset, stop in blocks
+             "source_offset": offset, "source_end": stop,
+             **({"source_title": title} if title else {})}
+            for start, end, text, offset, stop, title in blocks
         ],
     }
 
@@ -108,8 +131,16 @@ def explicit_negative_constraints(source: str) -> str:
     # Give explicit section labels a boundary so their prose is not mistaken
     # for part of that prohibition.
     source = _NOTES_HEADING.sub("\n", source)
+    source = _SECTION_HEADING.sub(
+        lambda match: "\n" if is_h3_production_label(match.group(1) or match.group(2)) else match.group(),
+        source,
+    )
     clauses = re.split(r"(?<=[.!?])\s+|[\r\n]+", source)
     return " ".join(dict.fromkeys(
         item.strip() for item in clauses
-        if re.match(r"\s*(?:Throughout\s*,\s*)?(?:no|never|without)\b", item, re.IGNORECASE)
+        if re.match(
+            r"\s*(?:Throughout\s*,\s*)?(?:(?:no|never|without)\b|"
+            r"(?:strictly\s+)?(?:prohibited|forbidden|disallowed)\s*:)",
+            item, re.IGNORECASE,
+        )
     ))

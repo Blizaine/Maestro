@@ -411,6 +411,7 @@ interface PersistedModeSettings {
   studioImageWorkflow?: StudioImageWorkflow
   audioSubMode?: import('../types').AudioSubMode
   selectedModelPerAudioSubMode?: Partial<Record<import('../types').AudioSubMode, string>>
+  inferenceStepsPerModel?: Record<string, number>
   h3OptimizationPreferences?: {
     override_attention?: '' | 'sol' | 'sla' | 'sdpa'
     skip_steps_cache_type?: '' | 'first_block'
@@ -580,6 +581,7 @@ function _saveSettings(
       studioImageWorkflow: state.studioImageWorkflow ?? previous.studioImageWorkflow,
       audioSubMode: state.audioSubMode ?? previous.audioSubMode,
       selectedModelPerAudioSubMode: state.selectedModelPerAudioSubMode ?? previous.selectedModelPerAudioSubMode,
+      inferenceStepsPerModel: state.inferenceStepsPerModel ?? previous.inferenceStepsPerModel,
       h3OptimizationPreferences: state.h3OptimizationPreferences ?? previous.h3OptimizationPreferences,
     }
     // Strip file-bearing / ephemeral fields BEFORE serializing so they
@@ -652,6 +654,7 @@ function _loadSettings(): PersistedModeSettings | null {
         studioImageWorkflow: parsed.studioImageWorkflow,
         audioSubMode: parsed.audioSubMode,
         selectedModelPerAudioSubMode: parsed.selectedModelPerAudioSubMode || {},
+        inferenceStepsPerModel: _normalizeRememberedSteps(parsed.inferenceStepsPerModel),
         h3OptimizationPreferences: parsed.h3OptimizationPreferences || {},
         _loraFilenameSnapshot: snapshot,
       }
@@ -749,8 +752,29 @@ const _PRIMARY_MODEL_DEFAULT_FIELDS: ReadonlyArray<string> = [
 // most recently requested model's options may touch the store.
 let _modelOptionsSeq = 0
 
+function _normalizeRememberedSteps(values: unknown): Record<string, number> {
+  if (!values || typeof values !== 'object' || Array.isArray(values)) return {}
+  return Object.fromEntries(Object.entries(values).filter(([model, count]) => (
+    model.trim().length > 0 && model.length <= 200
+    && typeof count === 'number' && Number.isInteger(count) && count >= 1 && count <= 1000
+  )).slice(0, 1000))
+}
+
+function _rememberedModelSteps(
+  state: Pick<AppState, 'inferenceStepsPerModel'>,
+  modelType: string,
+  options?: ModelOptions | null,
+): number | undefined {
+  const remembered = state.inferenceStepsPerModel[modelType]
+  if (remembered == null || options?.lock_inference_steps) return undefined
+  if (!options) return remembered
+  const min = Math.max(1, options.inference_steps_min ?? 1)
+  const max = Math.max(min, options.inference_steps_max ?? 50)
+  return Math.max(min, Math.min(max, remembered))
+}
+
 function _applyModelDefaults(
-  storeGet: () => { selectedModelPerMode: Partial<Record<GenerationMode, string>>; generationMode: GenerationMode; params: GenerateParams },
+  storeGet: () => Pick<AppState, 'selectedModelPerMode' | 'generationMode' | 'params' | 'inferenceStepsPerModel' | 'modelOptions'>,
   storeSet: (fn: (s: { params: GenerateParams }) => { params: GenerateParams }) => void,
   modelType: string,
 ): void {
@@ -773,6 +797,14 @@ function _applyModelDefaults(
         && state.params.minimax_h3_turbo_mode === true
       ) {
         continue
+      }
+      if (field === 'num_inference_steps') {
+        const remembered = _rememberedModelSteps(state, modelType,
+          state.modelOptions?.model_type === modelType ? state.modelOptions : undefined)
+        if (remembered != null) {
+          overrides.num_inference_steps = remembered
+          continue
+        }
       }
       if ((d as Record<string, unknown>)[field] !== undefined) {
         overrides[field] = (d as Record<string, unknown>)[field]
@@ -1486,6 +1518,8 @@ interface AppState {
   musicInstrumental: boolean
   setMusicInstrumental: (b: boolean) => void
   selectedModelPerAudioSubMode: Partial<Record<import('../types').AudioSubMode, string>>
+  /** Step choices are independent for each model and survive restarts. */
+  inferenceStepsPerModel: Record<string, number>
   /** H3 accelerations live outside per-mode params so visiting Audio/Image
    *  cannot erase the user's Video optimization choices. */
   h3OptimizationPreferences: {
@@ -2842,9 +2876,9 @@ function _audioSubModeForModel(modelType: string): import('../types').AudioSubMo
   return 'speech'
 }
 
-/** Persist only navigation/model choices and H3 acceleration preferences.
+/** Persist navigation/model choices, step counts and H3 acceleration preferences.
  *  This deliberately does not restore project state, prompts, uploads,
- *  seeds, LoRAs, or general Advanced controls. The server mirror makes the
+ *  seeds, LoRAs, or other Advanced controls. The server mirror makes the
  *  choices survive Pinokio assigning a different browser origin/port. */
 function _persistStickyStudioPreferences(state: AppState) {
   const durableGenerationMode: Exclude<GenerationMode, 'tools'> = (
@@ -2863,6 +2897,7 @@ function _persistStickyStudioPreferences(state: AppState) {
     studioImageWorkflow: state.studioImageWorkflow,
     audioSubMode: state.audioSubMode,
     selectedModelPerAudioSubMode: state.selectedModelPerAudioSubMode,
+    inferenceStepsPerModel: state.inferenceStepsPerModel,
     h3OptimizationPreferences,
   }, state.loraIdByFilename)
 
@@ -2878,6 +2913,7 @@ function _persistStickyStudioPreferences(state: AppState) {
       Object.entries(state.selectedModelPerAudioSubMode).filter(([, model]) => Boolean(model)),
     ),
     h3_optimizations: h3OptimizationPreferences,
+    inference_steps_per_model: state.inferenceStepsPerModel,
   }
   _studioPreferencesSaveTask = _studioPreferencesSaveTask
     .catch(() => { /* a later preference save should still run */ })
@@ -2887,6 +2923,21 @@ function _persistStickyStudioPreferences(state: AppState) {
     .catch(error => {
       console.warn('Failed to save Studio preferences:', error)
     })
+}
+
+function _rememberInferenceSteps(
+  storeGet: () => AppState,
+  storeSet: (update: Pick<AppState, 'inferenceStepsPerModel'>) => void,
+  modelType: string,
+  value: unknown,
+) {
+  if (!modelType || typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 1000) return
+  const state = storeGet()
+  if (state.inferenceStepsPerModel[modelType] === value) return
+  if (state.modelOptions?.model_type === modelType && state.modelOptions.lock_inference_steps) return
+  if (state.params.model_type === modelType && modelType.startsWith('minimax_h3') && state.params.minimax_h3_turbo_mode === true) return
+  storeSet({ inferenceStepsPerModel: { ...state.inferenceStepsPerModel, [modelType]: value } })
+  _persistStickyStudioPreferences(storeGet())
 }
 
 export const useStore = create<AppState>((set, get) => ({
@@ -3526,6 +3577,7 @@ export const useStore = create<AppState>((set, get) => ({
   setMusicInstrumental: (b) => set({ musicInstrumental: b }),
   audioSubMode: 'speech' as import('../types').AudioSubMode,
   selectedModelPerAudioSubMode: {} as Partial<Record<import('../types').AudioSubMode, string>>,
+  inferenceStepsPerModel: {},
   h3OptimizationPreferences: {
     override_attention: '',
     skip_steps_cache_type: '',
@@ -3880,12 +3932,13 @@ export const useStore = create<AppState>((set, get) => ({
     // num_inference_steps, video_prompt_type, video_guide, image_refs,
     // frames_positions, MMAudio_*, etc. — gets snapshotted here.
     //
-    // Deliberately NOT written to localStorage: a page refresh starts
-    // the working state (prompt, seed, LoRA selection, Advanced values)
+    // The complete snapshot is not restored after a page refresh: the
+    // working state (prompt, seed, LoRA selection, other Advanced values)
     // from the model's defaults. v1.2.0 persisted every edit across
     // refreshes and users found the stale text/seeds surprising —
     // in-session mode-switch persistence is the wanted behavior,
-    // refresh is a clean slate (see loadModels).
+    // refresh is a clean slate except for explicit sticky preferences such
+    // as per-model step counts (see loadModels).
     if (key !== 'model_type' && key !== 'prompt' && key !== 'activated_loras' && key !== 'loras_multipliers') {
       const s = get()
       const mode = s.generationMode
@@ -3900,6 +3953,7 @@ export const useStore = create<AppState>((set, get) => ({
       }
       set({ savedParamsPerMode: updatedSavedParams })
     }
+    if (key === 'num_inference_steps') _rememberInferenceSteps(get, set, get().params.model_type, value)
     if (
       key === 'minimax_h3_references'
       || key === 'image_start'
@@ -5008,8 +5062,8 @@ export const useStore = create<AppState>((set, get) => ({
       // Hydrate persisted per-mode settings from localStorage.
       //
       // Deliberately PARTIAL: only navigation, per-mode model selections,
-      // and H3 Sol/First Block preferences survive a page refresh. The working
-      // state — prompt text and Advanced settings (seed, steps, LoRA
+      // step counts and H3 Sol/First Block preferences survive a page refresh. The working
+      // state — prompt text and other Advanced settings (seed, LoRA
       // selection, …) — starts fresh from the model's defaults on every
       // load. The per-mode snapshots (savedParamsPerMode /
       // savedLoraPerMode / savedPromptPerMode) still carry edits across
@@ -5018,6 +5072,10 @@ export const useStore = create<AppState>((set, get) => ({
       // a reload felt wrong, so a refresh is a clean slate again.
       const saved = _loadSettings()
       const durableConfigured = studioPreferences?.configured === true
+      const restoredInferenceSteps = _normalizeRememberedSteps(
+        studioPreferences?.inference_steps_per_model ?? saved?.inferenceStepsPerModel,
+      )
+      set({ inferenceStepsPerModel: restoredInferenceSteps })
       let selectedModelPerMode: Partial<Record<GenerationMode, string>> = {
         ...(saved?.selectedModelPerMode || {}),
         ...(durableConfigured
@@ -7824,6 +7882,10 @@ export const useStore = create<AppState>((set, get) => ({
         ltx_window_plan,
       } = await api.submitGeneration(params, holdForQueue)
 
+      // Also remember steps used by an applied recipe or restored output,
+      // without re-saving the rest of that job's working state.
+      _rememberInferenceSteps(get, set, String(params.model_type || ''), params.num_inference_steps)
+
       if (h3_window_plan) {
         const planFps = state.modelOptions?.fps ?? 24
         const effectiveWindowFrames = h3_window_plan.effective_window_frames
@@ -8515,6 +8577,7 @@ export const useStore = create<AppState>((set, get) => ({
       params: { ...s.params, ...newParams },
       loraWeights: preset.lora_weights || {},
     }))
+    _rememberInferenceSteps(get, set, get().params.model_type, newParams.num_inference_steps)
   },
 
   deletePreset: async (id) => {
@@ -8695,6 +8758,8 @@ export const useStore = create<AppState>((set, get) => ({
       if (options.default_num_inference_steps != null) {
         paramUpdates.num_inference_steps = options.default_num_inference_steps
       }
+      const rememberedSteps = _rememberedModelSteps(activeState, modelType, options)
+      if (rememberedSteps != null) paramUpdates.num_inference_steps = rememberedSteps
       if (options.default_guidance_scale != null) {
         paramUpdates.guidance_scale = options.default_guidance_scale
       }
@@ -11807,7 +11872,7 @@ export const useStore = create<AppState>((set, get) => ({
       )
       const maxSteps = Math.max(
         minSteps,
-        Math.round(Number(restoredModelOptions.inference_steps_max ?? 8)),
+        Math.round(Number(restoredModelOptions.inference_steps_max ?? 12)),
       )
       const restoredSteps = Number(p.num_inference_steps)
       const defaultSteps = Number(

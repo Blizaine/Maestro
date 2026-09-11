@@ -218,7 +218,7 @@ export function DirectorH3Optimizations() {
                 Fused Turbo Recipe
               </span>
               <span className="mt-0.5 block text-[9px] leading-relaxed text-text-muted">
-                Every Director shot uses the checkpoint's baked Turbo and Mystic recipe. Four steps is the default; Total Steps can be adjusted from 4-8 in Director Advanced. Compatible H3 LoRAs are experimental under Video LoRAs. Extra Turbo/PDD and VDN adapters and cache recipes remain disabled.
+                Every Director shot uses the checkpoint's baked Turbo and Mystic recipe. Four steps is the default; Total Steps can be adjusted from 4-12 in Director Advanced. Compatible H3 LoRAs are experimental under Video LoRAs. Extra Turbo/PDD and VDN adapters and cache recipes remain disabled.
               </span>
             </span>
           </div>

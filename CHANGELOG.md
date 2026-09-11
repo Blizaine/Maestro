@@ -3,6 +3,29 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [2.1.6] - 2026-09-11
+
+- H3 and Viggle now pass the per-job transformer VRAM allowance to MMGP,
+  reducing repeated weight streaming on profiles 2, 4, 4.5 and 5. Existing
+  activation reserves, VAE/encoder budgets and manual preload settings remain
+  in effect, and each job restores the base budget when it finishes.
+- H3 Fused 4-Step Frames and References now allow 4–12 total steps, with 4
+  still the default. Studio remembers the last selected or used step count
+  per model across restarts, including when Pinokio assigns a different port.
+- Reference name and type controls now expand beneath the selected thumbnail
+  row instead of covering the prompt with a large dialog. Preview, replacement
+  and audio options remain available; thumbnails reorder directly in the grid.
+- Fixed H3 prompt enhancement treating compound production headings such as
+  "Scene description", "Visual requirements" and "Final state" as speakers.
+  Quoted and unquoted visual directions stay outside the dialogue duration
+  budget; actual screenplay lines and their timing checks remain intact.
+- Recognize production sections, Role A/B appearance definitions and titled
+  time ranges in imported H3 briefs. Preserve complete timed action phases,
+  cast identities and explicitly prohibited slow motion during adaptation.
+
+See the [v2.1.6 release notes](docs/RELEASE_NOTES_V2.1.6.md) and
+[validation record](docs/VALIDATION_V2.1.6.md).
+
 ## [2.1.5] - 2026-09-10
 
 - Includes the post-v2.1.4 Viggle control-frame memory fix: bounded conversion

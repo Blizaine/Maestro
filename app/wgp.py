@@ -4232,6 +4232,9 @@ def init_pipe(pipe, kwargs, profile):
     preload =int(args.preload)
     if preload == 0:
         preload = server_config.get("preload_in_VRAM", 0)
+    # Per-job residency in MB. Unlike preload, this changes only the
+    # transformer; VAE, encoder and catch-all streaming limits stay intact.
+    transformer_budget = int(getattr(args, "transformer_budget", 0) or 0)
 
     kwargs["extraModelsToQuantize"]=  None
     source_budgets = kwargs.get("budgets", None)
@@ -4245,7 +4248,10 @@ def init_pipe(pipe, kwargs, profile):
             default_transformer_budget = default_transformer_budget.get("transformer", 100) 
             default_transformer2_budget = default_transformer2_budget.get("transformer2", 100) 
 
-        budgets = { "transformer" : default_transformer_budget if preload  == 0 else preload, "text_encoder" : 100 if preload  == 0 else preload, "*" : max(1000 if profile==5 else 3000 , preload) }
+        transformer_budget_mb = default_transformer_budget if preload == 0 else preload
+        if preload == 0 and transformer_budget > 0:
+            transformer_budget_mb = transformer_budget
+        budgets = { "transformer" : transformer_budget_mb, "text_encoder" : 100 if preload  == 0 else preload, "*" : max(1000 if profile==5 else 3000 , preload) }
         if "transformer2" in pipe:
             budgets["transformer2"] = default_transformer2_budget if preload  == 0 else preload
         source_budgets.update(budgets)
@@ -4535,10 +4541,11 @@ def load_models(model_type, override_profile = -1, output_type="video", **model_
     offloadobj = offload.profile(pipe, profile_no= mmgp_profile, compile = compile_modules, quantizeTransformer = False, loras = loras_transformer, perc_reserved_mem_max = perc_reserved_mem_max , vram_safety_coefficient = vram_safety_coefficient , convertWeightsFloatTo = transformer_dtype, **kwargs)  
     # Let the job-level memory planner tell whether a resident model was
     # profiled with enough activation headroom for a later, heavier request
-    # (notably H3 Ref2VA with a video reference).  A lower coefficient remains
-    # safe for lighter jobs and does not force an unnecessary reload.
+    # (notably H3 Ref2VA with a video reference). Record the requested budget
+    # too: a lighter H3 job can retain more weights instead of streaming them.
     try:
         wan_model._maestro_profile_vram_coefficient = float(vram_safety_coefficient)
+        wan_model._maestro_profile_transformer_budget_mb = kwargs["budgets"].get("transformer")
     except Exception:
         pass
     if len(args.gpu) > 0:

@@ -1,0 +1,85 @@
+Strictly use the uploaded reference image as the first frame at 0 seconds. The character's identity, clothing, age, body type, skin tone, shaved head style, scars, limb positions, camera angle, shot scale, ancient temple courtyard space, and lighting all naturally inherit from the reference image. Do not reposition before starting movement, do not change the identities of the left and right characters, and do not regenerate characters. The entire film features only two adult East Asian male martial artists engaged in combat.
+Role A: White-Clothed Martial Monk.
+Off-white tattered loose monk robes, lean and wiry build, superior in speed, leg techniques, lightness skills, and continuous short strikes. Excels at seizing angles, rapid straight punches, palm strikes, elbow strikes, knee strikes, low sweeps, high kicks, wall-bouncing, and pillar-bouncing for direction changes.
+Role B: Deep Brown-Black-Clothed Martial Monk.
+Dark tattered layered monk robes, thicker shoulder, back, and arm muscles, with extreme explosive power. Excels at hard blocks, heavy punches, short hooks, horizontal elbows, shoulder charges, grappling throws, leg intercepts, and close-range counters.
+Neither is a punching bag.
+Role A has the speed advantage, but Role B delivers stronger single impacts.
+Role B has the power advantage, but Role A continuously seeks open lines through footwork and angles.
+Both sides must relentlessly vie for initiative.
+【Image Quality and Film System】
+UE5.4 Path Tracing. Lumen global illumination. Nanite ultra-high precision geometry.
+Top-tier theatrical live-action Eastern wuxia action blockbuster texture.
+8K detail, 60fps, 12bit HDR1500, 16:9. PBR physically based rendering materials.
+ARRI Alexa 35-level dynamic range. 35mm Kodak 5219 film grain at about 40%.
+Realistic Asian male skin pores, sweat, blood, dust, muscle contractions, fabric fibers, and impact deformations.
+Overcast natural light + warm slanted sunlight streaming from the collapsed roof.
+Thick volumetric dust.
+No anime rendering. No commercial game CG plastic feel. No UI, subtitles, or logos.
+【Cinematography System】
+The entire film strictly uses a single continuous shot.
+24mm ultra-wide-angle FPV drone-style motion cinematography. Normal speed.
+Strictly prohibited: Slow motion, freezes, jump cuts, flash blacks, random transitions, prolonged poses, or both sides stopping to stare.
+The camera must move around the actual action like a third high-speed martial arts videographer.
+Heavy use of: Whip Pan, rapid Push/Pull, over-the-shoulder circling, low-angle ground-hugging chase shots, short-radius Arc, Rack Focus, Crane high-speed up/down, eave-edge lateral following.
+1.0—1.5Hz slight high-frequency handheld breathing. Approximately 0.08 seconds of ultra-low body inertia.
+High-speed clashes with shutter near 1/2000s. Only slight directional motion blur at action edges.
+Faces, fist peaks, insteps, elbow tips, blocking relationships, and true impact points always sharp.
+【Action Density】
+0 seconds: Immediate engagement. The full 30 seconds must have no meaningless downtime.
+Normal phase: 3—5 explicit attack-defense state changes per second.
+After 20 seconds: 4—6 per second.
+Final 3 seconds: 5—7 short-range attack-defense exchanges per second.
+Not one person landing ten punches in a row while the other stands waiting.
+Instead: Attack → Block → Second attack already incoming → Dodge → Intercept → Counterpunch → Arm block → Seize line again.
+Actions always interlock mutually.
+【Colorless Physical Effects System】
+No colored internal energy throughout the film.
+All "wuxia supernatural forces" uniformly expressed as: Air compression, transparent airflow, white water vapor condensation, dust, gravel, sweat, blood droplets, and environmental stress reactions.
+Ordinary punch: Ultra-short air compression flicker.
+High-speed straight punch: White airburst cone + instantaneous Mach ring the size of a fist.
+High-speed swing punch: Arc-shaped air slash mark.
+Horizontal elbow: Thick localized pressure wave.
+Heavy kick: Conical airburst + circular water vapor compression ring.
+High-speed lightness skill ground push: Radial sand-dust wave from the sole.
+Body wall crash: Air shock + realistic material fracture.
+Ultimate ultimate-move-level clash: Multi-layered white Mach rings + massive transparent spherical shockwave + air refraction.
+No fixed apertures. All airbursts must originate from actual fist/foot positions and immediately propagate/decay along the force direction.
+【Blood and Injuries】
+Both roles are fictional adult males.
+Allow realistic heavy impacts to cause brief, directionally clear blood feedback.
+True facial hits from fists or elbows: Sweat, saliva, and minimal blood mist can simultaneously spray along the force direction.
+Nose bridge heavy strike: Continuous minimal nosebleed.
+Mouth corner: Can accumulate gradual bloodstains.
+Brow bone: Allow minor abrasions.
+Prohibited: Limb dismemberment, exposed bones, open wounds, and gore effects.
+Blood must have explicit strike origins.
+Injuries, once produced, are permanently and continuously retained.
+【0.00—4.00｜Close-Range Line-Seizing · First Round Storm Assault】
+Strictly inherit the first frame.
+Role A white-clothed martial monk's high kick is already pressing into Role B's upper body.
+Role B uses left forearm to heavily seal the kicking leg.
+A does not retract the leg and wait. Immediately borrow the counterforce from the block for a rapid landing.
+Right foot just touches down: Left straight punch directly enters B's face.
+B palm heel slaps it away.
+A's second body short punch immediately targets the ribs.
+B sinks elbow to seal.
+A's forearm remains in contact with B, suddenly shifting to a short elbow.
+B tilts head.
+Elbow tip grazes face, forming a fine air slash mark.
+As B evades, right punch already booms from under A's arm.
+A leans head outward.
+Fist grazes hairline, producing a brief white airburst cone.
+A immediately spins back with a swing punch.
+B blocks with forearm.
+Fist-arm collision produces the first clear transparent pressure ring.
+Both sides' sleeves and sweat beads instantly shake outward.
+A immediately follows with low sweep.
+B raises knee to intercept leg.
+Legs collide and haven't fully separated when B chases with short straight punch to A's nose bridge.
+A palm heel intercepts.
+The other fist immediately booms toward B's chest.
+The entire 4 seconds maintains close-range mutual assault.
+Camera starts from reference image position, rapidly moving about 150 degrees along the outer sides of both.
+
+【4.00—8.00｜Heavy Fist Suppression·Stone Steps Shattered All the Way】 B suddenly seizes back the initiative. Right foot slams heavily into the ground. The stone slab cracks on the spot. His body presses forward like a cannonball. In quick succession: Right heavy straight punch → Left short hook → Right horizontal elbow → Left body punch. A: Deflects the first punch outward. Leans back to evade the hook. Forearm blocks the elbow. Pulls in stomach to dodge the body punch. But B's final step suddenly turns into a shoulder charge. A can't fully retreat in time. Chest and shoulder are brutally struck head-on. Secondary impact. A's entire body is launched back several meters. Both feet still maintain ground contact. Soles of his shoes plow two gravel trenches along the stone slabs. B immediately closes in. A, while sliding back, uses three consecutive palm strikes to dismantle B's straight punches. B's fourth punch suddenly sinks to attack the abdomen. A twists waist to deflect only part of the force. The fist truly lands. A's abdomen visibly compresses. Breath is instantly interrupted. B immediately raises elbow to chase the face. A ducks head to evade. The elbow strike misses and directly smashes into the adjacent stone step. The entire stone step explodes. Large chunks of grayish-blue stone slab shatter and fly out in realistic directions. A seizes the opening while the debris is still in the air: Left palm slaps wrist → Right straight punch lands squarely on B's face side. Short spurts of blood droplets and sweat spray sideways. B's head is knocked askew, but his body immediately rights itself. The camera rapidly backtracks along the stone steps. 【8.00—12.00｜Lightness Skill Angle Cut·Corridor Pillars Consecutively Destroyed】 A begins to leverage his speed advantage. First step treads on stone balustrade. Second step steps onto wooden pillar. Two consecutive realistic kicks off the surface. Body erupts diagonally upward along the pillar face. Leaps over from B's shoulder side. Not floating. B turns while throwing a pursuing heavy punch. A draws in stomach mid-air. The fist peak grazes past below the abdomen. A white airburst cone blows A's wide robe entirely upward. A lands on the side of the second corridor pillar. Foot sole steps on pillar and rebounds again. A diving side kick brutally strikes toward B's chest and shoulder. B crosses both arms to hard-block. At the moment the kick lands, a large transparent Mach ring appears. B's entire body is pushed backward. Back crashes through the first wooden pillar. But he doesn't fall. B directly uses the collapsing wooden pillar to obscure vision and charges out. Short straight punch toward A's head. A dodges head. B's fist misses and smashes into the second pillar. Wooden pillar: First bends noticeably → Wood fibers tear → Midsection explodes → Wood chips scatter. A immediately follows up while B retracts fist: Body punch → Horizontal elbow → Knee strike. B blocks the first two strikes. The knee strike truly hits the abdomen. B's body folds at the waist. As A prepares to follow with a punch, B suddenly grabs A's shoulder and hurls him in reverse. A doesn't hit the ground. Instead, both feet step on the third pillar to absorb force. The next second, he rebounds back again. 【12.00—16.00｜Corridor High-Speed Deathmatch·Entire Eave Section Begins to Collapse】 A rebounds from the pillar face. Right fist enters B's face guard first. B blocks. Before A's fist can retract, left fist enters the ribs. B sinks elbow. A immediately follows with horizontal elbow. B dives low. B rises from below: Uppercut lands squarely on A's jaw. A's face is brutally snapped up. Short spurts of saliva and blood droplets spray upward. A doesn't fly back. Feet shuffle underneath to immediately regain ground. Backhand palm slaps away B's pursuing fist. Follows with high-position whip kick. B blocks with forearm. As A's leg lands, he immediately low-sweeps. B lifts foot. A's low sweep is a feint. Body spins with the momentum. Second spinning back kick truly brutally strikes B's chest. B crashes into the corridor railing. The entire railing segment breaks. B lunges back from the broken railing. The two enter continuous close-range combat at half-arm distance: Palms, fists, elbows, knees, shoulders. No fewer than 15 state changes. Their forearms constantly clash. Each contact shakes off sweat and wood chips. Once, B's heavy punch is deflected outward by A. The fist wind directly strikes the upper eave that's already lost support. The ten-plus-meter tiled roof begins to collapse in sequence. Not a simultaneous explosion. First, tiles slide off. Then, purlins snap. Finally, part of the eave tilts downward as a whole. The two continue mutual attacks amid the falling tiles.【16.00—20.00｜Rooftop Chase·Bodywork Fully Upgraded】 A steps onto a tilting, falling wooden beam. Uses the moving beam to leap up. Directly vaults onto the low eave. B follows closely. One palm slaps a broken pillar. Borrows the reaction force to leap up. The two begin pursuit-style mutual attacks on the roof. A sprints at high speed along the tile surface. Turns back with consecutive strikes: Backhand punch → Side kick → Spinning sweep kick. B chases while blocking. Forearm blocks punch. Body leans back to evade kick. Squats to let sweep kick pass over head. The air cut from the sweep kick laterally flips a row of roof tiles. After squatting, B immediately explodes upward. A skyward heavy punch blasts toward A's abdomen. A presses both hands down to block. The fist force still lifts A a short distance. A flips over B mid-air with the momentum. Lands on the opposite side of the ridge. B turns to pursue with punch. A retreats while using three high-speed palm blocks. The fourth time, suddenly doesn't block. Dodges to the outer side. B's heavy punch directly smashes the ridge. The ridge cracks continuously from the fist contact point toward both sides. The entire tile surface collapses into a massive depression. The camera races parallel along the outer eave side.

@@ -219,11 +219,16 @@ const read = async endpoint => {
     assert.equal(await sidebar.locator('.media-input-card').count(), 2);
     assert.equal(await sidebar.getByRole('button', {name: 'Add reference', exact: true}).count(), 1);
     await sidebar.locator('.media-input-card').nth(1).getByRole('button', {name: /^Edit /}).click();
-    await page.getByLabel('Picture 2 use').selectOption('style');
-    await page.getByRole('button', {name: 'Move Picture 2 earlier'}).click();
+    const referenceEditor = page.getByRole('group', {name: 'Picture 2 reference settings', exact: true});
+    assert.equal(await page.getByRole('dialog', {name: /reference settings$/}).count(), 0, 'Reference fields are inline');
+    const editorBounds = await referenceEditor.boundingBox();
+    const promptBounds = await sidebar.getByRole('textbox', {name: 'Generation prompt', exact: true}).boundingBox();
+    assert.ok(editorBounds.y + editorBounds.height <= promptBounds.y, 'Reference fields do not overlay the prompt');
+    await page.getByLabel('Picture 2 type').selectOption('style');
+    await sidebar.getByRole('button', {name: 'Edit Picture 2 reference', exact: true}).press('Alt+ArrowLeft');
     assert.equal(await page.evaluate(() => window.store.getState().params.minimax_h3_references[0].image_intent), 'style');
     assert.equal(await page.evaluate(() => window.store.getState().params.minimax_h3_references.slice(1).every(ref => ref.library_character_id === 'blaine')), true);
-    await page.getByRole('dialog', {name: /settings$/}).press('Escape');
+    await page.getByRole('group', {name: /reference settings$/}).press('Escape');
     await page.evaluate(() => {
       const s = window.store.getState();
       window.store.setState({modelOptions: {...s.modelOptions, omni_reference_limits: {image: 2, video: 0, audio: 1, total: 3}}});
@@ -234,12 +239,12 @@ const read = async endpoint => {
     await sidebar.getByLabel('Add reference files').setInputFiles({name: 'scene.png', mimeType: 'image/png', buffer: Buffer.from('test')});
     await pause();
     await sidebar.locator('.media-input-card').nth(1).getByRole('button', {name: /^Edit /}).click();
-    await page.getByLabel('Picture 2 use').selectOption('style');
+    await page.getByLabel('Picture 2 type').selectOption('style');
     await page.getByLabel('Replace Picture 2', {exact: true}).setInputFiles({name: 'replacement.png', mimeType: 'image/png', buffer: Buffer.from('test')});
     await pause();
     assert.equal(await page.evaluate(() => window.store.getState().params.minimax_h3_references[2].image_intent), 'style', 'Replace retains the role and order');
     assert.equal(await page.evaluate(() => window.store.getState().params.minimax_h3_references[2].filename), 'replacement.png');
-    await page.getByRole('dialog', {name: /settings$/}).press('Escape');
+    await page.getByRole('group', {name: /reference settings$/}).press('Escape');
     await page.evaluate(() => window.store.setState({modelOptions: window.options.minimax_h3_ref2va_fused_turbo}));
     console.log('Character appearance/voice grouping, uploads, trailing add tile, roles and accessible reference ordering passed');
 

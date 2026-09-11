@@ -2064,10 +2064,9 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("Music / performance timeline", section)
         self.assertIn("Music / sound style only", section)
         self.assertIn("groupActiveReferences", section)
-        self.assertIn("Bound together as one H3 subject", section)
-        self.assertIn("Saved character audio is automatically bound as a Voice Reference", section)
+        # The compact inline editor replaced the old dialog's explanatory
+        # copy. Keep checking the voice binding rather than obsolete wording.
         self.assertIn("audio_intent: 'voice' as const", section)
-        self.assertIn("preserves the exact soundtrack and advances through it", section)
         self.assertIn("timeline_start_frame=window_start_frame_no", main)
         self.assertNotIn('accept="image/*,video/*,audio/*', section)
         self.assertNotIn('accept="audio/*', section)
@@ -2146,7 +2145,6 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             handler.index("setDurationSeconds(audioDuration)"),
         )
         self.assertIn("onChange={event => setAudioIntent(", section)
-        self.assertIn("automatically enables a multi-window sequence", section)
         self.assertIn(
             "setDuration(useStore.getState().durationSeconds)",
             duration_slider,

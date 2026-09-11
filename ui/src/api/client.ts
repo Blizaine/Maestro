@@ -266,6 +266,7 @@ export interface StudioPreferenceSettings {
   audio_sub_mode?: 'speech' | 'music' | 'sfx' | 'mixer' | 'revoice'
   selected_model_per_mode?: Record<string, string>
   selected_model_per_audio_sub_mode?: Record<string, string>
+  inference_steps_per_model?: Record<string, number>
   h3_optimizations?: {
     override_attention?: '' | 'sol' | 'sla' | 'sdpa'
     skip_steps_cache_type?: '' | 'first_block'

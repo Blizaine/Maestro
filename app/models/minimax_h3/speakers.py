@@ -28,6 +28,56 @@ _DIALOGUE_OWNER_LEADING_WORDS = {
     "this", "while", "with",
 }
 
+# Shared by screenplay extraction and quoted-speech detection. A production
+# field must not become a character just because its value follows a colon.
+_PRODUCTION_LABELS = {
+    "action", "actions", "ambiance", "ambience", "atmosphere", "audio",
+    "audio design", "audio notes", "camera", "camera movement", "camera notes",
+    "cast", "character", "characters", "cinematography", "color palette",
+    "composition", "constraints", "continuity", "description", "dialogue",
+    "director", "duration", "editing", "effects", "detailed description",
+    "end", "ext", "exterior", "fade in", "fade out", "format", "fps",
+    "framing", "int", "interior", "language", "lighting", "location",
+    "integrated multimodal description", "music", "non diegetic music",
+    "negative prompt", "notes", "overall soundscape", "pacing", "pov",
+    "instead", "prohibited", "forbidden", "disallowed",
+    "prompt", "reference", "resolution", "retention analysis", "role",
+    "scene", "setting", "sfx", "shot", "sound", "sound design",
+    "sound effects", "soundscape", "soundtrack", "style", "subject",
+    "subject definitions", "summary", "time", "title", "tone", "transition",
+    "vfx", "visual", "visual direction", "visual style", "visuals", "voice",
+}
+_PRODUCTION_LABEL_WORDS = {
+    word for label in _PRODUCTION_LABELS for word in label.split()
+} | {
+    "and", "animation", "appearance", "background", "behavior", "blood", "body",
+    "characterization", "choreography", "cinematic", "closing", "clothing",
+    "colorless", "colour", "core", "delivery", "density", "design", "directions", "environment",
+    "facial", "film", "final", "foreground", "global", "guidance", "identity", "image",
+    "initial", "injuries", "instructions", "lock", "main", "motion", "movement",
+    "opening", "outfit", "performance", "physical", "plan", "production",
+    "quality", "reference", "references", "requirements", "rules", "settings", "setup",
+    "state", "structure", "system", "technique", "texture", "timing", "treatment",
+    "wardrobe",
+}
+
+
+def is_h3_production_label(value: Any) -> bool:
+    """Recognize production fields, including compound headings in briefs.
+
+    Match combinations of production vocabulary rather than maintaining a
+    separate exception for every heading ("Scene description", "Final state",
+    "Visual requirements", etc.). Unknown names and character/role labels
+    remain eligible to introduce real screenplay turns.
+    """
+    key = re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+    words = key.split()
+    return bool(
+        key in _PRODUCTION_LABELS
+        or re.fullmatch(r"(?:scene|shot|subject|picture|video|audio|s)\s*\d+", key)
+        or (len(words) > 1 and all(word in _PRODUCTION_LABEL_WORDS for word in words))
+    )
+
 
 class H3SpeakerBindingError(ValueError):
     """A real dialogue line lacks an unambiguous referenced speaker."""
@@ -80,6 +130,18 @@ def is_h3_spoken_quote(source: str, match: re.Match) -> bool:
     ):
         return False
 
+    label = re.search(
+        r"(?:^|\n)[ \t]*(?:[-*][ \t]+)?(?:\*\*)?"
+        r"([\w '-]{1,80}?)(?:\*\*)?[ \t]*:[ \t]*(?:\*\*)?[ \t]*$",
+        before,
+    )
+    # Check headings before speech verbs: "Final state" contains "state",
+    # but a quoted visual description is still not a spoken declaration.
+    if label and is_h3_production_label(label.group(1)) and (
+        label.group(1).strip().casefold() != "dialogue"
+    ):
+        return False
+
     clause = re.split(r"[.!?;\n]", before)[-1]
     if re.search(r"(?i)\b(?:a|an|the|character|role|style)\s*$", clause):
         return False
@@ -90,12 +152,7 @@ def is_h3_spoken_quote(source: str, match: re.Match) -> bool:
     # H3-native ownership and screenplay labels also declare spoken content.
     if re.search(r"(?:<Subject\s+\d+>|\(S\d+\))\s*[:,]?\s*$", before, re.IGNORECASE):
         return True
-    label = re.search(r"(?:^|\n)\s*([\w '-]{1,60})\s*:\s*$", before)
-    if label and label.group(1).strip().casefold() not in {
-        "subject", "character", "characters", "cast", "style", "visual style",
-        "music", "sound", "soundtrack", "audio", "voice", "language", "camera",
-        "setting", "scene", "title", "description", "reference", "role",
-    }:
+    if label and not is_h3_production_label(label.group(1)):
         return True
     # Quotation followed by attribution: "Hello," Alex says.
     attribution = re.split(r'[.!?;"“”\n]', after.lstrip(" ,"))[0]

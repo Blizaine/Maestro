@@ -94,6 +94,19 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v2.1.6 (2026-09-11)
+
+**Better H3/Viggle memory use, detailed-prompt fixes, and simpler reference controls**
+
+- **Faster streaming H3/Viggle jobs:** the per-job memory planner now passes its transformer allowance to MMGP so eligible profiles can retain more weights in VRAM. In a contributed RTX A4500 / 28 GB RAM Viggle test, denoising improved from about **75 to 60 seconds per step** compared with v2.1.5. Results depend on the GPU, model and job; manual preload settings remain respected.
+- **Detailed action prompts stay out of the dialogue budget:** AI Faithful recognizes production headings, Role A/B descriptions and titled time ranges in imported briefs. Visual directions no longer trigger false “too much dialogue” errors for those formats, while actual spoken lines keep their timing checks.
+- **Reference editing beside the thumbnails:** name and type fields expand beneath the selected reference row. Drag thumbnails to reorder them; saved character appearance and voice stay together. Preview, replacement and soundtrack controls remain available.
+- **H3 Fused steps up to 12:** both Frames and References allow **4–12 total steps**, with four still the default. Studio remembers the last selected or used step count for each model across restarts, including when the browser port changes.
+
+Use Pinokio's **Update**, restart Maestro and refresh the browser. Run Enhance again from the original prompt to apply the parsing fixes. Existing models and saved projects stay in place; these changes require no new dependencies or model downloads.
+
+[Full release notes](docs/RELEASE_NOTES_V2.1.6.md) · [Validation and measured limits](docs/VALIDATION_V2.1.6.md)
+
 ### v2.1.5 (2026-09-10)
 
 **Better H3 prompt adaptation, smarter Viggle INT8 execution, and audio and Director fixes**

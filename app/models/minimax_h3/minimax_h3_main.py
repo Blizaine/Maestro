@@ -1612,7 +1612,7 @@ class MiniMaxH3Model:
             <= FUSED_H3_MAX_EVALUATIONS
         ):
             raise ValueError(
-                "H3 Fused Turbo supports 4-8 total denoising steps; "
+                f"H3 Fused Turbo supports {FUSED_H3_MIN_EVALUATIONS}-{FUSED_H3_MAX_EVALUATIONS} total denoising steps; "
                 f"received {int(sampling_steps)}. Four is the published default."
             )
         if self._turbo_lora_active and int(sampling_steps) < MINIMAX_H3_TURBO_MIN_STEPS:

@@ -224,7 +224,7 @@ export function MiniMaxH3Optimizations() {
                       Fused Turbo Recipe
                     </span>
                     <span className="mt-0.5 block text-[9px] leading-relaxed text-text-muted">
-                      Turbo and Mystic are baked in. Four steps is the default; Total Steps can be adjusted from 4-8 in Advanced. Compatible H3 LoRAs are experimental. Extra Turbo/PDD and VDN adapters, Sol Engine, and First Block Cache remain disabled.
+                      Turbo and Mystic are baked in. Four steps is the default; Total Steps can be adjusted from 4-12 in Advanced. Compatible H3 LoRAs are experimental. Extra Turbo/PDD and VDN adapters, Sol Engine, and First Block Cache remain disabled.
                     </span>
                   </span>
                 </div>
