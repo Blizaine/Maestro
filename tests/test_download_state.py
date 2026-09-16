@@ -600,8 +600,12 @@ class TestDownloadState(unittest.TestCase):
         self.assertNotIn("ZIP extraction failed", civitai)
         self.assertIn("_extract_civitai_archive", civitai)
         self.assertIn("_validate_safetensors_payload(partial_path)", civitai)
+        # RefMods are imported into the character library and their temporary
+        # weight download is discarded before the normal LoRA publish branch.
+        # The final removal still belongs to failure cleanup after that branch.
+        self.assertLess(hf_source.index("_import_downloaded_character"), hf_source.index("os.remove(partial_path)"))
         self.assertGreater(
-            hf_source.index("os.remove(partial_path)"),
+            hf_source.rindex("os.remove(partial_path)"),
             hf_source.index("os.replace(partial_path, save_path)"),
         )
 

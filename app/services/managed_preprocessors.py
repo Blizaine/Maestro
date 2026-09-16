@@ -104,6 +104,14 @@ for _h3_architecture, _h3_width_specs in MINIMAX_H3_LORA_AFFINE_MAPS.items():
             }
         )
 
+MINIMAX_H3_LORA_AFFINE_MAPS["viggle"] = {8: {
+    "filename": "viggle_rank8.sft", "size": 129_800,
+    "sha256": "89081fd235e9deff56274ab76b1b01fa4d9aeebcbd0746295b0fd086cf0e0fec",
+    "url": "https://raw.githubusercontent.com/deepbeepmeep/Wan2GP/057f9ecab9ad57dfbec9768b2daf7a4426ce986c/models/minimax_h3/lora_affine_maps/viggle_rank8.sft",
+    "source_url": "https://github.com/deepbeepmeep/Wan2GP/tree/057f9ecab9ad57dfbec9768b2daf7a4426ce986c/models/minimax_h3",
+    "label": "Viggle rank-8 LoRA compatibility", "license": "WanGP Community License 2.0",
+}}
+
 
 _video_depth_download_lock = threading.Lock()
 _h3_affine_download_lock = threading.Lock()

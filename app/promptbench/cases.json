@@ -1,0 +1,212 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "mountain-fight",
+      "title": "Short mountain-fight concept",
+      "split": "development",
+      "params": {
+        "generation_mode": "video",
+        "model_type": "minimax_h3_fused_turbo",
+        "prompt": "Dynamic kung fu fight scene set in the mountains with power hits and cinematic action.",
+        "resolution": "864x480",
+        "video_length": 345,
+        "seed": 1234,
+        "num_inference_steps": 4
+      },
+      "checks": {
+        "expected_windows": 1,
+        "no_dialogue": false,
+        "exact_dialogue": []
+      },
+      "review": [
+        "The fighters are visually and behaviorally distinct without relying on supplied character identities.",
+        "The terrain, positions, impacts, escalation, and final outcome form a readable causal sequence."
+      ]
+    },
+    {
+      "id": "silent-martial-arts",
+      "title": "Detailed silent martial-arts script",
+      "split": "development",
+      "params": {
+        "generation_mode": "video",
+        "model_type": "minimax_h3_fused_turbo",
+        "prompt": "A silent live-action martial-arts scene in a rain-dark stone courtyard. A patient fighter in a pale training jacket circles clockwise around a cracked fountain while an impulsive fighter in a dark jacket cuts across the center. The dark-jacketed fighter lunges; the pale-jacketed fighter sidesteps, redirects the arm into the fountain rim, then releases immediately. Both recover their footing. The dark-jacketed fighter sweeps low, the pale-jacketed fighter vaults the fountain, lands behind the opponent, and stops one open palm a few centimeters from the opponent's back. The opponent recognizes defeat and slowly lowers both hands. No one speaks or mouths words. No weapons, magic, slow motion, or cuts.",
+        "resolution": "864x480",
+        "video_length": 345,
+        "seed": 1234,
+        "num_inference_steps": 4
+      },
+      "checks": {
+        "expected_windows": 1,
+        "no_dialogue": true,
+        "exact_dialogue": []
+      },
+      "review": [
+        "Every specified action remains in order, including the immediate release, recovery, vault, restrained final palm, and acknowledgment of defeat.",
+        "The prompt preserves a continuous silent take and does not add weapons, magic, slow motion, cuts, or speech-like mouth movement."
+      ]
+    },
+    {
+      "id": "office-transition",
+      "title": "Office conversation and room transition",
+      "split": "development",
+      "params": {
+        "generation_mode": "video",
+        "model_type": "minimax_h3_ref2va_fused_turbo",
+        "prompt": "In a modest architecture office, Mara stands beside a table showing blueprints to her colleague Dev while Lin listens from the open doorway. Mara explains that the north wall cannot move; Dev studies the page before answering that the stair can shift instead. Lin enters, closes the door behind her, crosses to the table, and asks whether the change preserves the skylight. Mara turns from Dev to Lin and confirms that it does. Continue naturally into a second beat in the adjoining materials room: Mara opens the connecting door, all three walk through, Dev enters last and closes it, and Lin compares a wood sample with the blueprint while the others listen. Keep entrances, exits, listeners, room geography, and each door's open or closed state coherent across the transition.",
+        "resolution": "864x480",
+        "video_length": 672,
+        "seed": 1234,
+        "num_inference_steps": 4,
+        "minimax_h3_reference_sequence": true,
+        "minimax_h3_sequence_clip_frames": 345,
+        "minimax_h3_sequence_memory_override": true,
+        "minimax_h3_sequence_continuity": true,
+        "sliding_window_overlap": 18,
+        "minimax_h3_references": []
+      },
+      "checks": {
+        "expected_windows": 2,
+        "no_dialogue": false,
+        "exact_dialogue": []
+      },
+      "review": [
+        "Speaker and listener attention matches the described exchange, with no line assigned to the wrong person.",
+        "All three people and both doors move through consistent states as the scene crosses into the materials room."
+      ]
+    },
+    {
+      "id": "exact-dialogue",
+      "title": "Exact supplied dialogue",
+      "split": "development",
+      "params": {
+        "generation_mode": "video",
+        "model_type": "minimax_h3_fused_turbo",
+        "prompt": "At a quiet railway platform before dawn, adult sisters Ana and Bea wait beside one suitcase. Preserve these words exactly and assign them to the named speaker. Ana says, \"You kept the blue ticket.\" Bea answers, \"I kept both of them.\" Ana asks, \"Then why are you still here?\" Bea replies, \"Because you are.\" Allow enough natural time for every line, reaction, and pause. Do not add, remove, paraphrase, split, or reorder dialogue.",
+        "resolution": "864x480",
+        "video_length": 345,
+        "seed": 1234,
+        "num_inference_steps": 4
+      },
+      "checks": {
+        "expected_windows": 1,
+        "no_dialogue": false,
+        "exact_dialogue": [
+          {"speaker": "Ana", "text": "You kept the blue ticket."},
+          {"speaker": "Bea", "text": "I kept both of them."},
+          {"speaker": "Ana", "text": "Then why are you still here?"},
+          {"speaker": "Bea", "text": "Because you are."}
+        ]
+      },
+      "review": [
+        "All four supplied lines remain verbatim, in order, and owned by the named sister.",
+        "Staging and pauses make the exchange deliverable without rushing or overlapping incompatible actions."
+      ]
+    },
+    {
+      "id": "superhero-flight",
+      "title": "Ordinary superhero flight",
+      "split": "development",
+      "params": {
+        "generation_mode": "video",
+        "model_type": "minimax_h3_fused_turbo",
+        "prompt": "An adult superhero in a simple blue suit flies under their own power above a coastal city at sunrise. They rise from a rooftop, bank between two towers, slow to help a drifting weather balloon clear an antenna, then accelerate toward the open sea. Flight is an innate ability: do not add wings, engines, jets, rocket exhaust, visible energy beams, vehicles, or external lifting devices.",
+        "resolution": "864x480",
+        "video_length": 345,
+        "seed": 1234,
+        "num_inference_steps": 4
+      },
+      "checks": {
+        "expected_windows": 1,
+        "no_dialogue": false,
+        "exact_dialogue": []
+      },
+      "review": [
+        "The hero's unaided flight remains visually legible through rising, banking, slowing, and accelerating.",
+        "No mechanism forbidden by the source prompt is introduced to explain the power."
+      ]
+    },
+    {
+      "id": "quiet-emotional",
+      "title": "Quiet emotional scene",
+      "split": "development",
+      "params": {
+        "generation_mode": "video",
+        "model_type": "minimax_h3_fused_turbo",
+        "prompt": "A quiet scene in a nearly empty community greenhouse at dusk. Adult caretaker Jo discovers that the final cutting from a storm-damaged rose has produced one new leaf. Jo steadies the small pot, notices an old handwritten plant label, cleans soil from it with a thumb, and places the pot in the last patch of sunlight. Develop the emotion through observation, breath, posture, and careful behavior. No dialogue, crying, flashbacks, spectacle, or sudden visitors.",
+        "resolution": "864x480",
+        "video_length": 345,
+        "seed": 1234,
+        "num_inference_steps": 4
+      },
+      "checks": {
+        "expected_windows": 1,
+        "no_dialogue": true,
+        "exact_dialogue": []
+      },
+      "review": [
+        "The emotional change is conveyed through specific behavior and attention to the cutting and label.",
+        "The scene stays restrained and does not add speech, tears, flashbacks, spectacle, or another person."
+      ]
+    },
+    {
+      "id": "continuous-chase",
+      "title": "Continuous-shot chase",
+      "split": "development",
+      "params": {
+        "generation_mode": "video",
+        "model_type": "minimax_h3_ref2va_fused_turbo",
+        "prompt": "One uninterrupted real-time tracking shot follows adult bicycle courier Imani chasing a loose envelope through a busy covered market. The envelope skims east along the central aisle, turns south at a red spice stall, slips beneath a fruit cart, and blows up the west stair toward the roof. Imani follows the same route, briefly loses sight of it beneath the cart, spots it on the stair, leaves the bicycle at the stair base, and continues upward on foot. Across the continuation boundary, preserve direction, landmarks, the parked bicycle, and the envelope's lead. End when Imani traps the envelope under one hand on the rooftop. No cuts, teleportation, route resets, or impossible camera jumps.",
+        "resolution": "864x480",
+        "video_length": 672,
+        "seed": 1234,
+        "num_inference_steps": 4,
+        "minimax_h3_reference_sequence": true,
+        "minimax_h3_sequence_clip_frames": 345,
+        "minimax_h3_sequence_memory_override": true,
+        "minimax_h3_sequence_continuity": true,
+        "sliding_window_overlap": 18,
+        "minimax_h3_references": []
+      },
+      "checks": {
+        "expected_windows": 2,
+        "no_dialogue": false,
+        "exact_dialogue": []
+      },
+      "review": [
+        "The route remains spatially consistent from aisle to stall, cart, stair, and rooftop across both windows.",
+        "The camera and action remain one continuous take, and the bicycle, envelope lead, and ending persist correctly."
+      ]
+    },
+    {
+      "id": "object-handoff",
+      "title": "Object handoff and reveal",
+      "split": "development",
+      "params": {
+        "generation_mode": "video",
+        "model_type": "minimax_h3_ref2va_fused_turbo",
+        "prompt": "In a museum conservation room, adult conservator Nia removes a sealed brass key from a gray evidence pouch while adult archivist Omar watches. Nia places the key in Omar's right hand and keeps the now-empty pouch. Omar closes his hand before adult security officer Tess enters, so Tess has not seen the key. Nia tells Tess only that the pouch arrived sealed. Continue into a second beat: Tess turns to inspect the shipping ledger, Omar quietly opens his right hand behind the ledger, and Nia recognizes an engraved crescent on the key. Tess then turns back and sees the key for the first time. Preserve who owns the key and pouch, which hand holds the key, every person's position, and what each person knows. Do not duplicate, swap, or make the key disappear.",
+        "resolution": "864x480",
+        "video_length": 672,
+        "seed": 1234,
+        "num_inference_steps": 4,
+        "minimax_h3_reference_sequence": true,
+        "minimax_h3_sequence_clip_frames": 345,
+        "minimax_h3_sequence_memory_override": true,
+        "minimax_h3_sequence_continuity": true,
+        "sliding_window_overlap": 18,
+        "minimax_h3_references": []
+      },
+      "checks": {
+        "expected_windows": 2,
+        "no_dialogue": false,
+        "exact_dialogue": []
+      },
+      "review": [
+        "The single key moves from pouch to Omar's right hand while Nia retains the empty pouch, without duplication or disappearance.",
+        "Tess's knowledge changes only when she turns back and sees the key; positions, gaze, concealment, and the crescent reveal remain causally coherent."
+      ]
+    }
+  ]
+}

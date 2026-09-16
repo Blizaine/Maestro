@@ -15,11 +15,8 @@ class SidebarDisclosurePersistenceTests(unittest.TestCase):
         self.assertIn("'col-span-2'", source)
         self.assertIn("grid-cols-6", source)
 
-    def test_characters_appear_before_the_reference_drop_zone(self):
-        source = (
-            ROOT / "ui/src/components/Sidebar/OmniReferenceSection.tsx"
-        ).read_text(encoding="utf-8")
-        self.assertLess(source.index("Characters\n"), source.index("Add images, videos, or audio"))
+    # Character placement, library scrolling and reference drop-zone behavior
+    # are covered by tests/ui/sidebar_redesign.cjs against the rendered sidebar.
 
     def test_character_and_h3_disclosures_persist(self):
         helper = (

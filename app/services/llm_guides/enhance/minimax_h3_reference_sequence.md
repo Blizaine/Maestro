@@ -113,7 +113,8 @@ SHOT FIELDS
 DIALOGUE AND AUDIO
 - Preserve every quoted line exactly and assign it to one shot only.
 - Put spoken words only in dialogue objects. Keep stable speaker IDs across all
-  clips. Dialogue should remain below roughly two words per second.
+  clips. Aim for 2.8 words per second during speech, allowing up to 3 words per
+  second across all speakers. Leave time for requested action and pauses.
 - A group speaking together uses a compound stable ID such as S1,S2. For an
   off-screen voiceover, set the action/delivery clearly as off-screen
   voiceover so Maestro emits the official phrase and keeps on-screen lips

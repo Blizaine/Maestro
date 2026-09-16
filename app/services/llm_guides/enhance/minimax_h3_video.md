@@ -69,6 +69,10 @@ VISUAL TIMELINE
 - Establish the visible subjects, setting, composition, lighting, action, and
   specific camera behavior. Describe observable motion rather than abstract
   emotion.
+- Preserve every requested visible action in its stated order, including the
+  opening transition into the action and the final held object and body state.
+  Do not begin after a requested action or replace the requested ending with a
+  conflicting pose.
 - When a start image is attached, treat it as the exact 0.00-second frame.
   Preserve its identity, wardrobe, objects, composition, setting, and light,
   then describe how motion develops forward from it.
@@ -86,7 +90,9 @@ SPEAKERS AND DIALOGUE
 - Put only the language tag and literal spoken words inside the dialogue tag:
   <d>[English] Exact words spoken.</d>
 - If the user supplies dialogue, preserve every word and punctuation mark
-  verbatim. Do not paraphrase, translate, or add another spoken line.
+  verbatim. Do not paraphrase or translate it. In FAITHFUL mode, or when the
+  user requests only those lines, do not add another spoken line. In CREATIVE
+  mode, supplied lines are anchors around which supporting dialogue may be written.
 - Put those words only inside their <d> blocks. Never duplicate them as
   ordinary quotation-mark text elsewhere in the prompt.
 - Never replace requested words with "speaks," "talks," "they discuss," or
@@ -105,15 +111,24 @@ SPEAKERS AND DIALOGUE
   dialogue tag must name that language (for example [French]); never label
   non-English words as [English], translate them, or infer the tag from the UI
   language instead of the user's request.
-- Budget all spoken words across all speakers at no more than about two words
-  per second. A roughly 5-second clip normally fits one short line; a roughly
-  10-second clip fits one brief exchange; a roughly 15-second clip fits a few
-  short turns with reactions between them.
+- Target 2.8 spoken words per second by default, allowing up to 3 words per
+  second across all speakers. A 5-second speech interval targets 14 words
+  (maximum 15); a 10-second interval targets 28 (maximum 30). Reserve time
+  for requested action and reactions; these budgets are ceilings, not quotas.
 - Do not use speech merely to occupy unused time. After the final line, assign
   the remaining seconds to concrete reactions or movement and explicitly state
   that the people remain silent with their mouths closed. This prevents H3
   from inventing extra speech-like gibberish.
-- If nobody is asked to speak, do not invent dialogue or speaker IDs.
+- In CREATIVE mode, character interactions can imply speech. Author a developed,
+  character-specific exchange for conversations, tutorials, interviews, and
+  monologues; follow the supplied spoken-word target across all speakers. A short
+  greeting does not fulfill a full-window conversation. Let characters respond
+  to one another and advance the requested topic rather than repeating it.
+- Keep explicitly silent requests silent. In FAITHFUL mode, do not invent
+  dialogue or speaker IDs when the request contains no speech.
+- In CREATIVE mode, calculate the spoken interval from the complete authored
+  script, including supporting lines; do not end speech at the time needed for
+  only the original quote. Closed-mouth intervals use the remaining time.
 - When multiple already-numbered speakers talk or sing together, use a
   compound ID such as (S1,S2). Characters who never vocalize receive no ID.
 - For voiceover, use the exact phrase "says in an off-screen voiceover" and
@@ -127,14 +142,16 @@ SPEAKERS AND DIALOGUE
 
 TIMED SILENCE AROUND DIALOGUE
 - When dialogue occupies only a small part of the target Duration, explicitly
-  allocate the entire remaining timeline. Begin the first line around 20% into
-  the clip unless the story requires a different moment.
+  allocate the entire remaining timeline. Begin the first line near the start
+  unless the story requires a different moment. Add opening and closing pauses
+  only when they fit after allocating enough time for the spoken words.
 - Before the first line, write a precise interval beginning at 0.00 seconds.
   Fill it with active nonverbal behavior appropriate to the scene—movement,
   work, fighting, reactions, or camera development—rather than idle staring.
   State that every mouth is closed and the audio contains no human voice.
-- Give the dialogue interval an approximate start and end time based on about
-  two spoken words per second. Immediately after the final word, close the
+- Give the dialogue interval an approximate start and end time based on
+  2.8 spoken words per second, allowing up to 3 when needed. Let dense lines
+  use the full clip instead of compressing speech to force pauses. Immediately after the final word, close the
   speaker's mouth.
 - Give the remaining interval through the exact target Duration concrete
   nonverbal action, ambience, and synchronized practical effects. Outside <d>

@@ -26,10 +26,22 @@ jobs:
         # compileall only compiles (never imports), so it needs no deps and
         # skips heavy vendored model code. Covers the surface we edit.
         run: python -m compileall -q app/services app/launch.py scripts
+      - name: Undefined Python names (our modules)
+        # Syntax compilation cannot detect a missing import or a value read
+        # before assignment on an infrequently exercised request path.
+        run: |
+          python -m pip install "ruff==0.16.2"
+          python -m ruff check --select F821,F823 app/services app/models/minimax_h3 app/launch.py
       - name: Install lightweight test dependencies
         run: >-
           python -m pip install
           "starlette==0.46.1"
+          "fastapi==0.141.1"
+          "gradio==5.29.0"
+          "pydantic==2.10.6"
+          "python-multipart==0.0.32"
+          "httpx==0.28.1"
+          "soundfile==0.13.1"
           "numpy==2.2.6"
           "opencv-python-headless==4.12.0.88"
           "Pillow==11.3.0"
@@ -44,6 +56,7 @@ jobs:
           "pycocotools==2.0.11"
           "rembg==2.0.65"
           "scipy==1.15.3"
+          "librosa==0.11.0"
           "timm==1.0.24"
           "ftfy==6.3.1"
       - name: Install CPU PyTorch test dependency

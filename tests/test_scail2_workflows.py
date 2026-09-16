@@ -4001,7 +4001,7 @@ class TestMultiPersonRecast(unittest.TestCase):
         self.assertIn("{showGuidanceScale && (", advanced)
         self.assertIn("Fast keeps its distilled CFG 1 recipe", advanced)
         self.assertIn(
-            "!isAudio && !isScailEdit && <PostProcessing />",
+            "!isAudio && !isScailEdit && <PostProcessing expanded />",
             advanced,
         )
         self.assertIn(
@@ -4009,7 +4009,7 @@ class TestMultiPersonRecast(unittest.TestCase):
             advanced,
         )
         self.assertIn(
-            "!isScailEdit && (modelOptions as Record<string, unknown> | null)?.perturbation",
+            "!isScailEdit && !!modelOptions?.perturbation",
             advanced,
         )
         self.assertIn(

@@ -133,6 +133,9 @@ OUTPUT FORMAT — respond with ONLY a JSON array:
 
 Output exactly {target_scenes} shot plans totaling ~{target_duration}s. Go:"""
 
+        if kwargs.get("polish_block"):
+            system_prompt = f"{system_prompt}\n\n{kwargs['polish_block']}"
+
         user_prompt = f"""Concept: {concept}
 Platform: {platform}
 Target duration: {target_duration}s

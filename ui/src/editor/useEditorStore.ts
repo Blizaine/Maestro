@@ -640,6 +640,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         api.fetchPipelineList().catch(() => ({ pipelines: [] })),
       ])
       const seen = new Set<string>()
+      const friendlyNames = new Map(
+        Object.values(get().project?.assets || {}).flatMap(asset => (
+          asset.display_name ? [[`${asset.workspace || asset.origin}:${asset.name}`, asset.display_name] as const] : []
+        )),
+      )
       const library = [
         ...workspaceResults.flatMap(({ workspace, result }) => (
           result.outputs.map(output => libraryAssetFromOutput(output, 'output', workspace))
@@ -650,7 +655,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         if (seen.has(key)) return false
         seen.add(key)
         return true
-      }).sort((a, b) => (b.created_at || 0) - (a.created_at || 0))
+      }).map(asset => ({
+        ...asset,
+        display_name: friendlyNames.get(`${asset.workspace || asset.origin}:${asset.name}`),
+      })).sort((a, b) => (b.created_at || 0) - (a.created_at || 0))
       set({
         library,
         libraryWorkspaces: workspaceNames,
@@ -843,7 +851,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   uploadMedia: async (file, preferredTrackId) => {
     set({ error: null })
     try {
-      const uploaded = await api.uploadImage(file)
+      const uploaded = await api.uploadImage(file, { reuseIdentical: true })
       const type: EditorAsset['type'] = file.type.startsWith('audio/')
         ? 'audio'
         : file.type.startsWith('image/')
@@ -852,6 +860,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const asset: EditorAsset = {
         id: newId('library'),
         name: uploaded.filename,
+        display_name: file.name,
         type,
         origin: 'upload',
         workspace: '__uploads__',
@@ -877,11 +886,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (!project || !original) return
     set({ error: null })
     try {
-      const uploaded = await api.uploadImage(file)
+      const uploaded = await api.uploadImage(file, { reuseIdentical: true })
       const candidate: EditorAsset = {
         ...original,
         id: assetId,
         name: uploaded.filename,
+        display_name: file.name,
         origin: 'upload',
         workspace: '__uploads__',
         path: uploaded.path,
@@ -978,7 +988,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         track.items.push({
           id: itemId,
           asset_id: assetId,
-          name: finalAsset.name,
+          name: finalAsset.display_name || finalAsset.name,
           start: placedStart,
           duration,
           source_in: 0,

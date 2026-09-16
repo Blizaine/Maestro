@@ -4,6 +4,7 @@ import { useStore } from '../../stores/useStore'
 import { VideoTimelineSelector } from '../shared/VideoTimelineSelector'
 import { OutpaintCanvas } from './OutpaintCanvas'
 import * as api from '../../api/client'
+import { OutpaintBatchPanel } from './OutpaintBatchPanel'
 
 /**
  * Outpaint mode controls.
@@ -64,6 +65,7 @@ export function OutpaintControls() {
   const windowSize = useStore(s => s.slidingWindowSeconds)
   const setWindowSize = useStore(s => s.setSlidingWindowSeconds)
   const windowLocked = useStore(s => s.slidingWindowLocked)
+  const isH3 = useStore(s => String(s.params.model_type || '').startsWith('minimax_h3'))
 
   const [error, setError] = useState<string | null>(null)
   const [showAdvanced, setShowAdvanced] = useState(false)
@@ -150,12 +152,12 @@ export function OutpaintControls() {
           className="border-2 border-dashed border-border rounded-lg p-6 text-center cursor-pointer hover:border-accent-blue transition-colors"
         >
           <Upload size={24} className="mx-auto mb-2 text-text-muted" />
-          <p className="text-xs text-text-secondary">Drop a video or image to outpaint</p>
+          <p className="text-xs text-text-secondary">{isH3 ? 'Drop a video to outpaint' : 'Drop a video or image to outpaint'}</p>
           <p className="text-[10px] text-text-muted mt-1">or click to browse</p>
           <input
             ref={fileRef}
             type="file"
-            accept="video/*,image/*"
+            accept={isH3 ? "video/*" : "video/*,image/*"}
             className="hidden"
             onChange={e => { const f = e.target.files?.[0]; if (f) handleUpload(f) }}
           />
@@ -241,9 +243,12 @@ export function OutpaintControls() {
       >
         {showAdvanced ? '▾' : '▸'} Advanced
       </button>
+      {isH3 && <p className="text-[11px] text-text-muted">H3 keeps the source region fixed and fills aligned 32-pixel borders. It uses dense attention and the native 24 fps timeline.</p>}
+      <OutpaintBatchPanel />
+
       {showAdvanced && (
         <div className="space-y-3 pl-2 border-l border-border/50">
-          <label
+          {!isH3 && <label
             className="flex items-start gap-2 cursor-pointer"
             title="Uses LTX-2.3's binary-mask conditioning and a soft multiscale boundary blend. Disable only to compare with Maestro's legacy Outpaint path."
           >
@@ -264,7 +269,7 @@ export function OutpaintControls() {
                 Protects the source and softly blends the new area.
               </p>
             </div>
-          </label>
+          </label>}
 
           <label className="flex items-start gap-2 cursor-pointer">
             <input
@@ -281,7 +286,7 @@ export function OutpaintControls() {
             </div>
           </label>
 
-          <label className="flex items-start gap-2 cursor-pointer">
+          {!isH3 && <label className="flex items-start gap-2 cursor-pointer">
             <input
               type="checkbox"
               checked={outpaintTrimSmear}
@@ -294,7 +299,7 @@ export function OutpaintControls() {
                 Trim the last few frames of each sliding-window segment where the model occasionally smears the boundary.
               </p>
             </div>
-          </label>
+          </label>}
         </div>
       )}
     </div>

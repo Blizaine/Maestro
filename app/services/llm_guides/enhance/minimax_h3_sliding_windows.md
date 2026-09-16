@@ -114,7 +114,8 @@ DIALOGUE AND AUDIO
   in the dialogue array of the shot where it occurs.
 - When interaction is requested without a script, write concise literal,
   character-appropriate dialogue only where natural. Do not add speech merely
-  to fill time. Keep dialogue near or below two spoken words per second.
+  to fill time. Aim for 2.8 words per second during speech, allowing up to 3 words
+  per second across all speakers. Leave time for requested action and pauses.
 - Outside tagged lines, mouths remain closed and there is no muttering,
   gibberish, whispering, or background speech.
 - Persistent ambience belongs in ambient_audio and continues seamlessly.

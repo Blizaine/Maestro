@@ -623,7 +623,7 @@ export function InputsPanel() {
   return (
     <div>
       <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">Inputs</label>
-      <div className="flex gap-2 overflow-x-auto pb-1">
+      <div className="studio-media-grid grid grid-cols-3 gap-2 pb-1">
         {/* Extend-from source video (Extend mode only) — the timeline anchor. */}
         {isExtend && (continueVideo ? (
           <div onClick={() => setSelected(selected === 'extend' ? null : 'extend')}
@@ -636,7 +636,7 @@ export function InputsPanel() {
             </div>
           </div>
         ) : (
-          <AddTile label="Extend from" icon={<Film size={18} />} onClick={() => pickFile('video/*', handleAddExtendSource)} onDropFile={handleAddExtendSource} dropAccept="video" />
+          <AddTile label="Video to extend" icon={<Film size={18} />} onClick={() => pickFile('video/*', handleAddExtendSource)} onDropFile={handleAddExtendSource} dropAccept="video" />
         ))}
 
         {/* Unified "Frame" tiles — start / end / injected keyframes, one concept,
@@ -668,7 +668,7 @@ export function InputsPanel() {
           </div>
         ))}
         {canAddFrame && (
-          <AddTile label={frameUploading ? 'Uploading…' : 'Frame'} icon={<Plus size={18} />}
+          <AddTile label={frameUploading ? 'Uploading…' : frameTiles.length ? 'Add frame' : supportsEndFrame ? 'Start / end frame' : 'Start frame'} icon={<Plus size={18} />}
             onClick={() => pickImage(handleAddFrameSmart)} onDropFile={handleAddFrameSmart} dropAccept="image" />
         )}
 
@@ -1016,12 +1016,12 @@ function AddTile({ label, icon, onClick, onDropFile, dropAccept }: {
     onDropFile(f)
   }
   return (
-    <button onClick={onClick}
+    <button type="button" onClick={onClick}
       onDrop={onDropFile ? handleDrop : undefined}
       onDragOver={onDropFile ? (e => e.preventDefault()) : undefined}
-      className="w-[90px] h-[90px] shrink-0 rounded-xl border border-dashed border-border hover:border-accent-blue flex flex-col items-center justify-center gap-1 text-text-muted hover:text-text-primary transition-colors">
+      className="w-[90px] h-[90px] shrink-0 rounded-xl border border-dashed border-border bg-bg-tertiary/30 hover:border-accent-blue hover:bg-bg-hover flex flex-col items-center justify-center gap-1 text-text-secondary hover:text-text-primary transition-colors">
       {icon ?? <Plus size={18} />}
-      <span className="text-[10px] text-center px-1">{label}</span>
+      <span className="text-[11px] text-center px-2">{label}</span>
     </button>
   )
 }

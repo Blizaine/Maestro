@@ -18,6 +18,8 @@ from ..schema import (
     SpeakerMapEntry,
 )
 from ..policies import build_character_rules_block, build_camera_style_block
+from ..vocal_activity import classify_vocal_intervals
+from ..music_performance import MUSIC_PERFORMANCE_RULES, PERFORMANCE_ROLES
 from .base import BasePlanner
 
 
@@ -124,8 +126,9 @@ _MUSIC_SHOT_PROPERTIES = {
                 "speaker_name": {"type": "string"},
                 "visual_description": {"type": "string"},
                 "position_or_relation": {"type": "string"},
+                "performance_role": {"type": "string", "enum": list(PERFORMANCE_ROLES)},
             },
-            "required": ["visual_description"],
+            "required": ["visual_description", "performance_role"],
             "additionalProperties": False,
         },
     },
@@ -289,6 +292,15 @@ class MusicVideoPlanner(BasePlanner):
             and shot_image_policy in {"prompt_only", "direct_references"}
         )
         performer_map = _parse_performer_map(scene_description)
+        source_audio_drives_vocals = video_model.lower().startswith(
+            ("minimax_h3", "ltx2_25")
+        )
+        vocal_activity = (
+            classify_vocal_intervals(
+                clips, lyrics, kwargs.get("audio_vocals_path")
+            )
+            if source_audio_drives_vocals else []
+        )
 
         # Normalize speaker_mappings: frontend sends list, we need dict
         if isinstance(speaker_mappings, list):
@@ -310,7 +322,7 @@ class MusicVideoPlanner(BasePlanner):
             kwargs,
             kind="music_video",
             fingerprint_payload={
-                "planner_revision": 2,
+                "planner_revision": 4,
                 "scene_description": scene_description,
                 "clips": clips,
                 "lyrics": lyrics or [],
@@ -321,6 +333,7 @@ class MusicVideoPlanner(BasePlanner):
                 "video_model": video_model,
                 "image_model": kwargs.get("image_model", ""),
                 "shot_image_policy": shot_image_policy,
+                "vocal_activity": vocal_activity,
                 "character_ref_labels": kwargs.get("character_ref_labels") or [],
                 "location_ref_labels": kwargs.get("location_ref_labels") or [],
             },
@@ -346,9 +359,8 @@ class MusicVideoPlanner(BasePlanner):
             performer_map,
             speaker_names,
             speaker_mappings,
-            source_audio_drives_vocals=video_model.lower().startswith(
-                ("minimax_h3", "ltx2_25")
-            ),
+            source_audio_drives_vocals=source_audio_drives_vocals,
+            vocal_activity=vocal_activity,
         )
 
         # Call LLM for creative planning
@@ -568,11 +580,14 @@ class MusicVideoPlanner(BasePlanner):
         speaker_mappings: Optional[dict],
         *,
         source_audio_drives_vocals: bool = False,
+        vocal_activity: Optional[list[str]] = None,
     ) -> list[str]:
         """Build text descriptions for each clip (context for LLM)."""
+        if source_audio_drives_vocals and vocal_activity is None:
+            vocal_activity = classify_vocal_intervals(clips, lyrics, None)
         contexts = []
         for i, clip in enumerate(clips):
-            section = (clip.get("label") or "verse").lower()
+            section = (clip.get("label") or clip.get("section_label") or "verse").lower()
             beat_count = clip.get("beat_count", 8)
             start_sec = clip.get("start", 0)
             end_sec = clip.get("end", start_sec + 5)
@@ -606,12 +621,37 @@ class MusicVideoPlanner(BasePlanner):
 
             # Vocal info
             if source_audio_drives_vocals:
-                vocal_info = (
-                    "mapped source audio drives this interval; synchronize "
-                    "visible performance and movement to that exact audio; "
-                    "any visible vocalist explicitly lip-syncs every syllable "
-                    "to it without quoting, transcribing, or inventing words"
+                activity = (
+                    vocal_activity[i]
+                    if vocal_activity and i < len(vocal_activity)
+                    else "unknown"
                 )
+                if activity == "active":
+                    vocal_info = (
+                        "mapped source audio drives this interval; vocal "
+                        "activity is present; "
+                        "synchronize visible performance and movement to that "
+                        "exact audio; any visible vocalist explicitly lip-syncs "
+                        "every syllable to it without quoting, transcribing, "
+                        "or inventing words; an instrumentalist cutaway keeps "
+                        "the established singer off screen and the visible "
+                        "musician's mouth closed"
+                    )
+                elif activity == "silent":
+                    vocal_info = (
+                        "the separated vocal stem is silent in this interval; "
+                        "do not depict singing, lip-sync, or an open-mouth "
+                        "vocal performance; keep visible mouths closed except "
+                        "for clearly non-vocal expression; synchronize motion "
+                        "to the supplied soundtrack"
+                    )
+                else:
+                    vocal_info = (
+                        "mapped source audio drives this interval, but vocal "
+                        "activity is unknown; do not invent lyrics or assert "
+                        "visible singing; if a vocalist is shown, derive any "
+                        "vocal performance only from the supplied audio"
+                    )
             else:
                 vocal_info = (
                     f'lyrics excerpt: "{lyrics_snippet}"'
@@ -619,6 +659,10 @@ class MusicVideoPlanner(BasePlanner):
                 )
 
             ctx = f"Clip {i + 1}: {section}, {beat_count} beats, {vocal_info}.{performer_hint}"
+            from services.director.music_cues import format_music_cues
+            cue_context = format_music_cues(clip)
+            if cue_context:
+                ctx += f" Music timing: {cue_context}"
             contexts.append(ctx)
 
         return contexts
@@ -768,8 +812,10 @@ class MusicVideoPlanner(BasePlanner):
             "visible traits, wardrobe, performance, camera, lighting, ambience, "
             "effects, and music.\n"
             "- The per-shot source-audio slice is mapped as driving audio. "
-            "Describe visible singing, lip movement, dance, action, and camera "
-            "that synchronize to it; do not invent or transcribe lyrics.\n"
+            "Synchronize instrument playing, dance, action and camera to it. "
+            "Only assigned visible vocalists sing or lip-sync; on instrument "
+            "cutaways the singer remains off screen and the musician's mouth "
+            "stays closed. Do not invent or transcribe lyrics.\n"
             "- Character/location references are soft guidance, not fixed first "
             "frames. Describe the finished target shot.\n"
             "- Do not create image_prompt, image_source, visual_changes, or "
@@ -811,7 +857,7 @@ The user's main reference is visual ground truth. Every image_prompt and video_p
 Character references define identity and location references define the setting. Follow their labels and the Scene Concept in every self-contained video prompt; do not invent conflicting identities or settings."""
         else:
             scene_anchoring_rules = """SCENE-ANCHORING (avoid off-topic content):
-No visual reference was provided. Invent one consistent performer and setting that fit the Scene Concept, then reuse the same artist and world across every clip. Show the performer delivering vocals on lyric clips and do not drift off-concept."""
+No visual reference was provided. Invent consistent performers and a setting that fit the Scene Concept, then reuse the same artists, roles and world across every clip. Show the assigned singer delivering vocals in singer-focused shots; instrument cutaways keep that voice off screen."""
 
         system_prompt = f"""You are a music video director. Plan each clip AND write its prompts. Output ONLY the JSON array.
 
@@ -830,6 +876,8 @@ MUSIC VIDEO RULES:
 
 {music_video_rules}
 
+{MUSIC_PERFORMANCE_RULES}
+
 {h3_direct_rules}
 
 {image_prompt_rules}
@@ -840,7 +888,7 @@ OUTPUT — respond with ONLY a JSON array:
   {{
     "scene_goal": "What this clip achieves",
     "scene_type": "performance|narrative|atmospheric",
-    "subjects_on_screen": [{{"visual_description": "the woman in red", "position_or_relation": "center frame"}}],
+    "subjects_on_screen": [{{"visual_description": "the woman in red", "position_or_relation": "center frame", "performance_role": "vocalist"}}],
     "environment": "Setting details",
     "visual_style": "Style",
     "lighting": "Lighting",
@@ -941,7 +989,7 @@ Write {len(clips)} structured shot plans. Go:"""
         shots = []
         for i, clip in enumerate(clips):
             raw = shot_dicts[i] if i < len(shot_dicts) else {}
-            section = (clip.get("label") or "verse").lower()
+            section = (clip.get("label") or clip.get("section_label") or "verse").lower()
             strategy = _SECTION_VISUAL_STRATEGY.get(section, _SECTION_VISUAL_STRATEGY["verse"])
             duration = clip.get("end", 0) - clip.get("start", 0)
 

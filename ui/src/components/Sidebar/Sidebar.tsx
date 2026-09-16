@@ -1,5 +1,7 @@
-import { Settings, X, Globe, BookMarked } from 'lucide-react'
+import { Settings, X } from 'lucide-react'
+import { useEffect, useLayoutEffect, useMemo, useState, type CSSProperties } from 'react'
 import { useStore } from '../../stores/useStore'
+import { ViggleControls } from './ViggleControls'
 import { useIsMobile } from '../../lib/useIsMobile'
 import { GenerationModeSelector } from './GenerationModeSelector'
 import { InputsPanel } from './InputsPanel'
@@ -11,11 +13,7 @@ import { MusicControls } from './MusicControls'
 import { AudioSubModeToggle } from './AudioSubModeToggle'
 import { SfxControls } from './SfxControls'
 import { MixerControls } from './MixerControls'
-import { DurationSlider } from './DurationSlider'
-import { AudioDurationControl } from './AudioDurationControl'
-import { AdvancedSettings } from './AdvancedSettings'
-import { GenerateButton } from './GenerateButton'
-import { ModelSelector } from './ModelSelector'
+import { StudioFooter } from './StudioFooter'
 import { MultiClipEditor } from './MultiClipEditor'
 import { DirectorChat } from './DirectorChat'
 import { RestyleControls } from './RestyleControls'
@@ -29,12 +27,27 @@ import { AnchorReturnBanner } from './AnchorReturnBanner'
 import { VoiceRefSection } from './VoiceRefSection'
 import { ToolsPanel } from './ToolsPanel'
 import { HardwareStatusBar } from './HardwareStatusBar'
-import { MiniMaxH3Optimizations } from './MiniMaxH3Optimizations'
-import { H3MultiWindowControls } from './H3MultiWindowControls'
 import { VideoWorkflowSelector } from './VideoWorkflowSelector'
 import { ImageWorkflowSelector } from './ImageWorkflowSelector'
 import { ImageWorkflowControls } from './ImageWorkflowControls'
 import { AppModeToggle, MaestroBrand } from '../AppModeNavigation'
+import { CharacterToolbarContext, PromptDock, SidebarLayoutContext } from './SidebarPanels'
+
+function inputRevealBounds(input: HTMLElement) {
+  if (input instanceof HTMLTextAreaElement) {
+    const mirror = input.parentElement?.querySelector('[data-prompt-mirror]')?.firstChild
+    if (mirror instanceof Text) {
+      // The prompt grows with its text. Reveal the actual caret line instead
+      // of jumping to the top of a textarea that can span several screens.
+      const offset = input.selectionDirection === 'backward' ? input.selectionStart : input.selectionEnd
+      const range = document.createRange()
+      range.setStart(mirror, Math.min(offset, mirror.length - 1))
+      range.setEnd(mirror, Math.min(offset + 1, mirror.length))
+      return range.getBoundingClientRect()
+    }
+  }
+  return input.getBoundingClientRect()
+}
 
 export function Sidebar() {
   const toggleSettings = useStore(s => s.toggleSettings)
@@ -45,10 +58,84 @@ export function Sidebar() {
   const setSidebarOpen = useStore(s => s.setSidebarOpen)
   const sidebarMode = useStore(s => s.sidebarMode)
   const editSubMode = useStore(s => s.editSubMode)
-  const modelType = useStore(s => s.params.model_type)
   const selectedModel = useStore(s => s.models.find(model => model.model_type === s.params.model_type))
-  const openLoraBrowser = useStore(s => s.setLoraBrowserOpen)
   const isMobile = useIsMobile()
+  const [characterSlot, setCharacterSlot] = useState<HTMLDivElement | null>(null)
+  const [sidebarElement, setSidebarElement] = useState<HTMLElement | null>(null)
+  const [settingsElement, setSettingsElement] = useState<HTMLDivElement | null>(null)
+  const layout = useMemo(() => ({ sidebar: sidebarElement, settings: settingsElement }), [sidebarElement, settingsElement])
+  const [visibleViewport, setVisibleViewport] = useState<{ height: number; top: number; keyboardOpen: boolean } | null>(null)
+  useEffect(() => {
+    if (!isMobile || !window.visualViewport) return
+    const viewport = window.visualViewport
+    let fullHeight = viewport.height
+    let width = window.innerWidth
+    const resize = () => {
+      // iOS browsers can shrink innerHeight along with the visual viewport.
+      // Retain the unobscured height; reset it when the orientation changes.
+      fullHeight = width === window.innerWidth ? Math.max(fullHeight, viewport.height) : viewport.height
+      width = window.innerWidth
+      const keyboardOpen = viewport.height < Math.max(fullHeight, window.innerHeight) - 100
+      setVisibleViewport(previous => (
+        previous?.height === viewport.height && previous.top === viewport.offsetTop && previous.keyboardOpen === keyboardOpen
+          ? previous : { height: viewport.height, top: viewport.offsetTop, keyboardOpen }
+      ))
+    }
+    resize()
+    viewport.addEventListener('resize', resize)
+    viewport.addEventListener('scroll', resize)
+    return () => {
+      viewport.removeEventListener('resize', resize)
+      viewport.removeEventListener('scroll', resize)
+    }
+  }, [isMobile])
+  useEffect(() => {
+    if (!isMobile || !sidebarOpen) return
+    // iOS can scroll the document to an old caret position while opening the
+    // keyboard. Lock the gallery underneath the drawer, retaining its position.
+    const body = document.body
+    const { position, top, left, width } = body.style
+    const { scrollX, scrollY } = window
+    Object.assign(body.style, { position: 'fixed', top: `${-scrollY}px`, left: `${-scrollX}px`, width: '100%' })
+    return () => {
+      Object.assign(body.style, { position, top, left, width })
+      window.scrollTo(scrollX, scrollY)
+    }
+  }, [isMobile, sidebarOpen])
+  useLayoutEffect(() => {
+    if (!sidebarElement) return
+    let frame = 0
+    const revealInput = () => {
+      const input = document.activeElement
+      if (!(input instanceof HTMLElement) || !sidebarElement.contains(input)
+        || !input.matches('textarea, input:not([type="range"]):not([type="checkbox"]):not([type="file"]), [contenteditable="true"]')) return
+      // Scroll only inside this drawer, never the gallery/document underneath.
+      // Both the main composer and Animate's embedded text fields need this.
+      for (let parent = input.parentElement; parent && parent !== sidebarElement; parent = parent.parentElement) {
+        if (parent.scrollHeight <= parent.clientHeight || !['auto', 'scroll'].includes(getComputedStyle(parent).overflowY)) continue
+        const bounds = parent.getBoundingClientRect()
+        const field = inputRevealBounds(input)
+        const visibleHeight = Math.min(field.height, Math.max(0, parent.clientHeight - 16))
+        const delta = field.top < bounds.top + 8 ? field.top - bounds.top - 8
+          : field.top + visibleHeight > bounds.bottom - 8 ? field.top + visibleHeight - bounds.bottom + 8 : 0
+        if (Math.abs(delta) > 1) parent.scrollTop += delta
+      }
+    }
+    const scheduleReveal = () => {
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(revealInput)
+    }
+    // Re-evaluate after viewport changes (not on focus/typing). Pointer focus
+    // already means the caret is visible; repeatedly revealing the whole field
+    // moves long text away from the line the user clicked. Mobile keyboard
+    // opening updates visibleViewport and schedules this layout pass.
+    scheduleReveal()
+    window.addEventListener('resize', scheduleReveal)
+    return () => {
+      cancelAnimationFrame(frame)
+      window.removeEventListener('resize', scheduleReveal)
+    }
+  }, [isMobile, sidebarElement, visibleViewport])
 
   const isVideo = generationMode === 'video'
   const isImage = generationMode === 'image'
@@ -81,12 +168,14 @@ export function Sidebar() {
     || selectedModel?.model_type.toLowerCase().startsWith('minimax_h3_ref2va'),
   )
   const isFramesWorkflow = isVideo && Number(imageMode) === 0 && videoWorkflow === 'frames'
+  const isAnimate = isVideo && videoWorkflow === 'animate'
   const isReferencesWorkflow = isVideo && Number(imageMode) === 0 && videoWorkflow === 'references'
   const isMultiClip = isVideo && imageMode === 2
   const isContinue = isVideo && imageMode === 3
   const isBlend = isVideo && imageMode === 4
   const isDirector = sidebarMode === 'director'
   const isI2vOnly = modelOptions?.i2v_class && !modelOptions?.t2v_class
+  const hasPrompt = !isStandaloneTool && !isAnimate && !(isAudio && ['sfx', 'mixer', 'music'].includes(audioSubMode))
 
   // Video Transform controls backed by the legacy edit-mode engines.
   const editControls = (
@@ -94,53 +183,45 @@ export function Sidebar() {
       {isRetake && (
         <>
           <RetakeControls />
-          <PromptInput />
         </>
       )}
       {isInpaint && (
         <>
           <InpaintControls />
-          <PromptInput />
         </>
       )}
       {isOutpaint && (
         <>
           <OutpaintControls />
-          <PromptInput />
         </>
       )}
       {isRestyle && (
         <>
           <RestyleControls />
-          <PromptInput />
         </>
       )}
       {isEditAnything && (
         <>
           <EditAnythingControls />
-          <PromptInput />
         </>
       )}
       {isRecast && (
         <>
           <RecastControls />
-          <PromptInput />
         </>
       )}
     </>
   )
 
   const studioControls = (
-    <>
+    <SidebarLayoutContext.Provider value={layout}>
+    <CharacterToolbarContext.Provider value={characterSlot}>
+      <div data-testid="studio-body-scroll" className="studio-scroll-body flex min-h-0 flex-1 flex-col">
       {/* Prompt Edit/Recast → Image Mode round-trip banner. Visible while
           a boundary anchor or Recast reference is being edited; null otherwise. */}
       <AnchorReturnBanner />
 
-      {/* [&>*]:shrink-0 — keep every section at its natural height and let
-          the column SCROLL when space is tight (e.g. ID-LoRA voice section
-          added + hardware bar expanded), instead of letting flex-shrink
-          crush sections into each other. */}
-      <div className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-4 min-h-0 [&>*]:shrink-0">
+      <div data-testid="studio-workflow-header" className="studio-workflow-header flex shrink-0 flex-col gap-2 px-3 pb-2 pt-3">
         <GenerationModeSelector />
 
         {/* Studio's user-facing hierarchy is media first, workflow second.
@@ -149,11 +230,9 @@ export function Sidebar() {
         {isVideoWorkspace && <VideoWorkflowSelector />}
         {isImageWorkspace && <ImageWorkflowSelector />}
         {isAudioWorkspace && <AudioSubModeToggle />}
-
-        {isAudio && audioSubMode !== 'sfx' && audioSubMode !== 'mixer' && audioSubMode !== 'revoice' && (
-          <AudioDurationControl />
-        )}
-
+      </div>
+      <div className="studio-composition mx-3 flex grow shrink-0 basis-auto flex-col rounded-2xl border border-border bg-bg-primary/30" data-has-prompt={hasPrompt}>
+      <div data-testid="studio-controls-scroll" className={`${hasPrompt ? 'studio-inputs shrink-0' : 'grow shrink-0'} flex min-w-0 flex-col gap-3 p-2.5 [&>*]:shrink-0`}>
         {isUpscale ? (
           <ToolsPanel forcedTool="upscale" mediaKind={toolsUpscaleMedia} embedded />
         ) : isFilmGrain ? (
@@ -168,7 +247,7 @@ export function Sidebar() {
         {/* Blend mode manages its own duration (overlap_sec) and its own
             start/end anchors — so the generic Duration slider and
             start/end ImageUpload don't apply there. */}
-        {isVideo && !isBlend && <DurationSlider />}
+        {isAnimate && <ViggleControls />}
         {/* Frames (image_mode 0) AND Extend (image_mode 3) both use the unified
             InputsPanel. In Extend mode its first tile is the source video to
             continue from; otherwise it's the start frame. */}
@@ -183,13 +262,11 @@ export function Sidebar() {
           </div>
         )}
         {isReferencesWorkflow && <OmniReferenceSection />}
-        {isVideo && <MiniMaxH3Optimizations />}
-        {isVideo && <H3MultiWindowControls />}
         {isBlend && <BlendControls />}
 
         {/* Image workflows expose only the inputs their native pipeline uses. */}
         {isImage && <ImageWorkflowControls />}
-        {isImage && imageWorkflow === 'generate' && <ImageRefSection />}
+        {isImage && (imageWorkflow === 'generate' || !!modelOptions?.image_ref_choices) && <ImageRefSection />}
 
         {/* Video/Image mode: audio controls (soundtrack, control video, etc.).
             In Frames mode (video, image_mode 0) the unified InputsPanel routes
@@ -198,13 +275,10 @@ export function Sidebar() {
         {!isEdit && !isAudio && !(isVideo && (imageMode === 0 || imageMode === 3)) && modelOptions?.audio_prompt_type_sources && <AudioModeSection />}
 
         {/* Audio mode: workflow-specific controls */}
-        {isAudio && audioSubMode === 'speech' && modelOptions?.audio_prompt_type_sources && <AudioModeSection />}
+        {isAudio && audioSubMode === 'speech' && modelOptions?.audio_only && <AudioModeSection />}
         {isAudio && audioSubMode === 'sfx' && <SfxControls />}
         {isAudio && audioSubMode === 'mixer' && <MixerControls />}
         {isAudio && audioSubMode === 'music' && <MusicControls />}
-
-        {/* Prompt area (non-edit modes, skip for SFX/Mixer/Music which have their own UI) */}
-        {!isEdit && !(isAudio && (audioSubMode === 'sfx' || audioSubMode === 'mixer' || audioSubMode === 'music')) && (isMultiClip ? <MultiClipEditor /> : <PromptInput />)}
 
         {/* Video: reference images below prompt. In Frames mode the InputsPanel
             renders them as ordered tiles instead. */}
@@ -217,39 +291,14 @@ export function Sidebar() {
         )}
       </div>
 
-      {/* Bottom Bar: Advanced + LoRA Browser + Model + Generate.
-          Hidden in standalone tool workflows — ToolsPanel has its own Run button and
-          owns no model. */}
-      {!isStandaloneTool && (
-      <div className="px-3 py-2.5 border-t border-border">
-        <div className="flex items-center gap-2">
-          <AdvancedSettings />
-          <button
-            onClick={() => useStore.getState().setRecipesOpen(true)}
-            className="p-2 rounded-lg bg-bg-tertiary border border-border hover:border-border-light text-text-secondary hover:text-accent-blue transition-colors shrink-0"
-            title="Recipes — one-click presets"
-          >
-            <BookMarked size={14} />
-          </button>
-          {!isOutpaint && (
-            <button
-              onClick={() => openLoraBrowser(true, modelType)}
-              className="p-2 rounded-lg bg-bg-tertiary border border-border hover:border-border-light text-text-secondary hover:text-accent-blue transition-colors shrink-0"
-              title="Browse LoRAs on CivitAI"
-            >
-              <Globe size={14} />
-            </button>
-          )}
-          <div className="flex-1 min-w-0">
-            <ModelSelector />
-          </div>
-          <div className="shrink-0">
-            <GenerateButton />
-          </div>
-        </div>
-      </div>
+      {hasPrompt && (
+        <PromptDock>{isMultiClip ? <MultiClipEditor /> : <PromptInput />}</PromptDock>
       )}
-    </>
+      </div>
+      </div>
+      {!isStandaloneTool && <StudioFooter onCharacterSlot={setCharacterSlot} onAnchor={setSettingsElement} />}
+    </CharacterToolbarContext.Provider>
+    </SidebarLayoutContext.Provider>
   )
 
   // Mobile: overlay drawer
@@ -262,11 +311,11 @@ export function Sidebar() {
             onClick={() => setSidebarOpen(false)}
           />
         )}
-        <aside className={`fixed top-0 left-0 h-full w-[380px] max-w-[85vw] bg-bg-secondary border-r border-border z-50 flex flex-col transform transition-transform duration-300 ease-in-out ${
-          sidebarOpen ? 'translate-x-0' : '-translate-x-full'
-        }`}>
+        <aside ref={setSidebarElement} style={{ top: visibleViewport?.top, height: visibleViewport?.height, '--studio-visual-viewport-height': visibleViewport ? `${visibleViewport.height}px` : undefined, '--studio-visual-viewport-top': `${visibleViewport?.top || 0}px` } as CSSProperties} inert={!sidebarOpen} aria-hidden={!sidebarOpen}
+          data-keyboard-open={visibleViewport?.keyboardOpen ?? false}
+          className={`maestro-sidebar fixed top-0 h-dvh w-[380px] max-w-[94vw] bg-bg-secondary border-r border-border z-50 flex flex-col transition-[left] duration-300 ease-in-out ${sidebarOpen ? 'left-0' : '-left-full'}`}>
           {/* Header */}
-          <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+          <div className="shrink-0 px-4 py-3 border-b border-border flex items-center justify-between">
             <MaestroBrand compact />
             <div className="flex items-center gap-1.5">
               <AppModeToggle size="sm" />
@@ -279,7 +328,7 @@ export function Sidebar() {
             </div>
           </div>
           {isDirector ? <DirectorChat /> : studioControls}
-          <HardwareStatusBar />
+          <div className="studio-hardware shrink-0"><HardwareStatusBar /></div>
         </aside>
       </>
     )
@@ -287,9 +336,9 @@ export function Sidebar() {
 
   // Desktop: static sidebar
   return (
-    <aside className="w-[420px] h-full bg-bg-secondary border-r border-border flex flex-col shrink-0">
+    <aside ref={setSidebarElement} className="maestro-sidebar w-[420px] h-full bg-bg-secondary border-r border-border flex flex-col shrink-0">
       {/* Header */}
-      <div className="flex h-14 items-center justify-between border-b border-border px-4">
+      <div className="flex h-14 shrink-0 items-center justify-between border-b border-border px-4">
         <MaestroBrand />
         <div className="flex items-center gap-2">
           <AppModeToggle />
@@ -303,7 +352,7 @@ export function Sidebar() {
         </div>
       </div>
       {isDirector ? <DirectorChat /> : studioControls}
-      <HardwareStatusBar />
+      <div className="studio-hardware shrink-0"><HardwareStatusBar /></div>
     </aside>
   )
 }

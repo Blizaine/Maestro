@@ -311,7 +311,7 @@ export function EditorMediaBin({ compact = false }: { compact?: boolean }) {
               {asset.favorite && <Heart size={9} fill="currentColor" className="absolute right-1 top-1 text-red-400 drop-shadow" />}
             </div>
             <div className={`min-w-0 ${compact ? 'p-2' : 'flex-1'}`}>
-              <div className="truncate text-[9px] font-medium text-text-secondary" title={asset.name}>{asset.name}</div>
+              <div className="truncate text-[9px] font-medium text-text-secondary" title={asset.display_name || asset.name}>{asset.display_name || asset.name}</div>
               <div className="mt-0.5 flex items-center justify-between gap-1 text-[8px] text-text-muted">
                 <span className="capitalize">{asset.type}</span>
                 <button

@@ -978,6 +978,10 @@ class ZImagePipeline(DiffusionPipeline, FromSingleFileMixin):
         else:
             latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
 
+            # The transformer and the offloaded VAE can use different precision.
+            # Decode with the VAE's own dtype, not the denoiser's dtype.
+            vae_dtype = next(self.vae.parameters()).dtype
+            latents = latents.to(dtype=vae_dtype)
             image = self.vae.decode(latents, return_dict=False)[0]
             if output_type == "pt":
                 image = self.image_processor.postprocess(

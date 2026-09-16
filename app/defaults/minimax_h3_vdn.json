@@ -1,0 +1,35 @@
+{
+  "model": {
+    "name": "H3 VDN First / Last — Pruned",
+    "architecture": "minimax_h3",
+    "description": "VideoDeltaNet hybrid attention with trained module and default LoRA. Requires Triton and additional VRAM. Uses the existing FL2VA checkpoint.",
+    "URLs": [
+      "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/fec7846aef352e58a1cfb699455e3d104281e68b/MiniMax-H3-FL2VA-pruned_rank8_bf16.safetensors",
+      "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/fec7846aef352e58a1cfb699455e3d104281e68b/MiniMax-H3-FL2VA-pruned_rank8_int8_convrot.safetensors"
+    ],
+    "vdn": true,
+    "modules": [
+      [
+        "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/304d34f7751f8ba9ca0eb55d5d10044234cdbfe2/modules/minimax_h3_vdn_module_bf16.safetensors",
+        "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/304d34f7751f8ba9ca0eb55d5d10044234cdbfe2/modules/minimax_h3_vdn_module_int8_convrot.safetensors"
+      ]
+    ],
+    "loras": [
+      "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/304d34f7751f8ba9ca0eb55d5d10044234cdbfe2/loras/minimax_h3_vdn_default_lora_bf16.safetensors"
+    ],
+    "loras_multipliers": [
+      "1"
+    ]
+  },
+  "prompt": "A cinematic medium shot of a traveler standing on a windswept overlook at sunrise. The camera slowly arcs around them as their coat moves naturally in the breeze. Distant birds and soft wind are audible, and the traveler says, \"We made it.\"",
+  "num_inference_steps": 50,
+  "video_length": 124,
+  "sliding_window_size": 345,
+  "sliding_window_overlap": 18,
+  "sliding_window_discard_last_frames": 0,
+  "resolution": "864x480",
+  "guidance_scale": 1,
+  "image_prompt_type": "",
+  "sample_solver": "euler",
+  "flow_shift": 12
+}

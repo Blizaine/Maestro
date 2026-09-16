@@ -13,6 +13,27 @@
   },
   "presets": [
     {
+      "id": "taomate-fl2va-3step-rank19",
+      "label": "TaoMate FL2VA — 3-step",
+      "status": "experimental",
+      "filename": "minimax_h3_taomate_3step_lora_avg_rank_19_bf16.safetensors",
+      "remote_path": "loras/minimax_h3_taomate_3step_lora_avg_rank_19_bf16.safetensors",
+      "repo_id": "DeepBeepMeep/MiniMax-H3",
+      "model_card_url": "https://huggingface.co/TaoLiveAIGC/TaoMate-H3",
+      "revision": "c89326b1e3d700b708c36c96dd231f777ae16138",
+      "sha256": "de9663d974a884b477556748239c6f28239f7ca1825be270f98f023ff5dab6a7",
+      "size": 181697688,
+      "steps": 3,
+      "minimum_steps": 3,
+      "weight": 1.0,
+      "weight_min": 0.5,
+      "weight_max": 1.0,
+      "workflow": "fl2va",
+      "runtime": "standard_lora",
+      "generation_settings": {"guidance_scale": 1.0, "audio_guidance_scale": 1.0, "sample_solver": "euler"},
+      "description": "TaoLive's three-step FL2VA adapter, using WanGP's compressed BF16 rank-19 conversion. Includes transformer and token-refiner weights. Uses three Euler evaluations at CFG 1. This adapter recipe does not enable TaoLive's separate multi-GPU streaming runtime."
+    },
+    {
       "id": "v1-ckpt500",
       "label": "Legacy v1-500",
       "status": "legacy",

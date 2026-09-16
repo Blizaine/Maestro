@@ -4,6 +4,59 @@ This file supplements the license files distributed with Maestro and is not
 an exhaustive replacement for dependency-specific notices in installed Python
 or JavaScript packages.
 
+## Wan2GP v12.71 media and H3 integrations
+
+The VDN attention implementation, H3 dialogue Whisper boundary alignment,
+DLSS native-worker adapter, offload registry, and optional DLSS installer are adapted from **deepbeepmeep/Wan2GP**, commit
+`1e1dd2757f24923f008593d9d4ec09062234be20` (5 September 2026).
+H3 grouped mask conditioning, outpaint margin quantization, audio refinement,
+audio-only generation, and RIFE temporal interpolation also incorporate work
+from this revision. Maestro-specific queue, API, and React integration is local.
+
+The upstream WanGP Community License 2.0 covering these contributions is
+preserved in `app/LICENSES/WanGP-Community-2.0.txt`. This notice does not replace
+licenses applicable to older Maestro components or model weights.
+
+- Source: https://github.com/deepbeepmeep/Wan2GP/tree/1e1dd2757f24923f008593d9d4ec09062234be20
+- VDN weights: https://huggingface.co/DeepBeepMeep/MiniMax-H3/tree/304d34f7751f8ba9ca0eb55d5d10044234cdbfe2
+- Native worker source and licenses: https://github.com/DeepBeepMeep/dlss5-visual-enhancer
+
+Native DLSS binaries are not distributed in this repository. The optional
+installer preserves their bundled notices and verifies pinned checksums.
+The neural-rendering runtime includes community-modified, unsigned
+NVIDIA-derived components outside the official NVIDIA SDK distribution.
+See `docs/DLSS5.md` for installation requirements and the explicit installer
+acknowledgment. NVIDIA, ReShade, RenoDX and model licenses remain applicable
+to their respective files.
+
+## Viggle Animate
+
+Maestro's Viggle conditioning and integration adapt **deepbeepmeep/Wan2GP**
+v12.72, commit `057f9ecab9ad57dfbec9768b2daf7a4426ce986c`, under the WanGP
+Community License 2.0 preserved at `app/LICENSES/WanGP-Community-2.0.txt`.
+This includes fixed-prompt reference ordering, control-window slicing and the
+rank-8 affine compatibility map. Model assets are downloaded on demand from
+`DeepBeepMeep/MiniMax-H3`, revision `fa7ed035f21d341439d4dd763a020fc4a2482c43`.
+The dedicated Viggle weights retain their upstream MiniMax H3 Community model
+terms; they are not bundled in Maestro.
+
+Sources: https://huggingface.co/Viggle/Viggle-Animate and
+https://github.com/deepbeepmeep/Wan2GP/tree/057f9ecab9ad57dfbec9768b2daf7a4426ce986c/models/minimax_h3
+
+## H3 Face Refiner
+
+Maestro's H3 Face Refiner also adapts the face detection, identity tracking,
+crop preparation, stitch-back and refinement schedule from Wan2GP commit
+`1e1dd2757f24923f008593d9d4ec09062234be20`. The face module is derived from
+**Carasibana/ComfyUI-H3-FaceRefine** commit
+`79a97ce5ee4b393ce26313bd1280b706fe8b4f2c`; its MIT license is preserved at
+`app/postprocessing/h3_face_refiner/LICENSE.upstream`. WanGP's adaptation is
+covered by the WanGP Community License noted above. Ultralytics is an external
+AGPL-3.0 dependency. InsightFace model weights and H3/LightX2V weights retain
+their respective upstream model terms; model weights are downloaded on demand.
+
+Source: https://github.com/deepbeepmeep/Wan2GP/tree/1e1dd2757f24923f008593d9d4ec09062234be20/postprocessing/h3_face_refiner
+
 ## MiniMax H3 Sol Engine
 
 Maestro's optional H3 Sol Engine includes adapted Apache-2.0-licensed source

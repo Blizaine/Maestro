@@ -29,6 +29,7 @@ export function AnchorReturnBanner() {
 
   const isRecast = target.anchor === 'recast'
   const isRepaint = target.anchor === 'repaint'
+  const isAnimate = target.anchor === 'animate'
   const anchorLabel = target.anchor === 'start'
     ? 'Start'
     : target.anchor === 'end'
@@ -38,15 +39,16 @@ export function AnchorReturnBanner() {
         : 'Recast Reference'
 
   // Latest image output (newest first, type === 'image')
-  const latestImage = outputs.find(o => o.type === 'image')
+  const latestImage = outputs.find(o => o.type === 'image'
+    && (!isAnimate || !target.previousImages?.includes(o.name)))
   const hasLatestImage = !!latestImage
 
   return (
-    <div className="px-3 py-2 bg-accent-blue/10 border-b border-accent-blue/30">
+    <div className="studio-return-banner shrink-0 px-3 py-2 bg-accent-blue/10 border-b border-accent-blue/30">
       <div className="flex items-center gap-2 mb-1.5">
         <ArrowLeft size={12} className="text-accent-blue shrink-0" />
         <span className="text-[10px] font-semibold text-accent-blue">
-          {isRecast
+          {isAnimate ? 'Editing Viggle reference frame' : isRecast
             ? 'Editing Recast Reference'
             : isRepaint
               ? 'Editing Repaint First Frame'
@@ -54,7 +56,7 @@ export function AnchorReturnBanner() {
         </span>
         <button
           onClick={cancel}
-          title={isRecast
+          title={isAnimate ? 'Return to Animate without changing the edited frame' : isRecast
             ? 'Cancel — return to Recast without changing its reference'
             : isRepaint
               ? 'Cancel — return to Repaint without changing its edited frame'
@@ -64,8 +66,8 @@ export function AnchorReturnBanner() {
           <X size={11} />
         </button>
       </div>
-      <p className="text-[9px] text-text-muted leading-snug mb-2">
-        {isRecast
+      <p className="studio-return-help text-[9px] text-text-muted leading-snug mb-2">
+        {isAnimate ? 'Replace the subject while keeping the source pose, background and framing. Generate the edit, then apply it to Animate.' : isRecast
           ? 'Edit the selected trim-start frame in Image Mode. Apply the result to use it as Recast’s replacement reference, or return unchanged.'
           : isRepaint
             ? 'Repaint the selected first frame in Image Mode. Apply the result to animate that exact new scene with the source video’s motion.'
@@ -82,7 +84,7 @@ export function AnchorReturnBanner() {
         </button>
         <button
           onClick={skip}
-          title={isRecast
+          title={isAnimate ? 'Return to Animate without changing the edited frame' : isRecast
             ? 'Return to Recast without changing its reference'
             : isRepaint
               ? 'Return to Repaint without changing its edited frame'
@@ -90,11 +92,11 @@ export function AnchorReturnBanner() {
           className="flex items-center justify-center gap-1 px-2 py-1 rounded border border-border text-text-secondary hover:bg-bg-hover text-[10px] transition-colors"
         >
           <SkipForward size={11} />
-          {isRecast || isRepaint ? 'Return unchanged' : 'Skip'}
+          {isAnimate || isRecast || isRepaint ? 'Return unchanged' : 'Skip'}
         </button>
       </div>
       {!hasLatestImage && (
-        <p className="text-[9px] text-text-muted mt-1.5 italic">
+        <p className="studio-return-help text-[9px] text-text-muted mt-1.5 italic">
           Generate an image first, then click Apply.
         </p>
       )}

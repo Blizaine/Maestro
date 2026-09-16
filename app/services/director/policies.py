@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-from .schema import ShotPlan, ProductionPlan, CharacterProfile
+from .schema import ShotPlan, ProductionPlan, CharacterProfile, CameraPlan
 
 
 # ── Policy Configuration ─────────────────────────────────────────────

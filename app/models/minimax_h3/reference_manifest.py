@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+from pathlib import Path
 
 
 MINIMAX_H3_MAX_REFERENCE_IMAGES = 9
@@ -80,6 +81,22 @@ def validate_reference_manifest(
         item["type"] = kind
         item["path"] = path
         item["role"] = str(raw.get("role") or "").strip()[:500]
+        refmod_path = str(raw.get("refmod_path") or "").strip()
+        if refmod_path:
+            if kind == "audio":
+                raise ValueError("RefMods attach to visual references; use the saved voice as a separate audio reference.")
+            resolved = Path(refmod_path).resolve()
+            library_root = (Path.cwd() / "uploads" / "characters").resolve()
+            if not resolved.is_relative_to(library_root):
+                raise ValueError("Import this RefMod into Maestro's character library first.")
+            if require_files:
+                from services.refmod import inspect_refmod
+                info = inspect_refmod(resolved)
+                if info["refmod"]["kind"] != kind:
+                    raise ValueError("The RefMod and its visual reference have different media kinds.")
+            item["refmod_path"] = str(resolved)
+            if raw.get("remove_background"):
+                raise ValueError("Background removal cannot change an encoded RefMod. Use an original image reference for that option.")
         library_character_id = str(raw.get("library_character_id") or "").strip()[:128]
         character_name = str(raw.get("character_name") or "").strip()[:120]
         if library_character_id:

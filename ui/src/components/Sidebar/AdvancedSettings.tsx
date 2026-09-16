@@ -1,14 +1,16 @@
 /* eslint-disable react-refresh/only-export-components -- the advanced badge hooks share this settings contract */
-import { useState, useEffect, useRef } from 'react'
-import { X, Save, Trash2, FolderOpen, SlidersHorizontal } from 'lucide-react'
+import { useState, useEffect, useId, type ReactNode } from 'react'
+import { Save, Trash2, FolderOpen, SlidersHorizontal, ChevronDown } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { PostProcessing } from './PostProcessing'
 import { ControlVideoSection } from './ControlVideoSection'
 import { LoraSelector } from '../SettingsDrawer/LoraSelector'
-import { ResolutionPresets } from './ResolutionPresets'
-import { AspectRatioGrid } from './AspectRatioGrid'
 import { WindowSettings } from './DurationSlider'
 import { DirectorH3Optimizations } from './DirectorH3Optimizations'
+import { H3MediaControls } from './H3MediaControls'
+import { MiniMaxH3Optimizations } from './MiniMaxH3Optimizations'
+import { AutomaticFaceRefiner } from '../Characters/FaceRefiner'
+import { SidebarDialog } from './SidebarPanels'
 import type { GenerateParams } from '../../types'
 
 const H3_LONG_SEQUENCE_EXPERIMENTS = [
@@ -128,7 +130,7 @@ function PresetManager() {
                 <FolderOpen size={10} className="shrink-0 text-text-muted" />
                 <span className="truncate">{p.name}</span>
               </button>
-              <button
+              {!p.builtin && <button
                 onClick={() => handleDelete(p.id)}
                 className={`p-1 rounded transition-colors shrink-0 ${
                   confirmDelete === p.id
@@ -137,7 +139,7 @@ function PresetManager() {
                 }`}
               >
                 <Trash2 size={10} />
-              </button>
+              </button>}
             </div>
           ))}
         </div>
@@ -238,10 +240,8 @@ function LtxFramesExperimentalControls() {
   )
 }
 
-/** Active advanced features as human-readable labels. Drives the badge
- *  count AND its hover tooltip, so a surprising number names its source
- *  instead of sending the user hunting through every section. */
-export function useAdvancedActiveItems(): string[] {
+/** One source for section badges, the total count and their help text. */
+function useAdvancedActiveSections(): Record<AdvancedSectionKey, string[]> {
   const params = useStore(s => s.params)
   const modelOptions = useStore(s => s.modelOptions)
   const sidebarMode = useStore(s => s.sidebarMode)
@@ -256,6 +256,7 @@ export function useAdvancedActiveItems(): string[] {
   const slidingWindowLocked = useStore(s => s.slidingWindowLocked)
   const servicesConfig = useStore(s => s.servicesConfig)
   const studioVideoWorkflow = useStore(s => s.studioVideoWorkflow)
+  const hasVoiceClone = useStore(s => s.voiceCloneEnabled && s.voiceCloneRefs.some(reference => !!reference?.path))
   const selectedModel = useStore(s => s.models.find(model => model.model_type === s.params.model_type))
   const isScailEdit = (
     generationMode === 'avatar'
@@ -263,20 +264,30 @@ export function useAdvancedActiveItems(): string[] {
   )
   const isScailHq = isScailEdit && params.model_type === 'scail2_14B'
 
-  const items: string[] = []
+  const items: Record<AdvancedSectionKey, string[]> = { performance: [], finishing: [], loras: [], generation: [] }
   if (sidebarMode === 'director') {
-    if (directorTurboMode[directorVideoModel] === true) items.push('H3 Turbo')
+    if (directorTurboMode[directorVideoModel] === true) items.performance.push('H3 Turbo')
     if (directorSolMode[directorVideoModel] === true) {
-      items.push(
+      items.performance.push(
         directorVideoModel.includes('fused_turbo')
           ? 'H3 SLA'
           : 'H3 Sol Engine',
       )
     }
-    if (directorFirstBlockCache[directorVideoModel] === true) items.push('First Block Cache')
+    if (directorFirstBlockCache[directorVideoModel] === true) items.performance.push('First Block Cache')
     return items
   }
-  if (params.seed !== -1) items.push(`Seed ${params.seed}`)
+  if (params.seed !== -1) items.generation.push(`Seed ${params.seed}`)
+  if (String(modelOptions?.architecture || '').startsWith('minimax_h3')) {
+    if (params.minimax_h3_turbo_mode && modelOptions?.minimax_h3_turbo) items.performance.push('H3 Turbo')
+    if (params.override_attention === 'sol') items.performance.push('H3 Sol Engine')
+    if (params.override_attention === 'sla') items.performance.push('H3 SLA')
+    if (params.skip_steps_cache_type === 'first_block') items.performance.push('First Block Cache')
+    if (generationMode !== 'audio' && params.custom_settings?.audio_refinement === 'enabled') items.finishing.push('Audio refinement')
+  }
+  if (generationMode === 'video' && params.face_refiner?.enabled) items.finishing.push('Face refinement')
+  if (generationMode === 'video' && params.temporal_upsampling) items.finishing.push(`Smoothing (${params.temporal_upsampling})`)
+  if ((generationMode === 'video' || generationMode === 'avatar') && hasVoiceClone && !isScailEdit) items.finishing.push('Voice replacement')
   const selectedFamily = String(selectedModel?.family || '').toLowerCase()
   const selectedArchitecture = String(selectedModel?.architecture || '').toLowerCase()
   const isLtxFrames = generationMode === 'video'
@@ -286,12 +297,14 @@ export function useAdvancedActiveItems(): string[] {
       || selectedFamily === 'ltx25'
       || selectedArchitecture.startsWith('ltx2')
     )
-  if (isLtxFrames && servicesConfig?.voice_reference_enabled) items.push('LTX voice reference')
-  if (isLtxFrames && servicesConfig?.director_multishot_lora_mode) items.push('LTX multi-shot prompting')
+  if (isLtxFrames && servicesConfig?.voice_reference_enabled) items.generation.push('LTX voice reference')
+  if (isLtxFrames && servicesConfig?.director_multishot_lora_mode) items.generation.push('LTX multi-shot prompting')
   if (
     String(modelOptions?.architecture || '').startsWith('minimax_h3')
+    // Studio video's window override lives in Duration, outside Advanced.
+    && generationMode === 'avatar' && !isScailEdit
     && slidingWindowLocked
-  ) items.push('H3 window override')
+  ) items.generation.push('H3 window override')
   if (
     H3_LONG_SEQUENCE_TESTS_VISIBLE
     && String(modelOptions?.architecture || '').startsWith('minimax_h3')
@@ -301,7 +314,7 @@ export function useAdvancedActiveItems(): string[] {
     const customSettings = params.custom_settings || {}
     for (const experiment of H3_LONG_SEQUENCE_EXPERIMENTS) {
       if (customSettings[experiment.id] === true) {
-        items.push(experiment.activeLabel)
+        items.generation.push(experiment.activeLabel)
       }
     }
   }
@@ -316,7 +329,7 @@ export function useAdvancedActiveItems(): string[] {
     && params.minimax_h3_camera_coverage
     && params.minimax_h3_camera_coverage !== 'auto'
   ) {
-    items.push(
+    items.generation.push(
       params.minimax_h3_camera_coverage === 'continuous'
         ? 'H3 continuous take'
         : 'H3 multi-shot coverage',
@@ -324,12 +337,19 @@ export function useAdvancedActiveItems(): string[] {
   }
   if (
     (params.negative_prompt?.length ?? 0) > 0
+    && !modelOptions?.no_negative_prompt
     && (!isScailEdit || isScailHq)
-  ) items.push('Negative prompt')
-  for (const l of params.activated_loras) items.push(`LoRA: ${l.replace(/\.(safetensors|sft)$/i, '')}`)
-  if (!isScailEdit && spatialUpsampling) items.push(`Upscaling (${spatialUpsampling})`)
-  if (!isScailEdit && filmGrainIntensity > 0) items.push('Film grain')
-  if (!isScailEdit && (params.self_refiner_setting ?? 0) > 0) items.push('Self refiner')
+  ) items.generation.push('Negative prompt')
+  if (!modelOptions?.loras_disabled && !(generationMode === 'avatar' && editSubMode === 'outpaint')) {
+    for (const l of params.activated_loras) items.loras.push(`LoRA: ${l.replace(/\.(safetensors|sft)$/i, '')}`)
+  }
+  if (!isScailEdit && generationMode !== 'audio' && spatialUpsampling) items.finishing.push(`Upscaling (${spatialUpsampling})`)
+  if (!isScailEdit && generationMode !== 'audio' && filmGrainIntensity > 0) items.finishing.push('Film grain')
+  if (!isScailEdit && modelOptions?.self_refiner && (params.self_refiner_setting ?? 0) > 0) items.generation.push('Self refiner')
+  if (generationMode === 'video' && modelOptions?.omni_reference && params.minimax_h3_reference_detail
+    && params.minimax_h3_reference_detail !== (modelOptions.omni_reference_detail_default ?? 'match')) {
+    items.performance.push('Reference detail')
+  }
   if (
     modelOptions?.minimax_h3_text_encoder_choices?.length
     && params.minimax_h3_text_encoder
@@ -338,13 +358,13 @@ export function useAdvancedActiveItems(): string[] {
     const selected = modelOptions.minimax_h3_text_encoder_choices.find(
       choice => choice.value === params.minimax_h3_text_encoder
     )
-    items.push(`H3 encoder: ${selected?.label || params.minimax_h3_text_encoder}`)
+    items.performance.push(`H3 encoder: ${selected?.label || params.minimax_h3_text_encoder}`)
   }
   if (
     modelOptions?.ltx25_video_vae_choices?.length
     && params.ltx25_video_vae === 'nad'
   ) {
-    items.push('LTX-2.5 NAD VAE')
+    items.performance.push('LTX-2.5 NAD VAE')
   }
   // injection_strength only matters when injected frames actually exist.
   // The persisted snapshot strips image_refs (file paths are ephemeral)
@@ -356,7 +376,7 @@ export function useAdvancedActiveItems(): string[] {
     && params.injection_strength != null
     && params.injection_strength !== 1.0
     && refCount > 0
-  ) items.push('Injection strength')
+  ) items.generation.push('Injection strength')
   // Process letter codes persist by design (the dropdown remembers the
   // user's choice across sessions), but their REQUIRED inputs are
   // ephemeral and stripped from persistence: frames injection ("F")
@@ -372,9 +392,13 @@ export function useAdvancedActiveItems(): string[] {
       : vptVisible.includes('V')
         ? !!params.video_guide
         : true
-    if (effective) items.push(`Process: ${vptVisible}`)
+    if (effective) items.generation.push(`Process: ${vptVisible}`)
   }
   return items
+}
+
+export function useAdvancedActiveItems(): string[] {
+  return Object.values(useAdvancedActiveSections()).flat()
 }
 
 /** Count active advanced features for the badge */
@@ -382,8 +406,38 @@ export function useAdvancedCount(): number {
   return useAdvancedActiveItems().length
 }
 
-export function AdvancedSettings() {
+type AdvancedSectionKey = 'performance' | 'finishing' | 'loras' | 'generation'
+const CLOSED_SECTIONS: Record<AdvancedSectionKey, boolean> = {
+  performance: false, finishing: false, loras: false, generation: false,
+}
+
+function AdvancedSection({ section, title, available = true, open, onToggle, activeItems, children }: {
+  section: AdvancedSectionKey; title: string; available?: boolean; open: boolean
+  onToggle: (open: boolean) => void; activeItems: string[]; children: ReactNode
+}) {
+  return <details hidden={!available} open={open} data-testid={`advanced-${section}`}
+    onToggle={event => onToggle(event.currentTarget.open)}
+    className="group/advanced border-b border-border last:border-b-0">
+    <summary className="flex min-h-11 cursor-pointer list-none items-center gap-3 rounded-lg px-1 text-xs font-medium text-text-primary hover:bg-bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-blue [&::-webkit-details-marker]:hidden">
+      <span>{title}</span>
+      {activeItems.length > 0 && <span aria-label={`${activeItems.length} active`} title={activeItems.join('\n')}
+        className="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-accent-blue/15 px-1 text-[9px] font-semibold tabular-nums text-accent-blue">
+        {activeItems.length}
+      </span>}
+      <ChevronDown size={15} className="ml-auto shrink-0 text-text-muted transition-transform group-open/advanced:rotate-180" />
+    </summary>
+    {/* Native disclosure hides its content without unmounting drafts or effects. */}
+    <div className="space-y-5 pb-4 pt-2">{children}</div>
+  </details>
+}
+
+export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
   const [open, setOpen] = useState(false)
+  const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null)
+  const [sections, setSections] = useState(CLOSED_SECTIONS)
+  const toggleSection = (key: AdvancedSectionKey, expanded: boolean) => {
+    setSections(current => current[key] === expanded ? current : { ...current, [key]: expanded })
+  }
   const params = useStore(s => s.params)
   const setParam = useStore(s => s.setParam)
   const modelOptions = useStore(s => s.modelOptions)
@@ -414,6 +468,16 @@ export function AdvancedSettings() {
     && modelOptions?.minimax_h3_turbo != null
   )
   const isH3 = String(modelOptions?.architecture || '').startsWith('minimax_h3')
+  const showH3Optimizations = isVideo && (isH3 || !!modelOptions?.minimax_h3_runtime_advisory) && Boolean(
+    modelOptions?.minimax_h3_runtime_advisory || modelOptions?.minimax_h3_turbo
+    || modelOptions?.sol_attention || modelOptions?.sla_attention || modelOptions?.first_block_cache,
+  )
+  const showReferenceDetail = isVideo && !!modelOptions?.omni_reference
+  const showCacheTuning = !!modelOptions?.first_block_cache && params.skip_steps_cache_type === 'first_block'
+  const hasPerformance = showH3Optimizations || showReferenceDetail || showCacheTuning
+    || !!modelOptions?.minimax_h3_text_encoder_choices?.length || !!modelOptions?.ltx25_video_vae_choices?.length
+  const hasFinishing = !isAudio && (!isScailEdit || (isH3 && !modelOptions?.audio_only))
+  const canUseLoras = !isOutpaint && !modelOptions?.loras_disabled
   const showH3LongSequenceExperiments = (
     H3_LONG_SEQUENCE_TESTS_VISIBLE
     && isVideo
@@ -422,7 +486,7 @@ export function AdvancedSettings() {
     && params.minimax_h3_multi_window === true
   )
   const showInferenceSteps = (
-    !isAudioOnly
+    (!isAudioOnly || params.model_type === 'minimax_h3_voice_audio')
     && (isScailEdit || !modelOptions?.lock_inference_steps)
   )
   const inferenceStepsMin = Math.max(
@@ -458,22 +522,28 @@ export function AdvancedSettings() {
     const refs = s.params.image_refs
     return refs && refs.length > 0
   })
-  const panelRef = useRef<HTMLDivElement>(null)
-  const advancedItems = useAdvancedActiveItems()
+  const panelId = useId()
+  const activeSections = useAdvancedActiveSections()
+  const advancedItems = Object.values(activeSections).flat()
   const advancedCount = advancedItems.length
 
-  // Close on escape
+  const closePanel = () => setOpen(false)
   useEffect(() => {
-    if (!open) return
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
-    document.addEventListener('keydown', handler)
-    return () => document.removeEventListener('keydown', handler)
-  }, [open])
+    const finishing = () => {
+      setSections({ ...CLOSED_SECTIONS, finishing: true })
+      setOpen(true)
+    }
+    window.addEventListener('maestro-open-finishing', finishing)
+    return () => {
+      window.removeEventListener('maestro-open-finishing', finishing)
+    }
+  }, [])
 
   return (
     <>
       {/* Trigger button */}
       <button
+        ref={setAnchor}
         type="button"
         onClick={() => setOpen(!open)}
         title={advancedCount > 0
@@ -481,41 +551,27 @@ export function AdvancedSettings() {
           : 'Advanced settings'}
         aria-label={`Advanced settings${advancedCount > 0 ? `, ${advancedCount} active` : ''}`}
         aria-expanded={open}
-        className={`relative flex shrink-0 items-center justify-center rounded-lg border p-2 transition-colors ${
+        aria-controls={panelId}
+        aria-haspopup="dialog"
+        className={`studio-setting-chip relative ${
           open ? 'border-accent-blue text-accent-blue' : 'border-border text-text-secondary hover:text-text-primary hover:border-border-light'
         }`}
       >
         <SlidersHorizontal size={14} />
+        {compact && <span className="studio-advanced-label">Advanced</span>}
         {advancedCount > 0 && (
           <span
             title={advancedItems.join('\n')}
-            className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-accent-blue px-0.5 text-[8px] font-bold leading-none text-white shadow-sm"
+            className="rounded bg-accent-blue/15 px-1 text-[9px] font-semibold text-accent-blue"
           >
             {advancedCount}
           </span>
         )}
       </button>
 
-      {/* Popup overlay — always mounted to preserve state (frames injection, etc.) */}
-      {open && <div className="fixed inset-0 bg-black/30 z-50" onClick={() => setOpen(false)} />}
-      <div
-        ref={panelRef}
-        className={`fixed top-0 h-full bg-bg-secondary border-r border-border z-50 flex flex-col shadow-2xl overflow-hidden transition-transform duration-200
-          left-0 w-full md:left-[420px] md:w-[380px] md:max-w-[90vw] ${
-          open ? 'translate-x-0' : '-translate-x-full md:-translate-x-[800px] pointer-events-none'
-        }`}
-        style={{ maxHeight: '100vh' }}
-      >
-            {/* Header */}
-            <div className="px-4 py-3 border-b border-border flex items-center justify-between shrink-0">
-              <span className="text-sm font-semibold text-text-primary">Advanced Settings</span>
-              <button onClick={() => setOpen(false)} className="p-1 rounded-lg hover:bg-bg-hover text-text-secondary">
-                <X size={16} />
-              </button>
-            </div>
-
-            {/* Scrollable content */}
-            <div className="flex-1 overflow-y-auto px-4 py-4 space-y-5">
+      {/* Keep all controls mounted while the overlay is closed. */}
+      <SidebarDialog id={panelId} variant="settings" anchor={anchor} title="Advanced settings" open={open} onClose={closePanel}>
+            <div className={`min-w-0 ${isDirector ? 'space-y-5' : ''}`}>
               {isDirector ? (
                 <>
                   <DirectorH3Optimizations />
@@ -528,28 +584,35 @@ export function AdvancedSettings() {
               {/* Recast/Repaint own their output-quality profiles in the main
                   workflow. Their dedicated endpoints also choose adaptive
                   windows, so generic controls would be misleading here. */}
-              {!isAudio && !isScailEdit && (
-                <>
-                  {!isOutpaint && !modelOptions?.hide_resolution_presets && <ResolutionPresets />}
-                  {!isAvatar && <AspectRatioGrid />}
-                </>
-              )}
 
               {/* Presets belong with the creative adapter controls so users can
                   save or restore a setup before adjusting its LoRAs. */}
+              <AdvancedSection section="loras" title={canUseLoras ? 'LoRAs & presets' : 'Presets'} activeItems={activeSections.loras} open={sections.loras} onToggle={expanded => toggleSection('loras', expanded)}>
               <PresetManager />
 
               {/* Keep creative adapters near the top so users can choose them
                   before working through the lower-level tuning controls.
                   Official Outpaint owns its stage-one-only IC-LoRA schedule. */}
-              {!isOutpaint && !modelOptions?.loras_disabled && <LoraSelector />}
-              {!isOutpaint && modelOptions?.loras_disabled && (
+              {canUseLoras && <LoraSelector />}
+              {canUseLoras && modelOptions?.minimax_h3_fused_turbo && (
                 <p className="rounded-lg border border-amber-500/25 bg-amber-500/8 px-3 py-2 text-[9px] leading-relaxed text-text-muted">
-                  This fused four-step checkpoint already contains its acceleration and style adapters, so additional LoRAs are disabled.
+                  H3 LoRAs are experimental with Fused 4-Step. Start with one adapter at low strength and compare a short clip using the same seed. Extra acceleration adapters are excluded; Mystic remains baked in at 0.7.
                 </p>
               )}
+              </AdvancedSection>
 
-              <LtxFramesExperimentalControls />
+              <AdvancedSection section="performance" title="Performance" available={hasPerformance} activeItems={activeSections.performance} open={sections.performance} onToggle={expanded => toggleSection('performance', expanded)}>
+              {showH3Optimizations && <MiniMaxH3Optimizations />}
+
+              {showReferenceDetail && modelOptions && <label className="block space-y-1.5 text-xs text-text-secondary">
+                <span>Reference detail</span>
+                <select aria-label="Reference detail" value={params.minimax_h3_reference_detail ?? modelOptions.omni_reference_detail_default ?? 'match'}
+                  onChange={event => setParam('minimax_h3_reference_detail', event.target.value as 'match' | 'max')}
+                  className="w-full rounded-lg border border-border bg-bg-tertiary px-2 py-2 text-xs">
+                  {(modelOptions.omni_reference_detail_choices ?? [['Match output (faster)', 'match'], ['High detail (official PDD recipe)', 'max']]).map(([label, value]) => <option key={value} value={value}>{label}</option>)}
+                </select>
+                <span className="block text-[10px] text-text-muted">Match output avoids reference upscaling. High detail uses the official 2048px short-edge preparation and can require more memory and time.</span>
+              </label>}
 
               {/* The Qwen conditioner is shared by every H3 transformer.
                   Expose it once here instead of multiplying model entries. */}
@@ -604,13 +667,13 @@ export function AdvancedSettings() {
                 </div>
               ) : null}
 
-              {modelOptions?.first_block_cache && params.skip_steps_cache_type === 'first_block' && (
+              {showCacheTuning && modelOptions && (
                 <div className="space-y-2 p-2.5 bg-bg-tertiary/40 rounded-lg border border-border/60">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-[11px] text-text-muted uppercase tracking-wider">
                       First Block Cache Tuning
                     </span>
-                    <span className="text-[9px] text-accent-blue">Enabled in Studio</span>
+                    <span className="text-[9px] text-accent-blue">Enabled</span>
                   </div>
                   <div className="space-y-2 pl-1 border-l border-border ml-1">
                     <div>
@@ -651,8 +714,16 @@ export function AdvancedSettings() {
                 </div>
               )}
 
-              {/* Window Settings */}
-              {(isVideo || (isAvatar && !isScailEdit))
+              </AdvancedSection>
+              <AdvancedSection section="finishing" title="Finishing" available={hasFinishing} activeItems={activeSections.finishing} open={sections.finishing} onToggle={expanded => toggleSection('finishing', expanded)}>
+                {isVideo && <AutomaticFaceRefiner />}
+                {isH3 && !isAudio && <H3MediaControls />}
+                {!isAudio && !isScailEdit && <PostProcessing expanded />}
+              </AdvancedSection>
+              <AdvancedSection section="generation" title="Generation" activeItems={activeSections.generation} open={sections.generation} onToggle={expanded => toggleSection('generation', expanded)}>
+              <LtxFramesExperimentalControls />
+              {/* Studio video windows now live with Duration. */}
+              {(isAvatar && !isScailEdit)
                 && (
                   modelOptions?.sliding_window
                   || isH3
@@ -845,7 +916,6 @@ export function AdvancedSettings() {
               )}
 
               {/* Post Processing */}
-              {!isAudio && !isScailEdit && <PostProcessing />}
 
               {/* Seed */}
               {
@@ -867,7 +937,7 @@ export function AdvancedSettings() {
               }
 
               {/* Self Refiner */}
-              {!isScailEdit && modelOptions?.self_refiner && (
+              {!isScailEdit && !!modelOptions?.self_refiner && (
                 <div>
                   <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">Self Refiner</label>
                   <select
@@ -1041,7 +1111,7 @@ export function AdvancedSettings() {
                   2.0/1.5 then off, STG on blocks 14+19 for the first 4
                   steps, RF euler_ancestral). Shown only for models whose
                   def declares reference_pipeline support. */}
-              {!isScailEdit && (modelOptions as Record<string, unknown> | null)?.reference_pipeline && (
+              {!isScailEdit && !!modelOptions?.reference_pipeline && (
                 <div className="space-y-1">
                   <label className="flex items-center gap-2 cursor-pointer group">
                     <input type="checkbox"
@@ -1088,7 +1158,7 @@ export function AdvancedSettings() {
                   />
                   {h3TurboMode && (
                     <p className="text-[9px] text-text-muted mt-0.5">
-                      Turbo mode locks this preset to {modelOptions?.minimax_h3_turbo?.steps} steps.
+                      Turbo mode locks this preset to {params.num_inference_steps} steps.
                     </p>
                   )}
                   {!h3TurboMode && modelOptions?.inference_steps_help && (
@@ -1128,7 +1198,7 @@ export function AdvancedSettings() {
               )}
 
               {/* LTX-2 Dev Pipeline Controls — only for models with perturbation/CFG-Star support */}
-              {!isScailEdit && (modelOptions as Record<string, unknown> | null)?.perturbation && (
+              {!isScailEdit && !!modelOptions?.perturbation && (
                 <>
                   {/* STG Scale */}
                   <div>
@@ -1277,7 +1347,7 @@ export function AdvancedSettings() {
               {/* Dedicated SCAIL edit endpoints own their source video,
                   edited/reference frames, masks, and process selection. */}
               {(modelOptions?.guide_preprocessing || modelOptions?.guide_custom_choices) &&
-                !isScailEdit && !modelOptions?.minimax_h3_media_sources && (
+                !isScailEdit && params.model_type !== 'viggle_animate' && !modelOptions?.minimax_h3_media_sources && (
                 <ControlVideoSection />
               )}
 
@@ -1353,10 +1423,11 @@ export function AdvancedSettings() {
                   </div>
                 </div>
               )}
+              </AdvancedSection>
                 </>
               )}
             </div>
-          </div>
+      </SidebarDialog>
     </>
   )
 }

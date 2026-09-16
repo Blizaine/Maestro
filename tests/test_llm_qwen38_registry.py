@@ -6,6 +6,7 @@ import os
 import sys
 import unittest
 from unittest import mock
+from types import SimpleNamespace
 
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -13,7 +14,7 @@ _APP = os.path.join(_ROOT, "app")
 if _APP not in sys.path:
     sys.path.insert(0, _APP)
 
-from services import llm_service
+from services import enhance_guides, llm_service
 
 
 QWEN38_REPO = "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
@@ -46,7 +47,7 @@ class TestQwen38Registry(unittest.TestCase):
         )
         self.assertEqual(
             entry["mmproj_file"],
-            "Qwen3.8-27B-Uncensored-vision-f16.gguf",
+            "mmproj-Qwen3.8-27B-Uncensored-F16.gguf",
         )
 
         flags = entry["extra_flags"]
@@ -91,6 +92,40 @@ class TestQwen38Registry(unittest.TestCase):
         self.assertIs(kwargs["enable_thinking"], True)
         self.assertEqual(kwargs["thinking_budget"], 8192)
 
+    def test_image_rewrite_uses_answer_budget_and_no_unseen_reference(self):
+        llm_service._model_id = QWEN38_REPO
+        source = "Image prompt:\n\n" + "A blue glass vase on the left, red bowl on the right. " * 50
+        for model in ("flux2_klein_9b", "krea2_turbo"):
+            with self.subTest(model=model), mock.patch.dict(
+                sys.modules, {"wgp": SimpleNamespace(get_model_def=lambda _: {})}
+            ), mock.patch.object(
+                llm_service, "generate", return_value="A blue vase beside a red bowl."
+            ) as generate:
+                result = llm_service.enhance_prompt(source, mode="image", model_type=model)
+                self.assertEqual(result, "A blue vase beside a red bowl.")
+                generate.assert_called_once()
+                args = generate.call_args.kwargs
+                self.assertFalse(args["enable_thinking"])
+                self.assertEqual(args["thinking_budget"], 0)
+                self.assertGreater(args["max_new_tokens"], 768)
+                self.assertLessEqual(args["max_new_tokens"], 2048)
+                self.assertIn(source, args["prompt"])
+                self.assertIn("No reference image is attached", args["system_prompt"])
+                self.assertNotIn("ALWAYS end the prompt", args["system_prompt"])
+
+    def test_image_edit_constraints_survive_in_the_writer_request(self):
+        with mock.patch.dict(
+            sys.modules, {"wgp": SimpleNamespace(get_model_def=lambda _: {})}
+        ), mock.patch.object(llm_service, "generate", return_value="A painted vase.") as generate:
+            llm_service.enhance_prompt(
+                "Paint only the vase blue; leave the table intact.", mode="image",
+                model_type="flux2_klein_9b", image_paths=["source.png"],
+            )
+        args = generate.call_args.kwargs
+        self.assertEqual(args["image_paths"], ["source.png"])
+        self.assertIn("edit boundaries", args["system_prompt"])
+        self.assertNotIn("No reference image is attached", args["system_prompt"])
+
     def test_structured_h3_prompt_enhancement_keeps_thinking_off(self):
         llm_service._model_id = QWEN38_REPO
         structured = (
@@ -101,8 +136,8 @@ class TestQwen38Registry(unittest.TestCase):
 
         with (
             mock.patch.object(llm_service, "generate", return_value=structured) as generate,
-            mock.patch(
-                "services.enhance_guides.get_enhance_guide",
+            mock.patch.object(
+                enhance_guides, "get_enhance_guide",
                 return_value="Write the required MiniMax H3 three-field prompt.",
             ),
         ):

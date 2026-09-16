@@ -1,3 +1,4 @@
+import { outputIdentity } from '../../lib/galleryIdentity'
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { Film, Music, PanelRightClose, PanelRightOpen, X } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
@@ -15,7 +16,7 @@ function VideoThumbnail({ src, name }: { src: string; name: string }) {
   useEffect(() => {
     let cancelled = false
 
-    requestThumbnail(src, name).then((dataUrl) => {
+    requestThumbnail(src, src).then((dataUrl) => {
       if (!cancelled && dataUrl) setThumbUrl(dataUrl)
     })
 
@@ -110,7 +111,7 @@ function VirtualizedThumbnailList({ activeIndex, onThumbnailClick, onMobileClick
           const idx = startIdx + i
           return (
             <button
-              key={file.name}
+              key={outputIdentity(file)}
               data-thumb-index={idx}
               onClick={() => {
                 onThumbnailClick(idx)

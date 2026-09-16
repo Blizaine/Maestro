@@ -41,6 +41,8 @@ export interface ApiResolution {
 }
 
 export interface ApiOutput {
+  id?: string
+  path?: string
   name: string
   type: 'video' | 'image' | 'audio'
   mode: string | null
@@ -62,6 +64,7 @@ export interface ApiOutput {
 }
 
 export interface ApiJobStatus {
+  enhancement?: import('../types').PromptEnhancementRecord | null
   job_id: string
   /** Stable browser-generated identity used to recover an accepted submit. */
   client_submission_id?: string | null
@@ -75,6 +78,7 @@ export interface ApiJobStatus {
   phase: string
   message: string
   output_files: string[]
+  viggle_preparation?: import('../types').VigglePreparedFrame | null
   error: string | null
   /** Present only on failed jobs that look like CUDA OOMs.
    *  See `OomInfo` in types/index.ts. */
@@ -221,7 +225,7 @@ export async function planH3Windows(params: {
   image_paths?: string[]
   injected_keyframes?: Array<{ path: string; position: string }>
   camera_coverage?: 'auto' | 'continuous' | 'multi_shot'
-  planning_style?: 'faithful' | 'creative'
+  planning_style?: 'faithful' | 'creative' | 'adaptive'
 }): Promise<H3WindowPlan> {
   const res = await fetch(`${BASE}/api/v1/llm/plan-h3-windows`, {
     method: 'POST',
@@ -265,6 +269,12 @@ export interface StudioPreferenceSettings {
   audio_sub_mode?: 'speech' | 'music' | 'sfx' | 'mixer' | 'revoice'
   selected_model_per_mode?: Record<string, string>
   selected_model_per_audio_sub_mode?: Record<string, string>
+  inference_steps_per_model?: Record<string, number>
+  enhance_on_generation_default?: boolean
+  director_music_clip_seconds?: number | null
+  director_max_shot_frames_per_model?: Record<string, number>
+  music_defaults_version?: number
+  director_music_model?: string
   h3_optimizations?: {
     override_attention?: '' | 'sol' | 'sla' | 'sdpa'
     skip_steps_cache_type?: '' | 'first_block'
@@ -304,7 +314,7 @@ export async function planH3Sequence(params: {
   overlap_frames?: number
   sequence_continuity?: boolean
   camera_coverage?: 'auto' | 'continuous' | 'multi_shot'
-  planning_style?: 'faithful' | 'creative'
+  planning_style?: 'faithful' | 'creative' | 'adaptive'
 }): Promise<H3WindowPlan> {
   const res = await fetch(`${BASE}/api/v1/llm/plan-h3-sequence`, {
     method: 'POST',
@@ -383,6 +393,10 @@ export async function submitToolUpscale(params: {
   method?: string
   seed?: number
   workspace?: string
+  dlss_intensity?: number
+  dlss_depth?: string
+  dlss_motion?: string
+  temporal_upsampling?: string
 }): Promise<{ job_id: string }> {
   const res = await fetch(`${BASE}/api/v1/tools/upscale`, {
     method: 'POST',
@@ -634,6 +648,11 @@ export async function cancelJob(jobId: string): Promise<void> {
   if (!res.ok) throw new Error('Failed to cancel job')
 }
 
+export async function dismissJob(jobId: string): Promise<void> {
+  const response = await fetch(`${BASE}/api/v1/jobs/${encodeURIComponent(jobId)}`, {method: 'DELETE'})
+  if (!response.ok) throw new Error('Could not dismiss the saved job')
+}
+
 export async function startStudioQueue(): Promise<{
   status: 'started' | 'idle'
   job_ids: string[]
@@ -657,8 +676,8 @@ export async function fetchActiveJobs(): Promise<{ jobs: Array<ApiJobStatus & {
 
 // --- Move to Workspace ---
 
-export async function moveOutput(name: string, workspace: string): Promise<void> {
-  const res = await fetch(`${BASE}/api/v1/outputs/${encodeURIComponent(name)}/move`, {
+export async function moveOutput(name: string, workspace: string, sourceWorkspace?: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/v1/outputs/${encodeURIComponent(name)}/move${workspaceQuery(sourceWorkspace)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ workspace }),
@@ -671,15 +690,15 @@ export async function moveOutput(name: string, workspace: string): Promise<void>
 
 // --- Favorites ---
 
-export async function toggleFavorite(name: string): Promise<{ name: string; favorite: boolean }> {
-  const res = await fetch(`${BASE}/api/v1/favorites/${encodeURIComponent(name)}`, { method: 'POST' })
+export async function toggleFavorite(name: string, workspace?: string): Promise<{ name: string; favorite: boolean }> {
+  const res = await fetch(`${BASE}/api/v1/favorites/${encodeURIComponent(name)}${workspaceQuery(workspace)}`, { method: 'POST' })
   if (!res.ok) throw new Error('Failed to toggle favorite')
   return res.json()
 }
 
 // --- Outputs ---
 
-export async function fetchOutputs(limit = 0, offset = 0, opts?: { favoritesOnly?: boolean; multiclipOnly?: boolean; search?: string; workspace?: string }): Promise<{ outputs: ApiOutput[]; total: number }> {
+export async function fetchOutputs(limit = 0, offset = 0, opts?: { favoritesOnly?: boolean; multiclipOnly?: boolean; search?: string; workspace?: string; mediaFilter?: string; cursor?: string }): Promise<{ outputs: ApiOutput[]; total: number; next_cursor?: string | null }> {
   const params = new URLSearchParams()
   if (limit > 0) params.set('limit', String(limit))
   if (offset > 0) params.set('offset', String(offset))
@@ -688,11 +707,17 @@ export async function fetchOutputs(limit = 0, offset = 0, opts?: { favoritesOnly
   if (opts?.search) params.set('search', opts.search)
   // "__uploads__" browses the uploads folder (virtual Uploads view)
   if (opts?.workspace) params.set('workspace', opts.workspace)
+  if (opts?.mediaFilter) params.set('media_filter', opts.mediaFilter)
+  if (opts?.cursor) params.set('cursor', opts.cursor)
   const qs = params.toString()
   const res = await fetch(`${BASE}/api/v1/outputs${qs ? '?' + qs : ''}`)
   if (!res.ok) throw new Error('Failed to fetch outputs')
   const data = await res.json()
-  return { outputs: data.outputs, total: data.total ?? data.outputs.length }
+  return { outputs: data.outputs, total: data.total ?? data.outputs.length, next_cursor: data.next_cursor }
+}
+
+function workspaceQuery(workspace?: string): string {
+  return workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
 }
 
 export function getFileUrl(filename: string, workspace?: string): string {
@@ -714,12 +739,12 @@ export function getUploadUrl(filename: string): string {
   return `${BASE}/api/v1/uploads/${encodeURIComponent(filename)}`
 }
 
-export async function fetchOutputMetadata(name: string): Promise<import('../types').OutputMetadata> {
+export async function fetchOutputMetadata(name: string, workspace?: string): Promise<import('../types').OutputMetadata> {
   // Retry with a per-attempt timeout. On a slow/high-latency link (e.g. the user
   // is remote over VPN) the request can stall long enough that a single attempt
   // hangs or is dropped by an intermediary; the old single-shot fetch then left
   // the caller with no metadata and the "Load Settings" button a silent no-op.
-  const url = `${BASE}/api/v1/outputs/${encodeURIComponent(name)}/metadata`
+  const url = `${BASE}/api/v1/outputs/${encodeURIComponent(name)}/metadata${workspaceQuery(workspace)}`
   const ATTEMPTS = 3
   const PER_ATTEMPT_MS = 30000  // generous: the server may read embedded video metadata to recover a seed
   let lastErr: unknown = null
@@ -750,23 +775,23 @@ export async function fetchOutputMetadata(name: string): Promise<import('../type
   throw lastErr  // all attempts failed — loadOutputMetadata's catch sets meta null
 }
 
-export async function deleteOutput(name: string): Promise<void> {
-  const res = await fetch(`${BASE}/api/v1/outputs/${encodeURIComponent(name)}`, { method: 'DELETE' })
+export async function deleteOutput(name: string, workspace?: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/v1/outputs/${encodeURIComponent(name)}${workspaceQuery(workspace)}`, { method: 'DELETE' })
   if (!res.ok) throw new Error('Failed to delete output')
 }
 
-export async function rejoinClips(groupId: string, audioFile?: string): Promise<{ filename: string; clip_count: number }> {
+export async function rejoinClips(groupId: string, audioFile?: string, workspace?: string): Promise<{ filename: string; clip_count: number }> {
   const res = await fetch(`${BASE}/api/v1/outputs/rejoin`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ group_id: groupId, audio_file: audioFile }),
+    body: JSON.stringify({ group_id: groupId, audio_file: audioFile, workspace }),
   })
   if (!res.ok) throw new Error('Failed to rejoin clips')
   return res.json()
 }
 
-export async function fetchGroupClips(groupId: string): Promise<{ group_id: string; clips: Array<{ filename: string; index: number; total: number; prompt: string }> }> {
-  const res = await fetch(`${BASE}/api/v1/outputs/group/${encodeURIComponent(groupId)}`)
+export async function fetchGroupClips(groupId: string, workspace?: string): Promise<{ group_id: string; clips: Array<{ filename: string; index: number; total: number; prompt: string }> }> {
+  const res = await fetch(`${BASE}/api/v1/outputs/group/${encodeURIComponent(groupId)}${workspaceQuery(workspace)}`)
   if (!res.ok) throw new Error('Failed to fetch group clips')
   return res.json()
 }
@@ -919,8 +944,8 @@ export async function updateDirectorQueueEntry(
   return res.json()
 }
 
-export async function deleteDirectorQueueEntry(entryId: string): Promise<void> {
-  const res = await fetch(`${BASE}/api/v1/director/queue/${encodeURIComponent(entryId)}`, {
+export async function deleteDirectorQueueEntry(entryId: string, completedOnly = false): Promise<void> {
+  const res = await fetch(`${BASE}/api/v1/director/queue/${encodeURIComponent(entryId)}${completedOnly ? '?completed_only=true' : ''}`, {
     method: 'DELETE',
   })
   if (!res.ok) {
@@ -991,7 +1016,7 @@ export async function fetchRecipe(id: string): Promise<Recipe> {
 }
 
 export async function saveRecipeFromOutput(body: {
-  output_name: string; name: string; description?: string; nsfw?: boolean
+  output_name: string; name: string; description?: string; nsfw?: boolean; workspace?: string
 }): Promise<RecipeCard> {
   const res = await fetch(`${BASE}/api/v1/recipes/save-from-output`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -1061,17 +1086,20 @@ export async function tagPipelineClip(pid: string, clipIndex: number, tag: strin
   if (!res.ok) throw new Error('Failed to tag clip')
 }
 
-export async function updateClipPrompt(
-  pid: string, clipIndex: number,
-  field: 'image_prompt' | 'video_prompt', value: string,
-): Promise<void> {
-  const res = await fetch(
-    `${BASE}/api/v1/director/pipelines/${encodeURIComponent(pid)}/clips/${clipIndex}/prompt`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ field, value }),
-    })
-  if (!res.ok) throw new Error('Failed to update clip prompt')
+export async function updateClipPrompt(pid: string, clipIndex: number, update: {
+  image_prompt?: string
+  video_prompt?: string
+  window_prompts?: string[]
+}): Promise<void> {
+  const res = await fetch(`${BASE}/api/v1/director/pipelines/${encodeURIComponent(pid)}/clips/${clipIndex}/prompt`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(update),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Failed to save prompt' }))
+    throw new Error(err.error || err.detail || 'Failed to save prompt')
+  }
 }
 
 export async function startPipelineRepair(pid: string): Promise<{
@@ -1150,7 +1178,41 @@ export async function deletePipeline(pid: string): Promise<{ media_deleted: numb
 
 // --- Director v2 ---
 
-export interface DirectorV2PlanRequest {
+export interface DirectorTimelineOptions {
+  director_music_clip_seconds?: number | null
+  video_model?: string
+  image_model?: string
+  video_params?: Record<string, unknown>
+  director_max_shot_frames?: number
+  director_resolution_preset?: string
+  director_aspect_ratio?: string
+  audio_path?: string
+}
+
+export interface DirectorMusicClipLimits {
+  fps: number
+  frames_minimum: number
+  frame_step: number
+  hard_max_frames: number
+  recommended_frames: number
+  max_frames: number
+  max_seconds: number
+  recommended_seconds: number
+  auto: boolean
+}
+
+export async function fetchDirectorMusicClipLimits(params: DirectorTimelineOptions): Promise<DirectorMusicClipLimits> {
+  const response = await fetch(`${BASE}/api/v1/director/music-clip-limits`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(params),
+  })
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}))
+    throw new Error(error.detail || 'Could not determine the clip length for this model')
+  }
+  return response.json()
+}
+
+export interface DirectorV2PlanRequest extends DirectorTimelineOptions {
   skill_type: string
   scene_description?: string
   story_description?: string
@@ -1176,7 +1238,8 @@ export interface DirectorV2PlanRequest {
 }
 
 export interface DirectorV2PlanResponse {
-  clip_plans: Array<{ video_prompt: string; image_prompt: string }>
+  clip_plans: import('../types').ClipPlan[]
+  planned_clips?: import('../types').PlannedClip[]
   production_plan: ProductionPlan
   skill_type: string
 }
@@ -1198,6 +1261,7 @@ export async function directorV2Plan(params: DirectorV2PlanRequest): Promise<Dir
 
 export interface GenerationPreset {
   id: string
+  builtin?: boolean
   name: string
   mode: string
   model_type: string
@@ -1708,7 +1772,7 @@ export async function mixAudio(tracks: {
 
 // --- Upload ---
 
-export async function uploadImage(file: File): Promise<{
+export async function uploadImage(file: File, options?: { reuseIdentical?: boolean }): Promise<{
   filename: string
   path: string
   url: string
@@ -1719,7 +1783,8 @@ export async function uploadImage(file: File): Promise<{
 }> {
   const form = new FormData()
   form.append('file', file)
-  const res = await fetch(`${BASE}/api/v1/upload`, {
+  const query = options?.reuseIdentical ? '?reuse_identical=true' : ''
+  const res = await fetch(`${BASE}/api/v1/upload${query}`, {
     method: 'POST',
     body: form,
   })
@@ -1763,6 +1828,26 @@ export async function fetchCharacters(): Promise<SavedOmniCharacter[]> {
   return Array.isArray(data.characters) ? data.characters : []
 }
 
+export async function submitFaceRefiner(params: {
+  video_path: string; workspace: string; options: import('../types').FaceRefinerOptions
+  analyze_only?: boolean; analysis_id?: string; assignments?: import('../types').FaceRefinerAssignment[]
+}): Promise<{ job_id: string; analysis_id: string | null }> {
+  const response = await fetch(`${BASE}/api/v1/tools/face-refiner`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params),
+  })
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}))
+    throw new Error(error.detail || 'Could not start Face Refiner')
+  }
+  return response.json()
+}
+
+export async function fetchFaceAnalysis(id: string): Promise<import('../types').FaceRefinerAnalysis> {
+  const response = await fetch(`${BASE}/api/v1/face-refiner/analyses/${encodeURIComponent(id)}`)
+  if (!response.ok) throw new Error('Face analysis is unavailable. Detect faces again.')
+  return response.json()
+}
+
 export async function createCharacter(params: {
   name: string
   visual_path: string
@@ -1790,6 +1875,89 @@ export async function deleteCharacter(characterId: string): Promise<void> {
     const error = await res.json().catch(() => ({ detail: 'Character delete failed' }))
     throw new Error(error.detail || 'Character delete failed')
   }
+}
+
+export interface CharacterTransferResult {
+  character: SavedOmniCharacter
+  filename?: string
+  url?: string
+}
+
+async function characterRequest(path: string, init?: RequestInit) {
+  const response = await fetch(`${BASE}${path}`, init)
+  const data = await response.json()
+  if (!response.ok) throw new Error(data.detail || data.error || 'Character request failed')
+  return data
+}
+
+async function waitForCharacterTransfer(job: { id: string }, onProgress?: (message: string) => void): Promise<CharacterTransferResult> {
+  for (;;) {
+    const status = await characterRequest(`/api/v1/character-transfers/${encodeURIComponent(job.id)}`)
+    onProgress?.(status.message || 'Preparing character…')
+    if (status.status === 'failed') throw new Error(status.error || 'Character transfer failed')
+    if (status.status === 'completed') {
+      window.dispatchEvent(new Event('maestro-characters-changed'))
+      return status.result
+    }
+    await new Promise(resolve => setTimeout(resolve, 1000))
+  }
+}
+
+export async function importCharacterFile(file: File, onProgress?: (message: string) => void, metadataFile?: File): Promise<SavedOmniCharacter> {
+  const form = new FormData()
+  form.append('file', file)
+  if (metadataFile) form.append('metadata_file', metadataFile)
+  const job = await characterRequest('/api/v1/characters/import', { method: 'POST', body: form })
+  return (await waitForCharacterTransfer(job, onProgress)).character
+}
+
+export async function exportCharacter(characterId: string, onProgress?: (message: string) => void): Promise<CharacterTransferResult> {
+  const job = await characterRequest(`/api/v1/characters/${encodeURIComponent(characterId)}/export`, { method: 'POST' })
+  return waitForCharacterTransfer(job, onProgress)
+}
+
+export async function findCharacterFiles(url: string): Promise<{ files: string[] }> {
+  return characterRequest(`/api/v1/characters/remote-files?url=${encodeURIComponent(url)}`)
+}
+
+export async function importCharacterUrl(url: string, filename: string, onProgress?: (message: string) => void): Promise<SavedOmniCharacter> {
+  const job = await characterRequest('/api/v1/characters/import-url', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, filename }),
+  })
+  return (await waitForCharacterTransfer(job, onProgress)).character
+}
+
+export async function attachCharacterVoice(characterId: string, voicePath: string): Promise<SavedOmniCharacter> {
+  const character = await characterRequest(`/api/v1/characters/${encodeURIComponent(characterId)}/voice`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ voice_path: voicePath }),
+  })
+  window.dispatchEvent(new Event('maestro-characters-changed'))
+  return character
+}
+
+export async function recoverCharacterImages(characterId: string, onProgress?: (message: string) => void, force = false): Promise<SavedOmniCharacter> {
+  const job = await characterRequest(`/api/v1/characters/${encodeURIComponent(characterId)}/images/recover?force=${force}`, { method: 'POST' })
+  return (await waitForCharacterTransfer(job, onProgress)).character
+}
+
+export async function selectCharacterImages(characterId: string, selectedIds: string[], coverId: string): Promise<SavedOmniCharacter> {
+  const character = await characterRequest(`/api/v1/characters/${encodeURIComponent(characterId)}/images`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ selected_ids: selectedIds, cover_id: coverId }),
+  })
+  window.dispatchEvent(new Event('maestro-characters-changed'))
+  return character
+}
+
+export function characterImagesDownloadUrl(characterId: string): string {
+  return `${BASE}/api/v1/characters/${encodeURIComponent(characterId)}/images.zip`
+}
+
+export async function characterImageFile(character: SavedOmniCharacter, image: {id: string; url: string}): Promise<File> {
+  const response = await fetch(image.url)
+  if (!response.ok) throw new Error('The character image is missing. Recover its images again.')
+  const blob = await response.blob()
+  return new File([blob], `${character.name.replace(/[^\p{L}\p{N}_-]+/gu, '_')}_${image.id}.png`, {type: 'image/png'})
 }
 
 export async function testHostNotificationSound(
@@ -2009,10 +2177,11 @@ export async function llmEnhancePrompt(params: {
   tts_voice_count?: number
   max_new_tokens?: number
   reference_context?: string
-  planning_style?: 'faithful' | 'creative'
+  planning_style?: 'faithful' | 'creative' | 'adaptive'
 }): Promise<{
   original: string
   enhanced: string
+  warnings?: string[]
 }> {
   const res = await fetch(`${BASE}/api/v1/llm/enhance-prompt`, {
     method: 'POST',
@@ -2134,7 +2303,7 @@ export async function planClipPrompts(params: {
   return res.json()
 }
 
-export async function planClipStructure(params: {
+export async function planClipStructure(params: DirectorTimelineOptions & {
   analysis: import('../types').AudioAnalysisResult
   energy_bias?: number
   fps?: number
@@ -2178,7 +2347,7 @@ export async function classifySections(params: {
   return res.json()
 }
 
-export async function planClipPromptsAndImages(params: {
+export async function planClipPromptsAndImages(params: DirectorTimelineOptions & {
   clips: import('../types').PlannedClip[]
   scene_description: string
   lyrics?: import('../types').LyricSegment[]
@@ -2187,7 +2356,7 @@ export async function planClipPromptsAndImages(params: {
   speaker_mappings?: Record<string, { name: string; role: string }>
   prompt_type?: 'image' | 'video' | 'both'
   existing_image_prompts?: string[]
-}): Promise<{ clip_plans: import('../types').ClipPlan[] }> {
+}): Promise<{ clip_plans: import('../types').ClipPlan[]; planned_clips?: import('../types').PlannedClip[] }> {
   const res = await fetch(`${BASE}/api/v1/director/plan-prompts-and-images`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -2727,4 +2896,25 @@ export async function fetchActiveDownloads(): Promise<{ downloads: ActiveDownloa
   const res = await fetch(`${BASE}/api/v1/downloads/active`)
   if (!res.ok) throw new Error(`Failed to fetch active downloads (${res.status})`)
   return res.json()
+}
+
+export async function fetchJobEnhancement(jobId: string): Promise<{
+  enhancement: import('../types').PromptEnhancementRecord
+  original_params: Record<string, unknown>
+  prepared?: { params: Record<string, unknown>; h3_window_plan?: H3WindowPlan; ltx_window_plan?: LTXWindowPlan }
+}> {
+  const response = await fetch(`${BASE}/api/v1/jobs/${encodeURIComponent(jobId)}/enhancement`)
+  if (!response.ok) throw new Error('Could not load this job’s saved prompts.')
+  return response.json()
+}
+
+export async function retryEnhancedJob(jobId: string, action: 'retry' | 'refresh' | 'as_written' | 'accept_draft' = 'retry') {
+  const response = await fetch(`${BASE}/api/v1/jobs/${encodeURIComponent(jobId)}/retry`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({action}),
+  })
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}))
+    throw new Error(error.detail || 'Could not retry this job.')
+  }
+  return response.json() as Promise<{job_id: string; status: string}>
 }

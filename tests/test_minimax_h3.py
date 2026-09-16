@@ -323,6 +323,8 @@ class TestMiniMaxH3Definition(unittest.TestCase):
                 "minimax_h3_full",
                 "minimax_h3_ref2va",
                 "minimax_h3_ref2va_full",
+                "minimax_h3_voice_audio",
+                "viggle_animate",
             ],
         )
         self.assertEqual((model_def["fps"], model_def["frames_minimum"]), (24, 124))
@@ -1498,7 +1500,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
 
     def test_shared_h3_window_ui_and_durable_overrides_are_wired(self):
         controls = _read(_H3_MULTI_WINDOW_CONTROLS_PATH)
-        sidebar = _read(_SIDEBAR_PATH)
+        output_controls = _read(_ROOT / "ui/src/components/Sidebar/OutputFormatControls.tsx")
         advanced = _read(_ADVANCED_SETTINGS_PATH)
         duration = _read(_DURATION_SLIDER_PATH)
         store = _read(_STORE_PATH)
@@ -1514,7 +1516,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("minimax_h3_multi_window", controls)
         self.assertIn("minimax_h3_reference_sequence", controls)
         self.assertIn("Window prompts", controls)
-        self.assertIn("<H3MultiWindowControls />", sidebar)
+        self.assertIn('<H3MultiWindowControls section="continuity"/>', output_controls)
         self.assertNotIn("Plan Prompt Across Windows", advanced)
         self.assertIn("Window Length", duration)
         self.assertIn("Recommended", duration)
@@ -1526,21 +1528,11 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn('@api.put("/api/v1/h3-window-overrides")', launch)
         self.assertIn("updateH3WindowOverrides", client)
 
-    def test_single_window_h3_auto_enhance_defers_while_generation_is_busy(self):
-        controls = _read(_H3_MULTI_WINDOW_CONTROLS_PATH)
-        store = _read(_STORE_PATH)
+    def test_legacy_deferred_enhancement_still_waits_for_generation_slot(self):
+        # Studio now enhances only on an explicit click (browser coverage in
+        # tests/ui/studio_enhancement.cjs). Previously saved/API jobs retain
+        # their deferred worker contract.
         launch = _read(_LAUNCH_PATH)
-
-        self.assertIn("enabled ? 'auto' : 'manual'", controls)
-        self.assertIn("promptMode === 'auto'", store)
-        self.assertIn("!usesMultiplePasses", store)
-        self.assertIn("await state.enhancePrompt()", store)
-        self.assertIn("typeof state.params._h3_original_prompt", store)
-        self.assertIn("const deferAutoEnhance", store)
-        self.assertIn("submissionMode === 'queue' || generationWorkInFlight", store)
-        self.assertIn("const active = await api.fetchActiveJobs()", store)
-        self.assertIn("params._deferred_prompt_enhance", store)
-        self.assertIn("Ready - AI planning will run when queue starts", store)
         activity = _read(_PROMPT_ACTIVITY_PATH)
         queue = _read(_GLOBAL_QUEUE_PATH)
         gallery = _read(_MAIN_CONTENT_PATH)
@@ -1557,7 +1549,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         worker_start = launch.index("def _run_generation(")
         worker = launch[worker_start:]
         self.assertLess(
-            worker.index("with generation_slot(_gen_lock, job) as acquired:"),
+            worker.index("generation_slot(_gen_lock, job)) as acquired:"),
             worker.index("_apply_deferred_prompt_enhancement(job, raw_params)"),
         )
         self.assertLess(
@@ -1638,11 +1630,14 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             "return _enqueue_deferred_generation_preparation(body)",
             endpoint,
         )
-        worker = launch[launch.index("def _run_generation("):]
+        worker_node = next(node for node in ast.parse(launch).body
+                           if isinstance(node, ast.FunctionDef) and node.name == "_run_generation")
+        worker = ast.get_source_segment(launch, worker_node)
         self.assertLess(
-            worker.index("with generation_slot(_gen_lock, job) as acquired:"),
+            worker.index("generation_slot(_gen_lock, job)"),
             worker.index("_apply_deferred_generation_preparation(job)"),
         )
+        self.assertIn("nullcontext(True) if _slot_owned else generation_slot", worker)
         self.assertIn(
             "_prepare_generation_submission(request_body, prepare_only=True)",
             launch,
@@ -1652,7 +1647,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
 
         store = _read(_STORE_PATH)
         self.assertIn(
-            "Prompt Enhance was not started. Add this setup to the queue",
+            "A generation is already using or waiting for the GPU.",
             store,
         )
         self.assertIn(
@@ -1848,7 +1843,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         source = _read(_HANDLER_PATH)
         self.assertIn("_TRANSFORMER_WORKING_VRAM_MB = 10 * 1024", source)
         self.assertIn('"workingVRAM": {', source)
-        self.assertIn('"transformer": _TRANSFORMER_WORKING_VRAM_MB', source)
+        self.assertIn('"transformer": int((model_def or {}).get("minimax_h3_transformer_working_vram_gb", 10) * 1024)', source)
 
     def test_h3_video_references_get_a_dedicated_memory_profile(self):
         launch = _read(_LAUNCH_PATH)
@@ -1880,7 +1875,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
     def test_maestro_registers_the_family_and_uses_its_native_frame_grid(self):
         source = _read(_WGP_PATH)
         self.assertIn('"models.minimax_h3.minimax_h3_handler"', source)
-        self.assertIn("video_length = normalize_model_total_frame_count(video_length, model_def)", source)
+        self.assertIn("video_length = normalize_model_total_frame_count(video_length, model_def, window_size=sliding_window_size)", source)
         self.assertIn(
             "frame_num=align_model_frame_count(current_video_length, model_def, for_generation=True)",
             source,
@@ -1906,20 +1901,15 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             "s.params.minimax_h3_multi_window === true",
             duration,
         )
-        self.assertIn("const shouldSequence = durationPlan.windowCount > 1", duration)
         self.assertIn("continuationFirstWindowSeconds(windowSize, overlap, fps)", duration)
-        self.assertIn("minimax_h3_reference_sequence', shouldSequence", duration)
-        self.assertIn("minimax_h3_multi_window', shouldSequence", duration)
-        self.assertIn("setDuration(preferredSeconds)", duration)
+        # Native duration, sequence transitions and window overrides run in
+        # real React/Zustand tests (tests/ui/studio_duration.cjs).
         self.assertIn("max={isH3 ? maximumFrames : windowMaxSeconds}", duration)
         self.assertIn("value={isH3 ? currentWindowFrames : windowSize}", duration)
         self.assertIn("sliderValue / fps", duration)
         self.assertNotIn("Math.max(minDuration, windowSize)", duration)
         self.assertIn("modelOptions?.sliding_window", advanced)
         self.assertIn("if (!supportsSlidingWindows && maximumFrames != null)", store)
-        self.assertIn("const h3SingleNativePass = (", store)
-        self.assertIn("nativeMaximum ?? Number.POSITIVE_INFINITY", store)
-        self.assertIn("expandNativeWindow", store)
         self.assertIn("delete params.sliding_window_size", store)
         self.assertIn('"frames_maximum": md.get("frames_maximum")', launch)
         self.assertIn("sliding_window_memory_policy", duration)
@@ -1930,8 +1920,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("sliding_window_memory_override", store)
         self.assertIn("const h3DirectOmniPass = (", store)
         self.assertIn("let windowFrames = h3DirectOmniPass", store)
-        self.assertIn("directOmniDurationOverride", store)
-        self.assertIn("full prompt auto-paced", duration)
+        self.assertIn("Reviewed window prompts", duration)
         self.assertIn('"sliding_window_memory_policy": md.get(', launch)
         self.assertIn('"omni_sequence_memory_policy": md.get(', launch)
         self.assertIn('h3_window_adjustment.get("unsupported")', launch)
@@ -1990,12 +1979,23 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             "At MM:SS.mmm",
             "says in an off-screen voiceover",
             "voice-timbre reference",
-            "roughly two words per second",
+            "2.8 words per second by default, allowing up to 3 words per second",
             "do not inflate it to a word quota",
         ):
             self.assertIn(official_rule, _read(_H3_REF2VA_GUIDE_PATH))
         self.assertIn("At MM:SS.mmm", enhance_guide)
         self.assertIn("480", enhance_guide)
+
+    def test_h3_enhancer_schedules_exact_dialogue_at_new_default_pace(self):
+        helpers = _load_llm_enhance_helpers()
+        prompt = 'Blaine says "' + ' '.join(['word'] * 25) + '."'
+        duration, start, end = helpers['_h3_dialogue_schedule'](prompt, 10)
+        self.assertEqual(duration, 10)
+        self.assertEqual(start, 0.25)
+        self.assertAlmostEqual(end - start, 25 / 2.8)
+        requirement = helpers['_build_h3_dialogue_requirement']('Blaine talks about Maestro.', 10)
+        self.assertIn('2.8 words per second', requirement)
+        self.assertIn('allowing up to 3', requirement)
 
     def test_h3_enhance_path_preserves_context_ir_contract(self):
         launch = _read(_LAUNCH_PATH)
@@ -2064,14 +2064,12 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("Music / performance timeline", section)
         self.assertIn("Music / sound style only", section)
         self.assertIn("groupActiveReferences", section)
-        self.assertIn("Bound together as one H3 subject", section)
-        self.assertIn("Saved character audio is automatically bound as a Voice Reference", section)
+        # The compact inline editor replaced the old dialog's explanatory
+        # copy. Keep checking the voice binding rather than obsolete wording.
         self.assertIn("audio_intent: 'voice' as const", section)
-        self.assertIn("preserves the exact soundtrack and advances through it", section)
         self.assertIn("timeline_start_frame=window_start_frame_no", main)
         self.assertNotIn('accept="image/*,video/*,audio/*', section)
         self.assertNotIn('accept="audio/*', section)
-        self.assertIn("iOS/WebKit can", section)
         self.assertIn("type !== 'audio' && type !== 'video'", section)
         self.assertIn("scope?: 'studio' | 'director'", section)
         self.assertIn('scope="director"', director)
@@ -2147,9 +2145,8 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             handler.index("setDurationSeconds(audioDuration)"),
         )
         self.assertIn("onChange={event => setAudioIntent(", section)
-        self.assertIn("automatically enables a multi-window sequence", section)
         self.assertIn(
-            "const shouldInitializeTotalDuration = selectionChanged || !h3MultiWindowEnabled",
+            "setDuration(useStore.getState().durationSeconds)",
             duration_slider,
         )
 
@@ -2172,7 +2169,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             'and body.get("multi_prompts_gen_type") in (None, 0, 1, "0", "1")',
             launch,
         )
-        self.assertIn("if (isH3Model && !usesMultiplePasses)", store)
+        self.assertIn("else if (!hasSlidingWindow && prompt.includes('\\n'))", store)
         self.assertIn("_h3_omni_context_ir", wgp)
         self.assertIn("Preserving one structured Context-IR", wgp)
         self.assertIn("prompt instead of splitting its sections", wgp)
@@ -2235,7 +2232,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         )
         self.assertIn("REQUIRED VERBATIM", requirement)
         self.assertIn("Run it locally.", requirement)
-        self.assertIn("From 0.00 to 2.00 seconds", requirement)
+        self.assertIn("From 0.00 to 0.25 seconds", requirement)
         self.assertIn("no human voice", requirement)
 
         visible_text_request = (
@@ -2432,7 +2429,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
 class TestMiniMaxH3RuntimeSource(unittest.TestCase):
     def test_runtime_uses_the_official_dual_scheduler_and_audio_output(self):
         main = _read(_MAIN_PATH)
-        self.assertIn("shift=12.0", main)
+        self.assertIn("shift=3.0 if self.viggle else 12.0", main)
         self.assertIn("solver=self.sample_solver", main)
         self.assertIn("MiniMaxH3Scheduler(shift=3.0)", main)
         self.assertIn('"audio_sampling_rate": MINIMAX_H3_AUDIO_SAMPLE_RATE', main)
@@ -2755,7 +2752,7 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
         self.assertIn('"minimax_h3_runtime_advisory":', launch)
         self.assertIn("_minimax_h3_runtime_advisory", launch)
         self.assertIn("normalize_minimax_h3_turbo_request", launch)
-        self.assertIn("<MiniMaxH3Optimizations />", sidebar)
+        self.assertIn("<MiniMaxH3Optimizations />", advanced)
         self.assertIn("H3 Optimizations", optimizations)
         self.assertIn("aria-expanded={expanded}", optimizations)
         self.assertIn("setExpanded(value => !value)", optimizations)
@@ -2801,7 +2798,7 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
             full["preset_id"],
             "alibaba-pai-fl2va-pdd-8step",
         )
-        self.assertEqual(len(full["presets"]), 3)
+        self.assertIn("taomate-fl2va-3step-rank19", {preset["id"] for preset in full["presets"]})
         current_option = next(
             preset for preset in full["presets"]
             if preset["id"] == "alibaba-pai-fl2va-pdd-8step"
@@ -3263,6 +3260,26 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
         autocast.assert_not_called()
         visual.assert_called_once_with(pixels, grid_thw=grid)
         self.assertEqual(result, ("image embeds", []))
+
+    def test_audio_resampling_stays_on_cpu_with_a_non_cpu_default_device(self):
+        from models.minimax_h3.minimax_h3_main import _prepare_stereo_waveform
+
+        # MMGP changes the default device to CUDA. Use meta to expose implicit
+        # helper allocations without reserving VRAM or requiring a GPU.
+        waveform = self.torch.stack([
+            self.torch.linspace(-0.5, 0.5, 960, device="cpu"),
+            self.torch.linspace(0.75, -0.25, 960, device="cpu"),
+        ], dim=1)
+        for sample_rate in (44100, 48000):
+            with self.subTest(sample_rate=sample_rate):
+                expected = _prepare_stereo_waveform(waveform, sample_rate, 720)
+                with self.torch.device("meta"):
+                    actual = _prepare_stereo_waveform(waveform, sample_rate, 720)
+                    self.assertEqual(self.torch.empty(0).device.type, "meta")
+                self.assertEqual(actual.device.type, "cpu")
+                self.assertEqual(tuple(actual.shape), (2, 720))
+                self.assertTrue(self.torch.equal(actual, expected))
+                self.assertFalse(self.torch.equal(actual[0], actual[1]))
 
     def test_fl2va_overlap_splits_motion_history_and_boundary_frame(self):
         from models.minimax_h3.minimax_h3_main import (

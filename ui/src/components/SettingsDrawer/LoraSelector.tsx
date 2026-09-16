@@ -1,5 +1,5 @@
 /* eslint-disable react-refresh/only-export-components -- shared LoRA display helpers are intentionally colocated */
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useLayoutEffect, useId, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { Search, X, Loader2, Globe, Sparkles, BookOpen, Info, ArrowUpCircle, RefreshCw, ArrowDownAZ, Clock } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
@@ -7,41 +7,120 @@ import { generateLoraGuide, fetchLoraGuide, fetchLoraDetails, checkLoraUpdates }
 import { formatAge } from '../../lib/format'
 import type { LoraRecommendedWeights, LoraUpdateStatus } from '../../types'
 
-export function LoraGuideTooltip({ guide }: { guide: string }) {
+export function LoraGuideTooltip({ guide, label = 'LoRA usage guide' }: { guide: string; label?: string }) {
   const [show, setShow] = useState(false)
   const btnRef = useRef<HTMLButtonElement>(null)
-  const [pos, setPos] = useState({ top: 0, left: 0 })
-
-  const updatePos = () => {
-    if (!btnRef.current) return
-    const rect = btnRef.current.getBoundingClientRect()
-    setPos({ top: rect.top - 4, left: Math.min(rect.right, window.innerWidth - 272) })
+  const guideRef = useRef<HTMLDivElement>(null)
+  const pinned = useRef(false)
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const guideId = useId()
+  const [portalTarget, setPortalTarget] = useState<Element | null>(null)
+  const [pos, setPos] = useState({ top: 0, left: 0, width: 256, maxHeight: 360 })
+  const close = () => { clearTimeout(closeTimer.current); pinned.current = false; setShow(false) }
+  const open = () => {
+    clearTimeout(closeTimer.current)
+    setPortalTarget(btnRef.current?.closest('[role="dialog"]') || document.body)
+    setShow(true)
   }
+  const leave = () => {
+    clearTimeout(closeTimer.current)
+    closeTimer.current = setTimeout(() => {
+      if (!pinned.current && document.activeElement !== btnRef.current && !guideRef.current?.contains(document.activeElement)) setShow(false)
+    }, 150)
+  }
+  useEffect(() => () => clearTimeout(closeTimer.current), [])
+
+  useLayoutEffect(() => {
+    if (!show) return
+    const measure = () => {
+      const button = btnRef.current, tooltip = guideRef.current
+      if (!button || !tooltip) return
+      const rect = button.getBoundingClientRect()
+      const viewport = window.visualViewport
+      const viewportTop = viewport?.offsetTop || 0, viewportLeft = viewport?.offsetLeft || 0
+      const viewportWidth = viewport?.width || window.innerWidth, viewportHeight = viewport?.height || window.innerHeight
+      const width = Math.min(256, viewportWidth - 16)
+      const above = Math.max(0, rect.top - viewportTop - 14)
+      const below = Math.max(0, viewportTop + viewportHeight - rect.bottom - 14)
+      const useBelow = above < Math.min(160, tooltip.scrollHeight) && below > above
+      const maxHeight = Math.max(1, Math.min(360, viewportHeight - 16, useBelow ? below : above))
+      const height = Math.min(tooltip.scrollHeight + 2, maxHeight)
+      setPos({ width, maxHeight,
+        left: Math.max(viewportLeft + 8, Math.min(rect.right - width, viewportLeft + viewportWidth - width - 8)),
+        top: Math.max(viewportTop + 8, Math.min(useBelow ? rect.bottom + 6 : rect.top - height - 6, viewportTop + viewportHeight - height - 8)),
+      })
+    }
+    measure()
+    let frame = 0
+    const schedule = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(measure) }
+    const observer = new ResizeObserver(schedule)
+    if (btnRef.current) observer.observe(btnRef.current)
+    if (guideRef.current) observer.observe(guideRef.current)
+    window.addEventListener('resize', schedule)
+    window.addEventListener('scroll', schedule, true)
+    window.visualViewport?.addEventListener('resize', schedule)
+    window.visualViewport?.addEventListener('scroll', schedule)
+    return () => {
+      cancelAnimationFrame(frame); observer.disconnect()
+      window.removeEventListener('resize', schedule)
+      window.removeEventListener('scroll', schedule, true)
+      window.visualViewport?.removeEventListener('resize', schedule)
+      window.visualViewport?.removeEventListener('scroll', schedule)
+    }
+  }, [show, guide])
+
+  useEffect(() => {
+    if (!show) return
+    const outside = (event: PointerEvent) => {
+      if (!btnRef.current?.contains(event.target as Node) && !guideRef.current?.contains(event.target as Node)) close()
+    }
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault(); event.stopPropagation()
+      btnRef.current?.focus({ preventScroll: true })
+      close()
+    }
+    document.addEventListener('pointerdown', outside)
+    // Escape closes this nested guide before its parent Advanced panel.
+    document.addEventListener('keydown', escape, true)
+    return () => {
+      document.removeEventListener('pointerdown', outside)
+      document.removeEventListener('keydown', escape, true)
+    }
+  }, [show])
 
   return (
     <>
       <button
         ref={btnRef}
-        onMouseEnter={() => { updatePos(); setShow(true) }}
-        onMouseLeave={() => setShow(false)}
-        onClick={e => { e.stopPropagation(); updatePos(); setShow(!show) }}
+        type="button" aria-label={label} aria-expanded={show} aria-describedby={show ? guideId : undefined}
+        onPointerEnter={event => { if (event.pointerType === 'mouse') open() }}
+        onPointerLeave={event => { if (event.pointerType === 'mouse') leave() }}
+        onFocus={open} onBlur={leave}
+        onClick={event => {
+          event.stopPropagation()
+          if (pinned.current) close()
+          else { pinned.current = true; open() }
+        }}
         // Functional indicator (LoRA has a guide) — paired with the
         // BookOpen "guide available" badge below. Uses indicator-success
         // so the green meaning stays consistent across themes.
-        className="p-0.5 text-indicator-success hover:text-indicator-success/80 transition-colors"
+        className="shrink-0 rounded p-0.5 text-indicator-success hover:text-indicator-success/80 transition-colors focus-visible:ring-1 focus-visible:ring-accent-blue"
       >
         <Info size={11} />
       </button>
       {show && createPortal(
         <div
-          className="fixed w-64 bg-bg-secondary border border-border rounded-lg shadow-xl z-[100] p-2.5"
-          style={{ top: pos.top, left: pos.left, transform: 'translate(-100%, -100%)' }}
-          onMouseEnter={() => setShow(true)}
-          onMouseLeave={() => setShow(false)}
+          ref={guideRef} id={guideId} role="tooltip" aria-label={label} tabIndex={0}
+          className="fixed overflow-y-auto overscroll-contain break-words bg-bg-secondary border border-border rounded-lg shadow-xl z-[120] p-2.5"
+          style={pos}
+          onPointerEnter={open} onPointerLeave={leave} onFocus={open} onBlur={leave}
+          onClick={event => event.stopPropagation()}
         >
           <div className="text-[11px] text-text-secondary leading-relaxed whitespace-pre-wrap">{guide}</div>
         </div>,
-        document.body,
+        // Keep nested guide interactions inside the parent's outside-click boundary.
+        portalTarget || document.body,
       )}
     </>
   )
@@ -468,13 +547,14 @@ export function LoraSelector() {
         {filtered.map(filename => {
           const isActive = activatedLoras.includes(filename)
           return (
-            <button
+            <div
               key={filename}
-              onClick={() => toggleLora(filename)}
               className={`w-full text-left px-2.5 py-1.5 text-xs flex items-center gap-2 hover:bg-bg-hover transition-colors ${
                 isActive ? 'text-accent-blue' : 'text-text-secondary'
               }`}
             >
+              <button type="button" onClick={() => toggleLora(filename)} aria-pressed={isActive}
+                className="min-w-0 flex-1 flex items-center gap-2 text-left">
               <div className={`w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0 ${
                 isActive ? 'bg-accent-blue border-accent-blue' : 'border-border'
               }`}>
@@ -485,6 +565,7 @@ export function LoraSelector() {
                 )}
               </div>
               <span className="truncate flex-1">{displayName(filename)}</span>
+              </button>
               {loraDates[filename] && (
                 <LoraAgeChip
                   released={loraDates[filename].released}
@@ -493,7 +574,7 @@ export function LoraSelector() {
               )}
               {guideTexts[filename] && (
                 <span onClick={e => e.stopPropagation()}>
-                  <LoraGuideTooltip guide={guideTexts[filename]} />
+                  <LoraGuideTooltip guide={guideTexts[filename]} label={`Guide for ${displayName(filename)}`} />
                 </span>
               )}
               {loraWeightRecs[filename] && (
@@ -519,7 +600,7 @@ export function LoraSelector() {
                   aria-label="Update available"
                 />
               )}
-            </button>
+            </div>
           )
         })}
         {filtered.length === 0 && (

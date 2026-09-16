@@ -16,9 +16,13 @@ CORE PRINCIPLES (Black Forest Labs official Flux.2 guidance):
   effect. The prompt itself must contain everything the image needs.
 
 LENGTH
-- 30-80 words for most scenes.
-- Up to ~120 words only when each extra detail adds visible value.
-- Use ~30 words when the user's request is simple and atomic.
+- Keep a simple request concise; do not add filler to meet a word count.
+- A detailed supplied brief can need a longer paragraph. Preserve its visible
+  requirements, especially each subject's pose, wardrobe, left/right position,
+  contact points, composition, setting and lighting. Do not compress these away
+  to meet a fixed word limit.
+- Remove repetition and instructions addressed to another assistant. Put the
+  essential subjects and their spatial relationship first.
 
 STRUCTURE
 Front-load in this order, woven into one flowing paragraph:

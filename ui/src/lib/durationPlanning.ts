@@ -1,4 +1,19 @@
 export const LONG_FORM_MAX_SECONDS = 60 * 60
+export const TIME_SLIDER_MAX_SECONDS = 5 * 60
+
+/** Integer frame ticks avoid accumulating rounded tenths (H3: 124, 141, 158…). */
+export function nativeDurationSlider(minimumFrames: number, frameStep: number, fps: number, maximumSeconds: number) {
+  const rate = Math.max(1, fps)
+  const minimum = Math.max(1, Math.round(minimumFrames))
+  const step = Math.max(1, Math.round(frameStep))
+  const maximum = Math.max(minimum, Math.floor(Math.min(TIME_SLIDER_MAX_SECONDS, maximumSeconds) * rate))
+  const count = Math.max(0, Math.floor((maximum - minimum) / step))
+  return {
+    count,
+    secondsAt: (index: number) => (minimum + Math.max(0, Math.min(count, Math.round(index))) * step) / rate,
+    indexAt: (seconds: number) => Math.max(0, Math.min(count, Math.round((seconds * rate - minimum) / step))),
+  }
+}
 
 export type DurationPlanningMode = 'duration' | 'windows' | 'auto'
 export type AutoDurationPlanningStyle = 'faithful' | 'creative'
@@ -149,7 +164,7 @@ export function durationWindowPlan(
       strideSeconds: stride,
     }
   }
-  const count = 1 + Math.ceil((requested - firstWindow + Math.max(0, discardSeconds)) / stride)
+  const count = 1 + Math.ceil((requested - firstWindow + Math.max(0, discardSeconds)) / stride - 1e-8)
   const generated = firstWindow + (count - 1) * stride - Math.max(0, discardSeconds)
   return {
     windowCount: count,
@@ -494,10 +509,10 @@ export function recommendAutoDuration(
 
   const timing = analyzePromptTiming(prompt)
   const { dialogueWords, dialogueTurns, visibleBeats } = timing
-  // H3 remains dependable around 2.15 spoken words/second. Speaker changes
+  // Match the backend's 2.8 words/second planning pace. Speaker changes
   // need a small reaction/breath allowance, but the visible performance can
   // happen while a character talks and must not be added a second time.
-  const speakingSeconds = dialogueWords / 2.15 + Math.max(0, dialogueTurns - 1) * 0.4
+  const speakingSeconds = dialogueWords / 2.8 + Math.max(0, dialogueTurns - 1) * 0.4
   const actionSeconds = visibleBeats * 3.5
   const scopedSeconds = Math.max(firstWindow, speakingSeconds, actionSeconds)
   const scopedPlan = durationWindowPlan(

@@ -134,6 +134,8 @@ class SubjectRef:
     # through to the polish layer so it can substitute screenplay-
     # invented names with descriptors in narrative prose.
     speaker_name: Optional[str] = None
+    # Music-video performance in this shot, independent of camera focus.
+    performance_role: Optional[str] = None
 
     def to_dict(self) -> dict:
         d = {"visual_description": self.visual_description}
@@ -145,6 +147,8 @@ class SubjectRef:
             d["wardrobe"] = self.wardrobe
         if self.speaker_name:
             d["speaker_name"] = self.speaker_name
+        if self.performance_role:
+            d["performance_role"] = self.performance_role
         return d
 
     @staticmethod
@@ -155,6 +159,7 @@ class SubjectRef:
             position_or_relation=d.get("position_or_relation"),
             wardrobe=d.get("wardrobe"),
             speaker_name=d.get("speaker_name"),
+            performance_role=d.get("performance_role"),
         )
 
 

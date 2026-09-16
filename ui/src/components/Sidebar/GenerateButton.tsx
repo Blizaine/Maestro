@@ -6,7 +6,7 @@ import {
   useStore,
 } from '../../stores/useStore'
 
-export function GenerateButton() {
+export function GenerateButton({ stretch = false }: { stretch?: boolean }) {
   const startGeneration = useStore(s => s.startGeneration)
   const setSidebarOpen = useStore(s => s.setSidebarOpen)
   const [pendingAction, setPendingAction] = useState<'generate' | 'queue' | null>(null)
@@ -59,6 +59,9 @@ export function GenerateButton() {
     ),
   ))
   const hasStartImage = useStore(s => !!(s.startImage || s.params.image_start))
+  const viggleMissing = useStore(s => s.generationMode === 'video' && s.studioVideoWorkflow === 'animate'
+    && (!s.params.video_guide || !(s.params.viggle_character ? s.params.viggle_character.reference_path : s.params._viggle_edited_frame)
+      || (s.params.audio_prompt_type === 'A' && !s.params.audio_guide)))
   const createWorkflow = studioVideoWorkflow === 'references' ? 'references' : 'frames'
   const studioMediaIntent = {
     workflow: createWorkflow,
@@ -114,7 +117,7 @@ export function GenerateButton() {
     && Object.values(imagePadding).every(value => value === 0)
   const incompatibleImageModel = generationMode === 'image'
     && !modelSupportsImageWorkflow(currentModel, imageWorkflow, imageRefs.length > 0)
-  const blocked = needsCreateModel || needsGuidance || needsImage || needsReference || needsOutpaintSource || needsOutpaintArea
+  const blocked = viggleMissing || needsCreateModel || needsGuidance || needsImage || needsReference || needsOutpaintSource || needsOutpaintArea
     || needsImageGenerateSource || needsImageWorkflowSource || needsImageMask
     || needsImageOutpaintArea || incompatibleImageModel
   const queueSupported = generationMode !== 'avatar'
@@ -132,7 +135,7 @@ export function GenerateButton() {
   }
 
   if (blocked) {
-    const label = needsCreateModel
+    const label = viggleMissing ? 'Need inputs' : needsCreateModel
       ? 'Need model'
       : needsGuidance
         ? 'Need frame'
@@ -167,7 +170,7 @@ export function GenerateButton() {
           ? 'Expand at least one side of the source canvas.'
         : undefined
     return (
-      <div className="grid w-[132px] shrink-0 grid-cols-[2fr_1fr] overflow-hidden rounded-lg bg-amber-500/20 text-indicator-warning">
+      <div className={`grid ${stretch ? 'w-full min-h-11' : 'w-[132px]'} shrink-0 grid-cols-[2fr_1fr] overflow-hidden rounded-xl bg-amber-500/20 text-indicator-warning`}>
         <button
           type="button"
           disabled
@@ -193,7 +196,7 @@ export function GenerateButton() {
   const pending = pendingAction !== null
 
   return (
-    <div className={`grid w-[132px] shrink-0 grid-cols-[2fr_1fr] overflow-hidden rounded-lg font-medium text-white shadow-accent-glow transition-all ${
+    <div className={`grid ${stretch ? 'w-full min-h-11' : 'w-[132px]'} shrink-0 grid-cols-[2fr_1fr] overflow-hidden rounded-xl font-medium text-white shadow-accent-glow transition-all ${
       pending ? 'bg-bg-active text-text-muted' : 'bg-cta'
     }`}>
       <button

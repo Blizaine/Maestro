@@ -126,7 +126,12 @@ class SearchIndex:
     def _index_file(self, media_name: str, meta: dict):
         """Add a single file's searchable content to the index."""
         self._indexed_files.add(media_name)
+        for token in self.searchable_tokens(media_name, meta):
+            self._index.setdefault(token, set()).add(media_name)
 
+    @classmethod
+    def searchable_tokens(self, media_name: str, meta: dict) -> set[str]:
+        """Shared text extraction for single-folder and global gallery queries."""
         # Collect all searchable text
         searchable_parts = [media_name]
 
@@ -136,6 +141,14 @@ class SearchIndex:
                 "prompt",
                 "_tts_original_prompt",
                 "_h3_original_prompt",
+                "_ltx_original_prompt",
+                "_image_original_prompt",
+                "_original_prompt",
+                "original_prompt",
+                "source_prompt",
+                "enhanced_prompt",
+                "prompt_enhancement",
+                "_prompt_enhancement",
                 "negative_prompt",
             ):
                 self._append_searchable(searchable_parts, params.get(key))
@@ -201,10 +214,7 @@ class SearchIndex:
 
         # Tokenize all parts and add to inverted index
         full_text = " ".join(searchable_parts)
-        for token in self._tokenize(full_text):
-            if token not in self._index:
-                self._index[token] = set()
-            self._index[token].add(media_name)
+        return set(self._tokenize(full_text))
 
     @staticmethod
     def _append_searchable(parts: list[str], value) -> None:

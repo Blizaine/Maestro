@@ -6,6 +6,7 @@ import {
   formatTimecode,
   maximumWholeWindowCount,
   nearestWholeWindowDuration,
+  nativeDurationSlider,
   parseTimecode,
   recommendAutoDuration,
   wholeWindowDuration,
@@ -29,6 +30,8 @@ interface DurationPresetControlProps {
   label?: string
   disabled?: boolean
   modelLimitLabel?: string
+  durationPresets?: ReadonlyArray<{ label: string; seconds: number }>
+  durationIsMaximum?: boolean
   quantizeToWindows?: boolean
   /** Add Auto / Time / Window selection for long-form video planning. */
   enablePlanningModes?: boolean
@@ -38,8 +41,15 @@ interface DurationPresetControlProps {
   autoPlanningStyle?: AutoDurationPlanningStyle
   autoSourceSeconds?: number | null
   autoSourceLabel?: string
+  autoMediaOnly?: boolean
   autoManualWindowCount?: number | null
   autoMaximumInferredWindows?: number
+  nativeTiming?: { minimumFrames: number; frameStep: number; fps: number }
+  /** Stable capacity for Auto; independent of Time's duration-following window. */
+  autoWindowSeconds?: number
+  autoFirstWindowSeconds?: number
+  /** Studio popup: Time/Window tabs with Auto as a toggle, and fewer presets. */
+  compact?: boolean
 }
 
 const WINDOW_COUNT_PRESETS = [1, 2, 3, 4, 6, 8] as const
@@ -57,6 +67,8 @@ export function DurationPresetControl({
   label = 'Duration',
   disabled = false,
   modelLimitLabel,
+  durationPresets = LONG_FORM_DURATION_PRESETS,
+  durationIsMaximum = false,
   quantizeToWindows = true,
   enablePlanningModes = false,
   planningMode,
@@ -65,8 +77,13 @@ export function DurationPresetControl({
   autoPlanningStyle = 'faithful',
   autoSourceSeconds = null,
   autoSourceLabel,
+  autoMediaOnly = false,
   autoManualWindowCount = null,
   autoMaximumInferredWindows = 8,
+  nativeTiming,
+  autoWindowSeconds,
+  autoFirstWindowSeconds,
+  compact = false,
 }: DurationPresetControlProps) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [customText, setCustomText] = useState<string | null>(null)
@@ -75,6 +92,11 @@ export function DurationPresetControl({
   const effectivePlanningMode = enablePlanningModes
     ? (planningMode ?? internalPlanningMode)
     : 'duration'
+  const automatic = effectivePlanningMode === 'auto'
+  const visiblePresets = compact
+    ? durationPresets.filter(preset => preset.seconds >= 600 && preset.seconds <= maxSeconds)
+    : durationPresets
+  const showSinglePreset = showSingleWindow && !compact
   const effectiveWindow = Math.max(minSeconds, windowSeconds || value || minSeconds)
   const effectiveFirstWindow = Math.max(
     minSeconds,
@@ -97,7 +119,7 @@ export function DurationPresetControl({
     effectiveFirstWindow,
   )
   const autoPlan = recommendAutoDuration(
-    effectiveWindow,
+    autoWindowSeconds ?? effectiveWindow,
     overlapSeconds,
     discardSeconds,
     {
@@ -109,26 +131,31 @@ export function DurationPresetControl({
       minimumSeconds: minSeconds,
       maximumSeconds: maxSeconds,
       maximumInferredWindows: autoMaximumInferredWindows,
-      firstWindowSeconds: effectiveFirstWindow,
+      firstWindowSeconds: autoFirstWindowSeconds ?? effectiveFirstWindow,
     },
   )
 
-  useEffect(() => {
-    if (effectivePlanningMode !== 'duration' || selectedPreset == null) return
-    const next = selectedPreset === 'single'
+  const selectPreset = (preset: Exclude<PresetSelection, null>) => {
+    activateManualDuration()
+    setSelectedPreset(preset)
+    const next = preset === 'single'
       ? Math.min(maxSeconds, effectiveFirstWindow)
       : quantizeToWindows
         ? nearestWholeWindowDuration(
-          selectedPreset,
+          preset,
           effectiveWindow,
           overlapSeconds,
           discardSeconds,
           maxSeconds,
           effectiveFirstWindow,
         ).generatedSeconds
-        : Math.min(maxSeconds, Math.max(minSeconds, selectedPreset))
+        : Math.min(maxSeconds, Math.max(minSeconds, preset))
     if (Math.abs(next - value) > 0.05) onChange(next)
-  }, [discardSeconds, effectiveFirstWindow, effectivePlanningMode, effectiveWindow, maxSeconds, minSeconds, onChange, overlapSeconds, quantizeToWindows, selectedPreset, value])
+  }
+
+  const slider = nativeTiming ? nativeDurationSlider(
+    nativeTiming.minimumFrames, nativeTiming.frameStep, nativeTiming.fps, maxSeconds,
+  ) : null
 
   useEffect(() => {
     if (effectivePlanningMode !== 'auto') return
@@ -141,19 +168,28 @@ export function DurationPresetControl({
 
   const setPlanningMode = (mode: DurationPlanningMode) => {
     setSelectedPreset(null)
+    setCustomText(null)
     if (onPlanningModeChange) onPlanningModeChange(mode)
     else setInternalPlanningMode(mode)
     if (mode === 'windows') {
+      const capacity = autoWindowSeconds ?? effectiveWindow
+      const firstCapacity = autoFirstWindowSeconds ?? effectiveFirstWindow
+      const count = durationWindowPlan(value, capacity, overlapSeconds, discardSeconds, firstCapacity).windowCount
       const plan = wholeWindowDuration(
-        exactPlan.windowCount,
-        effectiveWindow,
+        count,
+        capacity,
         overlapSeconds,
         discardSeconds,
         maxSeconds,
-        effectiveFirstWindow,
+        firstCapacity,
       )
       if (Math.abs(plan.generatedSeconds - value) > 0.05) onChange(plan.generatedSeconds)
     }
+  }
+
+  // Auto dims the manual controls without blocking direct manipulation.
+  const activateManualDuration = () => {
+    if (automatic && !disabled) setPlanningMode('duration')
   }
 
   const setWindowCount = (count: number) => {
@@ -169,6 +205,7 @@ export function DurationPresetControl({
   }
 
   const commitCustom = () => {
+    if (disabled || automatic) return
     const parsed = parseTimecode(customText ?? formatTimecode(value))
     if (parsed == null) {
       setCustomText(null)
@@ -184,12 +221,20 @@ export function DurationPresetControl({
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-2">
         <label className="text-[11px] text-text-muted uppercase tracking-wider">{label}</label>
-        <span className="text-xs text-text-secondary tabular-nums">{formatDuration(value, true)}</span>
+        <div className="flex items-center gap-2">
+          {compact && enablePlanningModes && (
+            <button type="button" role="switch" aria-label="Automatic duration" aria-checked={automatic} disabled={disabled}
+              title={`Auto: ${formatDuration(autoPlan.requestedSeconds, true)} · ${autoMediaOnly ? 'Match the control video duration automatically' : autoPlan.reason}`}
+              onClick={() => setPlanningMode(automatic ? 'duration' : 'auto')}
+              className={`rounded-md border px-2 py-1 text-xs transition-colors disabled:opacity-40 ${automatic ? 'border-accent-blue/40 bg-accent-blue/15 text-text-primary' : 'border-border text-text-muted hover:text-text-primary'}`}>Auto</button>
+          )}
+          <span className="text-xs text-text-secondary tabular-nums">{formatDuration(value, true)}</span>
+        </div>
       </div>
 
       {enablePlanningModes && (
-        <div className="grid grid-cols-3 rounded-lg border border-border bg-bg-secondary p-0.5" aria-label={`${label} planning mode`}>
-          {(['auto', 'duration', 'windows'] as DurationPlanningMode[]).map(mode => (
+        <div className={`grid ${compact ? 'grid-cols-2' : 'grid-cols-3'} rounded-lg border border-border bg-bg-secondary p-0.5`} aria-label={`${label} planning mode`}>
+          {((compact ? ['duration', 'windows'] : ['auto', 'duration', 'windows']) as DurationPlanningMode[]).map(mode => (
             <button
               key={mode}
               type="button"
@@ -201,30 +246,61 @@ export function DurationPresetControl({
                   ? 'Choose the exact number of native generation windows'
                   : `Let Maestro infer duration from timed media, manual prompt lines, exact dialogue, and story scope (vague concepts max ${autoMaximumInferredWindows} windows; explicit scripts may run longer)`}
               className={`rounded-md px-2 py-1.5 text-[10px] capitalize transition-colors disabled:opacity-40 ${
-                effectivePlanningMode === mode
+                effectivePlanningMode === mode || (compact && automatic && mode === 'duration')
                   ? 'bg-accent-blue/15 text-text-primary shadow-sm'
                   : 'text-text-muted hover:text-text-secondary'
               }`}
             >
-              {mode === 'auto' ? 'Auto' : mode === 'duration' ? 'Time' : 'Window'}
+              {mode === 'auto' ? (
+                <span className="flex flex-col items-center leading-3">
+                  <span>Auto</span>
+                  <span className="text-[9px] normal-case tabular-nums">{formatDuration(autoPlan.requestedSeconds, true)}</span>
+                </span>
+              ) : mode === 'duration' ? 'Time' : 'Window'}
             </button>
           ))}
         </div>
       )}
 
-      {effectivePlanningMode === 'duration' && (
+      {(effectivePlanningMode === 'duration' || (compact && automatic)) && (
         <>
-          <div className={showSingleWindow
+          {slider && (
+            <div className={`space-y-1 rounded-lg border border-border bg-bg-secondary px-3 py-2 ${automatic ? 'opacity-45 grayscale' : ''}`}>
+              <input type="range" min={0} max={slider.count} step={1}
+                value={slider.indexAt(value)} disabled={disabled}
+                aria-label={`${label} model duration`} aria-valuetext={formatDuration(value, true)}
+                onPointerDown={event => {
+                  if (event.button === 0) activateManualDuration()
+                }}
+                onKeyDown={event => {
+                  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) activateManualDuration()
+                }}
+                onChange={event => {
+                  activateManualDuration()
+                  setSelectedPreset(null)
+                  setCustomText(null)
+                  onChange(slider.secondsAt(Number(event.target.value)))
+                }} className="w-full min-w-0" />
+              <div className="flex justify-between text-[9px] text-text-muted tabular-nums">
+                <span>{formatDuration(slider.secondsAt(0), true)}</span>
+                <span>Model steps · up to {formatDuration(Math.min(maxSeconds, 300))}</span>
+              </div>
+              {!compact && value > slider.secondsAt(slider.count) + 0.05 && (
+                <p className="text-[9px] text-text-muted">Long preset selected · {formatDuration(value, true)}. Moving the slider selects a duration within five minutes.</p>
+              )}
+            </div>
+          )}
+          <div className={`${compact ? 'grid grid-cols-5 gap-1.5' : showSingleWindow
             ? 'grid grid-cols-[repeat(14,minmax(0,1fr))] gap-1.5'
-            : 'grid grid-cols-6 gap-1.5'}>
-            {showSingleWindow && (
+            : 'grid grid-cols-6 gap-1.5'} ${automatic ? 'opacity-45 grayscale' : ''}`}>
+            {showSinglePreset && (
               <button
                 type="button"
                 disabled={disabled}
                 title={hasReducedFirstWindow
                   ? `One continuation pass: ${formatDuration(Math.min(maxSeconds, effectiveFirstWindow), true)} of new footage; ${formatDuration(effectiveWindow, true)} native pass includes source-tail context.`
                   : `One complete model window: ${formatDuration(Math.min(maxSeconds, effectiveWindow), true)}`}
-                onClick={() => setSelectedPreset('single')}
+                onClick={() => selectPreset('single')}
                 className={`col-span-4 w-full rounded-md border px-2 py-1 text-[9px] transition-colors disabled:opacity-40 ${
                   selectedPreset === 'single'
                     ? 'border-accent-blue bg-accent-blue/15 text-text-primary'
@@ -234,7 +310,7 @@ export function DurationPresetControl({
                 1 window
               </button>
             )}
-            {LONG_FORM_DURATION_PRESETS.map(preset => {
+            {visiblePresets.map(preset => {
               const plan = quantizeToWindows
                 ? nearestWholeWindowDuration(
                     preset.seconds,
@@ -258,9 +334,9 @@ export function DurationPresetControl({
                     ? `${preset.label} exceeds this model's ${formatDuration(maxSeconds)} native maximum.`
                     : quantizeToWindows
                       ? `${preset.label} preset: ${formatDuration(plan.generatedSeconds, true)} actual, ${plan.windowCount} ${plan.windowCount === 1 ? 'window' : 'windows'}`
-                      : `${preset.label} output: ${formatDuration(plan.generatedSeconds, true)}`}
-                  onClick={() => setSelectedPreset(preset.seconds)}
-                  className={`${showSingleWindow ? 'col-span-2' : ''} w-full rounded-md border px-1.5 py-1 text-[9px] transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${
+                      : `${durationIsMaximum ? 'Up to' : 'Output'} ${formatDuration(plan.generatedSeconds, true)}`}
+                  onClick={() => selectPreset(preset.seconds)}
+                  className={`${compact ? 'min-h-8' : showSingleWindow ? 'col-span-2' : ''} w-full rounded-md border px-1.5 py-1 text-[9px] transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${
                     selectedPreset === preset.seconds
                       ? 'border-accent-blue bg-accent-blue/15 text-text-primary'
                       : 'border-border bg-bg-tertiary text-text-muted hover:text-text-secondary'
@@ -274,11 +350,12 @@ export function DurationPresetControl({
               type="button"
               disabled={disabled}
               onClick={() => {
+                activateManualDuration()
                 setSelectedPreset(null)
                 inputRef.current?.focus()
                 inputRef.current?.select()
               }}
-              className={`${showSingleWindow ? 'col-span-4' : 'col-span-2'} w-full rounded-md border px-2 py-1 text-[9px] transition-colors disabled:opacity-40 ${
+              className={`${compact ? 'min-h-8' : showSingleWindow ? 'col-span-4' : 'col-span-2'} w-full rounded-md border px-2 py-1 text-[9px] transition-colors disabled:opacity-40 ${
                 selectedPreset == null
                   ? 'border-accent-blue bg-accent-blue/15 text-text-primary'
                   : 'border-border bg-bg-tertiary text-text-muted hover:text-text-secondary'
@@ -295,8 +372,12 @@ export function DurationPresetControl({
               aria-label={`${label} timecode`}
               disabled={disabled}
               value={customText ?? formatTimecode(value)}
-              onChange={event => setCustomText(event.target.value)}
+              onChange={event => {
+                activateManualDuration()
+                setCustomText(event.target.value)
+              }}
               onFocus={() => {
+                activateManualDuration()
                 setSelectedPreset(null)
                 setCustomText(formatTimecode(value))
               }}
@@ -308,11 +389,16 @@ export function DurationPresetControl({
                 }
               }}
               placeholder="HH:MM:SS"
-              className="w-[104px] rounded-md border border-border bg-bg-secondary px-2 py-1.5 text-[10px] text-text-primary tabular-nums focus:outline-none focus:border-accent-blue disabled:opacity-50"
+              className={`w-[104px] rounded-md border border-border bg-bg-secondary px-2 py-1.5 text-[10px] text-text-primary tabular-nums focus:outline-none focus:border-accent-blue disabled:opacity-50 ${automatic ? 'opacity-45' : ''}`}
             />
-            <div className="min-w-0 text-[9px] leading-snug text-text-muted">
+            <div className={`min-w-0 text-[9px] leading-snug text-text-muted ${compact ? 'h-8' : ''}`}>
+              {compact ? (
+                <span className="line-clamp-2" title={automatic ? autoPlan.reason : `${exactPlan.windowCount} windows · ${formatDuration(value, true)} final output`}>
+                  {automatic ? autoPlan.reason : `${exactPlan.windowCount} ${exactPlan.windowCount === 1 ? 'window' : 'windows'} · ${formatDuration(value, true)} final output`}
+                </span>
+              ) : <>
               {!quantizeToWindows
-                ? `Exact requested output · ${formatDuration(value, true)}`
+                ? `${durationIsMaximum ? 'Maximum output' : 'Exact requested output'} · ${formatDuration(value, true)}`
                 : isSequence
                 ? hasReducedFirstWindow
                   ? `${exactPlan.windowCount} continuation passes; first adds ${formatDuration(effectiveFirstWindow, true)}, later passes add ${formatDuration(exactPlan.strideSeconds, true)}; final output ${formatDuration(value, true)}${exactPlan.trimSeconds > 0.05 ? ` (trim ${formatDuration(exactPlan.trimSeconds, true)})` : ''}`
@@ -321,6 +407,7 @@ export function DurationPresetControl({
                   ? `Single continuation pass · ${formatDuration(value, true)} new footage; source-tail context uses the rest of the ${formatDuration(effectiveWindow, true)} pass`
                   : `Single window · ${formatDuration(value, true)}`}
               {modelLimitLabel && <span className="block">{modelLimitLabel}</span>}
+              </>}
             </div>
           </div>
         </>
@@ -383,7 +470,7 @@ export function DurationPresetControl({
         </div>
       )}
 
-      {effectivePlanningMode === 'auto' && (
+      {effectivePlanningMode === 'auto' && !compact && (
         <div className="rounded-lg border border-accent-blue/25 bg-accent-blue/5 p-2.5 text-[10px] leading-relaxed">
           <div className="flex items-center justify-between gap-2">
             <span className="font-medium text-text-primary">Auto recommendation</span>
@@ -391,10 +478,12 @@ export function DurationPresetControl({
               {autoPlan.windowCount} {autoPlan.windowCount === 1 ? 'window' : 'windows'} · {formatDuration(autoPlan.requestedSeconds, true)}
             </span>
           </div>
-          <p className="mt-1 text-text-secondary">{autoPlan.reason}</p>
-          <p className="mt-1 text-[9px] text-text-muted">
+          <p className="mt-1 text-text-secondary">{autoMediaOnly
+            ? autoSourceSeconds ? 'Follows the control video. Choose Time or Window to change the runtime.' : 'Upload a control video to match its duration automatically.'
+            : autoPlan.reason}</p>
+          {!autoMediaOnly && <p className="mt-1 text-[9px] text-text-muted">
             Timed media, explicit durations, manual prompt lines, and explicit screenplay dialogue are honored. Vague inferred concepts are capped at {autoPlan.inferredWindowLimit} windows; choose Time or Window for a different runtime.
-          </p>
+          </p>}
           {modelLimitLabel && <p className="mt-1 text-[9px] text-text-muted">{modelLimitLabel}</p>}
         </div>
       )}

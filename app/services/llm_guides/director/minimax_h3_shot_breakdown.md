@@ -67,7 +67,8 @@ CONTEXT-IR FORMAT:
 
 TIMING:
 - Keep actions and dialogue realistic for the requested duration. Spoken text
-  should generally stay at or below about two words per second.
+  should target 2.8 words per second during speech and never exceed 3 words per
+  second across all speakers. Leave time for requested action and pauses.
 - H3 renders bounded native shots. Do not put LTX sliding-window commands,
   references to a previous shot, or IC-LoRA ``Shot N (Camera, Xs)`` trigger
   syntax inside video_prompt. Use the required structured continuity fields

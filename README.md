@@ -9,15 +9,16 @@ A one-click local AI **creative studio, director, and video editor** for creator
 ### 🎬 Director Mode — automatic music videos and short films
 The flagship feature. Drop in an audio track or write a story; a local LLM plans every shot, writes screenplays/lyrics, generates start frames & keyframes with character consistency, polishes prompts per model & LoRA-specific prompting guides, and runs the full multi-clip generation. Two skills:
 
-- **Music Video** — beat-aware shot planning aligned to your audio. The LLM analyzes BPM, sections (verse/chorus/bridge), and energy, then writes shots that hit the downbeats. Speaker transcription & diarization lets you name and target different voices or singers.
+- **Music Video** — beat-aware shot planning aligned to your audio. The LLM analyzes BPM, sections (verse/chorus/bridge), and energy, then writes shots that hit the downbeats. Speaker transcription & diarization lets you name and target different voices or singers. **Clip length** offers Auto or a model-aligned maximum, including shorter clips for smaller GPUs, while preserving the full song. [Director controls](docs/Director-controls.md).
 - **Short Film** — screenplay-driven scenes with named characters, dialogue, and continuity across cuts. Pacing-bias slider controls cut frequency.
   
 - **Auto Mode** runs the entire pipeline end-to-end (analyze → plan → generate images → generate clips → combine). Manual mode lets you review and edit at every step.
-- **Director v2 architecture** with structured shot planning, mode-specific prompt renderers, and a 3-pass refinement (screenplay → shot breakdown → per-model polish). Director v2 optimizes what the LLM is being asked to do across several passes, with each pass optimizing the LLM request for creativity (when writing the screenplay), structured outputs (when outputting JSON), and prompt refinement, which injects LoRA prompting guides into the context.  
+- **Director v2 architecture** separates screenplay writing, structured shot planning and model-specific formatting. Native H3 plans go directly through their H3 compiler; other paths use per-model polish where needed. Director shares Studio's adaptive writing and continuity guidance, protects exact dialogue and source-song vocals, and retains complete action/camera descriptions through final compilation.
 
 ### ⚡ Performance Auto-Tune — zero-config setup
 Detects your GPU, VRAM, and RAM on first launch and picks the right profile, quantization, VAE tiling, and VRAM safety coefficient. No more "Profile 1 vs 2 vs 4.5" guesswork. Power users still have full manual control under "Show advanced settings."
 
+- **Recommendations stay current:** while Auto is enabled, revised recommendations apply once at startup. Manual mode and customized values are preserved. See [Performance Auto-Tune](docs/Performance-auto-tune.md) for memory profiles and controlled performance comparisons.
 - **OOM recovery banner** auto-suggests lowering the VRAM headroom when a generation runs out, with one-click apply.
 - **Live download status** during model setup ("Downloading transcription model (first use downloads ~300MB)..." instead of a vague spinner).
 
@@ -25,13 +26,26 @@ Detects your GPU, VRAM, and RAM on first launch and picks the right profile, qua
 Direct access to every model and every knob:
 - **Video** — create, extend, blend, retake, edit anything, outpaint, repaint, recast, upscale, and finish clips with MiniMax H3, LTX-2.5/2.3, SCAIL-2, Wan, Hunyuan, and many more.
 - **Image** — create, edit, upscale, or outpaint with Flux 2 Klein 9B, Krea 2 RAW/Turbo and Identity Edit, Qwen Image Edit, and more.
-- **Audio** — generate music with MiniMax-Music3 or ACE-Step, speech with Kugelaudio or Qwen3 TTS, sound effects with MMAudio, and revoice existing clips.
+- **Audio** — generate music with MiniMax-Music3, ACE-Step or **YuE2**, speech and cloned voices with H3 Voice Audio, Kugelaudio or Qwen3 TTS, sound effects with H3 or MMAudio, and revoice existing clips.
+- **YuE2 songs and personal styles:** 48 kHz stereo music with optional melody/chord planning, ABC scores and source-song covers. **My music (Experimental)** adds recording/caption/lyric review with local transcription drafts, resumable style-adapter training, automatic checkpoint auditions with a fixed test song, and portable adapter bundles. Training is optional; matching a specific singer's voice is not guaranteed. The exercised training GPU has 24 GB VRAM. YuE2 and the real-audio tokenizer weights have their own noncommercial model terms. [YuE2 music guide](docs/YuE2-music.md).
 - **Multi-clip generation** with per-clip prompts, seamless overlapping (sliding window) transitions, and shared LoRAs
-- **Long-form planning up to 60 minutes** with one-window, friendly duration, exact timecode, window-count, and Auto controls; Faithful or Creative AI can plan each independent window
+- **Long-form planning up to 60 minutes** with one-window, friendly duration, exact timecode, window-count, and Auto controls; unified H3 Enhance develops short concepts and preserves detailed scripts across windows
 - **Blend video Mode** Remember Sora 1 blend mode, where you could overlap two videos, and use AI to blend them together? 
 - **Frames Injection (KFI)** for character continuity in long videos
 - **Sliding window** for arbitrarily long generations
+- **Viggle Animate:** select a saved character or image, describe its appearance, and let Flux 2 Klein prepare the replacement frame before three-step H3 animation. Preview the frame first or run both steps together; manual edited frames remain supported. See [Viggle Animate](docs/Viggle-Animate.md).
+- **Studio composition workspace:** compact reference cards above a large prompt editor. Characters stays on the left; Recipes, Resolution, Aspect, Duration and Advanced group on the right. The model selector sits beside Generate / Add to Queue, with a direct Model Browser shortcut. The magic button runs Enhance now; its menu can instead arm **Enhance on generation** for the next job. Advanced groups Performance, Finishing, LoRAs and Generation. Time retains model-aligned steps through five minutes and presets through one hour; Auto shows its recommended duration. See [Studio controls](docs/Studio-controls.md).
+- **Enhancement in the queue:** submit a brief while the GPU is busy and let Maestro enhance it when the job gets its turn, then generate automatically. Original inputs and completed drafts are saved for review and retries. Add to Queue keeps jobs held until Run queue; interrupted jobs are held after an app restart. Enhancement failures stop for attention instead of silently generating a fallback.
 - **Spatial upsampling, film grain, codec selection** as post-processing options
+- **H3 VDN**, an optional trained hybrid-attention model with dedicated Full/Pruned and eight-step presets; requires Triton and additional VRAM.
+- **TaoMate H3 three-step:** an optional Frames adapter preset with its own Euler/CFG settings and verified downloads. Existing fused and PDD recipes remain available. [TaoMate guide and tested scope](docs/TaoMate-H3.md).
+- **H3 Voice Audio** for speech, one/two-reference voice cloning and general audio: up to 45 seconds per segment and five minutes per assembled output. See the [H3 audio guide](docs/H3-Voice-Audio.md). **H3 Outpaint** extends video borders; an optional six-step **H3 Audio Refinement** pass holds the generated video fixed.
+- **Saved characters in every Speech workflow:** reuse Reference-mode character voices, save new characters from Speech, and restore character bindings with output settings. Qwen preset/design variants offer an explicit switch to voice cloning. See [TTS characters](docs/TTS-Characters.md).
+- **Portable characters with voice:** share `blaine.maestro.safetensors` files with appearance and saved audio embedded. Model Browser → Characters / RefMods adds file and Hugging Face imports, voice filters, and easy export. Standard H3 RefMods retain their original visual latents. See [Character sharing and RefMods](docs/Maestro-Characters.md).
+- **Better character images:** recover native-resolution PNG views from RefMods, choose a cover, and download selected images individually or as a ZIP. Original photos/video frames are used when available; selected PNGs and the cover travel with shared Maestro characters.
+- **Characters in Image mode:** add saved characters and recovered RefMod views to models that accept image references. Choose specific views, keep source/reference order, and describe clothing or other appearance changes in the image prompt.
+- **H3 Face Refiner:** automatically refine up to five tracked faces after generation, or use **Refine faces** on a gallery video. Preview face thumbnails, map saved characters and RefMods, or skip individual faces. Saves a new copy with the original resolution and soundtrack. See [H3 Face Refiner](docs/H3-Face-Refiner.md).
+- **Media Flow** batches image/video finishing and video outpainting. RIFE 4.26 supports x2/x3/x4 frame rates. Optional **DLSS 5 Neural Rendering** and **DLSS Frame Generation** integrate with generation postprocessing and finishing tools on supported Windows 11/RTX systems. See the [DLSS installation guide](docs/DLSS5.md) and [port plan, validation and testing instructions](docs/development/wan2gp-12-71-port-plan.md).
 
 ### 🤖 Local LLM — built-in, no setup
 Maestro auto-downloads `llama-server` (~600 MB one-time) and your chosen GGUF model on first use. Defaults to **Gemma 4 4B (Recommended)** — fast, capable, and runs comfortably on smaller GPUs. Auto-detects CUDA and binds the LLM to GPU when available.
@@ -40,6 +54,10 @@ Maestro auto-downloads `llama-server` (~600 MB one-time) and your chosen GGUF mo
 - **External providers** also supported: OpenAI, Anthropic, custom OpenAI-compatible endpoints (currently experimental)
 - **Vision support** so LLMs can enhance prompting based on reference images
 - Auto-unloads after 60s idle to free VRAM for video gen
+
+### 🗂️ Browse the whole library
+
+Choose **All folders** in the gallery folder picker to browse and search every output folder. Search includes original and enhanced prompts, and filters apply across the complete collection. Results load in pages and show their source folder. Browsing keeps your generation destination unchanged; identical filenames in different folders remain separate items. [Gallery controls](docs/Studio-controls.md#gallery-scope-and-search).
 
 ### 🛒 Built-in CivitAI LoRA browser
 - Search, filter, and one-click install any LoRA from CivitAI without leaving Maestro
@@ -82,6 +100,149 @@ View all past Director runs with their full state — clip plans, generated imag
 ## Updates
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
+
+### v2.2.1 (2026-09-16)
+
+**Unified AI enhancement, YuE2 music, and more control over Director productions**
+
+Includes the full v2.2.0 feature release below. **v2.2.1 enhancement fix:** imported numbered shot lists now keep their structure and camera settings, preventing false story-schedule and camera-fidelity warnings in Enhance now and queued enhancement.
+
+- **One Enhance workflow:** develops short ideas and adapts detailed scripts to the selected model. Enhance now, or let a queued job enhance immediately before generation. An optional **Use by default** setting remembers Enhance on generation; saved source prompts and drafts remain available for review and retries.
+- **Stronger H3 prompt writing:** improved silent-action parsing, dialogue ownership, choreography, camera direction, first-frame continuity and multi-window timing. Director shares the relevant writing guidance. Prompt review remains available for drafts that need attention.
+- **YuE2 3B music:** the new default music model produces 48 kHz stereo songs, with Direct generation selected initially, optional composition planning, ABC scores and source-song covers. Later model choices are remembered.
+- **My music (Experimental):** review recordings and lyrics, train and resume personal style adapters, compare checkpoint auditions, reconstruct source audio, and import/export styles. Style and vocal resemblance vary; this is not a promise of reliable singer cloning.
+- **Director music controls:** adjustable clip maximum and GPU limit, working Cut Speed, full-song timing, and musical/vocal cues for camera planning. Longer H3 clips can approach 14.4s; instrument cutaways retain the assigned singer's voice off screen. Shot edits now save reliably.
+- **All folders gallery:** browse and search across output folders while keeping each item's source folder and the generation destination clear. Refresh, pagination and folder-qualified actions are fixed.
+- **TaoMate H3:** optional experimental three-step Frames acceleration, with pinned downloads and compatibility checks. Includes internal token-refiner weights; it is not a separate video-refinement pass.
+- **Image, queue and runtime fixes:** 21:9 image aspect, original/enhanced prompt details, multiline-image and Z-Image decoding fixes, corrected CivitAI model reloads, collapsible completed-job history, repeated-upload deduplication, and improved Linux local-LLM setup and diagnostics.
+
+Use **Update** in Pinokio, restart Maestro and refresh the browser. Existing models, characters, outputs and projects stay in place. New models and optional music tools download their assets when used. YuE2 model/tokenizer weights have separate noncommercial terms; see the [music guide](docs/YuE2-music.md).
+
+[Full release notes and issue status](docs/RELEASE_NOTES_V2.2.0.md) · [Validation and known limits](docs/VALIDATION_V2.2.0.md)
+
+### v2.1.6 (2026-09-11)
+
+**Better H3/Viggle memory use, detailed-prompt fixes, and simpler reference controls**
+
+- **Faster streaming H3/Viggle jobs:** the per-job memory planner now passes its transformer allowance to MMGP so eligible profiles can retain more weights in VRAM.
+- **Detailed action prompts stay out of the dialogue budget:** AI Faithful recognizes production headings, Role A/B descriptions and titled time ranges in imported briefs. Visual directions no longer trigger false “too much dialogue” errors for those formats, while actual spoken lines keep their timing checks.
+- **Reference editing beside the thumbnails:** name and type fields expand beneath the selected reference row. Drag thumbnails to reorder them; saved character appearance and voice stay together. Preview, replacement and soundtrack controls remain available.
+- **H3 Fused steps up to 12:** both Frames and References allow **4–12 total steps**, with four still the default. Studio remembers the last selected or used step count for each model across restarts, including when the browser port changes.
+
+Use Pinokio's **Update**, restart Maestro and refresh the browser. Run Enhance again from the original prompt to apply the parsing fixes. Existing models and saved projects stay in place; these changes require no new dependencies or model downloads.
+
+[Full release notes](docs/RELEASE_NOTES_V2.1.6.md) · [Validation and measured limits](docs/VALIDATION_V2.1.6.md)
+
+### v2.1.5 (2026-09-10)
+
+**Better H3 prompt adaptation, smarter Viggle INT8 execution, and audio and Director fixes**
+
+- **More faithful detailed prompts:** pasted timed scripts keep their action phases, character profiles, camera directions and ending together. Production notes and silent action descriptions no longer inflate dialogue budgets. Complete action and sound descriptions survive the final H3 prompt compilation; the selected Maestro duration remains authoritative.
+- **More reliable AI enhancement:** clearer camera-writing requests and larger response budgets reduce incomplete drafts. The LLM stays loaded throughout planning and repairs, fixing mid-enhancement `LLM not loaded` errors. Real Gemma 4 4B and Qwen3.8 27B checks preserved all eight phases of the regression example without repair or fallback; results remain editable.
+- **Viggle / H3 INT8 performance:** corrected a fallback that promoted BF16/FP16 computation to FP32. ConvRot layers now compare the corrected fallback with Triton and retain the faster path when GPU memory allows. A local RTX 4090 layer test made the fallback about **3× faster**, while Triton still won and remained selected. This is a layer measurement, not a promised full-generation speedup.
+- **Stereo audio stays stereo:** H3's 32 kHz stereo output survives video muxing and window joins, including mono prefixes and silent gaps. Shared audio resampling stays on CPU until encoding needs the GPU, avoiding unintended CUDA helper allocations.
+- **Director seamless timelines:** validate each native H3 window against the saved shot limit, allowing the complete planned movie and its trimmed final window to render without being rejected as one oversized shot.
+- **Safer performance updates and diagnostics:** revised Auto recommendations can refresh existing installs once while preserving custom settings and manual mode. Memory failures record RAM/VRAM readings before cleanup, and generic CUDA errors are no longer mislabeled as definite system-RAM exhaustion.
+
+Use Pinokio's **Update**, restart Maestro and refresh the browser. Run **Enhance** again from the original prompt to replace a draft prepared by an older version. Existing models and saved projects stay in place; no new dependencies or model downloads are required.
+
+[Full release notes](docs/RELEASE_NOTES_V2.1.5.md) · [Validation and measured limits](docs/VALIDATION_V2.1.5.md)
+
+### v2.1.4 (2026-09-09)
+
+**The v2.1 update: a larger Studio workspace, portable characters, new H3 tools and improved memory management**
+
+This overview combines the features and fixes from **v2.1.0 through v2.1.4**.
+
+#### Lower RAM use and faster H3 decoding — new in v2.1.4
+
+- **Lower loading overhead:** H3 and Viggle read the video VAE's native checkpoint layout without repacking its weights into extra RAM. A local component-loading test removed about **4.35 GiB of private allocations**; existing FP16 and INT8 ConvRot checkpoints remain supported.
+- **Faster video decoding:** following WanGP's H3 memory policy, cards with **10 GiB VRAM or more** keep the decoder on the GPU during decoding, then release it when another stage starts. Smaller cards retain streaming. A local FP16 decoder benchmark improved from **8.9s to 2.2s** with identical output; this measures decoding, not total generation speed. [Measurements and validation](docs/VALIDATION_V2.1.4.md).
+- **Correct memory-profile limits:** profiles **3.5 and 4.5** now inherit their intended base budgets while preserving their pinning/transfer settings and explicit preload choices.
+
+#### Studio: more room to create
+
+- **One scrolling workspace:** media tabs, workflow selection, reference tiles and the prompt scroll together. Long prompts grow with their text; settings and **Generate / Add to Queue** stay pinned.
+- **Compact controls:** Characters, Recipes, Resolution, Aspect, Duration and Advanced leave more room to write. Setting lists open above their buttons; the model selector sits beside Generate, with a direct Model Browser shortcut.
+- **Clearer Advanced settings:** collapsible Performance, Finishing, LoRAs and Generation sections show active-count badges and hide empty sections. Director's H3 Video LoRAs regain editable weights, including restored settings.
+- **Consistent mobile layout:** matching input tiles, a centered gallery header and viewport-bounded LoRA guides. All three theme families and their light/dark variants remain supported. [Studio controls](docs/Studio-controls.md).
+
+#### Prompt enhancement and duration
+
+- **Enhance before generating:** the magic button runs **AI Faithful**; its menu also offers **AI Creative**. Review and edit the result before submission. Both support image prompts; long H3 sequences expose editable **Exact H3 prompts** for each window.
+- **Fuller Creative dialogue:** conversations, tutorials and character interactions use duration-aware targets of **2.8 words/second**, with up to **3** and six H3 speaker turns per window. Explicit talking points are checked against spoken lines; sparse windows get independent repairs that preserve successful work elsewhere. Faithful preserves supplied events and lines.
+- **More accurate speech budgets:** action descriptions, production headings, quoted character names/styles and reference metadata stay out of dialogue counts. Quotations inside existing dialogue remain intact. Explicit silence and requests to use only supplied lines remain respected.
+- **Clearer enhancement and audio handling:** fixed Omni's missing-`re` enhancement failure (#102). Music/style references retain their selected role even when descriptions mention voices; music-only requests reject unwanted speech. Malformed speaker assignments receive repair, named guests retain their own identities, and scenes can include more speakers than saved character references.
+- **Visible planning feedback:** unresolved H3 warnings appear beside the normal prompt, including on mobile. Refresh preserves the selected AI Creative or Faithful mode. UTF-8 fixes keep Arabic, Cyrillic, Chinese, accented text and emoji readable in Director and enhancement (#96, #110).
+- **Simpler Studio and Director duration controls:** Auto previews its recommendation in both Time and Window views. Moving the dimmed slider or choosing a preset switches to manual. Model-aligned Time steps reach **five minutes**, with **10m, 15m, 30m, 60m and Custom** presets for supported video workflows. Window sizing follows model/GPU limits or saved overrides; overlap is collapsed by default.
+- **Consistent optional guidance:** single- and multi-window enhancement share the optional Mature-mode content guide only when that mode is enabled. A [14.4-second-window Reference tutorial example](docs/prompts/blaine-maestro-tutorial-script.md) includes native dialogue tags and presenter cues.
+
+#### Director timelines and recoverable progress
+
+- **Music videos keep the full song:** long H3 sections split into supported shots before review, and the structure preview shows the actual shot count. **Cut Speed** is available during assisted setup (#84, #117).
+- **Reviewed images stay assigned:** subdivision retains each source scene's image. Completed start images and keyframes remain recorded if a later job fails or times out; Director image settings stay independent of Studio.
+- **Legacy projects remain editable:** use **Open & Edit** to replan affected music projects. Updating preserves saved work; it does not reconstruct already shortened renders or repair corrupted saved text automatically.
+
+#### Portable characters, RefMods and better reference images
+
+- **Share complete characters:** export **`<character>.maestro.safetensors`** with appearance, saved voice, name/description and selected images. Import standard H3 RefMods separately from trained LoRAs; compatible upstream loaders can use the visual portion, while embedded voice is a Maestro extension.
+- **Browse and reuse identities:** Model Browser adds **Characters / RefMods**, local and Hugging Face imports, voice filters, a saved **malcolmrey / MiniMax H3** collection and easy export. Multiple RefMods retain separate identities and voice bindings. H3 matches unambiguous filenames to natural character names and avoids treating pronouns as extra cast members.
+- **Recover better images:** decode native-resolution PNG views, choose a cover and download individual images or a ZIP. Original photos/video frames are preferred when available; cached recovery preserves the original latent and audio. Selected views travel with exports and work in Image models that accept references.
+- **Better character browsing:** scrollable mobile galleries, cached video thumbnails and cleaner display names make characters easier to identify. [Character sharing and recovery](docs/Maestro-Characters.md).
+
+#### Viggle Animate and automatic character replacement
+
+- **Three-step H3 animation:** supply a control video and an edited frame from **any point in the source video**. Longer videos use overlapping windows of approximately **5.2 seconds**.
+- **Trim and select the frame in one preview:** set the source clip's start/end points and move a separate frame-selection playhead to choose the image to edit.
+- **Automatic character preparation:** choose a saved character, recovered RefMod view or uploaded image. Flux 2 Klein replaces the subject in the selected frame, with editable appearance instructions. Preview first or queue preparation and animation together; Klein **9B and 4B** are supported.
+- **Manual editing stays available:** send the frame to Image mode, edit it and use **Apply & return**. Saved settings retain frame time, character view and preparation choices. Appearance prompts control preparation; Viggle uses its fixed motion-transfer recipe. [Viggle Animate guide](docs/Viggle-Animate.md).
+
+#### H3 Voice Audio and saved voices throughout Speech
+
+- **Speech, voice cloning and sound:** H3 Voice Audio — Pruned produces **32 kHz stereo audio**, with up to **45 seconds per generation** and **five minutes per assembled output**. `Sound:` prompts support effects and ambience.
+- **Longer conversations:** one or two voice references, named speaker turns, delivery cues and returning-speaker voice reuse work with boundary trimming. Duration is a ceiling; oversized scripts are checked before queueing, and cancelled jobs do not publish partial audio.
+- **Saved characters across Speech:** reuse character voices, save new characters from Speech and restore names/reference bindings with output settings. Each model retains its speaker limits; Qwen preset/design variants offer a switch to voice cloning. [H3 Voice Audio](docs/H3-Voice-Audio.md) · [TTS characters](docs/TTS-Characters.md).
+
+#### H3 generation and refinement
+
+- **VDN Full/Pruned and eight-step presets:** an optional trained hybrid-attention path requiring **Triton and additional VRAM**, with its own compatible adapters. Performance depends on the hardware and workload.
+- **LoRAs on Fused 4-Step:** compatible H3 character, style and concept LoRAs now work in Frames, References and Director while retaining the four-step recipe. Support remains experimental; acceleration/VDN adapters and unsupported DoRA are excluded. [Fused H3 LoRAs](docs/H3-Fused-LoRAs.md).
+- **H3 Outpaint:** expand video borders with protected source content, preserved source audio, multi-window processing and batch support.
+- **Audio Refinement Extra Phase:** optionally add **six audio-refinement steps** while locking the generated video latents. Fixed PDD/fused recipes and FL2VA source-soundtrack control are excluded.
+- **Face Refiner:** detect, track and refine **up to five faces** automatically through **Advanced → Finishing**, or on an existing gallery video/upload. Map saved characters or RefMods, retain an identity or skip a face. A new copy preserves source resolution, frame count, FPS and soundtrack. [Face Refiner guide](docs/H3-Face-Refiner.md).
+
+#### Media Flow, temporal upsampling and optional DLSS
+
+- **Batch finishing:** Media Flow processes image/video collections through the shared queue with per-file progress, cancellation and saved settings while retaining source files.
+- **Smoother video:** RIFE 4.26 adds **x3** alongside **x2/x4**, preserving duration and soundtrack. Optional DLSS Frame Generation offers **x2–x4** on supported RTX 40/50 systems, and **x5/x6** where supported on RTX 50.
+- **DLSS 5 Neural Rendering:** use **x1** refinement or **x1.5–x3** enlargement with adjustable intensity and depth/motion controls. Native DLSS requires a **separate installation on compatible Windows 11/RTX hardware**; RIFE does not. Native DLSS quality/performance still need validation on supported hardware. [Requirements and installation](docs/DLSS5.md).
+
+#### Fixes and polish
+
+- Fixed the **H3 Extend model-switch crash / React error #185**, prompt resizing and scrollbar flicker, and unintended Director horizontal scrolling.
+- Fixed mobile keyboard access to prompts, overlapping settings, off-screen LoRA guides and duration popups whose sliders jumped while dragging. The gallery stays in place behind the open sidecar.
+- Improved the mobile Model Browser and added a manual **Destination LoRA folder** for URL imports, with an automatic best-match suggestion.
+- Improved shared GPU offloading, cancellation and settings restoration; fixed locked ETA-history databases on Windows and expanded model, character, dialogue and UI regression coverage.
+- **Better memory recovery:** failed-generation cleanup releases temporary inference tensors; manual model release also clears FlashVSR and other registered post-processors (#79).
+- **Blackwell NVFP4 compatibility:** unsupported cuBLAS GEMM shapes use a dequantized fallback while compatible shapes keep acceleration (#105).
+- **Linux local LLM repair:** llama-server installs required library aliases, searches its runtime directory and repairs incomplete cached runtimes on the next local LLM load (#85).
+- Corrected initialization errors in Blend and video inpainting, added undefined-name checks, and corrected the bug-report log paths (#118). See [Finding logs](#finding-logs).
+
+#### Updating
+
+Use **Update** on Maestro's Pinokio page, restart Maestro and refresh the browser.
+Existing models, outputs, workspaces, characters, presets and Director/Editor
+projects stay in place. Update installs the Face Refiner detector dependency;
+new model assets download when needed, and DLSS uses its separate installer.
+
+Run enhancement again on affected prompts to apply the dialogue and audio fixes.
+The memory update uses existing checkpoints and requires no model conversion.
+
+See the [v2.1.4 release notes](docs/RELEASE_NOTES_V2.1.4.md) and
+[validation record](docs/VALIDATION_V2.1.4.md). Detailed release history remains
+available for [v2.1.0](docs/RELEASE_NOTES_V2.1.0.md),
+[v2.1.1](docs/RELEASE_NOTES_V2.1.1.md), [v2.1.2](docs/RELEASE_NOTES_V2.1.2.md)
+and [v2.1.3](docs/RELEASE_NOTES_V2.1.3.md).
 
 ### v2.0.1 (2026-09-04)
 
@@ -800,6 +961,10 @@ console.log(status.https_url)
 
 Mutating endpoints are `POST /api/v1/remote-access/tailscale/enable`, `POST /api/v1/remote-access/tailscale/disable`, `POST|DELETE /api/v1/notifications/push/subscribe`, and `POST /api/v1/notifications/push/test`. A Push subscription contains browser-issued endpoint and encryption keys and should be treated as private local configuration.
 
+## Developer prompt bench
+
+The optional [prompt enhancement test bench](app/promptbench/README.md) runs bounded H3 writing experiments with installed local Qwen/Gemma models. It records source snapshots, intermediate drafts, final model prompts and review reports without generating video. The [operator skill](app/promptbench/operator/SKILL.md) explains how an agent can run and assess a pilot.
+
 ## Credits
 
 Maestro is built on top of, and indebted to, the following projects:
@@ -829,3 +994,37 @@ Third-party models, weights, and components keep their own licenses — review t
 ## Issues
 
 Bug reports and feature requests: [github.com/Blizaine/Maestro/issues](https://github.com/Blizaine/Maestro/issues).
+
+### Finding logs
+
+Open Maestro's project in Pinokio and use its **Logs** page to find the session
+where the problem occurred. Where available, **Get Help** can prepare a report
+from that session's logs.
+
+To find the files directly, open Maestro's top-level installation folder — the
+folder containing `start.js`, `install.js`, and the `app` and `ui` folders. The
+paths below are relative to that folder:
+
+| Problem | Log file |
+|---|---|
+| Startup, generation, or runtime errors | `logs/api/start.js/latest` |
+| Updating Maestro | `logs/api/update.js/latest` |
+| Installing Maestro | `logs/api/install.js/latest` |
+| Local LLM server loading or crashes | `logs/llm/llama-server.log` |
+| Linux CUDA writer build | `app/ckpts/llm/bin/llama-cuda-build.log` — [setup and troubleshooting](docs/LLM-runtime.md) |
+
+`latest` is a **plain-text file without an extension**; open it with a text
+editor such as Notepad. Each launcher action has its own folder under
+`logs/api/`, created when that action runs. For an older run, select the relevant
+session in Pinokio or use a timestamped log in the same script folder. The local
+LLM log is refreshed each time its server starts, so save the failing output
+before retrying.
+
+If you launch Maestro outside Pinokio, include the output from the terminal
+where you started it; Pinokio's launcher log folders may not exist. If you still
+cannot find a log, explain how you launched Maestro and which log folders are
+present in your bug report.
+
+Include the last roughly 50 lines around the failure, plus your GPU, VRAM,
+operating system, mode, and model. Review the excerpt and redact personal
+information before sharing it.

@@ -24,6 +24,7 @@ FULL_TIME_DIM = 2688
 _PRUNED_WIDTHS = (4, 8, 64)
 _MAP_RELATIVE_DIR = os.path.join("minimax_h3", "lora_affine_maps")
 _ARCHITECTURES = {
+    "viggle_animate": "viggle",
     "minimax_h3": "fl2va",
     "minimax_h3_full": "fl2va",
     "minimax_h3_ref2va": "ref2va",

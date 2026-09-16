@@ -1,4 +1,8 @@
+import { galleryOutput, outputIdentity } from '../lib/galleryIdentity'
 import { create } from 'zustand'
+import type { SavedOmniCharacter, TtsVoice } from '../types'
+import { applyTtsVoices, ttsAudioModeForCount, ttsCharacterEnhancePrompt, ttsSpeakingVoiceCount, ttsVoiceLimit, ttsVoicePaths } from '../lib/ttsVoices'
+import { vigglePreparationKey, viggleTimeline } from '../lib/viggle'
 import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, StudioVideoWorkflow, StudioVideoCreateRoute, StudioVideoEffectiveCreateRoute, StudioImageWorkflow, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, DirectorShotImageGuidance, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineClipState, PipelineRepairState, SavedPipelineState, DirectorQueueState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping, H3WindowPlan, MiniMaxH3Reference, AppMode } from '../types'
 import * as api from '../api/client'
 import { applyThemePrefs, getStoredPrefs, type FamilyId, type ThemeMode, type ThemePrefs } from '../lib/theme'
@@ -33,6 +37,7 @@ type DirectorRepairPoll = {
 }
 const _directorRepairPolls = new Map<string, DirectorRepairPoll>()
 const _directorRepairDiscoveries = new Map<string, object>()
+let _directorStructureRequestToken = 0
 let _dashboardPipelineLoadToken = 0
 let _dashboardPipelineListLoadToken = 0
 let _directorPipelineAttachToken = 0
@@ -42,6 +47,9 @@ let _h3WindowOverridesHydrated = false
 let _h3WindowOverrideSaveTask: Promise<void> = Promise.resolve()
 let _studioPreferencesHydrated = false
 let _studioPreferencesSaveTask: Promise<void> = Promise.resolve()
+let _directorMusicClipChanged = false
+let _directorGpuLimitsChanged = false
+let _enhancementDefaultChanged = false
 const STUDIO_VIDEO_CREATE_ROUTE_KEY = 'maestro_studio_video_create_route_v1'
 
 type StudioVideoRoutePreferences = {
@@ -407,6 +415,8 @@ interface PersistedModeSettings {
   studioImageWorkflow?: StudioImageWorkflow
   audioSubMode?: import('../types').AudioSubMode
   selectedModelPerAudioSubMode?: Partial<Record<import('../types').AudioSubMode, string>>
+  inferenceStepsPerModel?: Record<string, number>
+  enhanceOnGenerationDefault?: boolean
   h3OptimizationPreferences?: {
     override_attention?: '' | 'sol' | 'sla' | 'sdpa'
     skip_steps_cache_type?: '' | 'first_block'
@@ -516,6 +526,14 @@ const EPHEMERAL_PARAM_FIELDS: ReadonlyArray<keyof SavedModeParams> = [
   'image_guide',
   'image_mask',
   'video_guide',
+  '_viggle_edited_frame',
+  '_viggle_source_seconds',
+  '_viggle_frame_seconds',
+  '_viggle_trim_start',
+  '_viggle_trim_end',
+  'viggle_character',
+  '_viggle_prepared',
+  '_viggle_prepare_only',
   'video_mask',
   'video_source',
   'audio_guide',
@@ -568,6 +586,8 @@ function _saveSettings(
       studioImageWorkflow: state.studioImageWorkflow ?? previous.studioImageWorkflow,
       audioSubMode: state.audioSubMode ?? previous.audioSubMode,
       selectedModelPerAudioSubMode: state.selectedModelPerAudioSubMode ?? previous.selectedModelPerAudioSubMode,
+      inferenceStepsPerModel: state.inferenceStepsPerModel ?? previous.inferenceStepsPerModel,
+      enhanceOnGenerationDefault: state.enhanceOnGenerationDefault ?? previous.enhanceOnGenerationDefault,
       h3OptimizationPreferences: state.h3OptimizationPreferences ?? previous.h3OptimizationPreferences,
     }
     // Strip file-bearing / ephemeral fields BEFORE serializing so they
@@ -640,6 +660,8 @@ function _loadSettings(): PersistedModeSettings | null {
         studioImageWorkflow: parsed.studioImageWorkflow,
         audioSubMode: parsed.audioSubMode,
         selectedModelPerAudioSubMode: parsed.selectedModelPerAudioSubMode || {},
+        inferenceStepsPerModel: _normalizeRememberedSteps(parsed.inferenceStepsPerModel),
+        enhanceOnGenerationDefault: parsed.enhanceOnGenerationDefault === true,
         h3OptimizationPreferences: parsed.h3OptimizationPreferences || {},
         _loraFilenameSnapshot: snapshot,
       }
@@ -737,8 +759,29 @@ const _PRIMARY_MODEL_DEFAULT_FIELDS: ReadonlyArray<string> = [
 // most recently requested model's options may touch the store.
 let _modelOptionsSeq = 0
 
+function _normalizeRememberedSteps(values: unknown): Record<string, number> {
+  if (!values || typeof values !== 'object' || Array.isArray(values)) return {}
+  return Object.fromEntries(Object.entries(values).filter(([model, count]) => (
+    model.trim().length > 0 && model.length <= 200
+    && typeof count === 'number' && Number.isInteger(count) && count >= 1 && count <= 1000
+  )).slice(0, 1000))
+}
+
+function _rememberedModelSteps(
+  state: Pick<AppState, 'inferenceStepsPerModel'>,
+  modelType: string,
+  options?: ModelOptions | null,
+): number | undefined {
+  const remembered = state.inferenceStepsPerModel[modelType]
+  if (remembered == null || options?.lock_inference_steps) return undefined
+  if (!options) return remembered
+  const min = Math.max(1, options.inference_steps_min ?? 1)
+  const max = Math.max(min, options.inference_steps_max ?? 50)
+  return Math.max(min, Math.min(max, remembered))
+}
+
 function _applyModelDefaults(
-  storeGet: () => { selectedModelPerMode: Partial<Record<GenerationMode, string>>; generationMode: GenerationMode; params: GenerateParams },
+  storeGet: () => Pick<AppState, 'selectedModelPerMode' | 'generationMode' | 'params' | 'inferenceStepsPerModel' | 'modelOptions'>,
   storeSet: (fn: (s: { params: GenerateParams }) => { params: GenerateParams }) => void,
   modelType: string,
 ): void {
@@ -761,6 +804,14 @@ function _applyModelDefaults(
         && state.params.minimax_h3_turbo_mode === true
       ) {
         continue
+      }
+      if (field === 'num_inference_steps') {
+        const remembered = _rememberedModelSteps(state, modelType,
+          state.modelOptions?.model_type === modelType ? state.modelOptions : undefined)
+        if (remembered != null) {
+          overrides.num_inference_steps = remembered
+          continue
+        }
       }
       if ((d as Record<string, unknown>)[field] !== undefined) {
         overrides[field] = (d as Record<string, unknown>)[field]
@@ -833,7 +884,7 @@ const audioSubFamilies: ModelFamily[] = [
 // them. Keep the explicit set for one-off ids that don't share a
 // prefix with their line.
 const musicModelTypes = new Set<string>([])
-const musicModelPrefixes = ['ace_step', 'heartmula', 'minimax_music3']
+const musicModelPrefixes = ['ace_step', 'heartmula', 'minimax_music3', 'yue2']
 
 function isMusicModelType(modelType: string): boolean {
   if (musicModelTypes.has(modelType)) return true
@@ -881,6 +932,10 @@ const DEFAULT_ENABLED_MODELS = new Set([
   // MiniMax H3 Base: text, first/last-frame video, and native stereo audio.
   'minimax_h3',
   'minimax_h3_full',
+  'minimax_h3_vdn',
+  'minimax_h3_vdn_full',
+  'minimax_h3_voice_audio',
+  'viggle_animate',
   // Experimental fused four-step Frames checkpoint. It is visible by
   // default, but the ordinary H3/LTX selections below remain the active
   // workflow defaults until a user explicitly chooses it.
@@ -901,6 +956,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
   'ace_step_v1_5_xl_sft',
   'ace_step_v1_5_xl_sft_lm_4b',
   'minimax_music3',
+  'yue2',
   // Audio — SFX
   'mmaudio_v2',
 ])
@@ -914,7 +970,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
  * a user who then disables them stays disabled forever. (This is
  * deliberately narrower than auto-enabling every unknown model — only
  * the curated list's own additions are pushed.) */
-const DEFAULTS_VERSION = 11
+const DEFAULTS_VERSION = 15
 const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   // v1.2.0: the ACE-Step XL SFT pair; LM_4B becomes the music default.
   2: ['ace_step_v1_5_xl_sft', 'ace_step_v1_5_xl_sft_lm_4b'],
@@ -936,16 +992,20 @@ const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   10: ['minimax_music3'],
   // Experimental MATLOWAI fused four-step H3 Frames + References variants.
   11: ['minimax_h3_fused_turbo', 'minimax_h3_ref2va_fused_turbo'],
+  12: ['minimax_h3_vdn', 'minimax_h3_vdn_full', 'minimax_h3_voice_audio'],
+  13: ['viggle_animate'],
+  14: ['yue2'],
+  15: ['yue2'], // v2.2 music default; enable once, then preserve user changes.
 }
 const DEFAULTS_VERSION_KEY = 'maestro_defaults_version'
 
-/* The music default changed in v1.2.0 (Turbo LM_4B -> SFT LM_4B).
- * A saved selection equal to the OLD default means the user was riding
- * the default rather than expressing a preference — follow them to the
- * new one, once, at the same version transition. Users who picked any
- * other model keep their choice. */
-const OLD_MUSIC_DEFAULT = 'ace_step_v1_5_xl_turbo_lm_4b'
-const NEW_MUSIC_DEFAULT = 'ace_step_v1_5_xl_sft_lm_4b'
+const DEFAULT_MUSIC_MODEL = 'yue2'
+// Separate from model visibility: enabling a model and selecting a default
+// are different preferences. Persist the migration so later choices survive
+// restarts and changes to Pinokio's browser origin.
+const MUSIC_DEFAULTS_VERSION = 1
+const MUSIC_DEFAULTS_KEY = 'maestro_music_defaults_version'
+let _musicDefaultsVersion = 0
 
 const ENABLED_MODELS_KEY = 'maestro_enabled_models'
 let _initializedMatureModels = new Set<string>()
@@ -1056,6 +1116,7 @@ export function getFamiliesForMode(mode: GenerationMode, allFamilies: ModelFamil
     if (editSubMode === 'recast' || editSubMode === 'restyle') {
       return allFamilies.filter(f => f.id === 'wan')
     }
+    if (editSubMode === 'outpaint') return allFamilies.filter(f => ['ltx2', 'ltxv', 'minimax_h3'].includes(f.id))
     return allFamilies.filter(f => f.id === 'ltx2' || f.id === 'ltxv')
   }
   if (mode === 'audio') {
@@ -1081,6 +1142,9 @@ export function getModelsForFamily(familyId: string, allModels: ModelDef[], mode
     return allModels.filter(m => m.family === 'tts' && sfxModelTypes.has(m.model_type))
   }
   const familyModels = allModels.filter(m => m.family === familyId)
+  if (mode === 'avatar' && editSubMode === 'outpaint' && familyId === 'minimax_h3') {
+    return familyModels.filter(m => ['minimax_h3', 'minimax_h3_full'].includes(m.model_type))
+  }
   // When mode is specified and the family spans multiple modes, filter to matching models
   if (mode === 'avatar') {
     // Recast exposes its dedicated native-replacement Fast recipe plus HQ.
@@ -1137,6 +1201,7 @@ function _normalizeStudioVideoWorkflow(
   model?: ModelDef,
 ): StudioVideoWorkflow | null {
   if (value === 'generate') return 'frames'
+  if (value === 'animate' || model?.model_type === 'viggle_animate') return 'animate'
   if (
     value === 'frames'
     || value === 'references'
@@ -1166,6 +1231,7 @@ export function getDisplayFamily(model: ModelDef): string {
 // Transient: the LTX model selected before entering either SCAIL-2 edit
 // workflow, so leaving Recast/Repaint restores the user's prior edit model.
 let _preScail2AvatarModel = ''
+let _preViggleVideoModel = ''
 
 const DEFAULT_RECAST_MAPPING: RecastCharacterMapping = {
   id: 'recast-a',
@@ -1305,7 +1371,9 @@ interface AppState {
    *  the user does them sequentially. */
   editReturnTarget: {
     /** Which anchor slot we're populating on return. */
-    anchor: 'start' | 'end' | 'recast' | 'repaint'
+    anchor: 'start' | 'end' | 'recast' | 'repaint' | 'animate'
+      previousImages?: string[]
+      savedResolutionPreset?: ResolutionPreset
     /** The pre-extracted source frame at the corresponding trim handle.
      *  This is the frame the user is editing in Image mode; if they
      *  cancel without applying, no anchor is set and the model falls
@@ -1327,7 +1395,7 @@ interface AppState {
    *  sidebar to Studio Image mode (using the proper setGenerationMode
    *  so the model + LoRA + image-mode params all swap correctly) with
    *  that frame loaded as image_start. */
-  sendFrameToImageMode: (which: 'start' | 'end' | 'recast' | 'repaint') => Promise<void>
+  sendFrameToImageMode: (which: 'start' | 'end' | 'recast' | 'repaint' | 'animate') => Promise<void>
   /** Apply the latest Image-mode output to the requested anchor/reference,
    *  then return to Edit Anything or Recast. */
   applyOutputAsAnchor: () => Promise<void>
@@ -1460,6 +1528,8 @@ interface AppState {
   musicInstrumental: boolean
   setMusicInstrumental: (b: boolean) => void
   selectedModelPerAudioSubMode: Partial<Record<import('../types').AudioSubMode, string>>
+  /** Step choices are independent for each model and survive restarts. */
+  inferenceStepsPerModel: Record<string, number>
   /** H3 accelerations live outside per-mode params so visiting Audio/Image
    *  cannot erase the user's Video optimization choices. */
   h3OptimizationPreferences: {
@@ -1503,7 +1573,9 @@ interface AppState {
   // Retake Dialog
   retakeDialogOpen: boolean
   retakeSourceFile: string | null
-  openRetakeDialog: (filename: string) => void
+  retakeSourceWorkspace?: string
+  retakeSourcePath?: string
+  openRetakeDialog: (filename: string, workspace?: string, path?: string) => void
   closeRetakeDialog: () => void
 
   // CivitAI LoRA Browser
@@ -1516,7 +1588,6 @@ interface AppState {
   loadPipelineList: () => Promise<void>
   loadSavedPipeline: (pid: string) => Promise<void>
   tagClip: (pid: string, clipIndex: number, tag: string | null) => Promise<void>
-  updateClipPrompt: (pid: string, clipIndex: number, field: 'image_prompt' | 'video_prompt', value: string) => Promise<void>
   startPipelineRepair: (pid: string) => Promise<PipelineRepairState>
   cancelPipelineRepair: (pid: string) => Promise<PipelineRepairState>
   pollPipelineRepair: (pid: string, operationId: string) => void
@@ -1535,8 +1606,8 @@ interface AppState {
   loadDirectorQueueEntry: (entryId: string) => Promise<void>
   startDirectorQueue: () => Promise<void>
   pauseDirectorQueue: () => Promise<void>
-  removeDirectorQueueEntry: (entryId: string) => Promise<void>
-  moveDirectorQueueEntry: (entryId: string, direction: -1 | 1) => Promise<void>
+  removeDirectorQueueEntry: (entryId: string, completedOnly?: boolean) => Promise<void>
+  moveDirectorQueueEntry: (entryId: string, direction: number) => Promise<void>
   queueCurrentDirectorPipeline: () => Promise<void>
 
   // Recipes (one-click Studio presets)
@@ -1546,7 +1617,7 @@ interface AppState {
   recipesLoading: boolean
   loadRecipes: () => Promise<void>
   applyRecipe: (id: string) => Promise<{ missing: import('../api/client').RecipeLora[] }>
-  saveRecipeFromOutput: (outputName: string, name: string, description: string, nsfw: boolean) => Promise<void>
+  saveRecipeFromOutput: (outputName: string, name: string, description: string, nsfw: boolean, workspace?: string) => Promise<void>
   deleteRecipe: (id: string) => Promise<void>
   downloadRecipeLora: (lora: import('../api/client').RecipeLora, modelType: string) => Promise<void>
 
@@ -1724,10 +1795,11 @@ interface AppState {
   _autoParseSpkeakerNames: (text: string, force?: boolean) => void
   // Dynamic multi-speaker (1-6 voices)
   ttsVoiceCount: number  // 0=text only, 1-6=voice clone count
-  ttsVoices: { name: string; filename: string | null; path: string | null }[]
+  ttsVoices: TtsVoice[]
   setTtsVoiceCount: (count: number) => void
   setTtsVoiceName: (index: number, name: string) => void
   setTtsVoiceFile: (index: number, filename: string | null, path: string | null) => void
+  setTtsVoiceCharacter: (index: number, character: SavedOmniCharacter) => void
   addTtsVoice: () => void
   removeTtsVoice: (index: number) => void
 
@@ -1746,6 +1818,7 @@ interface AppState {
   startStudioQueue: () => Promise<void>
   stopGeneration: (jobId?: string) => void
   dismissJob: (jobId: string) => void
+  clearCompletedJobs: () => Promise<void>
   reconnectJobs: () => Promise<void>
 
   // LoRA state
@@ -1819,6 +1892,7 @@ interface AppState {
   /** Gallery is showing the virtual "Uploads" view (browse-only — the
    *  server-side active workspace, and where generations save, is
    *  untouched). Entered via switchWorkspace('__uploads__'). */
+  browsingAllFolders: boolean
   browsingUploads: boolean
   loadWorkspaces: () => Promise<void>
   switchWorkspace: (name: string) => Promise<void>
@@ -1837,6 +1911,7 @@ interface AppState {
 
   // Outputs
   outputs: OutputFile[]
+  outputsCursor: string | null
   outputsTotal: number
   selectedOutput: number
   setSelectedOutput: (i: number) => void
@@ -1849,16 +1924,16 @@ interface AppState {
   loadOutputs: () => Promise<void>
   loadMoreOutputs: () => Promise<void>
   refreshOutputs: () => Promise<void>
-  toggleFavorite: (name: string) => Promise<void>
+  toggleFavorite: (name: string, workspace?: string) => Promise<void>
 
   // Output metadata (lazy-loaded for selected output)
   selectedOutputMeta: OutputMetadata | null
   metadataLoading: boolean
-  loadOutputMetadata: (name: string) => Promise<void>
+  loadOutputMetadata: (name: string, workspace?: string) => Promise<void>
   loadSettingsFromOutput: () => Promise<void>
   rerollGeneration: () => Promise<void>
-  deleteSelectedOutput: () => Promise<void>
-  rejoinClipGroup: (groupId: string) => Promise<void>
+  deleteSelectedOutput: (target?: OutputFile) => Promise<void>
+  rejoinClipGroup: (groupId: string, workspace?: string) => Promise<void>
 
   // Services config
   servicesConfig: ServicesConfig | null
@@ -1878,7 +1953,13 @@ interface AppState {
   // Prompt enhancement
   isEnhancing: boolean
   promptEnhanceError: string | null
-  enhancePrompt: (ttsMode?: string) => Promise<void>
+  /** null follows the saved default; a boolean overrides only the next submission. */
+  enhanceOnGeneration: boolean | null
+  enhanceOnGenerationDefault: boolean
+  enhanceOnGenerationRevision: number
+  setEnhanceOnGeneration: (enabled: boolean) => void
+  setEnhanceOnGenerationDefault: (enabled: boolean) => void
+  enhancePrompt: (ttsMode?: string, planningStyle?: 'faithful' | 'creative' | 'adaptive') => Promise<void>
   h3WindowPlan: H3WindowPlan | null
   updateH3WindowPrompt: (index: number, prompt: string) => void
   clearH3WindowPlan: () => void
@@ -1890,6 +1971,8 @@ interface AppState {
   directorAudioPath: string | null
   directorAnalysis: AudioAnalysisResult | null
   directorPlannedClips: PlannedClip[]
+  directorMusicClipSeconds: number | null
+  setDirectorMusicClipSeconds: (seconds: number | null) => void
   directorEnergyBias: number
   directorClipPlans: ClipPlan[]
   directorSceneDescription: string
@@ -2312,6 +2395,7 @@ async function _buildDirectorRestorePatch(
     directorAudioFile: audioPath ? new File([], audioName, { type: 'audio/wav' }) : null,
     directorAnalysis: analysis,
     directorPlannedClips: plannedClips,
+    directorMusicClipSeconds: typeof params.director_music_clip_seconds === "number" ? params.director_music_clip_seconds : null,
     directorEnergyBias: Number(ui.directorEnergyBias || 0),
     directorClipPlans: clipPlans,
     directorClipImages: clipImages,
@@ -2358,7 +2442,7 @@ async function _buildDirectorRestorePatch(
     directorVideoSelfRefiner: Number(ui.directorVideoSelfRefiner ?? params.video_self_refiner ?? 0),
     directorAudioScale: Number(ui.directorAudioScale ?? params.audio_scale ?? 1),
     directorMusicSource: (ui.directorMusicSource as 'upload' | 'generate' | null) || (audioPath ? 'upload' : null),
-    directorMusicModel: String(ui.directorMusicModel || 'ace_step_v1_5_xl_sft_lm_4b'),
+    directorMusicModel: String(ui.directorMusicModel || DEFAULT_MUSIC_MODEL),
     directorSongDescription: String(ui.directorSongDescription || ''),
     directorSongInstrumental: Boolean(ui.directorSongInstrumental),
     directorSongStyle: String(ui.directorSongStyle || ''),
@@ -2497,9 +2581,7 @@ const resolutionMap: Record<ResolutionPreset, Record<AspectRatio, string>> = {
   },
   '720p': {
     'auto': 'auto_720p',
-    // H3 is currently the only model that exposes 21:9. Keep the fallback
-    // canvas on its required 32-pixel lattice if model options are briefly
-    // unavailable while Director/Studio is hydrating.
+    // Shared ultrawide canvas for images and H3, aligned to 32 pixels.
     '21:9': '1632x704',
     '16:9': '1280x720',
     '9:16': '720x1280',
@@ -2565,6 +2647,18 @@ function findResolutionSelection(
   return null
 }
 
+let _galleryRevision = 0
+let _galleryMetadataRevision = 0
+let _galleryMorePending = false
+
+function galleryQuery(state: AppState) {
+  return {
+    workspace: state.browsingAllFolders ? '__all__' : state.browsingUploads ? '__uploads__' : state.activeWorkspace,
+    mediaFilter: state.mediaFilter,
+    search: state.outputSearchQuery.trim() || undefined,
+  }
+}
+
 // Memoization cache for filteredOutputs — ensures stable references
 let _foCachedOutputs: OutputFile[] = []
 let _foCachedFilter: MediaFilter = 'all'
@@ -2601,6 +2695,23 @@ function computeFilteredOutputs(outputs: OutputFile[], mediaFilter: MediaFilter)
     _foCachedResult = outputs
   }
   return _foCachedResult
+}
+
+/** Use the selected video model even when Studio last loaded an audio model. */
+async function _directorTimelineOptions(state: AppState): Promise<api.DirectorTimelineOptions> {
+  const videoModel = state.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+  const options = await api.fetchModelOptions(videoModel)
+  return {
+    video_model: videoModel,
+    image_model: state.selectedModelPerMode.image || 'flux2_klein_9b',
+    audio_path: state.directorAudioPath || undefined,
+    director_max_shot_frames: state.directorVideoMaxShotFramesByModel[videoModel],
+    ...(state.directorSkill === 'music_video' && !state.directorSeamless
+      ? {director_music_clip_seconds: state.directorMusicClipSeconds} : {}),
+    director_resolution_preset: state.directorResolution,
+    director_aspect_ratio: state.directorAspectRatio,
+    video_params: { resolution: resolveResolution(options, state.directorResolution, state.directorAspectRatio) },
+  }
 }
 
 /** Resolve whether the current Director selection owns generated per-shot
@@ -2801,9 +2912,27 @@ function _audioSubModeForModel(modelType: string): import('../types').AudioSubMo
   return 'speech'
 }
 
-/** Persist only navigation/model choices and H3 acceleration preferences.
+export function canEnhanceOnGeneration(state: Pick<AppState, 'generationMode' | 'studioVideoWorkflow' | 'studioImageWorkflow'>): boolean {
+  return (state.generationMode === 'video' && ['frames', 'references'].includes(state.studioVideoWorkflow))
+    || (state.generationMode === 'image' && state.studioImageWorkflow === 'generate')
+}
+
+/** Explicit choices apply once. The saved default never rewrites a completed draft. */
+export function shouldEnhanceOnGeneration(state: Pick<AppState,
+  'generationMode' | 'studioVideoWorkflow' | 'studioImageWorkflow' | 'enhanceOnGeneration'
+  | 'enhanceOnGenerationDefault' | 'params' | 'h3WindowPlan'>): boolean {
+  if (!canEnhanceOnGeneration(state)) return false
+  if (state.enhanceOnGeneration !== null) return state.enhanceOnGeneration
+  const draft = state.params._prompt_enhancement
+  const hasEnhancedPrompt = draft?.state === 'complete' && draft.enhanced_prompt === state.params.prompt
+  const hasEnhancedWindows = state.h3WindowPlan?.source_prompt === state.params.prompt
+    && state.h3WindowPlan.planned_by !== 'manual' && state.h3WindowPlan.windows.length > 0
+  return state.enhanceOnGenerationDefault && !hasEnhancedPrompt && !hasEnhancedWindows
+}
+
+/** Persist navigation/model choices, step counts, enhancement and H3 acceleration preferences.
  *  This deliberately does not restore project state, prompts, uploads,
- *  seeds, LoRAs, or general Advanced controls. The server mirror makes the
+ *  seeds, LoRAs, or other Advanced controls. The server mirror makes the
  *  choices survive Pinokio assigning a different browser origin/port. */
 function _persistStickyStudioPreferences(state: AppState) {
   const durableGenerationMode: Exclude<GenerationMode, 'tools'> = (
@@ -2812,6 +2941,10 @@ function _persistStickyStudioPreferences(state: AppState) {
       : state.generationMode
   )
   const h3OptimizationPreferences = state.h3OptimizationPreferences
+  // Startup callbacks may save other Studio choices before preferences arrive.
+  // Do not replace a saved opt-in with the store's initial false value.
+  const enhancementDefault = _studioPreferencesHydrated || _enhancementDefaultChanged
+    ? state.enhanceOnGenerationDefault : undefined
   _saveSettings({
     generationMode: durableGenerationMode,
     selectedModelPerMode: state.selectedModelPerMode,
@@ -2822,6 +2955,8 @@ function _persistStickyStudioPreferences(state: AppState) {
     studioImageWorkflow: state.studioImageWorkflow,
     audioSubMode: state.audioSubMode,
     selectedModelPerAudioSubMode: state.selectedModelPerAudioSubMode,
+    inferenceStepsPerModel: state.inferenceStepsPerModel,
+    enhanceOnGenerationDefault: enhancementDefault,
     h3OptimizationPreferences,
   }, state.loraIdByFilename)
 
@@ -2837,6 +2972,14 @@ function _persistStickyStudioPreferences(state: AppState) {
       Object.entries(state.selectedModelPerAudioSubMode).filter(([, model]) => Boolean(model)),
     ),
     h3_optimizations: h3OptimizationPreferences,
+    inference_steps_per_model: state.inferenceStepsPerModel,
+    enhance_on_generation_default: enhancementDefault,
+    ...(_musicDefaultsVersion > 0 ? {music_defaults_version: _musicDefaultsVersion} : {}),
+    ...(_studioPreferencesHydrated ? {director_music_model: state.directorMusicModel} : {}),
+    ...(_studioPreferencesHydrated || _directorMusicClipChanged
+      ? {director_music_clip_seconds: state.directorMusicClipSeconds} : {}),
+    ...(_studioPreferencesHydrated || _directorGpuLimitsChanged
+      ? {director_max_shot_frames_per_model: state.directorVideoMaxShotFramesByModel} : {}),
   }
   _studioPreferencesSaveTask = _studioPreferencesSaveTask
     .catch(() => { /* a later preference save should still run */ })
@@ -2846,6 +2989,21 @@ function _persistStickyStudioPreferences(state: AppState) {
     .catch(error => {
       console.warn('Failed to save Studio preferences:', error)
     })
+}
+
+function _rememberInferenceSteps(
+  storeGet: () => AppState,
+  storeSet: (update: Pick<AppState, 'inferenceStepsPerModel'>) => void,
+  modelType: string,
+  value: unknown,
+) {
+  if (!modelType || typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 1000) return
+  const state = storeGet()
+  if (state.inferenceStepsPerModel[modelType] === value) return
+  if (state.modelOptions?.model_type === modelType && state.modelOptions.lock_inference_steps) return
+  if (state.params.model_type === modelType && modelType.startsWith('minimax_h3') && state.params.minimax_h3_turbo_mode === true) return
+  storeSet({ inferenceStepsPerModel: { ...state.inferenceStepsPerModel, [modelType]: value } })
+  _persistStickyStudioPreferences(storeGet())
 }
 
 export const useStore = create<AppState>((set, get) => ({
@@ -2947,8 +3105,29 @@ export const useStore = create<AppState>((set, get) => ({
     set({ studioVideoWorkflow: workflow })
     const persist = () => _persistStickyStudioPreferences(get())
 
+    if (workflow === 'animate') {
+      if (get().generationMode !== 'video') get().setGenerationMode('video')
+      if (!get().enabledModels.has('viggle_animate')) get().toggleModelEnabled('viggle_animate')
+      if (get().params.model_type !== 'viggle_animate') _preViggleVideoModel = get().params.model_type
+      set(state => ({studioVideoWorkflow: workflow, params: {...state.params,
+        image_mode: 0, _studio_video_workflow: workflow,
+        _duration_planning_mode: state.params._studio_video_workflow === 'animate'
+          ? state.params._duration_planning_mode ?? 'auto' : 'auto',
+        audio_prompt_type: ['', 'K', 'A'].includes(state.params.audio_prompt_type || '') ? state.params.audio_prompt_type : ''}}))
+      if (get().params.model_type !== 'viggle_animate') get().selectModel('viggle_animate')
+      get().setAspectRatio('auto')
+      persist()
+      return
+    }
+
     if (workflow === 'frames' || workflow === 'references' || workflow === 'extend' || workflow === 'blend') {
       if (get().generationMode !== 'video') get().setGenerationMode('video')
+      if (get().params.model_type === 'viggle_animate') {
+        const restore = [_preViggleVideoModel, get().studioVideoModelPerCreateRoute.omni,
+          'minimax_h3_ref2va_fused_turbo', 'minimax_h3_ref2va'].find(type =>
+          type && type !== 'viggle_animate' && get().models.some(model => model.model_type === type))
+        if (restore) get().selectModel(restore)
+      }
       const imageMode = workflow === 'extend' ? 3 : workflow === 'blend' ? 4 : 0
       if (Number(get().params.image_mode) !== imageMode) {
         get().setParam('image_mode', imageMode)
@@ -3037,7 +3216,21 @@ export const useStore = create<AppState>((set, get) => ({
     const s = get()
     const prev = s.editSubMode
     set({ editSubMode: mode })
-    if (mode === prev || s.generationMode !== 'avatar') return
+    if (s.generationMode !== 'avatar') return
+    if (mode === 'outpaint') {
+      // Entering the edit workspace can restore its last Repaint/Recast model.
+      // Reconcile against the same choices shown by the Outpaint selector.
+      const compatible = getFamiliesForMode('avatar', s.families, mode).flatMap(family =>
+        getModelsForFamily(family.id, s.models, 'avatar', mode))
+      if (!compatible.some(model => model.model_type === s.params.model_type)) {
+        const preferred = compatible.find(model => model.model_type === _preScail2AvatarModel)
+          || compatible.find(model => s.enabledModels.has(model.model_type))
+          || compatible[0]
+        if (preferred) get().selectModel(preferred.model_type)
+      }
+      return
+    }
+    if (mode === prev) return
     // Recast uses SCAIL-2 Replace; Repaint uses the proven SCAIL-2 Animate
     // path from Studio Video/Frames. Swap recipes when moving between those
     // modes and restore the previous LTX edit model when leaving both.
@@ -3137,15 +3330,16 @@ export const useStore = create<AppState>((set, get) => ({
   editReturnTarget: null,
   setEditAnythingStartAnchor: (path: string | null) => set({ editAnythingStartAnchor: path }),
   setEditAnythingEndAnchor: (path: string | null) => set({ editAnythingEndAnchor: path }),
-  sendFrameToImageMode: async (which: 'start' | 'end' | 'recast' | 'repaint') => {
+  sendFrameToImageMode: async (which: 'start' | 'end' | 'recast' | 'repaint' | 'animate') => {
     const state = get()
-    const clipPath = state.editVideoPath
+    const clipPath = which === 'animate' ? state.params.video_guide : state.editVideoPath
     if (!clipPath) {
       console.error('Edit Anything: no source video loaded')
       return
     }
-    const startTime = state.editStartTime || 0
-    const endTime = state.editEndTime || state.editVideoDuration || 0
+    const animateTimeline = viggleTimeline(state.params)
+    const startTime = which === 'animate' ? animateTimeline.frame : state.editStartTime || 0
+    const endTime = which === 'animate' ? animateTimeline.end || startTime + 1 : state.editEndTime || state.editVideoDuration || 0
     if (endTime <= startTime) {
       console.error('Edit Anything: invalid trim range')
       return
@@ -3210,7 +3404,8 @@ export const useStore = create<AppState>((set, get) => ({
         // Make sure no stale i2v fields are populated — those would land
         // in video mode's i2v slot, which isn't what we want here.
         startImage: null,
-        params: { ...s.params, image_start: '', image_mode: 1 },
+        params: { ...s.params, image_start: '', image_mode: 1,
+          ...(which === 'animate' ? {prompt: 'Replace the character from source image with character from the second image. Preserve the exact pose, body orientation, props, background, camera framing, lighting and image dimensions from the source image.'} : {}) },
         editReturnTarget: {
           anchor: which,
           framePath,
@@ -3219,10 +3414,13 @@ export const useStore = create<AppState>((set, get) => ({
           endTime,
           savedImageRefs,
           savedImageRefType,
+          previousImages: state.outputs.filter(output => output.type === 'image').map(output => output.name),
+          ...(which === 'animate' ? {savedResolutionPreset: state.resolutionPreset} : {}),
         },
       }))
     } catch (e) {
       console.error('Failed to send frame to Image mode:', e)
+      if (which === 'animate') throw e
     }
   },
   applyOutputAsAnchor: async () => {
@@ -3230,7 +3428,8 @@ export const useStore = create<AppState>((set, get) => ({
     const target = state.editReturnTarget
     if (!target) return
     // Find the latest image-mode output (newest first in the outputs list).
-    const latestImage = state.outputs.find(o => o.type === 'image')
+    const latestImage = state.outputs.find(o => o.type === 'image'
+      && (target.anchor !== 'animate' || !target.previousImages?.includes(o.name)))
     if (!latestImage) {
       console.error('Edit Anything return: no image-mode output yet to apply')
       return
@@ -3239,6 +3438,22 @@ export const useStore = create<AppState>((set, get) => ({
     // active workspace's outputs/ for a bare filename, so passing the
     // gallery name is enough.
     const outputPath = latestImage.name
+
+    if (target.anchor === 'animate') {
+      const blob = await fetch(latestImage.url).then(response => {
+        if (!response.ok) throw new Error('Could not read the edited image')
+        return response.blob()
+      })
+      const uploaded = await api.uploadImage(new File([blob], latestImage.name, {type: blob.type || 'image/png'}))
+      get().setGenerationMode('video')
+      get().setStudioVideoWorkflow('animate')
+      get().setResolutionPreset(target.savedResolutionPreset ?? '480p')
+      get().setParam('_viggle_edited_frame', uploaded.path)
+      get().setParam('viggle_character', undefined)
+      get().setParam('_viggle_prepared', undefined)
+      set({editReturnTarget: null, imageRefs: target.savedImageRefs, imageRefType: target.savedImageRefType})
+      return
+    }
 
     if (target.anchor === 'recast') {
       set(s => ({
@@ -3289,6 +3504,13 @@ export const useStore = create<AppState>((set, get) => ({
     // slot → ltx2.py falls back to the source-extracted frame at
     // generation time (the morph-from-source default).
     const target = get().editReturnTarget
+    if (target?.anchor === 'animate') {
+      get().setGenerationMode('video')
+      get().setStudioVideoWorkflow('animate')
+      get().setResolutionPreset(target.savedResolutionPreset ?? '480p')
+      set({editReturnTarget: null, imageRefs: target.savedImageRefs, imageRefType: target.savedImageRefType})
+      return
+    }
     get().setGenerationMode('avatar')
     set({
       editSubMode: target?.anchor === 'recast'
@@ -3302,6 +3524,7 @@ export const useStore = create<AppState>((set, get) => ({
   },
   cancelAnchorReturn: () => {
     const target = get().editReturnTarget
+    if (target?.anchor === 'animate') { get().skipAnchorPhase(); return }
     get().setGenerationMode('avatar')
     set({
       editSubMode: target?.anchor === 'recast'
@@ -3420,6 +3643,7 @@ export const useStore = create<AppState>((set, get) => ({
   setMusicInstrumental: (b) => set({ musicInstrumental: b }),
   audioSubMode: 'speech' as import('../types').AudioSubMode,
   selectedModelPerAudioSubMode: {} as Partial<Record<import('../types').AudioSubMode, string>>,
+  inferenceStepsPerModel: {},
   h3OptimizationPreferences: {
     override_attention: '',
     skip_steps_cache_type: '',
@@ -3432,15 +3656,13 @@ export const useStore = create<AppState>((set, get) => ({
     // Determine model for target sub-mode
     const audioSubModeDefaults: Record<import('../types').AudioSubMode, string> = {
       speech: 'kugelaudio_0_open',
-      // XL SFT LM_4B: the premium CFG variant + strongest LM — the
-      // quality default. Turbo variants remain enabled for speed.
-      music: 'ace_step_v1_5_xl_sft_lm_4b',
+      music: DEFAULT_MUSIC_MODEL,
       sfx: 'mmaudio_v2',
       mixer: '',  // Mixer doesn't use a model — it's an ffmpeg-based tool
       revoice: '',  // Revoice is a SeedVC post-processing tool
     }
     const saved = savedModels[subMode]
-    const targetModel = (saved && models.some(m => m.model_type === saved))
+    const targetModel = (saved && get().enabledModels.has(saved) && models.some(m => m.model_type === saved))
       ? saved
       : audioSubModeDefaults[subMode]
     set({ audioSubMode: subMode, selectedModelPerAudioSubMode: savedModels })
@@ -3651,7 +3873,14 @@ export const useStore = create<AppState>((set, get) => ({
     ].includes(String(key))
     set(s => {
       const nextParams = { ...s.params, [key]: value }
+      if (key === 'video_guide' && value !== s.params.video_guide && s.params.model_type === 'viggle_animate') {
+        Object.assign(nextParams, {_viggle_source_seconds: undefined, _viggle_trim_start: undefined,
+          _viggle_trim_end: undefined, _viggle_frame_seconds: 0,
+          _viggle_prepared: undefined, _viggle_edited_frame: undefined,
+          ...(s.params.viggle_character ? {viggle_character: {...s.params.viggle_character, frame_seconds: 0}} : {})})
+      }
       if (key === 'prompt') {
+        if (value !== s.params.prompt) delete nextParams._prompt_enhancement
         delete nextParams._h3_original_prompt
         const editedLines = typeof value === 'string'
           ? value.replace(/\r\n?/g, '\n').split('\n').map(line => line.trim()).filter(Boolean)
@@ -3768,12 +3997,13 @@ export const useStore = create<AppState>((set, get) => ({
     // num_inference_steps, video_prompt_type, video_guide, image_refs,
     // frames_positions, MMAudio_*, etc. — gets snapshotted here.
     //
-    // Deliberately NOT written to localStorage: a page refresh starts
-    // the working state (prompt, seed, LoRA selection, Advanced values)
+    // The complete snapshot is not restored after a page refresh: the
+    // working state (prompt, seed, LoRA selection, other Advanced values)
     // from the model's defaults. v1.2.0 persisted every edit across
     // refreshes and users found the stale text/seeds surprising —
     // in-session mode-switch persistence is the wanted behavior,
-    // refresh is a clean slate (see loadModels).
+    // refresh is a clean slate except for explicit sticky preferences such
+    // as per-model step counts (see loadModels).
     if (key !== 'model_type' && key !== 'prompt' && key !== 'activated_loras' && key !== 'loras_multipliers') {
       const s = get()
       const mode = s.generationMode
@@ -3788,6 +4018,7 @@ export const useStore = create<AppState>((set, get) => ({
       }
       set({ savedParamsPerMode: updatedSavedParams })
     }
+    if (key === 'num_inference_steps') _rememberInferenceSteps(get, set, get().params.model_type, value)
     if (
       key === 'minimax_h3_references'
       || key === 'image_start'
@@ -3861,7 +4092,7 @@ export const useStore = create<AppState>((set, get) => ({
   // Director Pipeline Dashboard
   retakeDialogOpen: false,
   retakeSourceFile: null,
-  openRetakeDialog: (filename) => set({ retakeDialogOpen: true, retakeSourceFile: filename }),
+  openRetakeDialog: (filename, workspace, path) => set({ retakeDialogOpen: true, retakeSourceFile: filename, retakeSourceWorkspace: workspace, retakeSourcePath: path }),
   closeRetakeDialog: () => set({ retakeDialogOpen: false, retakeSourceFile: null }),
 
   dashboardOpen: false,
@@ -3992,31 +4223,6 @@ export const useStore = create<AppState>((set, get) => ({
       })
     } catch (e) {
       console.error('Failed to tag clip:', e)
-    }
-  },
-  updateClipPrompt: async (pid, clipIndex, field, value) => {
-    // Optimistic update — write to the store immediately so the UI
-    // reflects the change even before the API round-trip completes.
-    set(s => {
-      if (!s.dashboardSelectedPipeline || s.dashboardSelectedPipeline.pipeline_id !== pid) return {}
-      const clips = [...s.dashboardSelectedPipeline.clips]
-      if (clipIndex < clips.length) {
-        clips[clipIndex] = { ...clips[clipIndex], [field]: value }
-        // Multi-window video prompts are joined with \n for the
-        // video_prompt field.  Split them back into the individual
-        // window_prompts array so the per-window editing UI shows
-        // the updated values on the next pencil click (the backend
-        // stores only video_prompt; window_prompts is frontend-only).
-        if (field === 'video_prompt' && (clips[clipIndex].window_prompts?.length || 0) > 1) {
-          clips[clipIndex] = { ...clips[clipIndex], window_prompts: value.split('\n') }
-        }
-      }
-      return { dashboardSelectedPipeline: { ...s.dashboardSelectedPipeline, clips } }
-    })
-    try {
-      await api.updateClipPrompt(pid, clipIndex, field, value)
-    } catch (e) {
-      console.error('Failed to update clip prompt:', e)
     }
   },
   startPipelineRepair: async (pid: string) => {
@@ -4403,10 +4609,10 @@ export const useStore = create<AppState>((set, get) => ({
       })
     }
   },
-  removeDirectorQueueEntry: async (entryId: string) => {
+  removeDirectorQueueEntry: async (entryId: string, completedOnly = false) => {
     set({ directorQueueLoading: true })
     try {
-      await api.deleteDirectorQueueEntry(entryId)
+      await api.deleteDirectorQueueEntry(entryId, completedOnly)
       if (get().directorQueueEditingEntryId === entryId) {
         set({ directorQueueEditingEntryId: null })
       }
@@ -4418,7 +4624,7 @@ export const useStore = create<AppState>((set, get) => ({
       })
     }
   },
-  moveDirectorQueueEntry: async (entryId: string, direction: -1 | 1) => {
+  moveDirectorQueueEntry: async (entryId: string, direction: number) => {
     const queue = get().directorQueue
     if (!queue) return
     const ids = queue.entries.map(entry => entry.id)
@@ -4519,8 +4725,8 @@ export const useStore = create<AppState>((set, get) => ({
     const missing = (recipe.loras || []).filter(l => !present.has(l.filename))
     return { missing }
   },
-  saveRecipeFromOutput: async (outputName, name, description, nsfw) => {
-    await api.saveRecipeFromOutput({ output_name: outputName, name, description, nsfw })
+  saveRecipeFromOutput: async (outputName, name, description, nsfw, workspace) => {
+    await api.saveRecipeFromOutput({ output_name: outputName, name, description, nsfw, workspace })
     if (get().recipesOpen) get().loadRecipes()
   },
   deleteRecipe: async (id) => {
@@ -4887,7 +5093,6 @@ export const useStore = create<AppState>((set, get) => ({
       // DEFAULTS_VERSION). Fresh installs already start from the full
       // DEFAULT_ENABLED_MODELS list; for them this only stamps the
       // version key.
-      let migrateMusicDefault = false
       try {
         const storedVer = _modelVisibilityHydrated
           ? _modelVisibilityDefaultsVersion
@@ -4911,7 +5116,6 @@ export const useStore = create<AppState>((set, get) => ({
               return { enabledModels: next }
             })
           }
-          migrateMusicDefault = storedVer < 2
           _modelVisibilityDefaultsVersion = DEFAULTS_VERSION
           localStorage.setItem(DEFAULTS_VERSION_KEY, String(DEFAULTS_VERSION))
           _saveEnabledModels(get().enabledModels)
@@ -4921,8 +5125,8 @@ export const useStore = create<AppState>((set, get) => ({
       // Hydrate persisted per-mode settings from localStorage.
       //
       // Deliberately PARTIAL: only navigation, per-mode model selections,
-      // and H3 Sol/First Block preferences survive a page refresh. The working
-      // state — prompt text and Advanced settings (seed, steps, LoRA
+      // step counts and H3 Sol/First Block preferences survive a page refresh. The working
+      // state — prompt text and other Advanced settings (seed, LoRA
       // selection, …) — starts fresh from the model's defaults on every
       // load. The per-mode snapshots (savedParamsPerMode /
       // savedLoraPerMode / savedPromptPerMode) still carry edits across
@@ -4931,13 +5135,28 @@ export const useStore = create<AppState>((set, get) => ({
       // a reload felt wrong, so a refresh is a clean slate again.
       const saved = _loadSettings()
       const durableConfigured = studioPreferences?.configured === true
-      let selectedModelPerMode: Partial<Record<GenerationMode, string>> = {
+      if (shouldHydrateStudioPreferences && !_enhancementDefaultChanged) {
+        set({enhanceOnGenerationDefault: (
+          studioPreferences?.enhance_on_generation_default ?? saved?.enhanceOnGenerationDefault
+        ) === true})
+      }
+      if (shouldHydrateStudioPreferences && !_directorMusicClipChanged) {
+        set({directorMusicClipSeconds: studioPreferences?.director_music_clip_seconds ?? null})
+      }
+      if (shouldHydrateStudioPreferences && !_directorGpuLimitsChanged) {
+        set({directorVideoMaxShotFramesByModel: studioPreferences?.director_max_shot_frames_per_model ?? {}})
+      }
+      const restoredInferenceSteps = _normalizeRememberedSteps(
+        studioPreferences?.inference_steps_per_model ?? saved?.inferenceStepsPerModel,
+      )
+      set({ inferenceStepsPerModel: restoredInferenceSteps })
+      const selectedModelPerMode: Partial<Record<GenerationMode, string>> = {
         ...(saved?.selectedModelPerMode || {}),
         ...(durableConfigured
           ? studioPreferences.selected_model_per_mode as Partial<Record<GenerationMode, string>>
           : {}),
       }
-      let selectedModelPerAudioSubMode: Partial<Record<import('../types').AudioSubMode, string>> = {
+      const selectedModelPerAudioSubMode: Partial<Record<import('../types').AudioSubMode, string>> = {
         ...(saved?.selectedModelPerAudioSubMode || {}),
         ...(durableConfigured
           ? studioPreferences.selected_model_per_audio_sub_mode as Partial<Record<import('../types').AudioSubMode, string>>
@@ -4982,20 +5201,25 @@ export const useStore = create<AppState>((set, get) => ({
           ? { skip_steps_start_step_perc: h3Preferences.skip_steps_start_step_perc }
           : {}),
       }
-      // v2 migration: users whose saved audio model IS the old music
-      // default follow it to the new default (see NEW_MUSIC_DEFAULT).
-      // (The old-model-params concern the migration used to handle is
-      // gone: saved params no longer rehydrate, and the defaults
-      // hydration below runs on every boot.)
-      if (migrateMusicDefault && selectedModelPerMode.audio === OLD_MUSIC_DEFAULT
-          && models.some(m => m.model_type === NEW_MUSIC_DEFAULT)) {
-        selectedModelPerMode = { ...selectedModelPerMode, audio: NEW_MUSIC_DEFAULT }
-        if (selectedModelPerAudioSubMode.music === OLD_MUSIC_DEFAULT) {
-          selectedModelPerAudioSubMode = {
-            ...selectedModelPerAudioSubMode,
-            music: NEW_MUSIC_DEFAULT,
+      if (shouldHydrateStudioPreferences) {
+        let cachedMusicVersion = 0
+        try { cachedMusicVersion = Number(localStorage.getItem(MUSIC_DEFAULTS_KEY)) || 0 } catch { /* optional cache */ }
+        _musicDefaultsVersion = studioPreferences?.music_defaults_version ?? cachedMusicVersion
+        const migrateMusicDefault = _musicDefaultsVersion < MUSIC_DEFAULTS_VERSION
+          && models.some(model => model.model_type === DEFAULT_MUSIC_MODEL)
+        if (migrateMusicDefault) {
+          selectedModelPerAudioSubMode.music = DEFAULT_MUSIC_MODEL
+          if (restoredAudioSubMode === 'music' || isMusicModelType(rememberedAudioModel)) {
+            selectedModelPerMode.audio = DEFAULT_MUSIC_MODEL
           }
+          const enabled = new Set(get().enabledModels).add(DEFAULT_MUSIC_MODEL)
+          set({ enabledModels: enabled, directorMusicModel: DEFAULT_MUSIC_MODEL })
+          _saveEnabledModels(enabled)
+          _musicDefaultsVersion = MUSIC_DEFAULTS_VERSION
+        } else if (studioPreferences?.director_music_model) {
+          set({directorMusicModel: studioPreferences.director_music_model})
         }
+        try { localStorage.setItem(MUSIC_DEFAULTS_KEY, String(_musicDefaultsVersion)) } catch { /* durable copy remains */ }
       }
       let mode = get().generationMode
       let initialModelType: string
@@ -5074,7 +5298,8 @@ export const useStore = create<AppState>((set, get) => ({
           families,
           models,
           modelsLoaded: true,
-          selectedModelPerMode: { [mode]: initialModelType },
+          selectedModelPerMode: { ...selectedModelPerMode, [mode]: initialModelType },
+          selectedModelPerAudioSubMode,
           ...(mode === 'image' ? { resolutionPreset: 'auto' as ResolutionPreset, aspectRatio: 'auto' as AspectRatio } : {}),
           params: {
             ...s.params,
@@ -5143,9 +5368,15 @@ export const useStore = create<AppState>((set, get) => ({
 
   aspectRatio: '16:9',
   setAspectRatio: (ratio) => {
-    const preset = get().resolutionPreset
-    const resolution = resolveResolution(get().modelOptions, preset, ratio)
+    const state = get()
+    // Auto resolution follows the reference aspect. A fixed image aspect
+    // needs concrete dimensions so the backend can honor the selection.
+    const preset = state.generationMode === 'image'
+      && state.resolutionPreset === 'auto' && ratio !== 'auto'
+      ? '720p' : state.resolutionPreset
+    const resolution = resolveResolution(state.modelOptions, preset, ratio)
     set(s => ({
+      resolutionPreset: preset,
       aspectRatio: ratio,
       params: { ...s.params, resolution },
       h3WindowPlan: null,
@@ -5153,119 +5384,87 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   durationSeconds: 5,
-  setDurationSeconds: (s) => {
-    const options = get().modelOptions
-    const fps = options?.fps ?? 16
-    const nativeMinimumFrames = options?.frames_minimum || fps
-    const isVideoExtend = (
-      get().studioVideoWorkflow === 'extend'
-      && options?.sliding_window === true
-    )
-    const continuationContextFrames = isVideoExtend
-      ? Math.max(0, get().slidingWindowOverlap - 1)
-      : 0
-    const requestedMinimumFrames = Math.max(
-      1,
-      nativeMinimumFrames - continuationContextFrames,
-    )
-    const minimum = Math.max(1, requestedMinimumFrames / fps)
-    const nativeMaximum = options?.frames_maximum
-      ? options.frames_maximum / fps
-      : null
-    const isH3 = String(options?.architecture || '').startsWith('minimax_h3')
-    const isLtxSequence = options?.multi_window_sequence_controls === true
-    const ltxWindowDefaults = options?.sliding_window_defaults
-    const ltxSinglePassMaximum = isLtxSequence
-      ? (ltxWindowDefaults?.window_max ?? Math.round(20 * fps)) / fps
-      : null
-    const currentWindow = Math.max(minimum, get().slidingWindowSeconds)
-    const currentWindowFrames = Math.round(currentWindow * fps)
-    const firstWindowFrames = isVideoExtend
-      ? continuationFirstWindowFrames(
-          currentWindowFrames,
-          get().slidingWindowOverlap,
-        )
-      : currentWindowFrames
-    const sequenceCapable = isH3 || isLtxSequence
-    const wantsSequence = sequenceCapable && s > firstWindowFrames / fps + 0.05
-    const h3ReferenceSequence = isH3 && options?.omni_reference === true && wantsSequence
-    const h3FirstLastMultiWindow = isH3 && options?.omni_reference !== true && wantsSequence
-    const ltxMultiWindow = isLtxSequence && wantsSequence
-    const h3SingleNativePass = (
-      isH3
-      && !wantsSequence
-    )
-    const maximum = isH3
-      ? (h3ReferenceSequence || h3FirstLastMultiWindow
-          ? 60 * 60
-          : (nativeMaximum ?? Number.POSITIVE_INFINITY))
-      : isLtxSequence
-        ? (ltxMultiWindow
-            ? 60 * 60
-            : (ltxSinglePassMaximum ?? Number.POSITIVE_INFINITY))
-      : (options?.sliding_window || nativeMaximum == null
-          ? Number.POSITIVE_INFINITY
-          : nativeMaximum)
-    let seconds = Math.min(maximum, Math.max(minimum, s))
-    if (
-      options?.sliding_window
-      && nativeMaximum
-      && seconds <= Math.round(nativeMaximum * 10) / 10
-    ) {
-      seconds = Math.min(seconds, nativeMaximum)
+  setDurationSeconds: (requested) => {
+    const state = get()
+    const options = state.modelOptions
+    if (state.params.model_type === 'viggle_animate' && Number.isFinite(requested)) {
+      const range = viggleTimeline(state.params)
+      const frames = Math.max(1, Math.floor(Math.min(requested, range.length || 3600, 3600) * 24 + 1e-6))
+      if (state.params.video_length === frames && state.durationSeconds === frames / 24
+        && state.params.sliding_window_size === 124 && state.slidingWindowSeconds === 124 / 24) return
+      set({durationSeconds: frames / 24, slidingWindowSeconds: 124 / 24,
+        params: {...state.params, video_length: frames, sliding_window_size: 124}})
+      return
     }
+    if (options?.audio_only && options.audio_segment_max_seconds && options.duration_slider) {
+      const ds = options.duration_slider
+      const seconds = Math.max(ds.min, Math.min(ds.max,
+        Number.isFinite(requested) ? requested : ds.default ?? ds.min))
+      if (state.durationSeconds === seconds && state.params.duration_seconds === seconds) return
+      set({ durationSeconds: seconds, params: { ...state.params, duration_seconds: seconds,
+        minimax_h3_multi_window: false, minimax_h3_reference_sequence: false } })
+      return
+    }
+    if (!Number.isFinite(requested)) return
+    const fps = options?.fps || 16
+    const isH3 = String(options?.architecture || '').startsWith('minimax_h3')
+    const isLtx = options?.multi_window_sequence_controls === true
+    const sw = options?.sliding_window_defaults
+    const minimumFrames = options?.frames_minimum || fps
+    const maximumFrames = options?.frames_maximum || Math.round(3600 * fps)
+    const step = Math.max(1, options?.frames_steps || 1)
+    const context = state.studioVideoWorkflow === 'extend' && options?.sliding_window
+      ? Math.max(0, state.slidingWindowOverlap - 1) : 0
+    const minimum = Math.max(1, (minimumFrames - context) / fps)
+    const canSequence = isH3 || isLtx || options?.sliding_window
+    const maximum = canSequence ? 3600 : maximumFrames / fps
+    let seconds = Math.max(minimum, Math.min(maximum, requested))
     let frames = Math.round(seconds * fps)
-    if (h3SingleNativePass) {
-      const normalizedPassFrames = normalizeH3NativeFrames(
-        frames + continuationContextFrames,
-        options?.frames_minimum ?? 124,
-        options?.frames_maximum ?? 345,
-        options?.frames_steps ?? 17,
-      )
-      frames = Math.max(
-        requestedMinimumFrames,
-        normalizedPassFrames - continuationContextFrames,
-      )
+    const policy = options?.omni_reference ? options.omni_sequence_memory_policy : options?.sliding_window_memory_policy
+    // Ref2VA uses one stable capacity, regardless of whether this particular
+    // timeline needs one or several passes. A sequence-dependent recommendation
+    // used to toggle itself forever when Extend consumed source-tail context.
+    const recommendation = options?.omni_reference
+      ? recommendedH3OmniSequenceProfile(policy, state.params.resolution,
+          state.systemStats?.gpu.vram_total_gb ?? 0, minimumFrames, maximumFrames, step)
+      : recommendedH3PassProfile(policy, state.params.resolution, state.systemStats?.gpu.vram_total_gb ?? 0)
+    const windowMin = sw?.window_min ?? minimumFrames
+    const windowMax = sw?.window_max ?? maximumFrames
+    const capFrames = Math.max(windowMin, Math.min(windowMax,
+      state.slidingWindowLocked ? Math.round(state.slidingWindowSeconds * fps)
+        : recommendation?.frames ?? (recommendation?.supported === false ? windowMin : windowMax)))
+    if (isH3 && frames + context <= capFrames) {
+      frames = Math.max(Math.round(minimum * fps), normalizeH3NativeFrames(
+        frames + context, minimumFrames, maximumFrames, step) - context)
       seconds = frames / fps
     }
-    set(state => {
-      const selectedWindowFrames = Math.round(state.slidingWindowSeconds * fps)
-      const requestedPassFrames = frames + continuationContextFrames
-      const expandNativeWindow = h3SingleNativePass && requestedPassFrames > selectedWindowFrames
-      const nextParams = {
-        ...state.params,
-        video_length: frames,
-        ...(isLtxSequence ? { ltx_multi_window: ltxMultiWindow } : {}),
-        ...(isH3 && options?.omni_reference === true
-          ? { minimax_h3_reference_sequence: h3ReferenceSequence }
-          : {}),
-        ...(isH3 && options?.omni_reference !== true
-          ? { minimax_h3_multi_window: h3FirstLastMultiWindow }
-          : {}),
-        ...(expandNativeWindow
-          ? {
-              sliding_window_size: requestedPassFrames,
-              sliding_window_memory_override: true,
-              ...(state.modelOptions?.omni_reference === true
-                ? { minimax_h3_sequence_memory_override: true }
-                : {}),
-            }
-          : {}),
-      }
-      delete nextParams.ltx_window_prompts
-      return {
-        durationSeconds: seconds,
-        ...(expandNativeWindow
-          ? {
-              slidingWindowSeconds: requestedPassFrames / fps,
-              slidingWindowLocked: true,
-            }
-          : {}),
-        params: nextParams,
-        h3WindowPlan: null,
-        promptEnhanceError: null,
-      }
-    })
+    // Container metadata often differs by a millisecond from its frame count.
+    // Keep UI planning on the same integer timeline used by the backend.
+    seconds = frames / fps
+    let windowFrames = Math.round(state.slidingWindowSeconds * fps)
+    if (canSequence && !state.slidingWindowLocked) {
+      const windowStep = Math.max(1, sw?.window_step ?? step)
+      const needed = windowMin + Math.ceil((frames + context - windowMin) / windowStep) * windowStep
+      windowFrames = state.params._duration_planning_mode === 'windows'
+        ? capFrames : Math.max(windowMin, Math.min(capFrames, needed))
+    }
+    const wantsSequence = (isH3 || isLtx) && frames > windowFrames - context
+    const sequenceKey = isLtx ? 'ltx_multi_window'
+      : options?.omni_reference ? 'minimax_h3_reference_sequence' : 'minimax_h3_multi_window'
+    // A rounded request is often identical to the stored native duration.
+    // Returning the original state is essential: React effects must not turn
+    // an unrepresentable duration into repeated Zustand notifications.
+    if (Math.abs(state.durationSeconds - seconds) < 1e-8
+      && state.params.video_length === frames
+      && Math.abs(state.slidingWindowSeconds * fps - windowFrames) < 1e-8
+      && state.params.sliding_window_size === windowFrames
+      && (!(isH3 || isLtx) || state.params[sequenceKey] === wantsSequence)) return
+    const nextParams = { ...state.params, video_length: frames, sliding_window_size: windowFrames,
+      ...((isH3 || isLtx) ? { [sequenceKey]: wantsSequence } : {}),
+      ...(options?.omni_reference ? { minimax_h3_sequence_clip_frames: windowFrames } : {}) }
+    delete nextParams.ltx_window_prompts
+    set({ durationSeconds: seconds, slidingWindowSeconds: windowFrames / fps,
+      params: nextParams, h3WindowPlan: null, promptEnhanceError: null })
     get().syncClipCount()
   },
 
@@ -5293,6 +5492,8 @@ export const useStore = create<AppState>((set, get) => ({
       frames = Math.max(minimum, Math.min(maximum, frames))
     }
     const seconds = frames / fps
+    if (Math.abs(get().slidingWindowSeconds - seconds) < 1e-8
+      && get().params.sliding_window_size === frames) return
     set(state => {
       const nextParams = {
         ...state.params,
@@ -5563,6 +5764,10 @@ export const useStore = create<AppState>((set, get) => ({
             media_path: source,
             media_type: s.toolsUpscaleMedia,
             method: s.toolsUpscaleMethod,
+            temporal_upsampling: s.toolsUpscaleMedia === 'video' ? s.params.temporal_upsampling || '' : '',
+            dlss_intensity: Number(s.params.custom_settings?.dlss_intensity ?? 1),
+            dlss_depth: String(s.params.custom_settings?.dlss_depth ?? 'half'),
+            dlss_motion: String(s.params.custom_settings?.dlss_motion ?? 'original'),
             workspace: s.activeWorkspace,
           })
         : tool === 'film_grain'
@@ -5755,12 +5960,12 @@ export const useStore = create<AppState>((set, get) => ({
       voices.push({ name: '', filename: null, path: null })
     }
     for (let i = 0; i < Math.min(names.length, voiceCount); i++) {
-      voices[i] = { ...voices[i], name: names[i] }
+      if (!voices[i].characterId) voices[i] = { ...voices[i], name: names[i] }
     }
     set({
       ttsVoices: voices,
-      ttsSpeakerName1: names[0] || '',
-      ttsSpeakerName2: names[1] || '',
+      ttsSpeakerName1: voices[0]?.name || names[0] || '',
+      ttsSpeakerName2: voices[1]?.name || names[1] || '',
       // Force-call (from enhance) resets the manual flag so subsequent
       // prompt edits can also auto-parse again. Non-force calls preserve
       // the flag (user manually edited a name; keep their state).
@@ -5771,23 +5976,24 @@ export const useStore = create<AppState>((set, get) => ({
   ttsVoiceCount: 0,
   ttsVoices: [],
   setTtsVoiceCount: (count) => {
+    count = Math.max(0, Math.min(ttsVoiceLimit(get().modelOptions), Math.floor(count) || 0))
     const prevCount = get().ttsVoiceCount
     const current = get().ttsVoices
     const voices = [...current]
     while (voices.length < count) {
       voices.push({ name: '', filename: null, path: null })
     }
-    // Derive audio_prompt_type from voice count using the model's own selection
-    // list. KugelAudio's selection = ["", "A", "AB"] → 0→"", 1→"A", 2+→"AB".
-    // Scenema's selection = ["", "A2", "AB2"] → 0→"", 1→"A2", 2+→"AB2".
-    // Other (non-Scenema/Kugel) audio-only models keep the legacy ""/A/AB
-    // mapping for backward compat.
-    const selection = (get().modelOptions?.audio_prompt_type_sources?.selection as string[] | undefined) || ['', 'A', 'AB']
-    const audioType = selection[Math.min(count, selection.length - 1)]
+    // Match reference roles, since required-reference models omit text-only
+    // from their choices and IndexTTS distinguishes emotion from dialogue.
+    const audioType = ttsAudioModeForCount(count, get().modelOptions, String(get().params.audio_prompt_type || ''))
     set(s => ({
       ttsVoiceCount: count,
-      ttsVoices: voices.slice(0, Math.max(count, voices.length)),
-      params: { ...s.params, audio_prompt_type: audioType + ((s.params.audio_prompt_type as string || '').replace(/[^NV]/g, '')) },
+      ttsVoices: voices.slice(0, count),
+      audioGuideFilename: count > 0 ? voices[0]?.filename || null : null,
+      audioGuide2Filename: count > 1 ? voices[1]?.filename || null : null,
+      ttsSpeakerName1: count > 0 ? voices[0]?.name || '' : '',
+      ttsSpeakerName2: count > 1 ? voices[1]?.name || '' : '',
+      params: { ...s.params, ...ttsVoicePaths(voices, count), audio_prompt_type: audioType + ((s.params.audio_prompt_type as string || '').replace(/[^NV]/g, '')) },
     }))
     // If user added voices to an existing prompt (e.g. typed/pasted a
     // dialogue script first, THEN added voice slots), parse the names
@@ -5821,30 +6027,52 @@ export const useStore = create<AppState>((set, get) => ({
   setTtsVoiceFile: (index, filename, path) => {
     set(s => {
       const voices = [...s.ttsVoices]
-      if (index < voices.length) voices[index] = { ...voices[index], filename, path }
+      if (index < 0 || index >= s.ttsVoiceCount) return {}
+      voices[index] = { ...voices[index], filename, path, characterId: undefined, characterName: undefined }
       return {
         ttsVoices: voices,
+        params: { ...s.params, ...ttsVoicePaths(voices, s.ttsVoiceCount) },
         // Keep legacy fields in sync
         ...(index === 0 ? { audioGuideFilename: filename } : {}),
         ...(index === 1 ? { audioGuide2Filename: filename } : {}),
       }
     })
   },
+  setTtsVoiceCharacter: (index, character) => {
+    if (!character.voice?.path) throw new Error(`${character.name} has no saved voice reference.`)
+    if (index < 0 || index >= ttsVoiceLimit(get().modelOptions)) throw new Error('This model has no available voice slot.')
+    if (index >= get().ttsVoiceCount) get().setTtsVoiceCount(index + 1)
+    set(s => {
+      const voices = [...s.ttsVoices]
+      voices[index] = {
+        name: character.name, filename: character.voice!.filename, path: character.voice!.path,
+        characterId: character.id, characterName: character.name,
+      }
+      return {
+        ttsVoices: voices,
+        ttsSpeakerNamesManual: true,
+        ttsSpeakerName1: voices[0]?.name || '',
+        ttsSpeakerName2: voices[1]?.name || '',
+        audioGuideFilename: voices[0]?.filename || null,
+        audioGuide2Filename: voices[1]?.filename || null,
+        params: { ...s.params, ...ttsVoicePaths(voices, s.ttsVoiceCount) },
+      }
+    })
+  },
   addTtsVoice: () => {
     const count = get().ttsVoiceCount
-    // Respect the model's declared max (e.g. Scenema = 2, Kugel = 6).
-    // Defaults to 6 if the model_def doesn't specify max_voice_count.
-    const maxVoiceCount = ((get().modelOptions as { max_voice_count?: number } | null)?.max_voice_count) ?? 6
+    // Respect declared limits and the model's reference capabilities.
+    const maxVoiceCount = ttsVoiceLimit(get().modelOptions)
     if (count >= maxVoiceCount) return
     get().setTtsVoiceCount(count + 1)
   },
   removeTtsVoice: (index) => {
     set(s => {
-      const voices = s.ttsVoices.filter((_, i) => i !== index)
+      if (index < 0 || index >= s.ttsVoiceCount) return {}
+      const voices = s.ttsVoices.slice(0, s.ttsVoiceCount).filter((_, i) => i !== index)
       const newCount = Math.max(0, s.ttsVoiceCount - 1)
       // Same model-aware mapping as setTtsVoiceCount above.
-      const selection = (s.modelOptions?.audio_prompt_type_sources?.selection as string[] | undefined) || ['', 'A', 'AB']
-      const audioType = selection[Math.min(newCount, selection.length - 1)]
+      const audioType = ttsAudioModeForCount(newCount, s.modelOptions, String(s.params.audio_prompt_type || ''))
       return {
         ttsVoices: voices,
         ttsVoiceCount: newCount,
@@ -5852,7 +6080,7 @@ export const useStore = create<AppState>((set, get) => ({
         ttsSpeakerName2: voices[1]?.name || '',
         audioGuideFilename: voices[0]?.filename || null,
         audioGuide2Filename: voices[1]?.filename || null,
-        params: { ...s.params, audio_prompt_type: audioType + ((s.params.audio_prompt_type as string || '').replace(/[^NV]/g, '')) },
+        params: { ...s.params, ...ttsVoicePaths(voices, newCount), audio_prompt_type: audioType + ((s.params.audio_prompt_type as string || '').replace(/[^NV]/g, '')) },
       }
     })
   },
@@ -5983,97 +6211,24 @@ export const useStore = create<AppState>((set, get) => ({
       || '',
     )
     const isH3PromptModel = architecture.startsWith('minimax_h3')
-    const isLtxPromptModel = state.modelOptions?.multi_window_sequence_controls === true
     const isOmniPromptModel = isH3PromptModel && (
       activeCreateRoute === 'omni'
       || state.modelOptions?.omni_reference === true
       || selectedModelIsOmni
     )
-    const promptMode = isLtxPromptModel
-      ? state.params.ltx_window_prompt_mode
-      : state.params.minimax_h3_sequence_prompt_mode
-    const multiWindowEnabled = isLtxPromptModel
-      ? state.params.ltx_multi_window === true
-      : isOmniPromptModel
-        ? state.params.minimax_h3_reference_sequence === true
-        : state.params.minimax_h3_multi_window === true
-    const promptFps = state.modelOptions?.fps ?? 16
-    const promptSlidingDefaults = state.modelOptions?.sliding_window_defaults
-    const promptOverlapSeconds = state.slidingWindowOverlap / promptFps
-    const promptDiscardSeconds = (
-      promptSlidingDefaults?.discard_last_frames ?? 0
-    ) / promptFps
-    const promptFirstWindowSeconds = (
-      state.studioVideoWorkflow === 'extend'
-      && state.modelOptions?.sliding_window === true
-    )
-      ? continuationFirstWindowFrames(
-          Math.round(state.slidingWindowSeconds * promptFps),
-          state.slidingWindowOverlap,
-        ) / promptFps
-      : state.slidingWindowSeconds
-    const usesMultiplePasses = (
-      multiWindowEnabled
-      && durationWindowPlan(
-        state.durationSeconds,
-        state.slidingWindowSeconds,
-        promptOverlapSeconds,
-        promptDiscardSeconds,
-        promptFirstWindowSeconds,
-      ).windowCount > 1
-    )
-    const alreadyEnhanced = isLtxPromptModel
-      ? Boolean(
-          typeof state.params._ltx_original_prompt === 'string'
-          && state.params._ltx_original_prompt.trim(),
-        )
-      : Boolean(
-          typeof state.params._h3_original_prompt === 'string'
-          && state.params._h3_original_prompt.trim(),
-        )
-
-    const automaticSinglePromptEnhance = (
-      state.generationMode === 'video'
-      && (isH3PromptModel || isLtxPromptModel)
-      && (promptMode === 'auto' || promptMode === 'creative')
-      && !usesMultiplePasses
-      && !alreadyEnhanced
-      && String(state.params.prompt || '').trim()
-    )
-    let generationWorkInFlight = (
-      state.isGenerating
-      || state.jobs.some(job => job.status === 'running' || job.status === 'queued')
-    )
-    if (
-      automaticSinglePromptEnhance
-      && submissionMode !== 'queue'
-      && !generationWorkInFlight
-    ) {
-      try {
-        const active = await api.fetchActiveJobs()
-        generationWorkInFlight = active.jobs.some(job => (
-          job.status === 'running' || job.status === 'queued'
-        ))
-      } catch { /* reconnect polling remains the normal source of truth */ }
-    }
-    const deferAutoEnhance = Boolean(
-      automaticSinglePromptEnhance
-      && (submissionMode === 'queue' || generationWorkInFlight)
-    )
-
-    // Interactive Generate on an idle GPU still enhances first so the result
-    // is visible in Studio. Held queue entries, and Generate clicks made while
-    // another render is active, freeze the raw idea now and carry an enhancer
-    // request inside the job instead. The backend executes it only after that
-    // job owns the generation lock, avoiding an LLM/diffusion VRAM collision.
-    if (automaticSinglePromptEnhance && !deferAutoEnhance) {
-      await state.enhancePrompt()
-      state = get()
-      if (state.isEnhancing || state.promptEnhanceError) return
-    }
-
     // Freeze the Studio configuration at click time. This matters for the
     // split Add to Queue action: later UI edits must belong to a new job.
+    state = {...state, params: structuredClone(state.params), h3WindowPlan: structuredClone(state.h3WindowPlan)}
+    if (state.params._prompt_enhancement?.enhanced_prompt !== state.params.prompt) {
+      // Recipes/defaults can replace the prompt without using setParam.
+      // Never label an unrelated later brief with an earlier source.
+      delete state.params._prompt_enhancement
+    }
+    const deferredEnhance = shouldEnhanceOnGeneration(state)
+    const clearCapturedEnhancement = () => {
+      if (canEnhanceOnGeneration(state)) set(s => s.enhanceOnGenerationRevision === state.enhanceOnGenerationRevision
+        ? {enhanceOnGeneration: null, enhanceOnGenerationRevision: s.enhanceOnGenerationRevision + 1} : {})
+    }
     const holdForQueue = submissionMode === 'queue'
     const queueSupported = (
       state.generationMode !== 'avatar'
@@ -6085,16 +6240,6 @@ export const useStore = create<AppState>((set, get) => ({
     if (holdForQueue && !queueSupported) {
       console.warn('Add to Queue is not available for this specialized edit workflow yet.')
       return
-    }
-
-    // A held job does not touch the GPU, so keep the prompt LLM resident for
-    // enhancing the next queued prompt. It will be unloaded when the queue is
-    // explicitly started, just like Generate Now.
-    if (!holdForQueue && state.llmStatus?.loaded) {
-      try {
-        await api.unloadLlm()
-        set({ llmStatus: { loaded: false, model_id: null, device: null, provider: '' } })
-      } catch { /* best-effort */ }
     }
 
     // Validate: i2v-only models require a start image — Video mode only.
@@ -6721,10 +6866,26 @@ export const useStore = create<AppState>((set, get) => ({
     }
 
     const params: Record<string, unknown> = { ...state.params, generation_mode: state.generationMode, workspace: state.activeWorkspace }
+    // Generate and Add to Queue consume the text/plan already visible in Studio.
+    // Older saved Auto/Creative settings must not schedule an unseen LLM pass.
+    delete params._deferred_prompt_enhance
+    delete params._enhance_on_generation
+    if (deferredEnhance) params._enhance_on_generation = true
+    if (state.generationMode === 'video') {
+      const reviewedH3Plan = !deferredEnhance && state.h3WindowPlan && (
+        isOmniReference ? state.h3WindowPlan.plan_kind === 'reference_sequence'
+          : state.h3WindowPlan.plan_kind !== 'reference_sequence'
+      ) ? state.h3WindowPlan : null
+      params.minimax_h3_sequence_prompt_mode = deferredEnhance ? 'adaptive' : reviewedH3Plan
+        ? (reviewedH3Plan.planning_style === 'adaptive' ? 'adaptive' : reviewedH3Plan.planning_style === 'creative' ? 'creative' : 'auto') : 'manual'
+      params.minimax_h3_window_storyboard = deferredEnhance || !!reviewedH3Plan
+      params.ltx_window_prompt_mode = deferredEnhance ? 'auto' : 'manual'
+    }
     if (state.generationMode === 'video') {
       params._studio_video_workflow = state.studioVideoWorkflow
     }
-    const useStudioFrameInputs = !primaryStudioCreate || activeCreateRoute === 'guided'
+    const useStudioFrameInputs = state.studioVideoWorkflow !== 'animate'
+      && (!primaryStudioCreate || activeCreateRoute === 'guided')
     if (primaryStudioCreate && activeCreateRoute === 'generate') {
       // Generate is deliberately text-only. Preserve any hidden Guided inputs
       // in Studio state so switching back restores them, but never let those
@@ -6889,6 +7050,12 @@ export const useStore = create<AppState>((set, get) => ({
         ) - continuationSourceContextFrames
       }
       params.video_length = requestedFrames
+      if (h3ReferenceSequenceRequested && effectiveH3SequenceClipFrames != null
+        && requestedFrames <= effectiveH3SequenceClipFrames) {
+        // A single pass accepts paragraphs as written, even if a loaded
+        // recipe still has sequence mode enabled.
+        params.minimax_h3_reference_sequence = false
+      }
 
       if (supportsSlidingWindows) {
         const swDefaults = state.modelOptions?.sliding_window_defaults
@@ -6965,7 +7132,7 @@ export const useStore = create<AppState>((set, get) => ({
         })
         if (h3ManualFirstLastPrompts.length !== expectedPromptCount) {
           set({
-            promptEnhanceError: `Manual First / Last sequence needs exactly ${expectedPromptCount} non-empty prompt ${expectedPromptCount === 1 ? 'line' : 'lines'} (window 1 through window ${expectedPromptCount}); found ${h3ManualFirstLastPrompts.length}.`,
+            promptEnhanceError: `This First / Last sequence needs ${expectedPromptCount} prompt lines, one per window; found ${h3ManualFirstLastPrompts.length}. Adjust the prompt lines or press Enhance to plan the sequence before generating.`,
           })
           return
         }
@@ -6990,7 +7157,7 @@ export const useStore = create<AppState>((set, get) => ({
         })
         if (ltxManualPrompts.length !== expectedPromptCount) {
           set({
-            promptEnhanceError: `Manual LTX sequence needs exactly ${expectedPromptCount} non-empty prompt ${expectedPromptCount === 1 ? 'line' : 'lines'} (window 1 through window ${expectedPromptCount}); found ${ltxManualPrompts.length}.`,
+            promptEnhanceError: `This LTX sequence needs ${expectedPromptCount} prompt lines, one per window; found ${ltxManualPrompts.length}. Adjust the prompt lines or press Enhance to plan the sequence before generating.`,
           })
           return
         }
@@ -6998,7 +7165,7 @@ export const useStore = create<AppState>((set, get) => ({
       }
 
       if (
-        h3ReferenceSequenceRequested
+        params.minimax_h3_reference_sequence === true
         && params.minimax_h3_sequence_prompt_mode === 'manual'
         && effectiveH3SequenceClipFrames != null
       ) {
@@ -7017,7 +7184,7 @@ export const useStore = create<AppState>((set, get) => ({
         if (h3ManualSequencePrompts.length !== expectedPromptCount) {
           const unit = nativeContinuation ? 'window' : 'clip'
           set({
-            promptEnhanceError: `Manual Omni sequence needs exactly ${expectedPromptCount} non-empty prompt ${expectedPromptCount === 1 ? 'line' : 'lines'} (${unit} 1 through ${unit} ${expectedPromptCount}); found ${h3ManualSequencePrompts.length}.`,
+            promptEnhanceError: `This Reference sequence needs ${expectedPromptCount} prompt lines, one per ${unit}; found ${h3ManualSequencePrompts.length}. Adjust the prompt lines or press Enhance to plan the sequence before generating.`,
           })
           return
         }
@@ -7235,8 +7402,16 @@ export const useStore = create<AppState>((set, get) => ({
       }
     }
 
+    // Paragraphs in the image composer describe one still, not separate
+    // sliding-window prompts. Otherwise a pasted "Image prompt:" heading
+    // becomes the entire first (and only) image request.
+    if (state.generationMode === 'image') params.multi_prompts_gen_type = 2
+
     // Post-processing settings
-    if (state.spatialUpsampling) params.spatial_upsampling = state.spatialUpsampling
+    if (state.generationMode !== 'video' && state.generationMode !== 'avatar') delete params.face_refiner
+    if (state.generationMode !== 'video') params.temporal_upsampling = ''
+    if (state.generationMode === 'audio') params.spatial_upsampling = ''
+    else if (state.spatialUpsampling) params.spatial_upsampling = state.spatialUpsampling
     if (state.filmGrainIntensity > 0) {
       params.film_grain_intensity = state.filmGrainIntensity
       params.film_grain_saturation = state.filmGrainSaturation
@@ -7342,32 +7517,8 @@ export const useStore = create<AppState>((set, get) => ({
         params.video_length = 0
         params.image_mode = 0
         params.multi_prompts_gen_type = 2  // Preserve full text as one prompt (don't split by newlines)
-        // Save original prompt + speaker names before swap (for load settings)
-        params._tts_original_prompt = params.prompt
-        params._tts_speaker_name1 = state.ttsSpeakerName1 || ''
-        params._tts_speaker_name2 = state.ttsSpeakerName2 || ''
-        // Save all voice names for metadata
-        for (let i = 0; i < state.ttsVoices.length; i++) {
-          (params as Record<string, unknown>)[`_tts_speaker_name${i + 1}`] = state.ttsVoices[i]?.name || ''
-        }
-        params._tts_voice_count = state.ttsVoiceCount
-        // Swap character names → Speaker N: for TTS multi-voice mode
-        const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-        let text = params.prompt as string
-        for (let i = 0; i < state.ttsVoices.length; i++) {
-          const name = state.ttsVoices[i]?.name
-          if (name) {
-            text = text.replace(new RegExp(escapeRegex(name) + '\\s*:', 'gi'), `Speaker ${i + 1}:`)
-          }
-        }
-        params.prompt = text
-        // Set audio_guide paths for each voice (audio_guide, audio_guide2, audio_guide3, etc.)
-        for (let i = 0; i < state.ttsVoices.length; i++) {
-          const voice = state.ttsVoices[i]
-          if (voice?.path) {
-            const key = i === 0 ? 'audio_guide' : `audio_guide${i + 1}`
-            params[key as keyof typeof params] = voice.path as never
-          }
+        if (state.audioSubMode === 'speech') {
+          applyTtsVoices(params, state.ttsVoices, state.ttsVoiceCount, state.modelOptions)
         }
         // TTS duration (max duration for the model to generate)
         if (state.modelOptions?.audio_only) {
@@ -7376,7 +7527,9 @@ export const useStore = create<AppState>((set, get) => ({
           // back to `max` then 600.
           const ds = state.modelOptions.duration_slider
           const sliderDefault = ds?.default ?? ds?.max ?? 600
-          params.duration_seconds = state.durationSeconds < 30 ? sliderDefault : state.durationSeconds
+          params.duration_seconds = ds && (state.modelOptions.audio_segment_max_seconds || ds.max <= 15)
+            ? Math.max(ds.min, Math.min(ds.max, state.durationSeconds))
+            : state.durationSeconds < 30 ? sliderDefault : state.durationSeconds
         }
         // Let the TTS model use its own defaults for steps/guidance if ours are video defaults
         if ((params.num_inference_steps as number) > 0 && state.modelOptions?.default_num_inference_steps == null) {
@@ -7588,6 +7741,7 @@ export const useStore = create<AppState>((set, get) => ({
     ) && (
       state.generationMode !== 'image'
       || state.studioImageWorkflow === 'generate'
+      || !!state.modelOptions?.image_ref_choices
     )
     const imageReferenceChoices = state.modelOptions?.image_ref_choices?.choices ?? []
     const effectiveImageRefType = state.imageRefType || (
@@ -7678,93 +7832,6 @@ export const useStore = create<AppState>((set, get) => ({
       delete params.identity_guidance_scale
     }
 
-    if (deferAutoEnhance) {
-      // Deferred H3 enhancement replaces this one-line idea with one
-      // multiline Context-IR document. Mark it atomic before submission too;
-      // the backend repeats this normalization after enhancement for cached
-      // web assets and direct API callers.
-      if (isH3Model && !usesMultiplePasses) {
-        params.multi_prompts_gen_type = 2
-      }
-      let deferredImagePaths: string[] = []
-      let deferredReferenceContext: string | undefined
-      if (isOmniReference) {
-        const inventory = _omniEnhanceInventory(
-          (params.minimax_h3_references as MiniMaxH3Reference[] | undefined) ?? [],
-        )
-        deferredImagePaths = inventory.imagePaths
-        deferredReferenceContext = inventory.referenceContext
-      } else {
-        const appendPaths = (value: unknown) => {
-          if (typeof value === 'string' && value.trim()) deferredImagePaths.push(value)
-          else if (Array.isArray(value)) {
-            deferredImagePaths.push(...value.filter(
-              (item): item is string => typeof item === 'string' && Boolean(item.trim()),
-            ))
-          }
-        }
-        appendPaths(params.image_start)
-
-        if (isH3Model) {
-          const hasStart = deferredImagePaths.length > 0
-          const beforeEnd = deferredImagePaths.length
-          appendPaths(params.image_end)
-          const hasEnd = deferredImagePaths.length > beforeEnd
-          const injectedPositions = String(params.frames_positions || '')
-            .split(/[\s,]+/)
-            .filter(Boolean)
-          const injectedPaths = (
-            String(params.video_prompt_type || '').includes('KFI')
-            && Array.isArray(params.image_refs)
-          ) ? (params.image_refs as unknown[])
-              .map((path, index) => ({
-                path: typeof path === 'string' ? path : '',
-                position: injectedPositions[index] || '',
-              }))
-              .filter(item => Boolean(item.path && item.position))
-            : []
-          deferredImagePaths.push(...injectedPaths.map(item => item.path))
-
-          let pictureIndex = 0
-          const alignmentLines: string[] = []
-          const fps = state.modelOptions?.fps ?? 24
-          const duration = Number(params.video_length || 0) / fps
-          if (hasStart) {
-            alignmentLines.push(`For the target video, at 0.00 seconds into the target video, <Picture ${++pictureIndex}> (from [Shot 1]) is fully referenced.`)
-          }
-          if (hasEnd) {
-            alignmentLines.push(`At ${duration.toFixed(2)} seconds, <Picture ${++pictureIndex}> is the required final-frame destination.`)
-          }
-          for (const keyframe of injectedPaths) {
-            const match = /^W1:(\d{1,3})$/i.exec(keyframe.position)
-            let localSeconds: number | null = null
-            if (match) localSeconds = duration * Math.min(100, Number(match[1])) / 100
-            else if (/^\d+$/.test(keyframe.position)) localSeconds = Math.max(0, Number(keyframe.position) - 1) / fps
-            else if (/^l$/i.test(keyframe.position)) localSeconds = duration
-            const timing = localSeconds == null
-              ? `at timeline position ${keyframe.position}`
-              : `at ${localSeconds.toFixed(2)} seconds into the target video`
-            alignmentLines.push(`${timing}, <Picture ${++pictureIndex}> is fully referenced as an exact injected frame; reach it naturally and continue from it.`)
-          }
-          deferredReferenceContext = alignmentLines.join('\n') || undefined
-        }
-      }
-
-      params._deferred_prompt_enhance = {
-        prompt: String(params.prompt || ''),
-        mode: state.generationMode,
-        model_type: String(params.model_type || ''),
-        image_paths: deferredImagePaths.length > 0 ? deferredImagePaths : undefined,
-        duration_seconds: state.durationSeconds,
-        window_count: 1,
-        window_size_seconds: state.slidingWindowSeconds,
-        activated_loras: Array.isArray(params.activated_loras) && params.activated_loras.length > 0
-          ? params.activated_loras
-          : undefined,
-        reference_context: deferredReferenceContext,
-      }
-    }
-
     const continuationRuntimeFrames = (
       Number(params.video_length || 0) + continuationSourceContextFrames
     )
@@ -7800,16 +7867,6 @@ export const useStore = create<AppState>((set, get) => ({
       && params.minimax_h3_window_storyboard === false
       && continuationRuntimeFrames > Number(params.sliding_window_size || 0)
     )
-    const ltxWindowSequenceActive = (
-      state.generationMode === 'video'
-      && isLtxSequenceModel
-      && params.ltx_multi_window === true
-      && continuationRuntimeFrames > Number(params.sliding_window_size || 0)
-    )
-    const ltxAutoPlanActive = (
-      ltxWindowSequenceActive
-      && params.ltx_window_prompt_mode !== 'manual'
-    )
     const h3PlanActive = h3WindowStoryboardActive || (
       h3ReferenceSequenceActive && !h3ManualReferenceSequence
     )
@@ -7825,7 +7882,7 @@ export const useStore = create<AppState>((set, get) => ({
       delete params.h3_window_plan
     } else if (state.modelOptions?.sliding_window_auto_prompt_pacing === true) {
       params.minimax_h3_window_storyboard = h3WindowStoryboardActive
-      if (h3WindowStoryboardActive && state.h3WindowPlan) {
+      if (h3WindowStoryboardActive && !deferredEnhance && state.h3WindowPlan) {
         params.h3_window_prompts = state.h3WindowPlan.windows.map(window => window.prompt)
         params.h3_window_plan_signature = state.h3WindowPlan.signature
         params.h3_window_plan = state.h3WindowPlan
@@ -7837,7 +7894,7 @@ export const useStore = create<AppState>((set, get) => ({
       }
     } else if (h3ReferenceSequenceActive) {
       delete params.minimax_h3_window_storyboard
-      if (state.h3WindowPlan?.plan_kind === 'reference_sequence') {
+      if (!deferredEnhance && state.h3WindowPlan?.plan_kind === 'reference_sequence') {
         params.h3_window_prompts = state.h3WindowPlan.windows.map(window => window.prompt)
         params.h3_window_plan_signature = state.h3WindowPlan.signature
         params.h3_window_plan = state.h3WindowPlan
@@ -7855,6 +7912,35 @@ export const useStore = create<AppState>((set, get) => ({
     }
 
     const clientSubmissionId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    delete params._viggle_prepare_only
+    if (state.params.model_type === 'viggle_animate') {
+      const editedFrame = state.params._viggle_edited_frame
+      const hasCharacter = !!state.params.viggle_character?.reference_path
+      if (!params.video_guide || !(state.params.viggle_character ? hasCharacter : editedFrame)) {
+        set({promptEnhanceError: 'Viggle needs a control video and a character image or an edited frame.'})
+        return
+      }
+      const selection = viggleTimeline(state.params)
+      if (selection.length > 0) {
+        Object.assign(params, {_viggle_trim_start: selection.start, _viggle_trim_end: selection.end,
+          _viggle_frame_seconds: selection.frame,
+          video_length: (state.params._duration_planning_mode ?? 'auto') === 'auto'
+            ? Math.max(1, Math.floor(selection.length * 24 + 0.000001))
+            : Math.min(Number(params.video_length) || 124, Math.max(1, Math.floor(selection.length * 24 + 0.000001)))})
+      }
+      Object.assign(params, {prompt: 'Viggle Animate', image_refs: editedFrame ? [editedFrame] : [],
+        image_start: undefined, image_end: undefined, video_source: undefined, frames_positions: undefined,
+        video_prompt_type: 'IVU', image_prompt_type: '', image_mode: 0,
+        override_attention: '',
+        num_inference_steps: 3, flow_shift: 3, sample_solver: 'euler', guidance_scale: 1,
+        sliding_window_size: 124, sliding_window_overlap: 18, sliding_window_discard_last_frames: 0,
+        multi_prompts_gen_type: 2, activated_loras: [], loras_multipliers: '',
+        remove_background_images_ref: 0, image_refs_relative_size: 100, force_fps: '24',
+        minimax_h3_turbo_mode: false, custom_settings: {}})
+    } else {
+      delete params.viggle_character
+      delete params._viggle_prepared
+    }
     const pendingJobId = `pending-${clientSubmissionId}`
     params._client_submission_id = clientSubmissionId
     const newJob: GenerationJob = {
@@ -7868,9 +7954,7 @@ export const useStore = create<AppState>((set, get) => ({
       message: holdForQueue
         ? 'Preparing queue entry...'
         : h3PlanActive
-        ? `Planning H3 ${h3ReferenceSequenceActive ? 'reference sequence' : 'windows'}...`
-        : ltxAutoPlanActive
-          ? 'Planning LTX windows...'
+        ? 'Submitting reviewed H3 prompts...'
         : h3ManualReferenceSequence
           ? 'Preparing H3 manual sequence...'
           : 'Submitting...',
@@ -7891,6 +7975,11 @@ export const useStore = create<AppState>((set, get) => ({
         h3_window_plan,
         ltx_window_plan,
       } = await api.submitGeneration(params, holdForQueue)
+
+      clearCapturedEnhancement()
+      // Also remember steps used by an applied recipe or restored output,
+      // without re-saving the rest of that job's working state.
+      _rememberInferenceSteps(get, set, String(params.model_type || ''), params.num_inference_steps)
 
       if (h3_window_plan) {
         const planFps = state.modelOptions?.fps ?? 24
@@ -7933,13 +8022,7 @@ export const useStore = create<AppState>((set, get) => ({
           ...j,
           id: job_id,
           status: submittedStatus,
-          message: submittedStatus === 'held'
-            ? (deferAutoEnhance || h3PlanActive || ltxAutoPlanActive
-                ? 'Ready - AI planning will run when queue starts'
-                : 'Ready - waiting for Start Queue')
-            : (h3PlanActive || ltxAutoPlanActive
-                ? 'Queued - AI planning waits for generation resources'
-                : 'Queued...'),
+          message: submittedStatus === 'held' ? 'Ready - waiting for Start Queue' : 'Queued...',
           h3WindowPlan: h3_window_plan ?? null,
         } : j),
       }))
@@ -7955,6 +8038,17 @@ export const useStore = create<AppState>((set, get) => ({
         try {
           const status = await api.fetchJobStatus(job_id)
 
+          const current = get().params
+          if (status.viggle_preparation && current.model_type === 'viggle_animate'
+            && current._viggle_prepared?.signature !== status.viggle_preparation.signature
+            && vigglePreparationKey(current.video_guide, current.viggle_character, current.seed)
+              === vigglePreparationKey(params.video_guide, params.viggle_character, params.seed)) {
+            // An automatic run also exposes its prepared frame, without
+            // replacing newer character/appearance choices made during the job.
+            set(s => ({params: {...s.params, _viggle_prepared: status.viggle_preparation!,
+              _viggle_edited_frame: status.viggle_preparation!.image_path}}))
+          }
+
           set(s => ({
             jobs: s.jobs.map(j => j.id !== job_id ? j : {
               ...j,
@@ -7968,6 +8062,7 @@ export const useStore = create<AppState>((set, get) => ({
               error: status.error,
               oomInfo: status.oom_info ?? null,
               h3WindowPlan: status.h3_window_plan ?? j.h3WindowPlan ?? null,
+              enhancement: status.enhancement ?? j.enhancement,
               ..._adaptiveEtaJobFields(status),
             }),
           }))
@@ -7981,7 +8076,7 @@ export const useStore = create<AppState>((set, get) => ({
             clearInterval(pollInterval)
             // Completed job — remove the placeholder, real output now in gallery
             set(s => {
-              const remaining = s.jobs.filter(j => j.id !== job_id)
+              const remaining = s.jobs.filter(j => j.id !== job_id || !!j.enhancement)
               return {
                 jobs: remaining,
                 isGenerating: remaining.some(j => j.status === 'running' || j.status === 'queued'),
@@ -8024,6 +8119,7 @@ export const useStore = create<AppState>((set, get) => ({
             job.client_submission_id === clientSubmissionId
           ))
           if (accepted) {
+            clearCapturedEnhancement()
             set(s => ({
               jobs: s.jobs.filter(job => job.id !== pendingJobId),
             }))
@@ -8043,12 +8139,6 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   startStudioQueue: async () => {
-    if (get().llmStatus?.loaded) {
-      try {
-        await api.unloadLlm()
-        set({ llmStatus: { loaded: false, model_id: null, device: null, provider: '' } })
-      } catch { /* best-effort; generation has its own memory safeguards */ }
-    }
     const result = await api.startStudioQueue()
     if (result.job_ids.length === 0) return
     const released = new Set(result.job_ids)
@@ -8061,29 +8151,30 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   stopGeneration: (jobId) => {
-    if (jobId) {
-      // Cancel specific job on backend, then remove from UI
-      api.cancelJob(jobId).catch(e => console.error('Cancel failed:', e))
-      set(s => {
-        const remaining = s.jobs.filter(j => j.id !== jobId)
-        return {
-          jobs: remaining,
-          isGenerating: remaining.some(j => j.status === 'queued' || j.status === 'running'),
-        }
+    const targets = get().jobs.filter(j => (!jobId || j.id === jobId)
+      && ['held', 'queued', 'running'].includes(j.status))
+    targets.forEach(job => {
+      void api.cancelJob(job.id).catch(error => {
+        console.error('Cancel failed:', error)
+        void get().reconnectJobs()
       })
-    } else {
-      // Cancel all jobs
-      const jobs = get().jobs
-      jobs.forEach(j => {
-        if (j.id) api.cancelJob(j.id).catch(() => {})
-      })
-      set({ jobs: [], isGenerating: false })
-    }
+    })
+    const ids = new Set(targets.map(job => job.id))
+    set(s => {
+      const jobs = s.jobs.filter(j => !ids.has(j.id) || j.enhancement)
+        .map(j => ids.has(j.id) ? {...j, status: 'cancelled' as const, phase: '', message: 'Cancelled'} : j)
+      return {jobs, isGenerating: jobs.some(j => j.status === 'queued' || j.status === 'running')}
+    })
   },
 
-  // UI-only removal of a job tile (e.g. dismissing a failed/cancelled
-  // placeholder). No backend call — the job is already terminal.
+  // Persist dismissal so saved enhancement jobs do not reappear on refresh.
   dismissJob: (jobId) => {
+    if (get().jobs.find(j => j.id === jobId)?.enhancement) {
+      void api.dismissJob(jobId).catch(error => {
+        console.error('Could not dismiss saved job:', error)
+        void get().reconnectJobs()
+      })
+    }
     set(s => {
       const remaining = s.jobs.filter(j => j.id !== jobId)
       return {
@@ -8091,6 +8182,41 @@ export const useStore = create<AppState>((set, get) => ({
         isGenerating: remaining.some(j => j.status === 'running' || j.status === 'queued'),
       }
     })
+  },
+
+  clearCompletedJobs: async () => {
+    const snapshot = get()
+    const completedJobs = snapshot.jobs.filter(job => job.status === 'completed')
+    const completedProjects = snapshot.directorQueue?.entries.filter(entry => entry.status === 'completed') || []
+    const clearedJobs = new Set<string>()
+    const clearedProjects = new Set<string>()
+    let failed = 0
+    // Only clear the history selected at click time. Leave newly completed
+    // work, failed/cancelled jobs, media files, and Director projects intact.
+    // Sequential requests avoid flooding the server with a long history.
+    for (const job of completedJobs) {
+      if (get().jobs.find(current => current.id === job.id)?.status !== 'completed') continue
+      try {
+        if (job.enhancement) await api.dismissJob(job.id)
+        clearedJobs.add(job.id)
+      } catch { failed++ }
+    }
+    for (const entry of completedProjects) {
+      if (get().directorQueue?.entries.find(current => current.id === entry.id)?.status !== 'completed') continue
+      try {
+        await api.deleteDirectorQueueEntry(entry.id, true)
+        clearedProjects.add(entry.id)
+      } catch { failed++ }
+    }
+    set(s => ({
+      jobs: s.jobs.filter(job => job.status !== 'completed' || !clearedJobs.has(job.id)),
+      directorQueue: s.directorQueue ? {...s.directorQueue,
+        entries: s.directorQueue.entries.filter(entry => entry.status !== 'completed' || !clearedProjects.has(entry.id)),
+      } : null,
+      directorQueueEditingEntryId: s.directorQueueEditingEntryId && clearedProjects.has(s.directorQueueEditingEntryId)
+        ? null : s.directorQueueEditingEntryId,
+    }))
+    if (failed) throw new Error(`Could not clear ${failed} completed ${failed === 1 ? 'entry' : 'entries'}. Please try again.`)
   },
 
   reconnectJobs: async () => {
@@ -8115,6 +8241,7 @@ export const useStore = create<AppState>((set, get) => ({
             error: j.error,
             oomInfo: (j as { oom_info?: import('../types').OomInfo | null }).oom_info ?? null,
             h3WindowPlan: j.h3_window_plan ?? null,
+            enhancement: j.enhancement,
             ..._adaptiveEtaJobFields(j),
           }))
         if (newJobs.length > 0) {
@@ -8144,13 +8271,14 @@ export const useStore = create<AppState>((set, get) => ({
                     error: status.error,
                     oomInfo: status.oom_info ?? null,
                     h3WindowPlan: status.h3_window_plan ?? j.h3WindowPlan ?? null,
+              enhancement: status.enhancement ?? j.enhancement,
                     ..._adaptiveEtaJobFields(status),
                   }),
                 }))
                 if (status.status === 'completed' || status.status === 'failed' || status.status === 'cancelled') {
                   clearInterval(pollInterval)
                   set(s => {
-                    const remaining = s.jobs.filter(j => j.id !== job.id)
+                    const remaining = s.jobs.filter(j => j.id !== job.id || !!j.enhancement)
                     return {
                       jobs: remaining,
                       isGenerating: remaining.some(
@@ -8164,7 +8292,7 @@ export const useStore = create<AppState>((set, get) => ({
                 // Job may have been cleaned up
                 clearInterval(pollInterval)
                 set(s => {
-                  const remaining = s.jobs.filter(j => j.id !== job.id)
+                  const remaining = s.jobs.filter(j => j.id !== job.id || !!j.enhancement)
                   return {
                     jobs: remaining,
                     isGenerating: remaining.some(
@@ -8578,6 +8706,7 @@ export const useStore = create<AppState>((set, get) => ({
       params: { ...s.params, ...newParams },
       loraWeights: preset.lora_weights || {},
     }))
+    _rememberInferenceSteps(get, set, get().params.model_type, newParams.num_inference_steps)
   },
 
   deletePreset: async (id) => {
@@ -8619,7 +8748,7 @@ export const useStore = create<AppState>((set, get) => ({
         options.omni_reference === true
         && activeState.params.minimax_h3_reference_sequence === true
       )
-      const isH3 = String(options.architecture || '').startsWith('minimax_h3')
+      const isH3 = !options.audio_only && String(options.architecture || '').startsWith('minimax_h3')
       const maximumDuration = options.omni_reference === true
         ? (nativeMaximumDuration && !h3ReferenceSequence
             ? nativeMaximumDuration
@@ -8713,7 +8842,7 @@ export const useStore = create<AppState>((set, get) => ({
         const memoryPolicy = options.omni_reference === true
           ? options.omni_sequence_memory_policy
           : options.sliding_window_memory_policy
-        const recommendation = h3ReferenceSequence
+        const recommendation = options.omni_reference === true
           ? recommendedH3OmniSequenceProfile(
               memoryPolicy,
               selectedResolution,
@@ -8758,6 +8887,8 @@ export const useStore = create<AppState>((set, get) => ({
       if (options.default_num_inference_steps != null) {
         paramUpdates.num_inference_steps = options.default_num_inference_steps
       }
+      const rememberedSteps = _rememberedModelSteps(activeState, modelType, options)
+      if (rememberedSteps != null) paramUpdates.num_inference_steps = rememberedSteps
       if (options.default_guidance_scale != null) {
         paramUpdates.guidance_scale = options.default_guidance_scale
       }
@@ -8820,6 +8951,10 @@ export const useStore = create<AppState>((set, get) => ({
         // (20 steps) arrive after the user checks Turbo (currently 8-step PDD).
         if (get().params.minimax_h3_turbo_mode === true) {
           paramUpdates.num_inference_steps = selectedPreset.steps
+          const selectedRecipe = options.minimax_h3_turbo.presets?.find(preset => preset.id === selectedPreset.id)
+          if (selectedRecipe?.generation_settings?.guidance_scale != null) {
+            paramUpdates.guidance_scale = selectedRecipe.generation_settings.guidance_scale
+          }
         }
       } else {
         // Model switches preserve most Studio params. Never carry the Full-H3
@@ -8833,23 +8968,32 @@ export const useStore = create<AppState>((set, get) => ({
       const ttsDefaults: Record<string, unknown> = {}
       if (options.audio_only && options.duration_slider) {
         const ds = options.duration_slider
-        ttsDefaults.durationSeconds = ds.default ?? ds.max ?? 600
+        ttsDefaults.durationSeconds = options.audio_segment_max_seconds
+          && activeState.modelOptions?.architecture === options.architecture
+          ? Math.max(ds.min, Math.min(ds.max, durationSeconds))
+          : ds.default ?? ds.max ?? 600
       }
       // Clamp current voice count to the new model's max_voice_count (e.g.
       // user had 5 voices on Kugel, switches to Scenema which caps at 2 —
       // trim slots 3-5 so the UI doesn't show ghost voices that the backend
       // would silently ignore).
-      const newMaxVoiceCount = ((options as { max_voice_count?: number }).max_voice_count) ?? 6
+      const newMaxVoiceCount = options.audio_only ? ttsVoiceLimit(options) : 6
       const currentVoiceCount = get().ttsVoiceCount
-      if (currentVoiceCount > newMaxVoiceCount) {
+      if (options.audio_only && get().audioSubMode === 'speech') {
         const trimmedVoices = get().ttsVoices.slice(0, newMaxVoiceCount)
-        ttsDefaults.ttsVoiceCount = newMaxVoiceCount
+        const nextVoiceCount = Math.min(currentVoiceCount, newMaxVoiceCount)
+        ttsDefaults.ttsVoiceCount = nextVoiceCount
         ttsDefaults.ttsVoices = trimmedVoices
+        ttsDefaults.ttsSpeakerName1 = trimmedVoices[0]?.name || ''
+        ttsDefaults.ttsSpeakerName2 = trimmedVoices[1]?.name || ''
+        ttsDefaults.audioGuideFilename = trimmedVoices[0]?.filename || null
+        ttsDefaults.audioGuide2Filename = trimmedVoices[1]?.filename || null
         // Re-derive audio_prompt_type from the clamped count using the new
         // model's selection list.
-        const selection = (options.audio_prompt_type_sources?.selection as string[] | undefined) || ['', 'A', 'AB']
-        const audioType = selection[Math.min(newMaxVoiceCount, selection.length - 1)]
-        paramUpdates.audio_prompt_type = audioType
+        paramUpdates.audio_prompt_type = newMaxVoiceCount
+          ? ttsAudioModeForCount(nextVoiceCount, options, String(get().params.audio_prompt_type || ''))
+          : ''
+        Object.assign(paramUpdates, ttsVoicePaths(trimmedVoices, nextVoiceCount))
       }
       set(s => ({
         ...ttsDefaults,
@@ -9025,6 +9169,18 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   // Prompt enhancement
+  enhanceOnGeneration: null,
+  enhanceOnGenerationDefault: false,
+  enhanceOnGenerationRevision: 0,
+  setEnhanceOnGeneration: enabled => set(s => ({
+    enhanceOnGeneration: enabled, enhanceOnGenerationRevision: s.enhanceOnGenerationRevision + 1,
+  })),
+  setEnhanceOnGenerationDefault: enabled => {
+    _enhancementDefaultChanged = true
+    set(s => ({enhanceOnGenerationDefault: enabled, enhanceOnGeneration: null,
+      enhanceOnGenerationRevision: s.enhanceOnGenerationRevision + 1}))
+    _persistStickyStudioPreferences(get())
+  },
   isEnhancing: false,
   promptEnhanceError: null,
   h3WindowPlan: null,
@@ -9042,7 +9198,7 @@ export const useStore = create<AppState>((set, get) => ({
     }
   }),
   clearH3WindowPlan: () => set({ h3WindowPlan: null }),
-  enhancePrompt: async (ttsMode?: string) => {
+  enhancePrompt: async (ttsMode?: string, requestedStyle: 'faithful' | 'creative' | 'adaptive' = 'adaptive') => {
     let state = get()
     const primaryStudioCreate = (
       state.generationMode === 'video'
@@ -9062,7 +9218,7 @@ export const useStore = create<AppState>((set, get) => ({
       await state.loadModelOptions(selectedModelType)
       state = get()
       if (state.modelOptions?.model_type !== selectedModelType) {
-        set({ promptEnhanceError: 'The selected video model is still loading. Try Prompt Enhance again in a moment.' })
+        set({ promptEnhanceError: 'The selected model is still loading. Try Prompt Enhance again in a moment.' })
         return
       }
     }
@@ -9086,8 +9242,20 @@ export const useStore = create<AppState>((set, get) => ({
       })
       return
     }
-    const { params, generationMode, startImage, endImage, imageRefs } = state
-    if (!params.prompt.trim()) return
+    const { generationMode, startImage, endImage, imageRefs } = state
+    const isH3Writer = String(state.modelOptions?.architecture || selectedModelDefinition?.architecture || '').startsWith('minimax_h3')
+    const planningStyle = requestedStyle === 'adaptive' && !isH3Writer ? 'faithful' : requestedStyle
+    const clearCapturedEnhancement = () => set(s => s.enhanceOnGenerationRevision === state.enhanceOnGenerationRevision
+      ? {enhanceOnGeneration: null, enhanceOnGenerationRevision: s.enhanceOnGenerationRevision + 1} : {})
+    // Enhancement style belongs to this explicit click, not a future Generate.
+    const params = { ...state.params,
+      ...(generationMode === 'video' ? {
+        minimax_h3_sequence_prompt_mode: planningStyle === 'adaptive' ? 'adaptive' as const : planningStyle === 'creative' ? 'creative' as const : 'auto' as const,
+        minimax_h3_window_storyboard: true,
+        ltx_window_prompt_mode: planningStyle === 'creative' ? 'creative' as const : 'auto' as const,
+      } : {}),
+    }
+    if (!params.prompt.trim() || state.isEnhancing) return
     let generationWorkInFlight = (
       state.isGenerating
       || state.jobs.some(job => job.status === 'running' || job.status === 'queued')
@@ -9103,38 +9271,7 @@ export const useStore = create<AppState>((set, get) => ({
     if (generationWorkInFlight) {
       set({
         isEnhancing: false,
-        promptEnhanceError: 'A generation is already using or waiting for the GPU. Prompt Enhance was not started. Add this setup to the queue and Maestro will run AI planning safely when its turn begins.',
-      })
-      return
-    }
-    if (
-      state.modelOptions?.omni_reference === true
-      && params.minimax_h3_reference_sequence === true
-      && params.minimax_h3_sequence_prompt_mode === 'manual'
-    ) {
-      set({
-        promptEnhanceError: 'Manual Omni sequence mode uses each prompt line exactly as written. Switch Window prompts to AI - Faithful or AI - Creative to use the LLM planner.',
-      })
-      return
-    }
-    if (
-      String(state.modelOptions?.architecture || '').startsWith('minimax_h3')
-      && state.modelOptions?.omni_reference !== true
-      && params.minimax_h3_multi_window === true
-      && params.minimax_h3_window_storyboard === false
-    ) {
-      set({
-        promptEnhanceError: 'Manual H3 multi-window mode uses each prompt line as written. Switch Window prompts to Auto plan to use the LLM planner.',
-      })
-      return
-    }
-    if (
-      state.modelOptions?.multi_window_sequence_controls === true
-      && params.ltx_multi_window === true
-      && params.ltx_window_prompt_mode === 'manual'
-    ) {
-      set({
-        promptEnhanceError: 'Manual LTX multi-window mode uses each prompt line exactly as written. Switch Window prompts to AI - Faithful or AI - Creative to use the LLM planner.',
+        promptEnhanceError: 'A generation is already using or waiting for the GPU. Choose Enhance on generation from the wand menu, then Generate or Add to Queue.',
       })
       return
     }
@@ -9172,67 +9309,9 @@ export const useStore = create<AppState>((set, get) => ({
         : []
 
       if (isOmniReference) {
-        let pictureIndex = 0
-        let videoIndex = 0
-        let audioIndex = 0
-        const labelLines: string[] = []
-        const savedCharacterMedia = new Map<string, { name: string; labels: string[] }>()
-        const bindSavedCharacter = (reference: MiniMaxH3Reference, label: string) => {
-          if (!reference.library_character_id) return
-          const name = (reference.character_name || reference.role || 'Saved character').trim()
-          const binding = savedCharacterMedia.get(reference.library_character_id) ?? { name, labels: [] }
-          binding.labels.push(label)
-          savedCharacterMedia.set(reference.library_character_id, binding)
-        }
-        for (const reference of params.minimax_h3_references ?? []) {
-          const note = (reference.role || reference.filename || 'reference').trim()
-          if (reference.type === 'audio') {
-            const intent = reference.audio_intent ?? 'voice'
-            if (intent === 'drive') {
-              labelLines.push(`Exact target soundtrack: ${note}; intent=AUDIO REUSE / PERFORMANCE DRIVER; retention=fully_preserved; preserve its waveform and audible timeline exactly and synchronize visible action and lip movement to it; this is target conditioning rather than a numbered Omni audio reference`)
-            } else if (intent === 'style') {
-              const label = `<Audio ${++audioIndex}>`
-              labelLines.push(`${label}: ${note}; intent=AUDIO REFERENCE; retention=weak_reference; borrow only rhythm/style/texture and do not copy the source signal or words`)
-            } else {
-              const label = `<Audio ${++audioIndex}>`
-              labelLines.push(`${label}: ${note}; intent=VOICE REFERENCE; retention=reference; use vocal identity/timbre/emotion/delivery for new scripted dialogue without copying source words, timing, waveform, room tone, reverberation, echo, background noise, microphone coloration, or source spatial acoustics; render the voice acoustically inside the target environment`)
-              bindSavedCharacter(reference, label)
-            }
-          } else if (reference.type === 'image') {
-            const label = `<Picture ${++pictureIndex}>`
-            labelLines.push(`${label}: visual identity/appearance reference for ${note}; retention=reference for identity only; do not reproduce its background, framing, composition, or pose`)
-            bindSavedCharacter(reference, label)
-            if (reference.path) imagePaths.push(reference.path)
-          } else {
-            const nextVideoIndex = videoIndex + 1
-            if ((reference.has_audio || reference.audio_path) && reference.include_audio !== false) {
-              labelLines.push(`<Audio ${++audioIndex}>: soundtrack paired with <Video ${nextVideoIndex}>; intent=AUDIO REUSE / PERFORMANCE DRIVER; retention=partially_copy; preserve its audible timeline and synchronize action to it`)
-            }
-            videoIndex = nextVideoIndex
-            const label = `<Video ${videoIndex}>`
-            if (reference.video_intent === 'character') {
-              labelLines.push(`${label}: identity, appearance, and characteristic-motion evidence for ${note}; compile it into that character's Subject; reject its source background, framing, camera, edit rhythm, opening frame, and action`)
-              bindSavedCharacter(reference, label)
-            } else if (reference.video_intent === 'scene') {
-              labelLines.push(`${label}: environment, lighting, and scene-continuity reference for ${note}; do not copy incidental people as target identities`)
-            } else {
-              labelLines.push(`${label}: motion/camera/scene/timing reference for ${note}`)
-            }
-          }
-        }
-        const savedCharacterLines = Array.from(savedCharacterMedia.values()).map((binding, index) => {
-          const subjectNumber = index + 1
-          const subjectLabel = `<Subject ${subjectNumber}>`
-          return (
-            `Saved character "${binding.name}" is exactly ${subjectLabel}: `
-            + `${binding.labels.join(' + ')} all define this one stable character. `
-            + `Whenever the user names ${binding.name}, use ${subjectLabel}. Subject numbering follows `
-            + `this reference inventory, while speaker IDs are assigned independently in first-vocal-event order. `
-            + `Bind every listed voice Audio to this Subject and its event-ordered speaker ID. Do not create another Subject for `
-            + 'a repeated media label, do not renumber this mapping, and do not emit an @ token.'
-          )
-        })
-        referenceContext = [...savedCharacterLines, ...labelLines].join('\n')
+        const inventory = _omniEnhanceInventory(params.minimax_h3_references ?? [])
+        imagePaths.push(...inventory.imagePaths)
+        referenceContext = inventory.referenceContext
       } else if (generationMode === 'image') {
         if (
           (state.studioImageWorkflow === 'inpaint' || state.studioImageWorkflow === 'outpaint')
@@ -9367,9 +9446,6 @@ export const useStore = create<AppState>((set, get) => ({
       ) || params.prompt
 
       if (shouldPlanH3Sequence) {
-        const planningStyle = params.minimax_h3_sequence_prompt_mode === 'creative'
-          ? 'creative'
-          : 'faithful'
         const plan = await api.planH3Sequence({
           prompt: h3PlanningSource,
           model_type: params.model_type,
@@ -9393,10 +9469,12 @@ export const useStore = create<AppState>((set, get) => ({
             prompt: plan.source_prompt || h3PlanningSource,
             _h3_original_prompt: undefined,
             minimax_h3_sequence_clip_frames: effectiveClipFrames,
+            minimax_h3_sequence_prompt_mode: params.minimax_h3_sequence_prompt_mode,
             minimax_h3_sequence_memory_override: state.slidingWindowLocked,
           },
           isEnhancing: false,
         }))
+        clearCapturedEnhancement()
         return
       }
 
@@ -9413,9 +9491,6 @@ export const useStore = create<AppState>((set, get) => ({
         // Multi-window H3 instead needs a structured storyboard whose prompts
         // contain only their own local actions. Endpoint and injected images
         // were collected above in the runtime's stable presentation order.
-        const planningStyle = params.minimax_h3_sequence_prompt_mode === 'creative'
-          ? 'creative'
-          : 'faithful'
         const plan = await api.planH3Windows({
           prompt: h3PlanningSource,
           model_type: params.model_type,
@@ -9446,11 +9521,13 @@ export const useStore = create<AppState>((set, get) => ({
             prompt: plan.source_prompt || h3PlanningSource,
             _h3_original_prompt: undefined,
             sliding_window_size: effectiveWindowFrames,
+            minimax_h3_sequence_prompt_mode: params.minimax_h3_sequence_prompt_mode,
             minimax_h3_multi_window: true,
             minimax_h3_window_storyboard: true,
           },
           isEnhancing: false,
         }))
+        clearCapturedEnhancement()
         return
       }
 
@@ -9466,7 +9543,10 @@ export const useStore = create<AppState>((set, get) => ({
       ) ? params._ltx_original_prompt : params.prompt
 
       const result = await api.llmEnhancePrompt({
-        prompt: ltxEnhanceSource,
+        prompt: generationMode === 'audio' && state.audioSubMode === 'speech'
+          ? ttsCharacterEnhancePrompt(ltxEnhanceSource, state.ttsVoices,
+              ttsSpeakingVoiceCount(state.ttsVoiceCount, state.modelOptions, String(params.audio_prompt_type || '')))
+          : ltxEnhanceSource,
         mode: generationMode,
         model_type: params.model_type,
         max_new_tokens: maxTokens,
@@ -9476,16 +9556,9 @@ export const useStore = create<AppState>((set, get) => ({
         window_size_seconds: (generationMode === 'video' || generationMode === 'avatar') ? state.slidingWindowSeconds : undefined,
         activated_loras: params.activated_loras.length > 0 ? params.activated_loras : undefined,
         tts_enhance_mode: ttsMode || undefined,
-        tts_voice_count: state.ttsVoiceCount || undefined,
+        tts_voice_count: ttsSpeakingVoiceCount(state.ttsVoiceCount, state.modelOptions, String(params.audio_prompt_type || '')) || undefined,
         reference_context: referenceContext,
-        planning_style: (
-          generationMode === 'video'
-          && (
-            isLtxSequence
-              ? params.ltx_window_prompt_mode === 'creative'
-              : params.minimax_h3_sequence_prompt_mode === 'creative'
-          )
-        ) ? 'creative' : 'faithful',
+        planning_style: planningStyle,
       })
       const preserveH3Source = (
         generationMode === 'video'
@@ -9513,14 +9586,25 @@ export const useStore = create<AppState>((set, get) => ({
         params: {
           ...s.params,
           prompt: preserveLtxPlan ? enhancedLtxLines.join('\n') : result.enhanced,
+          _prompt_enhancement: {
+            version: 1,
+            state: 'complete',
+            original_prompt: params._prompt_enhancement?.enhanced_prompt === params.prompt
+              ? params._prompt_enhancement.original_prompt || params.prompt : params.prompt,
+            enhanced_prompt: preserveLtxPlan ? enhancedLtxLines.join('\n') : result.enhanced,
+            warnings: result.warnings || [],
+          },
           ...(preserveH3Source ? { _h3_original_prompt: preserveH3Source } : {}),
           ...(preserveLtxSource ? { _ltx_original_prompt: ltxSourcePrompt } : {}),
           ...(preserveLtxPlan ? {
             ltx_window_prompts: enhancedLtxLines,
           } : {}),
         },
+        promptEnhanceError: result.warnings?.length
+          ? `Review this AI draft before generating\n${result.warnings.join('\n')}` : null,
         isEnhancing: false,
       }))
+      clearCapturedEnhancement()
       // Auto-parse speaker names from the enhanced text whenever there are
       // voice slots to fill. Previously gated to dialogue mode only; the user
       // expects monologue enhance ("Peter: Hello world.") to also populate
@@ -9547,6 +9631,13 @@ export const useStore = create<AppState>((set, get) => ({
   directorAudioPath: null,
   directorAnalysis: null,
   directorPlannedClips: [],
+  directorMusicClipSeconds: null,
+  setDirectorMusicClipSeconds: (seconds) => {
+    if (seconds !== null && (!Number.isFinite(seconds) || seconds <= 0)) return
+    _directorMusicClipChanged = true
+    set({directorMusicClipSeconds: seconds})
+    _persistStickyStudioPreferences(get())
+  },
   directorEnergyBias: 0,
   directorClipPlans: [],
   directorSceneDescription: '',
@@ -9606,7 +9697,7 @@ export const useStore = create<AppState>((set, get) => ({
   directorLlmLog: [],
   directorSkill: null,
   directorMusicSource: null,
-  directorMusicModel: 'ace_step_v1_5_xl_sft_lm_4b',
+  directorMusicModel: DEFAULT_MUSIC_MODEL,
   directorSongDescription: '',
   directorSongInstrumental: false,
   directorSongStyle: '',
@@ -9614,13 +9705,15 @@ export const useStore = create<AppState>((set, get) => ({
   directorSongDuration: 120,
   directorTrackGenerating: false,
   setDirectorMusicSource: (s) => set({ directorMusicSource: s }),
-  setDirectorMusicModel: (modelType) => set({
-    directorMusicModel: modelType,
-    // The two model families use different caption contracts. Never retain a
-    // hidden song plan written for the previously selected generator.
-    directorSongStyle: '',
-    directorSongLyrics: '',
-  }),
+  setDirectorMusicModel: (modelType) => {
+    set({
+      directorMusicModel: modelType,
+      // Do not retain a song plan written for the previous generator.
+      directorSongStyle: '',
+      directorSongLyrics: '',
+    })
+    _persistStickyStudioPreferences(get())
+  },
   setDirectorSongDescription: (v) => set({ directorSongDescription: v }),
   setDirectorSongInstrumental: (v) => set({ directorSongInstrumental: v }),
   setDirectorSongStyle: (v) => set({ directorSongStyle: v }),
@@ -9713,15 +9806,17 @@ export const useStore = create<AppState>((set, get) => ({
     }
     return { directorVideoInferenceStepsByModel: next }
   }),
-  setDirectorVideoMaxShotFrames: (modelType, frames) => set(s => {
-    const next = { ...s.directorVideoMaxShotFramesByModel }
+  setDirectorVideoMaxShotFrames: (modelType, frames) => {
+    _directorGpuLimitsChanged = true
+    const next = { ...get().directorVideoMaxShotFramesByModel }
     if (frames == null || !Number.isFinite(frames) || frames <= 0) {
       delete next[modelType]
     } else {
       next[modelType] = Math.round(frames)
     }
-    return { directorVideoMaxShotFramesByModel: next }
-  }),
+    set({ directorVideoMaxShotFramesByModel: next })
+    _persistStickyStudioPreferences(get())
+  },
   setDirectorH3TurboMode: (modelType, enabled) => set(s => ({
     directorH3TurboModeByModel: {
       ...s.directorH3TurboModeByModel,
@@ -9976,14 +10071,11 @@ export const useStore = create<AppState>((set, get) => ({
       set({ directorLoadingMessage: 'Planning clip structure...' })
       const structure = await api.planClipStructure({
         analysis,
+        ...await _directorTimelineOptions(get()),
         energy_bias: get().directorEnergyBias,
         fps: get().modelOptions?.fps ?? 16,
         frames_steps: get().modelOptions?.frames_steps ?? 4,
         frames_minimum: get().modelOptions?.frames_minimum ?? 5,
-        // Authoritative: the Director's video model (modelOptions above may
-        // belong to a music model — e.g. ACE-Step after generating a track —
-        // whose fps fallback of 16 used to shrink clips by 16/25).
-        video_model: get().selectedModelPerMode.video || undefined,
       })
       // Music Video skips the manual clip-structure review step entirely —
       // the beat-aligned clips are used as-is. Short Film keeps it.
@@ -10168,18 +10260,21 @@ export const useStore = create<AppState>((set, get) => ({
   directorSetEnergyBias: async (bias) => {
     const { directorAnalysis } = get()
     if (!directorAnalysis) return
+    const requestToken = ++_directorStructureRequestToken
     set({ directorLoading: true, directorEnergyBias: bias })
     try {
       const structure = await api.planClipStructure({
         analysis: directorAnalysis,
+        ...await _directorTimelineOptions(get()),
         energy_bias: bias,
         fps: get().modelOptions?.fps ?? 16,
         frames_steps: get().modelOptions?.frames_steps ?? 4,
         frames_minimum: get().modelOptions?.frames_minimum ?? 5,
-        video_model: get().selectedModelPerMode.video || undefined,
       })
+      if (requestToken !== _directorStructureRequestToken || get().directorAnalysis !== directorAnalysis) return
       set({ directorPlannedClips: structure.clips, directorLoading: false })
     } catch (e: unknown) {
+      if (requestToken !== _directorStructureRequestToken) return
       const msg = e instanceof Error ? e.message : 'Failed to update structure'
       set({ directorLoading: false, directorError: msg })
     }
@@ -10303,12 +10398,15 @@ export const useStore = create<AppState>((set, get) => ({
       // (legacy v1 path); only fall back to true when servicesConfig
       // hasn't loaded yet or the field is undefined.
       const useV2 = get().servicesConfig?.use_director_v2 ?? true
-      let plans: Array<{ video_prompt: string; image_prompt: string }>
+      const timelineOptions = await _directorTimelineOptions(get())
+      let plans: ClipPlan[]
+      let timeline = directorPlannedClips
 
       if (useV2) {
         // Director v2: structured planning → rendering → validation
         const result = await api.directorV2Plan({
           skill_type: 'music_video',
+          ...timelineOptions,
           clips: directorPlannedClips,
           scene_description: directorSceneDescription,
           lyrics: directorAnalysis?.lyrics ?? undefined,
@@ -10318,14 +10416,13 @@ export const useStore = create<AppState>((set, get) => ({
           speaker_mappings: Object.keys(speakerMappings).length > 0 ? speakerMappings : undefined,
           prompt_type: promptType,
         })
-        plans = result.clip_plans.map(p => ({
-          video_prompt: p.video_prompt || '',
-          image_prompt: p.image_prompt || '',
-        }))
+        plans = result.clip_plans
+        timeline = result.planned_clips || timeline
       } else {
         // Legacy: direct LLM prompt generation
         const result = await api.planClipPromptsAndImages({
           clips: directorPlannedClips,
+          ...timelineOptions,
           scene_description: directorSceneDescription,
           lyrics: directorAnalysis?.lyrics ?? undefined,
           bpm: directorAnalysis?.bpm ?? 120,
@@ -10334,13 +10431,13 @@ export const useStore = create<AppState>((set, get) => ({
           speaker_mappings: Object.keys(speakerMappings).length > 0 ? speakerMappings : undefined,
           prompt_type: promptType,
         })
-        plans = result.clip_plans.map(p => ({
-          video_prompt: p.video_prompt || '',
-          image_prompt: p.image_prompt || '',
-        }))
+        plans = result.clip_plans
+        timeline = result.planned_clips || timeline
       }
       set({
         directorClipPlans: plans,
+        directorPlannedClips: timeline,
+        directorClipImages: [],
         directorStep: generateShotImages ? 'review' : 'review_video',
         directorLoading: false,
       })
@@ -10436,8 +10533,10 @@ export const useStore = create<AppState>((set, get) => ({
     )
     // Director's hardcoded image_model fallback is flux2_klein_9b, which is
     // step-distilled to 4 inference steps (per app/defaults/flux2_klein_9b.json).
-    const imageParams = savedParamsPerMode.image || { num_inference_steps: 4, guidance_scale: 1, resolution: directorRes }
-    imageParams.resolution = directorRes
+    const imageParams = {
+      ...(savedParamsPerMode.image || { num_inference_steps: 4, guidance_scale: 1 }),
+      resolution: directorRes,
+    }
     const imageLora = savedLoraPerMode.image
 
     const buildImgPostProc = (): Record<string, unknown> => {
@@ -11113,6 +11212,7 @@ export const useStore = create<AppState>((set, get) => ({
   // Workspaces
   workspaces: [],
   activeWorkspace: 'default',
+  browsingAllFolders: false,
   browsingUploads: false,
   loadWorkspaces: async () => {
     try {
@@ -11126,14 +11226,14 @@ export const useStore = create<AppState>((set, get) => ({
     // Virtual "Uploads" view: browse the uploads folder WITHOUT touching
     // the server-side active workspace — generations keep saving to the
     // real workspace; uploads are read-only in the gallery.
-    if (name === '__uploads__') {
-      set({ browsingUploads: true, outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
+    if (name === '__uploads__' || name === '__all__') {
+      set({ browsingAllFolders: name === '__all__', browsingUploads: name === '__uploads__', outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
       get().loadOutputs()
       return
     }
     try {
       await api.setActiveWorkspace(name)
-      set({ browsingUploads: false, activeWorkspace: name, outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
+      set({ browsingAllFolders: false, browsingUploads: false, activeWorkspace: name, outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
       get().loadOutputs()
       get().loadWorkspaces()
     } catch (e) {
@@ -11144,7 +11244,7 @@ export const useStore = create<AppState>((set, get) => ({
     try {
       await api.createWorkspace(name)
       await api.setActiveWorkspace(name)
-      set({ browsingUploads: false, activeWorkspace: name, outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
+      set({ browsingAllFolders: false, browsingUploads: false, activeWorkspace: name, outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
       get().loadOutputs()
       get().loadWorkspaces()
     } catch (e) {
@@ -11160,7 +11260,9 @@ export const useStore = create<AppState>((set, get) => ({
     // widen it by force-resetting state the server never changed).
     const result = await api.deleteWorkspace(name)
     if (result.switched_to_default) {
-      set({ browsingUploads: false, activeWorkspace: 'default', outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
+      set({ browsingAllFolders: false, browsingUploads: false, activeWorkspace: 'default', outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
+      get().loadOutputs()
+    } else if (get().browsingAllFolders) {
       get().loadOutputs()
     }
     get().loadWorkspaces()
@@ -11178,6 +11280,7 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   outputs: [],
+  outputsCursor: null,
   outputsTotal: 0,
   selectedOutput: 0,
   setSelectedOutput: (i) => {
@@ -11185,38 +11288,21 @@ export const useStore = create<AppState>((set, get) => ({
     const outputs = get().filteredOutputs()
     const output = outputs[i]
     if (output) {
-      get().loadOutputMetadata(output.name)
+      get().loadOutputMetadata(output.name, output.workspace)
     } else {
+      ++_galleryMetadataRevision
       set({ selectedOutputMeta: null })
     }
   },
   mediaFilter: 'all',
   outputSearchQuery: '',
   setMediaFilter: (f) => {
-    const prevFilter = get().mediaFilter
-    set({ mediaFilter: f, selectedOutput: 0 })
-    // Backend-filtered modes: reload from server to get ALL matches
-    const backendFilters: MediaFilter[] = ['favorites', 'multiclip']
-    if (backendFilters.includes(f) || backendFilters.includes(prevFilter)) {
-      get().loadOutputs()
-      return
-    }
-    // Load metadata for first item in new filtered list
-    const filtered = get().filteredOutputs()
-    if (filtered.length > 0) {
-      get().loadOutputMetadata(filtered[0].name)
-    } else {
-      set({ selectedOutputMeta: null })
-    }
+    set({ mediaFilter: f, selectedOutput: 0, selectedOutputMeta: null })
+    void get().loadOutputs()
   },
   setOutputSearchQuery: (q) => {
-    set({ outputSearchQuery: q, selectedOutput: 0 })
-    if (q.trim()) {
-      get().loadOutputs()
-    } else if (get().mediaFilter === 'all') {
-      // Clear search: reload normal paginated view
-      get().loadOutputs()
-    }
+    set({ outputSearchQuery: q, selectedOutput: 0, selectedOutputMeta: null })
+    void get().loadOutputs()
   },
   filteredOutputs: () => {
     const { outputs, mediaFilter } = get()
@@ -11225,127 +11311,76 @@ export const useStore = create<AppState>((set, get) => ({
 
   outputsLoading: false,
   loadOutputs: async () => {
-    const PAGE_SIZE = 100
-    const { mediaFilter, outputSearchQuery, browsingUploads } = get()
-    const isBackendFilter = mediaFilter === 'favorites' || mediaFilter === 'multiclip' || outputSearchQuery.trim()
-    const ws = browsingUploads ? '__uploads__' : undefined
-    set({ outputsLoading: true })
+    const revision = ++_galleryRevision
+    ++_galleryMetadataRevision
+    const options = galleryQuery(get())
+    set({ outputsLoading: true, selectedOutputMeta: null })
     try {
-      const { outputs: apiOutputs, total } = isBackendFilter
-        ? await api.fetchOutputs(0, 0, {
-            favoritesOnly: mediaFilter === 'favorites',
-            multiclipOnly: mediaFilter === 'multiclip',
-            search: outputSearchQuery.trim() || undefined,
-            workspace: ws,
-          })
-        : await api.fetchOutputs(PAGE_SIZE, 0, { workspace: ws })
-      const outputs: OutputFile[] = apiOutputs.map(o => ({
-        name: o.name,
-        url: o.url,
-        type: o.type,
-        mode: (o.mode as OutputFile['mode']) || null,
-        edit_sub_mode: (o.edit_sub_mode as OutputFile['edit_sub_mode']) || null,
-        favorite: o.favorite || false,
-        size: o.size,
-        created_at: o.created_at,
-        metadata_ready: o.metadata_ready,
-        metadata_updated_at: o.metadata_updated_at,
-      }))
-      set({ outputs, outputsTotal: total, selectedOutput: 0, outputsLoading: false })
-      if (outputs.length > 0) {
-        get().loadOutputMetadata(outputs[0].name)
-      }
+      const result = await api.fetchOutputs(100, 0, options)
+      if (revision !== _galleryRevision || JSON.stringify(options) !== JSON.stringify(galleryQuery(get()))) return
+      const outputs = result.outputs.map(galleryOutput)
+      set({ outputs, outputsTotal: result.total, outputsCursor: result.next_cursor || null,
+            selectedOutput: 0, selectedOutputMeta: null, outputsLoading: false })
+      if (outputs[0]) void get().loadOutputMetadata(outputs[0].name, outputs[0].workspace)
     } catch (e) {
       console.error('Failed to load outputs:', e)
-      set({ outputsLoading: false })
+    } finally {
+      if (revision === _galleryRevision) set({ outputsLoading: false })
     }
   },
 
-  // Load next page of outputs (infinite scroll)
   loadMoreOutputs: async () => {
-    const PAGE_SIZE = 100
-    const current = get().outputs
-    const total = get().outputsTotal
-    if (current.length >= total) return // All loaded
+    const state = get()
+    if (_galleryMorePending || state.outputsLoading || state.outputs.length >= state.outputsTotal) return
+    const revision = _galleryRevision
+    const options = galleryQuery(state)
+    _galleryMorePending = true
     try {
-      const { outputs: apiOutputs, total: newTotal } = await api.fetchOutputs(PAGE_SIZE, current.length, {
-        workspace: get().browsingUploads ? '__uploads__' : undefined,
-      })
-      const more: OutputFile[] = apiOutputs.map(o => ({
-        name: o.name,
-        url: o.url,
-        type: o.type,
-        mode: (o.mode as OutputFile['mode']) || null,
-        edit_sub_mode: (o.edit_sub_mode as OutputFile['edit_sub_mode']) || null,
-        favorite: o.favorite || false,
-        size: o.size,
-        created_at: o.created_at,
-        metadata_ready: o.metadata_ready,
-        metadata_updated_at: o.metadata_updated_at,
-      }))
-      // Deduplicate (in case items shifted during generation)
-      const existingNames = new Set(current.map(o => o.name))
-      const unique = more.filter(o => !existingNames.has(o.name))
-      if (unique.length > 0) {
-        set({ outputs: [...current, ...unique], outputsTotal: newTotal })
-      }
-    } catch {
-      // Silent fail
-    }
-  },
-
-  // Incremental refresh: only fetch the newest items to detect new outputs during generation
-  refreshOutputs: async () => {
-    try {
-      // Only fetch first page — new outputs appear at the top (newest first)
-      const { outputs: apiOutputs, total } = await api.fetchOutputs(50, 0)
-      const fresh: OutputFile[] = apiOutputs.map(o => ({
-        name: o.name,
-        url: o.url,
-        type: o.type,
-        mode: (o.mode as OutputFile['mode']) || null,
-        edit_sub_mode: (o.edit_sub_mode as OutputFile['edit_sub_mode']) || null,
-        favorite: o.favorite || false,
-        size: o.size,
-        created_at: o.created_at,
-        metadata_ready: o.metadata_ready,
-        metadata_updated_at: o.metadata_updated_at,
-      }))
+      const result = await api.fetchOutputs(100, state.outputsCursor ? 0 : state.outputs.length,
+        { ...options, cursor: state.outputsCursor || undefined })
+      if (revision !== _galleryRevision || JSON.stringify(options) !== JSON.stringify(galleryQuery(get()))) return
       const current = get().outputs
-      const currentNames = new Set(current.map(o => o.name))
-      const newItems = fresh.filter(o => !currentNames.has(o.name))
-      const freshByName = new Map(fresh.map(output => [output.name, output]))
-      // Existing files can gain their authoritative sidecar after first being
-      // shown from embedded metadata. Merge refreshed entries as well as new
-      // ones so mounted cards observe metadata_ready changing false -> true.
-      let metadataChanged = false
-      const refreshedCurrent = current.map(output => {
-        const freshOutput = freshByName.get(output.name)
-        if (!freshOutput) return output
-        if (
-          freshOutput.metadata_ready !== output.metadata_ready
-          || freshOutput.metadata_updated_at !== output.metadata_updated_at
-        ) {
-          metadataChanged = true
-          return freshOutput
-        }
-        return output
-      })
-      if (newItems.length > 0 || metadataChanged) {
-        const merged = [...newItems, ...refreshedCurrent]
-        const sel = get().selectedOutput
-        set({ outputs: merged, outputsTotal: total, selectedOutput: sel + newItems.length })
-      }
-    } catch {
-      // Silent fail for background refresh
+      const identities = new Set(current.map(outputIdentity))
+      const more = result.outputs.map(galleryOutput).filter(o => !identities.has(outputIdentity(o)))
+      set({ outputs: [...current, ...more], outputsTotal: result.total, outputsCursor: result.next_cursor || null })
+    } catch (e) {
+      console.error('Failed to load more outputs:', e)
+    } finally {
+      _galleryMorePending = false
     }
   },
 
-  toggleFavorite: async (name) => {
+  refreshOutputs: async () => {
+    const revision = _galleryRevision
+    const options = galleryQuery(get())
     try {
-      const result = await api.toggleFavorite(name)
+      const result = await api.fetchOutputs(100, 0, options)
+      if (revision !== _galleryRevision || JSON.stringify(options) !== JSON.stringify(galleryQuery(get()))) return
+      const fresh = result.outputs.map(galleryOutput)
+      const current = get().outputs
+      const selected = get().filteredOutputs()[get().selectedOutput]
+      const refreshed = new Map(fresh.map(output => [outputIdentity(output), output]))
+      const oldIds = new Set(current.map(outputIdentity))
+      const newItems = fresh.filter(output => !oldIds.has(outputIdentity(output)))
+      const merged = [...newItems, ...current.map(output => refreshed.get(outputIdentity(output)) || output)]
+      if (selected) {
+        const selectedIndex = merged.findIndex(output => outputIdentity(output) === outputIdentity(selected))
+        set({ selectedOutput: Math.max(0, selectedIndex) })
+      }
+      set({ outputs: merged, outputsTotal: result.total,
+            ...(current.length === 0 ? { outputsCursor: result.next_cursor || null } : {}) })
+    } catch {
+      // A transient disconnect must not clear the current library.
+    }
+  },
+
+  toggleFavorite: async (name, workspace) => {
+    const origin = workspace || get().activeWorkspace
+    try {
+      const result = await api.toggleFavorite(name, origin)
       set(s => ({
-        outputs: s.outputs.map(o => o.name === name ? { ...o, favorite: result.favorite } : o),
+        outputs: s.outputs.map(o => o.name === name && (o.workspace || s.activeWorkspace) === origin
+          ? { ...o, favorite: result.favorite } : o),
       }))
     } catch (e) {
       console.error('Failed to toggle favorite:', e)
@@ -11356,16 +11391,19 @@ export const useStore = create<AppState>((set, get) => ({
   selectedOutputMeta: null,
   metadataLoading: false,
 
-  loadOutputMetadata: async (name) => {
+  loadOutputMetadata: async (name, workspace) => {
+    const revision = ++_galleryMetadataRevision
     set({ metadataLoading: true, selectedOutputMeta: null })
     try {
-      const meta = await api.fetchOutputMetadata(name)
+      const meta = await api.fetchOutputMetadata(name, workspace)
+      if (revision !== _galleryMetadataRevision) return
       set({ selectedOutputMeta: meta, metadataLoading: false })
     } catch (e) {
       // Diagnostic: surface metadata-fetch failures (the usual cause of a
       // "Load Settings does nothing" report on slow/VPN links) instead of
       // swallowing them silently.
       console.error('[LoadSettings] fetchOutputMetadata FAILED for', name, '-', e)
+      if (revision !== _galleryMetadataRevision) return
       set({ selectedOutputMeta: null, metadataLoading: false })
     }
   },
@@ -11383,7 +11421,7 @@ export const useStore = create<AppState>((set, get) => ({
       const pendingOutput = get().filteredOutputs()[get().selectedOutput]
       console.log('[LoadSettings] no meta yet — on-demand fetch for:', pendingOutput?.name ?? '(no output at index)')
       if (pendingOutput) {
-        await get().loadOutputMetadata(pendingOutput.name)
+        await get().loadOutputMetadata(pendingOutput.name, pendingOutput.workspace)
         selectedOutputMeta = get().selectedOutputMeta
         console.log('[LoadSettings] after on-demand fetch — params present:', !!selectedOutputMeta?.params,
                     '| source:', selectedOutputMeta?.source)
@@ -11447,7 +11485,7 @@ export const useStore = create<AppState>((set, get) => ({
     // `post_processing` model id. Restore them into the new grouped Studio
     // hierarchy rather than asking model discovery to resolve that id. Older
     // sidecars only carry edit_sub_mode; newer ones also carry top-level tool.
-    const restoredTool = (
+    const restoredTool = selectedOutputMeta.tool === 'media_flow' ? 'upscale' : (
       selectedOutputMeta.tool === 'upscale'
       || selectedOutputMeta.tool === 'film_grain'
       || selectedOutputMeta.tool === 'revoice'
@@ -11491,10 +11529,14 @@ export const useStore = create<AppState>((set, get) => ({
             ...(restoredUpscaleMedia === 'image'
               ? { studioImageWorkflow: 'upscale' as StudioImageWorkflow }
               : { studioVideoWorkflow: 'upscale' as StudioVideoWorkflow }),
-            toolsSourcePath: sourceName || null,
+            toolsSourcePath: String(p.media_path || sourceName) || null,
             toolsSourceName: sourceName || null,
             toolsSourceUrl: sourceUrl,
-            toolsUpscaleMethod: String(p.method || 'flashvsr2'),
+            toolsUpscaleMethod: String(p.method ?? p.spatial_upsampling ?? 'flashvsr2'),
+            params: { ...get().params, temporal_upsampling: String(p.temporal_upsampling || ''),
+              custom_settings: { ...get().params.custom_settings,
+                dlss_intensity: Number(p.dlss_intensity ?? 1), dlss_depth: String(p.dlss_depth ?? 'half'),
+                dlss_motion: String(p.dlss_motion ?? 'original') } },
           }
         : restoredTool === 'film_grain'
           ? {
@@ -11651,8 +11693,8 @@ export const useStore = create<AppState>((set, get) => ({
     // First / Last sidecars created before the explicit prompt-mode field
     // used minimax_h3_window_storyboard as the UI's Auto/Manual switch.
     // Prefer the explicit field, while keeping those existing clips durable.
-    const restoredH3SequencePromptMode: 'auto' | 'creative' | 'manual' | undefined = (
-      p.minimax_h3_sequence_prompt_mode === 'manual'
+    const restoredH3SequencePromptMode: 'auto' | 'creative' | 'adaptive' | 'manual' | undefined = (
+      p.minimax_h3_sequence_prompt_mode === 'adaptive' ? 'adaptive' : p.minimax_h3_sequence_prompt_mode === 'manual'
         ? 'manual'
         : p.minimax_h3_sequence_prompt_mode === 'creative'
           ? 'creative'
@@ -11723,6 +11765,7 @@ export const useStore = create<AppState>((set, get) => ({
     // For image_mode: use 1 (I2V UI toggle) if start image was used, else 0
     const newParams: Partial<GenerateParams> = {
       prompt: originalPrompt,
+      _prompt_enhancement: p._prompt_enhancement as GenerateParams['_prompt_enhancement'],
       model_type: modelType,
       resolution: (p.resolution as string) || '1280x720',
       video_length: (p.video_length as number) || 81,
@@ -11788,6 +11831,19 @@ export const useStore = create<AppState>((set, get) => ({
     // caption can't leak into an unrelated restore.
     newParams.alt_prompt = (p.alt_prompt as string) || ''
     newParams.video_guide = (p.video_guide as string) || ''
+    newParams._viggle_edited_frame = (p._viggle_edited_frame as string)
+      || (p.model_type === 'viggle_animate' && Array.isArray(p.image_refs) ? String(p.image_refs[0] || '') : undefined)
+    newParams._viggle_source_seconds = Number(p._viggle_source_seconds) || undefined
+    newParams._viggle_frame_seconds = Number(p._viggle_frame_seconds) || 0
+    newParams._viggle_trim_start = p.model_type === 'viggle_animate' && p._viggle_trim_start != null
+      ? Number(p._viggle_trim_start) : undefined
+    newParams._viggle_trim_end = p.model_type === 'viggle_animate' && p._viggle_trim_end != null
+      ? Number(p._viggle_trim_end) : undefined
+    newParams.viggle_character = p.model_type === 'viggle_animate' && p.viggle_character && typeof p.viggle_character === 'object'
+      ? p.viggle_character as import('../types').ViggleCharacterOptions : undefined
+    newParams._viggle_prepared = newParams.viggle_character && p._viggle_prepared && typeof p._viggle_prepared === 'object'
+      ? p._viggle_prepared as import('../types').VigglePreparedFrame : undefined
+    newParams._viggle_prepare_only = undefined
     newParams.video_mask = (p.video_mask as string) || ''
     newParams.image_guide = (p.image_guide as string) || ''
     newParams.image_mask = (p.image_mask as string) || ''
@@ -11820,6 +11876,8 @@ export const useStore = create<AppState>((set, get) => ({
     newParams.tts_comp_makeup = (p.tts_comp_makeup as number) ?? undefined
     newParams.tts_voice_count = (p.tts_voice_count as number) ?? undefined
     newParams.voice_clone_enabled = p.voice_clone_enabled === true
+    newParams.face_refiner = p.face_refiner && typeof p.face_refiner === 'object'
+      ? p.face_refiner as import('../types').FaceRefinerOptions : undefined
     newParams.voice_clone_mode = p.voice_clone_mode === 'two' ? 'two' : 'single'
     newParams.voice_clone_refs = Array.isArray(p.voice_clone_refs)
       ? (p.voice_clone_refs as unknown[])
@@ -11846,7 +11904,7 @@ export const useStore = create<AppState>((set, get) => ({
     for (const key of [
       'alt_guidance_scale', 'audio_flow_shift', 'embedded_guidance_scale',
       'force_fps', 'sample_solver', 'top_k', 'top_p',
-      'spatial_upsampling_model', 'cfg_star_switch', 'apg_switch',
+      'spatial_upsampling_model', 'temporal_upsampling', 'cfg_star_switch', 'apg_switch',
     ]) {
       if (p[key] !== undefined) {
         (newParams as unknown as Record<string, unknown>)[key] = p[key]
@@ -11921,7 +11979,7 @@ export const useStore = create<AppState>((set, get) => ({
       )
       const maxSteps = Math.max(
         minSteps,
-        Math.round(Number(restoredModelOptions.inference_steps_max ?? 8)),
+        Math.round(Number(restoredModelOptions.inference_steps_max ?? 12)),
       )
       const restoredSteps = Number(p.num_inference_steps)
       const defaultSteps = Number(
@@ -11935,8 +11993,8 @@ export const useStore = create<AppState>((set, get) => ({
         ),
       )
       newParams.guidance_scale = restoredModelOptions.default_guidance_scale ?? 1
-      newParams.activated_loras = []
-      newParams.loras_multipliers = ''
+      // Keep ordinary H3 adapters and their aligned strengths when restoring
+      // fused outputs. The backend validates incompatible acceleration files.
       newParams.minimax_h3_turbo_mode = false
       newParams.minimax_h3_turbo_preset = undefined
       newParams.skip_steps_cache_type = ''
@@ -12280,22 +12338,25 @@ export const useStore = create<AppState>((set, get) => ({
       }
     }
     const restoredVoiceCount = hasTtsRestoreState
-      ? Math.max(0, Math.min(6, Number(p._tts_voice_count) || inferredVoiceCount))
+      ? Math.max(0, Math.min(6, p._tts_voice_count != null ? Number(p._tts_voice_count) || 0 : inferredVoiceCount))
       : 0
-    const restoredVoices: { name: string; filename: string | null; path: string | null }[] = []
-    for (let i = 0; i < Math.max(restoredVoiceCount, hasTtsRestoreState ? 2 : 0); i++) {
+    const restoredVoices: TtsVoice[] = []
+    for (let i = 0; i < restoredVoiceCount; i++) {
       const name = (p[`_tts_speaker_name${i + 1}`] as string) || ''
       const guideKey = i === 0 ? 'audio_guide' : `audio_guide${i + 1}`
       const path = typeof p[guideKey] === 'string' && p[guideKey]
         ? String(p[guideKey])
         : null
-      const filename = (
+      const filename = String(p[`_tts_voice_filename${i + 1}`] || '') || (
         typeof uploadFilenames?.[guideKey] === 'string'
           ? uploadFilenames[guideKey] as string
           : null
       ) || _deriveBase(path)
       if (name || i < restoredVoiceCount) {
-        restoredVoices.push({ name, filename, path })
+        restoredVoices.push({ name, filename, path,
+          characterId: String(p[`_tts_character_id${i + 1}`] || '') || undefined,
+          characterName: String(p[`_tts_character_name${i + 1}`] || '') || undefined,
+        })
       }
     }
 
@@ -12391,7 +12452,7 @@ export const useStore = create<AppState>((set, get) => ({
         },
       } : {}),
       // TTS state
-      ...(restoredSpeakerName1 || restoredSpeakerName2 || restoredVoiceCount > 0 ? {
+      ...(hasTtsRestoreState ? {
         ttsSpeakerName1: restoredSpeakerName1,
         ttsSpeakerName2: restoredSpeakerName2,
         ttsSpeakerNamesManual: true,
@@ -12902,43 +12963,33 @@ export const useStore = create<AppState>((set, get) => ({
     setTimeout(() => get().startGeneration(), 100)
   },
 
-  rejoinClipGroup: async (groupId) => {
+  rejoinClipGroup: async (groupId, workspace) => {
     try {
-      const result = await api.rejoinClips(groupId)
-      // Refresh outputs list to include the new concatenated file
-      const outputsRes = await fetch('/api/v1/outputs')
-      if (outputsRes.ok) {
-        const data = await outputsRes.json()
-        set({ outputs: data.files || [] })
-      }
-      // Select the new file
-      const allOutputs = get().outputs
-      const newIdx = allOutputs.findIndex(o => o.name === result.filename)
-      if (newIdx >= 0) {
-        set({ selectedOutput: newIdx })
-        get().loadOutputMetadata(result.filename)
-      }
+      const result = await api.rejoinClips(groupId, undefined, workspace)
+      await get().loadOutputs()
+      const newIdx = get().outputs.findIndex(o => o.name === result.filename && (!workspace || o.workspace === workspace))
+      if (newIdx >= 0) get().setSelectedOutput(newIdx)
     } catch (e) {
       console.error('Failed to rejoin clips:', e)
     }
   },
 
-  deleteSelectedOutput: async () => {
+  deleteSelectedOutput: async (target) => {
     const outputs = get().filteredOutputs()
     const idx = get().selectedOutput
-    const output = outputs[idx]
+    const output = target || outputs[idx]
     if (!output) return
 
     try {
-      await api.deleteOutput(output.name)
+      await api.deleteOutput(output.name, output.workspace)
       // Remove from local state
-      const allOutputs = get().outputs.filter(o => o.name !== output.name)
+      const allOutputs = get().outputs.filter(o => outputIdentity(o) !== outputIdentity(output))
       const newIdx = Math.min(idx, Math.max(0, allOutputs.length - 1))
-      set({ outputs: allOutputs, selectedOutput: newIdx })
+      set({ outputs: allOutputs, outputsTotal: Math.max(0, get().outputsTotal - 1), selectedOutput: newIdx })
       // Load metadata for new selection
       const newFiltered = get().filteredOutputs()
       if (newFiltered[newIdx]) {
-        get().loadOutputMetadata(newFiltered[newIdx].name)
+        get().loadOutputMetadata(newFiltered[newIdx].name, newFiltered[newIdx].workspace)
       } else {
         set({ selectedOutputMeta: null })
       }
@@ -13232,6 +13283,8 @@ export const useStore = create<AppState>((set, get) => ({
 
     const pipelineParams: Record<string, unknown> = {
       pipeline_type: pipelineType,
+      ...(pipelineType === 'music_video' && !state.directorSeamless
+        ? {director_music_clip_seconds: state.directorMusicClipSeconds} : {}),
       // Held work and reviewed revisions cannot pause for browser review.
       auto_mode: mode === 'queue' || state.directorClipPlans.length > 0
         ? true : directorAutoMode,
@@ -13378,6 +13431,7 @@ export const useStore = create<AppState>((set, get) => ({
         directorSongStyle: state.directorSongStyle,
         directorSongLyrics: state.directorSongLyrics,
         directorSongDuration: state.directorSongDuration,
+        directorMusicClipSeconds: state.directorMusicClipSeconds,
         directorVideoInferenceStepsByModel: state.directorVideoInferenceStepsByModel,
         directorVideoMaxShotFramesByModel: state.directorVideoMaxShotFramesByModel,
         directorH3TurboModeByModel: state.directorH3TurboModeByModel,

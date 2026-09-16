@@ -47,6 +47,10 @@ from ..long_form_story import (
 )
 from .base import BasePlanner
 from services.text_integrity import repair_text
+from services.dialogue_timing import (
+    DIALOGUE_DEFAULT_WORDS_PER_SECOND,
+    DIALOGUE_MAX_WORDS_PER_SECOND,
+)
 
 
 # Video-model architecture → Pass 2 shot-breakdown guide file.
@@ -178,10 +182,9 @@ _SHOT_IMAGE_FIELDS = frozenset({
     "keyframe_prompts",
 })
 
-# H3 remains natural around two spoken words per second. A small 0.1 margin
-# avoids rejecting a 29-word line in the model's 14.375-second maximum clip
-# solely because the old floor-based budget rounded 28.75 down to 28.
-_H3_DIALOGUE_WORDS_PER_SECOND = 2.1
+# Validation and repair may use the maximum; authored delivery targets the
+# shared default pace and leaves room for the requested action and pauses.
+_H3_DIALOGUE_WORDS_PER_SECOND = DIALOGUE_MAX_WORDS_PER_SECOND
 
 # Dialogue polishing is deliberately split into compact, scene-sized batches.
 # Large H3 screenplays can contain 40+ turns; asking a thinking model to return
@@ -7399,10 +7402,9 @@ Structure the story with: setup, rising conflict, climax, resolution."""
         # too-dense screenplay that no amount of consolidation can
         # actually fit.
         #
-        # Math: at ~2 spoken words/sec, target_duration sets the
-        # dialogue ceiling. Action lines add ~50% on top (they're
-        # silent but they consume screen time).
-        max_spoken_words = target_duration * 2  # 2 wps
+        # The default pace guides writing; the maximum is an admission limit,
+        # not a requirement to fill action-only time with speech.
+        max_spoken_words = int(target_duration * DIALOGUE_MAX_WORDS_PER_SECOND)
         max_total_words = int(target_duration * 4.5)  # action + dialogue
         # Suggest a reasonable scene count window. Cinematic average is
         # ~10-25s/scene; we anchor at the wider end to prevent shot
@@ -7414,7 +7416,8 @@ Structure the story with: setup, rising conflict, climax, resolution."""
 HARD LENGTH BUDGET — NON-NEGOTIABLE FOR THIS SCREENPLAY:
 - Target duration: {target_duration} seconds.
 - Maximum SPOKEN dialogue across the entire screenplay: {max_spoken_words} words.
-  (At ~2 words/second, dialogue alone fills the runtime if you write more.)
+  (Aim for {DIALOGUE_DEFAULT_WORDS_PER_SECOND:g} words/second during speech; allow up to {DIALOGUE_MAX_WORDS_PER_SECOND:g}.
+  Leave time for requested action and pauses; do not add dialogue just to fill this budget.)
 - Maximum TOTAL screenplay length (dialogue + action lines + scene headings):
   approximately {max_total_words} words.
 - Aim for {scene_count_low}-{scene_count_high} distinct scenes total.
@@ -10462,7 +10465,8 @@ each line kept in the visual shot whose action and visible speaker match it.
 You may use {shot_count_low}-{repair_max_items} shots. Increase a shot only up
 to {maximum_seconds:.2f}s or use additional self-contained shots. Never return
 a partial array, truncate a line, move dialogue to an unrelated visual beat,
-nest <d> tags, or exceed roughly two spoken words per second in any shot.
+nest <d> tags, or exceed {DIALOGUE_MAX_WORDS_PER_SECOND:g} spoken words per second in any shot.
+Aim for {DIALOGUE_DEFAULT_WORDS_PER_SECOND:g} words per second during speech when timing permits.
 
 Keep structured metadata concise so the complete array fits: one short
 sentence per descriptive metadata field and at most three action beats. Put

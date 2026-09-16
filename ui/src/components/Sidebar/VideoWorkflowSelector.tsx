@@ -35,6 +35,7 @@ const VIDEO_WORKFLOW_GROUPS: StudioWorkflowGroup<DisplayVideoWorkflow>[] = [
   {
     label: 'Transform',
     options: [
+      { value: 'animate', label: 'Animate', description: 'Viggle · animate an edited frame with a control video', icon: UsersRound },
       { value: 'retake', label: 'Retake', description: 'Regenerate a selected section', icon: RefreshCw },
       { value: 'prompt_edit', label: 'Prompt Edit', description: 'Modify a clip with natural language', icon: WandSparkles },
       { value: 'outpaint', label: 'Outpaint', description: 'Expand or reframe the canvas', icon: Scan },
@@ -97,7 +98,8 @@ function deriveActiveWorkflow(
   // every ordinary Video workflow; the generationMode branches above remain
   // authoritative for Transform and Finish outputs.
   if (
-    rememberedWorkflow === 'frames'
+    rememberedWorkflow === 'animate'
+    || rememberedWorkflow === 'frames'
     || rememberedWorkflow === 'references'
     || rememberedWorkflow === 'extend'
     || rememberedWorkflow === 'blend'
@@ -112,6 +114,8 @@ export function VideoWorkflowSelector() {
   const toolsTool = useStore(state => state.toolsTool)
   const rememberedWorkflow = useStore(state => state.studioVideoWorkflow)
   const setWorkflow = useStore(state => state.setStudioVideoWorkflow)
+  const modelType = useStore(state => state.params.model_type)
+  const viggleAvailable = useStore(state => state.models.some(model => model.model_type === 'viggle_animate'))
 
   const activeWorkflow = deriveActiveWorkflow(
     generationMode,
@@ -133,11 +137,12 @@ export function VideoWorkflowSelector() {
     if (
       activeWorkflow !== 'legacy_multishot'
       && activeWorkflow !== 'legacy_inpaint'
-      && activeWorkflow !== rememberedWorkflow
+      && (activeWorkflow !== rememberedWorkflow
+        || (activeWorkflow === 'animate' && viggleAvailable && modelType !== 'viggle_animate'))
     ) {
       setWorkflow(activeWorkflow)
     }
-  }, [activeWorkflow, rememberedWorkflow, setWorkflow])
+  }, [activeWorkflow, rememberedWorkflow, setWorkflow, viggleAvailable, modelType])
 
   return (
     <StudioWorkflowSelect<DisplayVideoWorkflow>

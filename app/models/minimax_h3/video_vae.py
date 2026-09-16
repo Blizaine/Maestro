@@ -31,6 +31,29 @@ from diffusers.models.autoencoders.vae import AutoencoderMixin, DecoderOutput, D
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
+def video_vae_offload_models(vae, *, device_mem_capacity: int | None = None) -> dict[str, nn.Module]:
+    """Give MMGP separate encoding/decoding phases, following WanGP's H3 policy.
+
+    At >=10 GiB, keep the decoder on the GPU across spatial tiles and temporal
+    chunks. Repeatedly streaming its layers otherwise transfers the same weights
+    hundreds of times per clip. MMGP still unloads it before another model runs;
+    smaller cards retain their profile's streaming budget. These wrappers share
+    the existing modules and allocate no second set of weights.
+    """
+    encoder = nn.ModuleDict({"encoder": vae.encoder, "quant_conv": vae.quant_conv})
+    decoder = nn.ModuleDict({"post_quant_conv": vae.post_quant_conv, "decoder": vae.decoder})
+    # Preserve the parent's FP16 codec policy when MMGP applies the transformer's
+    # global dtype. In particular, do not turn remaining FP32 codec tensors into
+    # BF16 merely because they now belong to a new ModuleDict.
+    if hasattr(vae, "_model_dtype"):
+        encoder._model_dtype = decoder._model_dtype = vae._model_dtype
+    if device_mem_capacity is None:
+        device_mem_capacity = torch.cuda.get_device_properties(None).total_memory if torch.cuda.is_available() else 0
+    if device_mem_capacity >= 10 * 1024**3:
+        decoder._budget = 0
+    return {"vae": decoder, "video_encoder": encoder}
+
+
 class MiniMaxH3VideoCausalConv3d(nn.Conv3d):
     r"""
     3D convolution used throughout the MiniMax-H3 video encoder.
@@ -306,9 +329,16 @@ class MiniMaxH3VideoAttnProcessor:
         hidden_states: torch.Tensor,
         rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        query = attn.to_q(hidden_states).unflatten(2, (attn.heads, -1))
-        key = attn.to_k(hidden_states).unflatten(2, (attn.heads, -1))
-        value = attn.to_v(hidden_states).unflatten(2, (attn.heads, -1))
+        if attn.native_checkpoint_layout:
+            # The compact checkpoint interleaves Q/K/V within each head.
+            # Interpret the small activation tensor instead of copying and
+            # reordering every projection weight into private system RAM.
+            qkv = attn.to_qkv(hidden_states).unflatten(2, (attn.heads, 3 * attn.dim_head))
+            query, key, value = qkv.chunk(3, dim=-1)
+        else:
+            query = attn.to_q(hidden_states).unflatten(2, (attn.heads, -1))
+            key = attn.to_k(hidden_states).unflatten(2, (attn.heads, -1))
+            value = attn.to_v(hidden_states).unflatten(2, (attn.heads, -1))
 
         # The reference normalizes Q/K in float32 regardless of the compute dtype.
         query = attn.norm_q(query.float()).to(query.dtype)
@@ -344,18 +374,23 @@ class MiniMaxH3VideoAttention(nn.Module, AttentionModuleMixin):
     _default_processor_cls = MiniMaxH3VideoAttnProcessor
     _available_processors = [MiniMaxH3VideoAttnProcessor]
 
-    def __init__(self, dim: int, heads: int, dim_head: int, eps: float = 1e-5, bias: bool = True) -> None:
+    def __init__(self, dim: int, heads: int, dim_head: int, eps: float = 1e-5, bias: bool = True,
+                 native_checkpoint_layout: bool = False) -> None:
         super().__init__()
         self.heads = heads
         self.dim_head = dim_head
         self.use_bias = bias
+        self.native_checkpoint_layout = native_checkpoint_layout
         inner_dim = heads * dim_head
 
         self.norm_q = nn.RMSNorm(dim_head, eps=eps, elementwise_affine=False)
         self.norm_k = nn.RMSNorm(dim_head, eps=eps, elementwise_affine=False)
-        self.to_q = nn.Linear(dim, inner_dim, bias=bias)
-        self.to_k = nn.Linear(dim, inner_dim, bias=bias)
-        self.to_v = nn.Linear(dim, inner_dim, bias=bias)
+        if native_checkpoint_layout:
+            self.to_qkv = nn.Linear(dim, 3 * inner_dim, bias=bias)
+        else:
+            self.to_q = nn.Linear(dim, inner_dim, bias=bias)
+            self.to_k = nn.Linear(dim, inner_dim, bias=bias)
+            self.to_v = nn.Linear(dim, inner_dim, bias=bias)
         self.to_out = nn.ModuleList([nn.Linear(inner_dim, dim, bias=bias), nn.Dropout(0.0)])
 
         self.set_processor(MiniMaxH3VideoAttnProcessor())
@@ -364,6 +399,18 @@ class MiniMaxH3VideoAttention(nn.Module, AttentionModuleMixin):
         self, hidden_states: torch.Tensor, rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None
     ) -> torch.Tensor:
         return self.processor(self, hidden_states, rotary_emb)
+
+
+class MiniMaxH3VideoNativeSwiGLU(nn.Module):
+    """SwiGLU with the compact checkpoint's gate-then-value row order."""
+
+    def __init__(self, proj: nn.Linear) -> None:
+        super().__init__()
+        self.proj = proj
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        gate, value = self.proj(hidden_states).chunk(2, dim=-1)
+        return value * F.silu(gate)
 
 
 class MiniMaxH3VideoTransformerBlock(nn.Module):
@@ -375,13 +422,17 @@ class MiniMaxH3VideoTransformerBlock(nn.Module):
         ffn_mult: int = 4,
         eps: float = 1e-5,
         bias: bool = True,
+        native_checkpoint_layout: bool = False,
     ) -> None:
         super().__init__()
         self.norm1 = nn.RMSNorm(dim, eps=eps, elementwise_affine=True)
-        self.attn = MiniMaxH3VideoAttention(dim=dim, heads=heads, dim_head=dim_head, eps=eps, bias=bias)
+        self.attn = MiniMaxH3VideoAttention(dim=dim, heads=heads, dim_head=dim_head, eps=eps, bias=bias,
+                                          native_checkpoint_layout=native_checkpoint_layout)
         self.scale1 = nn.Parameter(torch.zeros(dim))
         self.norm2 = nn.RMSNorm(dim, eps=eps, elementwise_affine=True)
         self.ff = FeedForward(dim, mult=ffn_mult, activation_fn="swiglu", bias=bias)
+        if native_checkpoint_layout:
+            self.ff.net[0] = MiniMaxH3VideoNativeSwiGLU(self.ff.net[0].proj)
         self.scale2 = nn.Parameter(torch.zeros(dim))
 
     def forward(
@@ -416,6 +467,7 @@ class MiniMaxH3VideoViTDecoder3d(nn.Module):
         rope_theta: float = 100.0,
         rope_dim_ratio: float = 0.75,
         norm_eps: float = 1e-5,
+        native_checkpoint_layout: bool = False,
     ) -> None:
         super().__init__()
         dim = num_attention_heads * attention_head_dim
@@ -435,6 +487,7 @@ class MiniMaxH3VideoViTDecoder3d(nn.Module):
                     dim_head=attention_head_dim,
                     ffn_mult=ffn_mult,
                     eps=norm_eps,
+                    native_checkpoint_layout=native_checkpoint_layout,
                 )
                 for _ in range(num_layers)
             ]
@@ -556,6 +609,7 @@ class AutoencoderKLMiniMaxH3(ModelMixin, ConfigMixin, AttentionMixin, Autoencode
         token_drop: int = 3,
         latents_mean: tuple[float, ...] = (0.0,) * 24,
         latents_std: tuple[float, ...] = (1.0,) * 24,
+        native_checkpoint_layout: bool = False,
     ) -> None:
         super().__init__()
 
@@ -588,6 +642,7 @@ class AutoencoderKLMiniMaxH3(ModelMixin, ConfigMixin, AttentionMixin, Autoencode
             rope_theta=decoder_rope_theta,
             rope_dim_ratio=decoder_rope_dim_ratio,
             norm_eps=decoder_norm_eps,
+            native_checkpoint_layout=native_checkpoint_layout,
         )
 
         # Derived temporal-chunking geometry. `clip_length` pixel frames are encoded at a time; because

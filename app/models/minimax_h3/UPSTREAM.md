@@ -1,5 +1,36 @@
 # MiniMax H3 upstream components
 
+Viggle Animate adapts Wan2GP v12.72 at
+`057f9ecab9ad57dfbec9768b2daf7a4426ce986c`: fixed prompt conditioning,
+video-then-edited-image reference ordering, target-only control slicing after
+the motion-history prefix, three Euler evaluations with shift 3, and fixed
+124-frame windows with 18-frame overlap. The dedicated transformer, fixed
+prompt and distillation adapter are pinned to
+`DeepBeepMeep/MiniMax-H3@fa7ed035f21d341439d4dd763a020fc4a2482c43`.
+The upstream rank-8 adapter map is pinned to the same Wan2GP commit and verified
+with SHA-256 `89081fd235e9deff56274ab76b1b01fa4d9aeebcbd0746295b0fd086cf0e0fec`.
+Maestro retains its own queue, media pipeline, MMGP offloading and continuation
+implementation. See `docs/Viggle-Animate.md` and
+`docs/development/Viggle-and-Studio-Controls.md` for usage and validation.
+
+The September 2026 VDN, grouped-row masking/outpainting, audio-only voice
+preset, and six-step audio refinement additions adapt Wan2GP v12.71 at
+`1e1dd2757f24923f008593d9d4ec09062234be20` to Maestro's existing pipeline.
+VDN module and adapter downloads use the immutable Hugging Face revision
+`DeepBeepMeep/MiniMax-H3@304d34f7751f8ba9ca0eb55d5d10044234cdbfe2`.
+See `THIRD_PARTY_NOTICES.md`, `app/LICENSES/WanGP-Community-2.0.txt`, and
+`docs/development/wan2gp-12-71-port-plan.md` for licensing, integration and
+local validation details.
+
+The H3 Voice Audio extension adapts `models/minimax_h3/dialogue.py` at that
+same revision, including Whisper medium loading and speech-boundary alignment.
+Maestro adds automatic splitting of long monologues, complete-script budget
+validation, its shared 2.8 words/second planning pace (maximum 3), private
+temporary voice references, cancellation and native queue progress. Native
+audio passes are limited to 45 seconds and assembled outputs to 300 seconds;
+15 seconds remains the default. Whisper assets reuse the existing Scenema
+`whisper_medium` download and MMGP offloading integration.
+
 The video VAE, audio VAE, scheduler, FL2VA packing, and Ref2VA reference
 preparation/packing in this directory are derived from the Hugging Face
 Diffusers MiniMax H3 implementation at commit

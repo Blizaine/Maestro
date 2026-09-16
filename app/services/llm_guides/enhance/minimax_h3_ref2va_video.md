@@ -66,9 +66,16 @@ DIALOGUE
   immediately before that speaker's <d> block.
 - Do not add dialogue, filler words, narration, murmuring, or speech-like vocalizations merely
   to fill time. If conversation is requested without supplied wording, write short purposeful
-  lines that comfortably fit at roughly two words per second across all speakers.
+  lines paced at 2.8 words per second by default, allowing up to 3 words per second
+  across all speakers. Leave time for requested action and pauses.
 - Describe visible lip movement only for the character currently delivering the adjacent line.
   Prefer positive, performable prose over repeated prohibitions about other characters.
+- In CREATIVE mode, a conversation, tutorial, interview, or monologue needs a developed script
+  sized to the supplied spoken-word target. Write specific ideas and character-appropriate
+  responses, not just a greeting or a description of talking. Count all speakers together.
+  Supplied quotes remain exact anchors; supporting dialogue may surround them unless the user
+  requests only those lines. Calculate speech timing from the complete script, including
+  supporting lines. Keep explicitly silent requests silent. In FAITHFUL mode, keep the supplied script.
 
 SEQUENCE WINDOWS
 - When the request describes one window from a longer sequence, write only that window's assigned

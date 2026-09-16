@@ -1,0 +1,691 @@
+{
+  "revision": "5d00559c3daa5cfb7a61fbe32158c8c08f9b5f35",
+  "tracks": [
+    {
+      "id": "tracks/mf-1-010372",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-000432",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-004291",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-016993",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-010257",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-005389",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-001530",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-007084",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-008340",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-000732",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-004553",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-003044",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-001411",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-010922",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-001498",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-001017",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-001139",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-004648",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-001088",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-001856",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-000168",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-002292",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-001024",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-001884",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-003454",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-007233",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-000905",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-006520",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-019970",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-009225",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-000146",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-005811",
+      "holdout": false
+    },
+    {
+      "id": "tracks/mf-1-006297",
+      "holdout": true
+    },
+    {
+      "id": "tracks/mf-1-010429",
+      "holdout": true
+    },
+    {
+      "id": "tracks/mf-1-004249",
+      "holdout": true
+    },
+    {
+      "id": "tracks/mf-1-002842",
+      "holdout": true
+    }
+  ],
+  "files": [
+    {
+      "path": "tracks/mf-1-010372/latent.npy",
+      "size": 875648,
+      "sha256": "6c53e034c637a4e193058ee48965eed980d6354c83e156929d94a576620de9fb"
+    },
+    {
+      "path": "tracks/mf-1-010372/semantic.npy",
+      "size": 13808,
+      "sha256": "77521b76f1a766af1ac4e0398962bf67c78b4fd167639c75bd65b0dc72b5eb63"
+    },
+    {
+      "path": "tracks/mf-1-010372/request.json",
+      "size": 743,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-000432/latent.npy",
+      "size": 510080,
+      "sha256": "1a41325cb02c4a4f73c794e215bd32f016c1730e82311e3dbdb8bfbc67f403d1"
+    },
+    {
+      "path": "tracks/mf-1-000432/semantic.npy",
+      "size": 8096,
+      "sha256": "7026226af6cfa45b276f712ad5f1c5e66a4fa754d2e1061742b9b5006073c137"
+    },
+    {
+      "path": "tracks/mf-1-000432/request.json",
+      "size": 1345,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-004291/latent.npy",
+      "size": 468352,
+      "sha256": "3bffa822c749657be20e93a99b082dc48c38c8468f4e59cf7c21f06b3519e128"
+    },
+    {
+      "path": "tracks/mf-1-004291/semantic.npy",
+      "size": 7444,
+      "sha256": "9a9cf10f8af82309ecdb4fd3d47eb2dd37df11eaa0b62047b236706c87f37424"
+    },
+    {
+      "path": "tracks/mf-1-004291/request.json",
+      "size": 1211,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-016993/latent.npy",
+      "size": 874880,
+      "sha256": "ffbb8dddb53366ba0e1da2205873f060f9e8b92059b3d29cabd1c74963c0b631"
+    },
+    {
+      "path": "tracks/mf-1-016993/semantic.npy",
+      "size": 13796,
+      "sha256": "41ee3cbca9dfd34feed015d9381a677ba1e3365470490d2dbfa6b98c3b28e50b"
+    },
+    {
+      "path": "tracks/mf-1-016993/request.json",
+      "size": 735,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-010257/latent.npy",
+      "size": 1673088,
+      "sha256": "31844b2c0b8a3950d4c67256a863144a5a84611e7dfd2c97207262bac3806823"
+    },
+    {
+      "path": "tracks/mf-1-010257/semantic.npy",
+      "size": 26268,
+      "sha256": "ff0f20a1f1641b89b7b63c45d32ed117b10c2ed96da6f269f6f26e019a879588"
+    },
+    {
+      "path": "tracks/mf-1-010257/request.json",
+      "size": 567,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-005389/latent.npy",
+      "size": 1325696,
+      "sha256": "9a7ce289f0f23ba2f8d7c5bd3fcb6f7320b00867effc87865b888eb37c0a00c3"
+    },
+    {
+      "path": "tracks/mf-1-005389/semantic.npy",
+      "size": 20840,
+      "sha256": "1648c38f8e7a3cbe52645b5517e582263c90e78609fb44c6be8c22dfeca6a126"
+    },
+    {
+      "path": "tracks/mf-1-005389/request.json",
+      "size": 469,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-001530/latent.npy",
+      "size": 699520,
+      "sha256": "575c53d93e6d9f3f8953d4b9f6f7674ed063c571054d8ba4e0c00136be8eea4b"
+    },
+    {
+      "path": "tracks/mf-1-001530/semantic.npy",
+      "size": 11056,
+      "sha256": "00942b1eaf2eeaef1c890b7dc36625d51b301234db3aff94d8ee6f5443552afd"
+    },
+    {
+      "path": "tracks/mf-1-001530/request.json",
+      "size": 561,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-007084/latent.npy",
+      "size": 435328,
+      "sha256": "7c80a591c2f2d04186400bca9b4f140b19c7e0d3b3f750ec4dd494e1593b6d88"
+    },
+    {
+      "path": "tracks/mf-1-007084/semantic.npy",
+      "size": 6928,
+      "sha256": "1ba8de59f866f3ac0e4975e280a09fc4ef85b63591b84a30d3f7e78f3585f7a4"
+    },
+    {
+      "path": "tracks/mf-1-007084/request.json",
+      "size": 485,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-008340/latent.npy",
+      "size": 591232,
+      "sha256": "f7b351a80aba5d7190cf6bf99a94b937ae30739e0f5ec2840e2580eb8d3a04f2"
+    },
+    {
+      "path": "tracks/mf-1-008340/semantic.npy",
+      "size": 9364,
+      "sha256": "e5f0c63d4cc645c9af84542265b7382ebb703d1de2044fa929d7508aa031e8e5"
+    },
+    {
+      "path": "tracks/mf-1-008340/request.json",
+      "size": 1231,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-000732/latent.npy",
+      "size": 543360,
+      "sha256": "1da3d63b945570168f21a634cc10ec7168ac301497558191c6aacf67c161f182"
+    },
+    {
+      "path": "tracks/mf-1-000732/semantic.npy",
+      "size": 8616,
+      "sha256": "70c5d9d891b66d0364185ea20d0d1378129308d4daca99816ba585162a692e32"
+    },
+    {
+      "path": "tracks/mf-1-000732/request.json",
+      "size": 1222,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-004553/latent.npy",
+      "size": 633216,
+      "sha256": "dd7e606a03a826f1b14db609cc8dbccaf67925604600087e41ce877f8211ca8e"
+    },
+    {
+      "path": "tracks/mf-1-004553/semantic.npy",
+      "size": 10020,
+      "sha256": "7f75e5b37317e2a074d66dcc54f5ca656c88f922db20cd25bac77f947c4ebd77"
+    },
+    {
+      "path": "tracks/mf-1-004553/request.json",
+      "size": 839,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-003044/latent.npy",
+      "size": 513920,
+      "sha256": "219e6ceba05f689f6b1c05c64c2b0388e1ae259fc3273409b4c367e81a8238ad"
+    },
+    {
+      "path": "tracks/mf-1-003044/semantic.npy",
+      "size": 8156,
+      "sha256": "00c6c172c061e28cffdc7734afd24f28f36639a17e6c4e5da03c08f24a02f920"
+    },
+    {
+      "path": "tracks/mf-1-003044/request.json",
+      "size": 498,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-001411/latent.npy",
+      "size": 1077376,
+      "sha256": "dec2d6bc3d55e6ea97b68af751122f5c87e2ec6efab0e1fd6c9b425cba8335df"
+    },
+    {
+      "path": "tracks/mf-1-001411/semantic.npy",
+      "size": 16960,
+      "sha256": "c8de07b4018187756831f2dec52c83eab0e266e7fa5c1bf6f665c9189c21f737"
+    },
+    {
+      "path": "tracks/mf-1-001411/request.json",
+      "size": 1193,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-010922/latent.npy",
+      "size": 766592,
+      "sha256": "d9abd351d0e5d9764da0b4aca25a9e6998f1f4233d8c2b993b4b9ad01317be0a"
+    },
+    {
+      "path": "tracks/mf-1-010922/semantic.npy",
+      "size": 12104,
+      "sha256": "025a044e7fd89684e35c0d0a1403028d1252ca051e0aab58156f5435ae835361"
+    },
+    {
+      "path": "tracks/mf-1-010922/request.json",
+      "size": 1215,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-001498/latent.npy",
+      "size": 1110912,
+      "sha256": "5fe59abaf20d93fd10288284f6d681039988379cdac7077dae2b8300d19cbc86"
+    },
+    {
+      "path": "tracks/mf-1-001498/semantic.npy",
+      "size": 17484,
+      "sha256": "d36d1715311da95042d36c2ed7d9723711301c9458850456c31df73788e4474b"
+    },
+    {
+      "path": "tracks/mf-1-001498/request.json",
+      "size": 2028,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-001017/latent.npy",
+      "size": 625280,
+      "sha256": "433b8d364bcdc15d26138130fbb193628559feff8d3faa8859c5cae156f2f135"
+    },
+    {
+      "path": "tracks/mf-1-001017/semantic.npy",
+      "size": 9896,
+      "sha256": "6148ad022965795e0b1639fdcc2165ce5c7c7cf252eeb4e0c2caeacbf3a4775e"
+    },
+    {
+      "path": "tracks/mf-1-001017/request.json",
+      "size": 1448,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-001139/latent.npy",
+      "size": 2304128,
+      "sha256": "b4f8c30be21a1e9c76ede05c39248b9ed11a7de47988d7716b3bb14fd0b11626"
+    },
+    {
+      "path": "tracks/mf-1-001139/semantic.npy",
+      "size": 36128,
+      "sha256": "c577b5f4ee98539a6938b345c4b1682028a65a5d07a1f05cac402d3c67ee9235"
+    },
+    {
+      "path": "tracks/mf-1-001139/request.json",
+      "size": 528,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-004648/latent.npy",
+      "size": 974464,
+      "sha256": "a7340aaf31cc7f0f8da38c84f2b35a96bc969bbbaac291c970f914c15ea368ac"
+    },
+    {
+      "path": "tracks/mf-1-004648/semantic.npy",
+      "size": 15352,
+      "sha256": "443e43114b37a32d88f9a3d3cf88e858fcee84b529cf3e7cdfdc9f69df5863c4"
+    },
+    {
+      "path": "tracks/mf-1-004648/request.json",
+      "size": 1221,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-001088/latent.npy",
+      "size": 1332352,
+      "sha256": "35b92598244b8f7349fdb3634e2e931934119f26726d2a55a4b5b41df1f1c06d"
+    },
+    {
+      "path": "tracks/mf-1-001088/semantic.npy",
+      "size": 20944,
+      "sha256": "b39e2f5d14414c0f7d2a79a558e66dc2c904f13aec872c6269fec4a488eac286"
+    },
+    {
+      "path": "tracks/mf-1-001088/request.json",
+      "size": 457,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-001856/latent.npy",
+      "size": 1283456,
+      "sha256": "54a7744aa87622f388b0751631f7d0cf4af5ef56821732dd0e4e1d924295e96c"
+    },
+    {
+      "path": "tracks/mf-1-001856/semantic.npy",
+      "size": 20180,
+      "sha256": "69d76714a3ba608bc7bd13f53bb3adb7f8cc5615311310a67c949b53f111bbb4"
+    },
+    {
+      "path": "tracks/mf-1-001856/request.json",
+      "size": 1236,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-000168/latent.npy",
+      "size": 1495168,
+      "sha256": "e264ff5dce914ecc2fb3f0038d8519d35304a9324593e134fdd7a680859d0802"
+    },
+    {
+      "path": "tracks/mf-1-000168/semantic.npy",
+      "size": 23488,
+      "sha256": "b3eb68fb1bf561cd039a300064a0d833e4b4a19f973d2aece9b49612aab13c9a"
+    },
+    {
+      "path": "tracks/mf-1-000168/request.json",
+      "size": 532,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-002292/latent.npy",
+      "size": 1558144,
+      "sha256": "4acb7e1e5ca5379f4ea3bda619b9eb8c53319a76d2b5e13d9a29b2404cbfbf22"
+    },
+    {
+      "path": "tracks/mf-1-002292/semantic.npy",
+      "size": 24472,
+      "sha256": "7c0f62beb32b3d471601278901c09229bb068a075783f051996c4d628e2f6c1f"
+    },
+    {
+      "path": "tracks/mf-1-002292/request.json",
+      "size": 463,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-001024/latent.npy",
+      "size": 2304128,
+      "sha256": "e9d348e8056c5af77fd828fa1169fb12f8e19f48b66af5abb3af9f9f8ce028a2"
+    },
+    {
+      "path": "tracks/mf-1-001024/semantic.npy",
+      "size": 36128,
+      "sha256": "8322c97428fbcd9de0d8d4f53c59911b6471ca59d9d00a25ce0e9d5367670c84"
+    },
+    {
+      "path": "tracks/mf-1-001024/request.json",
+      "size": 2378,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-001884/latent.npy",
+      "size": 754816,
+      "sha256": "68627607bd71e1bb4edc3e7062ca812caba083955401342366f64ed4de9e1cf2"
+    },
+    {
+      "path": "tracks/mf-1-001884/semantic.npy",
+      "size": 11920,
+      "sha256": "e64823eb4eb72d80f7643826b4db7ea72c37cda8a09ff8f0c362ca86baa7fb4e"
+    },
+    {
+      "path": "tracks/mf-1-001884/request.json",
+      "size": 719,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-003454/latent.npy",
+      "size": 1266816,
+      "sha256": "b10d0ea082cadbe61054e7df13ff0c675fd04e9bb7f06098f1a68f0753ef498d"
+    },
+    {
+      "path": "tracks/mf-1-003454/semantic.npy",
+      "size": 19920,
+      "sha256": "239afaecdb0fb79cae8ee6d00267cc63db19e611fce4c53138e8d735aa73b110"
+    },
+    {
+      "path": "tracks/mf-1-003454/request.json",
+      "size": 1903,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-007233/latent.npy",
+      "size": 1494400,
+      "sha256": "c5ef952c5767a74c24d5c9c0d130d755735505f9acbf72ed34378d0f8575a8a4"
+    },
+    {
+      "path": "tracks/mf-1-007233/semantic.npy",
+      "size": 23476,
+      "sha256": "bf6f42eb37a6900a3e7af3689f6fe39e43bc5c10f8b90bb9bf0c8b1afbec3c4f"
+    },
+    {
+      "path": "tracks/mf-1-007233/request.json",
+      "size": 1154,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-000905/latent.npy",
+      "size": 1203328,
+      "sha256": "32b955d4f7b0fcb057d2d0c7482f07e423f053db47641ecc1826524513b1b7bf"
+    },
+    {
+      "path": "tracks/mf-1-000905/semantic.npy",
+      "size": 18928,
+      "sha256": "ee1852b8a242e0622517ce50771a72d7813b09c9ee2500257521bec90112b1ad"
+    },
+    {
+      "path": "tracks/mf-1-000905/request.json",
+      "size": 468,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-006520/latent.npy",
+      "size": 2304128,
+      "sha256": "3d4ded233ac2b850e841522539e493825cb54eaf36e73d25881bde7f8a55c827"
+    },
+    {
+      "path": "tracks/mf-1-006520/semantic.npy",
+      "size": 36128,
+      "sha256": "c33f382ad2d56b2261baa5a02307d6df1f501227ff85d8c48318a3494da2d736"
+    },
+    {
+      "path": "tracks/mf-1-006520/request.json",
+      "size": 576,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-019970/latent.npy",
+      "size": 1321344,
+      "sha256": "1443998cb7632c0861f83f8a6c20c16f8b1e97e666d1f4a6f57d3637ca85891c"
+    },
+    {
+      "path": "tracks/mf-1-019970/semantic.npy",
+      "size": 20772,
+      "sha256": "8f813cd8edad75383c9c65bac79cd36a204bcc5d965fc8e702d8ea9a6d4212ec"
+    },
+    {
+      "path": "tracks/mf-1-019970/request.json",
+      "size": 988,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-009225/latent.npy",
+      "size": 1646208,
+      "sha256": "0c37fd8535a4f0909d1d5e2c18ece26845eb7d0d4d522b0ec3041ac6ed617ba2"
+    },
+    {
+      "path": "tracks/mf-1-009225/semantic.npy",
+      "size": 25848,
+      "sha256": "462fb353a5f5bfabf720cde1fd591c05ad8a686afdb8ad72ec3354901bb6442f"
+    },
+    {
+      "path": "tracks/mf-1-009225/request.json",
+      "size": 556,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-000146/latent.npy",
+      "size": 974208,
+      "sha256": "f6aacb6b4abd0af88982dfe37ab0341f237a122ffb67d2c9b6f845d3ee10c27b"
+    },
+    {
+      "path": "tracks/mf-1-000146/semantic.npy",
+      "size": 15348,
+      "sha256": "b8ffb98728e6d392cbd65a95456552f0542c64eb2c5e5e37a99dc5a64dca7efa"
+    },
+    {
+      "path": "tracks/mf-1-000146/request.json",
+      "size": 1045,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-005811/latent.npy",
+      "size": 854656,
+      "sha256": "df3708844d7af65968df20dcda9c2fe7bdb08f97dccc2e68e84ac5a8ad4fda0e"
+    },
+    {
+      "path": "tracks/mf-1-005811/semantic.npy",
+      "size": 13480,
+      "sha256": "df0e3cdc54141aa3b225129f82eb03f1cf176996570a2fb8ec201e0e7a243d10"
+    },
+    {
+      "path": "tracks/mf-1-005811/request.json",
+      "size": 1050,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-006297/latent.npy",
+      "size": 648576,
+      "sha256": "0ad929e45695bf82209bddbe8518da4368265c69bccfc571f12249c62cf39147"
+    },
+    {
+      "path": "tracks/mf-1-006297/semantic.npy",
+      "size": 10260,
+      "sha256": "11b8a34bebcb1c333a0acfa7829a968226ada27162619587fdb11f8829ea0bbc"
+    },
+    {
+      "path": "tracks/mf-1-006297/request.json",
+      "size": 507,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-010429/latent.npy",
+      "size": 991616,
+      "sha256": "08465df231dedcd101ab6d387591c4a05a5f0ce2cdbb477ae7bed07d707db564"
+    },
+    {
+      "path": "tracks/mf-1-010429/semantic.npy",
+      "size": 15620,
+      "sha256": "245243fa312cbb9031fc1dc117a491814472a27a95590cdeaf03064e0f3d4b05"
+    },
+    {
+      "path": "tracks/mf-1-010429/request.json",
+      "size": 951,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-004249/latent.npy",
+      "size": 1118592,
+      "sha256": "5d481695ef3018f7ea7ff493c41b9a35eb8deb5807b8e89b4db4b624fd2aefe9"
+    },
+    {
+      "path": "tracks/mf-1-004249/semantic.npy",
+      "size": 17604,
+      "sha256": "25d8d0f18c10f782e88d6a08a6f63b074dca9c2bd55e5935bb2755c6e7eda18e"
+    },
+    {
+      "path": "tracks/mf-1-004249/request.json",
+      "size": 494,
+      "sha256": null
+    },
+    {
+      "path": "tracks/mf-1-002842/latent.npy",
+      "size": 2079104,
+      "sha256": "86c82d34be7c38f564a6e399a4ad9f7c50fea77d72323f7a9171422105e5080b"
+    },
+    {
+      "path": "tracks/mf-1-002842/semantic.npy",
+      "size": 32612,
+      "sha256": "028e1e9d38c42e443ded2288865f8fb786764023f692d1fbefa9fb3b833686dd"
+    },
+    {
+      "path": "tracks/mf-1-002842/request.json",
+      "size": 516,
+      "sha256": null
+    }
+  ]
+}

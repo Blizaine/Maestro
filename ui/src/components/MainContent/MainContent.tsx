@@ -1,3 +1,4 @@
+import { outputIdentity } from '../../lib/galleryIdentity'
 import { useRef, useCallback, useState, useEffect, useMemo, type JSX } from 'react'
 import { Film, Play, Square, FolderOpen, Plus, Check, Loader2, X, BookMarked, Upload, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
 import { TabFilter } from './TabFilter'
@@ -13,6 +14,7 @@ import type { GenerationJob } from '../../types'
 function WorkspaceSelector() {
   const workspaces = useStore(s => s.workspaces)
   const activeWorkspace = useStore(s => s.activeWorkspace)
+  const browsingAllFolders = useStore(s => s.browsingAllFolders)
   const browsingUploads = useStore(s => s.browsingUploads)
   const switchWorkspace = useStore(s => s.switchWorkspace)
   const createWorkspace = useStore(s => s.createWorkspace)
@@ -79,7 +81,7 @@ function WorkspaceSelector() {
         title="Switch workspace"
       >
         <FolderOpen size={12} />
-        <span className="max-w-[120px] truncate">{browsingUploads ? 'Uploads' : activeWorkspace}</span>
+        <span className="max-w-[120px] truncate">{browsingAllFolders ? 'All folders' : browsingUploads ? 'Uploads' : activeWorkspace}</span>
       </button>
 
       {open && (
@@ -87,17 +89,25 @@ function WorkspaceSelector() {
           <div className="px-2 py-1.5 border-b border-border">
             <span className="text-[10px] text-text-muted uppercase tracking-wider">Workspaces</span>
           </div>
+          <button
+            onClick={() => { switchWorkspace('__all__'); setOpen(false) }}
+            className={`w-full text-left px-3 py-2 text-xs flex items-center justify-between hover:bg-bg-hover ${browsingAllFolders ? 'text-accent-blue' : 'text-text-secondary'}`}
+            title="Browse and search every output folder. New generations keep their current destination."
+          >
+            <span className="flex items-center gap-1.5"><FolderOpen size={12} /> All folders</span>
+            {browsingAllFolders && <Check size={12} />}
+          </button>
           <div className="max-h-[200px] overflow-y-auto">
             {workspaces.map(ws => (
               <div key={ws.name} className="flex items-center group hover:bg-bg-hover transition-colors">
                 <button
                   onClick={() => { switchWorkspace(ws.name); setOpen(false) }}
                   className={`flex-1 min-w-0 text-left px-3 py-2 text-xs flex items-center justify-between ${
-                    ws.name === activeWorkspace && !browsingUploads ? 'text-accent-blue' : 'text-text-secondary'
+                    ws.name === activeWorkspace && !browsingUploads && !browsingAllFolders ? 'text-accent-blue' : 'text-text-secondary'
                   }`}
                 >
                   <span className="truncate">{ws.name}</span>
-                  {ws.name === activeWorkspace && !browsingUploads && <Check size={12} className="shrink-0" />}
+                  {ws.name === activeWorkspace && !browsingUploads && !browsingAllFolders && <Check size={12} className="shrink-0" />}
                 </button>
                 {/* default IS the outputs folder itself — not deletable */}
                 {ws.name !== 'default' && (
@@ -544,6 +554,7 @@ export function MainContent() {
     () => {
       const visibleJobs = jobs.filter(job => (
         job.status !== 'held'
+        && job.status !== 'completed'
         && (job.status !== 'queued' || job.showInGallery === true)
       ))
       return isEnhancing ? [PROMPT_ENHANCEMENT_ACTIVITY, ...visibleJobs] : visibleJobs
@@ -866,7 +877,7 @@ export function MainContent() {
       if (!file) continue
       items.push(
         <MediaFeedItem
-          key={file.name}
+          key={outputIdentity(file)}
           file={file}
           index={i}
           isActive={activeIndex === i}

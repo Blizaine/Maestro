@@ -76,7 +76,10 @@ def resample_audio_array(audio_data, source_sample_rate, target_sample_rate):
         return audio_array.astype(np.float32, copy=False)
     import torchaudio.functional as taF
     wave = torch.from_numpy(audio_array.T.copy() if audio_array.ndim == 2 else audio_array[None].copy()).to(dtype=torch.float32)
-    resampled = taF.resample(wave, source_sample_rate, target_sample_rate).cpu().numpy()
+    # Torchaudio's scalar helpers otherwise inherit MMGP's CUDA default even
+    # though this waveform and the returned window-join audio live on CPU.
+    with torch.device("cpu"):
+        resampled = taF.resample(wave, source_sample_rate, target_sample_rate).cpu().numpy()
     return (resampled.T if audio_array.ndim == 2 else resampled[0]).astype(np.float32, copy=False)
 
 
@@ -340,6 +343,14 @@ def extract_audio_tracks(source_video, verbose=False, query_only=False, codec_ke
 
 
 
+def get_audio_file_channels(audio_path):
+    probe = ffmpeg.probe(os.fspath(audio_path))
+    audio_stream = next((stream for stream in probe["streams"] if stream.get("codec_type") == "audio"), None)
+    if audio_stream is None or not audio_stream.get("channels"):
+        raise ValueError(f"Unable to read audio channel count from {audio_path}")
+    return int(audio_stream["channels"])
+
+
 def combine_and_concatenate_video_with_audio_tracks(
     save_path_tmp, video_path,
     source_audio_tracks, new_audio_tracks,
@@ -364,27 +375,35 @@ def combine_and_concatenate_video_with_audio_tracks(
         s = (sources[i] if i < len(sources)
              else sources[0] if duplicate_source else None)
         n = news[i] if len(news) == N else (news[0] if news else None)
+        source_index = i if i < len(sources) else 0
+        meta = source_audio_metadata[source_index] if s and source_audio_metadata and source_index < len(source_audio_metadata) else {}
+        source_channels = int(meta.get('channels', 0) or 0) if s else 0
+        if s and source_channels == 0:
+            source_channels = get_audio_file_channels(s)
+        new_channels = get_audio_file_channels(n) if n else 0
+        # Match Wan2GP's per-track mono/stereo layout so a stereo H3 result
+        # survives muxing, including joins to mono prefixes or silent gaps.
+        channel_layout = 'stereo' if max(source_channels, new_channels) >= 2 else 'mono'
 
         if source_audio_duration == 0:
             if n:
                 inputs += ['-i', n]
-                filters.append(f'[{idx}:a]apad=pad_dur=100[aout{i}]')
+                filters.append(f'[{idx}:a]aformat=channel_layouts={channel_layout},apad=pad_dur=100[aout{i}]')
                 idx += 1
             else:
-                filters.append(f'anullsrc=r={audio_sampling_rate}:cl=mono,apad=pad_dur=100[aout{i}]')
+                filters.append(f'anullsrc=r={audio_sampling_rate}:cl={channel_layout},apad=pad_dur=100[aout{i}]')
         else:
             if s:
                 inputs += ['-i', s]
-                meta = source_audio_metadata[i] if source_audio_metadata and i < len(source_audio_metadata) else {}
                 needs_filter = (
                     meta.get('codec') != audio_codec or
                     meta.get('sample_rate') != audio_sampling_rate or
-                    meta.get('channels') != 1 or
+                    source_channels != (2 if channel_layout == 'stereo' else 1) or
                     meta.get('duration', 0) < source_audio_duration
                 )
                 if needs_filter:
                     filters.append(
-                        f'[{idx}:a]aresample={audio_sampling_rate},aformat=channel_layouts=mono,'
+                        f'[{idx}:a]aresample={audio_sampling_rate},aformat=channel_layouts={channel_layout},'
                         f'apad=pad_dur={source_audio_duration},atrim=0:{source_audio_duration},asetpts=PTS-STARTPTS[s{i}]')
                 else:
                     filters.append(
@@ -394,13 +413,13 @@ def combine_and_concatenate_video_with_audio_tracks(
                 idx += 1
             else:
                 filters.append(
-                    f'anullsrc=r={audio_sampling_rate}:cl=mono,atrim=0:{source_audio_duration},asetpts=PTS-STARTPTS[s{i}]')
+                    f'anullsrc=r={audio_sampling_rate}:cl={channel_layout},atrim=0:{source_audio_duration},asetpts=PTS-STARTPTS[s{i}]')
 
             if n:
                 inputs += ['-i', n]
                 start = '0' if new_audio_from_start else source_audio_duration
                 filters.append(
-                    f'[{idx}:a]aresample={audio_sampling_rate},aformat=channel_layouts=mono,'
+                    f'[{idx}:a]aresample={audio_sampling_rate},aformat=channel_layouts={channel_layout},'
                     f'atrim=start={start},asetpts=PTS-STARTPTS[n{i}]')
                 filters.append(f'[s{i}][n{i}]concat=n=2:v=0:a=1[aout{i}]')
                 idx += 1
@@ -410,15 +429,14 @@ def combine_and_concatenate_video_with_audio_tracks(
         maps += ['-map', f'[aout{i}]']
 
     cmd = ['ffmpeg', '-y', *inputs,
-           '-filter_complex', ';'.join(filters),  # ✅ Only change made
+           '-filter_complex', ';'.join(filters),
            *maps, *metadata_args,
            '-c:v', 'copy',
            '-c:a', audio_codec,
            '-ar', str(audio_sampling_rate),
-           '-ac', '1',
            '-shortest', save_path_tmp]
     if audio_bitrate:
-        cmd[-6:-6] = ['-b:a', audio_bitrate]
+        cmd[-4:-4] = ['-b:a', audio_bitrate]
 
     if verbose:
         print(f"ffmpeg command: {cmd}")

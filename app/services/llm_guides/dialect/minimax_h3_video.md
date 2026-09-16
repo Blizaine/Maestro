@@ -7,7 +7,7 @@ MINIMAX H3 CONTEXT-IR RULES (apply to video_prompt):
 - For voiceover, use the exact phrase "says in an off-screen voiceover" and immediately state that the corresponding on-screen character's lips remain completely closed.
 - Use <scenetrans> at both connecting points only when one line truly crosses a cut, and <cutoff> only when speech is intentionally truncated by the end of the video.
 - Preserve visible signs, labels, banners, subtitles, and other on-screen text verbatim in English double quotation marks; never translate it.
-- Preserve supplied dialogue verbatim. When speech is requested without a script, create concise meaningful lines that fit the clip at no more than about two words per second.
+- Preserve supplied dialogue verbatim. When speech is requested without a script, create meaningful lines at 2.8 words per second by default, allowing up to 3 words per second across all speakers. Leave time for requested action and pauses.
 - Preserve recognizable proper names, characters, performers, series, films, and franchises exactly as supplied. Never replace a trained identity such as "Dwight from The Office" with a generic descriptor.
 - After the final line, use visible reactions or movement for remaining time and state that the characters remain silent with mouths closed. Never invent extra speech to fill the clip.
 - overall_soundscape contains ambience, practical effects, and non-verbal human sounds; do not repeat dialogue there.

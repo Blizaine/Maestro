@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from services.dialogue_timing import DIALOGUE_MAX_WORDS_PER_SECOND
 from ..schema import (
     ShotPlan, ProductionPlan,
     VALID_SKILL_TYPES, VALID_SOURCE_MODES, VALID_IMAGE_STRATEGIES, VALID_CONTINUITY_STRATEGIES,
@@ -111,11 +112,11 @@ def validate_shot_plan(shot: ShotPlan, plan: Optional[ProductionPlan] = None) ->
         total_words = sum(
             len(beat.spoken_text.split()) for beat in normalized_dialogue
         )
-        budget = int(shot.duration_sec * 2.5)
-        if total_words > budget * 1.5:
+        budget = int(shot.duration_sec * DIALOGUE_MAX_WORDS_PER_SECOND)
+        if total_words > budget:
             warnings.append(
                 f"Dialogue over-budget: {total_words} words for {shot.duration_sec}s shot "
-                f"(budget ~{budget} words at ~2 words/sec)"
+                f"(budget {budget} words at {DIALOGUE_MAX_WORDS_PER_SECOND:g} words/sec)"
             )
 
     # ── Action beat count check ──────────────────────────────────

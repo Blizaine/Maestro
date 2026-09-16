@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import os.path as osp
 import torchvision.transforms.functional as TF
@@ -377,7 +378,22 @@ def prepare_binary_mask_frame(mask, target_h=None, target_w=None, expand_scale=0
     return (mask <= threshold if invert else mask > threshold).astype(np.float32)
 
 
-def  get_outpainting_frame_location(final_height, final_width,  outpainting_dims, block_size = 8, outpainting_ratio = "", source_height = None, source_width = None):
+def _quantize_outpainting_axis(before, inner, total, quantum):
+    """Wan2GP's latent-aligned margins, preserving a nonempty source region."""
+    after = total - before - inner
+    before = max(0, int(round(before / quantum) * quantum))
+    after = max(0, int(round(after / quantum) * quantum))
+    overflow = before + after + min(quantum, total) - total
+    if overflow > 0:
+        adjustment = math.ceil(overflow / quantum) * quantum
+        if after >= before:
+            after = max(0, after - adjustment)
+        else:
+            before = max(0, before - adjustment)
+    return total - before - after, before
+
+
+def  get_outpainting_frame_location(final_height, final_width,  outpainting_dims, block_size = 8, outpainting_ratio = "", source_height = None, source_width = None, quantize_margins=0):
     if source_height is not None and source_width is not None:
         outpainting_dims = resolve_outpainting_dims(source_height, source_width, outpainting_dims, outpainting_ratio)
     outpainting_top, outpainting_bottom, outpainting_left, outpainting_right= outpainting_dims
@@ -396,6 +412,9 @@ def  get_outpainting_frame_location(final_height, final_width,  outpainting_dims
     if extra_width != 0 and (outpainting_left + outpainting_right) != 0:
         margin_left += int(outpainting_left / (outpainting_left + outpainting_right) * extra_width)
     if (margin_left + width) > final_width or outpainting_right == 0: margin_left = final_width - width
+    if quantize_margins:
+        height, margin_top = _quantize_outpainting_axis(margin_top, height, final_height, quantize_margins)
+        width, margin_left = _quantize_outpainting_axis(margin_left, width, final_width, quantize_margins)
     return height, width, margin_top, margin_left
 
 def rescale_and_crop(img, w, h):

@@ -64,7 +64,7 @@ export interface ModelDef {
   // store auto-adds these models to enabledModels so they appear in
   // selectors without the user having to enable each one manually.
   nsfw_only?: boolean
-  /** Model is a self-contained baked recipe and cannot accept extra LoRAs. */
+  /** Model does not support user-selectable LoRAs. */
   loras_disabled?: boolean
 }
 
@@ -152,6 +152,15 @@ export interface GenerateParams {
   }>
   /** UI-only long-form selector retained for reload/sidecar fidelity. */
   _duration_planning_mode?: 'duration' | 'windows' | 'auto'
+  _viggle_edited_frame?: string
+  _viggle_source_seconds?: number
+  _viggle_frame_seconds?: number
+  /** Absolute source-video trim bounds; end is exclusive. */
+  _viggle_trim_start?: number
+  _viggle_trim_end?: number
+  viggle_character?: ViggleCharacterOptions
+  _viggle_prepared?: VigglePreparedFrame
+  _viggle_prepare_only?: boolean
   // TTS-specific
   audio_guide2?: string
   audio_guide3?: string
@@ -161,7 +170,9 @@ export interface GenerateParams {
   duration_seconds?: number
   pause_seconds?: number
   temperature?: number
+  model_mode?: number
   custom_settings?: Record<string, unknown>
+  temporal_upsampling?: string
   // Loose params: backend accepts additional optional fields. Declared
   // explicitly here so TypeScript narrows JSX children correctly (an
   // index signature widens explicit fields to `unknown` in some contexts).
@@ -207,6 +218,7 @@ export interface GenerateParams {
   voice_clone_enabled?: boolean
   voice_clone_mode?: 'single' | 'two'
   voice_clone_refs?: string[]
+  face_refiner?: FaceRefinerOptions
   // MiniMax H3 Ref2VA ordered Omni-reference manifest.
   minimax_h3_references?: MiniMaxH3Reference[]
   minimax_h3_reference_detail?: 'match' | 'max'
@@ -247,10 +259,12 @@ export interface GenerateParams {
   ltx_window_prompts?: string[]
   /** Original overall idea retained while the compiled prompts are visible. */
   _ltx_original_prompt?: string
+  /** Source and resulting draft from an explicit Studio enhancement. */
+  _prompt_enhancement?: PromptEnhancementRecord
 }
 
-export type WindowPromptMode = 'auto' | 'creative' | 'manual'
-export type WindowPlanningStyle = 'faithful' | 'creative'
+export type WindowPromptMode = 'auto' | 'creative' | 'adaptive' | 'manual'
+export type WindowPlanningStyle = 'faithful' | 'creative' | 'adaptive'
 
 export interface LTXWindowPlan {
   source_prompt: string
@@ -277,6 +291,7 @@ export interface MiniMaxH3Reference {
   video_intent?: 'character' | 'motion' | 'scene'
   library_character_id?: string
   character_name?: string
+  refmod_path?: string
   include_audio?: boolean
   has_audio?: boolean
   audio_path?: string
@@ -287,13 +302,73 @@ export interface MiniMaxH3Reference {
   effective_duration_seconds?: number | null
 }
 
+export interface FaceRefinerOptions {
+  enabled: boolean
+  face_count: number
+  strength: number
+  steps: number
+  window_frames: number
+  model: 'auto' | 'pruned' | 'fused'
+  character_ids: string[]
+}
+
+export interface FaceRefinerAssignment {
+  track_id: number
+  character_id: string | null
+  skip: boolean
+}
+
+export interface FaceRefinerAnalysis {
+  id: string
+  fps: number
+  frames: number
+  width: number
+  height: number
+  warnings: string[]
+  faces: { track_id: number; thumbnail_url: string; character_id: string | null;
+    similarity: number | null; first_seen_seconds: number; presence: number }[]
+}
+
 export interface SavedOmniCharacterMedia {
   type?: 'image' | 'video' | 'audio'
   path: string
   filename: string
   url: string
+  thumbnail_url?: string
   duration_seconds?: number | null
   has_audio?: boolean
+}
+
+export interface ViggleCharacterOptions {
+  reference_path: string
+  reference_url?: string
+  character_id?: string
+  character_name?: string
+  view_id?: string
+  image_model: 'flux2_klein_9b' | 'flux2_klein_4b'
+  frame_seconds: number
+  swap_prompt: string
+  appearance_prompt: string
+}
+
+export interface VigglePreparedFrame {
+  signature: string
+  image_path: string
+  image_url: string
+  width: number
+  height: number
+  frame_seconds: number
+  image_model: string
+  prompt: string
+}
+
+export interface CharacterImageViews {
+  version: number
+  source: 'refmod' | 'original_image' | 'original_video'
+  items: { id: string; url: string; width: number; height: number; latent_index?: number; seconds?: number }[]
+  selected_ids: string[]
+  cover_id: string
+  notes?: string[]
 }
 
 export interface SavedOmniCharacter {
@@ -303,6 +378,17 @@ export interface SavedOmniCharacter {
   updated_at: number
   visual: SavedOmniCharacterMedia & { type: 'image' | 'video' }
   voice?: SavedOmniCharacterMedia | null
+  description?: string
+  image_views?: CharacterImageViews
+  refmod?: { path: string; kind: 'image' | 'video'; tokens: number; mode: string; preview_generated?: boolean }
+}
+
+export interface TtsVoice {
+  name: string
+  filename: string | null
+  path: string | null
+  characterId?: string
+  characterName?: string
 }
 
 export interface H3InjectedKeyframe {
@@ -381,7 +467,17 @@ export interface OomInfo {
   message: string
 }
 
+export interface PromptEnhancementRecord {
+  version: number
+  state: 'pending' | 'enhancing' | 'complete' | 'failed' | 'review'
+  original_prompt?: string
+  enhanced_prompt?: string | null
+  warnings?: string[]
+  error?: string | null
+}
+
 export interface GenerationJob {
+  enhancement?: PromptEnhancementRecord | null
   id: string
   /** Direct submissions stay visible while the backend is queued/planning. */
   showInGallery?: boolean
@@ -418,6 +514,9 @@ export interface GenerationJob {
 }
 
 export interface OutputFile {
+  id?: string
+  workspace?: string
+  path?: string
   name: string
   url: string
   type: 'video' | 'image' | 'audio'
@@ -454,6 +553,7 @@ export type EditorAIReturnMode = 'replace' | 'alternate'
 export interface EditorAsset {
   id: string
   name: string
+  display_name?: string
   type: EditorMediaType
   origin: 'output' | 'upload' | 'project'
   workspace?: string
@@ -681,6 +781,7 @@ export type GenerationMode = 'image' | 'video' | 'audio' | 'avatar' | 'tools'
  * API payloads, and the future timeline editor can reuse the proven engines.
  */
 export type StudioVideoWorkflow =
+  | 'animate'
   | 'frames'
   | 'references'
   | 'extend'
@@ -872,6 +973,7 @@ export interface ModelOptions {
       revision: string
       workflow?: 'all' | 'fl2va' | 'ref2va'
       runtime?: 'standard_lora' | 'pdd'
+      generation_settings?: {guidance_scale?: number}
       full_checkpoint_only?: boolean
     }>
     upstream_url: string
@@ -909,6 +1011,7 @@ export interface ModelOptions {
   mask_preprocessing?: ChoiceConfig | null
   image_ref_choices: ChoiceConfig | null
   audio_prompt_type_sources: ChoiceConfig | null
+  max_voice_count?: number
   background_removal_label: string | null
   max_image_refs?: number | null
   sample_solvers: [string, string][] | null
@@ -946,6 +1049,9 @@ export interface ModelOptions {
   // TTS-specific
   audio_only: boolean
   duration_slider: { label: string; min: number; max: number; increment: number; default: number } | null
+  audio_segment_max_seconds?: number | null
+  duration_is_maximum?: boolean
+  yue2_composition?: boolean
   pause_between_sentences: boolean
   temperature_enabled: boolean
   custom_settings_def: { id: string; label: string; name: string; type: string }[] | null
@@ -1001,11 +1107,20 @@ export interface MultiWindowTiming {
 }
 
 export interface OutputMetadata {
+  model_details?: {
+    architecture?: string
+    sample_rate?: number
+    channels?: number
+    weights_revision?: string
+    plan?: { abc?: string; request?: Record<string, unknown> }
+    truncated?: Record<string, boolean>
+    artist?: { id: string; name: string; strength: number; tokenizer_revision: string }
+  }
   source: 'sidecar' | 'embedded' | 'none'
   params: Record<string, unknown> | null
   /** Standalone Studio post-processing outputs are restored through their
    *  workflow panels instead of being treated as generation models. */
-  tool?: 'upscale' | 'film_grain' | 'revoice' | 'editor' | 'audio_mixer'
+  tool?: 'upscale' | 'film_grain' | 'revoice' | 'editor' | 'audio_mixer' | 'media_flow' | 'face_refiner'
   tool_media_type?: 'image' | 'video'
   tool_source?: string
   upload_filenames?: Record<string, string | string[]>
@@ -1385,6 +1500,8 @@ export interface AudioAnalysisResult {
   downbeats: number[]
   sections: AudioSection[]
   onset_envelope: number[]
+  percussion_activity?: {start: number; end: number}[] | null
+  music_cues?: {type: string; time: number; confidence: string; evidence: string}[]
   lyrics: LyricSegment[] | null
   vocals_path: string | null
   song_structure?: SongStructureEntry[] | null
@@ -1402,6 +1519,10 @@ export interface PlannedClip extends SuggestedClip {
   beat_count: number
   duration_frames: number
   dominant_speaker?: string | null
+  output_frames?: number
+  music_timing_version?: number
+  percussion_activity?: 'active' | 'quiet' | 'unknown'
+  music_cues?: AudioAnalysisResult['music_cues']
 }
 
 export interface SpeakerMapping {

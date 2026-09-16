@@ -118,7 +118,7 @@ class TestTemporalDepthAssetRegistry(unittest.TestCase):
 
     def test_h3_lora_affine_packages_are_revision_pinned(self):
         maps = self.module.MINIMAX_H3_LORA_AFFINE_MAPS
-        self.assertEqual(set(maps), {"fl2va", "ref2va"})
+        self.assertEqual(set(maps), {"fl2va", "ref2va", "viggle"})
         expected = {
             ("fl2va", 8): (
                 130_072,
@@ -128,6 +128,10 @@ class TestTemporalDepthAssetRegistry(unittest.TestCase):
                 130_072,
                 "7179899e59fce9c36038cd6c0c57edaced0032c769c436cef234b07bf809381f",
             ),
+            ("viggle", 8): (
+                129_800,
+                "89081fd235e9deff56274ab76b1b01fa4d9aeebcbd0746295b0fd086cf0e0fec",
+            ),
         }
         for key, (size, sha256) in expected.items():
             architecture, width = key
@@ -135,7 +139,8 @@ class TestTemporalDepthAssetRegistry(unittest.TestCase):
             self.assertEqual(spec["size"], size)
             self.assertEqual(spec["sha256"], sha256)
             self.assertIn(
-                "1830091bf4b27df2f901920d55b1fb748f33e7eb",
+                "057f9ecab9ad57dfbec9768b2daf7a4426ce986c" if architecture == "viggle"
+                else "1830091bf4b27df2f901920d55b1fb748f33e7eb",
                 spec["url"],
             )
 

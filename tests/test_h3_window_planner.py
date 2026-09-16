@@ -22,6 +22,7 @@ from services.h3_window_planner import (  # noqa: E402
     _fallback_plan,
     _narrative_dialogue_expected,
     _plan_contract_violations,
+    _window_local_music,
     compile_h3_window_prompts,
     compute_h3_window_boundaries,
     h3_window_plan_signature,
@@ -132,6 +133,18 @@ def _staged_segment(
 
 
 class H3WindowPlannerTests(unittest.TestCase):
+    def test_music_clock_rewrites_only_whole_clip_scope(self):
+        self.assertEqual(
+            _window_local_music(
+                "Soaring score begins at 0.00s and stays energetic throughout the 14 seconds"
+            ),
+            "Soaring score stays energetic throughout this segment",
+        )
+        self.assertEqual(
+            _window_local_music("Music stops at 7 seconds, then resumes at 10 seconds"),
+            "Music stops at 7 seconds, then resumes at 10 seconds",
+        )
+
     def test_official_dialogue_format_supports_groups_and_voiceover(self):
         speaker_ids: dict[str, str] = {}
         group = _dialogue_sentence({
@@ -407,6 +420,46 @@ class H3WindowPlannerTests(unittest.TestCase):
             self.assertEqual(item["prompt"].count("non_diegetic_music:"), 1)
             self.assertIn("Clark Kent wears the same blue shirt", item["prompt"])
 
+    def test_continuation_audio_keeps_bed_and_localizes_one_shots_and_music_clock(self):
+        spans = compute_h3_window_boundaries(672, 345, fps=24, overlap_frames=18)
+        plan = {
+            "subject_continuity": "The same masked acrobat",
+            "setting_continuity": "A sunlit city canyon",
+            "visual_continuity": "Cinematic live action",
+            "initial_state": "The acrobat begins on a roof",
+            "ambient_audio": (
+                "Strong free-fall wind, web-shooters firing, and distant city traffic"
+            ),
+            "music": (
+                "Soaring orchestral music begins at 0.00s and stays energetic "
+                "throughout the 14 seconds"
+            ),
+            "windows": [
+                {
+                    "title": "Swing",
+                    "action": "The acrobat swings across the street",
+                    "dialogue": [],
+                    "sound_effects": "One web line fires",
+                    "closing_state": "The acrobat reaches the ledge",
+                },
+                {
+                    "title": "Hold",
+                    "action": "The acrobat remains still on the ledge",
+                    "dialogue": [],
+                    "sound_effects": "Distant city traffic",
+                    "closing_state": "The acrobat remains still",
+                },
+            ],
+        }
+        compiled = compile_h3_window_prompts(plan, spans)
+        self.assertIn("web-shooters firing", compiled[0]["prompt"])
+        self.assertNotIn("web-shooters firing", compiled[1]["prompt"])
+        self.assertIn("Distant city traffic", compiled[1]["prompt"])
+        self.assertIn("continuous environmental ambience", compiled[1]["prompt"])
+        self.assertNotIn("begins at 0.00s", compiled[1]["prompt"])
+        self.assertNotIn("14 seconds", compiled[1]["prompt"])
+        self.assertIn("throughout this segment", compiled[1]["prompt"])
+
     def test_later_window_preserves_established_cast_blocking_without_reentry(self):
         spans = compute_h3_window_boundaries(
             672,
@@ -480,7 +533,7 @@ class H3WindowPlannerTests(unittest.TestCase):
         for item in compiled:
             self.assertNotRegex(item["prompt"], r"(?i)\bwindow\b")
 
-    def test_compiler_preserves_a_literal_user_requested_window(self):
+    def test_compiler_preserves_physical_windows_with_or_without_source_mention(self):
         spans = compute_h3_window_boundaries(240, 240, fps=24)
         plan = {
             "subject_continuity": "The same woman remains in the cafe",
@@ -499,12 +552,13 @@ class H3WindowPlannerTests(unittest.TestCase):
             }],
         }
 
-        compiled = compile_h3_window_prompts(
-            plan,
-            spans,
-            source_prompt="A woman looks outside through a stained-glass window",
-        )
-        self.assertIn("stained-glass window", compiled[0]["prompt"])
+        for source in (
+            "A woman looks outside through a stained-glass window",
+            "A woman gets some fresh air in a quiet cafe",
+        ):
+            with self.subTest(source=source):
+                compiled = compile_h3_window_prompts(plan, spans, source_prompt=source)
+                self.assertIn("stained-glass window", compiled[0]["prompt"])
 
     def test_compiler_rejects_planner_window_leak_when_user_did_not_request_one(self):
         spans = compute_h3_window_boundaries(240, 240, fps=24)
@@ -518,14 +572,14 @@ class H3WindowPlannerTests(unittest.TestCase):
             "windows": [{
                 "window": 1,
                 "title": "Conversation",
-                "action": "The camera moves outside the window while they talk",
+                "action": "The camera continues talking coverage in generation window 2",
                 "dialogue": [],
                 "sound_effects": "No one-time effect",
-                "closing_state": "They remain visible through the window",
+                "closing_state": "They remain on the couch",
             }],
         }
 
-        with self.assertRaisesRegex(ValueError, "internal term 'window'"):
+        with self.assertRaisesRegex(ValueError, "generation-window bookkeeping"):
             compile_h3_window_prompts(
                 plan,
                 spans,
@@ -656,22 +710,35 @@ class H3WindowPlannerTests(unittest.TestCase):
         self.assertIn("Immutable chronological events", first_segment_prompt)
 
     @patch("services.llm_service.generate")
-    def test_mature_mode_uses_fidelity_note_not_general_enhancer(self, generate):
+    def test_mature_mode_conditionally_loads_shared_content_guide(self, generate):
+        from services.guide_loader import load_guide
+
+        marker = "TEST CONTENT GUIDE: Use a warm conversational tone."
+
+        def load_fixture(category, name):
+            return marker if name == "nsfw_shared" else load_guide(category, name)
+
         generate.side_effect = RuntimeError("offline")
-        plan_h3_sliding_windows(
-            "A named character completes one requested action",
-            model_type="minimax_h3",
-            resolution="1920x1088",
-            total_frames=345,
-            window_frames=124,
-            overlap_frames=1,
-            fps=24,
-            nsfw=True,
-        )
-        system_prompt = generate.call_args_list[0].kwargs["system_prompt"]
-        self.assertIn("SOURCE FIDELITY", system_prompt)
-        self.assertIn("MATURE-MODE FIDELITY", system_prompt)
-        self.assertIn("Do not censor it, add to it, or intensify it", system_prompt)
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled), patch("services.guide_loader.load_guide", side_effect=load_fixture) as loader:
+                generate.reset_mock()
+                plan_h3_sliding_windows(
+                    "A named character completes one requested action",
+                    model_type="minimax_h3",
+                    resolution="1920x1088",
+                    total_frames=345,
+                    window_frames=124,
+                    overlap_frames=1,
+                    fps=24,
+                    nsfw=enabled,
+                )
+                self.assertGreater(len(generate.call_args_list), 1)
+                self.assertIn("SOURCE FIDELITY", generate.call_args_list[0].kwargs["system_prompt"])
+                for call in generate.call_args_list:
+                    self.assertEqual(call.kwargs["system_prompt"].count(marker), int(enabled))
+                    self.assertNotIn("MATURE-MODE FIDELITY", call.kwargs["system_prompt"])
+                    self.assertIn("json_schema", call.kwargs)
+                self.assertEqual(any(call.args[1] == "nsfw_shared" for call in loader.call_args_list), enabled)
 
     def test_signature_changes_when_timing_or_media_contract_changes(self):
         common = dict(
@@ -939,6 +1006,28 @@ class H3WindowPlannerTests(unittest.TestCase):
         )
         for item in compiled:
             self.assertNotRegex(item["prompt"], r"(?i)\bwindow\b")
+
+    @patch("services.llm_service.generate", side_effect=RuntimeError("offline"))
+    def test_faithful_imported_silent_duel_fits_two_windows_without_speech_budget_error(self, _generate):
+        prompt = (ROOT / "tests/fixtures/h3_silent_wuxia_prompt.txt").read_text(encoding="utf-8")
+        result = plan_h3_sliding_windows(
+            prompt,
+            model_type="minimax_h3_fl2va_full",
+            resolution="1280x704",
+            total_frames=672,
+            window_frames=345,
+            overlap_frames=18,
+            fps=24,
+            planning_style="faithful",
+        )
+        self.assertEqual(result["window_count"], 2)
+        self.assertEqual(len(result["window_prompts"]), 2)
+        self.assertEqual(result["source_intent"]["cast_names"], ["Character A", "Character B"])
+        self.assertEqual(result["source_prompt"], prompt.strip())
+        joined = "\n".join(result["window_prompts"])
+        self.assertNotIn("<d>", joined)
+        self.assertNotIn("no slow motion", joined)
+        self.assertIn("No spoken words", joined)
 
     @patch("services.llm_service.generate", side_effect=RuntimeError("offline"))
     def test_studio_faithful_eight_window_screenplay_keeps_cast_and_dialogue(self, _generate):
@@ -1385,8 +1474,10 @@ class H3WindowPlannerTests(unittest.TestCase):
         self.assertIn("Never label a compiled H3/LTX window payload as the source prompt", media_item)
         self.assertIn("file.metadata_ready", media_item)
         self.assertIn("meta.source === 'sidecar'", media_item)
-        self.assertIn("metadata_ready", launch)
-        self.assertIn("metadata_updated_at", launch)
+        gallery = (ROOT / "app" / "services" / "gallery_library.py").read_text(encoding="utf-8")
+        self.assertIn("gallery_library", launch)
+        self.assertIn("metadata_ready", gallery)
+        self.assertIn("metadata_updated_at", gallery)
         self.assertIn("cache: 'no-store'", (ROOT / "ui" / "src" / "api" / "client.ts").read_text(encoding="utf-8"))
         self.assertIn("textarea.scrollHeight", prompt_input)
         self.assertNotIn("max-h-[360px] overflow-y-auto", prompt_input)

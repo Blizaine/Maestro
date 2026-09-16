@@ -1,5 +1,6 @@
 import ast
 import os
+import traceback
 import torch
 from torch.utils import _pytree as pytree
 
@@ -65,6 +66,7 @@ _NVFP4_KERNEL_AVAILABLE = False
 _NVFP4_KERNEL_CHECKED = False
 _NVFP4_KERNEL_BACKEND = None
 _NVFP4_ACT_SCALE_CACHE = {}
+_NVFP4_UNSUPPORTED_SHAPES = set()
 
 _NVFP4_SPLIT_FIELDS = {
     "weight": 0,
@@ -79,8 +81,7 @@ _NVFP4_SPLIT_FIELDS = {
     "output_scale": 0,
 }
 
-_NVFP4_BACKEND = os.environ.get("WGP_NVFP4_BACKEND", _NVFP4_BACKEND_AUTO).strip().lower()
-_NVFP4_BACKEND = _NVFP4_BACKEND_LIGHTX2V
+_NVFP4_BACKEND = os.environ.get("WGP_NVFP4_BACKEND", _NVFP4_BACKEND_LIGHTX2V).strip().lower()
 
 def _normalize_nvfp4_backend(name):
     if name is None:
@@ -171,6 +172,7 @@ def set_nvfp4_backend(name):
     _NVFP4_KERNEL_BACKEND = None
     _NVFP4_KERNEL_LOGGED = False
     _NVFP4_LOAD_LOGGED = False
+    _NVFP4_UNSUPPORTED_SHAPES.clear()
     _init_nvfp4_kernel_support()
 
 
@@ -450,6 +452,12 @@ def _nvfp4_linear_cuda_lightx2v(input, weight, bias=None):
         alpha = alpha * input_scale
     else:
         quant_scale = input_scale
+    # cuBLAS FP4 GEMM needs aligned rows even for small/odd Qwen vision-text
+    # batches. Quantization alone pads the scale buffer, not the activations.
+    original_rows = x2d.shape[0]
+    padding_rows = (-original_rows) % 16
+    if padding_rows:
+        x2d = torch.nn.functional.pad(x2d, (0, 0, 0, padding_rows))
     qx, qx_scale = _lx_gemm.scaled_nvfp4_quant(x2d, quant_scale)
     if layout == _NVFP4_LAYOUT_TENSORCORE:
         qx = _nvfp4_swap_nibbles(qx)
@@ -465,6 +473,8 @@ def _nvfp4_linear_cuda_lightx2v(input, weight, bias=None):
         alpha=alpha,
         bias=bias,
     )
+    if padding_rows:
+        out = out[:original_rows]
     if out.dtype != orig_dtype:
         out = out.to(orig_dtype)
     return out.reshape(*input.shape[:-1], weight.size(0))
@@ -481,7 +491,28 @@ def _nvfp4_linear(input, weight, bias=None, op=None):
     if _nvfp4_can_use_kernel(input, weight):
         if _is_fake_tensor(input):
             return input.new_empty((*input.shape[:-1], weight.size(0)))
-        return _nvfp4_linear_cuda(input, weight, bias=bias)
+        shape_key = (
+            _NVFP4_KERNEL_BACKEND, str(input.device), input.dtype,
+            tuple(input.shape), tuple(weight.shape), _nvfp4_layout(weight),
+            bias is not None,
+        )
+        if shape_key not in _NVFP4_UNSUPPORTED_SHAPES:
+            try:
+                return _nvfp4_linear_cuda(input, weight, bias=bias)
+            except RuntimeError as error:
+                message = str(error).lower()
+                if isinstance(error, torch.OutOfMemoryError) or not any(reason in message for reason in (
+                    "unable to find suitable cublas gemm algorithm",
+                    "cublas_status_not_supported",
+                )):
+                    raise
+                # Release temporary quantized activations before dequantizing
+                # this layer. Other CUDA failures must still surface normally.
+                traceback.clear_frames(error.__traceback__)
+                if len(_NVFP4_UNSUPPORTED_SHAPES) >= 256:
+                    _NVFP4_UNSUPPORTED_SHAPES.clear()
+                _NVFP4_UNSUPPORTED_SHAPES.add(shape_key)
+                print(f"NVFP4: {shape_key[0]} cannot run shape {tuple(input.shape)} x {tuple(weight.shape)}; using dequantized linear for this shape.")
     _nvfp4_note_fallback()
     if _is_fake_tensor(input):
         return input.new_empty((*input.shape[:-1], weight.size(0)))
