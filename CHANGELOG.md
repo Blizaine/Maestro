@@ -3,7 +3,13 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
-## [2.2.0] - 2026-09-16
+## [2.2.1] - 2026-09-16
+
+Includes the full v2.2.0 feature release plus this enhancement hotfix:
+
+- Fixed false H3 enhancement review warnings for imported numbered shot lists.
+  Preserve shot clocks, source order and camera settings; accept faithful
+  descriptive paraphrases while retaining action, dialogue and timing checks.
 
 - Unified adaptive Enhance for concepts and detailed scripts, with Enhance now,
   queued Enhance on generation, an opt-in default, saved source/draft review,

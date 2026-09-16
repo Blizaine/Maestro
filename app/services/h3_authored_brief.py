@@ -39,7 +39,7 @@ _LINE_HEADING = re.compile(
     r"(?m)^[ \t]*(?:#{1,6}[ \t]+(?P<hash>[^\r\n]{1,200})|"
     r"\*\*(?P<bold>[^*\r\n]{1,200})\*\*[ \t]*:?|"
     r"__(?P<underline>[^_\r\n]{1,200})__[ \t]*:?|"
-    r"(?P<plain>[\w][\w /&-]{0,100}):)[ \t]*$"
+    r"(?P<plain>[\w][\w /&-]{0,100}):)[ \t]*\r?$"
 )
 _LINE_TIMED_HEADING = re.compile(
     rf"(?m)^[ \t]*(?:[-*][ \t]+|\d+[.)][ \t]+)?"
@@ -53,14 +53,28 @@ _NUMBERED_SHOT_HEADING = re.compile(
     rf"(?P<end>{_CLOCK})\s*(?:s|sec(?:onds?)?)?\s*[】\])]",
     re.IGNORECASE,
 )
+_LINE_NUMBERED_SHOT_HEADING = re.compile(
+    rf"(?m)^[ \t]*(?:#{{1,6}}[ \t]+|[-*][ \t]+)?(?:\*\*|__)?"
+    rf"Shot[ \t]+\d+[ \t]*(?:[:.\-–—|][ \t]*)?"
+    rf"(?P<start>{_CLOCK})[ \t]*(?:s|sec(?:onds?)?)?[ \t]*"
+    rf"(?:[-–—]|\bto\b)[ \t]*(?P<end>{_CLOCK})[ \t]*(?:s|sec(?:onds?)?)?"
+    r"(?:[ \t]*[|｜:：–—-][ \t]*(?P<title>[^*\r\n]{1,200}?))?"
+    r"[ \t]*(?:\*\*|__)?[ \t]*\r?$",
+    re.IGNORECASE,
+)
 
 
 def _timed_headings(source: str) -> list[re.Match]:
     # A numbered shot list is the detailed clock. Chapter/skill ranges and a
     # prose synopsis may repeat it; they must not invalidate or duplicate it.
-    shots = list(_NUMBERED_SHOT_HEADING.finditer(source))
+    # Pasted storyboards also use standalone "SHOT 1 — 0:00–0:02" headings.
+    # Recognize that explicit structure before sentence/cast extraction; its
+    # clock must not become an action, and adjectives in its body are not names.
+    line_shots = list(_LINE_NUMBERED_SHOT_HEADING.finditer(source))
+    shots = sorted([*_NUMBERED_SHOT_HEADING.finditer(source), *line_shots],
+                   key=lambda match: match.start())
     return shots if len(shots) >= 2 else sorted(
-        [*_TIMED_HEADING.finditer(source), *_LINE_TIMED_HEADING.finditer(source)],
+        [*_TIMED_HEADING.finditer(source), *_LINE_TIMED_HEADING.finditer(source), *line_shots],
         key=lambda match: match.start(),
     )
 
@@ -288,6 +302,41 @@ def authored_timed_brief(source: str) -> dict:
             for start, end, text, offset, stop, title in blocks
         ],
     }
+
+
+_OPTICAL_MODIFIER = (
+    r"(?:strong|subtle|slight|soft|hard|shallow|deep|volumetric|cinematic|filmic|"
+    r"photorealistic|realistic|natural|warm|cool|dramatic|high|low|fine|coarse|"
+    r"minimal|heavy|gentle|bright|dark|anamorphic|atmospheric|epic|professional|"
+    r"very|extremely|no|without)"
+)
+_OPTICAL_SETTING = re.compile(
+    rf"(?:{_OPTICAL_MODIFIER}[ -]+)*(?:motion blur|depth of field|light rays|"
+    r"lighting|film grain|lens flare|bokeh|dynamic range|contrast|"
+    r"cinematic perspective|filmic perspective|cinematic style|filmic style)|"
+    r"(?:creating|making) (?:a |an )?(?:dramatic|cinematic|smooth) transition|"
+    r"\d{1,3}(?:\.\d+)?\s*mm\s+(?:anamorphic\s+)?lens",
+    re.IGNORECASE,
+)
+
+
+def authored_optical_settings(source: str) -> list[str]:
+    """Copy standalone optical settings, never actions or quoted speech.
+
+    These settings do not need creative rewriting or extra timeline space.
+    A whole-clause match deliberately excludes camera moves, reveals, actions
+    involving light and focus changes tied to a particular movement.
+    """
+    text = re.sub(r'<d>.*?</d>|"[^"\r\n]*"|“[^”\r\n]*”', " ", str(source or ""), flags=re.S)
+    clauses = re.split(r"(?<=[.!?])\s+|[,;\r\n]+", text)
+    result: list[str] = []
+    seen: set[str] = set()
+    for clause in clauses:
+        cue = clause.strip(" \t.!?:")
+        if _OPTICAL_SETTING.fullmatch(cue) and cue.casefold() not in seen:
+            seen.add(cue.casefold())
+            result.append(cue)
+    return result
 
 
 def explicit_negative_constraints(source: str) -> str:

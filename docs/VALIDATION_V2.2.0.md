@@ -1,10 +1,30 @@
-# v2.2.0 validation record
+# v2.2.1 validation record
 
 Prepared 16 September 2026. This distinguishes automated regression coverage
 from rendered workflows exercised during development and tests still needed on
 other hardware.
 
-## Release checks
+## v2.2.1 enhancement hotfix
+
+- 497 H3, 33 adaptive-enhancement and 23 Studio/queue regression tests passed
+  (553 total). Coverage includes numbered shot formats, Windows line endings,
+  source offsets, local camera-setting retention and genuine omitted actions.
+- Ten live local enhancements passed with no review warnings or fallback on
+  the final candidate. Eight used the exact reported 28-second, eight-shot
+  brief and its composition reference: three queued-path repeats each with
+  installed Gemma E4B and Qwen3.6 27B, plus two direct Enhance-now endpoint
+  replays with the existing user settings. Two single-window controls exercised
+  exact dialogue ownership and a quiet scene without speech.
+- The six repeated queued-path runs each used three LLM calls, without focused
+  repair. All eight exact-brief plans retained eight ordered source events,
+  two windows totaling 28 seconds, and the requested first-shot optical settings.
+- An earlier candidate rejected two Gemma paraphrases because it checked every
+  descriptive sentence independently. It was corrected before the complete
+  repeat above; those failures are not counted as successful final checks.
+- These checks validate enhancement and compiled prompts, not rendered-video
+  fidelity. The complete feature release's existing coverage remains below.
+
+## v2.2.0 feature-release checks
 
 | Check | Result |
 | --- | --- |

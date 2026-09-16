@@ -1,10 +1,22 @@
-# Maestro v2.2.0
+# Maestro v2.2.1
 
 Released 16 September 2026.
 
 This release brings one adaptive Enhance workflow, enhancement inside the
 generation queue, YuE2 music and experimental personal music styles, a searchable
 gallery across folders, and stronger control over Director music videos.
+
+The complete v2.2.0 feature release remains below, with the following v2.2.1
+enhancement fix included.
+
+**AI enhancement hotfix:** imported numbered shot headings such as
+`SHOT 1 — 0:00–0:02` now retain their authored structure, including Markdown
+variants and Windows line endings. Camera settings such as motion blur, light
+rays and depth of field carry into their own shots without depending on the
+writer to repeat each phrase. This fixes false story-schedule and camera-fidelity
+warnings while preserving checks for missing actions, event order and exact
+dialogue. Applies to Enhance now and Enhance on generation. Retry enhancement
+from the original prompt to replace an older draft.
 
 ## Unified Enhance and queued generation
 

@@ -155,11 +155,40 @@ class H3CameraCoverageTests(unittest.TestCase):
         self.assertTrue(segment_violations(source, canonical, segment_number=1, duration=12,
                                            assigned_beats=beats, dialogue_catalog=[]))
 
-    def canonical(self, draft, beats, catalog=None):
+    def test_generic_style_quality_does_not_require_a_separate_visible_action(self):
+        source = ("[0s-6s] Nora pockets the key, cinematic perspective. "
+                  "[6s-12s] Nora exits the room.")
+        beats = [_beat(1, extract_source_events(source)[0]["text"])]
+        canonical = self.canonical(_camera([[1]], actions=["Nora pockets the key."]), beats,
+                                   source_events=extract_source_events(source))
+        self.assertEqual(segment_violations(source, canonical, segment_number=1, duration=12,
+                                          assigned_beats=beats, dialogue_catalog=[]), [])
+        # The authored quality remains in the rendered source summary, even
+        # though the writer does not have to repeat the same adjective.
+        rendered = _materialize_segment(canonical, beats=beats, dialogue_catalog=[],
+                                        source_events=extract_source_events(source))
+        self.assertIn("cinematic perspective", rendered["summary"])
+        self.assertIn("cinematic perspective", rendered["shots"][0]["camera"])
+
+    def test_concrete_optics_and_actions_are_not_generic_style_quality(self):
+        for requirement in ("shallow depth of field", "rapid push-in to her eyes",
+                            "dramatic red light illuminates her face",
+                            "the heavy oak door swings completely shut behind Nora"):
+            source = f"[0s-6s] Nora pockets the key, {requirement}. [6s-12s] Nora exits the room."
+            beats = [_beat(1, extract_source_events(source)[0]["text"])]
+            canonical = self.canonical(_camera([[1]], actions=["Nora pockets the key."]), beats)
+            with self.subTest(requirement=requirement):
+                violations = segment_violations(source, canonical, segment_number=1, duration=12,
+                                                 assigned_beats=beats, dialogue_catalog=[])
+                self.assertTrue(any("omits required source step" in item for item in violations),
+                                violations)
+
+    def canonical(self, draft, beats, catalog=None, **kwargs):
         return _canonicalize_segment_contract(
             draft, segment_number=draft["segment"],
             duration=draft["shots"][-1]["end_seconds"], assigned_beats=beats,
             dialogue_catalog=catalog or [], opening_state=draft["opening_state"], source_intent={},
+            **kwargs,
         )
 
     def violations(self, draft, beats, catalog=None):

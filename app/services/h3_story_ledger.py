@@ -20,6 +20,7 @@ from typing import Any, Callable
 from models.minimax_h3.speakers import is_h3_production_label
 
 from services.h3_authored_brief import (
+    authored_optical_settings,
     authored_timed_brief,
     character_profile_spans,
     explicit_character_profiles,
@@ -2906,14 +2907,27 @@ def _h3_contract_clauses(value: Any) -> list[str]:
     """Split explicit event steps without treating every ``and`` as a cut."""
 
     text = sanitize_h3_prompt_text(value)
-    clauses = [
-        part.strip(" ,;:-.!?")
-        for part in re.split(
-            r"\s*[,;]\s*|\b(?:then|before|after|only\s+after|until)\b",
-            text,
-            flags=re.IGNORECASE,
-        )
-    ]
+    clauses = []
+    for part in re.split(
+        r"\s*[,;]\s*|\b(?:then|before|after|only\s+after|until)\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        # Keep descriptive lead-ins with their concrete actions so a faithful
+        # paraphrase need not repeat every adjective. Separate optical settings:
+        # carrying "film grain" must not count as carrying an adjacent action.
+        action_sentences = []
+        for sentence in re.split(r"(?<=[.!?])\s+", part):
+            if authored_optical_settings(sentence):
+                if action_sentences:
+                    clauses.append(" ".join(action_sentences))
+                    action_sentences = []
+                clauses.append(sentence)
+            else:
+                action_sentences.append(sentence)
+        if action_sentences:
+            clauses.append(" ".join(action_sentences))
+    clauses = [part.strip(" ,;:-.!?") for part in clauses]
     speech_only = re.compile(
         r"(?:(?:who|[A-Z][\w'-]*(?:\s+[A-Z][\w'-]*)*)\s+)?"
         r"(?:says?|replies|answers?|exclaims?|asks?|shouts?|whispers?|"
@@ -5917,6 +5931,7 @@ def _canonicalize_segment_contract(
     dialogue_catalog: list[dict[str, Any]],
     opening_state: str,
     source_intent: dict[str, Any],
+    source_events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """Attach exact dialogue and timing to the LLM's paired camera/action.
 
@@ -6129,9 +6144,31 @@ def _canonicalize_segment_contract(
             duration=total,
             dialogue_id=str(source_intent.get("opening_dialogue_id")),
         )
+    # Camera writing owns staging and movement. Literal user-authored optics
+    # belong to the compiler, just like exact dialogue. Retain them in their
+    # own event's camera field instead of repeatedly asking an LLM to copy
+    # them and replacing a good window when the focused rewrite drops one.
+    # Read only original source events, never AI-proposed beat descriptions.
+    source_optics = {
+        str(event.get("event_id") or "").upper(): authored_optical_settings(event.get("text"))
+        for event in (source_events or [])
+    }
+    retained_optics: set[str] = set()
     for shot, shot_beats in zip(raw_shots, assignments):
         beat_ids = [str(beat.get("beat_id") or "").upper() for beat in shot_beats]
         shot["beat_ids"] = beat_ids
+        for beat in shot_beats:
+            for event_id in (beat.get("source_event_ids") or []):
+                event_id = str(event_id or "").upper()
+                if event_id in retained_optics:
+                    continue
+                retained_optics.add(event_id)
+                local_text = _normalize_key(" ".join(str(shot.get(field) or "")
+                                                     for field in ("action", "framing", "camera")))
+                cues = [cue for cue in source_optics.get(event_id, [])
+                        if _normalize_key(cue) not in local_text]
+                if cues:
+                    shot["camera"] = ". ".join([shot["camera"].rstrip(" ."), *cues])
         required = ". Then ".join(
             sanitize_h3_prompt_text(beat.get("description"))
             for beat in shot_beats
@@ -8985,6 +9022,7 @@ def _plan_h3_story_segments(
                 dialogue_catalog=catalog,
                 opening_state=previous_closing,
                 source_intent=source_intent,
+                source_events=source_events,
             )
             segment_errors = segment_violations(
                 prompt,
@@ -9079,6 +9117,7 @@ def _plan_h3_story_segments(
                     dialogue_catalog=catalog,
                     opening_state=previous_closing,
                     source_intent=source_intent,
+                    source_events=source_events,
                 )
                 segment_errors = segment_violations(
                     prompt,
