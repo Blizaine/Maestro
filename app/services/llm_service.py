@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from typing import Optional
 
 from services.text_integrity import repair_text
+from promptbench.trace import traced, record_payload, record_metrics, record_response
 from services.dialogue_timing import (
     DIALOGUE_DEFAULT_WORDS_PER_SECOND,
     DIALOGUE_MAX_WORDS_PER_SECOND,
@@ -314,7 +315,8 @@ MODEL_REGISTRY = {
         # quantized KV cache, recurrent state, vision projector, and runtime
         # buffers. Q5_K_M (19.5 GB) is too close to the edge for that goal.
         "gguf_file": "Qwen3.8-27B-Uncensored-noMTP-Q4_K_M.gguf",
-        "mmproj_file": "Qwen3.8-27B-Uncensored-vision-f16.gguf",
+        "mmproj_file": "mmproj-Qwen3.8-27B-Uncensored-F16.gguf",
+        "mmproj_cache_aliases": ["Qwen3.8-27B-Uncensored-vision-f16.gguf"],
         "weights_gb": 16.5, "mmproj_gb": 0.928, "arch": "qwen38-27b",
         "thinking_style": "qwen",
         # Qwen3.8's own chat template supports explicit reasoning tiers.
@@ -722,7 +724,7 @@ def _finalize_payload(payload: dict) -> dict:
     """
 
     if _provider not in ("remote", "openai"):
-        return payload
+        return record_payload(payload, model_id=_model_id, command=getattr(_process, "args", None))
     prepared = {
         key: value
         for key, value in payload.items()
@@ -735,7 +737,7 @@ def _finalize_payload(payload: dict) -> dict:
             f"accepted by provider={_provider}: {', '.join(dropped)}"
         )
     prepared["model"] = _model_id
-    return prepared
+    return record_payload(prepared, model_id=_model_id)
 
 
 def _server_url() -> str:
@@ -1135,6 +1137,8 @@ def _build_generation_metrics(
 def _log_generation_metrics(metrics: dict) -> None:
     """Emit one compact, useful line instead of opaque reasoning chatter."""
 
+    record_metrics(metrics)
+
     reasoning = metrics.get("reasoning_tokens")
     answer = metrics.get("answer_tokens")
     effort = metrics.get("reasoning_effort") or "off/default"
@@ -1292,7 +1296,7 @@ def _read_llama_runtime_receipt(bin_dir: str) -> dict:
     return receipt if isinstance(receipt, dict) else {}
 
 
-def _write_llama_runtime_receipt(bin_dir: str, *, tag: str, build) -> None:
+def _write_llama_runtime_receipt(bin_dir: str, *, tag: str, build, backend=None) -> None:
     """Atomically record which release supplied the installed executable."""
 
     import json
@@ -1305,6 +1309,8 @@ def _write_llama_runtime_receipt(bin_dir: str, *, tag: str, build) -> None:
         "build": int(build) if build else None,
         "installed_at": int(time.time()),
     }
+    if backend:
+        receipt["backend"] = backend
     try:
         with open(temporary, "w", encoding="utf-8") as handle:
             json.dump(receipt, handle, indent=2)
@@ -1409,12 +1415,13 @@ def _llama_server_build(exe_path: str):
     return None
 
 
-def _ensure_llama_server(bin_dir: str) -> None:
+def _ensure_llama_server(bin_dir: str, device: str = "cpu") -> None:
     """Auto-download llama-server from llama.cpp GitHub releases if missing.
 
     Picks the appropriate prebuilt binary for the current platform:
       - Windows + CUDA (default for Maestro on NVIDIA): bin-win-cuda-12.4-x64.zip
-      - Linux: bin-ubuntu-x64.tar.gz (includes CUDA backend if libs are present)
+      - Linux CPU: bin-ubuntu-x64.tar.gz (CPU-only)
+      - Linux CUDA: build/cache the matching upstream release with GGML_CUDA
       - macOS / AMD: not supported by Maestro itself (Pinokio install gates these),
         but if someone gets here, raise with a clear message.
 
@@ -1438,6 +1445,7 @@ def _ensure_llama_server(bin_dir: str) -> None:
 
     is_windows = sys.platform.startswith("win")
     is_linux = sys.platform.startswith("linux")
+    linux_cuda = is_linux and device == "cuda"
     exe_name = "llama-server.exe" if is_windows else "llama-server"
     exe_path = os.path.join(bin_dir, exe_name)
     exe_exists = os.path.isfile(exe_path)
@@ -1475,6 +1483,20 @@ def _ensure_llama_server(bin_dir: str) -> None:
         ]
     needs_cudart = bool(missing_cuda_files)
 
+    if linux_cuda:
+        from services.llama_linux_runtime import probe_cuda, require_cuda
+        if not needs_executable:
+            devices, _ = probe_cuda(exe_path, _llama_server_env(exe_path))
+            if devices:
+                return
+            # A known CUDA build with no visible GPU needs driver/library repair,
+            # not an expensive rebuild on every load attempt.
+            import glob
+            if receipt.get("backend") == "cuda" or glob.glob(os.path.join(bin_dir, "libggml-cuda.so*")):
+                require_cuda(exe_path, _llama_server_env(exe_path))
+            print("[LLM] Cached Linux llama-server has no CUDA device; replacing the CPU runtime.")
+        needs_executable = True
+
     # Unknown/zero version metadata is deliberately accepted. Official
     # llama.cpp archives have occasionally shipped that way; repeatedly
     # replacing the same binary cannot make its embedded metadata improve.
@@ -1503,8 +1525,8 @@ def _ensure_llama_server(bin_dir: str) -> None:
     #      but a manual install or weird env may not have it on PATH.
     #      Putting them next to llama-server.exe lets it find them
     #      regardless of system state.
-    # Linux: just one asset — bin-ubuntu-x64.tar.gz dynamically links
-    # against CUDA libs, which Pinokio's AI bundle has on Linux too.
+    # Linux's Ubuntu archive is CPU-only. For CUDA, resolve the same release
+    # tag below but build its source rather than downloading that archive.
     #
     # Both assets are matched by:
     #   (must_start_with, must_contain)
@@ -1605,6 +1627,15 @@ def _ensure_llama_server(bin_dir: str) -> None:
         tag = FALLBACK_LLAMA_TAG
         release_info = None
 
+    if linux_cuda:
+        from services.llama_linux_runtime import build_cuda_runtime
+        build_cuda_runtime(bin_dir, tag, _llama_server_env)
+        _write_llama_runtime_receipt(
+            bin_dir, tag=tag, build=_llama_server_build(exe_path) or _llama_release_build(tag), backend="cuda",
+        )
+        print(f"[LLM] CUDA llama-server installed to {exe_path}")
+        return
+
     # Resolve each asset spec to a download URL — prefer GitHub API
     # (handles tag drift gracefully) but fall back to a constructed URL.
     asset_urls = []
@@ -1691,7 +1722,7 @@ def _ensure_llama_server(bin_dir: str) -> None:
     print(f"[LLM] llama-server installed to {exe_path}")
 
 
-def _get_server_exe() -> str:
+def _get_server_exe(device: str = "cpu") -> str:
     """Find the llama-server executable, downloading it on first use if missing.
 
     Lazy-download pattern matches the model-weights flow: nothing is
@@ -1699,8 +1730,8 @@ def _get_server_exe() -> str:
     download is one-time (~50-100 MB) and cached in bin_dir, so
     subsequent loads are instant.
     """
-    bin_dir = os.environ.get("MAESTRO_LLAMA_BIN", DEFAULT_BIN_DIR)
-    _ensure_llama_server(bin_dir)
+    bin_dir = os.path.abspath(os.environ.get("MAESTRO_LLAMA_BIN", DEFAULT_BIN_DIR))
+    _ensure_llama_server(bin_dir, device=device)
     if os.name == "nt":
         return os.path.join(bin_dir, "llama-server.exe")
     return os.path.join(bin_dir, "llama-server")
@@ -1758,13 +1789,21 @@ def load_model(
     _api_key = ""
 
     with _lock:
-        if is_loaded() and _model_id == repo_id and not force_reload:
+        if is_loaded() and _model_id == repo_id and _device == device and not force_reload:
             return
 
         if is_loaded():
             _unload_inner()
 
         print(f"[LLM] Loading model: {repo_id} on {device}")
+
+        # Detect CPU-only/missing CUDA runtimes before downloading large weights.
+        server_exe = _get_server_exe(device=device)
+        cuda_devices = []
+        if device == "cuda":
+            from services.llama_linux_runtime import require_cuda
+            cuda_devices = require_cuda(server_exe, _llama_server_env(server_exe))
+            print(f"[LLM] Verified CUDA devices: {', '.join(cuda_devices)}")
 
         base_cache_dir = get_model_dir()
 
@@ -1790,15 +1829,20 @@ def load_model(
         mmproj_repo = registry_entry.get("mmproj_repo", repo_id)  # allow mmproj from different repo
         mmproj_path = None
         try:
-            mmproj_path = _download_gguf(mmproj_repo, mmproj_file, cache_dir)
+            # Reuse an already downloaded projector after an upstream rename.
+            for alias in registry_entry.get("mmproj_cache_aliases", []):
+                cached = os.path.join(cache_dir, alias)
+                if os.path.isfile(cached) and os.path.getsize(cached) > 0:
+                    mmproj_path = cached
+                    break
+            if mmproj_path is None:
+                mmproj_path = _download_gguf(mmproj_repo, mmproj_file, cache_dir)
             mmproj_path = os.path.normpath(mmproj_path)
             print(f"[LLM] Vision support: mmproj loaded from {mmproj_repo}")
         except Exception as e:
             print(f"[LLM] No mmproj available (vision disabled): {e}")
 
         _vision_available = mmproj_path is not None or registry_entry.get("native_vision", False)
-
-        server_exe = _get_server_exe()
 
         _server_port = _find_free_port()
 
@@ -1845,13 +1889,14 @@ def load_model(
                 cmd += ["--mtmd-batch-max-tokens", "1"]
 
         if device == "cuda":
+            cmd += ["--device", ",".join(cuda_devices)]
             # Use -ngl from extra_flags if present, otherwise default to all layers
             if "-ngl" in extra_flags:
                 pass  # already included via extra_flags
             else:
                 cmd += ["--n-gpu-layers", "-1"]
         else:
-            cmd += ["--n-gpu-layers", "0"]
+            cmd += ["--n-gpu-layers", "0", "--device", "none", "--no-mmproj-offload"]
 
         print(f"[LLM] Starting llama-server on port {_server_port}")
         _process = subprocess.Popen(
@@ -1861,6 +1906,9 @@ def load_model(
             stderr=subprocess.STDOUT,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
+        # Loading emits enough diagnostics to fill the pipe too. Drain from
+        # process start, so device/offload diagnostics survive loading failures.
+        _start_log_reader(_process)
 
         # Wait for server to be ready (poll /health)
         # Scale timeout with model size — large models need more time to load
@@ -1871,7 +1919,9 @@ def load_model(
             if _process.poll() is not None:
                 # Process exited — read output for error details
                 exit_code = _process.returncode
-                output = _process.stdout.read().decode(errors="replace") if _process.stdout else ""
+                if _log_reader:
+                    _log_reader.join(timeout=1)
+                output = _server_log_tail(30)
                 _process = None
                 _model_id = ""
                 raise RuntimeError(f"llama-server exited with code {exit_code}:\n{output[-2000:]}")
@@ -1890,29 +1940,7 @@ def load_model(
             time.sleep(1)
 
         if not ready:
-            # Capture process output for debugging
-            server_output = ""
-            if _process and _process.stdout:
-                import select
-                try:
-                    # Non-blocking read of whatever output is available
-                    _process.stdout.flush()
-                    import threading
-                    lines = []
-                    def _read():
-                        try:
-                            for line in iter(_process.stdout.readline, b''):
-                                lines.append(line.decode(errors="replace"))
-                                if len(lines) > 50:
-                                    break
-                        except Exception:
-                            pass
-                    t = threading.Thread(target=_read, daemon=True)
-                    t.start()
-                    t.join(timeout=2)
-                    server_output = "".join(lines[-20:])
-                except Exception:
-                    pass
+            server_output = _server_log_tail(30)
             _unload_inner()
             raise RuntimeError(
                 f"llama-server did not become ready within {load_timeout}s (model: {file_size_gb:.1f}GB)\n"
@@ -1923,10 +1951,6 @@ def load_model(
         _device = device
         file_size = os.path.getsize(gguf_path) / 1e6
         print(f"[LLM] Model loaded: {repo_id} ({file_size:.0f}MB) on {device}, port {_server_port}")
-
-        # Start draining the server's output now that it's up. Without this
-        # the PIPE fills on a long run and the server blocks on write.
-        _start_log_reader(_process)
 
 
 def _cancel_idle_timer():
@@ -2193,6 +2217,7 @@ def _image_to_data_url(image_path: str, max_size: int = 768) -> Optional[str]:
 
 
 @keep_loaded()
+@traced
 def generate(
     prompt: str,
     system_prompt: str = "",
@@ -2229,6 +2254,18 @@ def generate(
     """
     global _stream_buffer, _stream_done, _last_system_prompt, _last_user_prompt
     global _last_thinking_text, _last_generation_metrics
+
+    from services.studio_enhancement import check_cancelled, is_cancellable
+    check_cancelled()
+    if is_cancellable():
+        return generate_streaming(
+            prompt, system_prompt=system_prompt, max_new_tokens=max_new_tokens,
+            temperature=temperature, top_p=top_p, seed=seed if seed is not None else -1,
+            image_paths=image_paths, thinking_budget=thinking_budget,
+            enable_thinking=enable_thinking, reasoning_effort=reasoning_effort,
+            frequency_penalty=frequency_penalty, presence_penalty=presence_penalty,
+            json_schema=json_schema, stop=stop,
+        )
 
     if not is_loaded():
         raise RuntimeError("LLM not loaded. Call load_model() first.")
@@ -2361,6 +2398,7 @@ def generate(
     message = choice["message"]
     raw_content = message.get("content") or ""
     reasoning_content = message.get("reasoning_content") or ""
+    record_response(raw_content, reasoning_content)
     finish_reason = choice.get("finish_reason", "unknown")
     usage = data.get("usage", {})
     prompt_tokens = usage.get("prompt_tokens", "?")
@@ -2414,6 +2452,7 @@ def get_stream_status() -> dict:
 
 
 @keep_loaded()
+@traced
 def generate_streaming(
     prompt: str,
     system_prompt: str = "",
@@ -2428,6 +2467,7 @@ def generate_streaming(
     frequency_penalty: float = 0.0,
     presence_penalty: float = 0.0,
     json_schema: Optional[dict] = None,
+    stop: Optional[list[str]] = None,
 ) -> str:
     """Generate text using SSE streaming, populating the stream buffer in real-time.
 
@@ -2446,6 +2486,8 @@ def generate_streaming(
     global _last_generation_metrics
     import re as _re
 
+    from services.studio_enhancement import check_cancelled
+    check_cancelled()
     if not is_loaded():
         raise RuntimeError("LLM not loaded. Call load_model() first.")
 
@@ -2585,6 +2627,8 @@ def generate_streaming(
     except Exception:
         pass
 
+    if stop:
+        payload["stop"] = list(dict.fromkeys([*(payload.get("stop") or []), *stop]))
     if _provider == "anthropic":
         return _generate_streaming_anthropic(messages, total_tokens, max(temperature, 0.01), top_p)
 
@@ -2608,7 +2652,9 @@ def generate_streaming(
         # SSE is UTF-8 regardless of Requests' text/* Latin-1 default.
         # Split bytes first: Unicode line separators inside JSON strings are
         # content, not SSE event boundaries (notably Arabic UTF-8 byte 0x85).
-        for line in resp.iter_lines(decode_unicode=False):
+        from services.studio_enhancement import cancellable_lines
+        for line in cancellable_lines(resp, decode_unicode=False):
+            check_cancelled()
             if isinstance(line, bytes):
                 line = line.decode("utf-8")
             if not line or not line.startswith("data: "):
@@ -2664,6 +2710,13 @@ def generate_streaming(
             _stream_done = True
         raise
 
+    finally:
+        record_response(raw_content, reasoning_content, complete=finish_reason not in {None, "unknown"})
+        if "resp" in locals():
+            from services.studio_enhancement import close_response
+            close_response(resp)
+
+    check_cancelled()
     # Capture thinking text for the pipeline dashboard. Two sources:
     #   1. reasoning_content — populated by chat templates that emit
     #      thinking via the OpenAI-style `reasoning_content` delta field
@@ -2795,7 +2848,8 @@ def _generate_streaming_anthropic(messages: list, max_tokens: int, temperature: 
         resp.raise_for_status()
 
         import json
-        for line in resp.iter_lines():
+        from services.studio_enhancement import cancellable_lines
+        for line in cancellable_lines(resp):
             if not line:
                 continue
             line_str = line.decode("utf-8", errors="replace")
@@ -2818,12 +2872,21 @@ def _generate_streaming_anthropic(messages: list, max_tokens: int, temperature: 
                     with _stream_lock:
                         _stream_buffer = raw_content
 
+    except InterruptedError:
+        with _stream_lock:
+            _stream_done = True
+        raise
     except Exception as e:
         print(f"[LLM/Anthropic] Streaming error: {e}")
         with _stream_lock:
             _stream_buffer = raw_content or f"Error: {e}"
             _stream_done = True
         return ""
+
+    finally:
+        if "resp" in locals():
+            from services.studio_enhancement import close_response
+            close_response(resp)
 
     content = _strip_thinking_tags(raw_content)
 
@@ -2849,11 +2912,8 @@ def _build_enhance_user_prompt(
     window. Shared by the guide-based path and the raw per-model-enhancer
     path — the dedicated enhancer gets no system guide, so without this it has
     no idea how many window-paragraphs to produce."""
-    planning_style = (
-        "creative"
-        if str(planning_style or "").strip().casefold() == "creative"
-        else "faithful"
-    )
+    from services.adaptive_enhancement import normalize_writing_style
+    planning_style = normalize_writing_style(planning_style)
     if mode == "image":
         # The Studio split button also applies to still images. Carry the
         # choice through both guided and dedicated raw-enhancer paths.
@@ -2861,7 +2921,7 @@ def _build_enhance_user_prompt(
             "CREATIVE IMAGE WRITING: Treat the user's text as a visual brief. "
             "Add complementary composition, lighting, material and environmental "
             "details to make a compelling still image."
-            if planning_style == "creative" else
+            if planning_style in {"creative", "adaptive"} else
             "FAITHFUL IMAGE WRITING: Clarify the supplied visual description "
             "without inventing new subjects, objects, actions or story events."
         )
@@ -2870,6 +2930,27 @@ def _build_enhance_user_prompt(
             "requested text, reference constraints and edit boundaries. "
             f"Describe one still image, not a sequence.]\n\n{prompt}"
         )
+    if planning_style == "adaptive":
+        from services.adaptive_enhancement import adaptive_dialogue_expected, adaptive_dialogue_expansion_requested
+        from services.dialogue_writing import creative_dialogue_budget
+
+        context = []
+        if duration_seconds:
+            context.append(f"Selected duration: {duration_seconds} seconds.")
+        if window_count and window_count > 1:
+            context.append(
+                f"Write exactly {window_count} chronological window prompts, "
+                f"each covering up to {window_size_seconds} seconds."
+            )
+        if adaptive_dialogue_expansion_requested(prompt):
+            budget = creative_dialogue_budget(prompt, window_size_seconds if window_count and window_count > 1 else duration_seconds)
+            if budget:
+                context.append(budget.instruction())
+        elif adaptive_dialogue_expected(prompt):
+            context.append("Preserve the supplied spoken lines beside their requested actions. Do not add or pad speech to fill the selected duration; develop the visual scene.")
+        else:
+            context.append("No spoken exchange is requested. Develop the visible scene and practical sound without adding dialogue.")
+        return "\n".join(context) + "\n\nUser brief:\n" + prompt
     if duration_seconds and mode in ("video", "avatar"):
         parts = [f"Duration: {duration_seconds} seconds"]
         if window_count and window_count > 1:
@@ -2882,7 +2963,7 @@ def _build_enhance_user_prompt(
                 "separated by newlines"
             )
         context = f"[{', '.join(parts)}]"
-        if planning_style == "creative":
+        if planning_style in {"creative", "adaptive"}:
             from services.dialogue_writing import creative_dialogue_budget
 
             budget_duration = window_size_seconds if window_count and window_count > 1 else duration_seconds
@@ -2894,7 +2975,7 @@ def _build_enhance_user_prompt(
                 + (" For each window: " + budget.instruction() if budget else "") + "]"
             )
         if window_count and window_count > 1:
-            if planning_style == "creative":
+            if planning_style in {"creative", "adaptive"}:
                 context += (
                     "\n[CREATIVE MULTI-WINDOW WRITING: Treat the user's text as a "
                     "brief for one complete full-duration scene. First plan the "
@@ -2989,11 +3070,8 @@ def enhance_prompt(
     system_override = repair_text(system_override) if system_override else system_override
     reference_context = repair_text(reference_context) if reference_context else reference_context
     lora_system_hint = repair_text(lora_system_hint)
-    planning_style = (
-        "creative"
-        if str(planning_style or "").strip().casefold() == "creative"
-        else "faithful"
-    )
+    from services.adaptive_enhancement import normalize_writing_style
+    planning_style = normalize_writing_style(planning_style)
     is_h3_ref2va = (
         mode in ("video", "avatar")
         and (model_type or "").lower().startswith("minimax_h3_ref2va")
@@ -3004,6 +3082,17 @@ def enhance_prompt(
         and not is_h3_ref2va
     )
     is_h3_structured = is_h3_context_ir or is_h3_ref2va
+    if planning_style == "adaptive" and is_h3_ref2va and not reference_context and not image_paths:
+        reference_context = (
+            "No reference media were supplied. Develop prompt-native characters with "
+            "descriptive names, not <Subject N>, <Picture N>, <Video N> or <Audio N> "
+            "media bindings. Keep their descriptions in subject_definitions. "
+            "When speech is requested, prompt-native speakers still have vocal IDs: "
+            "put the speaker's descriptive name beside (S1), then the literal <d> block. "
+            "Do not invent any voice-reference audio. The summary's task type is [reference generation], "
+            "not a writing-mode or camera label. "
+            "retention_analysis: N/A — no reference media."
+        )
     # If caller provides a system prompt override, use it directly (e.g., Director third-pass)
     if system_override:
         # Do NOT append the full model-specific enhance guide — the override is self-contained.
@@ -3100,6 +3189,13 @@ def enhance_prompt(
         print(f"[Enhance] Raw enhancer ({model_type}, images={bool(image_paths)}, windows={window_count})")
         result = generate(prompt=raw_prompt, image_paths=image_paths, **gen_kw)
         return repair_text(_clean_enhancer_output(result) or prompt)
+
+    if planning_style == "adaptive" and is_h3_structured:
+        from services.adaptive_enhancement import draft_spoken_exchange
+        prompt = draft_spoken_exchange(
+            prompt, duration_seconds, generate, language=_detect_h3_dialogue_language(prompt),
+            reference_context=reference_context or "", nsfw=nsfw,
+        )
 
     # Try to load a model-specific guide
     system = None
@@ -3297,15 +3393,25 @@ def enhance_prompt(
         if writing_budget:
             system += "\nCREATIVE DIALOGUE ALLOCATION: " + writing_budget.instruction()
 
+    if planning_style == "adaptive":
+        from services.adaptive_enhancement import adaptive_dialogue_expected, adaptive_writing_guide
+        system += "\n\n" + adaptive_writing_guide(prompt)
+        if not adaptive_dialogue_expected(prompt):
+            system += "\nNo speech was requested: do not add spoken lines or <d> tags. Keep nonverbal effort sounds and synchronized practical effects."
+
     # Preserve structural elements in image prompts
     if mode == "image":
         system += (
             '\n\nSTRUCTURAL RULES for image prompts:'
+            '\n- Adapt the supplied brief to the selected image model. Preserve explicit composition, left/right ownership, contact points, wardrobe, lighting and requested text. Remove instructions addressed to another assistant and redundant formatting, not visual requirements.'
             '\n- If the prompt starts with "create new scene", keep that prefix.'
             '\n- If the prompt ends with "Use original reference images" or similar, keep that suffix.'
-            '\n- ALWAYS end the prompt with: "Preserve character identity, attire, body attributes, and the art style of the reference image."'
             '\n- NEVER include LoRA names or filenames in the output.'
         )
+        if image_paths:
+            system += '\n- Preserve the supplied reference constraints and edit boundaries. Do not turn an identity reference into an unwanted scene or style constraint.'
+        else:
+            system += '\n- No reference image is attached. Make the description self-contained; do not refer to a source image or append instructions to preserve an unseen reference.'
 
     # Reinforce the output constraint. MiniMax H3 is intentionally different:
     # its field labels and <d> blocks are part of the model input, not prose
@@ -3351,6 +3457,10 @@ def enhance_prompt(
 
     # Scale max tokens for multi-window video prompts
     effective_max_tokens = max_new_tokens
+    if mode == "image":
+        # A detailed imported brief needs answer space, not thousands of
+        # reasoning tokens. Keep small prompts quick and longer rewrites whole.
+        effective_max_tokens = max(effective_max_tokens, min(2048, max(768, len(prompt) // 3 + 256)))
     if window_count and window_count > 1:
         effective_max_tokens = max(max_new_tokens, window_count * 300 + 256)
     if is_h3_ref2va:
@@ -3372,7 +3482,10 @@ def enhance_prompt(
     if is_tts:
         use_thinking = not is_fast
         prompt_thinking_budget = 16384 if use_thinking else 0
-    elif is_h3_structured:
+    elif is_h3_structured or mode == "image":
+        # Image adaptation is a direct visual rewrite. The generic Qwen
+        # planning default spent 8192 reasoning tokens on a single still,
+        # delaying interactive responses for minutes before writing the draft.
         use_thinking = False
         prompt_thinking_budget = 0
     else:
@@ -3424,17 +3537,22 @@ def enhance_prompt(
             result, prompt, reference_context
         )
 
-    if mode in ("video", "avatar") and planning_style == "creative" and result:
-        result = _complete_creative_enhancement(
-            prompt, result, duration_seconds=duration_seconds,
-            structured=is_h3_structured, ref2va=is_h3_ref2va,
-            system_prompt=system, user_prompt=user_prompt,
-            generator=generate, max_new_tokens=effective_max_tokens,
-            temperature=temperature,
-        )
+    if mode in ("video", "avatar") and planning_style in {"creative", "adaptive"} and result:
+        if planning_style == "adaptive" and is_h3_structured:
+            result = _fit_adaptive_dialogue(prompt, result, duration_seconds, generate)
+        else:
+            result = _complete_creative_enhancement(
+                prompt, result, duration_seconds=duration_seconds,
+                structured=is_h3_structured, ref2va=is_h3_ref2va,
+                system_prompt=system, user_prompt=user_prompt,
+                generator=generate, max_new_tokens=effective_max_tokens,
+                temperature=temperature,
+            )
         if is_h3_ref2va:
             result = _canonicalize_h3_ref2va_reference_fields(result, reference_context, prompt)
             result = _canonicalize_h3_ref2va_dialogue_speakers(result, prompt, reference_context)
+    if is_h3_context_ir and result:
+        result = _repair_unambiguous_h3_context_speaker_ids(prompt, result)
 
     structure_is_valid = (
         _has_complete_h3_ref2va_structure(result)
@@ -3443,7 +3561,7 @@ def enhance_prompt(
     ) if is_h3_structured else True
     dialogue_is_valid = _h3_dialogue_contract_satisfied(prompt, result) if is_h3_structured else True
     timed_silence_is_valid = (
-        _h3_timed_silence_contract_satisfied(prompt, result, duration_seconds)
+        _h3_speech_timing_satisfied(prompt, result, duration_seconds, planning_style)
         if is_h3_structured
         else True
     )
@@ -3457,6 +3575,8 @@ def enhance_prompt(
             prompt, result, reference_context
         )
         if is_h3_ref2va
+        else _h3_context_dialogue_binding_contract_satisfied(prompt, result)
+        if is_h3_context_ir
         else True
     )
 
@@ -3508,6 +3628,10 @@ def enhance_prompt(
         )
         retry = repair_text(retry)
         retry = _clean_enhance_output(retry, preserve_structure=True) if retry else ""
+        if planning_style == "adaptive" and retry:
+            retry = _fit_adaptive_dialogue(prompt, retry, duration_seconds, generate)
+        if is_h3_context_ir and retry:
+            retry = _repair_unambiguous_h3_context_speaker_ids(prompt, retry)
         if is_h3_ref2va and retry:
             retry = _canonicalize_h3_ref2va_reference_fields(
                 retry, reference_context, prompt
@@ -3521,10 +3645,11 @@ def enhance_prompt(
             else _has_complete_h3_context_structure(retry)
         )
         retry_dialogue_is_valid = _h3_dialogue_contract_satisfied(prompt, retry)
-        retry_timed_silence_is_valid = _h3_timed_silence_contract_satisfied(
+        retry_timed_silence_is_valid = _h3_speech_timing_satisfied(
             prompt,
             retry,
             duration_seconds,
+            planning_style,
         )
         retry_voice_binding_is_valid = (
             _h3_voice_binding_contract_satisfied(retry, reference_context)
@@ -3536,6 +3661,8 @@ def enhance_prompt(
                 prompt, retry, reference_context
             )
             if is_h3_ref2va
+            else _h3_context_dialogue_binding_contract_satisfied(prompt, retry)
+            if is_h3_context_ir
             else True
         )
         if (
@@ -3553,6 +3680,7 @@ def enhance_prompt(
                     prompt,
                     reference_context,
                     duration_seconds=duration_seconds,
+                    planning_style=planning_style,
                 )
                 if is_h3_ref2va
                 else _build_h3_context_fallback(
@@ -3563,6 +3691,7 @@ def enhance_prompt(
                     ),
                     reference_context=reference_context,
                     duration_seconds=duration_seconds,
+                    planning_style=planning_style,
                 )
             )
 
@@ -3647,6 +3776,7 @@ def enhance_prompt(
                 prompt,
                 reference_context,
                 duration_seconds=duration_seconds,
+                planning_style=planning_style,
             )
     if is_h3_context_ir and image_paths:
         result = _ensure_h3_visual_grounding(
@@ -3683,16 +3813,53 @@ def enhance_prompt(
                 "MiniMax H3 prompt budgeting could not preserve the exact "
                 "scripted dialogue. Shorten the visual request or use more windows."
             )
-        if not _h3_timed_silence_contract_satisfied(
+        if not _h3_speech_timing_satisfied(
             prompt,
             result,
             duration_seconds,
+            planning_style,
         ):
             raise H3PromptBudgetError(
                 "MiniMax H3 prompt budgeting could not preserve the requested "
                 "dialogue timing. Shorten the visual request or use more windows."
             )
+    if planning_style == "adaptive" and is_h3_structured:
+        result = _preserve_adaptive_h3_literals(prompt, result)
     return repair_text(result)
+
+
+def _preserve_adaptive_h3_literals(prompt: str, result: str) -> str:
+    """Keep literal visual data and avoid nonexistent voice-reference prose."""
+    import re
+    field = "detailed_description" if "detailed_description:" in result else "integrated_multimodal_description"
+    visible = []
+    for match in re.finditer(r'"([^"\r\n]+)"|“([^”\r\n]+)”', prompt):
+        if not _h3_quote_is_visible_text(prompt, match):
+            continue
+        words = match.group(1) or match.group(2)
+        if words in result:
+            continue
+        # Restore the object's literal attribute, not its surrounding action:
+        # repeating a handoff here could make the video perform it twice.
+        start = max(prompt.rfind(char, 0, match.start()) for char in '.!?;\n') + 1
+        objects = list(re.finditer(r'\b(?:sign|banner|label|subtitle|caption|marquee|poster|billboard|'
+            r'screen|monitor|display|neon|placard|headline|logo|shirt|door|wall|note|card|page|letter)\b',
+            prompt[start:match.start()], re.I))
+        if objects:
+            import json
+            visible.append(f'The {objects[-1].group(0)} displays the exact text {json.dumps(words, ensure_ascii=False)}.')
+    if visible:
+        pattern = rf"(?ms)(^\s*{field}\s*:)(.*?)(?=^\s*overall_soundscape\s*:)"
+        result = re.sub(pattern, lambda match: match.group(1) + match.group(2).rstrip()
+                        + ' ' + ' '.join(visible) + '\n', result, count=1)
+    # Change only delivery prose outside protected speech tags. N/A is not a
+    # voice asset, and a generic exchange does not request off-screen narration.
+    pieces = re.split(r'(<d>.*?</d>)', result, flags=re.S)
+    for index in range(0, len(pieces), 2):
+        pieces[index] = re.sub(r'\s+in the voice referenced from N/A\b', '', pieces[index], flags=re.I)
+        if not re.search(r'\b(?:voice[- ]?over|off[- ](?:screen|camera)|narrat\w*)\b', prompt, re.I):
+            pieces[index] = re.sub(r'\s+in an? off[- ]screen voiceover\b', '', pieces[index], flags=re.I)
+    return ''.join(pieces)
 
 
 _H3_REF2VA_FIELDS = (
@@ -3802,7 +3969,7 @@ def _h3_quote_is_visible_text(source: str, match) -> bool:
         return True
     visible_noun = re.search(
         r"(?i)\b(?:sign|banner|label|subtitle|caption|marquee|poster|billboard|"
-        r"screen|monitor|display|neon|placard|headline|logo|shirt|door|wall)\b",
+        r"screen|monitor|display|neon|placard|headline|logo|shirt|door|wall|note|card|page|letter)\b",
         before,
     )
     visible_cue = re.search(
@@ -3828,7 +3995,7 @@ def _h3_quote_is_visible_text(source: str, match) -> bool:
 
 
 def _extract_h3_quoted_dialogue(text: str) -> list[str]:
-    """Extract user-authored speech from quotes or existing ``<d>`` tags.
+    """Extract user-authored quoted, tagged, or screenplay speech.
 
     Studio accepts both natural quoted dialogue and convenient bare H3 tags
     such as ``<d>Hello</d>``.  Treat both forms as immutable source dialogue;
@@ -3850,8 +4017,11 @@ def _extract_h3_source_dialogue_entries(
     """
     import re
     from models.minimax_h3.speakers import is_h3_spoken_quote
+    from services.h3_authored_brief import production_note_spans
+    from services.h3_story_ledger import _screenplay_dialogue_spans
 
     source = normalize_h3_dialogue_tags(text)
+    notes = production_note_spans(source)
     spans: list[dict] = []
     tagged_ranges: list[tuple[int, int]] = []
     tag_pattern = re.compile(
@@ -3876,7 +4046,8 @@ def _extract_h3_source_dialogue_entries(
             continue
         if _h3_quote_is_visible_text(source, match):
             continue
-        if not is_h3_spoken_quote(source, match):
+        in_notes = any(start <= match.start() < end for start, end in notes)
+        if not is_h3_spoken_quote(source, match, allow_screenplay_label=not in_notes):
             continue
         words = (match.group(1) or match.group(2) or "").strip()
         if words:
@@ -3887,6 +4058,18 @@ def _extract_h3_source_dialogue_entries(
                 "language": _detect_h3_dialogue_language(source),
             })
 
+    # Single-window validation must recognize the same screenplay turns as
+    # the multi-window ledger. Keep the content offset (after "Name:") so
+    # existing reference-owner resolution and in-place compilation retain
+    # the speaker label. Tagged/quoted turns above already occupy this span.
+    for item in _screenplay_dialogue_spans(source):
+        if any(item["start"] < entry["end"] and entry["start"] < item["end"] for entry in spans):
+            continue
+        spans.append({
+            "start": item["content_start"], "end": item["end"],
+            "words": item["text"], "language": _detect_h3_dialogue_language(source),
+            "speaker": item["speaker"],
+        })
     spans.sort(key=lambda entry: entry["start"])
     manifest = _parse_h3_ref2va_subject_manifest(reference_context)
     if manifest:
@@ -3926,10 +4109,20 @@ def _extract_h3_source_dialogue_entries(
             key = ("subject", subject) if subject is not None else ("name", owner.casefold())
             entry["speaker_id"] = vocal_speakers.setdefault(key, len(vocal_speakers) + 1)
     else:
+        from models.minimax_h3.speakers import _resolve_ref2va_dialogue_owner_name
+        vocal_speakers: dict[tuple, int] = {}
         for index, entry in enumerate(spans, start=1):
             prefix = source[max(0, int(entry["start"]) - 80):int(entry["start"])]
             explicit = re.findall(r"\(S(\d+)\)", prefix, flags=re.IGNORECASE)
-            entry["speaker_id"] = int(explicit[-1]) if explicit else index
+            owner = entry.get("speaker") or _resolve_ref2va_dialogue_owner_name(
+                source, int(entry["start"]), int(entry["end"]),
+            )
+            key = ("name", owner.casefold()) if owner else ("event", index)
+            if owner:
+                entry["speaker"] = owner
+            entry["speaker_id"] = vocal_speakers.setdefault(
+                key, int(explicit[-1]) if explicit else max(vocal_speakers.values(), default=0) + 1,
+            )
     return spans
 
 
@@ -3947,6 +4140,63 @@ def _h3_ref2va_subject_speaker_map(
         )
         if entry.get("subject_id") is not None and entry.get("speaker_id") is not None
     }
+
+
+def _fit_adaptive_dialogue(prompt, result, duration_seconds, generator) -> str:
+    """Fit generated speech without rewriting successful camera/action prose."""
+    import json
+    import re
+    from services.dialogue_writing import creative_dialogue_budget, spoken_word_count
+    from services.adaptive_enhancement import adaptive_dialogue_expansion_requested
+
+    if not adaptive_dialogue_expansion_requested(prompt):
+        return result
+    budget = creative_dialogue_budget(prompt, duration_seconds)
+    if not budget:
+        return result
+    text = normalize_h3_dialogue_tags(result)
+    matches = list(re.finditer(r"(<d>\s*\[[^\]]+\]\s*)((?:(?!<d>).)*?)(\s*</d>)", text, re.S))
+    if not matches:
+        return result
+    lines = [match.group(2).strip() for match in matches]
+    count = sum(spoken_word_count(line) for line in lines)
+    if budget.minimum <= count <= budget.maximum:
+        return result
+    exact = set(_extract_h3_quoted_dialogue(prompt))
+    locked = {index: line for index, line in enumerate(lines) if line in exact}
+    schema = {"type": "object", "additionalProperties": False, "required": ["lines"],
+              "properties": {"lines": {"type": "array", "minItems": len(lines), "maxItems": len(lines),
+                                        "items": {"type": "string"}}}}
+    problem = f"The current dialogue has {count} words."
+    for _attempt in range(2):
+        raw = generator(
+            prompt=(f"User brief: {prompt}\n{problem}\n{budget.instruction()}\n"
+                    "Revise just the spoken wording, keeping the same turn order and each turn's speaker. "
+                    "Preserve the topic, character reactions, and requested ending. Do not repeat setup or greetings. "
+                    "Return one string per existing turn. Locked lines must remain verbatim.\n"
+                    + json.dumps({"turns": [{"context": text[max(0, match.start() - 120):match.start()],
+                        "words": line, "locked": index in locked}
+                        for index, (match, line) in enumerate(zip(matches, lines))]}, ensure_ascii=False)),
+            system_prompt="You edit a spoken screenplay to its time budget. Return only JSON with the requested lines array. No stage directions or tags inside the strings.",
+            json_schema=schema, max_new_tokens=768, temperature=0.45,
+            enable_thinking=False, frequency_penalty=0.0, presence_penalty=0.0,
+        )
+        try:
+            revised = json.loads(raw)['lines']
+            valid = isinstance(revised, list) and len(revised) == len(lines) and all(isinstance(line, str) and line.strip() for line in revised)
+            if not valid:
+                problem = f"Return exactly {len(lines)} nonempty strings."
+                continue
+            count = sum(spoken_word_count(line) for line in revised)
+            if not budget.minimum <= count <= budget.maximum or any(revised[i] != line for i, line in locked.items()):
+                problem = f"Your last revision had {count} words. The total must be {budget.minimum}–{budget.maximum}; aim for {budget.target}. Keep locked lines exact."
+                continue
+            for match, line in reversed(list(zip(matches, revised))):
+                text = text[:match.start(2)] + line.strip() + text[match.end(2):]
+            return text
+        except (ValueError, KeyError, TypeError):
+            problem = 'Return valid JSON containing the lines array, without markdown.'
+    return result
 
 
 def _complete_creative_enhancement(
@@ -4102,9 +4352,12 @@ def _build_h3_dialogue_requirement(
     from services.dialogue_writing import dialogue_forbidden, only_supplied_dialogue_requested
 
     allow_additions = (
-        planning_style == "creative" and not dialogue_forbidden(prompt)
+        planning_style in {"creative", "adaptive"} and not dialogue_forbidden(prompt)
         and not only_supplied_dialogue_requested(prompt)
     )
+    if planning_style == "adaptive":
+        from services.adaptive_enhancement import adaptive_dialogue_expansion_requested
+        allow_additions = adaptive_dialogue_expansion_requested(prompt)
     quotes = _extract_h3_quoted_dialogue(prompt)
     language = _detect_h3_dialogue_language(prompt)
     timed_clause = _build_h3_timed_silence_clause(prompt, duration_seconds)
@@ -4115,6 +4368,14 @@ def _build_h3_dialogue_requirement(
             "State approximate start and end times; assign closed mouths and no voices to any "
             "nonverbal intervals before or after speech. Never calculate the ending from only the "
             "user's original quotes when additional dialogue has been authored."
+        )
+    if planning_style == "adaptive":
+        timed_clause = (
+            f"Fit the complete spoken script inside {duration_seconds or 8:g} seconds at "
+            "2.8 words per second, never above 3, leaving room for requested action and pauses. "
+            "Place each line beside its speaker and the action at that point in the timeline. "
+            "Describe only the visible reaction of listeners. Do not copy scheduling instructions "
+            "or artificial closed-mouth intervals into the finished prompt."
         )
     if quotes:
         required = "\n".join(
@@ -4170,6 +4431,227 @@ def _h3_dialogue_contract_satisfied(prompt: str, result: str) -> bool:
             entry_language == language for entry_language, _words in entries
         )
     return True
+
+
+_H3_AMBIGUOUS_SPEAKER_NAMES = {
+    "he", "her", "him", "his", "it", "narrator", "person", "she",
+    "someone", "speaker", "they", "them", "their", "voice", "we", "you",
+}
+
+
+def _unambiguous_h3_context_dialogue_entries(text: str) -> list[dict] | None:
+    """Return exact dialogue only when every turn has one explicit named owner."""
+
+    import re
+
+    entries = _extract_h3_source_dialogue_entries(text)
+    if not entries:
+        return None
+    normalized_words = [str(entry.get("words") or "").strip() for entry in entries]
+    if len(set(normalized_words)) != len(normalized_words):
+        return None
+    for entry in entries:
+        # Adaptive dialogue drafting feeds the frame writer an application-owned
+        # script in the form ``Nia (S1) says, <d>...</d>``.  The general owner
+        # resolver can otherwise mistake the marker itself (``S1``) for a name.
+        # Recover only this adjacent, explicit form; looser attribution remains
+        # subject to the conservative checks below.
+        start = int(entry.get("start") or 0)
+        line_prefix = str(text or "")[max(0, start - 180):start]
+        line_prefix = re.split(r"[.!?;\r\n]", line_prefix)[-1]
+        explicit_owner = re.search(
+            r"([A-Z][A-Za-z0-9_'’-]*(?:\s+[A-Z][A-Za-z0-9_'’-]*){0,3})\s*"
+            r"(?:\(S(\d+)\)\s*(?:[,—:-]\s*)?(?i:say|says|said|speak|speaks|reply|"
+            r"replies|answer|answers|ask|asks|exclaim|exclaims)|"
+            r"(?i:say|says|said|speak|speaks|reply|replies|answer|answers|ask|asks|"
+            r"exclaim|exclaims)\s*[:,]?\s*\(S(\d+)\))\s*[:,]?\s*$",
+            line_prefix,
+        )
+        if explicit_owner:
+            entry["speaker"] = explicit_owner.group(1).strip()
+            entry["speaker_id"] = int(explicit_owner.group(2) or explicit_owner.group(3))
+        speaker = str(entry.get("speaker") or "").strip()
+        if not speaker or speaker.casefold() in _H3_AMBIGUOUS_SPEAKER_NAMES:
+            return None
+        prefix = str(text or "")[max(0, start - 220):start]
+        clause = re.split(r"[.!?;\r\n]", prefix)[-1]
+        # Nearest-name inference intentionally handles "Lena turns to Priya and
+        # says", but it must not collapse a compound vocal subject to Priya.
+        if re.search(
+            r"\b[A-Z][A-Za-z0-9_'’-]*(?:\s+[A-Z][A-Za-z0-9_'’-]*){0,3}"
+            r"\s*(?:,\s*)?(?:and|AND|&)\s+"
+            r"[A-Z][A-Za-z0-9_'’-]*(?:\s+[A-Z][A-Za-z0-9_'’-]*){0,3}"
+            r"[^.!?;\r\n]{0,80}\b(?i:say|says|said|speak|speaks|reply|replies|"
+            r"answer|answers|ask|asks|exclaim|exclaims)\b",
+            clause,
+        ):
+            return None
+    return entries
+
+
+def _h3_pronoun_turn_keeps_previous_named_owner(
+    result: str,
+    entry: dict,
+    expected_owner: str,
+) -> bool:
+    """Prove a narrow pronoun continuation without guessing speaker identity.
+
+    This covers a common sound frame draft: ``Theo ... his umbrella. He looks
+    at Mina and says <d>...</d>``.  Requiring the preceding sentence to start
+    with the expected owner and contain the matching possessive avoids binding
+    ambiguous ``he/she/they`` turns or a line visibly delivered by someone else.
+    """
+
+    import re
+
+    source = str(result or "")
+    start = int(entry.get("start") or 0)
+    before = source[:start]
+    sentence_parts = re.split(r"(?<=[.!?])\s+|[\r\n]+", before)
+    current = sentence_parts[-1].strip() if sentence_parts else ""
+    current = re.sub(r"\(S\d+\)\s*$", "", current, flags=re.IGNORECASE).rstrip()
+    previous = sentence_parts[-2].strip() if len(sentence_parts) >= 2 else ""
+    vocal = re.search(
+        r"^(He|She|They)\b[^.!?;\r\n]{0,140}\b"
+        r"(?i:say|says|said|speak|speaks|reply|replies|answer|answers|ask|asks|"
+        r"exclaim|exclaims)\s*[:,]?\s*$",
+        current,
+    )
+    if not vocal or not previous:
+        return False
+    if re.search(
+        r"\b[A-Z][A-Za-z0-9_'’-]*(?:\s+[A-Z][A-Za-z0-9_'’-]*){0,3}\s+"
+        r"(?i:say|says|said|speak|speaks|reply|replies|answer|answers|ask|asks|"
+        r"exclaim|exclaims)\s*[:,]?\s*$",
+        current,
+    ):
+        return False
+    owner = re.escape(str(expected_owner or "").strip())
+    if not owner or not re.search(
+        rf"(?:^|:\s*\[Shot\s+\d+\]\s*){owner}\b",
+        previous,
+        flags=re.IGNORECASE,
+    ):
+        return False
+    owner_tokens = {
+        token.casefold()
+        for token in re.findall(r"[A-Z][A-Za-z0-9_'’-]*", str(expected_owner or ""))
+    }
+    other_names = [
+        token
+        for token in re.findall(r"\b[A-Z][A-Za-z0-9_'’-]*\b", previous)
+        if token.casefold() not in owner_tokens and token.casefold() != "shot"
+    ]
+    if other_names:
+        return False
+    pronoun = vocal.group(1).casefold()
+    anonymous_people = {
+        "he": r"\b(?:man|boy|male|guy|gentleman)\b",
+        "she": r"\b(?:woman|girl|female|lady)\b",
+        "they": r"\b(?:people|persons?|adults?|children|pair|couple|group)\b",
+    }[pronoun]
+    if re.search(anonymous_people, previous, flags=re.IGNORECASE):
+        return False
+    possessive = {"he": r"\b(?:he|him|his)\b", "she": r"\b(?:she|her|hers)\b", "they": r"\b(?:they|them|their|theirs)\b"}[pronoun]
+    return bool(re.search(possessive, previous, flags=re.IGNORECASE))
+
+
+def _h3_context_speaker_binding_plan(
+    prompt: str,
+    result: str,
+) -> list[tuple[int, int | None]] | None:
+    """Pair exact base-H3 dialogue blocks with proven source speaker IDs."""
+
+    import re
+
+    source_entries = _unambiguous_h3_context_dialogue_entries(prompt)
+    if source_entries is None:
+        return None
+    result_entries = _unambiguous_h3_context_dialogue_entries(result)
+    if result_entries is None or len(result_entries) != len(source_entries):
+        return None
+    expected_words = [str(entry["words"]).strip() for entry in source_entries]
+    if [str(entry["words"]).strip() for entry in result_entries] != expected_words:
+        return None
+    for expected, actual in zip(source_entries, result_entries):
+        expected_owner = str(expected.get("speaker") or "").strip()
+        actual_owner = str(actual.get("speaker") or "").strip()
+        if actual_owner.casefold() == expected_owner.casefold():
+            continue
+        if not _h3_pronoun_turn_keeps_previous_named_owner(
+            result,
+            actual,
+            expected_owner,
+        ):
+            return None
+
+    matches = list(re.finditer(
+        r"<d>\s*\[([^\]\r\n]+)\]\s*((?:(?!<d>).)*?)\s*</d>",
+        str(result or ""),
+        flags=re.DOTALL | re.IGNORECASE,
+    ))
+    if len(matches) != len(source_entries):
+        return None
+    plan: list[tuple[int, int | None]] = []
+    cursor = 0
+    for expected, match in zip(source_entries, matches):
+        language = _canonical_h3_language_tag(match.group(1) or "")
+        if language != _canonical_h3_language_tag(expected.get("language") or ""):
+            return None
+        if (match.group(2) or "").strip() != str(expected["words"]).strip():
+            return None
+        expected_id = int(expected.get("speaker_id") or 0)
+        if expected_id <= 0:
+            return None
+        prefix_start = max(cursor, match.start() - 180)
+        prefix = str(result or "")[prefix_start:match.start()]
+        boundary = max((prefix.rfind(char) for char in ".!?;\r\n"), default=-1)
+        prefix = prefix[boundary + 1:]
+        # A character ID elsewhere in a long shot clause does not bind this
+        # vocal event.  Accept only an ID attached to the immediate speaking
+        # attribution; otherwise insert the proven source ID beside the tag.
+        ids = [
+            int(first or second)
+            for first, second in re.findall(
+                r"(?:\(S(\d+)\)\s*(?:[,—:-]\s*)?(?i:say|says|said|speak|speaks|"
+                r"reply|replies|answer|answers|ask|asks|exclaim|exclaims)\s*[:,]?|"
+                r"\(S(\d+)\))\s*$",
+                prefix,
+            )
+        ]
+        if len(ids) > 1 or (ids and ids[0] != expected_id):
+            return None
+        plan.append((match.start(), ids[0] if ids else None))
+        cursor = match.end()
+    return plan
+
+
+def _repair_unambiguous_h3_context_speaker_ids(prompt: str, result: str) -> str:
+    """Insert only missing speaker markers without rewriting base-H3 prose."""
+
+    plan = _h3_context_speaker_binding_plan(prompt, result)
+    if plan is None:
+        return result
+    source_entries = _unambiguous_h3_context_dialogue_entries(prompt) or []
+    repaired = str(result or "")
+    insertions = [
+        (position, f"(S{int(entry['speaker_id'])}) ")
+        for entry, (position, existing_id) in zip(source_entries, plan)
+        if existing_id is None
+    ]
+    for position, marker in reversed(insertions):
+        repaired = repaired[:position] + marker + repaired[position:]
+    return repaired
+
+
+def _h3_context_dialogue_binding_contract_satisfied(prompt: str, result: str) -> bool:
+    """Validate every safely attributable base-H3 exact line's adjacent ID."""
+
+    source_entries = _unambiguous_h3_context_dialogue_entries(prompt)
+    if source_entries is None:
+        return True
+    plan = _h3_context_speaker_binding_plan(prompt, result)
+    return bool(plan is not None and all(existing_id is not None for _, existing_id in plan))
 
 
 _H3_VISUAL_CATEGORY_PATTERNS = (
@@ -4292,6 +4774,20 @@ def _ensure_h3_visual_grounding(
     if grounded == result:
         print("[Enhance] Focused H3 visual pass returned no usable grounding details.")
     return grounded
+
+
+def _h3_speech_timing_satisfied(prompt, result, duration_seconds, planning_style="faithful") -> bool:
+    if planning_style != "adaptive":
+        return _h3_timed_silence_contract_satisfied(prompt, result, duration_seconds)
+    from services.adaptive_enhancement import adaptive_dialogue_expected
+    from services.dialogue_writing import spoken_word_count
+    blocks = _extract_h3_dialogue_blocks(result)
+    if not adaptive_dialogue_expected(prompt):
+        return not blocks
+    # Native dialogue blocks and a real speech budget are the constraints.
+    # A valid natural conversation need not repeat a particular "from 0 to"
+    # phrase or prohibit breathing to pass a string-based fidelity check.
+    return sum(spoken_word_count(line) for line in blocks) <= float(duration_seconds or 8) * 3
 
 
 def _h3_timed_silence_contract_satisfied(
@@ -4562,6 +5058,12 @@ def _canonicalize_h3_ref2va_reference_fields(
     import re
     from models.minimax_h3.speakers import H3SpeakerBindingError
 
+    if reference_context and not re.search(r"<(?:Subject|Picture|Video|Audio)\s+\d+>", reference_context, re.I):
+        # With no attached media, the writer owns prompt-native character
+        # descriptions. Do not replace them with an empty reference template.
+        return _replace_h3_structured_field(
+            result, "retention_analysis", "detailed_description", "N/A — no reference media."
+        )
     dialogue_source = str(prompt or "")
     source_has_dialogue = bool(_extract_h3_source_dialogue_entries(dialogue_source, reference_context))
     if not source_has_dialogue:
@@ -4669,6 +5171,15 @@ def _h3_ref2va_reference_contract_satisfied(
     """Reject placeholder, duplicate, invented, or cross-wired Omni subjects."""
     import re
     manifest = _parse_h3_ref2va_subject_manifest(reference_context)
+    if reference_context is not None:
+        label_pattern = r"<(?:Subject|Picture|Video|Audio)\s+\d+>"
+        supplied_labels = {label.casefold() for label in re.findall(label_pattern, reference_context, re.I)}
+        # Legacy inventories can name a saved character on its Picture row;
+        # the canonical manifest assigns that character a Subject slot.
+        supplied_labels.update(f"<subject {subject['index']}>" for subject in manifest)
+        actual_labels = {label.casefold() for label in re.findall(label_pattern, str(result or ""), re.I)}
+        if not actual_labels.issubset(supplied_labels):
+            return False
     if not manifest:
         return True
     text = str(result or "")
@@ -4838,11 +5349,15 @@ def _inject_missing_h3_dialogue(
     missing = [entry for entry in requested if entry["words"] not in existing]
     if not missing:
         return result
-    additions = " ".join(
-        f"The intended speaker (S{int(entry.get('speaker_id') or index)}) says exactly once: "
-        f"<d>[{entry['language']}] {entry['words']}</d>."
-        for index, entry in enumerate(missing, start=1)
-    )
+    additions = []
+    for index, entry in enumerate(missing, start=1):
+        owner = (f"<Subject {entry['subject_id']}>" if entry.get("subject_id") is not None
+                 else entry.get("speaker") or "The intended speaker")
+        additions.append(
+            f"{owner} (S{int(entry.get('speaker_id') or index)}) says exactly once: "
+            f"<d>[{entry['language']}] {entry['words']}</d>."
+        )
+    additions = " ".join(additions)
     additions += (
         " Only the scripted <d> blocks are spoken, including the lines already staged above; outside their intervals, everyone remains "
         "silent with mouths closed, with no other voices or speech-like vocalization."
@@ -4970,7 +5485,7 @@ def _enforce_h3_soundscape_silence(result: str, prompt: str) -> str:
         "Outside the tagged dialogue, no human voices, whispers, grunts, audible breathing, "
         "or speech-like vocalizations occur"
     )
-    replacement = match.group(1) + " " + ". ".join(kept).rstrip(".") + ".\n"
+    replacement = match.group(1) + " " + ". ".join(part.rstrip(".") for part in kept) + ".\n"
     return result[:match.start()] + replacement + result[match.end():]
 
 
@@ -5007,8 +5522,11 @@ def _build_h3_ref2va_tagged_fallback(
     reference_context: Optional[str],
     *,
     duration_seconds: Optional[float] = None,
+    planning_style: str = "faithful",
 ) -> str:
     """Create a deterministic six-field fallback when the local LLM loops."""
+    from services.studio_enhancement import record_review_warning
+    record_review_warning("The AI draft did not produce a valid H3 reference prompt. Review the source-based draft before generating.")
     manifest = _parse_h3_ref2va_subject_manifest(reference_context)
     speaker_map = _h3_ref2va_subject_speaker_map(prompt, reference_context)
     subject_mapping, retention_mapping = _canonical_h3_ref2va_subject_fields(
@@ -5016,7 +5534,38 @@ def _build_h3_ref2va_tagged_fallback(
         speaker_map,
     )
     request = _compile_h3_explicit_dialogue(prompt, reference_context)
-    timed_clause = _build_h3_timed_silence_clause(prompt, duration_seconds)
+    adaptive = planning_style == "adaptive"
+    requests_speech = _h3_requests_speech(prompt)
+    timed_clause = (
+        "Place each tagged line only after every action that causes or motivates it and before "
+        "any consequence the source puts after it. Let the source action order determine speech "
+        "timing; do not invent an absolute start time. Preserve only requested nonverbal reactions "
+        "such as a laugh as actions and sounds, without turning them into extra words."
+        if adaptive and requests_speech
+        else (
+            "Preserve every requested action and nonverbal reaction in source order; do not invent "
+            "spoken words or an absolute speech time."
+            if adaptive
+            else _build_h3_timed_silence_clause(prompt, duration_seconds)
+        )
+    )
+    speech_boundary = (
+        (
+            "The tagged dialogue is the only speech; add no other spoken words or speech-like "
+            "vocalizations. Preserve explicitly requested nonverbal reactions."
+            if requests_speech
+            else "Add no spoken words or speech-like vocalizations. Preserve explicitly requested "
+            "nonverbal reactions."
+        )
+        if adaptive
+        else "The scripted dialogue is the only speech; all mouths remain closed before and after it."
+    )
+    sound_boundary = (
+        "Outside tagged dialogue, add no spoken words or speech-like vocalizations; preserve only "
+        "explicitly requested nonverbal reactions."
+        if adaptive
+        else "Outside tagged dialogue there are no human voices, whispers, grunts, audible breathing, or speech-like vocalizations."
+    )
     task_types = "reference generation"
     if any(subject["audios"] for subject in manifest):
         task_types += " + audio reference"
@@ -5033,14 +5582,12 @@ def _build_h3_ref2va_tagged_fallback(
         "color, and cinematic texture. "
         f"[Shot 1] {visible_subjects} The finished target video follows this request: {request} "
         "Reference pictures provide identity and appearance only, never their original background, "
-        "framing, pose, or an opening still. The scripted dialogue is the only speech; all mouths "
-        "remain closed before and after it. Each tagged dialogue block is spoken exactly once by its adjacent "
+        f"framing, pose, or an opening still. {speech_boundary} Each tagged dialogue block is spoken exactly once by its adjacent "
         "mapped speaker only; no other subject repeats, echoes, mouths, or paraphrases another "
         f"subject's line. {timed_clause}\n"
         "overall_soundscape: Continuous scene-appropriate stereo ambience and synchronized practical "
-        "sound effects begin at the first frame and continue naturally underneath dialogue. Outside "
-        "tagged dialogue there are no human voices, whispers, grunts, audible breathing, or "
-        "speech-like vocalizations. Voice references supply vocal identity, timbre, emotion, and "
+        "sound effects begin at the first frame and continue naturally underneath dialogue. "
+        f"{sound_boundary} Voice references supply vocal identity, timbre, emotion, and "
         "delivery only; reject source room tone, reverberation, echo, background noise, microphone "
         "coloration, and spatial acoustics, and render each voice inside the target environment.\n"
         "non_diegetic_music: N/A"
@@ -5053,8 +5600,11 @@ def _build_h3_context_fallback(
     has_start_image: bool,
     reference_context: Optional[str] = None,
     duration_seconds: Optional[float] = None,
+    planning_style: str = "faithful",
 ) -> str:
     """Create a deterministic three-field fallback for ordinary H3 Base."""
+    from services.studio_enhancement import record_review_warning
+    record_review_warning("The AI draft did not produce a valid H3 frame prompt. Review the source-based draft before generating.")
     alignment = str(reference_context or "").strip()
     if alignment:
         alignment += "\n\n"
@@ -5064,14 +5614,44 @@ def _build_h3_context_fallback(
             "(from [Shot 1]) is fully referenced.\n\n"
         )
     request = _compile_h3_explicit_dialogue(prompt)
-    timed_clause = _build_h3_timed_silence_clause(prompt, duration_seconds)
+    adaptive = planning_style == "adaptive"
+    requests_speech = _h3_requests_speech(prompt)
+    timed_clause = (
+        "Place each tagged line only after every action that causes or motivates it and before "
+        "any consequence the source puts after it. Let the source action order determine speech "
+        "timing; do not invent an absolute start time. Preserve requested nonverbal reactions "
+        "such as a laugh as actions and sounds, without turning them into extra words."
+        if adaptive and requests_speech
+        else (
+            "Preserve every requested action and nonverbal reaction in source order; do not invent "
+            "spoken words or an absolute speech time."
+            if adaptive
+            else _build_h3_timed_silence_clause(prompt, duration_seconds)
+        )
+    )
+    speech_boundary = (
+        (
+            "The tagged dialogue is the only speech; add no other spoken words or speech-like "
+            "vocalizations. Preserve explicitly requested nonverbal reactions."
+            if requests_speech
+            else "Add no spoken words or speech-like vocalizations. Preserve explicitly requested "
+            "nonverbal reactions."
+        )
+        if adaptive
+        else "The scripted dialogue is the only speech; all mouths remain closed before and after it."
+    )
+    sound_boundary = (
+        "Outside tagged dialogue, add no spoken words or speech-like vocalizations; preserve only "
+        "explicitly requested nonverbal reactions."
+        if adaptive
+        else "Outside tagged dialogue there are no human voices, whispers, grunts, audible breathing, or speech-like vocalizations."
+    )
     return (
-        f"{alignment}integrated_multimodal_description: [Shot 1] {request} The scripted dialogue "
-        f"is the only speech; all mouths remain closed before and after it. {timed_clause}\n\n"
+        f"{alignment}integrated_multimodal_description: [Shot 1] {request} {speech_boundary} "
+        f"{timed_clause}\n\n"
         "overall_soundscape: Continuous scene-appropriate ambience and synchronized practical "
-        "sound effects begin at the first frame and continue naturally underneath dialogue. Outside "
-        "tagged dialogue there are no human voices, whispers, grunts, audible breathing, or "
-        "speech-like vocalizations.\n\n"
+        "sound effects begin at the first frame and continue naturally underneath dialogue. "
+        f"{sound_boundary}\n\n"
         "non_diegetic_music: N/A"
     )
 

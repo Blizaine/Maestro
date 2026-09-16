@@ -32,6 +32,43 @@ from services.h3_sequence_planner import (  # noqa: E402
 
 
 class H3ReferenceSequencePlannerTests(unittest.TestCase):
+    def test_shared_ability_mechanics_survive_in_every_native_window(self):
+        clips, _ = compute_h3_sequence_clips(500)
+        style = (
+            "Cinematic live action with cool practical light, natural skin texture, "
+            "weathered brick and directional shadows across the courtyard. "
+            "The same grounded color palette, detailed fabrics and readable geography "
+            "continue through each change of camera angle. "
+        )
+        self.assertGreater(len(style), 220)
+        for mechanics in (
+            "Alex flies unaided; his boots remain unlit and emit nothing. "
+            "His heat vision travels from his eyes to the target he faces.",
+            "Alex uses the requested jet boots; visible exhaust comes from their nozzles.",
+        ):
+            with self.subTest(mechanics=mechanics):
+                plan = {
+                    "visual_style": style + mechanics,
+                    "setting_continuity": "A stone courtyard",
+                    "clips": [{
+                        "clip": i + 1, "opening_state": "Alex stands in the courtyard",
+                        "closing_state": "Alex reaches the far side",
+                        "shots": [{
+                            "start_seconds": 0, "end_seconds": clip["duration_seconds"],
+                            "action": "Alex travels across the courtyard",
+                            "camera": "Track his movement", "dialogue": [],
+                        }],
+                    } for i, clip in enumerate(clips)],
+                }
+                compiled = compile_h3_reference_sequence_prompts(
+                    plan, clips, reference_relationships="<Subject 1> is Alex from <Picture 1>",
+                    default_retention="<Picture 1>: fully_preserved for identity",
+                    task_types="reference generation",
+                )
+                self.assertEqual(len(compiled), len(clips))
+                for window in compiled:
+                    self.assertIn(mechanics.replace("Alex", "<Subject 1>"), window["prompt"])
+
     def test_saved_video_character_and_voice_share_one_subject(self):
         relationships, retention, task_types = _reference_context([
             {

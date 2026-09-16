@@ -29,33 +29,100 @@ def only_supplied_dialogue_requested(prompt: str) -> bool:
 def dialogue_forbidden(prompt: str) -> bool:
     """Recognize a scene-wide instruction, not a locally silent reaction/shot."""
     source = str(prompt or "")
+    # Natural restriction lists often begin with a scene-specific noun before
+    # reaching the speech item ("No baby, dialogue, collision, or cuts").
+    # Collapse only a bare list item: positive clauses such as "dialogue begins
+    # later" do not match, and the quote/temporal checks below still apply.
+    source = re.sub(
+        r"\b(?:no|without)\s+[^,;.!?\r\n]{1,80},\s*"
+        r"(?:[^,;.!?\r\n]{1,80},\s*)*"
+        r"(?:and\s+|or\s+)?(?:spoken\s+)?"
+        r"(?:dialogue|speech|talking|voices?)\b"
+        r"(?=\s*(?:[,.;!?]|$))",
+        "no dialogue", source, flags=re.IGNORECASE,
+    )
+    # A shared "no" can govern comma- or conjunction-separated restrictions.
+    source = re.sub(
+        r"\b(?:no|without)\s+(?:(?:cuts?|slow motion|subtitles?|captions?|music|"
+        r"narration|logos?|watermarks?|magic)(?:\s*,\s*(?:(?:and|or)\s+)?|"
+        r"\s+(?:and|or)\s+))+(dialogue|speech|talking|voices?)\b"
+        r"(?=\s*(?:[,.;!?]|$|until\b|before\b|after\b|during\b|for\b|in\b))",
+        r"no \1", source, flags=re.IGNORECASE,
+    )
     matches = re.finditer(
         r"\b(?:(?:no|without)\s+(?:spoken\s+)?(?:dialogue|speech|talking|voices?)|"
         r"(?:do not|don't|never)\s+(?:speak|talk|add dialogue)|"
-        r"(?:silent|nonverbal)\s+(?:film|movie|video|sequence)|"
-        r"(?:entire|whole)\s+(?:scene|clip|video|sequence)\s+(?:is\s+|stays\s+|remains\s+)?silent|"
+        r"(?:no[ -]?one|nobody)\s+(?:ever\s+)?(?:speaks?|talks?|"
+        r"mouths?\s+(?:any\s+)?words?)|"
+        r"(?:silent|nonverbal)\s+"
+        r"(?:(?:live[- ]action|animated|cinematic|dramatic|short|feature|"
+        r"martial[- ]arts)\s+){0,4}(?:scene|film|movie|video|sequence)|"
+        r"(?:entire|whole)\s+(?:scene|clip|film|movie|video|sequence)\s+(?:is\s+|stays\s+|remains\s+)?silent|"
         r"(?:music|instrumental)[ -]only)\b",
         source, re.IGNORECASE,
     )
     for match in matches:
+        # A character can say "No one speaks here". Only quotes introduced by
+        # a speech attribution are dialogue; a quote around a pasted prompt is
+        # still allowed to contain scene-wide production restrictions.
+        before = source[:match.start()]
+        straight_start = before.rfind('"') if before.count('"') % 2 else -1
+        curly_start = before.rfind("“") if before.rfind("“") > before.rfind("”") else -1
+        quote_start = max(straight_start, curly_start)
+        quote_lead = before[:quote_start] if quote_start >= 0 else ""
+        if quote_start >= 0 and re.search(
+            r"\b(?:says?|said|speaks?|spoke|asks?|asked|replies?|replied)\s*,?\s*$",
+            quote_lead, re.IGNORECASE,
+        ):
+            continue
+
+        # Preserve local silence before later requested speech. Explicit
+        # entire/whole/full-scene scope remains global even with "during".
+        clause_start = max(
+            before.rfind(mark) for mark in (".", "!", "?", ";", "\n", "\r")
+        ) + 1
+        clause_prefix = before[clause_start:]
+        prefix_is_temporal = re.match(
+            r"\s*(?:(?:until|before|after|between|outside|during|from)\b|"
+            r"(?:in|for)\s+(?:the\s+)?(?:first|last|opening|final|initial|next|"
+            r"\d+(?:\.\d+)?(?:\s+(?:seconds?|minutes?|beats?|shots?))?))\b",
+            clause_prefix, re.IGNORECASE,
+        )
+        prefix_is_global = re.match(
+            r"\s*(?:during|for|in|throughout)\s+(?:the\s+)?"
+            r"(?:entire|whole|full)\s+(?:scene|clip|film|movie|video|sequence)\b",
+            clause_prefix, re.IGNORECASE,
+        )
+        if prefix_is_temporal and not prefix_is_global:
+            continue
         after = source[match.end():]
-        if re.match(
+        suffix_is_temporal = re.match(
             r"\s+(?:until|before|after|between|outside|during|from|"
             r"(?:in|for)\s+(?:the\s+)?(?:first|last|opening|final|initial|next|\d))\b",
             after, re.IGNORECASE,
-        ):
+        )
+        suffix_is_global = re.match(
+            r"\s+(?:during|for|in|throughout)\s+(?:the\s+)?"
+            r"(?:entire|whole|full)\s+(?:scene|clip|film|movie|video|sequence)\b",
+            after, re.IGNORECASE,
+        )
+        if suffix_is_temporal and not suffix_is_global:
             continue
         return True
     return False
 
 
 def _speech_context(prompt: str) -> str:
+    from services.h3_authored_brief import positive_instruction_text
+
+    # A negative mention of banter or dialogue cannot create a speech quota.
+    source = positive_instruction_text(str(prompt or ""))
     # Visible words are not a request for a narrator to read them aloud.
     return re.sub(
         r"\b(?:sign|banner|label|subtitle|caption|marquee|poster|billboard|screen|"
         r"monitor|display|placard|headline|logo|on-screen\s+text)\b[^.!?\r\n]{0,35}"
         r"\b(?:says?|reads?|shows?|displays?|bears?)\b\s*(?:\"[^\"]*\"|“[^”]*”)?",
-        "visible text", str(prompt or ""), flags=re.IGNORECASE,
+        "visible text", source, flags=re.IGNORECASE,
     )
 
 
@@ -70,6 +137,33 @@ def conversation_brief(prompt: str) -> bool:
         r"explain(?:s|ed|ing)?|present(?:s|ed|ing|ation)?|announc(?:e|es|ed|ing)|"
         r"tutorial|walk[ -]?through|podcast|monologue|dialogue|speech)\b",
         _speech_context(prompt), re.IGNORECASE,
+    ))
+
+
+def requested_dialogue_turns(prompt: str) -> int | None:
+    """Return an explicit bounded turn count such as ``four-turn conversation``."""
+
+    words = {
+        "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    }
+    match = re.search(
+        r"\b(one|two|three|four|five|six|[1-6])(?:[ -])turn\s+"
+        r"(?:natural\s+)?(?:conversation|dialogue|exchange)\b",
+        _speech_context(prompt), re.IGNORECASE,
+    )
+    if not match:
+        return None
+    token = match.group(1).casefold()
+    return words.get(token, int(token) if token.isdigit() else None)
+
+
+def compact_dialogue_brief(prompt: str) -> bool:
+    """Return whether the user explicitly asks for a brief exchange."""
+
+    return bool(re.search(
+        r"\b(?:brief|short|concise)\b[^.!?\r\n]{0,40}"
+        r"\b(?:conversation|dialogue|exchange)\b",
+        str(prompt or ""), re.IGNORECASE,
     ))
 
 
@@ -115,19 +209,29 @@ def creative_dialogue_budget(prompt: str, duration_seconds: float | None) -> Dia
         return None
     # Dialogue-led scenes allocate most of the clip to speech. A verbal beat
     # in an action scene uses half, leaving room for its physical progression.
-    brief_speech = bool(re.search(
+    sparse_speech = bool(re.search(
         r"\b(?:brief|short|sparse|minimal|occasional)\s+(?:tactical\s+)?"
-        r"(?:dialogue|speech|exchange|spoken\s+reaction)|\b(?:one|a single)\s+(?:short\s+)?line\b",
+        r"(?:dialogue|speech|exchange|spoken\s+reaction|line)|"
+        r"\b(?:one|a single)\s+(?:short\s+)?line\b",
         str(prompt or ""), re.IGNORECASE,
     ))
-    speech_fraction = 0.25 if brief_speech else (0.85 if conversation_brief(prompt) else 0.5)
+    compact_exchange = compact_dialogue_brief(prompt)
+    if sparse_speech:
+        speech_fraction = 0.25
+    elif compact_exchange:
+        # A concise exchange must not be padded until it crowds out the action.
+        # Four complete technical turns in a 14.4s action scene naturally land
+        # around 11-16 words, while an open dialogue-led scene remains denser.
+        speech_fraction = 0.35
+    else:
+        speech_fraction = 0.85 if conversation_brief(prompt) else 0.5
     maximum = max(1, math.floor(duration * DIALOGUE_MAX_WORDS_PER_SECOND))
     target = min(maximum, max(1, round(duration * speech_fraction * DIALOGUE_DEFAULT_WORDS_PER_SECOND)))
     # A conversation draft at 75% of the target was routinely accepted as a
     # single short reaction per window. Keep sustained speech close to its
     # allocation while leaving mixed action scenes their wider breathing room.
-    minimum_fraction = 0.9 if conversation_brief(prompt) else 0.75
-    return DialogueBudget(1 if brief_speech else max(1, math.ceil(target * minimum_fraction)), target, maximum)
+    minimum_fraction = 0.9 if conversation_brief(prompt) and not compact_exchange else 0.75
+    return DialogueBudget(1 if sparse_speech else max(1, math.ceil(target * minimum_fraction)), target, maximum)
 
 
 def requested_dialogue_topics(prompt: str) -> list[str]:

@@ -36,15 +36,15 @@ _PRODUCTION_LABELS = {
     "cast", "character", "characters", "cinematography", "color palette",
     "composition", "constraints", "continuity", "description", "dialogue",
     "director", "duration", "editing", "effects", "detailed description",
-    "end", "ext", "exterior", "fade in", "fade out", "format", "fps",
+    "end", "example", "examples", "ext", "exterior", "fade in", "fade out", "format", "fps",
     "framing", "int", "interior", "language", "lighting", "location",
     "integrated multimodal description", "music", "non diegetic music",
     "negative prompt", "notes", "overall soundscape", "pacing", "pov",
     "instead", "prohibited", "forbidden", "disallowed",
-    "prompt", "reference", "resolution", "retention analysis", "role",
+    "instruction", "instructions", "prompt", "reference", "resolution", "retention analysis", "role",
     "scene", "setting", "sfx", "shot", "sound", "sound design",
     "sound effects", "soundscape", "soundtrack", "style", "subject",
-    "subject definitions", "summary", "time", "title", "tone", "transition",
+    "subject definitions", "summary", "template", "templates", "time", "title", "tone", "transition",
     "vfx", "visual", "visual direction", "visual style", "visuals", "voice",
 }
 _PRODUCTION_LABEL_WORDS = {
@@ -83,7 +83,7 @@ class H3SpeakerBindingError(ValueError):
     """A real dialogue line lacks an unambiguous referenced speaker."""
 
 
-def is_h3_spoken_quote(source: str, match: re.Match) -> bool:
+def is_h3_spoken_quote(source: str, match: re.Match, *, allow_screenplay_label: bool = True) -> bool:
     """Recognize speech cues, without turning quoted names/styles into dialogue.
 
     Explicit <d> blocks are handled separately by callers. Quotes in reference
@@ -152,7 +152,7 @@ def is_h3_spoken_quote(source: str, match: re.Match) -> bool:
     # H3-native ownership and screenplay labels also declare spoken content.
     if re.search(r"(?:<Subject\s+\d+>|\(S\d+\))\s*[:,]?\s*$", before, re.IGNORECASE):
         return True
-    if label and not is_h3_production_label(label.group(1)):
+    if allow_screenplay_label and label and not is_h3_production_label(label.group(1)):
         return True
     # Quotation followed by attribution: "Hello," Alex says.
     attribution = re.split(r'[.!?;"“”\n]', after.lstrip(" ,"))[0]

@@ -1060,7 +1060,7 @@ class MiniMaxH3Model:
                 "MiniMax H3 supports one Parallel Decoding Distillation "
                 "adapter at a time."
             )
-        for path in pdd_paths:
+        for path in turbo_paths:
             preset = minimax_h3_turbo_preset_for_path(path)
             if preset is None:
                 continue
@@ -1615,10 +1615,15 @@ class MiniMaxH3Model:
                 f"H3 Fused Turbo supports {FUSED_H3_MIN_EVALUATIONS}-{FUSED_H3_MAX_EVALUATIONS} total denoising steps; "
                 f"received {int(sampling_steps)}. Four is the published default."
             )
-        if self._turbo_lora_active and int(sampling_steps) < MINIMAX_H3_TURBO_MIN_STEPS:
+        turbo_minimum_steps = max((
+            int((minimax_h3_turbo_preset_for_path(path) or {}).get(
+                "minimum_steps", MINIMAX_H3_TURBO_MIN_STEPS
+            )) for path in self._turbo_lora_paths
+        ), default=MINIMAX_H3_TURBO_MIN_STEPS)
+        if self._turbo_lora_active and int(sampling_steps) < turbo_minimum_steps:
             raise ValueError(
                 "MiniMax H3 Turbo LoRA needs at least "
-                f"{MINIMAX_H3_TURBO_MIN_STEPS} denoising steps; "
+                f"{turbo_minimum_steps} denoising steps; "
                 f"received {int(sampling_steps)}."
             )
         if self._pdd_lora_active and int(sampling_steps) != PDD_NUM_EVALUATIONS:

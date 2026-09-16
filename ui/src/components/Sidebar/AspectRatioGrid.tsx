@@ -15,7 +15,7 @@ export function AspectRatioGrid({ menu = false, onSelect }: { menu?: boolean; on
   const generationMode = useStore(s => s.generationMode)
   const modelOptions = useStore(s => s.modelOptions)
   const isImage = generationMode === 'image'
-  const supportsUltraWide = Object.values(modelOptions?.resolution_presets || {}).some(
+  const supportsUltraWide = isImage || Object.values(modelOptions?.resolution_presets || {}).some(
     preset => preset?.values?.['21:9'] != null,
   )
   const modelRatios = supportsUltraWide

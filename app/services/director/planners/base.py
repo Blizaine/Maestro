@@ -97,7 +97,11 @@ class BasePlanner(ABC):
         )
         self._planning_checkpoint_kind = str(kind or "")
         encoded = json.dumps(
-            fingerprint_payload,
+            {"request": fingerprint_payload,
+             "writing_contract": str(kwargs.get("polish_block") or ""),
+             "character_ref_paths": kwargs.get("character_ref_paths") or [],
+             "location_ref_paths": kwargs.get("location_ref_paths") or [],
+             "nsfw": bool(kwargs.get("nsfw", False))},
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),

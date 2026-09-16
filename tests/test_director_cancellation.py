@@ -893,6 +893,33 @@ class TestDirectorCancellation(unittest.TestCase):
             ["old-one.mp4", "old-two.mp4", "new-one.mp4"],
         )
 
+    def test_music_rerun_uses_editorial_audio_offset_and_trims_native_padding(self):
+        pid = "pipe-rerun-musical-cuts"
+        record = self._add_pipeline(pid, "completed")
+        record["params"].update({"seamless": False, "video_model": "ltx2_22B_distilled_1_1",
+                                 "audio_path": self._write_media("song.wav", b"audio"),
+                                 "director_music_clip_seconds": 2.6})
+        record["_planned_clips"] = [
+            {"start": 0, "end": 2, "duration_sec": 2, "duration_frames": 57, "output_frames": 50, "music_timing_version": 1},
+            {"start": 2, "end": 4.4, "duration_sec": 2.4, "duration_frames": 65, "output_frames": 60, "music_timing_version": 1},
+        ]
+        record["clip_plans"] = [{"image_prompt": "band", "video_prompt": "band performs"}] * 2
+        record["clip_images"] = ["start-one.jpg", "start-two.jpg"]
+        for filename in record["clip_images"]:
+            self._write_media(filename, b"image")
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+        pipeline._wgp = SimpleNamespace(save_path=self.temp_dir.name,
+            get_model_def=lambda _: {"fps": 25, "frames_minimum": 17, "frames_steps": 8, "frames_maximum": 65, "sliding_window": True},
+            get_model_min_frames_and_step=lambda _: (17, 8, 8))
+        submitted, audio_slices = [], []
+        with (patch.object(pipeline, "_slice_audio_segment", side_effect=lambda *args: audio_slices.append(args)),
+              patch.object(pipeline, "_submit_and_wait", side_effect=lambda params, **_: submitted.append(params) or ["replacement.mp4"])):
+            pipeline.rerun_clip_video(self.temp_dir.name, pid, 1)
+        self.assertEqual(submitted[0]["video_length"], 65)
+        self.assertEqual(submitted[0]["trim_tail_frames"], 5)
+        self.assertAlmostEqual(audio_slices[0][1], 2)
+        self.assertAlmostEqual(audio_slices[0][2], 2.6)
+
     def test_video_rerun_reuses_full_director_carried_frame_schedule(self):
         pid = "pipe-rerun-frame-schedule"
         record = self._add_pipeline(pid, "completed")
@@ -1160,8 +1187,9 @@ class TestDirectorCancellation(unittest.TestCase):
             {"video_prompt": "An atmospheric view crosses the empty stage."},
         ]
         planned = [
-            {"start": 2, "end": 7, "duration_sec": 5},
-            {"start": 7, "end": 12, "duration_sec": 5},
+            # The production timeline stage supplies legal LTX 8n+1 frames.
+            {"start": 2, "end": 2 + 121 / 24, "duration_sec": 121 / 24, "duration_frames": 121},
+            {"start": 2 + 121 / 24, "end": 2 + 242 / 24, "duration_sec": 121 / 24, "duration_frames": 121},
         ]
         submitted: list[dict] = []
         pipeline._wgp = SimpleNamespace(

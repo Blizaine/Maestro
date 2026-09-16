@@ -599,6 +599,8 @@ def compute_h3_weight_budget(
         return {
             "weight_budget_gb": 0.0,
             "activation_reserve_gb": 0.0,
+            "requested_activation_reserve_gb": 0.0,
+            "activation_reserve_clamped": False,
             "compute_ratio": 1.0,
             "video_reference_count": max(0, int(video_reference_count or 0)),
             "runtime_workspace_gb": 0.0,
@@ -694,6 +696,7 @@ def compute_h3_weight_budget(
     # Always leave enough room to stream at least a small transformer slice.
     max_reserve_gb = max(0.0, total_vram_gb - _H3_MIN_WEIGHT_BUDGET_GB)
     activation_reserve_gb = min(requested_reserve_gb, max_reserve_gb)
+    activation_reserve_clamped = requested_reserve_gb > max_reserve_gb + 1e-6
     weight_budget_gb = min(
         _H3_MAX_WEIGHT_BUDGET_GB,
         max(_H3_MIN_WEIGHT_BUDGET_GB, total_vram_gb - activation_reserve_gb),
@@ -701,6 +704,8 @@ def compute_h3_weight_budget(
     return {
         "weight_budget_gb": weight_budget_gb,
         "activation_reserve_gb": activation_reserve_gb,
+        "requested_activation_reserve_gb": requested_reserve_gb,
+        "activation_reserve_clamped": activation_reserve_clamped,
         "compute_ratio": compute_ratio,
         "video_reference_count": reference_count,
         "runtime_workspace_gb": runtime_workspace_gb,

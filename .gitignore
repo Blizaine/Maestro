@@ -98,6 +98,7 @@ app/postprocessing/seedvc/
 # Local build/archive outputs (formerly supplement-pack zips) — never tracked.
 dist/
 .codex-tmp/
+pinokio_agent/
 
 # Official LTX-2.5 source checkout. The pinned revision is installed lazily
 # into an isolated runtime by app/scripts/install_ltx25_runtime.py.

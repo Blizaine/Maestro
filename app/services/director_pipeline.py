@@ -19,6 +19,7 @@ import uuid
 import math
 import shutil
 import subprocess
+import sys
 import threading
 import traceback
 from functools import wraps
@@ -33,6 +34,7 @@ from services.director_model_compat import (
     DIRECTOR_PIPELINE_TYPES,
     assess_director_model,
 )
+from services.director.music_performance import music_performance_direction
 from services.director_video_strategy import (
     BOUNDED_START_END,
     OMNI_REFERENCE,
@@ -95,7 +97,8 @@ _LTX25_MUSIC_VIDEO_SYNC_CONTRACT = (
     "SOURCE-AUDIO LIP SYNC: Any person visibly singing or rapping "
     "lip-syncs every vocal syllable to the supplied source soundtrack with "
     "exact timing, natural mouth shapes, and matching breaths. People who "
-    "are not performing vocals keep their mouths closed."
+    "are not performing vocals keep their mouths closed. "
+    + music_performance_direction()
 )
 _DIRECTOR_VOCAL_PERFORMANCE_RE = re.compile(
     r"\b(?:lip[-\s]?sync(?:s|ing|ed)?|sing(?:s|ing|er|ers)?|"
@@ -122,17 +125,21 @@ class DirectorModelCompatibilityError(ValueError):
 def _director_hardware_snapshot() -> dict:
     """Read the same cached hardware facts used by Studio's H3 preflight."""
 
+    # The server runs as __main__ under Pinokio. Importing launch again here
+    # would execute its startup a second time just to preview a clip limit.
+    for name in ("launch", "__main__"):
+        getter = getattr(sys.modules.get(name), "_get_cached_hardware", None)
+        if callable(getter):
+            try:
+                return dict(getter() or {})
+            except Exception:
+                pass
     try:
-        from launch import _get_cached_hardware
+        from services.hardware_detect import detect_hardware
 
-        return dict(_get_cached_hardware() or {})
+        return dict(detect_hardware() or {})
     except Exception:
-        try:
-            from services.hardware_detect import detect_hardware
-
-            return dict(detect_hardware() or {})
-        except Exception:
-            return {"gpu_vram_gb": 0.0}
+        return {"gpu_vram_gb": 0.0}
 
 
 def _director_uses_fixed_media_strength(
@@ -222,6 +229,32 @@ def _director_requests_vocal_performance(params: dict) -> bool:
             str(params.get("scene_description") or "")
         )
     )
+
+
+def director_music_clip_limits(params: dict, model_def: Optional[dict] = None) -> dict:
+    from services.director_music_timing import resolve_clip_limits
+    video_model = params.get("video_model") or "ltx2_22B_distilled_1_1"
+    if model_def is None:
+        getter = getattr(_wgp, "get_model_def", None)
+        model_def = getter(video_model) if callable(getter) else {}
+    profile = _director_video_execution_profile(params)
+    saved_limits = profile.get("music_clip_limits") if profile else None
+    if saved_limits and saved_limits.get("auto") == (params.get("director_music_clip_seconds") is None):
+        # The execution profile's effective cap already includes this setting.
+        # Keep the original hardware recommendation for saved projects.
+        profile = {**profile, "effective_max_frames": profile.get("manual_max_frames") or saved_limits["recommended_frames"]}
+    if not profile:
+        profile = build_director_video_execution_profile(
+            video_model, model_def, params.get("video_params") or {}, _director_hardware_snapshot(),
+            manual_max_frames=params.get("director_max_shot_frames"),
+        )
+    return resolve_clip_limits(model_def or {}, params.get("director_music_clip_seconds"), profile)
+
+
+def _music_video_max_shot_frames(params: dict, model_def: Optional[dict], *, pipeline_type: str) -> Optional[int]:
+    if pipeline_type == "music_video" and "director_music_clip_seconds" in params:
+        return director_music_clip_limits(params, model_def)["max_frames"]
+    return _ltx25_music_video_max_shot_frames(params, model_def, pipeline_type=pipeline_type)
 
 
 def _ltx25_music_video_max_shot_frames(
@@ -363,6 +396,14 @@ def _create_director_video_execution_profile(
         video_params["minimax_h3_turbo_preset"] = turbo_preset["id"]
         video_params["num_inference_steps"] = int(turbo_preset["steps"])
         profile["turbo_preset"] = turbo_preset["id"]
+    if params.get("pipeline_type") == "music_video" and "director_music_clip_seconds" in params:
+        from services.director_music_timing import resolve_clip_limits
+        limits = resolve_clip_limits(model_def, params.get("director_music_clip_seconds"), profile)
+        profile["music_clip_limits"] = limits
+        profile["effective_max_frames"] = limits["max_frames"]
+        profile["effective_max_seconds"] = limits["max_seconds"]
+        if not limits["auto"]:
+            profile["manual_override"] = True
     params["video_params"] = video_params
     params["_director_video_execution_profile"] = profile
     return profile
@@ -462,14 +503,14 @@ def prepare_director_timeline(params: dict, clip_plans: list, planned_clips: lis
     getter = getattr(_wgp, "get_model_def", None)
     model_def = (getter(video_model) if video_model and callable(getter) else {}) or {}
     strategy = video_strategy(model_def)
-    ltx_max = _ltx25_music_video_max_shot_frames(
+    ltx_max = _music_video_max_shot_frames(
         params, model_def, pipeline_type=params.get("pipeline_type", "music_video"),
     )
     if not planned_clips or (strategy not in {BOUNDED_START_END, OMNI_REFERENCE} and ltx_max is None):
         return clip_plans, planned_clips
     fps = float(model_def.get("fps") or 24)
-    minimum = int(model_def.get("frames_minimum") or 124)
-    step = int(model_def.get("frames_steps") or 17)
+    minimum = int(model_def.get("frames_minimum") or 1)
+    step = int(model_def.get("frames_steps") or 1)
     maximum = ltx_max if ltx_max is not None else _director_effective_max_frames(params, model_def)
     maximum = minimum + max(0, (maximum - minimum) // step) * step
     already_native = len(clip_plans) == len(planned_clips)
@@ -486,6 +527,7 @@ def prepare_director_timeline(params: dict, clip_plans: list, planned_clips: lis
     return adapt_bounded_timeline(
         clip_plans, planned_clips, fps=fps, minimum_frames=minimum,
         maximum_frames=maximum, frame_step=step,
+        cover_source_duration=params.get("pipeline_type") == "music_video",
     )
 
 
@@ -1817,6 +1859,58 @@ def update_clip_tag(out_dir: str, pid: str, clip_index: int, tag: Optional[str])
         _release_pipeline_operation(pid)
 
 
+def update_clip_prompt(out_dir: str, pid: str, clip_index: int, update: dict) -> bool:
+    """Persist reviewed prompt text without starting image or video generation."""
+    if not _claim_pipeline_operation(pid):
+        raise PipelineBusyError("Pipeline is still active; try again shortly.")
+    try:
+        if not isinstance(update, dict):
+            raise ValueError("Prompt update must be a JSON object")
+        supplied = {key: update[key] for key in (
+            "image_prompt", "video_prompt", "window_prompts",
+        ) if key in update}
+        if not supplied:
+            raise ValueError("No prompt field was supplied")
+        for key in ("image_prompt", "video_prompt"):
+            if key in supplied and not isinstance(supplied[key], str):
+                raise ValueError(f"{key} must be text")
+        if "window_prompts" in supplied and (
+            not isinstance(supplied["window_prompts"], list)
+            or not supplied["window_prompts"]
+            or not all(isinstance(item, str) for item in supplied["window_prompts"])
+        ):
+            raise ValueError("window_prompts must be a non-empty list of text prompts")
+
+        def apply_update(state):
+            clips = state.get("clips", [])
+            if clip_index < 0 or clip_index >= len(clips):
+                raise ValueError(f"Clip index {clip_index} out of range")
+            clip = clips[clip_index]
+            existing_windows = clip.get("window_prompts") or []
+            if "video_prompt" in supplied and len(existing_windows) > 1:
+                raise ValueError(
+                    "This clip has multiple window prompts; save window_prompts instead"
+                )
+            clip.update(supplied)
+            if "window_prompts" in supplied:
+                clip["video_prompt"] = "\n".join(supplied["window_prompts"])
+            elif "video_prompt" in supplied and len(existing_windows) == 1:
+                clip["window_prompts"] = [supplied["video_prompt"]]
+            if "video_prompt" in supplied or "window_prompts" in supplied:
+                # Reviewed text becomes the new source of truth. Old structured
+                # H3 caches would otherwise restore the pre-edit prompt during
+                # rerun preflight.
+                clip["_director_h3_source_prompt"] = clip["video_prompt"]
+                clip["_director_prompt_user_edited"] = True
+                clip["_director_h3_compiled_prompt"] = ""
+                clip["_director_dialogue_beats"] = []
+
+        with _pipeline_file_lock:
+            return _update_saved_pipeline_locked(out_dir, pid, apply_update) is not None
+    finally:
+        _release_pipeline_operation(pid)
+
+
 def _update_clip_tag_locked(out_dir: str, pid: str, clip_index: int, tag: Optional[str]) -> bool:
     """Update the tag on a specific clip in a saved pipeline state."""
     state = load_pipeline_state(out_dir, pid)
@@ -2600,6 +2694,7 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
     video_model = state.get("video_model") or "ltx2_22B_distilled_1_1"
     prompt_plan = {
         "video_prompt": prompt,
+        "_director_prompt_user_edited": prompt_override is not None or bool(clip.get("_director_prompt_user_edited")),
         "_director_h3_source_prompt": (
             prompt
             if prompt_override is not None
@@ -2630,6 +2725,14 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
         "_director_closing_blocking": clip.get("_director_closing_blocking", ""),
         "_director_audio_plan": clip.get("_director_audio_plan") or {},
     }
+    _apply_h3_music_audio_contract(
+        video_model, [prompt_plan],
+        {
+            **snapshot,
+            "pipeline_type": state.get("pipeline_type") or snapshot.get("pipeline_type") or "music_video",
+            "scene_description": prompt_override if prompt_override is not None else snapshot.get("scene_description", ""),
+        },
+    )
     _preflight_h3_director_prompts(video_model, [prompt_plan], pid=pid)
     prompt = prompt_plan["video_prompt"]
     video_loras = state.get("video_loras") or {}
@@ -2714,7 +2817,9 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
                 )
             except (TypeError, ValueError):
                 saved_duration = 0.0
-        if saved_duration > 0:
+        if saved_plan.get("music_timing_version") == 1:
+            frame_count = int(saved_plan["duration_frames"])
+        elif saved_duration > 0:
             frame_count = round(saved_duration * fps)
         else:
             try:
@@ -2726,7 +2831,7 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
         requested_frames.append(max(
             frame_count, round(5 * fps),
         ))
-    if director_strategy in {BOUNDED_START_END, OMNI_REFERENCE}:
+    if director_strategy in {BOUNDED_START_END, OMNI_REFERENCE} or all(c.get("music_timing_version") == 1 for c in planned_clips):
         frame_schedule = []
         maximum_frames = int(
             execution_profile.get("effective_max_frames")
@@ -2887,7 +2992,7 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
         next_clip = clips[clip_index + 1]
         first_plan = clip.get("planned_clip") or {}
         second_plan = next_clip.get("planned_clip") or {}
-        if _director_same_logical_scene(clip, first_plan, next_clip, second_plan):
+        if first_plan.get("music_timing_version") != 1 and _director_same_logical_scene(clip, first_plan, next_clip, second_plan):
             next_image = next_clip.get("start_image_filename")
             next_path = os.path.join(clip_out_dir, next_image) if next_image else ""
             if next_path and os.path.isfile(next_path):
@@ -2908,6 +3013,10 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
         audio_origin_frames + sum(frame_schedule[:clip_index])
     ) / fps
     clip_duration_sec = video_length / fps
+    if planned_clips[clip_index].get("music_timing_version") == 1:
+        from services.director_music_timing import music_output_trim
+        clip_start = float(planned_clips[clip_index]["start"])
+        gen_params["trim_tail_frames"] = music_output_trim(video_length, planned_clips[clip_index]["output_frames"])
     slice_path = None
     vocal_slice_path = None
     has_story_drive_audio = bool(snapshot.get("_director_omni_drive_audio"))
@@ -3581,7 +3690,7 @@ def pause_director_queue(base_out_dir: str) -> dict:
         return _public_director_queue_state(state)
 
 
-def remove_director_queue_entry(base_out_dir: str, entry_id: str) -> bool:
+def remove_director_queue_entry(base_out_dir: str, entry_id: str, *, completed_only: bool = False) -> bool:
     with _director_queue_lock:
         state = _load_director_queue_locked(base_out_dir)
         entries = state.get("entries") or []
@@ -3591,6 +3700,8 @@ def remove_director_queue_entry(base_out_dir: str, entry_id: str) -> bool:
         )
         if target is None:
             return False
+        if completed_only and target.get("status") != "completed":
+            raise PipelineBusyError("This Director entry is no longer completed; its queue history was kept.")
         if target.get("status") == "running":
             raise PipelineBusyError(
                 "The queued Director project is running; stop its pipeline first."
@@ -3600,6 +3711,10 @@ def remove_director_queue_entry(base_out_dir: str, entry_id: str) -> bool:
             if not isinstance(entry, dict) or entry.get("id") != entry_id
         ]
         _write_director_queue_locked(base_out_dir, state)
+    if completed_only:
+        # Saved projects can still refer to these inputs. Clearing completed
+        # history must not delete their media or queue-owned reference copies.
+        return True
     asset_dir = os.path.realpath(
         os.path.join(base_out_dir, "_director_queue_assets", entry_id)
     )
@@ -5315,7 +5430,7 @@ def _run_pipeline(pid: str, resume: bool = False):
             except Exception:
                 selected_video_def = {}
             selected_strategy = video_strategy(selected_video_def)
-            ltx25_max_frames = _ltx25_music_video_max_shot_frames(
+            ltx25_max_frames = _music_video_max_shot_frames(
                 params,
                 selected_video_def,
                 pipeline_type=pipeline_type,
@@ -5501,6 +5616,7 @@ def _run_pipeline(pid: str, resume: bool = False):
         # Re-attach the stored world/location anchor after any LLM polish so a
         # rewrite cannot reduce a recognizable set to a generic room.
         clip_plans = apply_independent_shot_context(clip_plans)
+        _apply_h3_music_audio_contract(params.get("video_model", ""), clip_plans, params)
         _preflight_h3_director_prompts(
             params.get("video_model", ""),
             clip_plans,
@@ -5853,7 +5969,8 @@ def _ensure_llm_loaded(params: dict):
     """Load/reload LLM if needed. Shared between legacy and new planning."""
     from services import llm_service
 
-    services_cfg = _wgp.server_config.get("services", {}) if _wgp else {}
+    from services.studio_enhancement import current_settings
+    services_cfg = current_settings(_wgp.server_config.get("services", {}) if _wgp else {})
     desired_model = params.get("llm_model_id") or services_cfg.get("llm_model_id", "Abhiray/gemma-4-E4B-it-heretic-GGUF")
     desired_device = params.get("llm_device") or services_cfg.get("llm_device", "cpu")
     desired_provider = params.get("llm_provider") or services_cfg.get("llm_provider", "local")
@@ -6047,11 +6164,15 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
 
     # Build planner kwargs
     scene_description = params.get("scene_description", "")
-    reference_image_path = params.get("reference_image_path")
+    from services.director.reference_inputs import planning_reference_inputs, VISUAL_IDENTITY_GUIDANCE
+    visual_inputs = planning_reference_inputs(params)
+    reference_image_path = visual_inputs["reference_image_path"]
     planned_clips = params.get("planned_clips", [])
 
-    # Read NSFW from server config (persisted setting, not per-request)
-    services_cfg = _wgp.server_config.get("services", {}) if _wgp else {}
+    # Ordinary projects use saved settings; bounded evaluation may scope its
+    # writer and content mode without changing the installation's preferences.
+    from services.studio_enhancement import current_settings
+    services_cfg = current_settings(_wgp.server_config.get("services", {}) if _wgp else {})
     nsfw = services_cfg.get("nsfw_mode", False)
     # Multi-shot LoRA mode — passes through to Pass 2 so it can emit
     # storyboard-format video_prompts for medium-length shots. See
@@ -6072,7 +6193,7 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
     effective_max_frames = _director_effective_max_frames(
         params, selected_video_def,
     )
-    ltx25_max_frames = _ltx25_music_video_max_shot_frames(
+    ltx25_max_frames = _music_video_max_shot_frames(
         params,
         selected_video_def,
         pipeline_type=pipeline_type,
@@ -6107,10 +6228,11 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
             planned_clips,
             fps=float(selected_video_def.get("fps") or 24),
             minimum_frames=int(
-                selected_video_def.get("frames_minimum") or 124
+                selected_video_def.get("frames_minimum") or 1
             ),
             maximum_frames=planning_max_frames,
-            frame_step=int(selected_video_def.get("frames_steps") or 17),
+            frame_step=int(selected_video_def.get("frames_steps") or 1),
+            cover_source_duration=pipeline_type == "music_video",
         )
         params["planned_clips"] = planned_clips
         print(
@@ -6197,6 +6319,7 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
             "scene_description": scene_description,
             "lyrics": params.get("lyrics"),
             "bpm": params.get("bpm", 120),
+            "audio_vocals_path": params.get("audio_vocals_path"),
         })
 
     # Inject LoRA guides + model dialect guides into the planner only for
@@ -6218,11 +6341,26 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
             planner_kwargs["polish_block"] = polish_block
             print(f"[Pipeline {pid}] Injected {guide_mode} polish block ({len(polish_block)} chars)")
 
+    # Reuse Studio's adaptive craft rules during planning, not as another
+    # whole-film rewrite. This also applies when optional prompt polish is off.
+    from services.director.writing_contract import director_writing_contract, DIRECTOR_WRITING_VERSION
+    source_brief = "\n".join(str(params.get(key) or "") for key in
+                             ("scene_description", "story", "screenplay", "concept"))
+    writing_contract = director_writing_contract(
+        source_brief, source_song=pipeline_type == "music_video",
+        source_audio=bool(params.get("audio_path")),
+        nsfw=bool(services_cfg.get("nsfw_mode", False)),
+    )
+    planner_kwargs["polish_block"] = "\n\n".join(filter(None, [
+        planner_kwargs.get("polish_block", ""), writing_contract,
+        VISUAL_IDENTITY_GUIDANCE if any(visual_inputs[key] for key in (
+            "reference_image_path", "character_ref_paths", "location_ref_paths",
+        )) else "",
+    ]))
+    params["_director_writing_version"] = DIRECTOR_WRITING_VERSION
+
     # Also pass character/location ref labels and paths for image prompt rules
-    planner_kwargs["character_ref_paths"] = params.get("character_ref_paths", [])
-    planner_kwargs["character_ref_labels"] = params.get("character_ref_labels", [])
-    planner_kwargs["location_ref_paths"] = params.get("location_ref_paths", [])
-    planner_kwargs["location_ref_labels"] = params.get("location_ref_labels", [])
+    planner_kwargs.update(visual_inputs)
 
     # Plan
     print(f"[Pipeline {pid}] Planning with DirectorOrchestrator (skill={skill_type})...")
@@ -6873,6 +7011,45 @@ def _run_image_generation(pid: str, params: dict, clip_plans: list[dict], out_di
 
 # ── Video Generation Phase ──────────────────────────────────────────────
 
+def _apply_h3_music_audio_contract(video_model: str, clip_plans: list[dict], params: dict) -> None:
+    """The uploaded song supplies H3 music-video vocals, including on reruns.
+
+    Planner-authored transcript tags cannot request a second generated voice.
+    Keep explicitly user-scripted speech; otherwise the compiler removes the
+    invented vocal tags once the source-audio plan is restored.
+    """
+    if (
+        not str(video_model or "").lower().startswith("minimax_h3")
+        or params.get("pipeline_type", "music_video") != "music_video"
+        or not str(params.get("audio_path") or "").strip()
+    ):
+        return
+    from services.h3_story_ledger import extract_locked_dialogue
+
+    # Only the user's scene brief (or explicit rerun edit), never an AI shot
+    # draft, can opt into scripted speech alongside the music workflow.
+    scene_script = extract_locked_dialogue(str(params.get("scene_description") or ""))
+    for plan in clip_plans:
+        user_edited = bool(plan.get("_director_prompt_user_edited"))
+        user_script = (
+            extract_locked_dialogue(str(plan.get("_director_h3_source_prompt") or plan.get("video_prompt") or ""))
+            if user_edited else scene_script
+        )
+        plan["_director_audio_plan"] = {
+            **(plan.get("_director_audio_plan") or {}),
+            "mode": "audio_driven" if user_script else "music_driven",
+        }
+        if not user_script:
+            plan["_director_dialogue_beats"] = []
+        elif user_edited:
+            # A reviewed shot edit deliberately clears the old AI speech
+            # cache. Recover only this shot's newly supplied exact lines.
+            plan["_director_dialogue_beats"] = [
+                {"speaker_id": line.get("speaker", ""), "spoken_text": line["text"]}
+                for line in user_script
+            ]
+
+
 def _preflight_h3_director_prompts(
     video_model: str,
     clip_plans: list[dict],
@@ -6920,6 +7097,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
     """Generate multi-clip video with optional keyframe injection. Returns list of output filenames."""
     _validate_director_models(params, stages=("video",))
     video_model = params.get("video_model") or "ltx2_22B_distilled_1_1"
+    _apply_h3_music_audio_contract(video_model, clip_plans, params)
     _preflight_h3_director_prompts(video_model, clip_plans, pid=pid)
     video_params = params.get("video_params", {})
     video_loras = params.get("video_loras", {})
@@ -7212,16 +7390,19 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
         per_clip_prompt_modes = []
         has_sliding_window = False
         h3_timing_repaired = False
+        music_cap = _music_video_max_shot_frames(params, model_def, pipeline_type=pipeline_type)
         bounded_director = director_strategy in {
             BOUNDED_START_END,
             OMNI_REFERENCE,
-        }
+        } or music_cap is not None
         bounded_minimum = int(model_def.get("frames_minimum") or _min_f)
         bounded_maximum = int(
             execution_profile.get("effective_max_frames")
             or model_def.get("frames_maximum")
             or bounded_minimum
         )
+        if music_cap is not None:
+            bounded_maximum = music_cap
         bounded_step = int(model_def.get("frames_steps") or _fs or 1)
 
         for i, plan in enumerate(clip_plans):
@@ -7256,6 +7437,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                 uses_shot_images
                 and director_strategy == BOUNDED_START_END
                 and i + 1 < len(clip_plans)
+                and pc.get("music_timing_version") != 1
             ):
                 next_pc = planned_clips[i + 1] if i + 1 < len(planned_clips) else {}
                 if _director_same_logical_scene(plan, pc, clip_plans[i + 1], next_pc):
@@ -7412,7 +7594,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
         # clip to the NEAREST valid length and carry the residual into the
         # next clip: every cumulative boundary stays within half a latent
         # step (±4 frames ≈ 0.16s) of the planned beat, forever.
-        if director_strategy == ROLLING_WINDOW:
+        if director_strategy == ROLLING_WINDOW and not bounded_director:
             per_clip_frames = _quantize_clip_frame_schedule(
                 per_clip_frames, _min_f, _latent,
             )
@@ -7652,7 +7834,11 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                 clip_plans,
                 pid=pid,
                 prompt_modes=final_prompt_modes,
-                durations=[frames / fps for frames in per_clip_frames],
+                durations=[
+                    float(planned_clips[i]["duration_sec"])
+                    if planned_clips[i].get("music_timing_version") == 1 else frames / fps
+                    for i, frames in enumerate(per_clip_frames)
+                ],
                 reference_manifests=(
                     per_clip_h3_references
                     if director_strategy == OMNI_REFERENCE
@@ -7731,6 +7917,8 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
             gen_params["image_start"] = image_start_paths
         if has_any_end:
             gen_params["image_end"] = image_end_paths
+        if pipeline_type == "music_video" and planned_clips and all(c.get("music_timing_version") == 1 for c in planned_clips):
+            gen_params["per_clip_output_frames"] = [int(c["output_frames"]) for c in planned_clips]
         if any(per_clip_continue_from_previous):
             gen_params["per_clip_continue_from_previous"] = (
                 per_clip_continue_from_previous

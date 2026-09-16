@@ -2798,7 +2798,7 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
             full["preset_id"],
             "alibaba-pai-fl2va-pdd-8step",
         )
-        self.assertEqual(len(full["presets"]), 3)
+        self.assertIn("taomate-fl2va-3step-rank19", {preset["id"] for preset in full["presets"]})
         current_option = next(
             preset for preset in full["presets"]
             if preset["id"] == "alibaba-pai-fl2va-pdd-8step"

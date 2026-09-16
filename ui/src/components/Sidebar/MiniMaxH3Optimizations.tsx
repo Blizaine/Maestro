@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { AlertTriangle, ChevronDown, Gauge, Layers, Zap } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
+import type { ModelOptions } from '../../types'
 import { InfoTooltip } from './InfoTooltip'
 import { readPersistentDisclosure, writePersistentDisclosure } from '../../lib/persistentDisclosure'
 
@@ -27,7 +28,7 @@ export function MiniMaxH3Optimizations() {
     writePersistentDisclosure(H3_OPTIMIZATIONS_EXPANDED_KEY, expanded)
   }, [expanded])
 
-  const turboPresets = option?.presets?.length
+  const turboPresets: NonNullable<ModelOptions['minimax_h3_turbo']>['presets'] = option?.presets?.length
     ? option.presets
     : option
       ? [{
@@ -90,6 +91,9 @@ export function MiniMaxH3Optimizations() {
       // selected preset's starting weight after enabling the recipe.
       setLoraWeight(selectedTurboPreset.filename, 0, selectedTurboPreset.weight)
       setParam('num_inference_steps', selectedTurboPreset.steps)
+      if (selectedTurboPreset.generation_settings?.guidance_scale != null) {
+        setParam('guidance_scale', selectedTurboPreset.generation_settings.guidance_scale)
+      }
       setParam('minimax_h3_turbo_mode', true)
     } else {
       for (const preset of turboPresets) {
@@ -121,6 +125,9 @@ export function MiniMaxH3Optimizations() {
       }
       setLoraWeight(nextPreset.filename, 0, nextPreset.weight)
       setParam('num_inference_steps', nextPreset.steps)
+      if (nextPreset.generation_settings?.guidance_scale != null) {
+        setParam('guidance_scale', nextPreset.generation_settings.guidance_scale)
+      }
       setParam('minimax_h3_turbo_mode', true)
     }
   }

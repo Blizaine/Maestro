@@ -90,6 +90,15 @@ class AuthoredBriefTests(unittest.TestCase):
 
         def generate(**kwargs):
             calls.append(kwargs)
+            if kwargs["json_schema"] is None:
+                return json.dumps({"character_appearance": {
+                    "Character A": "An adult Asian male grandmaster in gray robes.",
+                    "Character B": "An adult Asian male grandmaster in earth-yellow monk robes."},
+                    "setting_continuity": "Ruined mountain platform, cliffs, statues and waterfalls.",
+                    "motion_mechanics": "Every strike preserves its source, contact, travel, and consequence.",
+                    "visual_continuity": "Realistic live-action wuxia with transparent air impacts.",
+                    "editing_style": "Slow tension followed by explosive action.",
+                    "ambient_audio": "Mountain wind."})
             if "setting_continuity" in kwargs["json_schema"]["properties"]:
                 self.assertEqual(kwargs["json_schema"]["properties"]["character_appearance"]["required"], ["Character A", "Character B"])
                 return json.dumps({"character_appearance": {"Character A": "An adult Asian male grandmaster in gray robes.",
@@ -99,19 +108,18 @@ class AuthoredBriefTests(unittest.TestCase):
                                    "editing_style": "Slow tension followed by explosive action.", "ambient_audio": "Mountain wind."})
             number = kwargs["json_schema"]["properties"]["segment"]["minimum"]
             self.assertGreaterEqual(kwargs["max_new_tokens"], 4096)
-            self.assertEqual(kwargs["json_schema"]["properties"]["shots"]["minItems"], 4)
-            self.assertIn("event_indices", kwargs["json_schema"]["properties"]["shots"]["items"]["required"])
+            self.assertEqual(kwargs["json_schema"]["properties"]["event_cards"]["required"],
+                             ["event_1", "event_2", "event_3", "event_4"])
             duration = [14.375, 13.625][number - 1]
             return json.dumps({
                 "segment": number, "title": "The duel", "opening_state": "Match the supplied scene.",
                 "coverage": "Readable impact coverage", "pacing": "Authored slow motion and explosive speed",
                 "closing_state": "A plummets toward B's charged kick." if number == 1 else "Both fighters remain frozen in clash pose amid the ruined platform.",
-                "shots": [{"shot": index + 1, "event_indices": [index + 1],
-                           "start_seconds": duration * index / 4, "end_seconds": duration * (index + 1) / 4,
+                "event_cards": {f"event_{index + 1}": {"phases": [{
                            "transition": "cut", "framing": "Wide view of Character A and Character B",
                            "camera": f"Follow the contact and travel described in phase {4 * (number - 1) + index + 1}.",
-                           "action": actions[4 * (number - 1) + index], "sound_effects": "Stone impacts and wind."}
-                          for index in range(4)],
+                           "action": actions[4 * (number - 1) + index], "sound_effects": "Stone impacts and wind."}]}
+                          for index in range(4)},
             })
 
         with patch("services.llm_service.generate", side_effect=generate):
@@ -133,7 +141,11 @@ class AuthoredBriefTests(unittest.TestCase):
             self.assertIn("Character B: An adult Asian male grandmaster in earth-yellow monk robes.", prompt)
             self.assertNotIn("Lens,", prompt)
             self.assertNotIn("<d>", prompt)
-        self.assertEqual(result["windows"][-1]["closing_state"], "Both fighters remain frozen in clash pose amid the ruined platform.")
+        # The application-owned source ending outranks a shorter model-authored
+        # paraphrase and must remain complete in the final state.
+        final_source_event = extract_source_events(source)[-1]["text"]
+        self.assertIn(final_source_event, result["windows"][-1]["closing_state"])
+        self.assertIn("frozen in clash pose", result["windows"][-1]["closing_state"])
 
         # A provider can ignore the requested schema and return only its
         # first phase. Keep that draft for one focused repair, not a silent
@@ -147,7 +159,7 @@ class AuthoredBriefTests(unittest.TestCase):
             if not incomplete_returned and "segment" in kwargs["json_schema"]["properties"]:
                 incomplete_returned = True
                 partial = json.loads(response)
-                partial["shots"] = partial["shots"][:1]
+                partial["event_cards"] = {"event_1": partial["event_cards"]["event_1"]}
                 return json.dumps(partial)
             return response
 
@@ -201,7 +213,8 @@ class AuthoredBriefTests(unittest.TestCase):
         self.assertEqual(result["shots"][0]["end_seconds"], 2.5)
         candidate["shots"][1]["event_indices"] = [3, 2, 4]
         rejected = _canonicalize_segment_contract(candidate, **kwargs)
-        self.assertIn("once, in order", rejected["event_assignment_error"])
+        self.assertIn("in order", rejected["event_assignment_error"])
+        self.assertIn("do not return to an earlier event", rejected["event_assignment_error"])
         self.assertEqual(rejected["shots"], candidate["shots"])
 
     def test_timed_exchange_compiles_each_exact_line_once_with_its_action(self):

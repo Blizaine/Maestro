@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
   ArrowDown,
   ArrowUp,
   Check,
+  ChevronDown,
   Clock,
   ListVideo,
   Loader2,
@@ -16,6 +17,8 @@ import {
 import { useStore } from '../stores/useStore'
 import { formatEtaDuration } from '../lib/format'
 import { PROMPT_ENHANCEMENT_ACTIVITY } from '../lib/promptEnhancementActivity'
+import { EnhancedJobReview } from './EnhancedJobReview'
+import type { GenerationJob } from '../types'
 
 const ACTIVE_JOB_STATUSES = new Set(['held', 'queued', 'running'])
 const ACTIVE_DIRECTOR_STATUSES = new Set(['held', 'queued', 'running'])
@@ -38,12 +41,19 @@ export function GlobalQueuePopover({
   panelAlign?: 'icon' | 'header-edge'
 }) {
   const [open, setOpen] = useState(false)
+  const [reviewJob, setReviewJob] = useState<GenerationJob | null>(null)
   const [startingAll, setStartingAll] = useState(false)
+  const [completedOpen, setCompletedOpen] = useState(false)
+  const [clearingCompleted, setClearingCompleted] = useState(false)
+  const [clearError, setClearError] = useState('')
+  const completedId = useId()
   const rootRef = useRef<HTMLDivElement>(null)
 
   const jobs = useStore(state => state.jobs)
   const isEnhancing = useStore(state => state.isEnhancing)
   const stopGeneration = useStore(state => state.stopGeneration)
+  const dismissJob = useStore(state => state.dismissJob)
+  const clearCompletedJobs = useStore(state => state.clearCompletedJobs)
   const startStudioQueue = useStore(state => state.startStudioQueue)
   const directorQueue = useStore(state => state.directorQueue)
   const directorQueueLoading = useStore(state => state.directorQueueLoading)
@@ -62,12 +72,18 @@ export function GlobalQueuePopover({
   const studioJobs = useMemo(
     () => {
       const activeJobs = jobs.filter(job => ACTIVE_JOB_STATUSES.has(job.status))
-      return isEnhancing ? [PROMPT_ENHANCEMENT_ACTIVITY, ...activeJobs] : activeJobs
+      const recentJobs = jobs.filter(job => job.status === 'failed' || job.status === 'cancelled')
+      return [...(isEnhancing ? [PROMPT_ENHANCEMENT_ACTIVITY] : []), ...activeJobs, ...recentJobs]
     },
     [isEnhancing, jobs],
   )
+  const completedJobs = useMemo(() => jobs.filter(job => job.status === 'completed')
+    .reverse(), [jobs])
   const studioHeldCount = studioJobs.filter(job => job.status === 'held').length
-  const directorEntries = directorQueue?.entries || []
+  const directorEntries = (directorQueue?.entries || []).filter(entry => entry.status !== 'completed')
+  const completedDirectorEntries = (directorQueue?.entries || []).filter(entry => entry.status === 'completed')
+    .sort((a, b) => (b.completed_at || b.created_at) - (a.completed_at || a.created_at))
+  const completedCount = completedJobs.length + completedDirectorEntries.length
   const pendingDirectorCount = directorEntries.filter(entry => (
     ACTIVE_DIRECTOR_STATUSES.has(entry.status)
   )).length
@@ -83,8 +99,9 @@ export function GlobalQueuePopover({
       && (!entry.pipeline_id || entry.pipeline_id === pipelineId)
     )),
   )
-  const totalCount = studioJobs.length
+  const totalCount = studioJobs.filter(job => ACTIVE_JOB_STATUSES.has(job.status) || job.status === 'failed').length
     + pendingDirectorCount
+    + directorEntries.filter(entry => entry.status === 'failed').length
     + (activePipeline && !activePipelineIsQueued ? 1 : 0)
 
   useEffect(() => {
@@ -128,6 +145,25 @@ export function GlobalQueuePopover({
     await loadDirectorQueueEntry(entryId)
     setOpen(false)
     setSidebarOpen(true)
+  }
+
+  const clearCompleted = async () => {
+    if (clearingCompleted) return
+    setClearingCompleted(true)
+    setClearError('')
+    try { await clearCompletedJobs() }
+    catch (error) { setClearError(error instanceof Error ? error.message : 'Could not clear completed history.') }
+    finally { setClearingCompleted(false) }
+  }
+
+  const moveDirectorEntry = (entryId: string, direction: -1 | 1) => {
+    const index = directorEntries.findIndex(entry => entry.id === entryId)
+    const target = directorEntries[index + direction]
+    const all = directorQueue?.entries || []
+    if (!target) return
+    // Completed rows are hidden from this list; move past them in one click.
+    void moveDirectorQueueEntry(entryId, all.findIndex(entry => entry.id === target.id)
+      - all.findIndex(entry => entry.id === entryId))
   }
 
   const startAllQueues = async () => {
@@ -260,7 +296,7 @@ export function GlobalQueuePopover({
                       Start queue
                     </button>
                   ) : (
-                    <span className="text-[9px] text-text-muted">{studioJobs.length} active</span>
+                    <span className="text-[9px] text-text-muted">{studioJobs.filter(job => ACTIVE_JOB_STATUSES.has(job.status)).length} active</span>
                   )}
                 </div>
                 <div className="space-y-1">
@@ -279,12 +315,18 @@ export function GlobalQueuePopover({
                         <div className="flex items-center gap-2">
                           {job.status === 'running'
                             ? <Loader2 size={11} className="shrink-0 animate-spin text-accent-blue" />
+                            : job.status === 'completed'
+                            ? <Check size={11} className="shrink-0 text-indicator-success" />
+                            : job.status === 'failed' || job.status === 'cancelled'
+                            ? <X size={11} className="shrink-0 text-indicator-warning" />
                             : <Clock size={11} className="shrink-0 text-text-muted" />}
                           <div className="min-w-0 flex-1">
                             <div className="truncate text-[10px] text-text-secondary">{label}</div>
                             <div className="text-[9px] text-text-muted">
                               {job.kind === 'editor_export'
                                 ? `Editor export · ${compactStatus(job.status)}`
+                                : job.kind === 'music_training' || job.kind === 'music_reconstruction'
+                                  ? `My music · ${compactStatus(job.status)}`
                                 : isPromptPlanning
                                   ? 'Studio · AI planning'
                                   : `Studio · ${compactStatus(job.status)}`}
@@ -294,7 +336,7 @@ export function GlobalQueuePopover({
                                 : ''}
                             </div>
                           </div>
-                          {!isPromptPlanning && (
+                          {!isPromptPlanning && ACTIVE_JOB_STATUSES.has(job.status) && (
                             <button
                               type="button"
                               onClick={() => {
@@ -315,13 +357,20 @@ export function GlobalQueuePopover({
                                 : <Square size={10} />}
                             </button>
                           )}
+                          {!ACTIVE_JOB_STATUSES.has(job.status) && <button type="button" title="Dismiss saved job"
+                            aria-label="Dismiss saved job" onClick={() => dismissJob(job.id)}
+                            className="rounded p-1 text-text-muted hover:bg-bg-hover"><X size={12} /></button>}
                         </div>
-                        <div className="mt-2 h-1 overflow-hidden rounded-full bg-bg-active">
+                        {job.enhancement && <button type="button" onClick={() => { setReviewJob(job); setOpen(false) }}
+                          className="mt-2 min-h-8 rounded border border-border px-2 text-[10px] text-accent-blue hover:bg-bg-hover">
+                          {job.status === 'failed' ? 'Needs attention — review prompts' : 'View prompts'}
+                        </button>}
+                        {job.status === 'running' && <div className="mt-2 h-1 overflow-hidden rounded-full bg-bg-active">
                           <div
                             className={`h-full rounded-full bg-accent-blue transition-all ${percent === 0 && job.status === 'running' ? 'w-full animate-pulse opacity-60' : ''}`}
                             style={percent > 0 ? { width: `${percent}%` } : undefined}
                           />
-                        </div>
+                        </div>}
                       </div>
                     )
                   })}
@@ -395,7 +444,7 @@ export function GlobalQueuePopover({
                         <>
                           <button
                             type="button"
-                            onClick={() => void moveDirectorQueueEntry(entry.id, -1)}
+                            onClick={() => moveDirectorEntry(entry.id, -1)}
                             disabled={index === 0 || directorQueueLoading}
                             className="rounded p-1 text-text-muted hover:bg-bg-hover disabled:opacity-20"
                             title="Move up"
@@ -404,7 +453,7 @@ export function GlobalQueuePopover({
                           </button>
                           <button
                             type="button"
-                            onClick={() => void moveDirectorQueueEntry(entry.id, 1)}
+                            onClick={() => moveDirectorEntry(entry.id, 1)}
                             disabled={index === directorEntries.length - 1 || directorQueueLoading}
                             className="rounded p-1 text-text-muted hover:bg-bg-hover disabled:opacity-20"
                             title="Move down"
@@ -428,7 +477,51 @@ export function GlobalQueuePopover({
               </section>
             )}
 
-            {!activePipeline && studioJobs.length === 0 && directorEntries.length === 0 && (
+            {completedCount > 0 && <section aria-label="Completed jobs" className="space-y-1.5 border-t border-border pt-2">
+              <div className="flex items-center justify-between gap-2 px-1">
+                <button type="button" aria-expanded={completedOpen} aria-controls={completedId}
+                  onClick={() => setCompletedOpen(value => !value)}
+                  className="flex min-h-9 items-center gap-1.5 text-xs font-medium text-text-secondary hover:text-text-primary">
+                  <ChevronDown size={13} className={`transition-transform ${completedOpen ? '' : '-rotate-90'}`}/>
+                  Completed <span className="rounded-full bg-bg-active px-1.5 py-0.5 text-[9px] text-text-muted">{completedCount}</span>
+                </button>
+                <button type="button" onClick={() => void clearCompleted()} disabled={clearingCompleted || directorQueueLoading}
+                  title="Clear completed queue history; keep generated media and Director projects"
+                  className="flex min-h-9 items-center gap-1 rounded px-2 text-[10px] text-text-muted hover:bg-bg-hover hover:text-text-primary disabled:opacity-40">
+                  {clearingCompleted ? <Loader2 size={11} className="animate-spin"/> : <Trash2 size={11}/>}
+                  Clear completed
+                </button>
+              </div>
+              <div id={completedId} hidden={!completedOpen} className="space-y-1">
+                {completedJobs.map(job => <div key={job.id} className="rounded-lg border border-border bg-bg-tertiary p-2">
+                  <div className="flex items-center gap-2">
+                    <Check size={11} className="shrink-0 text-indicator-success"/>
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-[10px] text-text-secondary">{job.message || 'Done'}</div>
+                      <div className="text-[9px] text-text-muted">{job.kind === 'editor_export' ? 'Editor export' : 'Studio'} · Completed</div>
+                    </div>
+                    <button type="button" title="Dismiss saved job" aria-label="Dismiss saved job" disabled={clearingCompleted}
+                      onClick={() => dismissJob(job.id)} className="rounded p-1 text-text-muted hover:bg-bg-hover disabled:opacity-40"><X size={12}/></button>
+                  </div>
+                  {job.enhancement && <button type="button" onClick={() => {setReviewJob(job); setOpen(false)}}
+                    className="mt-2 min-h-8 rounded border border-border px-2 text-[10px] text-accent-blue hover:bg-bg-hover">View prompts</button>}
+                </div>)}
+                {completedDirectorEntries.map(entry => <div key={entry.id} className="flex items-center gap-2 rounded-lg border border-border bg-bg-tertiary p-2">
+                  <Check size={11} className="shrink-0 text-indicator-success"/>
+                  <button type="button" onClick={() => void openDirectorEntry(entry.id)} disabled={directorQueueLoading}
+                    title="Open Director project" className="min-w-0 flex-1 text-left disabled:opacity-40">
+                    <div className="truncate text-[10px] text-text-secondary">{entry.scene_description || 'Director project'}</div>
+                    <div className="text-[9px] text-text-muted">Director · Completed</div>
+                  </button>
+                  <button type="button" onClick={() => void removeDirectorQueueEntry(entry.id, true)} disabled={clearingCompleted || directorQueueLoading}
+                    aria-label="Dismiss completed Director entry" title="Remove from queue"
+                    className="rounded p-1 text-text-muted hover:bg-bg-hover disabled:opacity-40"><X size={12}/></button>
+                </div>)}
+              </div>
+            </section>}
+            {clearError && <p role="alert" className="px-1 text-xs text-indicator-warning">{clearError}</p>}
+
+            {!activePipeline && studioJobs.length === 0 && directorEntries.length === 0 && completedCount === 0 && (
               <div className="flex min-h-36 flex-col items-center justify-center gap-2 px-6 text-center">
                 <ListVideo size={28} className="text-text-muted/60" />
                 <div className="text-xs font-medium text-text-secondary">Queue is empty</div>
@@ -440,6 +533,7 @@ export function GlobalQueuePopover({
           </div>
         </div>
       )}
+      {reviewJob && <EnhancedJobReview job={jobs.find(job => job.id === reviewJob.id) || reviewJob} onClose={() => setReviewJob(null)}/>}
     </div>
   )
 }

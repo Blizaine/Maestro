@@ -25,6 +25,8 @@ from services.h3_story_ledger import (
     extract_h3_source_intent,
     extract_locked_dialogue,
     normalize_h3_planning_style,
+    sanitize_h3_prompt_text,
+    sanitize_h3_nonverbal_audio,
     plan_h3_story_segments,
     recover_h3_plain_story,
 )
@@ -583,7 +585,9 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
 def _ref2va_style_opening(style: str) -> str:
     """Return MiniMax's required pre-[Shot 1] full-reference style sentence."""
 
-    value = _compact(style, 220).rstrip(" .")
+    # Shared visual language also carries ability sources and effect limits.
+    # A character ceiling silently dropped those later sentences at handoff.
+    value = sanitize_h3_prompt_text(style).rstrip(" .")
     if not value:
         return (
             "The target video maintains the requested visual style, lighting, "
@@ -591,6 +595,11 @@ def _ref2va_style_opening(style: str) -> str:
         )
     if re.match(r"^(?:the|this)\s+target\s+video\b", value, re.IGNORECASE):
         return f"{value}."
+    direction = re.match(r"^(?:please\s+)?(use|keep|maintain|favor|prefer)\s+(.+)$", value, re.IGNORECASE)
+    if direction:
+        verb = {"use": "uses", "keep": "keeps", "maintain": "maintains",
+                "favor": "favors", "prefer": "prefers"}[direction.group(1).lower()]
+        return f"The target video {verb} {direction.group(2)}."
     return f"The target video uses {value[0].lower() + value[1:]}."
 
 
@@ -692,7 +701,9 @@ def _ref2va_prompt_bindings(
     ):
         subject = int(match.group(1))
         name = re.sub(r"\s+", " ", match.group(2)).strip(" ,;:.-")
-        if name:
+        if name and name.casefold() not in {
+            "the supplied image reference", "the supplied video reference",
+        }:
             aliases[name.casefold()] = subject
 
     audio_by_subject: dict[int, int] = {}
@@ -928,10 +939,7 @@ def _clean_ref2va_action(
     ).strip(" .")
     clauses = [
         clause.strip(" .")
-        for clause in re.split(
-            r"(?i)(?:\.\s+Then\s+|\s+Then\s+|\.\s+)",
-            text,
-        )
+        for clause in re.split(r"(?<=[.!?])\s+", text)
         if clause.strip(" .")
     ]
     context_tokens = set(re.findall(
@@ -962,7 +970,10 @@ def _clean_ref2va_action(
         ):
             continue
         cleaned.append(clause)
-    return ". Then ".join(cleaned).strip(" .")
+    return " ".join(
+        clause if clause.endswith((".", "!", "?")) else clause + "."
+        for clause in cleaned
+    ).strip()
 
 
 def _clean_ref2va_state(value: str) -> str:
@@ -1017,7 +1028,7 @@ def _ref2va_dialogue_sentence(
         return _dialogue_sentence(item, speaker_ids)
     audio = audio_by_subject.get(subject)
     delivery = _compact(item.get("delivery") or "speaks naturally", 100)
-    action = _compact(item.get("action") or "", 120)
+    action = _compact(item.get("action") or "", 240)
     if re.search(
         r"(?i)\b(?:only\s+.+?mouth|every\s+other\s+visible\s+mouth|"
         r"established\s+target\s+scene)\b",
@@ -1058,8 +1069,8 @@ def _ref2va_shot_prompt_sentence(
     start = float(shot["start_seconds"])
     end = float(shot["end_seconds"])
     transition = _compact(shot.get("transition"), 70)
-    framing = _compact(shot.get("framing"), 130)
-    camera = _compact(shot.get("camera"), 170)
+    framing = sanitize_h3_prompt_text(shot.get("framing"))
+    camera = sanitize_h3_prompt_text(shot.get("camera"))
     action = _clean_ref2va_action(
         shot.get("action") or "",
         setting=setting,
@@ -1070,7 +1081,7 @@ def _ref2va_shot_prompt_sentence(
         lead = f"[Shot 1] {preamble} From {start:.2f} to {end:.2f} seconds, {framing}".strip()
     elif transition.casefold().startswith(("continuous", "without a cut", "reframe")):
         lead = (
-            f"[Shot {number}] At {_h3_shot_timestamp(start)}, without a cut, "
+            f"At {_h3_shot_timestamp(start)}, without a cut, "
             f"reframe to {framing}; continue through {_h3_shot_timestamp(end)}"
         )
     else:
@@ -1080,7 +1091,10 @@ def _ref2va_shot_prompt_sentence(
             f"{_h3_shot_timestamp(end)}"
         )
     details = "; ".join(part for part in (camera, action) if part)
-    sentence = f"{lead}; {details}." if details else f"{lead}."
+    sentence = f"{lead}; {details.rstrip('.')}." if details else f"{lead}."
+    effects = sanitize_h3_nonverbal_audio(shot.get("sound_effects") or "")
+    if effects:
+        sentence += f" Synchronized practical sound: {effects.rstrip('.')}."
     dialogue = " ".join(
         value
         for value in (
@@ -1294,11 +1308,11 @@ def compile_h3_reference_sequence_prompts(
         if clause and key not in seen_retention:
             retention_clauses.append(clause.strip())
             seen_retention.add(key)
-    retention = "\n".join(retention_clauses)
-    setting = _compact(plan.get("setting_continuity"), 260)
-    style = _compact(plan.get("visual_style"), 220)
-    ambient = _compact(plan.get("ambient_audio") or "Natural location ambience", 190)
-    music = _compact(plan.get("music") or "N/A", 130)
+    retention = "\n".join(retention_clauses) or "N/A"
+    setting = sanitize_h3_prompt_text(plan.get("setting_continuity")).rstrip('.')
+    style = sanitize_h3_prompt_text(plan.get("visual_style")).rstrip('.')
+    ambient = sanitize_h3_prompt_text(plan.get("ambient_audio") or "Natural location ambience").rstrip('.')
+    music = sanitize_h3_prompt_text(plan.get("music") or "N/A")
     source_intent = (
         plan.get("source_intent")
         if isinstance(plan.get("source_intent"), dict)
@@ -1373,19 +1387,17 @@ def compile_h3_reference_sequence_prompts(
             for name in blocking_names
         ):
             blocking_contract = ""
-        coverage = _compact(item.get("coverage") or "cinematic editorial coverage", 90)
+        coverage = sanitize_h3_prompt_text(item.get("coverage") or "cinematic editorial coverage")
         pacing = _compact(item.get("pacing") or "natural real-time pacing", 180)
-        opening = _compact(
+        opening = sanitize_h3_prompt_text(
             _clean_ref2va_state(
                 item.get("opening_state") or "The scene begins in a clear composition"
             ),
-            210,
         )
-        closing = _compact(
+        closing = sanitize_h3_prompt_text(
             _clean_ref2va_state(
                 item.get("closing_state") or "The beat settles in a clear final composition"
             ),
-            210,
         )
         pacing_sentence = f"Coverage is {coverage}; pacing is {pacing}."
         if "slow motion" not in pacing.casefold():
@@ -1449,7 +1461,7 @@ def compile_h3_reference_sequence_prompts(
         seen_effects: set[str] = set()
         for shot in shots:
             for raw_effect in re.split(r"\s*;\s*", str(shot.get("sound_effects") or "")):
-                effect = _compact(raw_effect, 130)
+                effect = sanitize_h3_prompt_text(raw_effect).rstrip('.')
                 key = effect.casefold()
                 if key in {"", "n/a", "none"} or key in seen_effects:
                     continue
@@ -1624,9 +1636,12 @@ def plan_h3_reference_sequence(
 
     expect_dialogue = (
         _creative_dialogue_expected(prompt, len(clips))
-        if planning_style == "creative"
+        if planning_style in {"creative", "adaptive"}
         else bool(extract_locked_dialogue(prompt))
     )
+    if planning_style == "adaptive":
+        from services.adaptive_enhancement import adaptive_dialogue_expected
+        expect_dialogue = adaptive_dialogue_expected(prompt)
     resolved_coverage = _infer_camera_coverage(prompt, camera_coverage)
     story_ledger: dict[str, Any] | None = None
     planning_warnings: list[str] = []

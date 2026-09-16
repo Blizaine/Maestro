@@ -1423,49 +1423,24 @@ _H3_VISUAL_LABELS = (
     "By the final beat",
 )
 
-
-def _h3_word_cap(value: Any, limit: int) -> str:
-    words = _normalized_space(value).split()
-    if not words or limit <= 0:
-        return ""
-    selected = words[:limit]
-    while selected and selected[-1].casefold().strip(" ,;:.-") in {
-        "and", "then", "with", "while",
-    }:
-        selected.pop()
-    result = " ".join(selected).rstrip(" .,;:-")
-    return result
-
-
-def _h3_sentence_cap(value: Any, word_limit: int, sentence_limit: int) -> str:
-    """Keep complete leading sentences when possible, then cap a long first one."""
-
-    text = _normalized_space(value)
-    if not text:
-        return ""
-    sentences = re.split(r"(?<=[.!?])\s+", text)
-    kept: list[str] = []
-    words_used = 0
-    for sentence in sentences[:max(1, sentence_limit)]:
-        sentence_words = sentence.split()
-        if kept and words_used + len(sentence_words) > word_limit:
-            break
-        if not kept and len(sentence_words) > word_limit:
-            kept.append(_h3_word_cap(sentence, word_limit).rstrip(".") + ".")
-            break
-        kept.append(sentence)
-        words_used += len(sentence_words)
-    return _normalized_space(" ".join(kept)).rstrip(" ,;:-")
+_H3_VISUAL_LABEL_RE = re.compile(
+    r"(?:^|(?<=[.!?;\n]))\s*(?P<label>"
+    + "|".join(re.escape(item) for item in _H3_VISUAL_LABELS)
+    + r")\s*:\s*",
+    re.IGNORECASE,
+)
 
 
 def _h3_labeled_value(body: str, label: str) -> str:
-    alternatives = "|".join(re.escape(item) for item in _H3_VISUAL_LABELS)
-    match = re.search(
-        rf"(?is)\b{re.escape(label)}\s*:\s*(.*?)"
-        rf"(?=\s+(?:{alternatives})\s*:|$)",
-        body,
-    )
-    return _normalized_space(match.group(1)) if match else ""
+    # Native Director fields begin sentences. A phrase such as "cinematic
+    # action: ..." inside the world description is ordinary prose, not a
+    # field delimiter. Use the same boundary for extraction and insertion.
+    fields = list(_H3_VISUAL_LABEL_RE.finditer(body))
+    for index, field in enumerate(fields):
+        if field.group("label").casefold() == label.casefold():
+            end = fields[index + 1].start() if index + 1 < len(fields) else len(body)
+            return _normalized_space(body[field.end():end])
+    return ""
 
 
 def _compact_h3_visual_body(
@@ -1474,7 +1449,6 @@ def _compact_h3_visual_body(
     registry: Mapping[str, Any],
     *,
     closing_blocking: str = "",
-    level: int = 0,
 ) -> str:
     """Remove planner repetition while retaining H3's highest-value visuals.
 
@@ -1490,43 +1464,14 @@ def _compact_h3_visual_body(
     if spans:
         text = _normalized_space(_replace_spans(text, spans, [""] * len(spans)))
 
-    label_positions = [
-        match.start()
-        for label in _H3_VISUAL_LABELS
-        if (match := re.search(rf"(?i)\b{re.escape(label)}\s*:", text))
-    ]
+    label_positions = [match.start() for match in _H3_VISUAL_LABEL_RE.finditer(text)]
     if not label_positions:
-        if level <= 0:
-            return text
-        limits = (220, 150, 100)
-        return _h3_sentence_cap(
-            text,
-            limits[min(level - 1, len(limits) - 1)],
-            8,
-        )
+        return text
 
-    profiles = (
-        # intro, description, wardrobe, position, action, camera,
-        # lighting, mood, final
-        (48, 18, 15, 15, 56, 30, 18, 10, 28),
-        (36, 14, 12, 12, 42, 20, 12, 8, 18),
-        (28, 10, 10, 10, 30, 14, 8, 0, 14),
-        (22, 7, 10, 8, 22, 10, 0, 0, 12),
-    )
-    profile = profiles[min(max(0, level), len(profiles) - 1)]
-    (
-        intro_cap,
-        description_cap,
-        wardrobe_cap,
-        position_cap,
-        action_cap,
-        camera_cap,
-        lighting_cap,
-        mood_cap,
-        final_cap,
-    ) = profile
-
-    intro = _h3_sentence_cap(text[:min(label_positions)], intro_cap, 4)
+    # A cosmetic token target cannot justify severing an action chain, a
+    # camera's destination or the final state. Keep unique field content;
+    # the shared Studio fitter removes redundant boilerplate afterward.
+    intro = _normalized_space(text[:min(label_positions)])
     cast: list[str] = []
     for subject in subjects or []:
         character_id = _normalized_space(_field(subject, "character_id", ""))
@@ -1535,13 +1480,9 @@ def _compact_h3_visual_body(
         )
         entry = _speaker_registry_entry(registry, character_id)
         stable_id = entry[0] if entry else ""
-        visual = _h3_word_cap(
-            _field(subject, "visual_description", ""), description_cap,
-        )
-        wardrobe = _h3_word_cap(_field(subject, "wardrobe", ""), wardrobe_cap)
-        position = _h3_word_cap(
-            _field(subject, "position_or_relation", ""), position_cap,
-        )
+        visual = _normalized_space(_field(subject, "visual_description", ""))
+        wardrobe = _normalized_space(_field(subject, "wardrobe", ""))
+        position = _normalized_space(_field(subject, "position_or_relation", ""))
         bits = [f"{speaker_name} {stable_id}".strip(), visual]
         if wardrobe:
             bits.append(f"wearing {wardrobe}")
@@ -1551,18 +1492,13 @@ def _compact_h3_visual_body(
         if compact_subject:
             cast.append(compact_subject)
 
-    action = _h3_word_cap(_h3_labeled_value(text, "Action"), action_cap)
+    action = _h3_labeled_value(text, "Action")
     camera = _h3_labeled_value(text, "Camera")
-    camera = re.split(r"(?i),\s*Keep\s+", camera, maxsplit=1)[0]
-    camera = _h3_word_cap(camera, camera_cap)
-    lighting = _h3_word_cap(
-        _h3_labeled_value(text, "Lighting"), lighting_cap,
-    )
-    mood = _h3_word_cap(_h3_labeled_value(text, "Mood"), mood_cap)
+    lighting = _h3_labeled_value(text, "Lighting")
+    mood = _h3_labeled_value(text, "Mood")
     final = _h3_labeled_value(text, "Final beat")
     if not final:
         final = closing_blocking
-    final = _h3_word_cap(final, final_cap)
 
     parts = [intro]
     if cast:
@@ -1576,12 +1512,19 @@ def _compact_h3_visual_body(
         parts.append(f"Lighting and mood: {light_and_mood}.")
     if final:
         parts.append(f"Final frame: {final}.")
-    return _normalized_space(" ".join(part for part in parts if part))
+    result = _normalized_space(" ".join(part for part in parts if part))
+    for subject in subjects or []:
+        key = _normalized_space(_field(subject, "character_id", ""))
+        name = _normalized_space(_field(subject, "speaker_name", ""))
+        if name and name != key and re.fullmatch(r"(?i)char(?:acter)?[_ -]?\d+", key):
+            entry = _speaker_registry_entry(registry, key)
+            label = f"{name} {entry[0]}" if entry else name
+            result = re.sub(rf"\b{re.escape(key)}\b", lambda _: label, result, flags=re.I)
+            result = re.sub(re.escape(label) + rf"\s*\({re.escape(name)}\)", lambda _: label, result, flags=re.I)
+    return result
 
 
-def _compact_h3_line_delivery(value: Any, *, level: int, beat_count: int) -> str:
-    if level >= 3 or (level >= 2 and beat_count > 3):
-        return ""
+def _compact_h3_line_delivery(value: Any) -> str:
     parts = [
         part.strip(" .")
         for part in str(value or "").split(";")
@@ -1593,8 +1536,7 @@ def _compact_h3_line_delivery(value: Any, *, level: int, beat_count: int) -> str
     # direction with semicolons.  Keep the line direction, not the repeated
     # multi-sentence bible on every turn.
     selected = parts[-2] if len(parts) >= 3 else parts[-1]
-    limits = (8, 6, 4, 0)
-    return _h3_word_cap(selected, limits[min(level, len(limits) - 1)])
+    return _normalized_space(selected)
 
 
 def _h3_dialogue_timing_clause(
@@ -1614,7 +1556,10 @@ def _h3_dialogue_timing_clause(
 def _insert_h3_vocal_detail(body: str, detail: str) -> str:
     """Keep dialogue ahead of camera/action detail in the token stream."""
 
-    boundary = re.search(r"(?i)\b(?:Camera|Action)\s*:", body)
+    boundary = next((
+        field for field in _H3_VISUAL_LABEL_RE.finditer(body)
+        if field.group("label").casefold() in {"camera", "action"}
+    ), None)
     if boundary:
         return _normalized_space(
             f"{body[:boundary.start()]} {detail} {body[boundary.start():]}"
@@ -1661,7 +1606,7 @@ def _compile_official_dialogue(
     *,
     has_driving_audio: bool = False,
     duration_seconds: float = 0.0,
-    compact_level: int = 0,
+    music_driven: bool = False,
 ) -> tuple[str, str]:
     """Place exact tagged lines and stable speaker IDs in the visual field."""
 
@@ -1707,22 +1652,16 @@ def _compile_official_dialogue(
         # copies and insert one concise, prominent sequence so visual prose
         # cannot bury the exact lines and their timing cues.
         body = _replace_spans(body, spans, [""] * len(spans))
-        beat_count = len(valid_beats)
         dialogue_parts: list[str] = []
         for beat in valid_beats:
-            delivery = _compact_h3_line_delivery(
-                beat["delivery"],
-                level=compact_level,
-                beat_count=beat_count,
-            )
+            delivery = _compact_h3_line_delivery(beat["delivery"])
             delivery_text = f" {delivery}" if delivery else ""
             sentence = (
                 f"{beat['speaker_name']} {beat['stable_id']} speaks"
                 f"{delivery_text}: {beat['tag']}."
             )
-            cue_limit = 8 if compact_level == 0 else 6
-            if beat_count <= max(1, 2 - compact_level) and beat["physical_cue"]:
-                cue = _h3_word_cap(beat["physical_cue"], cue_limit)
+            if beat["physical_cue"]:
+                cue = _normalized_space(beat["physical_cue"])
                 if cue:
                     sentence += f" While speaking, {cue}."
             dialogue_parts.append(sentence)
@@ -1772,6 +1711,12 @@ def _compile_official_dialogue(
             )
             if "mapped driving audio" not in body.casefold():
                 body = _insert_h3_vocal_detail(body, driver_contract)
+            if music_driven:
+                from .music_performance import music_performance_direction
+                direction = music_performance_direction(subjects)
+                if "vocal ownership stays with the assigned singer" not in body.casefold():
+                    body = _insert_h3_vocal_detail(body, direction)
+                driver_contract = f"{driver_contract} {direction}"
             contract = driver_contract
         else:
             silence = (
@@ -2085,14 +2030,14 @@ def _split_ref2va_style_opening(body: str) -> tuple[str, str]:
     text = _normalized_space(body)
     shot = re.search(r"\[Shot\s+1\]", text, flags=re.IGNORECASE)
     if shot and text[:shot.start()].strip():
-        opening = _h3_sentence_cap(text[:shot.start()], 70, 2)
+        opening = _normalized_space(text[:shot.start()])
         timeline = text[shot.end():].strip()
         return opening.rstrip(" .") + ".", timeline
     if shot:
         text = text[shot.end():].strip()
 
-    lighting = _h3_word_cap(_h3_labeled_value(text, "Lighting"), 24)
-    mood = _h3_word_cap(_h3_labeled_value(text, "Mood"), 12)
+    lighting = _h3_labeled_value(text, "Lighting")
+    mood = _h3_labeled_value(text, "Mood")
     if lighting or mood:
         details = "; ".join(value for value in (lighting, mood) if value)
         opening = (
@@ -2171,6 +2116,10 @@ def compile_h3_official_prompt(
         source_text=f"{project_context}\n{prompt}",
     )
     audio_mode = _normalized_space(_field(audio_plan or {}, "mode", "")).casefold()
+    if audio_mode == "music_driven":
+        # The supplied soundtrack already contains the sung words. Do not let
+        # an LLM's transcript become a competing generated-dialogue request.
+        dialogue_beats = []
     if audio_mode in {"audio_driven", "music_driven"}:
         # Initial Director preflight runs before concrete Ref2VA manifests are
         # assembled. The shot's audio plan still proves that a mapped source
@@ -2195,6 +2144,7 @@ def compile_h3_official_prompt(
             existing_blocks,
             has_driving_audio=has_driving_audio,
             duration_seconds=duration_seconds,
+            music_driven=audio_mode == "music_driven",
         )
         body = re.sub(r"^\s*\[Shot\s+1\]\s*", "", body, flags=re.IGNORECASE)
         body = f"[Shot 1] {body}".strip()
@@ -2238,75 +2188,29 @@ def compile_h3_official_prompt(
             f"non_diegetic_music: {music}"
         )
     else:
-        compiled = ""
-        vocal_contract = ""
-        initial_tokens = 0
-        final_tokens = 0
-        used_level = 0
-        sound_caps = (36, 28, 20, 14)
-        music_caps = (24, 18, 12, 8)
-        for level in range(4):
-            compact_body = _compact_h3_visual_body(
-                body,
-                subjects or [],
-                registry,
-                closing_blocking=closing_blocking,
-                level=level,
-            )
-            compact_body = _ensure_h3_context_anchors(
-                compact_body,
-                context_anchors or [],
-            )
-            compiled_body, current_contract = _compile_official_dialogue(
-                compact_body,
-                subjects or [],
-                dialogue_beats or [],
-                registry,
-                existing_blocks,
-                has_driving_audio=has_driving_audio,
-                duration_seconds=duration_seconds,
-                compact_level=level,
-            )
-            compiled_body = re.sub(
-                r"^\s*\[Shot\s+1\]\s*", "", compiled_body,
-                flags=re.IGNORECASE,
-            )
-            compiled_body = f"[Shot 1] {compiled_body}".strip()
-            shot_numbers = [
-                int(value)
-                for value in re.findall(
-                    r"\[Shot\s+(\d+)\]", compiled_body,
-                    flags=re.IGNORECASE,
-                )
-            ]
-            header = _alignment_header(
-                mode,
-                duration_seconds,
-                max(shot_numbers) if shot_numbers else 1,
-            )
-            compact_soundscape = _h3_word_cap(soundscape, sound_caps[level])
-            compact_music = (
-                "N/A"
-                if music == "N/A"
-                else _h3_word_cap(music, music_caps[level])
-            )
-            candidate = (
-                f"integrated_multimodal_description: {compiled_body}\n\n"
-                f"overall_soundscape: {compact_soundscape}.\n\n"
-                f"non_diegetic_music: {compact_music}"
-            )
-            if header:
-                candidate = f"{header}\n\n{candidate}"
-            token_count = h3_prompt_token_count(candidate)
-            if level == 0:
-                initial_tokens = token_count
-            compiled = candidate
-            vocal_contract = current_contract
-            final_tokens = token_count
-            used_level = level
-            if token_count <= _H3_DIRECTOR_TEXT_TOKEN_BUDGET:
-                break
-
+        compact_body = _compact_h3_visual_body(
+            body, subjects or [], registry, closing_blocking=closing_blocking,
+        )
+        compact_body = _ensure_h3_context_anchors(compact_body, context_anchors or [])
+        compiled_body, vocal_contract = _compile_official_dialogue(
+            compact_body, subjects or [], dialogue_beats or [], registry, existing_blocks,
+            has_driving_audio=has_driving_audio, duration_seconds=duration_seconds,
+            music_driven=audio_mode == "music_driven",
+        )
+        compiled_body = re.sub(r"^\s*\[Shot\s+1\]\s*", "", compiled_body, flags=re.IGNORECASE)
+        compiled_body = f"[Shot 1] {compiled_body}".strip()
+        shot_numbers = [int(value) for value in re.findall(
+            r"\[Shot\s+(\d+)\]", compiled_body, flags=re.IGNORECASE,
+        )]
+        header = _alignment_header(mode, duration_seconds, max(shot_numbers) if shot_numbers else 1)
+        compiled = (
+            f"integrated_multimodal_description: {compiled_body}\n\n"
+            f"overall_soundscape: {_normalized_space(soundscape)}.\n\n"
+            f"non_diegetic_music: {_normalized_space(music)}"
+        )
+        if header:
+            compiled = f"{header}\n\n{compiled}"
+        initial_tokens = final_tokens = h3_prompt_token_count(compiled)
         if final_tokens > _H3_DIRECTOR_TEXT_TOKEN_BUDGET:
             # Give unusually dense Director prompts one final structure-aware
             # quality pass. Exact dialogue, timing, and first/final states are
@@ -2318,9 +2222,7 @@ def compile_h3_official_prompt(
             )
             compiled = fitted.prompt
             final_tokens = fitted.token_count
-            if fitted.compacted:
-                used_level = max(used_level, 4)
-        if used_level and final_tokens < initial_tokens:
+        if final_tokens < initial_tokens:
             print(
                 "[MiniMax H3] Compacted Director prompt from "
                 f"{initial_tokens} to {final_tokens} text tokens for clearer "
@@ -2483,6 +2385,9 @@ def compile_h3_clip_plans(
     registry = _build_stable_speaker_registry(clip_plans)
     for index, plan in enumerate(clip_plans):
         beats = plan.get("_director_dialogue_beats") or []
+        if _normalized_space(_field(plan.get("_director_audio_plan") or {}, "mode", "")).casefold() == "music_driven":
+            beats = []
+            plan["_director_dialogue_beats"] = []
         for beat in beats:
             if isinstance(beat, MutableMapping) and "spoken_text" in beat:
                 beat["spoken_text"] = normalize_h3_text(beat["spoken_text"])

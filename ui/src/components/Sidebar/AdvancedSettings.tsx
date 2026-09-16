@@ -1158,7 +1158,7 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
                   />
                   {h3TurboMode && (
                     <p className="text-[9px] text-text-muted mt-0.5">
-                      Turbo mode locks this preset to {modelOptions?.minimax_h3_turbo?.steps} steps.
+                      Turbo mode locks this preset to {params.num_inference_steps} steps.
                     </p>
                   )}
                   {!h3TurboMode && modelOptions?.inference_steps_help && (

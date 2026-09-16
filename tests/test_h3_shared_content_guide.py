@@ -50,7 +50,7 @@ class H3SharedContentGuideTests(unittest.TestCase):
                             self.assertIn("json_schema", call.kwargs)
                         self.assertNotIn(MARKER, json.dumps(result))
                         if style == "creative":
-                            self.assertTrue(any("COMPLETE SPARSE CREATIVE DIALOGUE" in call.kwargs["prompt"] for call in generator.call_args_list))
+                            self.assertTrue(any("FIT THE SPOKEN SCRIPT" in call.kwargs["prompt"] for call in generator.call_args_list))
 
     def test_long_form_chapters_use_the_same_conditional_guide(self):
         for enabled in (True, False):

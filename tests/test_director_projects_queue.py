@@ -49,6 +49,67 @@ class TestDirectorProjectRevisionsAndQueue(unittest.TestCase):
             handle.write(b"director-test-asset")
         return path
 
+    def _saved_pipeline(self, clips) -> tuple[str, str]:
+        pid = "prompt-edit-test"
+        path = os.path.join(self.temp_dir.name, f"_director_pipeline_{pid}.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"id": pid, "pipeline_id": pid, "clips": clips}, handle)
+        return pid, path
+
+    def test_reviewed_clip_prompts_persist_and_clear_stale_h3_cache(self):
+        pid, _path = self._saved_pipeline([
+            {"image_prompt": "old image", "video_prompt": "old video",
+             "window_prompts": ["old video"],
+             "_director_h3_source_prompt": "old source",
+             "_director_h3_compiled_prompt": "old compiled",
+             "_director_dialogue_beats": [{"text": "old speech"}]},
+            {"video_prompt": "old one\nold two", "window_prompts": ["old one", "old two"]},
+        ])
+
+        self.assertTrue(pipeline.update_clip_prompt(
+            self.temp_dir.name, pid, 0, {"image_prompt": "reviewed image"},
+        ))
+        self.assertTrue(pipeline.update_clip_prompt(
+            self.temp_dir.name, pid, 0, {"video_prompt": "reviewed video"},
+        ))
+        self.assertTrue(pipeline.update_clip_prompt(
+            self.temp_dir.name, pid, 1,
+            {"window_prompts": ["reviewed one", "reviewed two"]},
+        ))
+
+        reloaded = pipeline.load_pipeline_state(self.temp_dir.name, pid)
+        self.assertEqual(reloaded["clips"][0]["image_prompt"], "reviewed image")
+        self.assertEqual(reloaded["clips"][0]["video_prompt"], "reviewed video")
+        self.assertEqual(reloaded["clips"][0]["window_prompts"], ["reviewed video"])
+        self.assertEqual(reloaded["clips"][0]["_director_h3_source_prompt"], "reviewed video")
+        self.assertTrue(reloaded["clips"][0]["_director_prompt_user_edited"])
+        self.assertEqual(reloaded["clips"][0]["_director_h3_compiled_prompt"], "")
+        self.assertEqual(reloaded["clips"][0]["_director_dialogue_beats"], [])
+        self.assertEqual(reloaded["clips"][1]["window_prompts"], ["reviewed one", "reviewed two"])
+        self.assertEqual(reloaded["clips"][1]["video_prompt"], "reviewed one\nreviewed two")
+
+    def test_reviewed_clip_prompt_rejects_ambiguous_invalid_and_busy_updates(self):
+        pid, _path = self._saved_pipeline([
+            {"video_prompt": "one\ntwo", "window_prompts": ["one", "two"]},
+        ])
+        with self.assertRaisesRegex(ValueError, "multiple window prompts"):
+            pipeline.update_clip_prompt(
+                self.temp_dir.name, pid, 0, {"video_prompt": "ambiguous"},
+            )
+        for clip_index, update, message in (
+            (3, {"image_prompt": "x"}, "out of range"),
+            (0, [], "JSON object"),
+            (0, {}, "No prompt field"),
+            (0, {"window_prompts": []}, "non-empty list"),
+        ):
+            with self.subTest(update=update), self.assertRaisesRegex(ValueError, message):
+                pipeline.update_clip_prompt(self.temp_dir.name, pid, clip_index, update)
+        with patch.object(pipeline, "_claim_pipeline_operation", return_value=False):
+            with self.assertRaises(pipeline.PipelineBusyError):
+                pipeline.update_clip_prompt(
+                    self.temp_dir.name, pid, 0, {"window_prompts": ["one", "two"]},
+                )
+
     def test_start_persists_complete_revision_before_worker(self):
         reference = self._asset()
         params = {
@@ -155,8 +216,48 @@ class TestDirectorProjectRevisionsAndQueue(unittest.TestCase):
             edited_detail["params"]["reference_image_path"],
         )
         self.assertTrue(pipeline.remove_director_queue_entry(self.temp_dir.name, first_id))
+        self.assertFalse(os.path.exists(owned))
         remaining = pipeline.list_director_queue(self.temp_dir.name)
         self.assertEqual([entry["id"] for entry in remaining["entries"]], [second_id])
+
+    def test_clear_completed_history_preserves_projects_media_and_references(self):
+        queue = pipeline.enqueue_director_pipeline(self.temp_dir.name, {
+            "scene_description": "Finished project",
+            "reference_image_path": self._asset(),
+        })
+        entry_id = queue["entries"][0]["id"]
+        detail = pipeline.get_director_queue_entry(self.temp_dir.name, entry_id)
+        reference = detail["params"]["reference_image_path"]
+        video = self._asset("finished.mp4")
+        _, project = self._saved_pipeline([{"video_filename": video, "reference_image_path": reference}])
+        pipeline._director_queue_state["entries"][0]["status"] = "completed"
+
+        self.assertTrue(pipeline.remove_director_queue_entry(
+            self.temp_dir.name, entry_id, completed_only=True,
+        ))
+        pipeline._director_queue_state = None
+        self.assertEqual(pipeline.list_director_queue(self.temp_dir.name)["entries"], [])
+        for retained in (reference, video, project):
+            with self.subTest(path=retained):
+                self.assertTrue(os.path.isfile(retained))
+
+    def test_clear_completed_rejects_entries_that_are_no_longer_completed(self):
+        queue = pipeline.enqueue_director_pipeline(self.temp_dir.name, {
+            "scene_description": "Keep this project",
+            "reference_image_path": self._asset(),
+        })
+        entry_id = queue["entries"][0]["id"]
+        detail = pipeline.get_director_queue_entry(self.temp_dir.name, entry_id)
+        reference = detail["params"]["reference_image_path"]
+        for status in ("held", "queued", "running", "failed", "cancelled"):
+            with self.subTest(status=status):
+                pipeline._director_queue_state["entries"][0]["status"] = status
+                with self.assertRaises(pipeline.PipelineBusyError):
+                    pipeline.remove_director_queue_entry(
+                        self.temp_dir.name, entry_id, completed_only=True,
+                    )
+                self.assertEqual(pipeline.get_director_queue_entry(self.temp_dir.name, entry_id)["status"], status)
+                self.assertTrue(os.path.isfile(reference))
 
     def test_held_queue_owns_ordered_omni_media_and_attached_soundtrack(self):
         identity = self._asset("identity.png")

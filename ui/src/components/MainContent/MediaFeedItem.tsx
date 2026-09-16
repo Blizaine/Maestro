@@ -1,3 +1,4 @@
+import { outputIdentity } from '../../lib/galleryIdentity'
 import { useState, useRef, useEffect, useCallback, type CSSProperties } from 'react'
 import { Play, Pencil, RefreshCw, Copy, Trash2, Check, Combine, Loader2, Heart, ArrowLeftToLine, Download, FolderInput, Scissors, FastForward, BookMarked, Info, ChevronDown, ChevronUp, MoreHorizontal, ScanFace } from 'lucide-react'
 import { SaveRecipeDialog } from '../Recipes/SaveRecipeDialog'
@@ -72,6 +73,8 @@ function RetryImage({ url, alt }: { url: string; alt: string }) {
 }
 
 export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackStart, onMeasured, style }: Props) {
+  const browsingAllFolders = useStore(s => s.browsingAllFolders)
+  const switchWorkspace = useStore(s => s.switchWorkspace)
   const setSelectedOutput = useStore(s => s.setSelectedOutput)
   const loadSettingsFromOutput = useStore(s => s.loadSettingsFromOutput)
   const rerollGeneration = useStore(s => s.rerollGeneration)
@@ -143,14 +146,14 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
       (entries) => {
         if (entries[0].isIntersecting) {
           setMetaLoaded(true)
-          fetchOutputMetadata(file.name).then(setMeta).catch(() => {})
+          fetchOutputMetadata(file.name, file.workspace).then(setMeta).catch(() => {})
         }
       },
       { threshold: 0.1 }
     )
     observer.observe(el)
     return () => observer.disconnect()
-  }, [file.name, metaLoaded])
+  }, [file.name, file.workspace, metaLoaded])
 
   // Multi-window media becomes gallery-visible before its final sidecar is
   // necessarily written.  The first request can therefore return embedded
@@ -160,13 +163,13 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   useEffect(() => {
     if (!metaLoaded || !file.metadata_ready || !meta || meta.source === 'sidecar') return
     let cancelled = false
-    fetchOutputMetadata(file.name)
+    fetchOutputMetadata(file.name, file.workspace)
       .then(nextMeta => {
         if (!cancelled) setMeta(nextMeta)
       })
       .catch(() => {})
     return () => { cancelled = true }
-  }, [file.name, file.metadata_ready, file.metadata_updated_at, metaLoaded, meta])
+  }, [file.name, file.workspace, file.metadata_ready, file.metadata_updated_at, metaLoaded, meta])
 
   // Pause video when scrolled out of view (but don't auto-play when scrolled in)
   useEffect(() => {
@@ -205,6 +208,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     return []
   })()
   const effectivePromptPlan = h3WindowPlan || ltxWindowPlan
+  const enhancement = params?._prompt_enhancement as Record<string, unknown> | undefined
   const rawPrompt = String(
     params?._tts_original_prompt
       || params?.prompt
@@ -214,6 +218,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     effectivePromptPlan?.source_prompt
       || params?._h3_original_prompt
       || params?._ltx_original_prompt
+      || enhancement?.original_prompt
       || rawPrompt,
   )
   // Never label a compiled H3/LTX window payload as the source prompt. The
@@ -224,7 +229,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     : rawPrompt
   const originalPrompt = effectiveWindowPrompts.length > 0
     ? ''
-    : String(params?._h3_original_prompt || params?._ltx_original_prompt || '')
+    : String(params?._h3_original_prompt || params?._ltx_original_prompt || enhancement?.original_prompt || '')
   const effectivePromptPlannedBy = String(
     effectivePromptPlan?.planned_by || '',
   ).trim().toLowerCase()
@@ -429,14 +434,14 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     }
     setSelectedOutput(index)
     // Small delay to let the browser release the file handle
-    setTimeout(() => deleteOutput(), 200)
+    setTimeout(() => deleteOutput(file), 200)
   }
 
   const handleRejoin = async () => {
     if (!groupId) return
     setRejoining(true)
     try {
-      await rejoinClipGroup(groupId)
+      await rejoinClipGroup(groupId, file.workspace)
     } finally {
       setRejoining(false)
     }
@@ -460,10 +465,10 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     setMoving(true)
     setShowMoveMenu(false)
     try {
-      await moveOutput(file.name, targetWs)
+      await moveOutput(file.name, targetWs, file.workspace)
       // Immediately remove from local state (source may still exist during deferred cleanup)
       const store = useStore.getState()
-      const filtered = store.outputs.filter(o => o.name !== file.name)
+      const filtered = store.outputs.filter(o => outputIdentity(o) !== outputIdentity(file))
       useStore.setState({ outputs: filtered, selectedOutput: Math.min(store.selectedOutput, Math.max(0, filtered.length - 1)) })
       setShowActionMenu(false)
     } catch (e) {
@@ -476,7 +481,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const handleSendToInput = async () => {
     if (file.type !== 'image') return
     try {
-      const res = await fetch(getFileUrl(file.name))
+      const res = await fetch(getFileUrl(file.name, file.workspace))
       const blob = await res.blob()
       const imageFile = new File([blob], file.name, { type: blob.type || 'image/png' })
       if (generationMode === 'image') {
@@ -502,7 +507,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
       if (!video || video.videoWidth === 0) {
         // Preview not loaded (never hovered) — decode frame 0 offscreen.
         video = document.createElement('video')
-        video.src = getFileUrl(file.name)
+        video.src = getFileUrl(file.name, file.workspace)
         video.muted = true
         await new Promise<void>((resolve, reject) => {
           video!.onloadeddata = () => resolve()
@@ -532,7 +537,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     if (file.type !== 'video') return
     let url = ''
     try {
-      const res = await fetch(getFileUrl(file.name))
+      const res = await fetch(getFileUrl(file.name, file.workspace))
       if (!res.ok) throw new Error(`Could not read source video (${res.status})`)
       const blob = await res.blob()
       const videoFile = new File([blob], file.name, { type: blob.type || 'video/mp4' })
@@ -567,7 +572,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
 
   const handleDownload = () => {
     const link = document.createElement('a')
-    link.href = getFileUrl(file.name)
+    link.href = getFileUrl(file.name, file.workspace)
     link.download = file.name
     document.body.appendChild(link)
     link.click()
@@ -696,6 +701,14 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
           )}
         </div>
 
+        {browsingAllFolders && file.workspace && (
+          <button
+            className="max-w-[100px] shrink-0 truncate text-[11px] text-accent-blue hover:underline"
+            title={`Open ${file.workspace}`}
+            onClick={event => { event.stopPropagation(); void switchWorkspace(file.workspace!) }}
+          >{file.workspace}</button>
+        )}
+
         {/* Four persistent controls; secondary actions are labeled in More. */}
         <div ref={actionMenuRef} className="relative flex shrink-0 items-center gap-0.5" onClick={e => e.stopPropagation()}>
           {params && (
@@ -737,7 +750,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
           )}
           {!browsingUploads && (
             <button
-              onClick={() => toggleFavorite(file.name)}
+              onClick={() => toggleFavorite(file.name, file.workspace)}
               className={`rounded-lg p-1.5 transition-colors ${
                 file.favorite
                   ? 'text-red-400 hover:text-red-300'
@@ -826,7 +839,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
                   role="menuitem"
                   onClick={() => {
                     setShowActionMenu(false)
-                    openRetakeDialog(file.name)
+                    openRetakeDialog(file.name, file.workspace, file.path)
                   }}
                   className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs text-text-secondary transition-colors hover:bg-bg-hover hover:text-indicator-warning"
                 >
@@ -917,7 +930,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
                   </button>
                   {showMoveMenu && (
                     <div className="mx-2 mb-1 overflow-hidden rounded-lg border border-border bg-bg-tertiary">
-                      {workspaces.filter(ws => ws.name !== activeWorkspace).map(ws => (
+                      {workspaces.filter(ws => ws.name !== (file.workspace || activeWorkspace)).map(ws => (
                         <button
                           key={ws.name}
                           role="menuitem"
@@ -927,7 +940,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
                           {ws.name}
                         </button>
                       ))}
-                      {workspaces.filter(ws => ws.name !== activeWorkspace).length === 0 && (
+                      {workspaces.filter(ws => ws.name !== (file.workspace || activeWorkspace)).length === 0 && (
                         <div className="px-3 py-2 text-[10px] text-text-muted">No other workspaces</div>
                       )}
                     </div>
@@ -1000,6 +1013,18 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
           <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-[11px]">
             <dt className="text-text-muted">Model</dt>
             <dd className="text-text-secondary break-words">{modelLabel || modelType || 'Unknown'}</dd>
+            {meta?.model_details?.sample_rate && <>
+              <dt className="text-text-muted">Audio</dt>
+              <dd className="text-text-secondary">{meta.model_details.sample_rate / 1000} kHz · {meta.model_details.channels === 2 ? 'stereo' : `${meta.model_details.channels} channel`}</dd>
+            </>}
+            {meta?.model_details?.artist && <>
+              <dt className="text-text-muted">Music style</dt>
+              <dd className="break-words text-text-secondary">{meta.model_details.artist.name} · strength {meta.model_details.artist.strength}</dd>
+            </>}
+            {meta?.model_details?.plan?.abc && <>
+              <dt className="text-text-muted">Composition</dt>
+              <dd className="min-w-0 text-text-secondary"><details><summary className="cursor-pointer">View ABC score</summary><pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words text-[10px]">{meta.model_details.plan.abc}</pre></details></dd>
+            </>}
             {h3Workflow && (
               <>
                 <dt className="text-text-muted">Workflow</dt>
@@ -1149,7 +1174,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
             <div className="mt-3">
               <div className="mb-1 flex items-center justify-between gap-2">
                 <span className="text-[10px] font-medium uppercase tracking-wide text-text-muted">
-                  {effectiveWindowPrompts.length > 0 ? 'Source prompt' : 'Prompt'}
+                  {effectiveWindowPrompts.length > 0 ? 'Source prompt' : originalPrompt && originalPrompt.trim() !== prompt.trim() ? 'Enhanced prompt' : 'Prompt'}
                 </span>
                 <button
                   type="button"
@@ -1249,13 +1274,13 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
           defaultNsfw={nsfwMode}
           onCancel={() => setShowSaveRecipe(false)}
           onSave={async (name, description, nsfw) => {
-            await saveRecipeFromOutput(file.name, name, description, nsfw)
+            await saveRecipeFromOutput(file.name, name, description, nsfw, file.workspace)
             setShowSaveRecipe(false)
           }}
         />
       )}
       {showFaceRefiner && (
-        <FaceRefinerDialog initialSource={{ path: file.name, name: file.name, url: file.url }} onClose={() => setShowFaceRefiner(false)} />
+        <FaceRefinerDialog initialSource={{ path: file.path || file.name, name: file.name, url: file.url }} onClose={() => setShowFaceRefiner(false)} />
       )}
     </div>
   )

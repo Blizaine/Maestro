@@ -1,0 +1,91 @@
+{
+  "repo_id": "DeepBeepMeep/TTS",
+  "revision": "864a479cbf3e810e1b2c1993b438510750e383b2",
+  "files": {
+    "YuE2_AR/YuE2_AR_bf16.safetensors": {
+      "size": 4331951160,
+      "sha256": "59ce30757ae3960405dc6116c3a919541d61e5e55b28c4927dbb879870209366",
+      "pointerSize": 135
+    },
+    "YuE2_AR/YuE2_AR_int8_convrot.safetensors": {
+      "size": 2925023698,
+      "sha256": "02ae63099e82496a6b61ea7ef15aa729bc5503a50ed2d64a1da328dcc40ea5cb",
+      "pointerSize": 135
+    },
+    "YuE2_AR/qwen.tiktoken": {
+      "size": 2561218
+    },
+    "YuE2_AR_bf16.safetensors": {
+      "size": 4331951160,
+      "sha256": "59ce30757ae3960405dc6116c3a919541d61e5e55b28c4927dbb879870209366",
+      "pointerSize": 135
+    },
+    "YuE2_AR_int8_convrot.safetensors": {
+      "size": 2925023698,
+      "sha256": "02ae63099e82496a6b61ea7ef15aa729bc5503a50ed2d64a1da328dcc40ea5cb",
+      "pointerSize": 135
+    },
+    "YuE2_Acoustic_bf16.safetensors": {
+      "size": 2929494672,
+      "sha256": "975253f29d0f9d3229fa96e92234ab8c82221c6e511f0c8b68ad3a3f3fee151e",
+      "pointerSize": 135
+    },
+    "YuE2_Acoustic_int8_convrot.safetensors": {
+      "size": 1522568148,
+      "sha256": "6e66f94fa7145fd2e28b491d14182cd51d72653b7965d80ec23ae3ff24a92755",
+      "pointerSize": 135
+    },
+    "sheetsage2/MERT-v2-FullSong_LICENSE": {
+      "size": 20000
+    },
+    "sheetsage2/README.md": {
+      "size": 1192
+    },
+    "sheetsage2/SheetSage2_LICENSE": {
+      "size": 20000
+    },
+    "sheetsage2/SheetSage2_MERT2_bf16.json": {
+      "size": 418
+    },
+    "sheetsage2/SheetSage2_MERT2_bf16.safetensors": {
+      "size": 1354429922,
+      "sha256": "b4b0d83c2fa0c6e912479866078a2c22f4a0ff4e4e63ed33b780b941cc2bad47",
+      "pointerSize": 135
+    },
+    "sheetsage2/THIRD_PARTY_NOTICES.md": {
+      "size": 589
+    },
+    "sheetsage2/config.json": {
+      "size": 1855
+    },
+    "yue2/LICENSE": {
+      "size": 11560
+    },
+    "yue2/MODEL_LICENSE": {
+      "size": 20736
+    },
+    "yue2/README.md": {
+      "size": 1919
+    },
+    "yue2/THIRD_PARTY_NOTICES.md": {
+      "size": 875
+    },
+    "yue2/YuE2_VAE_bf16.safetensors": {
+      "size": 132731320,
+      "sha256": "499714f69404d378b19a6fcbba9a8f99b4babfaed3f706e52c6dfa4e9521db67",
+      "pointerSize": 134
+    },
+    "yue2/licenses/SnakeBeta-NVIDIA-MIT.txt": {
+      "size": 1097
+    },
+    "yue2/licenses/stable-audio-tools-MIT.txt": {
+      "size": 1090
+    },
+    "yue2/qwen.tiktoken": {
+      "size": 2561218
+    },
+    "yue2/vae_config.json": {
+      "size": 1378
+    }
+  }
+}

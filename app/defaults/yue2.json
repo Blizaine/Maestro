@@ -1,0 +1,34 @@
+{
+    "model": {
+        "name": "YuE2 3B",
+        "architecture": "yue2",
+        "description": "Lyrics and style to 48 kHz stereo songs with optional melody/chord planning and ABC score conditioning. CC BY-NC 4.0 weights.",
+        "URLs": [
+            "https://huggingface.co/DeepBeepMeep/TTS/resolve/864a479cbf3e810e1b2c1993b438510750e383b2/YuE2_Acoustic_bf16.safetensors",
+            "https://huggingface.co/DeepBeepMeep/TTS/resolve/864a479cbf3e810e1b2c1993b438510750e383b2/YuE2_Acoustic_int8_convrot.safetensors"
+        ],
+        "source_repo": "https://huggingface.co/m-a-p/YuE2-3B",
+        "license_name": "CC BY-NC 4.0",
+        "license_url": "https://huggingface.co/m-a-p/YuE2-3B/blob/main/MODEL_LICENSE",
+        "selector_help": "48 kHz stereo songs from lyrics and style. Optional melody/chord planning or score extraction from a source song. Duration is an upper limit. CC BY-NC 4.0 weights.",
+        "model_size_gb": 4.6,
+        "required_model_assets": [
+            "YuE2_AR/qwen.tiktoken",
+            "yue2/vae_config.json",
+            "yue2/YuE2_VAE_bf16.safetensors"
+        ]
+    },
+    "prompt": "[Verse]\nMorning light across the bay\nWe watch the shadows drift away\n[Chorus]\nStay with me until the dawn\nLet our little song go on",
+    "alt_prompt": "English acoustic pop, warm female vocal, fingerpicked guitar, gentle drums, hopeful, 90 BPM",
+    "duration_seconds": 120,
+    "num_inference_steps": 32,
+    "guidance_scale": 1.0,
+    "temperature": 1.0,
+    "top_k": 100,
+    "top_p": 0.95,
+    "model_mode": 2,
+    "custom_settings": {
+        "abc": ""
+    },
+    "prompt_enhancer": ""
+}

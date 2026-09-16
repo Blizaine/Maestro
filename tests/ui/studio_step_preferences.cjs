@@ -25,7 +25,7 @@ const locked = 'viggle_animate', regular = 'minimax_h3';
   }};
   const models = Object.keys(defaults).map(id => ({...options[id], name:id, family:'minimax_h3', is_downloaded:true}));
   const bundle = await esbuild.build({stdin:{contents:
-    "import {useStore} from './src/stores/useStore'; window.store = useStore;",
+    "import {useStore,shouldEnhanceOnGeneration} from './src/stores/useStore'; window.store = useStore; window.shouldEnhanceOnGeneration = shouldEnhanceOnGeneration;",
     resolveDir:path.join(root,'ui'), loader:'ts'}, bundle:true, write:false,
     define:{'process.env.NODE_ENV':'"development"'}, logLevel:'silent'});
   const browser = await chromium.launch({headless:true, ...(process.platform === 'win32' ? {
@@ -55,7 +55,7 @@ const locked = 'viggle_animate', regular = 'minimax_h3';
       // starts its requests. Wait for these fetches and their queued saves.
       const settle = page => page.waitForFunction(() =>
         window.pendingRequests === 0 && Date.now() - window.lastRequestActivity >= 150);
-      const open = async origin => {
+      const open = async (origin, earlyChoice) => {
         const page = await context.newPage();
         page.on('pageerror', error => errors.push(error.message));
         await page.route('**/*', async route => {
@@ -79,7 +79,13 @@ const locked = 'viggle_animate', regular = 'minimax_h3';
         });
         await page.goto(origin);
         await page.addScriptTag({content:bundle.outputFiles[0].text});
-        await page.evaluate(() => window.store.getState().loadModels());
+        await page.evaluate(async earlyChoice => {
+          const s = window.store.getState();
+          const loading = s.loadModels();
+          if (earlyChoice === 'skip') s.setEnhanceOnGeneration(false);
+          if (earlyChoice === 'opt-out') s.setEnhanceOnGenerationDefault(false);
+          await loading;
+        }, earlyChoice);
         await settle(page);
         return page;
       };
@@ -90,6 +96,13 @@ const locked = 'viggle_animate', regular = 'minimax_h3';
       };
       let page = await open('http://studio.test:42015');
       assert.equal(await steps(page),4,'New models start at four steps');
+      assert.equal(await page.evaluate(() => window.shouldEnhanceOnGeneration(window.store.getState())),false,'Enhancement default starts off');
+      await page.evaluate(() => {
+        window.store.getState().setEnhanceOnGenerationDefault(true);
+        window.store.getState().setEnhanceOnGeneration(false);
+      });
+      await settle(page);
+      assert.equal(durable.enhance_on_generation_default,true,'Default is durable; one-time skip is not');
       await page.evaluate(() => window.store.getState().setParam('num_inference_steps',12));
       await settle(page);
       assert.equal(durable.inference_steps_per_model[frames],12);
@@ -115,15 +128,19 @@ const locked = 'viggle_animate', regular = 'minimax_h3';
       await settle(page);
       const persisted = await page.evaluate(() => JSON.parse(localStorage.getItem('maestro_mode_settings')));
       assert.equal(persisted.inferenceStepsPerModel[frames],12);
+      assert.equal(persisted.enhanceOnGenerationDefault,true,'Unrelated step/model saves retain the preference');
+      assert.equal(persisted.enhanceOnGeneration,undefined,'The one-time choice is not stored');
       assert.equal(durable.prompt,undefined);
       await page.close();
       page = await open('http://studio.test:42015');
       assert.equal(await steps(page),12,'Full reload restores steps');
+      assert.equal(await page.evaluate(() => window.shouldEnhanceOnGeneration(window.store.getState())),true,'Reload restores the default, not the last one-time skip');
       assert.equal(await page.evaluate(() => window.store.getState().params.prompt),'','The working prompt still starts fresh');
       assert.notEqual(await page.evaluate(() => window.store.getState().params.seed),123);
       await page.close();
       page = await open('http://studio.test:42199');
       assert.equal(await steps(page),12,'A new Pinokio port restores from server preferences');
+      assert.equal(await page.evaluate(() => window.shouldEnhanceOnGeneration(window.store.getState())),true,'New origin restores enhancement default from the server');
       await choose(page,references);
       assert.equal(await steps(page),9);
       await choose(page,frames);
@@ -131,6 +148,7 @@ const locked = 'viggle_animate', regular = 'minimax_h3';
       offlinePreferences = true;
       page = await open('http://studio.test:42199');
       assert.equal(await steps(page),12,'Browser cache works when server preferences are unavailable');
+      assert.equal(await page.evaluate(() => window.shouldEnhanceOnGeneration(window.store.getState())),true,'Browser cache preserves opt-in offline');
       await page.close();
       offlinePreferences = false;
       durable.inference_steps_per_model[frames] = 99;
@@ -145,6 +163,22 @@ const locked = 'viggle_animate', regular = 'minimax_h3';
       },regular);
       await settle(page);
       assert.equal(await steps(page),8,'Managed Turbo recipes take precedence over remembered steps');
+      await page.evaluate(() => window.store.getState().setEnhanceOnGenerationDefault(false));
+      await settle(page);
+      assert.equal(durable.enhance_on_generation_default,false,'Opting out is also durable');
+      await page.close();
+      page = await open('http://studio.test:42201');
+      assert.equal(await page.evaluate(() => window.store.getState().enhanceOnGenerationDefault),false,'Restart retains opt-out');
+      await page.evaluate(() => window.store.getState().setEnhanceOnGenerationDefault(true));
+      await settle(page);
+      await page.close();
+      page = await open('http://studio.test:42202', 'skip');
+      assert.equal(await page.evaluate(() => window.store.getState().enhanceOnGenerationDefault),true,'An early one-time skip cannot prevent restoring the saved default');
+      assert.equal(await page.evaluate(() => window.shouldEnhanceOnGeneration(window.store.getState())),false,'Hydration preserves the early one-time skip');
+      await page.close();
+      page = await open('http://studio.test:42203', 'opt-out');
+      assert.equal(await page.evaluate(() => window.store.getState().enhanceOnGenerationDefault),false,'An explicit preference change wins over pending hydration');
+      assert.equal(durable.enhance_on_generation_default,false);
       assert.deepEqual(errors,[]);
       await context.close();
       console.log(`Step persistence passed with ${defaultsFirst ? 'defaults' : 'options'} resolving first: model switches, reload, changed port, cache fallback, late responses, clamping and fixed recipes.`);

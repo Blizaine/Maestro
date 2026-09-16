@@ -50,6 +50,24 @@ class TestJobLifecycleWiring(unittest.TestCase):
     def setUpClass(cls):
         cls.launch = _parse("app/launch.py")
 
+    def test_stream_error_survives_the_final_queue_status(self):
+        from app.services.job_lifecycle import update_job, finish_job
+        worker = _function(self.launch, '_run_generation')
+        branch = next(node for node in ast.walk(worker) if isinstance(node, ast.If)
+                      and ast.unparse(node.test) == "cmd == 'error'")
+        terminal = next(node for node in ast.walk(worker) if isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name) and node.func.id == 'finish_job'
+                        and any(isinstance(value, ast.Constant) and value.value == 'Generation failed'
+                                for value in ast.walk(node)))
+        module = ast.fix_missing_locations(ast.Module(body=[*branch.body, ast.Expr(value=terminal)], type_ignores=[]))
+        job = {'id': 'failed-cover', 'status': 'running', 'error': None}
+        namespace = {'job': job, 'data': 'Notation package could not load', 'success': False,
+                     'update_job': update_job, 'finish_job': finish_job, 'print': lambda *args: None}
+        exec(compile(module, 'generation-error-stream', 'exec'), namespace)
+        self.assertEqual(job['status'], 'failed')
+        self.assertEqual(job['error'], 'Notation package could not load')
+        self.assertEqual(job['message'], 'Error: Notation package could not load')
+
     def test_each_worker_uses_lifecycle_transitions(self):
         expected = {
             "_run_generation": {
@@ -177,6 +195,7 @@ class TestJobLifecycleWiring(unittest.TestCase):
 
     def test_studio_queue_release_preserves_submission_order(self):
         started_threads = []
+        saved_jobs = []
 
         class FakeThread:
             def __init__(self, **kwargs):
@@ -208,10 +227,13 @@ class TestJobLifecycleWiring(unittest.TestCase):
                 "release_held": release,
                 "threading": SimpleNamespace(Thread=FakeThread),
                 "_run_held_studio_jobs": object(),
+                "_studio_job_archive": SimpleNamespace(save=lambda job: saved_jobs.append(dict(job))),
             },
         )
 
         self.assertEqual(start_queue(), ["earlier", "later"])
+        self.assertEqual([job["created_at"] for job in saved_jobs], [10, 20])
+        self.assertTrue(all(job["status"] == "queued" for job in saved_jobs))
         self.assertEqual(jobs["earlier"]["status"], "queued")
         self.assertEqual(jobs["later"]["status"], "queued")
         self.assertEqual(jobs["active"]["status"], "running")
@@ -268,6 +290,14 @@ class TestJobLifecycleWiring(unittest.TestCase):
         cancel = _function(self.launch, "cancel_saved_pipeline_repair")
         self.assertIn("start_pipeline_repair", _called_names(repair))
         self.assertIn("cancel_pipeline_repair", _called_names(cancel))
+
+    def test_director_prompt_save_validates_json_object_before_service_call(self):
+        endpoint = _function(self.launch, "save_pipeline_clip_prompt")
+        source = ast.unparse(endpoint)
+        self.assertIn("body = await request.json()", source)
+        self.assertIn("not isinstance(body, dict)", source)
+        self.assertGreaterEqual(source.count("status_code=400"), 2)
+        self.assertIn("update_clip_prompt", _called_names(endpoint))
 
     def test_blend_defers_generation_completion(self):
         blend = _function(self.launch, "_run_blend_generation")

@@ -1,0 +1,5 @@
+# Optional SheetSage2 notation support, matching the pinned Wan2GP port.
+mir_eval==0.8.2
+pretty_midi==0.2.11.post0
+mido==1.3.3
+importlib_resources==6.5.2

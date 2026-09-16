@@ -7,6 +7,8 @@ import { modelDisplayName } from '../lib/modelDisplay'
 
 export function RetakeDialog() {
   const retakeOpen = useStore(s => s.retakeDialogOpen)
+  const sourceWorkspace = useStore(s => s.retakeSourceWorkspace)
+  const sourcePath = useStore(s => s.retakeSourcePath)
   const retakeFile = useStore(s => s.retakeSourceFile)
   const closeRetake = useStore(s => s.closeRetakeDialog)
   const activeWorkspace = useStore(s => s.activeWorkspace)
@@ -37,18 +39,18 @@ export function RetakeDialog() {
   useEffect(() => {
     if (!retakeFile) return
     const video = document.createElement('video')
-    video.src = api.getFileUrl(retakeFile)
+    video.src = api.getFileUrl(retakeFile, sourceWorkspace)
     video.onloadedmetadata = () => {
       const dur = video.duration && isFinite(video.duration) ? video.duration : 10
       setDuration(dur)
       setEndTime(dur)
       setStartTime(0)
     }
-  }, [retakeFile])
+  }, [retakeFile, sourceWorkspace])
 
   if (!retakeOpen || !retakeFile) return null
 
-  const videoUrl = api.getFileUrl(retakeFile)
+  const videoUrl = api.getFileUrl(retakeFile, sourceWorkspace)
 
   const handleSubmit = async () => {
     setSubmitting(true)
@@ -56,7 +58,7 @@ export function RetakeDialog() {
     setSuccess(null)
     try {
       const result = await api.submitRetake({
-        video_path: retakeFile,
+        video_path: sourcePath || retakeFile,
         start_time: startTime,
         end_time: endTime,
         prompt: prompt || 'retake',

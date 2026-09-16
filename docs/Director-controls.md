@@ -10,6 +10,9 @@ Director already shares Studio's themes, mobile drawer viewport tracking,
 keyboard focus handling and gallery scroll lock. H3 references use the same
 reference component and saved-character support.
 
+LoRAs and Advanced appear directly below the model selectors, before the music
+and image inputs, so generation settings can be chosen before audio analysis.
+
 ## Target duration
 
 Target duration uses Studio's compact duration control. Auto and the current
@@ -29,6 +32,68 @@ length limits each window, while the full movie keeps its planned duration,
 including the final trimmed window. The total movie length does not have to
 match the frame increments of a single H3 shot. Independent shots still need
 to fit the model's frame increments and the saved maximum.
+
+## Music-video clip length
+
+**Advanced → GPU clip limit**, beside inference steps, sets the maximum
+generated shot length for supported bounded models. Auto uses Maestro's GPU
+recommendation. A manual choice is remembered per model across refreshes and
+restarts. For example, H3 fused Ref2VA can be set to **14.4s** (345 frames at
+24fps) on a setup where the automatic recommendation is 10.1s. Choosing a
+longer limit uses more GPU memory; it does not force every shot to that length.
+
+Music-video setup includes **Clip length**, with Auto and a maximum-length slider.
+Auto follows the chosen video model, resolution and memory recommendation. Moving
+the dimmed slider selects a custom maximum immediately. The displayed time follows
+the model's frame increments, and the minimum clip count updates with it.
+
+Cuts follow section changes, lyric phrases, performer changes, and strong beats.
+**Cut Speed** controls how tightly these cues divide the song: **0** keeps the
+normal musical layout; **+1 / +2** favor shorter clips, including within sections
+that already fit the maximum. **−1** favors longer clips. **−2** uses the fewest
+clips that fit the selected maximum, balancing their lengths and placing cuts
+near musical cues. For a two-minute song with H3's 14.4s limit, −2 produces nine
+clips averaging about 13.3s. Section and percussion changes inside a longer clip
+still guide its performance and camera plan without requiring another clip.
+
+New music plans keep cut positions on the output frame
+grid; Maestro generates a valid model-native duration and trims the extra tail.
+That preserves the soundtrack timing through generation, reruns, and rejoining.
+Shorter clips can lower peak memory, though
+they add preparation and transitions. After planning, choose **Update clip layout**
+to apply a changed maximum. The setting is saved with the project. Separate-clip
+length is disabled for Seamless, which uses its native continuation windows.
+
+New audio analyses also estimate sustained percussion passages and entrances
+using transient energy on the CPU. Director receives the entrance's song time
+and time within the shot, favoring the referenced drummer at those moments
+instead of inventing a new drum entrance on an arbitrary beat. These are
+percussion estimates, not separated drum stems or exact instrument recognition;
+other transient sounds can resemble drums. Unknown timing stays unknown.
+Re-analyze the soundtrack and create a new plan to add these cues to an older project.
+
+## Shared prompt writing
+
+Director uses the adaptive writing rules from Studio inside its existing planning
+stages. Short concepts receive development; detailed scripts retain their events,
+exact lines and constraints. Shot planning includes character/prop ownership,
+physical transitions, first-frame authority and the final state needed for continuity.
+Music videos retain the supplied song's lyrics, voices and vocal timing.
+
+Music planning assigns visible people their vocal or instrumental roles. During
+guitar and drum cutaways, prompts keep the lead singer's voice off screen and
+the instrumentalist's lips closed while their playing stays active. Wide band
+shots reserve lip-sync for the assigned vocalist. Explicit backing singers,
+singing guitarists, wind instruments and crowd cheers retain their intended
+performance. These directions apply to newly planned shots; create a new plan
+to update older prompts.
+
+H3 compilation keeps complete actions, camera destinations, dialogue delivery and
+ending states. It may remove repeated boilerplate, but a cosmetic prompt-length
+target cannot cut off an action or discard the end of a shot. Planning caches include
+the writing contract and optional-content setting. Reviewed per-shot edits remain
+authoritative. Prompt review is still useful: successful preparation does not
+guarantee perfect movement, lip synchronization or visual continuity.
 
 ## LoRA strengths
 

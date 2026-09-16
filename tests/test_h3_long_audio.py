@@ -30,7 +30,7 @@ class LongAudioPlanningTests(unittest.TestCase):
         guard = next(node for node in ast.walk(source) if isinstance(node, ast.If)
                      and "_h3_omni_context_ir" in ast.unparse(node.test)
                      and "minimax_h3_audio_only" in ast.unparse(node.test))
-        namespace = {"multi_prompts_gen_type": 0, "_h3_omni_context_ir": False,
+        namespace = {"image_mode": 0, "multi_prompts_gen_type": 0, "_h3_omni_context_ir": False,
                      "model_def": {"minimax_h3_audio_only": True}, "prompt": script}
         exec(compile(ast.Module(body=[guard], type_ignores=[]), "wgp.py", "exec"), namespace)
         self.assertEqual(namespace["prompts"], [script])

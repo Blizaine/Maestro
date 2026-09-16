@@ -125,18 +125,14 @@ export function Sidebar() {
       cancelAnimationFrame(frame)
       frame = requestAnimationFrame(revealInput)
     }
+    // Re-evaluate after viewport changes (not on focus/typing). Pointer focus
+    // already means the caret is visible; repeatedly revealing the whole field
+    // moves long text away from the line the user clicked. Mobile keyboard
+    // opening updates visibleViewport and schedules this layout pass.
     scheduleReveal()
-    sidebarElement.addEventListener('focusin', scheduleReveal)
-    sidebarElement.addEventListener('input', scheduleReveal)
-    sidebarElement.addEventListener('keyup', scheduleReveal)
-    sidebarElement.addEventListener('select', scheduleReveal)
     window.addEventListener('resize', scheduleReveal)
     return () => {
       cancelAnimationFrame(frame)
-      sidebarElement.removeEventListener('focusin', scheduleReveal)
-      sidebarElement.removeEventListener('input', scheduleReveal)
-      sidebarElement.removeEventListener('keyup', scheduleReveal)
-      sidebarElement.removeEventListener('select', scheduleReveal)
       window.removeEventListener('resize', scheduleReveal)
     }
   }, [isMobile, sidebarElement, visibleViewport])

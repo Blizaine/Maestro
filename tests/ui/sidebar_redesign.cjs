@@ -6,10 +6,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {assertPromptStability} = require('./prompt_stability.cjs');
 const {assertExplicitEnhancement} = require('./studio_enhancement.cjs');
+const {assertQueueHistory} = require('./queue_history.cjs');
+const {assertGalleryLibrary} = require('./gallery_library.cjs');
 const {assertDurationPopup} = require('./duration_popup.cjs');
 const {assertAnimateKeyboard} = require('./animate_keyboard.cjs');
 const {assertDirectorLayout} = require('./director_layout.cjs');
 const {assertDirectorSettings} = require('./director_settings.cjs');
+const {assertDirectorMusicLength} = require('./director_music_length.cjs');
+const {assertDirectorPromptSave} = require('./director_prompt_save.cjs');
 const {assertComposerScrolling} = require('./composer_scrolling.cjs');
 const {assertAdvancedPopups} = require('./advanced_popups.cjs');
 const root = path.resolve(__dirname, '../..');
@@ -27,14 +31,19 @@ const read = async endpoint => {
 
 (async () => {
   const catalogue = await read('/api/v1/models');
-  const ids = ['minimax_h3_ref2va_fused_turbo', 'minimax_h3_ref2va', 'minimax_h3_fused_turbo', 'minimax_h3', 'viggle_animate', 'flux2_klein_9b', 'minimax_h3_voice_audio', 'ltx2_22B_distilled_1_1'];
+  const ids = ['minimax_h3_ref2va_fused_turbo', 'minimax_h3_ref2va', 'minimax_h3_fused_turbo', 'minimax_h3', 'viggle_animate', 'flux2_klein_9b', 'krea2_turbo', 'minimax_h3_voice_audio', 'ltx2_22B_distilled_1_1'];
   const options = Object.fromEntries(await Promise.all(ids.map(async id => [id, await read('/api/v1/model-options/' + id)])));
   const bundle = await esbuild.build({stdin: {contents: [
     "import React from 'react'; import {createRoot} from 'react-dom/client';",
-    "import {useStore} from './src/stores/useStore'; import {Sidebar} from './src/components/Sidebar/Sidebar';",
+    "import {useStore, shouldEnhanceOnGeneration} from './src/stores/useStore'; import {Sidebar} from './src/components/Sidebar/Sidebar';",
+    "import {GlobalQueuePopover} from './src/components/GlobalQueuePopover'; import {DirectorDashboard} from './src/components/DirectorDashboard/DirectorDashboard';",
+    "import {MainContent} from './src/components/MainContent/MainContent'; window.mountGallery = () => {window.reactRoot = createRoot(document.getElementById('root')); window.reactRoot.render(<MainContent/>);};",
     "import {applyThemePrefs, FAMILIES} from './src/lib/theme';",
-    "window.store = useStore; window.themes = {applyThemePrefs, FAMILIES}; window.baseParams = {...useStore.getState().params};",
+    "import {DirectorMusicClipLength} from './src/components/Sidebar/DirectorMusicClipLength'; window.mountMusicLength = () => {window.reactRoot.unmount(); window.reactRoot = createRoot(document.getElementById('root')); window.reactRoot.render(<DirectorMusicClipLength/>);};",
+    "window.store = useStore; window.shouldEnhanceOnGeneration = shouldEnhanceOnGeneration; window.themes = {applyThemePrefs, FAMILIES}; window.baseParams = {...useStore.getState().params};",
     "window.mount = () => {window.reactRoot = createRoot(document.getElementById('root')); window.reactRoot.render(<React.StrictMode><Sidebar/></React.StrictMode>);};",
+    "window.mountQueue = () => {const node = document.createElement('div'); node.style.cssText = 'position:fixed;top:10px;right:10px;z-index:60'; document.body.append(node); window.queueNode = node; window.queueRoot = createRoot(node); window.queueRoot.render(<GlobalQueuePopover/>);};",
+    "window.mountDashboard = () => {if (window.dashboardRoot) return; const node = document.createElement('div'); document.body.append(node); window.dashboardRoot = createRoot(node); window.dashboardRoot.render(<DirectorDashboard/>);};",
   ].join('\n'), resolveDir: path.join(root, 'ui'), loader: 'tsx'}, bundle: true, write: false,
     jsx: 'automatic', define: {'process.env.NODE_ENV': '"development"'}, logLevel: 'silent'});
   const assets = path.join(root, 'ui/dist/assets');
@@ -44,7 +53,8 @@ const read = async endpoint => {
     ...(process.platform === 'win32' ? {executablePath: process.env.MAESTRO_CHROME || 'C:/Program Files/Google/Chrome/Application/chrome.exe'} : {})});
   try {
     const page = await browser.newPage({viewport: {width: 1360, height: 900}});
-    const errors = [], requests = [], llmRequests = [];
+    const errors = [], requests = [], llmRequests = [], directorPromptUpdates = [];
+    let directorPipelineFixture = null;
     page.on('pageerror', error => { errors.push(error.message); console.error(error.stack); });
     const character = {id: 'blaine', name: 'Blaine', visual: {type: 'image', path: '/uploads/portrait.png', url: '/picture.svg', thumbnail_url: '/picture.svg'},
       voice: {path: '/uploads/voice.wav', url: '/voice.wav', duration_seconds: 3}};
@@ -57,6 +67,15 @@ const read = async endpoint => {
       if (endpoint === '/api/v1/models') return json(catalogue);
       if (endpoint === '/api/v1/system-stats') return json(stats);
       if (endpoint === '/api/v1/characters') return json({characters});
+      const promptMatch = endpoint.match(/^\/api\/v1\/director\/pipelines\/([^/]+)\/clips\/(\d+)\/prompt$/);
+      if (promptMatch && route.request().method() === 'PUT') {
+        const body = route.request().postDataJSON();
+        directorPromptUpdates.push({pid: decodeURIComponent(promptMatch[1]), index: Number(promptMatch[2]), body});
+        if (directorPipelineFixture) Object.assign(directorPipelineFixture.clips[Number(promptMatch[2])], body);
+        await page.evaluate(update => { window.directorPromptUpdates.push(update); }, directorPromptUpdates.at(-1));
+        return json({ok: true});
+      }
+      if (endpoint === '/api/v1/director/pipelines/prompt-save-test' && route.request().method() === 'GET') return json(directorPipelineFixture);
       if (endpoint.includes('/media-flow/capabilities')) return json({neural_rendering: {available: false, reason: 'Isolated test'}, frame_generation: {available: false, factors: [], reason: 'Isolated test'}});
       if (endpoint.includes('/upload')) return json({path: '/uploads/reference.png', url: '/picture.svg', duration_seconds: 3});
       if (endpoint === '/api/v1/extract-frames') return json({start_path: '/uploads/frame.png', start_url: '/picture.svg'});
@@ -104,13 +123,14 @@ const read = async endpoint => {
           studioVideoWorkflow: workflow, studioImageWorkflow: 'generate', audioSubMode: 'speech',
           selectedModelPerMode: {[mode]: id}, durationSeconds: 124 / 24, slidingWindowSeconds: 243 / 24, slidingWindowOverlap: 18,
           slidingWindowLocked: false, h3WindowOverrides: {}, systemStats: stats, startImage: null, endImage: null, imageRefs: [],
-          h3WindowPlan: null, editReturnTarget: null, outputs: [], spatialUpsampling: '', filmGrainIntensity: 0, jobs: [], isGenerating: false, isEnhancing: false, promptEnhanceError: null,
+          h3WindowPlan: null, editReturnTarget: null, outputs: [], spatialUpsampling: '', filmGrainIntensity: 0, jobs: [], isGenerating: false, isEnhancing: false, promptEnhanceError: null, enhanceOnGeneration: null, enhanceOnGenerationDefault: false,
           params: {...window.baseParams, model_type: id, resolution: '864x480', prompt: 'A calm scene.', image_mode: workflow === 'extend' ? 3 : 0,
             _duration_planning_mode: 'duration', minimax_h3_sequence_prompt_mode: 'manual', minimax_h3_window_storyboard: false, minimax_h3_references: [],
             num_inference_steps: options.default_num_inference_steps || 4, guidance_scale: 1, seed: 42},
           resolutionPreset: '480p', aspectRatio: '16:9'});
       };
       localStorage.setItem('hwbar_collapsed', '1');
+      window.directorPromptUpdates = [];
       window.resetFixture(); window.mount();
     }, {catalogue, options, stats});
     const pause = () => page.waitForTimeout(150);
@@ -119,10 +139,32 @@ const read = async endpoint => {
     const durationChip = () => sidebar.getByRole('button', {name: /^Duration:/});
     await sidebar.getByRole('button', {name: /Characters/}).waitFor();
     await pause();
+    directorPipelineFixture = await page.evaluate(() => window.directorPipelineFixture || null);
+    if (process.env.MAESTRO_UI_MUSIC_LENGTH_ONLY) {
+      await assertDirectorMusicLength(page);
+      assert.deepEqual(errors, []);
+      console.log('PASS Director music clip length: Auto takeover, model frame steps, replan, persistence');
+      return;
+    }
     assert.deepEqual(errors, [], 'StrictMode renders the full sidebar without a loop');
     if (process.env.MAESTRO_UI_DIRECTOR_ONLY) {
       await assertDirectorSettings(page, sidebar, output);
       await assertDirectorLayout(page, sidebar, output);
+      directorPipelineFixture = {pipeline_id: 'prompt-save-test', pipeline_type: 'short_film', status: 'completed', created_at: 1,
+        total_time_sec: 1, scene_description: 'Prompt save fixture', shot_image_policy: 'generate', llm_log: {}, clips: [{index: 0,
+          tag: null, image_prompt: 'Original image', video_prompt: 'Original video', window_prompts: ['Original video'],
+          start_image_filename: 'frame.png', video_filename: 'clip.mp4', window_count: 1, keyframe_prompts: [], keyframe_filenames: []}]};
+      await assertDirectorPromptSave(page, directorPromptUpdates);
+      assert.deepEqual(errors, []);
+      return;
+    }
+    if (process.env.MAESTRO_UI_GALLERY_ONLY) {
+      await assertGalleryLibrary(page, output);
+      assert.deepEqual(errors, []);
+      return;
+    }
+    if (process.env.MAESTRO_UI_QUEUE_ONLY) {
+      await assertQueueHistory(page, output);
       assert.deepEqual(errors, []);
       return;
     }
@@ -399,7 +441,7 @@ const read = async endpoint => {
         'Recipes sits between Characters and Resolution on the same row');
         const toolbarBounds = await sidebar.getByRole('group', {name: 'Prompt controls', exact: true}).boundingBox();
         const promptBounds = await prompt.boundingBox();
-        const enhanceBounds = await sidebar.getByRole('button', {name: 'Enhance prompt with AI Faithful'}).boundingBox();
+        const enhanceBounds = await sidebar.getByRole('button', {name: 'Enhance prompt'}).boundingBox();
         assert.ok(enhanceBounds.y >= promptBounds.y + promptBounds.height && enhanceBounds.y >= toolbarBounds.y, 'Enhance stays below the text');
         const menuBounds = await sidebar.getByRole('button', {name: 'Prompt enhancement options'}).boundingBox();
         assert.ok(Math.abs(menuBounds.x + menuBounds.width - toolbarBounds.x - toolbarBounds.width) < 1, 'Prompt tools align to the bottom-right');
@@ -538,6 +580,7 @@ const read = async endpoint => {
     assert.deepEqual(errors, []);
     console.log('Extend full-model transition plus Frames, Viggle, Image and H3 Speech rendered without errors');
     await assertExplicitEnhancement(page, sidebar, requests, llmRequests);
+    await assertQueueHistory(page, output);
     assert.deepEqual(errors, []);
     console.log('Sidebar regression checks passed. Screenshots: ' + output);
   } catch (error) {

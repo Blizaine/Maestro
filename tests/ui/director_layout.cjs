@@ -45,6 +45,20 @@ async function assertDirectorLayout(page, sidebar, output) {
     await input.fill('A detective searches the city. '.repeat(80));
     await fits('Long Director composer at ' + width);
     assert.ok(await input.evaluate(node => node.scrollHeight > node.clientHeight), 'Long composer scrolls internally');
+    if (width >= 768) {
+      const scrollBeforeEdit = await sidebar.evaluate(node => node.scrollTop);
+      await input.evaluate(node => {
+        node.scrollTop = node.scrollHeight;
+        node.focus();
+        node.setSelectionRange(node.value.length, node.value.length);
+        node.dispatchEvent(new Event('input', {bubbles: true}));
+        node.dispatchEvent(new KeyboardEvent('keyup', {bubbles: true, key: 'End'}));
+        node.dispatchEvent(new Event('select', {bubbles: true}));
+      });
+      await settle();
+      assert.equal(await sidebar.evaluate(node => node.scrollTop), scrollBeforeEdit,
+        'Clicking or typing in visible long text does not reposition the sidebar');
+    }
     const bounds = await sidebar.boundingBox();
     for (const name of ['Start Director project now', 'Add Director project to queue']) {
       const button = await composer.getByRole('button', {name, exact: true}).boundingBox();

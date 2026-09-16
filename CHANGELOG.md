@@ -3,6 +3,38 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [2.2.0] - 2026-09-16
+
+- Unified adaptive Enhance for concepts and detailed scripts, with Enhance now,
+  queued Enhance on generation, an opt-in default, saved source/draft review,
+  phase-aware retries and restart-safe held jobs.
+- Improved H3 dialogue classification, story timing, action/camera continuity,
+  first-frame authority and local repairs; shared writing guidance in Director.
+- Added YuE2 3B as the default music model, 48 kHz stereo generation, optional
+  composition/score/source-song workflows, and remembered later model choices.
+- Added My music (Experimental): data/lyric review, resumable personal-style
+  and acoustic training, checkpoint auditions, reconstruction and style bundles.
+- Added TaoMate's experimental three-step H3 Frames adapter preset.
+- Added All folders gallery browsing/search and folder-qualified media actions;
+  repaired startup hydration, refresh and repeated Editor-upload duplication.
+- Restored model-aware music-video clip limits and added a remembered Director
+  GPU cap. Cut Speed now honors negative values, musical cues and full-song
+  coverage; −2 favors the fewest clips within the selected limit.
+- Improved music-video reference identity, vocal/instrument ownership and
+  timed percussion/section cues. Director shot edits save durably, and editing
+  long prompts no longer jumps the sidebar out of view.
+- Added 21:9 image generation, source/enhanced prompt metadata, and immediate
+  image enhancement fixes; corrected multiline prompts, Z-Image VAE precision
+  and live CivitAI architecture reloads.
+- Added collapsed completed-job history and safer prompt review/retry controls.
+- Prevented incompatible H3 PDD/audio-refinement settings, refined the H3
+  residency fallback, improved Windows HTTP responsiveness, and added verified
+  Linux CUDA llama-server selection/building and transcription fallback.
+- Added a bounded local prompt bench with reproducible inputs and trace review.
+
+See [release notes](docs/RELEASE_NOTES_V2.2.0.md) for feature details, issue status,
+optional model terms and remaining hardware/quality limitations.
+
 ## [2.1.6] - 2026-09-11
 
 - H3 and Viggle now pass the per-job transformer VRAM allowance to MMGP,

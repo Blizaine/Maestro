@@ -30,9 +30,9 @@ CRITICAL — MUSIC VIDEO PROMPTS MUST BE SHORT AND ENERGETIC:
 - NEVER use continuity words: "continuing", "still", "repeats", "again".
 
 GOOD MUSIC VIDEO PROMPTS (short, energetic):
-- "Dogs playing in a band. Singing. Dancing. Dynamic camera movement. Lights. Smoke. Atmospheric."
+- "Dog band: the lead singer sings while the guitarist and drummer play with closed mouths. Dynamic camera movement. Lights. Smoke."
 - "Woman in red dress singing on neon-lit stage. Crowd energy. Strobe lights. Handheld camera."
-- "Man in leather jacket playing guitar. Close-up. Sweat. Stage lights. Raw energy."
+- "Man in leather jacket playing guitar, lips closed. Lead vocal continues off screen. Close-up. Sweat. Stage lights. Raw energy."
 - "Two dancers in a warehouse. Dramatic shadows. Spinning. Low angle. Dust in the air."
 - "Singer in spotlight. Emotional performance. Tears. Slow push in. Dark background."
 
@@ -65,25 +65,29 @@ THE STILLNESS TRAP — words that freeze the whole video:
   prompt compounds into no motion at all). Every vocal prompt names at
   least one thing that KEEPS MOVING for the full shot — the mouth first.
 
-PERFORMER / VOCALIST — SHOW WHO IS SINGING (applies to EVERY clip):
-- A music video is about the ARTIST performing. When a clip has lyrics (vocals),
-  the image_prompt AND video_prompt MUST show a performer delivering them — a
-  singer singing, a rapper rapping, or a vocalist speaking/lip-syncing to camera.
-  Do NOT render empty scenery while a vocal plays; the performer is the subject.
-- USE THE LITERAL WORDS. On vocal clips the video_prompt must contain an
-  explicit vocal-performance verb attached to the performer: "singing",
+PERFORMER / VOCALIST — KEEP EACH PERSON'S ROLE ACROSS CUTS:
+- Separate audible vocals from visible performance. The lead singer owns the
+  lead vocal even when the camera cuts to a guitarist, drummer, dancer or crowd.
+  Follow the user's assigned roles and match performers to their references.
+- USE THE LITERAL WORDS in singer-focused shots. The video_prompt must contain
+  an explicit vocal-performance verb attached to that assigned vocalist: "singing",
   "rapping", "lip-syncing", or "singing the lyrics". The soundtrack alone
   sometimes animates the mouth, but the written word is what makes it happen
   EVERY time. "She performs on stage" is NOT enough — write "she sings
   passionately into the microphone".
-- DELIBERATE NON-SINGING SHOTS ARE ALLOWED — SPARINGLY. At most about 1 in 4
-  vocal clips may intentionally show the performer NOT singing while the
-  vocal continues (cinematic b-roll: walking away from camera, staring out a
-  window, a slow orbit around them standing still). When you choose this,
-  SAY IT EXPLICITLY in the video_prompt — "she does not sing; her mouth stays
-  closed as the song continues over the shot" — otherwise the audio will
-  half-animate the mouth and the shot reads as a glitch. Never make two
-  non-singing vocal clips in a row.
+- INSTRUMENT CUTAWAYS: the vocalist may stay off screen while their vocal
+  continues. Write "the guitarist plays with lips closed; the lead vocal
+  continues off screen" in video_prompt and every window_prompt. Do not
+  insert a singer into that shot or make the musician mouth the lyrics.
+  Choose cutaways for musical/visual purpose; there is no fixed quota.
+- In a wide band shot only the assigned visible singer mouths the vocal.
+  Drummers, guitarists, bassists and other non-singing people keep lips closed,
+  with energetic instrument/body movement. Wind/brass players use their normal
+  embouchure without singing. First-frame poses must reflect these roles too.
+  Preserve requested crowd cheers or shouts without turning the crowd into
+  singers of the source vocal.
+- Backing vocals, duets or a guitarist who also sings are valid when the user
+  assigns them. Do not invent backing singers to fill the frame.
 - If NO reference photo or named performer is given, INVENT one that fits the
   song's vibe and keep it CONSISTENT across every clip (the same described
   artist) — e.g. "a stylish female singer in a sequined jacket", "a young male
@@ -91,10 +95,12 @@ PERFORMER / VOCALIST — SHOW WHO IS SINGING (applies to EVERY clip):
 - MULTIPLE VOICES: if a clip's context names a dominant speaker/voice (e.g.
   "speaker: SPEAKER_01" or a duet), attribute the singing to the matching
   performer and keep each voice's performer consistent across the whole video.
-  With no speaker info, the main performer sings everything.
+  With no speaker info, keep the established lead singer; camera focus alone
+  never reassigns a voice.
 - Match delivery to the vocal: singing → microphone, expressive face; rapping →
   rhythmic hand movement, head bob, attitude; spoken → direct-to-camera address.
-- The clip context tells you each clip's vocal content (lyrics: "..." or
-  instrumental). Show the performer performing THAT line on vocal clips.
+- The clip context identifies audible vocal content, not who must be on camera.
+  If its singer is visible, synchronize them to that part; otherwise keep the
+  voice off screen and visible non-vocal performers' mouths closed.
 - Instrumental clips (no lyrics): musicians playing, dancers, or atmosphere — the
   performer may recede, but keep the energy.

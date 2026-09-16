@@ -34,6 +34,38 @@ def _load_normalizers():
 
 
 class TestStudioPreferencePersistence(unittest.TestCase):
+    def test_director_gpu_limit_round_trip_auto_and_other_preference_saves(self):
+        normalize = _load_normalizers()["_normalize_studio_preferences"]
+        saved = normalize({"director_max_shot_frames_per_model": {"minimax_h3_ref2va_fused_turbo": 345}})
+        saved = normalize({"audio_sub_mode": "music"}, current=json.loads(json.dumps(saved)))
+        self.assertEqual(saved["director_max_shot_frames_per_model"], {"minimax_h3_ref2va_fused_turbo": 345})
+        self.assertEqual(normalize({"director_max_shot_frames_per_model": {}}, current=saved)["director_max_shot_frames_per_model"], {})
+        for value in (True, -1, 0, 1.5, float('nan'), float('inf'), 60001):
+            with self.assertRaises(ValueError):
+                normalize({"director_max_shot_frames_per_model": {"model": value}})
+
+    def test_music_migration_stamp_and_subsequent_choice_survive_other_saves(self):
+        normalize = _load_normalizers()["_normalize_studio_preferences"]
+        saved = normalize({"music_defaults_version": 1, "director_music_model": "yue2"})
+        saved = normalize({"director_music_model": "minimax_music3"}, current=saved)
+        restored = normalize({"audio_sub_mode": "music"}, current=json.loads(json.dumps(saved)))
+        self.assertEqual(restored["music_defaults_version"], 1)
+        self.assertEqual(restored["director_music_model"], "minimax_music3")
+        for value in (True, -1, 1.5, "1", None):
+            with self.assertRaises(ValueError):
+                normalize({"music_defaults_version": value})
+
+    def test_music_clip_maximum_round_trip_and_legacy_saves(self):
+        normalize = _load_normalizers()["_normalize_studio_preferences"]
+        for value in (None, 2.0, 124 / 24):
+            saved = normalize({"director_music_clip_seconds": value})
+            restored = normalize(json.loads(json.dumps(saved)))
+            self.assertEqual(restored["director_music_clip_seconds"], value)
+            self.assertEqual(normalize({"generation_mode": "audio"}, current=restored)["director_music_clip_seconds"], value)
+        for bad in (True, 0, -1, 301, "6", float("nan"), float("inf")):
+            with self.subTest(value=bad), self.assertRaises(ValueError):
+                normalize({"director_music_clip_seconds": bad})
+
     def test_backend_normalizes_safe_preferences_only(self):
         normalize = _load_normalizers()["_normalize_studio_preferences"]
         result = normalize({
@@ -76,6 +108,21 @@ class TestStudioPreferencePersistence(unittest.TestCase):
         for bad in (None, [], {"": 8}, {"model": True}, {"model": 5.5}, {"model": 0}, {"model": 1001}, {"model": "12"}, {"model": float("nan")}, {"model": float("inf")}):
             with self.subTest(value=bad), self.assertRaises(ValueError):
                 normalize({"inference_steps_per_model": bad})
+
+    def test_enhancement_default_is_explicit_and_survives_unrelated_saves(self):
+        normalize = _load_normalizers()["_normalize_studio_preferences"]
+        self.assertNotIn("enhance_on_generation_default", normalize({}))
+        for enabled in (True, False):
+            saved = normalize({"enhance_on_generation_default": enabled, "enhanceOnGeneration": not enabled})
+            restored = normalize(json.loads(json.dumps(saved)))
+            self.assertEqual(restored, {"enhance_on_generation_default": enabled})
+            self.assertEqual(normalize({"generation_mode": "image"}, current=restored)["enhance_on_generation_default"], enabled)
+
+    def test_enhancement_default_rejects_non_boolean_opt_in(self):
+        normalize = _load_normalizers()["_normalize_studio_preferences"]
+        for bad in (None, 0, 1, "true", "false", [], {}):
+            with self.subTest(value=bad), self.assertRaises(ValueError):
+                normalize({"enhance_on_generation_default": bad})
 
     def test_api_and_store_restore_requested_choices(self):
         launch = _read(_LAUNCH_PATH)

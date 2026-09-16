@@ -1,3 +1,4 @@
+import { galleryOutput, outputIdentity } from '../lib/galleryIdentity'
 import { create } from 'zustand'
 import type { SavedOmniCharacter, TtsVoice } from '../types'
 import { applyTtsVoices, ttsAudioModeForCount, ttsCharacterEnhancePrompt, ttsSpeakingVoiceCount, ttsVoiceLimit, ttsVoicePaths } from '../lib/ttsVoices'
@@ -46,6 +47,9 @@ let _h3WindowOverridesHydrated = false
 let _h3WindowOverrideSaveTask: Promise<void> = Promise.resolve()
 let _studioPreferencesHydrated = false
 let _studioPreferencesSaveTask: Promise<void> = Promise.resolve()
+let _directorMusicClipChanged = false
+let _directorGpuLimitsChanged = false
+let _enhancementDefaultChanged = false
 const STUDIO_VIDEO_CREATE_ROUTE_KEY = 'maestro_studio_video_create_route_v1'
 
 type StudioVideoRoutePreferences = {
@@ -412,6 +416,7 @@ interface PersistedModeSettings {
   audioSubMode?: import('../types').AudioSubMode
   selectedModelPerAudioSubMode?: Partial<Record<import('../types').AudioSubMode, string>>
   inferenceStepsPerModel?: Record<string, number>
+  enhanceOnGenerationDefault?: boolean
   h3OptimizationPreferences?: {
     override_attention?: '' | 'sol' | 'sla' | 'sdpa'
     skip_steps_cache_type?: '' | 'first_block'
@@ -582,6 +587,7 @@ function _saveSettings(
       audioSubMode: state.audioSubMode ?? previous.audioSubMode,
       selectedModelPerAudioSubMode: state.selectedModelPerAudioSubMode ?? previous.selectedModelPerAudioSubMode,
       inferenceStepsPerModel: state.inferenceStepsPerModel ?? previous.inferenceStepsPerModel,
+      enhanceOnGenerationDefault: state.enhanceOnGenerationDefault ?? previous.enhanceOnGenerationDefault,
       h3OptimizationPreferences: state.h3OptimizationPreferences ?? previous.h3OptimizationPreferences,
     }
     // Strip file-bearing / ephemeral fields BEFORE serializing so they
@@ -655,6 +661,7 @@ function _loadSettings(): PersistedModeSettings | null {
         audioSubMode: parsed.audioSubMode,
         selectedModelPerAudioSubMode: parsed.selectedModelPerAudioSubMode || {},
         inferenceStepsPerModel: _normalizeRememberedSteps(parsed.inferenceStepsPerModel),
+        enhanceOnGenerationDefault: parsed.enhanceOnGenerationDefault === true,
         h3OptimizationPreferences: parsed.h3OptimizationPreferences || {},
         _loraFilenameSnapshot: snapshot,
       }
@@ -877,7 +884,7 @@ const audioSubFamilies: ModelFamily[] = [
 // them. Keep the explicit set for one-off ids that don't share a
 // prefix with their line.
 const musicModelTypes = new Set<string>([])
-const musicModelPrefixes = ['ace_step', 'heartmula', 'minimax_music3']
+const musicModelPrefixes = ['ace_step', 'heartmula', 'minimax_music3', 'yue2']
 
 function isMusicModelType(modelType: string): boolean {
   if (musicModelTypes.has(modelType)) return true
@@ -949,6 +956,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
   'ace_step_v1_5_xl_sft',
   'ace_step_v1_5_xl_sft_lm_4b',
   'minimax_music3',
+  'yue2',
   // Audio — SFX
   'mmaudio_v2',
 ])
@@ -962,7 +970,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
  * a user who then disables them stays disabled forever. (This is
  * deliberately narrower than auto-enabling every unknown model — only
  * the curated list's own additions are pushed.) */
-const DEFAULTS_VERSION = 13
+const DEFAULTS_VERSION = 15
 const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   // v1.2.0: the ACE-Step XL SFT pair; LM_4B becomes the music default.
   2: ['ace_step_v1_5_xl_sft', 'ace_step_v1_5_xl_sft_lm_4b'],
@@ -986,16 +994,18 @@ const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   11: ['minimax_h3_fused_turbo', 'minimax_h3_ref2va_fused_turbo'],
   12: ['minimax_h3_vdn', 'minimax_h3_vdn_full', 'minimax_h3_voice_audio'],
   13: ['viggle_animate'],
+  14: ['yue2'],
+  15: ['yue2'], // v2.2 music default; enable once, then preserve user changes.
 }
 const DEFAULTS_VERSION_KEY = 'maestro_defaults_version'
 
-/* The music default changed in v1.2.0 (Turbo LM_4B -> SFT LM_4B).
- * A saved selection equal to the OLD default means the user was riding
- * the default rather than expressing a preference — follow them to the
- * new one, once, at the same version transition. Users who picked any
- * other model keep their choice. */
-const OLD_MUSIC_DEFAULT = 'ace_step_v1_5_xl_turbo_lm_4b'
-const NEW_MUSIC_DEFAULT = 'ace_step_v1_5_xl_sft_lm_4b'
+const DEFAULT_MUSIC_MODEL = 'yue2'
+// Separate from model visibility: enabling a model and selecting a default
+// are different preferences. Persist the migration so later choices survive
+// restarts and changes to Pinokio's browser origin.
+const MUSIC_DEFAULTS_VERSION = 1
+const MUSIC_DEFAULTS_KEY = 'maestro_music_defaults_version'
+let _musicDefaultsVersion = 0
 
 const ENABLED_MODELS_KEY = 'maestro_enabled_models'
 let _initializedMatureModels = new Set<string>()
@@ -1563,7 +1573,9 @@ interface AppState {
   // Retake Dialog
   retakeDialogOpen: boolean
   retakeSourceFile: string | null
-  openRetakeDialog: (filename: string) => void
+  retakeSourceWorkspace?: string
+  retakeSourcePath?: string
+  openRetakeDialog: (filename: string, workspace?: string, path?: string) => void
   closeRetakeDialog: () => void
 
   // CivitAI LoRA Browser
@@ -1594,8 +1606,8 @@ interface AppState {
   loadDirectorQueueEntry: (entryId: string) => Promise<void>
   startDirectorQueue: () => Promise<void>
   pauseDirectorQueue: () => Promise<void>
-  removeDirectorQueueEntry: (entryId: string) => Promise<void>
-  moveDirectorQueueEntry: (entryId: string, direction: -1 | 1) => Promise<void>
+  removeDirectorQueueEntry: (entryId: string, completedOnly?: boolean) => Promise<void>
+  moveDirectorQueueEntry: (entryId: string, direction: number) => Promise<void>
   queueCurrentDirectorPipeline: () => Promise<void>
 
   // Recipes (one-click Studio presets)
@@ -1605,7 +1617,7 @@ interface AppState {
   recipesLoading: boolean
   loadRecipes: () => Promise<void>
   applyRecipe: (id: string) => Promise<{ missing: import('../api/client').RecipeLora[] }>
-  saveRecipeFromOutput: (outputName: string, name: string, description: string, nsfw: boolean) => Promise<void>
+  saveRecipeFromOutput: (outputName: string, name: string, description: string, nsfw: boolean, workspace?: string) => Promise<void>
   deleteRecipe: (id: string) => Promise<void>
   downloadRecipeLora: (lora: import('../api/client').RecipeLora, modelType: string) => Promise<void>
 
@@ -1806,6 +1818,7 @@ interface AppState {
   startStudioQueue: () => Promise<void>
   stopGeneration: (jobId?: string) => void
   dismissJob: (jobId: string) => void
+  clearCompletedJobs: () => Promise<void>
   reconnectJobs: () => Promise<void>
 
   // LoRA state
@@ -1879,6 +1892,7 @@ interface AppState {
   /** Gallery is showing the virtual "Uploads" view (browse-only — the
    *  server-side active workspace, and where generations save, is
    *  untouched). Entered via switchWorkspace('__uploads__'). */
+  browsingAllFolders: boolean
   browsingUploads: boolean
   loadWorkspaces: () => Promise<void>
   switchWorkspace: (name: string) => Promise<void>
@@ -1897,6 +1911,7 @@ interface AppState {
 
   // Outputs
   outputs: OutputFile[]
+  outputsCursor: string | null
   outputsTotal: number
   selectedOutput: number
   setSelectedOutput: (i: number) => void
@@ -1909,16 +1924,16 @@ interface AppState {
   loadOutputs: () => Promise<void>
   loadMoreOutputs: () => Promise<void>
   refreshOutputs: () => Promise<void>
-  toggleFavorite: (name: string) => Promise<void>
+  toggleFavorite: (name: string, workspace?: string) => Promise<void>
 
   // Output metadata (lazy-loaded for selected output)
   selectedOutputMeta: OutputMetadata | null
   metadataLoading: boolean
-  loadOutputMetadata: (name: string) => Promise<void>
+  loadOutputMetadata: (name: string, workspace?: string) => Promise<void>
   loadSettingsFromOutput: () => Promise<void>
   rerollGeneration: () => Promise<void>
-  deleteSelectedOutput: () => Promise<void>
-  rejoinClipGroup: (groupId: string) => Promise<void>
+  deleteSelectedOutput: (target?: OutputFile) => Promise<void>
+  rejoinClipGroup: (groupId: string, workspace?: string) => Promise<void>
 
   // Services config
   servicesConfig: ServicesConfig | null
@@ -1938,7 +1953,13 @@ interface AppState {
   // Prompt enhancement
   isEnhancing: boolean
   promptEnhanceError: string | null
-  enhancePrompt: (ttsMode?: string, planningStyle?: 'faithful' | 'creative') => Promise<void>
+  /** null follows the saved default; a boolean overrides only the next submission. */
+  enhanceOnGeneration: boolean | null
+  enhanceOnGenerationDefault: boolean
+  enhanceOnGenerationRevision: number
+  setEnhanceOnGeneration: (enabled: boolean) => void
+  setEnhanceOnGenerationDefault: (enabled: boolean) => void
+  enhancePrompt: (ttsMode?: string, planningStyle?: 'faithful' | 'creative' | 'adaptive') => Promise<void>
   h3WindowPlan: H3WindowPlan | null
   updateH3WindowPrompt: (index: number, prompt: string) => void
   clearH3WindowPlan: () => void
@@ -1950,6 +1971,8 @@ interface AppState {
   directorAudioPath: string | null
   directorAnalysis: AudioAnalysisResult | null
   directorPlannedClips: PlannedClip[]
+  directorMusicClipSeconds: number | null
+  setDirectorMusicClipSeconds: (seconds: number | null) => void
   directorEnergyBias: number
   directorClipPlans: ClipPlan[]
   directorSceneDescription: string
@@ -2372,6 +2395,7 @@ async function _buildDirectorRestorePatch(
     directorAudioFile: audioPath ? new File([], audioName, { type: 'audio/wav' }) : null,
     directorAnalysis: analysis,
     directorPlannedClips: plannedClips,
+    directorMusicClipSeconds: typeof params.director_music_clip_seconds === "number" ? params.director_music_clip_seconds : null,
     directorEnergyBias: Number(ui.directorEnergyBias || 0),
     directorClipPlans: clipPlans,
     directorClipImages: clipImages,
@@ -2418,7 +2442,7 @@ async function _buildDirectorRestorePatch(
     directorVideoSelfRefiner: Number(ui.directorVideoSelfRefiner ?? params.video_self_refiner ?? 0),
     directorAudioScale: Number(ui.directorAudioScale ?? params.audio_scale ?? 1),
     directorMusicSource: (ui.directorMusicSource as 'upload' | 'generate' | null) || (audioPath ? 'upload' : null),
-    directorMusicModel: String(ui.directorMusicModel || 'ace_step_v1_5_xl_sft_lm_4b'),
+    directorMusicModel: String(ui.directorMusicModel || DEFAULT_MUSIC_MODEL),
     directorSongDescription: String(ui.directorSongDescription || ''),
     directorSongInstrumental: Boolean(ui.directorSongInstrumental),
     directorSongStyle: String(ui.directorSongStyle || ''),
@@ -2557,9 +2581,7 @@ const resolutionMap: Record<ResolutionPreset, Record<AspectRatio, string>> = {
   },
   '720p': {
     'auto': 'auto_720p',
-    // H3 is currently the only model that exposes 21:9. Keep the fallback
-    // canvas on its required 32-pixel lattice if model options are briefly
-    // unavailable while Director/Studio is hydrating.
+    // Shared ultrawide canvas for images and H3, aligned to 32 pixels.
     '21:9': '1632x704',
     '16:9': '1280x720',
     '9:16': '720x1280',
@@ -2625,6 +2647,18 @@ function findResolutionSelection(
   return null
 }
 
+let _galleryRevision = 0
+let _galleryMetadataRevision = 0
+let _galleryMorePending = false
+
+function galleryQuery(state: AppState) {
+  return {
+    workspace: state.browsingAllFolders ? '__all__' : state.browsingUploads ? '__uploads__' : state.activeWorkspace,
+    mediaFilter: state.mediaFilter,
+    search: state.outputSearchQuery.trim() || undefined,
+  }
+}
+
 // Memoization cache for filteredOutputs — ensures stable references
 let _foCachedOutputs: OutputFile[] = []
 let _foCachedFilter: MediaFilter = 'all'
@@ -2672,6 +2706,8 @@ async function _directorTimelineOptions(state: AppState): Promise<api.DirectorTi
     image_model: state.selectedModelPerMode.image || 'flux2_klein_9b',
     audio_path: state.directorAudioPath || undefined,
     director_max_shot_frames: state.directorVideoMaxShotFramesByModel[videoModel],
+    ...(state.directorSkill === 'music_video' && !state.directorSeamless
+      ? {director_music_clip_seconds: state.directorMusicClipSeconds} : {}),
     director_resolution_preset: state.directorResolution,
     director_aspect_ratio: state.directorAspectRatio,
     video_params: { resolution: resolveResolution(options, state.directorResolution, state.directorAspectRatio) },
@@ -2876,7 +2912,25 @@ function _audioSubModeForModel(modelType: string): import('../types').AudioSubMo
   return 'speech'
 }
 
-/** Persist navigation/model choices, step counts and H3 acceleration preferences.
+export function canEnhanceOnGeneration(state: Pick<AppState, 'generationMode' | 'studioVideoWorkflow' | 'studioImageWorkflow'>): boolean {
+  return (state.generationMode === 'video' && ['frames', 'references'].includes(state.studioVideoWorkflow))
+    || (state.generationMode === 'image' && state.studioImageWorkflow === 'generate')
+}
+
+/** Explicit choices apply once. The saved default never rewrites a completed draft. */
+export function shouldEnhanceOnGeneration(state: Pick<AppState,
+  'generationMode' | 'studioVideoWorkflow' | 'studioImageWorkflow' | 'enhanceOnGeneration'
+  | 'enhanceOnGenerationDefault' | 'params' | 'h3WindowPlan'>): boolean {
+  if (!canEnhanceOnGeneration(state)) return false
+  if (state.enhanceOnGeneration !== null) return state.enhanceOnGeneration
+  const draft = state.params._prompt_enhancement
+  const hasEnhancedPrompt = draft?.state === 'complete' && draft.enhanced_prompt === state.params.prompt
+  const hasEnhancedWindows = state.h3WindowPlan?.source_prompt === state.params.prompt
+    && state.h3WindowPlan.planned_by !== 'manual' && state.h3WindowPlan.windows.length > 0
+  return state.enhanceOnGenerationDefault && !hasEnhancedPrompt && !hasEnhancedWindows
+}
+
+/** Persist navigation/model choices, step counts, enhancement and H3 acceleration preferences.
  *  This deliberately does not restore project state, prompts, uploads,
  *  seeds, LoRAs, or other Advanced controls. The server mirror makes the
  *  choices survive Pinokio assigning a different browser origin/port. */
@@ -2887,6 +2941,10 @@ function _persistStickyStudioPreferences(state: AppState) {
       : state.generationMode
   )
   const h3OptimizationPreferences = state.h3OptimizationPreferences
+  // Startup callbacks may save other Studio choices before preferences arrive.
+  // Do not replace a saved opt-in with the store's initial false value.
+  const enhancementDefault = _studioPreferencesHydrated || _enhancementDefaultChanged
+    ? state.enhanceOnGenerationDefault : undefined
   _saveSettings({
     generationMode: durableGenerationMode,
     selectedModelPerMode: state.selectedModelPerMode,
@@ -2898,6 +2956,7 @@ function _persistStickyStudioPreferences(state: AppState) {
     audioSubMode: state.audioSubMode,
     selectedModelPerAudioSubMode: state.selectedModelPerAudioSubMode,
     inferenceStepsPerModel: state.inferenceStepsPerModel,
+    enhanceOnGenerationDefault: enhancementDefault,
     h3OptimizationPreferences,
   }, state.loraIdByFilename)
 
@@ -2914,6 +2973,13 @@ function _persistStickyStudioPreferences(state: AppState) {
     ),
     h3_optimizations: h3OptimizationPreferences,
     inference_steps_per_model: state.inferenceStepsPerModel,
+    enhance_on_generation_default: enhancementDefault,
+    ...(_musicDefaultsVersion > 0 ? {music_defaults_version: _musicDefaultsVersion} : {}),
+    ...(_studioPreferencesHydrated ? {director_music_model: state.directorMusicModel} : {}),
+    ...(_studioPreferencesHydrated || _directorMusicClipChanged
+      ? {director_music_clip_seconds: state.directorMusicClipSeconds} : {}),
+    ...(_studioPreferencesHydrated || _directorGpuLimitsChanged
+      ? {director_max_shot_frames_per_model: state.directorVideoMaxShotFramesByModel} : {}),
   }
   _studioPreferencesSaveTask = _studioPreferencesSaveTask
     .catch(() => { /* a later preference save should still run */ })
@@ -3590,15 +3656,13 @@ export const useStore = create<AppState>((set, get) => ({
     // Determine model for target sub-mode
     const audioSubModeDefaults: Record<import('../types').AudioSubMode, string> = {
       speech: 'kugelaudio_0_open',
-      // XL SFT LM_4B: the premium CFG variant + strongest LM — the
-      // quality default. Turbo variants remain enabled for speed.
-      music: 'ace_step_v1_5_xl_sft_lm_4b',
+      music: DEFAULT_MUSIC_MODEL,
       sfx: 'mmaudio_v2',
       mixer: '',  // Mixer doesn't use a model — it's an ffmpeg-based tool
       revoice: '',  // Revoice is a SeedVC post-processing tool
     }
     const saved = savedModels[subMode]
-    const targetModel = (saved && models.some(m => m.model_type === saved))
+    const targetModel = (saved && get().enabledModels.has(saved) && models.some(m => m.model_type === saved))
       ? saved
       : audioSubModeDefaults[subMode]
     set({ audioSubMode: subMode, selectedModelPerAudioSubMode: savedModels })
@@ -3816,6 +3880,7 @@ export const useStore = create<AppState>((set, get) => ({
           ...(s.params.viggle_character ? {viggle_character: {...s.params.viggle_character, frame_seconds: 0}} : {})})
       }
       if (key === 'prompt') {
+        if (value !== s.params.prompt) delete nextParams._prompt_enhancement
         delete nextParams._h3_original_prompt
         const editedLines = typeof value === 'string'
           ? value.replace(/\r\n?/g, '\n').split('\n').map(line => line.trim()).filter(Boolean)
@@ -4027,7 +4092,7 @@ export const useStore = create<AppState>((set, get) => ({
   // Director Pipeline Dashboard
   retakeDialogOpen: false,
   retakeSourceFile: null,
-  openRetakeDialog: (filename) => set({ retakeDialogOpen: true, retakeSourceFile: filename }),
+  openRetakeDialog: (filename, workspace, path) => set({ retakeDialogOpen: true, retakeSourceFile: filename, retakeSourceWorkspace: workspace, retakeSourcePath: path }),
   closeRetakeDialog: () => set({ retakeDialogOpen: false, retakeSourceFile: null }),
 
   dashboardOpen: false,
@@ -4544,10 +4609,10 @@ export const useStore = create<AppState>((set, get) => ({
       })
     }
   },
-  removeDirectorQueueEntry: async (entryId: string) => {
+  removeDirectorQueueEntry: async (entryId: string, completedOnly = false) => {
     set({ directorQueueLoading: true })
     try {
-      await api.deleteDirectorQueueEntry(entryId)
+      await api.deleteDirectorQueueEntry(entryId, completedOnly)
       if (get().directorQueueEditingEntryId === entryId) {
         set({ directorQueueEditingEntryId: null })
       }
@@ -4559,7 +4624,7 @@ export const useStore = create<AppState>((set, get) => ({
       })
     }
   },
-  moveDirectorQueueEntry: async (entryId: string, direction: -1 | 1) => {
+  moveDirectorQueueEntry: async (entryId: string, direction: number) => {
     const queue = get().directorQueue
     if (!queue) return
     const ids = queue.entries.map(entry => entry.id)
@@ -4660,8 +4725,8 @@ export const useStore = create<AppState>((set, get) => ({
     const missing = (recipe.loras || []).filter(l => !present.has(l.filename))
     return { missing }
   },
-  saveRecipeFromOutput: async (outputName, name, description, nsfw) => {
-    await api.saveRecipeFromOutput({ output_name: outputName, name, description, nsfw })
+  saveRecipeFromOutput: async (outputName, name, description, nsfw, workspace) => {
+    await api.saveRecipeFromOutput({ output_name: outputName, name, description, nsfw, workspace })
     if (get().recipesOpen) get().loadRecipes()
   },
   deleteRecipe: async (id) => {
@@ -5028,7 +5093,6 @@ export const useStore = create<AppState>((set, get) => ({
       // DEFAULTS_VERSION). Fresh installs already start from the full
       // DEFAULT_ENABLED_MODELS list; for them this only stamps the
       // version key.
-      let migrateMusicDefault = false
       try {
         const storedVer = _modelVisibilityHydrated
           ? _modelVisibilityDefaultsVersion
@@ -5052,7 +5116,6 @@ export const useStore = create<AppState>((set, get) => ({
               return { enabledModels: next }
             })
           }
-          migrateMusicDefault = storedVer < 2
           _modelVisibilityDefaultsVersion = DEFAULTS_VERSION
           localStorage.setItem(DEFAULTS_VERSION_KEY, String(DEFAULTS_VERSION))
           _saveEnabledModels(get().enabledModels)
@@ -5072,17 +5135,28 @@ export const useStore = create<AppState>((set, get) => ({
       // a reload felt wrong, so a refresh is a clean slate again.
       const saved = _loadSettings()
       const durableConfigured = studioPreferences?.configured === true
+      if (shouldHydrateStudioPreferences && !_enhancementDefaultChanged) {
+        set({enhanceOnGenerationDefault: (
+          studioPreferences?.enhance_on_generation_default ?? saved?.enhanceOnGenerationDefault
+        ) === true})
+      }
+      if (shouldHydrateStudioPreferences && !_directorMusicClipChanged) {
+        set({directorMusicClipSeconds: studioPreferences?.director_music_clip_seconds ?? null})
+      }
+      if (shouldHydrateStudioPreferences && !_directorGpuLimitsChanged) {
+        set({directorVideoMaxShotFramesByModel: studioPreferences?.director_max_shot_frames_per_model ?? {}})
+      }
       const restoredInferenceSteps = _normalizeRememberedSteps(
         studioPreferences?.inference_steps_per_model ?? saved?.inferenceStepsPerModel,
       )
       set({ inferenceStepsPerModel: restoredInferenceSteps })
-      let selectedModelPerMode: Partial<Record<GenerationMode, string>> = {
+      const selectedModelPerMode: Partial<Record<GenerationMode, string>> = {
         ...(saved?.selectedModelPerMode || {}),
         ...(durableConfigured
           ? studioPreferences.selected_model_per_mode as Partial<Record<GenerationMode, string>>
           : {}),
       }
-      let selectedModelPerAudioSubMode: Partial<Record<import('../types').AudioSubMode, string>> = {
+      const selectedModelPerAudioSubMode: Partial<Record<import('../types').AudioSubMode, string>> = {
         ...(saved?.selectedModelPerAudioSubMode || {}),
         ...(durableConfigured
           ? studioPreferences.selected_model_per_audio_sub_mode as Partial<Record<import('../types').AudioSubMode, string>>
@@ -5127,20 +5201,25 @@ export const useStore = create<AppState>((set, get) => ({
           ? { skip_steps_start_step_perc: h3Preferences.skip_steps_start_step_perc }
           : {}),
       }
-      // v2 migration: users whose saved audio model IS the old music
-      // default follow it to the new default (see NEW_MUSIC_DEFAULT).
-      // (The old-model-params concern the migration used to handle is
-      // gone: saved params no longer rehydrate, and the defaults
-      // hydration below runs on every boot.)
-      if (migrateMusicDefault && selectedModelPerMode.audio === OLD_MUSIC_DEFAULT
-          && models.some(m => m.model_type === NEW_MUSIC_DEFAULT)) {
-        selectedModelPerMode = { ...selectedModelPerMode, audio: NEW_MUSIC_DEFAULT }
-        if (selectedModelPerAudioSubMode.music === OLD_MUSIC_DEFAULT) {
-          selectedModelPerAudioSubMode = {
-            ...selectedModelPerAudioSubMode,
-            music: NEW_MUSIC_DEFAULT,
+      if (shouldHydrateStudioPreferences) {
+        let cachedMusicVersion = 0
+        try { cachedMusicVersion = Number(localStorage.getItem(MUSIC_DEFAULTS_KEY)) || 0 } catch { /* optional cache */ }
+        _musicDefaultsVersion = studioPreferences?.music_defaults_version ?? cachedMusicVersion
+        const migrateMusicDefault = _musicDefaultsVersion < MUSIC_DEFAULTS_VERSION
+          && models.some(model => model.model_type === DEFAULT_MUSIC_MODEL)
+        if (migrateMusicDefault) {
+          selectedModelPerAudioSubMode.music = DEFAULT_MUSIC_MODEL
+          if (restoredAudioSubMode === 'music' || isMusicModelType(rememberedAudioModel)) {
+            selectedModelPerMode.audio = DEFAULT_MUSIC_MODEL
           }
+          const enabled = new Set(get().enabledModels).add(DEFAULT_MUSIC_MODEL)
+          set({ enabledModels: enabled, directorMusicModel: DEFAULT_MUSIC_MODEL })
+          _saveEnabledModels(enabled)
+          _musicDefaultsVersion = MUSIC_DEFAULTS_VERSION
+        } else if (studioPreferences?.director_music_model) {
+          set({directorMusicModel: studioPreferences.director_music_model})
         }
+        try { localStorage.setItem(MUSIC_DEFAULTS_KEY, String(_musicDefaultsVersion)) } catch { /* durable copy remains */ }
       }
       let mode = get().generationMode
       let initialModelType: string
@@ -5219,7 +5298,8 @@ export const useStore = create<AppState>((set, get) => ({
           families,
           models,
           modelsLoaded: true,
-          selectedModelPerMode: { [mode]: initialModelType },
+          selectedModelPerMode: { ...selectedModelPerMode, [mode]: initialModelType },
+          selectedModelPerAudioSubMode,
           ...(mode === 'image' ? { resolutionPreset: 'auto' as ResolutionPreset, aspectRatio: 'auto' as AspectRatio } : {}),
           params: {
             ...s.params,
@@ -5288,9 +5368,15 @@ export const useStore = create<AppState>((set, get) => ({
 
   aspectRatio: '16:9',
   setAspectRatio: (ratio) => {
-    const preset = get().resolutionPreset
-    const resolution = resolveResolution(get().modelOptions, preset, ratio)
+    const state = get()
+    // Auto resolution follows the reference aspect. A fixed image aspect
+    // needs concrete dimensions so the backend can honor the selection.
+    const preset = state.generationMode === 'image'
+      && state.resolutionPreset === 'auto' && ratio !== 'auto'
+      ? '720p' : state.resolutionPreset
+    const resolution = resolveResolution(state.modelOptions, preset, ratio)
     set(s => ({
+      resolutionPreset: preset,
       aspectRatio: ratio,
       params: { ...s.params, resolution },
       h3WindowPlan: null,
@@ -6132,6 +6218,17 @@ export const useStore = create<AppState>((set, get) => ({
     )
     // Freeze the Studio configuration at click time. This matters for the
     // split Add to Queue action: later UI edits must belong to a new job.
+    state = {...state, params: structuredClone(state.params), h3WindowPlan: structuredClone(state.h3WindowPlan)}
+    if (state.params._prompt_enhancement?.enhanced_prompt !== state.params.prompt) {
+      // Recipes/defaults can replace the prompt without using setParam.
+      // Never label an unrelated later brief with an earlier source.
+      delete state.params._prompt_enhancement
+    }
+    const deferredEnhance = shouldEnhanceOnGeneration(state)
+    const clearCapturedEnhancement = () => {
+      if (canEnhanceOnGeneration(state)) set(s => s.enhanceOnGenerationRevision === state.enhanceOnGenerationRevision
+        ? {enhanceOnGeneration: null, enhanceOnGenerationRevision: s.enhanceOnGenerationRevision + 1} : {})
+    }
     const holdForQueue = submissionMode === 'queue'
     const queueSupported = (
       state.generationMode !== 'avatar'
@@ -6143,16 +6240,6 @@ export const useStore = create<AppState>((set, get) => ({
     if (holdForQueue && !queueSupported) {
       console.warn('Add to Queue is not available for this specialized edit workflow yet.')
       return
-    }
-
-    // A held job does not touch the GPU, so keep the prompt LLM resident for
-    // enhancing the next queued prompt. It will be unloaded when the queue is
-    // explicitly started, just like Generate Now.
-    if (!holdForQueue && state.llmStatus?.loaded) {
-      try {
-        await api.unloadLlm()
-        set({ llmStatus: { loaded: false, model_id: null, device: null, provider: '' } })
-      } catch { /* best-effort */ }
     }
 
     // Validate: i2v-only models require a start image — Video mode only.
@@ -6782,15 +6869,17 @@ export const useStore = create<AppState>((set, get) => ({
     // Generate and Add to Queue consume the text/plan already visible in Studio.
     // Older saved Auto/Creative settings must not schedule an unseen LLM pass.
     delete params._deferred_prompt_enhance
+    delete params._enhance_on_generation
+    if (deferredEnhance) params._enhance_on_generation = true
     if (state.generationMode === 'video') {
-      const reviewedH3Plan = state.h3WindowPlan && (
+      const reviewedH3Plan = !deferredEnhance && state.h3WindowPlan && (
         isOmniReference ? state.h3WindowPlan.plan_kind === 'reference_sequence'
           : state.h3WindowPlan.plan_kind !== 'reference_sequence'
       ) ? state.h3WindowPlan : null
-      params.minimax_h3_sequence_prompt_mode = reviewedH3Plan
-        ? (reviewedH3Plan.planning_style === 'creative' ? 'creative' : 'auto') : 'manual'
-      params.minimax_h3_window_storyboard = !!reviewedH3Plan
-      params.ltx_window_prompt_mode = 'manual'
+      params.minimax_h3_sequence_prompt_mode = deferredEnhance ? 'adaptive' : reviewedH3Plan
+        ? (reviewedH3Plan.planning_style === 'adaptive' ? 'adaptive' : reviewedH3Plan.planning_style === 'creative' ? 'creative' : 'auto') : 'manual'
+      params.minimax_h3_window_storyboard = deferredEnhance || !!reviewedH3Plan
+      params.ltx_window_prompt_mode = deferredEnhance ? 'auto' : 'manual'
     }
     if (state.generationMode === 'video') {
       params._studio_video_workflow = state.studioVideoWorkflow
@@ -7313,6 +7402,11 @@ export const useStore = create<AppState>((set, get) => ({
       }
     }
 
+    // Paragraphs in the image composer describe one still, not separate
+    // sliding-window prompts. Otherwise a pasted "Image prompt:" heading
+    // becomes the entire first (and only) image request.
+    if (state.generationMode === 'image') params.multi_prompts_gen_type = 2
+
     // Post-processing settings
     if (state.generationMode !== 'video' && state.generationMode !== 'avatar') delete params.face_refiner
     if (state.generationMode !== 'video') params.temporal_upsampling = ''
@@ -7788,7 +7882,7 @@ export const useStore = create<AppState>((set, get) => ({
       delete params.h3_window_plan
     } else if (state.modelOptions?.sliding_window_auto_prompt_pacing === true) {
       params.minimax_h3_window_storyboard = h3WindowStoryboardActive
-      if (h3WindowStoryboardActive && state.h3WindowPlan) {
+      if (h3WindowStoryboardActive && !deferredEnhance && state.h3WindowPlan) {
         params.h3_window_prompts = state.h3WindowPlan.windows.map(window => window.prompt)
         params.h3_window_plan_signature = state.h3WindowPlan.signature
         params.h3_window_plan = state.h3WindowPlan
@@ -7800,7 +7894,7 @@ export const useStore = create<AppState>((set, get) => ({
       }
     } else if (h3ReferenceSequenceActive) {
       delete params.minimax_h3_window_storyboard
-      if (state.h3WindowPlan?.plan_kind === 'reference_sequence') {
+      if (!deferredEnhance && state.h3WindowPlan?.plan_kind === 'reference_sequence') {
         params.h3_window_prompts = state.h3WindowPlan.windows.map(window => window.prompt)
         params.h3_window_plan_signature = state.h3WindowPlan.signature
         params.h3_window_plan = state.h3WindowPlan
@@ -7882,6 +7976,7 @@ export const useStore = create<AppState>((set, get) => ({
         ltx_window_plan,
       } = await api.submitGeneration(params, holdForQueue)
 
+      clearCapturedEnhancement()
       // Also remember steps used by an applied recipe or restored output,
       // without re-saving the rest of that job's working state.
       _rememberInferenceSteps(get, set, String(params.model_type || ''), params.num_inference_steps)
@@ -7967,6 +8062,7 @@ export const useStore = create<AppState>((set, get) => ({
               error: status.error,
               oomInfo: status.oom_info ?? null,
               h3WindowPlan: status.h3_window_plan ?? j.h3WindowPlan ?? null,
+              enhancement: status.enhancement ?? j.enhancement,
               ..._adaptiveEtaJobFields(status),
             }),
           }))
@@ -7980,7 +8076,7 @@ export const useStore = create<AppState>((set, get) => ({
             clearInterval(pollInterval)
             // Completed job — remove the placeholder, real output now in gallery
             set(s => {
-              const remaining = s.jobs.filter(j => j.id !== job_id)
+              const remaining = s.jobs.filter(j => j.id !== job_id || !!j.enhancement)
               return {
                 jobs: remaining,
                 isGenerating: remaining.some(j => j.status === 'running' || j.status === 'queued'),
@@ -8023,6 +8119,7 @@ export const useStore = create<AppState>((set, get) => ({
             job.client_submission_id === clientSubmissionId
           ))
           if (accepted) {
+            clearCapturedEnhancement()
             set(s => ({
               jobs: s.jobs.filter(job => job.id !== pendingJobId),
             }))
@@ -8042,12 +8139,6 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   startStudioQueue: async () => {
-    if (get().llmStatus?.loaded) {
-      try {
-        await api.unloadLlm()
-        set({ llmStatus: { loaded: false, model_id: null, device: null, provider: '' } })
-      } catch { /* best-effort; generation has its own memory safeguards */ }
-    }
     const result = await api.startStudioQueue()
     if (result.job_ids.length === 0) return
     const released = new Set(result.job_ids)
@@ -8060,29 +8151,30 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   stopGeneration: (jobId) => {
-    if (jobId) {
-      // Cancel specific job on backend, then remove from UI
-      api.cancelJob(jobId).catch(e => console.error('Cancel failed:', e))
-      set(s => {
-        const remaining = s.jobs.filter(j => j.id !== jobId)
-        return {
-          jobs: remaining,
-          isGenerating: remaining.some(j => j.status === 'queued' || j.status === 'running'),
-        }
+    const targets = get().jobs.filter(j => (!jobId || j.id === jobId)
+      && ['held', 'queued', 'running'].includes(j.status))
+    targets.forEach(job => {
+      void api.cancelJob(job.id).catch(error => {
+        console.error('Cancel failed:', error)
+        void get().reconnectJobs()
       })
-    } else {
-      // Cancel all jobs
-      const jobs = get().jobs
-      jobs.forEach(j => {
-        if (j.id) api.cancelJob(j.id).catch(() => {})
-      })
-      set({ jobs: [], isGenerating: false })
-    }
+    })
+    const ids = new Set(targets.map(job => job.id))
+    set(s => {
+      const jobs = s.jobs.filter(j => !ids.has(j.id) || j.enhancement)
+        .map(j => ids.has(j.id) ? {...j, status: 'cancelled' as const, phase: '', message: 'Cancelled'} : j)
+      return {jobs, isGenerating: jobs.some(j => j.status === 'queued' || j.status === 'running')}
+    })
   },
 
-  // UI-only removal of a job tile (e.g. dismissing a failed/cancelled
-  // placeholder). No backend call — the job is already terminal.
+  // Persist dismissal so saved enhancement jobs do not reappear on refresh.
   dismissJob: (jobId) => {
+    if (get().jobs.find(j => j.id === jobId)?.enhancement) {
+      void api.dismissJob(jobId).catch(error => {
+        console.error('Could not dismiss saved job:', error)
+        void get().reconnectJobs()
+      })
+    }
     set(s => {
       const remaining = s.jobs.filter(j => j.id !== jobId)
       return {
@@ -8090,6 +8182,41 @@ export const useStore = create<AppState>((set, get) => ({
         isGenerating: remaining.some(j => j.status === 'running' || j.status === 'queued'),
       }
     })
+  },
+
+  clearCompletedJobs: async () => {
+    const snapshot = get()
+    const completedJobs = snapshot.jobs.filter(job => job.status === 'completed')
+    const completedProjects = snapshot.directorQueue?.entries.filter(entry => entry.status === 'completed') || []
+    const clearedJobs = new Set<string>()
+    const clearedProjects = new Set<string>()
+    let failed = 0
+    // Only clear the history selected at click time. Leave newly completed
+    // work, failed/cancelled jobs, media files, and Director projects intact.
+    // Sequential requests avoid flooding the server with a long history.
+    for (const job of completedJobs) {
+      if (get().jobs.find(current => current.id === job.id)?.status !== 'completed') continue
+      try {
+        if (job.enhancement) await api.dismissJob(job.id)
+        clearedJobs.add(job.id)
+      } catch { failed++ }
+    }
+    for (const entry of completedProjects) {
+      if (get().directorQueue?.entries.find(current => current.id === entry.id)?.status !== 'completed') continue
+      try {
+        await api.deleteDirectorQueueEntry(entry.id, true)
+        clearedProjects.add(entry.id)
+      } catch { failed++ }
+    }
+    set(s => ({
+      jobs: s.jobs.filter(job => job.status !== 'completed' || !clearedJobs.has(job.id)),
+      directorQueue: s.directorQueue ? {...s.directorQueue,
+        entries: s.directorQueue.entries.filter(entry => entry.status !== 'completed' || !clearedProjects.has(entry.id)),
+      } : null,
+      directorQueueEditingEntryId: s.directorQueueEditingEntryId && clearedProjects.has(s.directorQueueEditingEntryId)
+        ? null : s.directorQueueEditingEntryId,
+    }))
+    if (failed) throw new Error(`Could not clear ${failed} completed ${failed === 1 ? 'entry' : 'entries'}. Please try again.`)
   },
 
   reconnectJobs: async () => {
@@ -8114,6 +8241,7 @@ export const useStore = create<AppState>((set, get) => ({
             error: j.error,
             oomInfo: (j as { oom_info?: import('../types').OomInfo | null }).oom_info ?? null,
             h3WindowPlan: j.h3_window_plan ?? null,
+            enhancement: j.enhancement,
             ..._adaptiveEtaJobFields(j),
           }))
         if (newJobs.length > 0) {
@@ -8143,13 +8271,14 @@ export const useStore = create<AppState>((set, get) => ({
                     error: status.error,
                     oomInfo: status.oom_info ?? null,
                     h3WindowPlan: status.h3_window_plan ?? j.h3WindowPlan ?? null,
+              enhancement: status.enhancement ?? j.enhancement,
                     ..._adaptiveEtaJobFields(status),
                   }),
                 }))
                 if (status.status === 'completed' || status.status === 'failed' || status.status === 'cancelled') {
                   clearInterval(pollInterval)
                   set(s => {
-                    const remaining = s.jobs.filter(j => j.id !== job.id)
+                    const remaining = s.jobs.filter(j => j.id !== job.id || !!j.enhancement)
                     return {
                       jobs: remaining,
                       isGenerating: remaining.some(
@@ -8163,7 +8292,7 @@ export const useStore = create<AppState>((set, get) => ({
                 // Job may have been cleaned up
                 clearInterval(pollInterval)
                 set(s => {
-                  const remaining = s.jobs.filter(j => j.id !== job.id)
+                  const remaining = s.jobs.filter(j => j.id !== job.id || !!j.enhancement)
                   return {
                     jobs: remaining,
                     isGenerating: remaining.some(
@@ -8822,6 +8951,10 @@ export const useStore = create<AppState>((set, get) => ({
         // (20 steps) arrive after the user checks Turbo (currently 8-step PDD).
         if (get().params.minimax_h3_turbo_mode === true) {
           paramUpdates.num_inference_steps = selectedPreset.steps
+          const selectedRecipe = options.minimax_h3_turbo.presets?.find(preset => preset.id === selectedPreset.id)
+          if (selectedRecipe?.generation_settings?.guidance_scale != null) {
+            paramUpdates.guidance_scale = selectedRecipe.generation_settings.guidance_scale
+          }
         }
       } else {
         // Model switches preserve most Studio params. Never carry the Full-H3
@@ -9036,6 +9169,18 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   // Prompt enhancement
+  enhanceOnGeneration: null,
+  enhanceOnGenerationDefault: false,
+  enhanceOnGenerationRevision: 0,
+  setEnhanceOnGeneration: enabled => set(s => ({
+    enhanceOnGeneration: enabled, enhanceOnGenerationRevision: s.enhanceOnGenerationRevision + 1,
+  })),
+  setEnhanceOnGenerationDefault: enabled => {
+    _enhancementDefaultChanged = true
+    set(s => ({enhanceOnGenerationDefault: enabled, enhanceOnGeneration: null,
+      enhanceOnGenerationRevision: s.enhanceOnGenerationRevision + 1}))
+    _persistStickyStudioPreferences(get())
+  },
   isEnhancing: false,
   promptEnhanceError: null,
   h3WindowPlan: null,
@@ -9053,7 +9198,7 @@ export const useStore = create<AppState>((set, get) => ({
     }
   }),
   clearH3WindowPlan: () => set({ h3WindowPlan: null }),
-  enhancePrompt: async (ttsMode?: string, planningStyle: 'faithful' | 'creative' = 'faithful') => {
+  enhancePrompt: async (ttsMode?: string, requestedStyle: 'faithful' | 'creative' | 'adaptive' = 'adaptive') => {
     let state = get()
     const primaryStudioCreate = (
       state.generationMode === 'video'
@@ -9073,7 +9218,7 @@ export const useStore = create<AppState>((set, get) => ({
       await state.loadModelOptions(selectedModelType)
       state = get()
       if (state.modelOptions?.model_type !== selectedModelType) {
-        set({ promptEnhanceError: 'The selected video model is still loading. Try Prompt Enhance again in a moment.' })
+        set({ promptEnhanceError: 'The selected model is still loading. Try Prompt Enhance again in a moment.' })
         return
       }
     }
@@ -9098,10 +9243,14 @@ export const useStore = create<AppState>((set, get) => ({
       return
     }
     const { generationMode, startImage, endImage, imageRefs } = state
+    const isH3Writer = String(state.modelOptions?.architecture || selectedModelDefinition?.architecture || '').startsWith('minimax_h3')
+    const planningStyle = requestedStyle === 'adaptive' && !isH3Writer ? 'faithful' : requestedStyle
+    const clearCapturedEnhancement = () => set(s => s.enhanceOnGenerationRevision === state.enhanceOnGenerationRevision
+      ? {enhanceOnGeneration: null, enhanceOnGenerationRevision: s.enhanceOnGenerationRevision + 1} : {})
     // Enhancement style belongs to this explicit click, not a future Generate.
     const params = { ...state.params,
       ...(generationMode === 'video' ? {
-        minimax_h3_sequence_prompt_mode: planningStyle === 'creative' ? 'creative' as const : 'auto' as const,
+        minimax_h3_sequence_prompt_mode: planningStyle === 'adaptive' ? 'adaptive' as const : planningStyle === 'creative' ? 'creative' as const : 'auto' as const,
         minimax_h3_window_storyboard: true,
         ltx_window_prompt_mode: planningStyle === 'creative' ? 'creative' as const : 'auto' as const,
       } : {}),
@@ -9122,7 +9271,7 @@ export const useStore = create<AppState>((set, get) => ({
     if (generationWorkInFlight) {
       set({
         isEnhancing: false,
-        promptEnhanceError: 'A generation is already using or waiting for the GPU. Wait for it to finish, then press Enhance to review the improved prompt before generating.',
+        promptEnhanceError: 'A generation is already using or waiting for the GPU. Choose Enhance on generation from the wand menu, then Generate or Add to Queue.',
       })
       return
     }
@@ -9297,9 +9446,6 @@ export const useStore = create<AppState>((set, get) => ({
       ) || params.prompt
 
       if (shouldPlanH3Sequence) {
-        const planningStyle = params.minimax_h3_sequence_prompt_mode === 'creative'
-          ? 'creative'
-          : 'faithful'
         const plan = await api.planH3Sequence({
           prompt: h3PlanningSource,
           model_type: params.model_type,
@@ -9328,6 +9474,7 @@ export const useStore = create<AppState>((set, get) => ({
           },
           isEnhancing: false,
         }))
+        clearCapturedEnhancement()
         return
       }
 
@@ -9344,9 +9491,6 @@ export const useStore = create<AppState>((set, get) => ({
         // Multi-window H3 instead needs a structured storyboard whose prompts
         // contain only their own local actions. Endpoint and injected images
         // were collected above in the runtime's stable presentation order.
-        const planningStyle = params.minimax_h3_sequence_prompt_mode === 'creative'
-          ? 'creative'
-          : 'faithful'
         const plan = await api.planH3Windows({
           prompt: h3PlanningSource,
           model_type: params.model_type,
@@ -9383,6 +9527,7 @@ export const useStore = create<AppState>((set, get) => ({
           },
           isEnhancing: false,
         }))
+        clearCapturedEnhancement()
         return
       }
 
@@ -9441,14 +9586,25 @@ export const useStore = create<AppState>((set, get) => ({
         params: {
           ...s.params,
           prompt: preserveLtxPlan ? enhancedLtxLines.join('\n') : result.enhanced,
+          _prompt_enhancement: {
+            version: 1,
+            state: 'complete',
+            original_prompt: params._prompt_enhancement?.enhanced_prompt === params.prompt
+              ? params._prompt_enhancement.original_prompt || params.prompt : params.prompt,
+            enhanced_prompt: preserveLtxPlan ? enhancedLtxLines.join('\n') : result.enhanced,
+            warnings: result.warnings || [],
+          },
           ...(preserveH3Source ? { _h3_original_prompt: preserveH3Source } : {}),
           ...(preserveLtxSource ? { _ltx_original_prompt: ltxSourcePrompt } : {}),
           ...(preserveLtxPlan ? {
             ltx_window_prompts: enhancedLtxLines,
           } : {}),
         },
+        promptEnhanceError: result.warnings?.length
+          ? `Review this AI draft before generating\n${result.warnings.join('\n')}` : null,
         isEnhancing: false,
       }))
+      clearCapturedEnhancement()
       // Auto-parse speaker names from the enhanced text whenever there are
       // voice slots to fill. Previously gated to dialogue mode only; the user
       // expects monologue enhance ("Peter: Hello world.") to also populate
@@ -9475,6 +9631,13 @@ export const useStore = create<AppState>((set, get) => ({
   directorAudioPath: null,
   directorAnalysis: null,
   directorPlannedClips: [],
+  directorMusicClipSeconds: null,
+  setDirectorMusicClipSeconds: (seconds) => {
+    if (seconds !== null && (!Number.isFinite(seconds) || seconds <= 0)) return
+    _directorMusicClipChanged = true
+    set({directorMusicClipSeconds: seconds})
+    _persistStickyStudioPreferences(get())
+  },
   directorEnergyBias: 0,
   directorClipPlans: [],
   directorSceneDescription: '',
@@ -9534,7 +9697,7 @@ export const useStore = create<AppState>((set, get) => ({
   directorLlmLog: [],
   directorSkill: null,
   directorMusicSource: null,
-  directorMusicModel: 'ace_step_v1_5_xl_sft_lm_4b',
+  directorMusicModel: DEFAULT_MUSIC_MODEL,
   directorSongDescription: '',
   directorSongInstrumental: false,
   directorSongStyle: '',
@@ -9542,13 +9705,15 @@ export const useStore = create<AppState>((set, get) => ({
   directorSongDuration: 120,
   directorTrackGenerating: false,
   setDirectorMusicSource: (s) => set({ directorMusicSource: s }),
-  setDirectorMusicModel: (modelType) => set({
-    directorMusicModel: modelType,
-    // The two model families use different caption contracts. Never retain a
-    // hidden song plan written for the previously selected generator.
-    directorSongStyle: '',
-    directorSongLyrics: '',
-  }),
+  setDirectorMusicModel: (modelType) => {
+    set({
+      directorMusicModel: modelType,
+      // Do not retain a song plan written for the previous generator.
+      directorSongStyle: '',
+      directorSongLyrics: '',
+    })
+    _persistStickyStudioPreferences(get())
+  },
   setDirectorSongDescription: (v) => set({ directorSongDescription: v }),
   setDirectorSongInstrumental: (v) => set({ directorSongInstrumental: v }),
   setDirectorSongStyle: (v) => set({ directorSongStyle: v }),
@@ -9641,15 +9806,17 @@ export const useStore = create<AppState>((set, get) => ({
     }
     return { directorVideoInferenceStepsByModel: next }
   }),
-  setDirectorVideoMaxShotFrames: (modelType, frames) => set(s => {
-    const next = { ...s.directorVideoMaxShotFramesByModel }
+  setDirectorVideoMaxShotFrames: (modelType, frames) => {
+    _directorGpuLimitsChanged = true
+    const next = { ...get().directorVideoMaxShotFramesByModel }
     if (frames == null || !Number.isFinite(frames) || frames <= 0) {
       delete next[modelType]
     } else {
       next[modelType] = Math.round(frames)
     }
-    return { directorVideoMaxShotFramesByModel: next }
-  }),
+    set({ directorVideoMaxShotFramesByModel: next })
+    _persistStickyStudioPreferences(get())
+  },
   setDirectorH3TurboMode: (modelType, enabled) => set(s => ({
     directorH3TurboModeByModel: {
       ...s.directorH3TurboModeByModel,
@@ -11045,6 +11212,7 @@ export const useStore = create<AppState>((set, get) => ({
   // Workspaces
   workspaces: [],
   activeWorkspace: 'default',
+  browsingAllFolders: false,
   browsingUploads: false,
   loadWorkspaces: async () => {
     try {
@@ -11058,14 +11226,14 @@ export const useStore = create<AppState>((set, get) => ({
     // Virtual "Uploads" view: browse the uploads folder WITHOUT touching
     // the server-side active workspace — generations keep saving to the
     // real workspace; uploads are read-only in the gallery.
-    if (name === '__uploads__') {
-      set({ browsingUploads: true, outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
+    if (name === '__uploads__' || name === '__all__') {
+      set({ browsingAllFolders: name === '__all__', browsingUploads: name === '__uploads__', outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
       get().loadOutputs()
       return
     }
     try {
       await api.setActiveWorkspace(name)
-      set({ browsingUploads: false, activeWorkspace: name, outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
+      set({ browsingAllFolders: false, browsingUploads: false, activeWorkspace: name, outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
       get().loadOutputs()
       get().loadWorkspaces()
     } catch (e) {
@@ -11076,7 +11244,7 @@ export const useStore = create<AppState>((set, get) => ({
     try {
       await api.createWorkspace(name)
       await api.setActiveWorkspace(name)
-      set({ browsingUploads: false, activeWorkspace: name, outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
+      set({ browsingAllFolders: false, browsingUploads: false, activeWorkspace: name, outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
       get().loadOutputs()
       get().loadWorkspaces()
     } catch (e) {
@@ -11092,7 +11260,9 @@ export const useStore = create<AppState>((set, get) => ({
     // widen it by force-resetting state the server never changed).
     const result = await api.deleteWorkspace(name)
     if (result.switched_to_default) {
-      set({ browsingUploads: false, activeWorkspace: 'default', outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
+      set({ browsingAllFolders: false, browsingUploads: false, activeWorkspace: 'default', outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
+      get().loadOutputs()
+    } else if (get().browsingAllFolders) {
       get().loadOutputs()
     }
     get().loadWorkspaces()
@@ -11110,6 +11280,7 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   outputs: [],
+  outputsCursor: null,
   outputsTotal: 0,
   selectedOutput: 0,
   setSelectedOutput: (i) => {
@@ -11117,38 +11288,21 @@ export const useStore = create<AppState>((set, get) => ({
     const outputs = get().filteredOutputs()
     const output = outputs[i]
     if (output) {
-      get().loadOutputMetadata(output.name)
+      get().loadOutputMetadata(output.name, output.workspace)
     } else {
+      ++_galleryMetadataRevision
       set({ selectedOutputMeta: null })
     }
   },
   mediaFilter: 'all',
   outputSearchQuery: '',
   setMediaFilter: (f) => {
-    const prevFilter = get().mediaFilter
-    set({ mediaFilter: f, selectedOutput: 0 })
-    // Backend-filtered modes: reload from server to get ALL matches
-    const backendFilters: MediaFilter[] = ['favorites', 'multiclip']
-    if (backendFilters.includes(f) || backendFilters.includes(prevFilter)) {
-      get().loadOutputs()
-      return
-    }
-    // Load metadata for first item in new filtered list
-    const filtered = get().filteredOutputs()
-    if (filtered.length > 0) {
-      get().loadOutputMetadata(filtered[0].name)
-    } else {
-      set({ selectedOutputMeta: null })
-    }
+    set({ mediaFilter: f, selectedOutput: 0, selectedOutputMeta: null })
+    void get().loadOutputs()
   },
   setOutputSearchQuery: (q) => {
-    set({ outputSearchQuery: q, selectedOutput: 0 })
-    if (q.trim()) {
-      get().loadOutputs()
-    } else if (get().mediaFilter === 'all') {
-      // Clear search: reload normal paginated view
-      get().loadOutputs()
-    }
+    set({ outputSearchQuery: q, selectedOutput: 0, selectedOutputMeta: null })
+    void get().loadOutputs()
   },
   filteredOutputs: () => {
     const { outputs, mediaFilter } = get()
@@ -11157,127 +11311,76 @@ export const useStore = create<AppState>((set, get) => ({
 
   outputsLoading: false,
   loadOutputs: async () => {
-    const PAGE_SIZE = 100
-    const { mediaFilter, outputSearchQuery, browsingUploads } = get()
-    const isBackendFilter = mediaFilter === 'favorites' || mediaFilter === 'multiclip' || outputSearchQuery.trim()
-    const ws = browsingUploads ? '__uploads__' : undefined
-    set({ outputsLoading: true })
+    const revision = ++_galleryRevision
+    ++_galleryMetadataRevision
+    const options = galleryQuery(get())
+    set({ outputsLoading: true, selectedOutputMeta: null })
     try {
-      const { outputs: apiOutputs, total } = isBackendFilter
-        ? await api.fetchOutputs(0, 0, {
-            favoritesOnly: mediaFilter === 'favorites',
-            multiclipOnly: mediaFilter === 'multiclip',
-            search: outputSearchQuery.trim() || undefined,
-            workspace: ws,
-          })
-        : await api.fetchOutputs(PAGE_SIZE, 0, { workspace: ws })
-      const outputs: OutputFile[] = apiOutputs.map(o => ({
-        name: o.name,
-        url: o.url,
-        type: o.type,
-        mode: (o.mode as OutputFile['mode']) || null,
-        edit_sub_mode: (o.edit_sub_mode as OutputFile['edit_sub_mode']) || null,
-        favorite: o.favorite || false,
-        size: o.size,
-        created_at: o.created_at,
-        metadata_ready: o.metadata_ready,
-        metadata_updated_at: o.metadata_updated_at,
-      }))
-      set({ outputs, outputsTotal: total, selectedOutput: 0, outputsLoading: false })
-      if (outputs.length > 0) {
-        get().loadOutputMetadata(outputs[0].name)
-      }
+      const result = await api.fetchOutputs(100, 0, options)
+      if (revision !== _galleryRevision || JSON.stringify(options) !== JSON.stringify(galleryQuery(get()))) return
+      const outputs = result.outputs.map(galleryOutput)
+      set({ outputs, outputsTotal: result.total, outputsCursor: result.next_cursor || null,
+            selectedOutput: 0, selectedOutputMeta: null, outputsLoading: false })
+      if (outputs[0]) void get().loadOutputMetadata(outputs[0].name, outputs[0].workspace)
     } catch (e) {
       console.error('Failed to load outputs:', e)
-      set({ outputsLoading: false })
+    } finally {
+      if (revision === _galleryRevision) set({ outputsLoading: false })
     }
   },
 
-  // Load next page of outputs (infinite scroll)
   loadMoreOutputs: async () => {
-    const PAGE_SIZE = 100
-    const current = get().outputs
-    const total = get().outputsTotal
-    if (current.length >= total) return // All loaded
+    const state = get()
+    if (_galleryMorePending || state.outputsLoading || state.outputs.length >= state.outputsTotal) return
+    const revision = _galleryRevision
+    const options = galleryQuery(state)
+    _galleryMorePending = true
     try {
-      const { outputs: apiOutputs, total: newTotal } = await api.fetchOutputs(PAGE_SIZE, current.length, {
-        workspace: get().browsingUploads ? '__uploads__' : undefined,
-      })
-      const more: OutputFile[] = apiOutputs.map(o => ({
-        name: o.name,
-        url: o.url,
-        type: o.type,
-        mode: (o.mode as OutputFile['mode']) || null,
-        edit_sub_mode: (o.edit_sub_mode as OutputFile['edit_sub_mode']) || null,
-        favorite: o.favorite || false,
-        size: o.size,
-        created_at: o.created_at,
-        metadata_ready: o.metadata_ready,
-        metadata_updated_at: o.metadata_updated_at,
-      }))
-      // Deduplicate (in case items shifted during generation)
-      const existingNames = new Set(current.map(o => o.name))
-      const unique = more.filter(o => !existingNames.has(o.name))
-      if (unique.length > 0) {
-        set({ outputs: [...current, ...unique], outputsTotal: newTotal })
-      }
-    } catch {
-      // Silent fail
-    }
-  },
-
-  // Incremental refresh: only fetch the newest items to detect new outputs during generation
-  refreshOutputs: async () => {
-    try {
-      // Only fetch first page — new outputs appear at the top (newest first)
-      const { outputs: apiOutputs, total } = await api.fetchOutputs(50, 0)
-      const fresh: OutputFile[] = apiOutputs.map(o => ({
-        name: o.name,
-        url: o.url,
-        type: o.type,
-        mode: (o.mode as OutputFile['mode']) || null,
-        edit_sub_mode: (o.edit_sub_mode as OutputFile['edit_sub_mode']) || null,
-        favorite: o.favorite || false,
-        size: o.size,
-        created_at: o.created_at,
-        metadata_ready: o.metadata_ready,
-        metadata_updated_at: o.metadata_updated_at,
-      }))
+      const result = await api.fetchOutputs(100, state.outputsCursor ? 0 : state.outputs.length,
+        { ...options, cursor: state.outputsCursor || undefined })
+      if (revision !== _galleryRevision || JSON.stringify(options) !== JSON.stringify(galleryQuery(get()))) return
       const current = get().outputs
-      const currentNames = new Set(current.map(o => o.name))
-      const newItems = fresh.filter(o => !currentNames.has(o.name))
-      const freshByName = new Map(fresh.map(output => [output.name, output]))
-      // Existing files can gain their authoritative sidecar after first being
-      // shown from embedded metadata. Merge refreshed entries as well as new
-      // ones so mounted cards observe metadata_ready changing false -> true.
-      let metadataChanged = false
-      const refreshedCurrent = current.map(output => {
-        const freshOutput = freshByName.get(output.name)
-        if (!freshOutput) return output
-        if (
-          freshOutput.metadata_ready !== output.metadata_ready
-          || freshOutput.metadata_updated_at !== output.metadata_updated_at
-        ) {
-          metadataChanged = true
-          return freshOutput
-        }
-        return output
-      })
-      if (newItems.length > 0 || metadataChanged) {
-        const merged = [...newItems, ...refreshedCurrent]
-        const sel = get().selectedOutput
-        set({ outputs: merged, outputsTotal: total, selectedOutput: sel + newItems.length })
-      }
-    } catch {
-      // Silent fail for background refresh
+      const identities = new Set(current.map(outputIdentity))
+      const more = result.outputs.map(galleryOutput).filter(o => !identities.has(outputIdentity(o)))
+      set({ outputs: [...current, ...more], outputsTotal: result.total, outputsCursor: result.next_cursor || null })
+    } catch (e) {
+      console.error('Failed to load more outputs:', e)
+    } finally {
+      _galleryMorePending = false
     }
   },
 
-  toggleFavorite: async (name) => {
+  refreshOutputs: async () => {
+    const revision = _galleryRevision
+    const options = galleryQuery(get())
     try {
-      const result = await api.toggleFavorite(name)
+      const result = await api.fetchOutputs(100, 0, options)
+      if (revision !== _galleryRevision || JSON.stringify(options) !== JSON.stringify(galleryQuery(get()))) return
+      const fresh = result.outputs.map(galleryOutput)
+      const current = get().outputs
+      const selected = get().filteredOutputs()[get().selectedOutput]
+      const refreshed = new Map(fresh.map(output => [outputIdentity(output), output]))
+      const oldIds = new Set(current.map(outputIdentity))
+      const newItems = fresh.filter(output => !oldIds.has(outputIdentity(output)))
+      const merged = [...newItems, ...current.map(output => refreshed.get(outputIdentity(output)) || output)]
+      if (selected) {
+        const selectedIndex = merged.findIndex(output => outputIdentity(output) === outputIdentity(selected))
+        set({ selectedOutput: Math.max(0, selectedIndex) })
+      }
+      set({ outputs: merged, outputsTotal: result.total,
+            ...(current.length === 0 ? { outputsCursor: result.next_cursor || null } : {}) })
+    } catch {
+      // A transient disconnect must not clear the current library.
+    }
+  },
+
+  toggleFavorite: async (name, workspace) => {
+    const origin = workspace || get().activeWorkspace
+    try {
+      const result = await api.toggleFavorite(name, origin)
       set(s => ({
-        outputs: s.outputs.map(o => o.name === name ? { ...o, favorite: result.favorite } : o),
+        outputs: s.outputs.map(o => o.name === name && (o.workspace || s.activeWorkspace) === origin
+          ? { ...o, favorite: result.favorite } : o),
       }))
     } catch (e) {
       console.error('Failed to toggle favorite:', e)
@@ -11288,16 +11391,19 @@ export const useStore = create<AppState>((set, get) => ({
   selectedOutputMeta: null,
   metadataLoading: false,
 
-  loadOutputMetadata: async (name) => {
+  loadOutputMetadata: async (name, workspace) => {
+    const revision = ++_galleryMetadataRevision
     set({ metadataLoading: true, selectedOutputMeta: null })
     try {
-      const meta = await api.fetchOutputMetadata(name)
+      const meta = await api.fetchOutputMetadata(name, workspace)
+      if (revision !== _galleryMetadataRevision) return
       set({ selectedOutputMeta: meta, metadataLoading: false })
     } catch (e) {
       // Diagnostic: surface metadata-fetch failures (the usual cause of a
       // "Load Settings does nothing" report on slow/VPN links) instead of
       // swallowing them silently.
       console.error('[LoadSettings] fetchOutputMetadata FAILED for', name, '-', e)
+      if (revision !== _galleryMetadataRevision) return
       set({ selectedOutputMeta: null, metadataLoading: false })
     }
   },
@@ -11315,7 +11421,7 @@ export const useStore = create<AppState>((set, get) => ({
       const pendingOutput = get().filteredOutputs()[get().selectedOutput]
       console.log('[LoadSettings] no meta yet — on-demand fetch for:', pendingOutput?.name ?? '(no output at index)')
       if (pendingOutput) {
-        await get().loadOutputMetadata(pendingOutput.name)
+        await get().loadOutputMetadata(pendingOutput.name, pendingOutput.workspace)
         selectedOutputMeta = get().selectedOutputMeta
         console.log('[LoadSettings] after on-demand fetch — params present:', !!selectedOutputMeta?.params,
                     '| source:', selectedOutputMeta?.source)
@@ -11587,8 +11693,8 @@ export const useStore = create<AppState>((set, get) => ({
     // First / Last sidecars created before the explicit prompt-mode field
     // used minimax_h3_window_storyboard as the UI's Auto/Manual switch.
     // Prefer the explicit field, while keeping those existing clips durable.
-    const restoredH3SequencePromptMode: 'auto' | 'creative' | 'manual' | undefined = (
-      p.minimax_h3_sequence_prompt_mode === 'manual'
+    const restoredH3SequencePromptMode: 'auto' | 'creative' | 'adaptive' | 'manual' | undefined = (
+      p.minimax_h3_sequence_prompt_mode === 'adaptive' ? 'adaptive' : p.minimax_h3_sequence_prompt_mode === 'manual'
         ? 'manual'
         : p.minimax_h3_sequence_prompt_mode === 'creative'
           ? 'creative'
@@ -11659,6 +11765,7 @@ export const useStore = create<AppState>((set, get) => ({
     // For image_mode: use 1 (I2V UI toggle) if start image was used, else 0
     const newParams: Partial<GenerateParams> = {
       prompt: originalPrompt,
+      _prompt_enhancement: p._prompt_enhancement as GenerateParams['_prompt_enhancement'],
       model_type: modelType,
       resolution: (p.resolution as string) || '1280x720',
       video_length: (p.video_length as number) || 81,
@@ -12856,43 +12963,33 @@ export const useStore = create<AppState>((set, get) => ({
     setTimeout(() => get().startGeneration(), 100)
   },
 
-  rejoinClipGroup: async (groupId) => {
+  rejoinClipGroup: async (groupId, workspace) => {
     try {
-      const result = await api.rejoinClips(groupId)
-      // Refresh outputs list to include the new concatenated file
-      const outputsRes = await fetch('/api/v1/outputs')
-      if (outputsRes.ok) {
-        const data = await outputsRes.json()
-        set({ outputs: data.files || [] })
-      }
-      // Select the new file
-      const allOutputs = get().outputs
-      const newIdx = allOutputs.findIndex(o => o.name === result.filename)
-      if (newIdx >= 0) {
-        set({ selectedOutput: newIdx })
-        get().loadOutputMetadata(result.filename)
-      }
+      const result = await api.rejoinClips(groupId, undefined, workspace)
+      await get().loadOutputs()
+      const newIdx = get().outputs.findIndex(o => o.name === result.filename && (!workspace || o.workspace === workspace))
+      if (newIdx >= 0) get().setSelectedOutput(newIdx)
     } catch (e) {
       console.error('Failed to rejoin clips:', e)
     }
   },
 
-  deleteSelectedOutput: async () => {
+  deleteSelectedOutput: async (target) => {
     const outputs = get().filteredOutputs()
     const idx = get().selectedOutput
-    const output = outputs[idx]
+    const output = target || outputs[idx]
     if (!output) return
 
     try {
-      await api.deleteOutput(output.name)
+      await api.deleteOutput(output.name, output.workspace)
       // Remove from local state
-      const allOutputs = get().outputs.filter(o => o.name !== output.name)
+      const allOutputs = get().outputs.filter(o => outputIdentity(o) !== outputIdentity(output))
       const newIdx = Math.min(idx, Math.max(0, allOutputs.length - 1))
-      set({ outputs: allOutputs, selectedOutput: newIdx })
+      set({ outputs: allOutputs, outputsTotal: Math.max(0, get().outputsTotal - 1), selectedOutput: newIdx })
       // Load metadata for new selection
       const newFiltered = get().filteredOutputs()
       if (newFiltered[newIdx]) {
-        get().loadOutputMetadata(newFiltered[newIdx].name)
+        get().loadOutputMetadata(newFiltered[newIdx].name, newFiltered[newIdx].workspace)
       } else {
         set({ selectedOutputMeta: null })
       }
@@ -13186,6 +13283,8 @@ export const useStore = create<AppState>((set, get) => ({
 
     const pipelineParams: Record<string, unknown> = {
       pipeline_type: pipelineType,
+      ...(pipelineType === 'music_video' && !state.directorSeamless
+        ? {director_music_clip_seconds: state.directorMusicClipSeconds} : {}),
       // Held work and reviewed revisions cannot pause for browser review.
       auto_mode: mode === 'queue' || state.directorClipPlans.length > 0
         ? true : directorAutoMode,
@@ -13332,6 +13431,7 @@ export const useStore = create<AppState>((set, get) => ({
         directorSongStyle: state.directorSongStyle,
         directorSongLyrics: state.directorSongLyrics,
         directorSongDuration: state.directorSongDuration,
+        directorMusicClipSeconds: state.directorMusicClipSeconds,
         directorVideoInferenceStepsByModel: state.directorVideoInferenceStepsByModel,
         directorVideoMaxShotFramesByModel: state.directorVideoMaxShotFramesByModel,
         directorH3TurboModeByModel: state.directorH3TurboModeByModel,

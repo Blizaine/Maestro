@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useLayoutEffect, useContext, useCallback } from 'react'
-import { Sparkles, Loader2, ChevronDown, ChevronUp, Brain, PenLine, RefreshCw } from 'lucide-react'
-import { useStore } from '../../stores/useStore'
+import { Sparkles, Loader2, ChevronDown, ChevronUp, Brain, PenLine, RefreshCw, Check } from 'lucide-react'
+import { canEnhanceOnGeneration, shouldEnhanceOnGeneration, useStore } from '../../stores/useStore'
 import {
   effectiveH3OmniSequenceFrames,
   h3OmniSequenceWindowCount,
@@ -147,6 +147,11 @@ export function PromptInput() {
   const generationMode = useStore(s => s.generationMode)
   const editSubMode = useStore(s => s.editSubMode)
   const enhancePrompt = useStore(s => s.enhancePrompt)
+  const setEnhanceOnGeneration = useStore(s => s.setEnhanceOnGeneration)
+  const enhanceOnGeneration = useStore(shouldEnhanceOnGeneration)
+  const enhanceOnGenerationDefault = useStore(s => s.enhanceOnGenerationDefault)
+  const setEnhanceOnGenerationDefault = useStore(s => s.setEnhanceOnGenerationDefault)
+  const canDeferEnhancement = useStore(canEnhanceOnGeneration)
   const isEnhancing = useStore(s => s.isEnhancing)
   const promptEnhanceError = useStore(s => s.promptEnhanceError)
   const durationSeconds = useStore(s => s.durationSeconds)
@@ -413,7 +418,7 @@ export function PromptInput() {
             </button>
             <button
               type="button"
-              onClick={() => enhancePrompt(undefined, h3WindowPlan.planning_style === 'creative' ? 'creative' : 'faithful')}
+              onClick={() => enhancePrompt(undefined, h3WindowPlan.planning_style || 'adaptive')}
               disabled={isEnhancing}
               title={`Rebuild the H3 ${usesH3SequencePlanner ? 'reference sequence' : 'window plan'} from the current idea and timing.`}
               className="p-1 text-text-muted hover:text-accent-blue disabled:opacity-50"
@@ -443,7 +448,7 @@ export function PromptInput() {
                 </details>
               )}
               <div className="mt-1 text-text-muted">
-                Open the exact window prompts to review or edit the script, or refresh to retry {h3WindowPlan.planning_style === 'creative' ? 'AI Creative' : 'AI Faithful'}.
+                Open the exact window prompts to review or edit the script, or refresh to enhance again.
               </div>
             </div>
           )}
@@ -593,20 +598,30 @@ export function PromptInput() {
           </div>
         ) : (
           <div ref={setEnhanceAnchor} className={`${composer ? 'relative' : 'absolute right-2 bottom-2'} flex items-center`}>
-            <button type="button" onClick={() => enhancePrompt(undefined, 'faithful')}
-              disabled={isEnhancing || !prompt.trim()} aria-label="Enhance prompt with AI Faithful" title="AI Faithful — enhance your prompt while preserving your events and dialogue"
+            <button type="button" onClick={() => enhancePrompt()}
+              disabled={isEnhancing || !prompt.trim()} aria-label="Enhance prompt" title="Enhance now — preserve your requirements and develop your idea"
               className="min-h-8 rounded-l-md p-2 text-text-muted hover:text-accent-blue hover:bg-bg-hover disabled:opacity-40">
               {isEnhancing ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
             </button>
-            <button type="button" onClick={() => setEnhanceMenuOpen(value => !value)} disabled={isEnhancing || !prompt.trim()}
+            <button type="button" onClick={() => setEnhanceMenuOpen(value => !value)} disabled={isEnhancing}
               aria-label="Prompt enhancement options" aria-haspopup="menu" aria-expanded={enhanceMenuOpen}
               className="min-h-8 rounded-r-md border-l border-border px-1.5 text-text-muted hover:text-accent-blue hover:bg-bg-hover disabled:opacity-40"><ChevronUp size={12}/></button>
-            <SidebarMenu open={enhanceMenuOpen} anchor={enhanceAnchor} label="Enhance prompt" onClose={() => setEnhanceMenuOpen(false)} width={184}>
-              {(['faithful', 'creative'] as const).map(style => <button key={style} type="button" role="menuitem"
-                onClick={() => { setEnhanceMenuOpen(false); void enhancePrompt(undefined, style) }}
-                className="flex min-h-11 w-full items-center rounded-lg px-3 text-left text-xs text-text-secondary hover:bg-bg-hover hover:text-text-primary">
-                {style === 'faithful' ? 'AI Faithful' : 'AI Creative'}
-              </button>)}
+            <SidebarMenu open={enhanceMenuOpen} anchor={enhanceAnchor} label="Enhance prompt" onClose={() => setEnhanceMenuOpen(false)} width={240}>
+              <button type="button" role="menuitem" disabled={isEnhancing || !prompt.trim()} onClick={() => { setEnhanceMenuOpen(false); void enhancePrompt() }}
+                className="flex min-h-11 w-full items-center rounded-lg px-3 text-left text-xs text-text-secondary hover:bg-bg-hover disabled:opacity-40">Enhance now</button>
+              {canDeferEnhancement && <button type="button" role="menuitemcheckbox" aria-checked={enhanceOnGeneration}
+                onClick={() => { setEnhanceOnGeneration(!enhanceOnGeneration); setEnhanceMenuOpen(false) }}
+                className="flex min-h-11 w-full items-center justify-between gap-2 rounded-lg px-3 text-left text-xs text-text-secondary hover:bg-bg-hover">
+                Enhance on generation<Check size={14} aria-hidden="true" className={enhanceOnGeneration ? 'text-accent-blue' : 'invisible'}/>
+              </button>}
+              {canDeferEnhancement && <button type="button" role="menuitemcheckbox" aria-label="Use by default" aria-checked={enhanceOnGenerationDefault}
+                onClick={() => setEnhanceOnGenerationDefault(!enhanceOnGenerationDefault)}
+                className="flex min-h-11 w-full items-start gap-2 rounded-lg border-t border-border px-3 py-2.5 text-left text-xs text-text-secondary hover:bg-bg-hover">
+                <span aria-hidden="true" className={`mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border ${enhanceOnGenerationDefault ? 'border-accent-blue bg-accent-blue text-white' : 'border-text-muted'}`}>
+                  {enhanceOnGenerationDefault && <Check size={12}/>}
+                </span>
+                <span>Use by default<span className="mt-1 block text-[10px] leading-relaxed text-text-muted">Automatically enhance new jobs before generation.</span></span>
+              </button>}
             </SidebarMenu>
           </div>
         )}</ComposerToolbarItem>

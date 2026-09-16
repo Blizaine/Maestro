@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, Component, type ReactNode } from 'react'
 import { X, ChevronDown, ChevronRight, Play, ImageIcon, Check, AlertTriangle, Clock, Brain, Sparkles, Loader2, Camera, Film, Combine, Pencil, Trash2 } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
-import { getFileUrl } from '../../api/client'
+import { getFileUrl, updateClipPrompt } from '../../api/client'
 import type { PipelineClipState, SavedPipelineState } from '../../types'
 
 /** Safely coerce any value to a displayable string */
@@ -184,13 +184,14 @@ function LlmLogPanel({ pipeline }: { pipeline: SavedPipelineState }) {
   )
 }
 
-function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVideo }: {
+function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVideo, onSavePrompt }: {
   clip: PipelineClipState
   pipeline: SavedPipelineState
   busy?: boolean
   onTag: (tag: 'good' | 'needs_work' | null) => void
   onRerunImage: (clipIndex: number, prompt?: string) => void
   onRerunVideo: (clipIndex: number, prompt?: string) => void
+  onSavePrompt: (clipIndex: number, update: { image_prompt?: string; video_prompt?: string; window_prompts?: string[] }) => Promise<void>
 }) {
   const [expandImage, setExpandImage] = useState(false)
   const [expandVideo, setExpandVideo] = useState(false)
@@ -200,6 +201,8 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
   const [editWindowPrompts, setEditWindowPrompts] = useState<string[]>(clip.window_prompts || [])
   const [editImagePrompt, setEditImagePrompt] = useState(clip.image_prompt || '')
   const [editVideoPrompt, setEditVideoPrompt] = useState(clip.video_prompt || '')
+  const [savingPrompt, setSavingPrompt] = useState(false)
+  const [saveError, setSaveError] = useState('')
   const requiresShotImage = !pipeline.shot_image_policy
     || pipeline.shot_image_policy === 'generate'
 
@@ -283,11 +286,20 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
                 {requiresShotImage ? 'Image Prompt' : 'Planned Visual'}
               </span>
               {requiresShotImage && <div className="flex items-center gap-1">
-                <button onClick={() => { setEditingImage(!editingImage); setEditImagePrompt(clip.image_prompt || '') }}
-                  className={`p-0.5 rounded transition-colors ${editingImage ? 'text-accent-blue' : 'text-text-muted hover:text-text-secondary'}`}
+                <button disabled={editingImage || savingPrompt} onClick={() => { setEditingImage(true); setEditImagePrompt(clip.image_prompt || ''); setSaveError('') }}
+                  className={`p-0.5 rounded transition-colors disabled:cursor-default ${editingImage ? 'text-accent-blue' : 'text-text-muted hover:text-text-secondary'}`}
                   title="Edit prompt">
                   <Pencil size={9} />
                 </button>
+                {editingImage && <>
+                  <button disabled={savingPrompt} title="Save image prompt" onClick={async () => {
+                    setSavingPrompt(true); setSaveError('')
+                    try { await onSavePrompt(clip.index, { image_prompt: editImagePrompt }); setEditingImage(false) }
+                    catch (error) { setSaveError(error instanceof Error ? error.message : String(error)) }
+                    finally { setSavingPrompt(false) }
+                  }} className="p-0.5 rounded text-indicator-success disabled:opacity-40"><Check size={10} /></button>
+                  <button disabled={savingPrompt} title="Cancel image prompt edit" onClick={() => { setEditingImage(false); setEditImagePrompt(clip.image_prompt || ''); setSaveError('') }} className="p-0.5 rounded text-text-muted disabled:opacity-40"><X size={10} /></button>
+                </>}
                 <button onClick={() => onRerunImage(clip.index, editingImage ? editImagePrompt : undefined)}
                   disabled={busy}
                   className="p-0.5 rounded text-text-muted hover:text-accent-blue transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
@@ -347,15 +359,32 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
               Video Prompt{clip.window_prompts?.length > 1 ? ` (${clip.window_prompts.length} windows)` : ''}
             </span>
             <div className="flex items-center gap-1">
-              <button onClick={() => {
-                setEditingVideo(!editingVideo)
+              <button disabled={editingVideo || savingPrompt} onClick={() => {
+                setEditingVideo(true)
                 setEditVideoPrompt(clip.video_prompt || '')
                 setEditWindowPrompts(clip.window_prompts || [])
+                setSaveError('')
               }}
-                className={`p-0.5 rounded transition-colors ${editingVideo ? 'text-accent-blue' : 'text-text-muted hover:text-text-secondary'}`}
+                className={`p-0.5 rounded transition-colors disabled:cursor-default ${editingVideo ? 'text-accent-blue' : 'text-text-muted hover:text-text-secondary'}`}
                 title="Edit prompt">
                 <Pencil size={9} />
               </button>
+              {editingVideo && <>
+                <button disabled={savingPrompt} title="Save video prompt" onClick={async () => {
+                  setSavingPrompt(true); setSaveError('')
+                  try {
+                    await onSavePrompt(clip.index, editWindowPrompts.length > 1
+                      ? { window_prompts: editWindowPrompts }
+                      : { video_prompt: editVideoPrompt })
+                    setEditingVideo(false)
+                  } catch (error) { setSaveError(error instanceof Error ? error.message : String(error)) }
+                  finally { setSavingPrompt(false) }
+                }} className="p-0.5 rounded text-indicator-success disabled:opacity-40"><Check size={10} /></button>
+                <button disabled={savingPrompt} title="Cancel video prompt edit" onClick={() => {
+                  setEditingVideo(false); setEditVideoPrompt(clip.video_prompt || '')
+                  setEditWindowPrompts(clip.window_prompts || []); setSaveError('')
+                }} className="p-0.5 rounded text-text-muted disabled:opacity-40"><X size={10} /></button>
+              </>}
               <button onClick={() => {
                 if (editingVideo && editWindowPrompts.length > 1) {
                   onRerunVideo(clip.index, editWindowPrompts.join('\n'))
@@ -419,6 +448,7 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
               </p>
             )
           )}
+          {saveError && <p role="alert" className="mt-1 text-[9px] text-indicator-warning">{saveError}</p>}
         </div>
 
         {/* Prompt polish diff */}
@@ -873,6 +903,11 @@ function DirectorDashboardInner() {
                     pipeline={selectedPipeline}
                     busy={repairBusy}
                     onTag={(tag) => tagClip(selectedPipeline.pipeline_id, clip.index, tag)}
+                    onSavePrompt={async (idx, update) => {
+                      setRegenError(null)
+                      await updateClipPrompt(selectedPipeline.pipeline_id, idx, update)
+                      await loadPipeline(selectedPipeline.pipeline_id)
+                    }}
                     onRerunImage={(idx, prompt) => { setRegenError(null); rerunClipImage(selectedPipeline.pipeline_id, idx, prompt).catch(e => setRegenError(String(e instanceof Error ? e.message : e))) }}
                     onRerunVideo={(idx, prompt) => { setRegenError(null); rerunClipVideo(selectedPipeline.pipeline_id, idx, prompt).catch(e => setRegenError(String(e instanceof Error ? e.message : e))) }}
                   />

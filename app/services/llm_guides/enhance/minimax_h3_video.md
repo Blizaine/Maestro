@@ -69,6 +69,10 @@ VISUAL TIMELINE
 - Establish the visible subjects, setting, composition, lighting, action, and
   specific camera behavior. Describe observable motion rather than abstract
   emotion.
+- Preserve every requested visible action in its stated order, including the
+  opening transition into the action and the final held object and body state.
+  Do not begin after a requested action or replace the requested ending with a
+  conflicting pose.
 - When a start image is attached, treat it as the exact 0.00-second frame.
   Preserve its identity, wardrobe, objects, composition, setting, and light,
   then describe how motion develops forward from it.

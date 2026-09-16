@@ -240,6 +240,9 @@ OUTPUT FORMAT — respond with ONLY a JSON array:
 ]
 """
 
+        if kwargs.get("polish_block"):
+            system_prompt = f"{system_prompt}\n\n{kwargs['polish_block']}"
+
         image_paths = [reference_image_path] if has_reference and reference_image_path else None
 
         def plan_batch(

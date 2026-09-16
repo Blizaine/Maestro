@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
 from services.dialogue_writing import (
     conversation_brief, creative_dialogue_budget, creative_dialogue_expected,
-    dialogue_forbidden, spoken_word_count,
+    dialogue_forbidden, requested_dialogue_turns, spoken_word_count,
 )
 from services.h3_story_ledger import (
     _canonicalize_story_ledger, _complete_creative_dialogue, _deterministic_ledger,
@@ -54,6 +54,15 @@ class CreativeDialogueWritingTests(unittest.TestCase):
         brief = creative_dialogue_budget("A space battle with short tactical dialogue.", 14.4)
         self.assertEqual(brief.minimum, 1)
         self.assertLess(brief.target, action.target)
+
+    def test_concise_requested_conversation_uses_action_compatible_budget(self):
+        prompt = (
+            "Two mechanics have a concise natural four-turn conversation while they "
+            "center a bicycle brake, spin the wheel, and hear the rubbing stop."
+        )
+        budget = creative_dialogue_budget(prompt, 14.375)
+        self.assertEqual(requested_dialogue_turns(prompt), 4)
+        self.assertEqual((budget.minimum, budget.target, budget.maximum), (11, 14, 43))
 
     def test_tutorial_and_ordinary_character_names_imply_dialogue(self):
         for prompt in (

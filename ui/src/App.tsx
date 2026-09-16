@@ -40,8 +40,9 @@ function App() {
 
   useEffect(() => {
     loadModels()
-    loadWorkspaces()
-    loadOutputs()
+    // Resolve the saved folder before querying its media. Otherwise the
+    // default-folder response can become stale during workspace hydration.
+    void loadWorkspaces().then(() => loadOutputs())
     loadSystemConfig()
     loadServicesConfig()
     loadLlmStatus()

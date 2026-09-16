@@ -170,6 +170,7 @@ export interface GenerateParams {
   duration_seconds?: number
   pause_seconds?: number
   temperature?: number
+  model_mode?: number
   custom_settings?: Record<string, unknown>
   temporal_upsampling?: string
   // Loose params: backend accepts additional optional fields. Declared
@@ -258,10 +259,12 @@ export interface GenerateParams {
   ltx_window_prompts?: string[]
   /** Original overall idea retained while the compiled prompts are visible. */
   _ltx_original_prompt?: string
+  /** Source and resulting draft from an explicit Studio enhancement. */
+  _prompt_enhancement?: PromptEnhancementRecord
 }
 
-export type WindowPromptMode = 'auto' | 'creative' | 'manual'
-export type WindowPlanningStyle = 'faithful' | 'creative'
+export type WindowPromptMode = 'auto' | 'creative' | 'adaptive' | 'manual'
+export type WindowPlanningStyle = 'faithful' | 'creative' | 'adaptive'
 
 export interface LTXWindowPlan {
   source_prompt: string
@@ -464,7 +467,17 @@ export interface OomInfo {
   message: string
 }
 
+export interface PromptEnhancementRecord {
+  version: number
+  state: 'pending' | 'enhancing' | 'complete' | 'failed' | 'review'
+  original_prompt?: string
+  enhanced_prompt?: string | null
+  warnings?: string[]
+  error?: string | null
+}
+
 export interface GenerationJob {
+  enhancement?: PromptEnhancementRecord | null
   id: string
   /** Direct submissions stay visible while the backend is queued/planning. */
   showInGallery?: boolean
@@ -501,6 +514,9 @@ export interface GenerationJob {
 }
 
 export interface OutputFile {
+  id?: string
+  workspace?: string
+  path?: string
   name: string
   url: string
   type: 'video' | 'image' | 'audio'
@@ -537,6 +553,7 @@ export type EditorAIReturnMode = 'replace' | 'alternate'
 export interface EditorAsset {
   id: string
   name: string
+  display_name?: string
   type: EditorMediaType
   origin: 'output' | 'upload' | 'project'
   workspace?: string
@@ -956,6 +973,7 @@ export interface ModelOptions {
       revision: string
       workflow?: 'all' | 'fl2va' | 'ref2va'
       runtime?: 'standard_lora' | 'pdd'
+      generation_settings?: {guidance_scale?: number}
       full_checkpoint_only?: boolean
     }>
     upstream_url: string
@@ -1032,6 +1050,8 @@ export interface ModelOptions {
   audio_only: boolean
   duration_slider: { label: string; min: number; max: number; increment: number; default: number } | null
   audio_segment_max_seconds?: number | null
+  duration_is_maximum?: boolean
+  yue2_composition?: boolean
   pause_between_sentences: boolean
   temperature_enabled: boolean
   custom_settings_def: { id: string; label: string; name: string; type: string }[] | null
@@ -1087,6 +1107,15 @@ export interface MultiWindowTiming {
 }
 
 export interface OutputMetadata {
+  model_details?: {
+    architecture?: string
+    sample_rate?: number
+    channels?: number
+    weights_revision?: string
+    plan?: { abc?: string; request?: Record<string, unknown> }
+    truncated?: Record<string, boolean>
+    artist?: { id: string; name: string; strength: number; tokenizer_revision: string }
+  }
   source: 'sidecar' | 'embedded' | 'none'
   params: Record<string, unknown> | null
   /** Standalone Studio post-processing outputs are restored through their
@@ -1471,6 +1500,8 @@ export interface AudioAnalysisResult {
   downbeats: number[]
   sections: AudioSection[]
   onset_envelope: number[]
+  percussion_activity?: {start: number; end: number}[] | null
+  music_cues?: {type: string; time: number; confidence: string; evidence: string}[]
   lyrics: LyricSegment[] | null
   vocals_path: string | null
   song_structure?: SongStructureEntry[] | null
@@ -1488,6 +1519,10 @@ export interface PlannedClip extends SuggestedClip {
   beat_count: number
   duration_frames: number
   dominant_speaker?: string | null
+  output_frames?: number
+  music_timing_version?: number
+  percussion_activity?: 'active' | 'quiet' | 'unknown'
+  music_cues?: AudioAnalysisResult['music_cues']
 }
 
 export interface SpeakerMapping {

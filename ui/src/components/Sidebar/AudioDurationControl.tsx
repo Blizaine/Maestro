@@ -22,7 +22,7 @@ export function AudioDurationControl() {
       maxSeconds={maximum}
       showSingleWindow={false}
       quantizeToWindows={false}
-      durationIsMaximum={!!segmentMaximum}
+      durationIsMaximum={!!segmentMaximum || !!modelOptions?.duration_is_maximum}
       durationPresets={segmentMaximum ? [
         { label: '15s', seconds: 15 }, { label: '30s', seconds: 30 },
         { label: '45s', seconds: 45 }, { label: '1m', seconds: 60 },
@@ -31,6 +31,8 @@ export function AudioDurationControl() {
       ] : undefined}
       modelLimitLabel={segmentMaximum
         ? `Up to ${formatDuration(segmentMaximum)} per segment, ${formatDuration(maximum)} per output. Long scripts split automatically; short speech ends when the script finishes.`
+        : modelOptions?.duration_is_maximum
+        ? 'Maximum length. The song can finish earlier; increase this limit if its ending is cut off.'
         : isLongForm
         ? 'Long speech is synthesized in bounded chunks and assembled automatically.'
         : `This generator supports up to ${formatDuration(maximum)} per output.`}

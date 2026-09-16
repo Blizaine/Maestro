@@ -94,6 +94,7 @@ class H3ResidencyBudgetTests(unittest.TestCase):
             "wan_model": self.wgp.wan_model,
             "kwargs": self.configure(),
             "vram_safety_coefficient": self.wgp.args.vram_safety_coefficient,
+            "args": self.wgp.args,
         })
         self.wgp.reload_needed = False
 
@@ -164,13 +165,40 @@ class H3ResidencyBudgetTests(unittest.TestCase):
         first = self.wgp.wan_model._maestro_profile_transformer_budget_mb
         self.restore()
         heavier = self.plan(resolution="1280x720", sliding_window_size=240)["vram_adjustment"]
-        self.assertLess(heavier["h3_residency_mb"], first)
+        self.assertTrue(heavier["h3_activation_reserve_clamped"])
+        self.assertEqual(heavier["h3_residency_policy"], "profile_default")
+        self.assertNotIn("h3_residency_mb", heavier)
         self.assertTrue(self.wgp.reload_needed)
         self.record_loaded_model()
         self.restore()
         lighter = self.plan()["vram_adjustment"]
         self.assertEqual(lighter["h3_residency_mb"], first)
         self.assertTrue(self.wgp.reload_needed)
+
+    def test_16gb_full_window_keeps_profile_default_when_reserve_is_clamped(self):
+        self.hardware["gpu_vram_gb"] = 15.875
+        self.profile = 2
+        adjustment = self.plan(
+            model_type="minimax_h3",
+            resolution="704x1280",
+            video_length=345,
+            sliding_window_size=345,
+        )["vram_adjustment"]
+        self.assertTrue(adjustment["h3_activation_reserve_clamped"])
+        self.assertGreater(
+            adjustment["h3_requested_activation_reserve_gb"],
+            adjustment["h3_activation_reserve_gb"],
+        )
+        self.assertEqual(adjustment["h3_residency_policy"], "profile_default")
+        self.assertNotIn("h3_residency_mb", adjustment)
+        options = {
+            "workingVRAM": {"transformer": 10240},
+            "budgets": {"transformer": 1200, "vae": 512},
+        }
+        self.pipe_namespace["init_pipe"](
+            {"transformer": object()}, options, self.profile
+        )
+        self.assertEqual(options["budgets"]["transformer"], 1200)
 
     def test_restore_prevents_budget_leaking_to_another_model(self):
         try:

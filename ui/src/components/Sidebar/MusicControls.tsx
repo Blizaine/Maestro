@@ -3,6 +3,7 @@ import { Music, Sparkles, Loader2 } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
 import type { GenerateParams } from '../../types'
+import { Yue2Controls } from './Yue2Controls'
 
 const TEXTAREA_BASE =
   'w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary ' +
@@ -89,6 +90,7 @@ export function MusicControls() {
   const setInstrumental = useStore(s => s.setMusicInstrumental)
   const params = useStore(s => s.params)
   const modelOptions = useStore(s => s.modelOptions)
+  const selectedArchitecture = useStore(s => s.models.find(model => model.model_type === s.params.model_type)?.architecture)
   const durationSeconds = useStore(s => s.durationSeconds)
   const setParam = useStore(s => s.setParam)
 
@@ -96,6 +98,9 @@ export function MusicControls() {
   const lyrics = (params.prompt as string) || ''
   const [writing, setWriting] = useState(false)
   const [writeError, setWriteError] = useState<string | null>(null)
+  // These controls belong to the selected generator, even while its async
+  // capability request is pending or failed after a refresh.
+  const isYue2 = params.model_type === 'yue2' || selectedArchitecture === 'yue2'
   const isMusic3 = !!modelOptions?.music3_structured_caption
   const captionLabel = modelOptions?.music_caption_label || 'Style / Music Caption'
   const captionPlaceholder = isMusic3
@@ -192,6 +197,7 @@ export function MusicControls() {
         help={modelOptions?.music_caption_help}
       />
       {!instrumental && <LyricsField value={lyrics} onChange={setLyrics} help={modelOptions?.music_lyrics_help} />}
+      {isYue2 && <Yue2Controls />}
     </div>
   )
 }

@@ -219,6 +219,8 @@ def safetensors_metadata(path: str) -> dict[str, str]:
 def is_minimax_h3_turbo_lora(path: str) -> bool:
     """Recognize standard and PDD H3 acceleration adapters."""
 
+    if minimax_h3_turbo_preset_for_path(path) is not None:
+        return True
     basename = os.path.basename(str(path or "")).lower().replace("-", "_")
     if "minimax_h3_turbo" in basename:
         return True
@@ -358,6 +360,7 @@ def normalize_minimax_h3_turbo_request(
     body["activated_loras"] = normalized_loras
     body["loras_multipliers"] = " ".join(normalized_multipliers)
     body["num_inference_steps"] = int(preset["steps"])
+    body.update(preset.get("generation_settings") or {})
     preset_reference_detail = str(
         preset.get("reference_detail") or ""
     ).strip().lower()

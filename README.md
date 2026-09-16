@@ -9,11 +9,11 @@ A one-click local AI **creative studio, director, and video editor** for creator
 ### 🎬 Director Mode — automatic music videos and short films
 The flagship feature. Drop in an audio track or write a story; a local LLM plans every shot, writes screenplays/lyrics, generates start frames & keyframes with character consistency, polishes prompts per model & LoRA-specific prompting guides, and runs the full multi-clip generation. Two skills:
 
-- **Music Video** — beat-aware shot planning aligned to your audio. The LLM analyzes BPM, sections (verse/chorus/bridge), and energy, then writes shots that hit the downbeats. Speaker transcription & diarization lets you name and target different voices or singers.
+- **Music Video** — beat-aware shot planning aligned to your audio. The LLM analyzes BPM, sections (verse/chorus/bridge), and energy, then writes shots that hit the downbeats. Speaker transcription & diarization lets you name and target different voices or singers. **Clip length** offers Auto or a model-aligned maximum, including shorter clips for smaller GPUs, while preserving the full song. [Director controls](docs/Director-controls.md).
 - **Short Film** — screenplay-driven scenes with named characters, dialogue, and continuity across cuts. Pacing-bias slider controls cut frequency.
   
 - **Auto Mode** runs the entire pipeline end-to-end (analyze → plan → generate images → generate clips → combine). Manual mode lets you review and edit at every step.
-- **Director v2 architecture** with structured shot planning, mode-specific prompt renderers, and a 3-pass refinement (screenplay → shot breakdown → per-model polish). Director v2 optimizes what the LLM is being asked to do across several passes, with each pass optimizing the LLM request for creativity (when writing the screenplay), structured outputs (when outputting JSON), and prompt refinement, which injects LoRA prompting guides into the context.  
+- **Director v2 architecture** separates screenplay writing, structured shot planning and model-specific formatting. Native H3 plans go directly through their H3 compiler; other paths use per-model polish where needed. Director shares Studio's adaptive writing and continuity guidance, protects exact dialogue and source-song vocals, and retains complete action/camera descriptions through final compilation.
 
 ### ⚡ Performance Auto-Tune — zero-config setup
 Detects your GPU, VRAM, and RAM on first launch and picks the right profile, quantization, VAE tiling, and VRAM safety coefficient. No more "Profile 1 vs 2 vs 4.5" guesswork. Power users still have full manual control under "Show advanced settings."
@@ -26,16 +26,19 @@ Detects your GPU, VRAM, and RAM on first launch and picks the right profile, qua
 Direct access to every model and every knob:
 - **Video** — create, extend, blend, retake, edit anything, outpaint, repaint, recast, upscale, and finish clips with MiniMax H3, LTX-2.5/2.3, SCAIL-2, Wan, Hunyuan, and many more.
 - **Image** — create, edit, upscale, or outpaint with Flux 2 Klein 9B, Krea 2 RAW/Turbo and Identity Edit, Qwen Image Edit, and more.
-- **Audio** — generate music with MiniMax-Music3 or ACE-Step, speech and cloned voices with H3 Voice Audio, Kugelaudio or Qwen3 TTS, sound effects with H3 or MMAudio, and revoice existing clips.
+- **Audio** — generate music with MiniMax-Music3, ACE-Step or **YuE2**, speech and cloned voices with H3 Voice Audio, Kugelaudio or Qwen3 TTS, sound effects with H3 or MMAudio, and revoice existing clips.
+- **YuE2 songs and personal styles:** 48 kHz stereo music with optional melody/chord planning, ABC scores and source-song covers. **My music (Experimental)** adds recording/caption/lyric review with local transcription drafts, resumable style-adapter training, automatic checkpoint auditions with a fixed test song, and portable adapter bundles. Training is optional; matching a specific singer's voice is not guaranteed. The exercised training GPU has 24 GB VRAM. YuE2 and the real-audio tokenizer weights have their own noncommercial model terms. [YuE2 music guide](docs/YuE2-music.md).
 - **Multi-clip generation** with per-clip prompts, seamless overlapping (sliding window) transitions, and shared LoRAs
-- **Long-form planning up to 60 minutes** with one-window, friendly duration, exact timecode, window-count, and Auto controls; Faithful or Creative AI can plan each independent window
+- **Long-form planning up to 60 minutes** with one-window, friendly duration, exact timecode, window-count, and Auto controls; unified H3 Enhance develops short concepts and preserves detailed scripts across windows
 - **Blend video Mode** Remember Sora 1 blend mode, where you could overlap two videos, and use AI to blend them together? 
 - **Frames Injection (KFI)** for character continuity in long videos
 - **Sliding window** for arbitrarily long generations
 - **Viggle Animate:** select a saved character or image, describe its appearance, and let Flux 2 Klein prepare the replacement frame before three-step H3 animation. Preview the frame first or run both steps together; manual edited frames remain supported. See [Viggle Animate](docs/Viggle-Animate.md).
-- **Studio composition workspace:** compact reference cards above a large prompt editor. Characters stays on the left; Recipes, Resolution, Aspect, Duration and Advanced group on the right. The model selector sits beside Generate / Add to Queue, with a direct Model Browser shortcut. The magic button explicitly enhances with AI Faithful or Creative before submission. Advanced groups Performance, Finishing, LoRAs and Generation. Time retains model-aligned steps through five minutes and presets through one hour; Auto shows its recommended duration. See [Studio controls](docs/Studio-controls.md).
+- **Studio composition workspace:** compact reference cards above a large prompt editor. Characters stays on the left; Recipes, Resolution, Aspect, Duration and Advanced group on the right. The model selector sits beside Generate / Add to Queue, with a direct Model Browser shortcut. The magic button runs Enhance now; its menu can instead arm **Enhance on generation** for the next job. Advanced groups Performance, Finishing, LoRAs and Generation. Time retains model-aligned steps through five minutes and presets through one hour; Auto shows its recommended duration. See [Studio controls](docs/Studio-controls.md).
+- **Enhancement in the queue:** submit a brief while the GPU is busy and let Maestro enhance it when the job gets its turn, then generate automatically. Original inputs and completed drafts are saved for review and retries. Add to Queue keeps jobs held until Run queue; interrupted jobs are held after an app restart. Enhancement failures stop for attention instead of silently generating a fallback.
 - **Spatial upsampling, film grain, codec selection** as post-processing options
 - **H3 VDN**, an optional trained hybrid-attention model with dedicated Full/Pruned and eight-step presets; requires Triton and additional VRAM.
+- **TaoMate H3 three-step:** an optional Frames adapter preset with its own Euler/CFG settings and verified downloads. Existing fused and PDD recipes remain available. [TaoMate guide and tested scope](docs/TaoMate-H3.md).
 - **H3 Voice Audio** for speech, one/two-reference voice cloning and general audio: up to 45 seconds per segment and five minutes per assembled output. See the [H3 audio guide](docs/H3-Voice-Audio.md). **H3 Outpaint** extends video borders; an optional six-step **H3 Audio Refinement** pass holds the generated video fixed.
 - **Saved characters in every Speech workflow:** reuse Reference-mode character voices, save new characters from Speech, and restore character bindings with output settings. Qwen preset/design variants offer an explicit switch to voice cloning. See [TTS characters](docs/TTS-Characters.md).
 - **Portable characters with voice:** share `blaine.maestro.safetensors` files with appearance and saved audio embedded. Model Browser → Characters / RefMods adds file and Hugging Face imports, voice filters, and easy export. Standard H3 RefMods retain their original visual latents. See [Character sharing and RefMods](docs/Maestro-Characters.md).
@@ -51,6 +54,10 @@ Maestro auto-downloads `llama-server` (~600 MB one-time) and your chosen GGUF mo
 - **External providers** also supported: OpenAI, Anthropic, custom OpenAI-compatible endpoints (currently experimental)
 - **Vision support** so LLMs can enhance prompting based on reference images
 - Auto-unloads after 60s idle to free VRAM for video gen
+
+### 🗂️ Browse the whole library
+
+Choose **All folders** in the gallery folder picker to browse and search every output folder. Search includes original and enhanced prompts, and filters apply across the complete collection. Results load in pages and show their source folder. Browsing keeps your generation destination unchanged; identical filenames in different folders remain separate items. [Gallery controls](docs/Studio-controls.md#gallery-scope-and-search).
 
 ### 🛒 Built-in CivitAI LoRA browser
 - Search, filter, and one-click install any LoRA from CivitAI without leaving Maestro
@@ -93,6 +100,23 @@ View all past Director runs with their full state — clip plans, generated imag
 ## Updates
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
+
+### v2.2.0 (2026-09-16)
+
+**Unified AI enhancement, YuE2 music, and more control over Director productions**
+
+- **One Enhance workflow:** develops short ideas and adapts detailed scripts to the selected model. Enhance now, or let a queued job enhance immediately before generation. An optional **Use by default** setting remembers Enhance on generation; saved source prompts and drafts remain available for review and retries.
+- **Stronger H3 prompt writing:** improved silent-action parsing, dialogue ownership, choreography, camera direction, first-frame continuity and multi-window timing. Director shares the relevant writing guidance. Prompt review remains available for drafts that need attention.
+- **YuE2 3B music:** the new default music model produces 48 kHz stereo songs, with Direct generation selected initially, optional composition planning, ABC scores and source-song covers. Later model choices are remembered.
+- **My music (Experimental):** review recordings and lyrics, train and resume personal style adapters, compare checkpoint auditions, reconstruct source audio, and import/export styles. Style and vocal resemblance vary; this is not a promise of reliable singer cloning.
+- **Director music controls:** adjustable clip maximum and GPU limit, working Cut Speed, full-song timing, and musical/vocal cues for camera planning. Longer H3 clips can approach 14.4s; instrument cutaways retain the assigned singer's voice off screen. Shot edits now save reliably.
+- **All folders gallery:** browse and search across output folders while keeping each item's source folder and the generation destination clear. Refresh, pagination and folder-qualified actions are fixed.
+- **TaoMate H3:** optional experimental three-step Frames acceleration, with pinned downloads and compatibility checks. Includes internal token-refiner weights; it is not a separate video-refinement pass.
+- **Image, queue and runtime fixes:** 21:9 image aspect, original/enhanced prompt details, multiline-image and Z-Image decoding fixes, corrected CivitAI model reloads, collapsible completed-job history, repeated-upload deduplication, and improved Linux local-LLM setup and diagnostics.
+
+Use **Update** in Pinokio, restart Maestro and refresh the browser. Existing models, characters, outputs and projects stay in place. New models and optional music tools download their assets when used. YuE2 model/tokenizer weights have separate noncommercial terms; see the [music guide](docs/YuE2-music.md).
+
+[Full release notes and issue status](docs/RELEASE_NOTES_V2.2.0.md) · [Validation and known limits](docs/VALIDATION_V2.2.0.md)
 
 ### v2.1.6 (2026-09-11)
 
@@ -935,6 +959,10 @@ console.log(status.https_url)
 
 Mutating endpoints are `POST /api/v1/remote-access/tailscale/enable`, `POST /api/v1/remote-access/tailscale/disable`, `POST|DELETE /api/v1/notifications/push/subscribe`, and `POST /api/v1/notifications/push/test`. A Push subscription contains browser-issued endpoint and encryption keys and should be treated as private local configuration.
 
+## Developer prompt bench
+
+The optional [prompt enhancement test bench](app/promptbench/README.md) runs bounded H3 writing experiments with installed local Qwen/Gemma models. It records source snapshots, intermediate drafts, final model prompts and review reports without generating video. The [operator skill](app/promptbench/operator/SKILL.md) explains how an agent can run and assess a pilot.
+
 ## Credits
 
 Maestro is built on top of, and indebted to, the following projects:
@@ -981,6 +1009,7 @@ paths below are relative to that folder:
 | Updating Maestro | `logs/api/update.js/latest` |
 | Installing Maestro | `logs/api/install.js/latest` |
 | Local LLM server loading or crashes | `logs/llm/llama-server.log` |
+| Linux CUDA writer build | `app/ckpts/llm/bin/llama-cuda-build.log` — [setup and troubleshooting](docs/LLM-runtime.md) |
 
 `latest` is a **plain-text file without an extension**; open it with a text
 editor such as Notepad. Each launcher action has its own folder under

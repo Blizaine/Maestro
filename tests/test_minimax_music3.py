@@ -449,14 +449,14 @@ class MiniMaxMusic3Tests(unittest.TestCase):
         setup = _read(_DIRECTOR_MUSIC_UI)
         launch = _read(_LAUNCH)
         self.assertIn("directorMusicModel: string", store)
-        self.assertIn("directorMusicModel: 'ace_step_v1_5_xl_sft_lm_4b'", store)
+        self.assertIn("directorMusicModel: DEFAULT_MUSIC_MODEL", store)
         self.assertGreaterEqual(
             store.count("model_type: s.directorMusicModel"),
             2,
         )
         self.assertIn("'minimax_music3'", setup)
         self.assertIn("Music model", setup)
-        self.assertIn("maximumDuration = isMusic3 ? 300 : 360", setup)
+        self.assertIn("maximumDuration = isYue2 ? 600 : isMusic3 ? 300 : 360", setup)
         self.assertIn("generation_timeout_s", launch)
         self.assertIn("1536 if is_minimax_music3 else 1024", launch)
 

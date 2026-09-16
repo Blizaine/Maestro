@@ -134,6 +134,58 @@ class H3CreativeRegressionTests(unittest.TestCase):
         self.assertEqual(warnings, [])
         self.assertEqual(result["generated_dialogue"][0]["text"], replacement)
 
+    def test_final_dialogue_review_accounts_for_time_spent_on_camera_action(self):
+        _, ledger = fixture(BRIEF, [14.4], [speech(LINE_A, 1)])
+        original = deepcopy(ledger)
+        # A six-second entrance/room move leaves eight seconds to speak. The
+        # revised 22-word line fits, despite missing the earlier 31-word floor.
+        camera = [{"shots": [
+            {"start_seconds": 0, "end_seconds": 6.4, "dialogue": []},
+            {"start_seconds": 6.4, "end_seconds": 14.4, "dialogue": [{"dialogue_id": "D1"}]},
+        ]}]
+        self.assertTrue(creative_dialogue_windows(BRIEF, ledger, [], [14.4])[0]["problems"])
+        final = creative_dialogue_windows(BRIEF, ledger, [], [14.4], camera_segments=camera)[0]
+        self.assertEqual(final["problems"], [])
+        self.assertEqual(final["spoken_words"], 22)
+        self.assertEqual(ledger, original)
+
+        # A sparse reply does not become a developed conversation when there
+        # is ample speaking time, and a silent plan cannot satisfy it either.
+        _, sparse = fixture(BRIEF, [14.4], [speech("Ready?", 1)])
+        for shots in ([{"start_seconds": 0, "end_seconds": 14.4, "dialogue": [{"dialogue_id": "D1"}]}], []):
+            with self.subTest(shots=shots):
+                audited = creative_dialogue_windows(BRIEF, sparse, [], [14.4], camera_segments=[{"shots": shots}])
+                self.assertTrue(audited[0]["problems"])
+
+    def test_camera_time_does_not_waive_missing_spoken_topics(self):
+        prompt = BRIEF + "\nFeatures include:\n• Save & share characters w/ RefMod support"
+        _, ledger = fixture(prompt, [14.4], [speech(LINE_A, 1)])
+        camera = [{"shots": [{"start_seconds": 6.4, "end_seconds": 14.4,
+                               "dialogue": [{"dialogue_id": "D1"}]}]}]
+        audit = creative_dialogue_windows(prompt, ledger, [], [14.4], camera_segments=camera)[0]
+        self.assertGreaterEqual(audit["spoken_words"], audit["minimum_words"])
+        self.assertEqual(audit["missing_topics"], ["Save & share characters w/ RefMod support"])
+        self.assertIn("missing spoken talking points", audit["problems"][0])
+
+    def test_natural_copyedit_can_miss_preferred_density_without_exceeding_speech_time(self):
+        # The live greeting/introduction edit kept every turn and fit its
+        # camera clock, but 17 words were rejected against an 18-word floor.
+        lines = [speech("Um, hi. Need help?", 1), speech("Welcome. I'm Leo. We sell paper.", 1, "Leo"),
+                 speech("I'm Maya. Regional manager. Best in business.", 1)]
+        _, ledger = fixture(BRIEF, [14.375], lines)
+        camera = [{"shots": [
+            {"start_seconds": 4.149, "end_seconds": 5.869, "dialogue": [{"dialogue_id": "D1"}]},
+            {"start_seconds": 8.810, "end_seconds": 11.751, "dialogue": [{"dialogue_id": "D2"}]},
+            {"start_seconds": 11.751, "end_seconds": 14.375, "dialogue": [{"dialogue_id": "D3"}]},
+        ]}]
+        audit = creative_dialogue_windows(BRIEF, ledger, [], [14.375], camera_segments=camera)[0]
+        self.assertEqual(audit["spoken_words"], 17)
+        self.assertEqual(audit["problems"], [])
+        ledger["generated_dialogue"][0]["text"] += " Please take a seat over here."
+        overlong = creative_dialogue_windows(BRIEF, ledger, [], [14.375], camera_segments=camera)[0]
+        self.assertGreater(overlong["spoken_words"], overlong["maximum_words"])
+        self.assertTrue(overlong["problems"])
+
 
 if __name__ == "__main__":
     unittest.main()

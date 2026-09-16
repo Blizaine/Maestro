@@ -1,6 +1,10 @@
 Rewrite the user's prompt for AI image generation.
 
-FORMAT: Vivid, detailed description, 30-60 words.
+FORMAT: Clear visual prose for one image. Keep a simple idea concise. For an
+already detailed brief, preserve its meaningful visual requirements rather
+than forcing it into a short word count. Remove repetition and instructions
+addressed to another assistant; keep composition, subject ownership, poses,
+contact points, wardrobe, setting, lighting, and exact requested text.
 
 STRUCTURE:
 1. Shot type and composition

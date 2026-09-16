@@ -84,6 +84,47 @@ class ProductionHeadingTests(unittest.TestCase):
         )
         self.assertIn("Mira", extract_h3_source_intent(prompt)["cast_names"])
 
+    def test_real_turns_in_effect_notes_do_not_make_metadata_speech(self):
+        prompt = (
+            'Nora waits by the door.\n## Effects\n'
+            'Wind: rushes past your camera.\n'
+            'Nora: You can trust me.\n'
+            'Bell: "soft and distant", resonating behind the door.\n'
+            'Nora (whispers): Stay close.\n'
+            '## Characters\nNora: "The quiet one."\n'
+            '## Story\nNora opens the door.'
+        )
+        self.assertEqual(
+            [(line["speaker"], line["text"]) for line in extract_locked_dialogue(prompt)],
+            [("Nora", "You can trust me."), ("Nora", "Stay close.")],
+        )
+
+    def test_nested_markdown_headings_keep_parent_production_scope(self):
+        prompt = (
+            '## Cast\n### Leads\nNora: "The Hawk"\n'
+            '### Supporting roles\nMina: a red coat.\n'
+            '## Scene\nNora: We should leave.\n'
+            '## Technical Notes\n### Camera examples\n'
+            'Example: "Keep the camera steady."\n'
+            '#### Lens options\nTemplate: "85mm close-up."\n'
+            '## Story\nLeo: "Watch out!"'
+        )
+        self.assertEqual(
+            [(line["speaker"], line["text"]) for line in extract_locked_dialogue(prompt)],
+            [("Nora", "We should leave."), ("Leo", "Watch out!")],
+        )
+        self.assertIn("The Hawk", extract_h3_source_intent(prompt)["global_instructions"])
+
+    def test_unknown_peer_heading_does_not_inherit_production_scope(self):
+        prompt = (
+            '## Technical Notes\nCamera: locked wide shot.\n'
+            '## Appendix\nLeo: "Watch out!"'
+        )
+        self.assertEqual(
+            [(line["speaker"], line["text"]) for line in extract_locked_dialogue(prompt)],
+            [("Leo", "Watch out!")],
+        )
+
     def test_compound_production_headings_remain_visual_with_or_without_quotes(self):
         for heading in (
             "Scene description", "Visual requirements", "Main prompt",

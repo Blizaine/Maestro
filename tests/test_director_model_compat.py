@@ -101,6 +101,32 @@ class TestDirectorModelAssessment(unittest.TestCase):
             contexts[0],
         )
 
+    def test_h3_music_context_for_silent_stem_forbids_visible_singing(self):
+        planner = MusicVideoPlanner()
+        contexts = planner._build_clip_contexts(
+            [{"start": 0.0, "end": 5.2, "label": "instrumental"}],
+            [], {}, {}, None,
+            source_audio_drives_vocals=True,
+            vocal_activity=["silent"],
+        )
+
+        self.assertIn("separated vocal stem is silent", contexts[0])
+        self.assertIn("do not depict singing, lip-sync", contexts[0])
+        self.assertNotIn("lip-syncs every syllable", contexts[0])
+
+    def test_h3_music_context_keeps_missing_vocal_evidence_unknown(self):
+        planner = MusicVideoPlanner()
+        contexts = planner._build_clip_contexts(
+            [{"start": 0.0, "end": 5.2, "label": "verse"}],
+            [], {}, {}, None,
+            source_audio_drives_vocals=True,
+            vocal_activity=["unknown"],
+        )
+
+        self.assertIn("vocal activity is unknown", contexts[0])
+        self.assertIn("do not invent lyrics or assert visible singing", contexts[0])
+        self.assertNotIn("lip-syncs every syllable", contexts[0])
+
     def test_video_only_planner_schemas_forbid_unused_image_fields(self):
         short_schema = _shot_list_schema(
             1,
@@ -2293,6 +2319,19 @@ class TestDirectorH3GenerationContract(unittest.TestCase):
         self.assertEqual(captured["audio_prompt_type"], "AD")
         self.assertEqual(captured["audio_guide"], song)
         self.assertEqual(captured["audio_frame_offset"], 48)
+        clips = [
+            {"start": 2, "end": 6, "duration_sec": 4, "duration_frames": 124, "output_frames": 96, "music_timing_version": 1},
+            {"start": 6, "end": 12.75, "duration_sec": 6.75, "duration_frames": 175, "output_frames": 162, "music_timing_version": 1},
+        ]
+        with patch.object(pipeline, "_submit_and_wait", side_effect=submit):
+            pipeline._run_video_generation("h3-music-cuts", {
+                "video_model": model_type, "pipeline_type": "music_video", "seamless": False,
+                "video_params": {}, "audio_path": song,
+            }, [{"video_prompt": "A dancer performs."}, {"video_prompt": "The band performs."}],
+                clips, [os.path.basename(shot)] * 2, out_dir=self.temp_dir.name)
+        self.assertEqual(captured["per_clip_frames"], [124, 175])
+        self.assertEqual(captured["per_clip_output_frames"], [96, 162])
+        self.assertEqual([c['start'] for c in clips], [2, 6], 'Generation must keep the musical cuts')
         self.assertFalse(any(
             item["type"] == "audio"
             for item in captured["per_clip_minimax_h3_references"][0]
@@ -2376,7 +2415,7 @@ class TestDirectorUICatalogContract(unittest.TestCase):
         self.assertIn("directorSetClipImage", store)
         self.assertIn("const timelineChanged =", store)
         self.assertIn("directorPlannedClips: status.planned_clips!", store)
-        self.assertIn("Maximum planned shot", chat)
+        self.assertIn("<DirectorGpuClipLimit", chat)
         self.assertIn("H3 Optimizations", director_h3_optimizations)
         self.assertIn("Director H3 Turbo", director_h3_optimizations)
         self.assertIn("const defaultTurboPreset", director_h3_optimizations)

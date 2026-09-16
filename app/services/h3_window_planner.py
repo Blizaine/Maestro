@@ -24,6 +24,7 @@ from services.h3_story_ledger import (
     UNREQUESTED_SPECTACLE_PATTERNS,
     extract_h3_source_intent,
     extract_locked_dialogue,
+    has_h3_window_bookkeeping,
     normalize_h3_planning_style,
     plan_h3_story_segments,
     recover_h3_plain_story,
@@ -34,6 +35,25 @@ from services.h3_story_ledger import (
 _H3_WINDOW_PLANNER_VERSION = 4 + H3_STORY_LEDGER_VERSION
 _CAMERA_COVERAGE_VALUES = {"auto", "continuous", "multi_shot"}
 _H3_INJECTED_POSITION_RE = re.compile(r"^[Ww](\d+):(\d{1,3})$")
+
+
+def _window_local_music(value: Any) -> str:
+    """Rewrite an authored whole-clip music clock as a window-local contract."""
+
+    text = re.sub(
+        r"\b(?:begins?|starts?)\s+at\s+0+(?:\.0+)?\s*(?:seconds?|secs?|s)\b"
+        r"\s*(?:,?\s*and\s+)?",
+        "",
+        sanitize_h3_prompt_text(value),
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\bthroughout\s+(?:the\s+)?\d+(?:\.\d+)?\s*(?:seconds?|secs?|s)\b",
+        "throughout this segment",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return sanitize_h3_prompt_text(text) or "N/A"
 
 
 def normalize_h3_camera_coverage(value: Any) -> str:
@@ -393,7 +413,7 @@ def _dialogue_sentence(item: Any, speaker_ids: dict[str, str]) -> str:
     stable_id = speaker_ids[key]
     language = _compact(item.get("language") or "English", 30)
     delivery = _compact(item.get("delivery") or "speaks naturally", 100)
-    action = _compact(item.get("action") or "", 120)
+    action = _compact(item.get("action") or "", 240)
     is_voiceover = bool(re.search(
         r"\b(?:off[- ]camera|off[- ]screen|voice[- ]?over|unseen first-person)\b",
         f"{delivery} {action}",
@@ -521,7 +541,7 @@ def _shot_prompt_sentence(
         lead = f"[Shot 1] {preamble} From {start:.2f} to {end:.2f} seconds, {framing}".strip()
     elif transition.casefold().startswith(("continuous", "without a cut", "reframe")):
         lead = (
-            f"[Shot {number}] At {_h3_shot_timestamp(start)}, without a cut, "
+            f"At {_h3_shot_timestamp(start)}, without a cut, "
             f"reframe to {framing}; continue through {_h3_shot_timestamp(end)}"
         )
     else:
@@ -531,7 +551,10 @@ def _shot_prompt_sentence(
             f"{_h3_shot_timestamp(end)}"
         )
     details = "; ".join(part for part in (camera, action) if part)
-    sentence = f"{lead}; {details}." if details else f"{lead}."
+    sentence = f"{lead}; {details.rstrip('.')}." if details else f"{lead}."
+    effects = sanitize_h3_nonverbal_audio(shot.get("sound_effects") or "")
+    if effects:
+        sentence += f" Synchronized practical sound: {effects.rstrip('.')}."
     dialogue = " ".join(
         value
         for value in (
@@ -571,7 +594,7 @@ def compile_h3_window_prompts(
         ),
         260,
     )
-    music = _compact(plan.get("music") or "N/A", 180)
+    music = _compact(_window_local_music(plan.get("music") or "N/A"), 180)
     source_intent = (
         plan.get("source_intent")
         if isinstance(plan.get("source_intent"), dict)
@@ -724,7 +747,9 @@ def compile_h3_window_prompts(
             )
             next_picture_index += 1
 
-        coverage = _compact(item.get("coverage") or "auto cinematic coverage", 80)
+        # Coverage carries the camera's landmarks and action axis, not just a
+        # label. Cutting it to 80 characters can drop the direction/reversal.
+        coverage = sanitize_h3_prompt_text(item.get("coverage") or "auto cinematic coverage")
         pacing = _compact(item.get("pacing") or "natural real-time pacing", 180)
         pacing_sentence = f"Coverage is {coverage}; pacing is {pacing}."
         if "slow motion" not in pacing.casefold():
@@ -773,9 +798,11 @@ def compile_h3_window_prompts(
                 "must not create a new entrance."
             )
         blocking_instruction = (
-            "Cuts change camera angle only; preserve the same set, furniture, "
-            "and subject positions unless assigned action moves them. Never "
-            "replay an entrance."
+            "Each timed range advances the same action in time. Cuts preserve "
+            "established geography, travel direction and completed changes; "
+            "continue from the position already reached. Never replay an "
+            "entrance, strike or collision for a new camera angle unless a "
+            "replay is explicitly requested."
             if len(shots) > 1 else ""
         )
         preamble = " ".join(
@@ -810,7 +837,15 @@ def compile_h3_window_prompts(
         visual_parts.append(f"The segment ends with {closing}.")
         soundscape = ambient
         if position > 0:
-            soundscape += "; the same ambience continues seamlessly without restarting"
+            # The story plan's ambient field may contain a whole-clip mixture
+            # of environmental bed and one-time action effects. Later windows
+            # own only their local shot effects; carrying that mixture forward
+            # replays impacts, launches, web shots and other completed sounds.
+            soundscape = (
+                "Only the continuous environmental ambience of the established "
+                "location carries over seamlessly; do not replay any earlier "
+                "one-time action sound"
+            )
         if effects and effects.casefold() not in {"n/a", "none", "no one-time effect"}:
             soundscape += f". Synchronized effects in this segment: {effects}"
         music_value = music
@@ -825,11 +860,10 @@ def compile_h3_window_prompts(
         prompt = "\n\n".join(prompt_parts)
         if (
             source_prompt is not None
-            and not re.search(r"\bwindows?\b", str(source_prompt), flags=re.IGNORECASE)
-            and re.search(r"\bwindows?\b", prompt, flags=re.IGNORECASE)
+            and has_h3_window_bookkeeping(prompt, source_prompt=source_prompt)
         ):
             raise ValueError(
-                "H3 camera plan introduced the internal term 'window' into visible scene content."
+                "H3 camera plan introduced generation-window bookkeeping into scene content."
             )
         budgeted_prompt = fit_h3_base_prompt(prompt)
         compiled.append(
@@ -1137,7 +1171,7 @@ def _infer_camera_coverage(prompt: str, requested: str = "auto") -> str:
     ):
         return "continuous"
     if re.search(
-        r"\b(?:single[- ]take|one[- ]take|unbroken|continuous tracking|no cuts?)\b",
+        r"\b(?:single[- ]take|one[- ]take|(?:one|single) continuous shot|unbroken|continuous tracking|no cuts?)\b",
         lowered,
     ):
         return "continuous"
@@ -1381,9 +1415,12 @@ def plan_h3_sliding_windows(
         )
     expect_dialogue = (
         _creative_dialogue_expected(prompt, len(boundaries))
-        if planning_style == "creative"
+        if planning_style in {"creative", "adaptive"}
         else bool(extract_locked_dialogue(prompt))
     )
+    if planning_style == "adaptive":
+        from services.adaptive_enhancement import adaptive_dialogue_expected
+        expect_dialogue = adaptive_dialogue_expected(prompt)
     resolved_coverage = _infer_camera_coverage(prompt, camera_coverage)
     story_ledger: dict[str, Any] | None = None
     planning_warnings: list[str] = []
@@ -1403,6 +1440,7 @@ def plan_h3_sliding_windows(
             expect_dialogue=expect_dialogue,
             planning_style=planning_style,
             image_paths=image_paths,
+            has_start_image=has_start_image,
             nsfw=nsfw,
         )
         planned_by = staged["planned_by"]
