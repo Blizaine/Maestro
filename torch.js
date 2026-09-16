@@ -34,6 +34,7 @@ module.exports = async (kernel) => {
     sm_90: "9.0",
     sm_100: "10.0",
     sm_120: "12.0",
+    sm_121: "12.1",
   })[String(kernel.gpu_target || "").toLowerCase()] || "8.9"
 
   if (solCapable && windows) {
