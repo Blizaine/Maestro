@@ -37,6 +37,7 @@ jobs:
           python -m pip install
           "starlette==0.46.1"
           "fastapi==0.141.1"
+          "gradio==5.29.0"
           "pydantic==2.10.6"
           "python-multipart==0.0.32"
           "httpx==0.28.1"
