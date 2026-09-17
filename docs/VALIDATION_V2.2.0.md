@@ -1,8 +1,41 @@
-# v2.2.1 validation record
+# v2.2.2 validation record
 
 Prepared 16 September 2026. This distinguishes automated regression coverage
 from rendered workflows exercised during development and tests still needed on
 other hardware.
+
+## v2.2.2 reliability update
+
+- Release CPU discovery passed **2,069 tests**, with six CUDA-dependent skips,
+  in 126.589 seconds. Syntax, undefined-name checks, five standalone JSON grammar
+  checks, UI lint and production build also passed. The normal Vite bundle-size
+  and mixed-import warnings remain informational. No LLM retests were run during
+  release preparation.
+- 869 focused Python regression tests passed during development, covering H3
+  parsing, exact dialogue, timing and camera plans; Director; Studio enhancement
+  and queue retries; adaptive enhancement; and the prompt bench.
+- Six final live regression requests completed without review warnings or
+  automated check failures: three prompts, once each with Gemma E4B and Qwen3.6
+  27B. The three-window reported brief retained its exact line with the older man.
+  These were enhancement-only, text-only Frames equivalents because the reporter's
+  reference image was unavailable. Qwen3.8 was installed but omitted by an overly
+  strict benchmark filename check; that detection is now corrected, with no new
+  Qwen3.8 generation or enhancement run claimed.
+- All 50 development/evaluation attempts were retained privately, including
+  failures and rejected approaches. Two earlier evaluations exposed more parsing
+  defects and became regression fixtures; the final six are not unseen holdouts.
+- Text review found remaining limitations despite operational passes: one Gemma
+  draft described boarding/sitting only in its closing state and paired a spoken
+  turn with the other character's acting cue. Some simple scenes were stretched
+  too slowly across three windows. Warning-free output does not certify fidelity.
+  Final requests took 24.5-289 seconds, with up to eleven writer calls.
+- Production UI build and mocked browser checks passed for reviewed-draft
+  acceptance, rejected retries, immediate queue visibility without a history
+  request, and mobile validation remaining visible. No test video jobs were sent.
+- Director regressions cover silent/unknown vocal intervals, singers and
+  instrumentalists, contradictory mouth cues, explicit expressions, wind
+  instruments and persistence through final compilation. A newly rendered music
+  video was not required or claimed for this release.
 
 ## v2.2.1 enhancement hotfix
 

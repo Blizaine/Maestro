@@ -5,7 +5,7 @@ import * as api from '../api/client'
 import { useStore } from '../stores/useStore'
 import type { GenerationJob } from '../types'
 
-export function EnhancedJobReview({job, onClose}: {job: GenerationJob; onClose: () => void}) {
+export function EnhancedJobReview({job, onClose, onSubmitted}: {job: GenerationJob; onClose: () => void; onSubmitted?: () => void}) {
   const dialog = useRef<HTMLDialogElement>(null)
   const [data, setData] = useState<Awaited<ReturnType<typeof api.fetchJobEnhancement>> | null>(null)
   const [error, setError] = useState('')
@@ -23,9 +23,17 @@ export function EnhancedJobReview({job, onClose}: {job: GenerationJob; onClose: 
     if (busy) return
     setBusy(true); setError('')
     try {
-      await api.retryEnhancedJob(job.id, action)
-      await useStore.getState().reconnectJobs()
+      const accepted = await api.retryEnhancedJob(job.id, action)
+      await useStore.getState().reconnectJobs({
+        ...job, id: accepted.job_id, status: accepted.status, progress: 0,
+        step: 0, totalSteps: 0, phase: '', message: 'Queued for generation',
+        error: null, outputFiles: [], showInGallery: true,
+        enhancement: {...job.enhancement!, error: undefined,
+          state: action === 'accept_draft' || action === 'as_written' ? 'complete'
+            : action === 'refresh' ? 'pending' : job.enhancement!.state},
+      })
       onClose()
+      onSubmitted?.()
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
     finally { setBusy(false) }
   }

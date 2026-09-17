@@ -97,7 +97,13 @@ def installed_writer(llm, model_id):
     directory = Path(llm.get_model_dir()) / (entry.get("cache_dir_override") or stem)
     names = [entry["gguf_file"]]
     if entry.get("mmproj_file"):
-        names.append(entry["mmproj_file"])
+        # Match the production loader's preference for an existing projector
+        # alias after an upstream rename; record the file it will actually use.
+        projector = next((name for name in entry.get("mmproj_cache_aliases", [])
+                          if (directory / name).is_file()
+                          and (directory / name).stat().st_size > 0),
+                         entry["mmproj_file"])
+        names.append(projector)
     assets = []
     for name in names:
         path = directory / name

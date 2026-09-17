@@ -126,9 +126,13 @@ export function GenerateButton({ stretch = false }: { stretch?: boolean }) {
   const submit = async (action: 'generate' | 'queue') => {
     if (blocked || pendingAction || (action === 'queue' && !queueSupported)) return
     setPendingAction(action)
-    if (action === 'generate') setSidebarOpen(false)
+    const previousJobs = new Set(useStore.getState().jobs.map(job => job.id))
     try {
       await startGeneration(action === 'queue' ? 'queue' : 'now')
+      if (action === 'generate' && useStore.getState().jobs.some(job =>
+        !previousJobs.has(job.id) && ['queued', 'running', 'completed'].includes(job.status))) {
+        setSidebarOpen(false)
+      }
     } finally {
       setPendingAction(null)
     }

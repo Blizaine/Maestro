@@ -3,9 +3,27 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
-## [2.2.1] - 2026-09-16
+## [2.2.2] - 2026-09-16
 
-Includes the full v2.2.0 feature release plus this enhancement hotfix:
+Includes the full v2.2.0 feature release and v2.2.1 hotfix, plus:
+
+- Reduce false H3 fidelity failures by separating writing instructions, speech
+  topics and descriptive role phrases from required physical action. Preserve
+  straight/curly quoted speech and its intended speaker, including unnamed roles.
+- Keep useful shorter AI conversations after bounded repair instead of failing
+  preferred minimum-word targets. Reallocate speaking time and copyedit only
+  AI-written lines when needed; exact user quotes remain intact.
+- Preserve conversational turn order and complete source-event schedules across
+  windows, including continuing conversations and corrected window labels.
+- Show accepted reviewed-draft retries in the queue immediately. Keep submission
+  errors visible and leave mobile controls open when generation was not accepted.
+- Carry Director vocal-activity evidence through planning and H3 compilation.
+  Remove conflicting singing/open-mouth cues during instrumental passages and
+  musician cutaways while respecting explicit performance requests.
+- Recognize cached vision-projector aliases in the developer prompt bench,
+  matching the normal loader after model-file renames.
+
+Previously included in v2.2.1:
 
 - Fixed false H3 enhancement review warnings for imported numbered shot lists.
   Preserve shot clocks, source order and camera settings; accept faithful

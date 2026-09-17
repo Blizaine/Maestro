@@ -101,11 +101,11 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
-### v2.2.1 (2026-09-16)
+### v2.2.2 (2026-09-16)
 
 **Unified AI enhancement, YuE2 music, and more control over Director productions**
 
-Includes the full v2.2.0 feature release below. **v2.2.1 enhancement fix:** imported numbered shot lists now keep their structure and camera settings, preventing false story-schedule and camera-fidelity warnings in Enhance now and queued enhancement.
+Includes the full v2.2.0 feature release and v2.2.1 numbered-shot fix below. **v2.2.2 reliability update:** fewer false enhancement review warnings, better quoted-dialogue ownership and speaking-time allocation, and reliable queue feedback when continuing with a reviewed draft. Director also keeps singers quiet during instrumental passages and prevents contradictory singing directions for instrumentalists.
 
 - **One Enhance workflow:** develops short ideas and adapts detailed scripts to the selected model. Enhance now, or let a queued job enhance immediately before generation. An optional **Use by default** setting remembers Enhance on generation; saved source prompts and drafts remain available for review and retries.
 - **Stronger H3 prompt writing:** improved silent-action parsing, dialogue ownership, choreography, camera direction, first-frame continuity and multi-window timing. Director shares the relevant writing guidance. Prompt review remains available for drafts that need attention.

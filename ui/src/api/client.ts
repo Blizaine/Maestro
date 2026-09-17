@@ -2916,5 +2916,5 @@ export async function retryEnhancedJob(jobId: string, action: 'retry' | 'refresh
     const error = await response.json().catch(() => ({}))
     throw new Error(error.detail || 'Could not retry this job.')
   }
-  return response.json() as Promise<{job_id: string; status: string}>
+  return response.json() as Promise<{job_id: string; status: import('../types').GenerationJob['status']}>
 }

@@ -554,7 +554,7 @@ class SparseSpeechTests(unittest.TestCase):
             beat = {'dialogue_ids': ['D1'], '_speech_action_order': order}
             schema = _camera_event_card_schema(1, [beat])
             turn = schema['properties']['event_cards']['properties']['event_1']['properties']['D1']['properties']
-            self.assertEqual('anyOf' in turn['lead_in'], connector == 'while')
+            self.assertEqual(turn['lead_in']['type'], 'null' if connector == 'while' else 'object')
 
     def test_ongoing_activity_can_develop_before_separate_ending_without_replaying_it(self):
         locked = extract_locked_dialogue(FINALE)
