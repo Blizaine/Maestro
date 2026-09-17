@@ -108,8 +108,7 @@ class H3CreativeRegressionTests(unittest.TestCase):
         generator = Mock(side_effect=["{}", "{}", json.dumps({"generated_dialogue": [speech(LINE_B, 2, "Leo")]})])
         result, warnings = complete_creative_dialogue(BRIEF, ledger, canonical_ledger=canonical, locked_dialogue=[], durations=[10.1, 10.1], generate=generator, system_prompt="Focused guide")
         self.assertEqual([item["text"] for item in result["generated_dialogue"]], ["Ready?", LINE_B])
-        self.assertEqual(len(warnings), 1)
-        self.assertIn("window 1", warnings[0])
+        self.assertEqual(warnings, [])  # A short valid line is not a timing failure.
         self.assertEqual(ledger, original)
         self.assertEqual(generator.call_count, 3)
 
@@ -120,7 +119,7 @@ class H3CreativeRegressionTests(unittest.TestCase):
         self.assertEqual(warnings, [])
         self.assertEqual([item["text"] for item in result["generated_dialogue"]], [LINE_A, LINE_B])
         self.assertIn("Validation feedback: 3 spoken words", generator.call_args_list[1].kwargs["prompt"])
-        self.assertIn("at least 19 MORE spoken words; aim to add 21", generator.call_args_list[1].kwargs["prompt"])
+        self.assertIn("Try adding 21 spoken words if useful", generator.call_args_list[1].kwargs["prompt"])
         self.assertEqual(generator.call_args.kwargs["json_schema"]["properties"]["generated_dialogue"]["items"]["properties"]["speaker"]["enum"], ["Maya", "Leo"])
 
     def test_missing_topic_triggers_repair_even_with_enough_words(self):
@@ -143,19 +142,19 @@ class H3CreativeRegressionTests(unittest.TestCase):
             {"start_seconds": 0, "end_seconds": 6.4, "dialogue": []},
             {"start_seconds": 6.4, "end_seconds": 14.4, "dialogue": [{"dialogue_id": "D1"}]},
         ]}]
-        self.assertTrue(creative_dialogue_windows(BRIEF, ledger, [], [14.4])[0]["problems"])
+        self.assertTrue(creative_dialogue_windows(BRIEF, ledger, [], [14.4])[0]["writing_notes"])
         final = creative_dialogue_windows(BRIEF, ledger, [], [14.4], camera_segments=camera)[0]
         self.assertEqual(final["problems"], [])
         self.assertEqual(final["spoken_words"], 22)
         self.assertEqual(ledger, original)
 
-        # A sparse reply does not become a developed conversation when there
-        # is ample speaking time, and a silent plan cannot satisfy it either.
+        # Preferred density remains useful writing feedback, not a blocker.
         _, sparse = fixture(BRIEF, [14.4], [speech("Ready?", 1)])
         for shots in ([{"start_seconds": 0, "end_seconds": 14.4, "dialogue": [{"dialogue_id": "D1"}]}], []):
             with self.subTest(shots=shots):
                 audited = creative_dialogue_windows(BRIEF, sparse, [], [14.4], camera_segments=[{"shots": shots}])
-                self.assertTrue(audited[0]["problems"])
+                self.assertTrue(audited[0]["writing_notes"])
+                self.assertEqual(audited[0]["problems"], [])
 
     def test_camera_time_does_not_waive_missing_spoken_topics(self):
         prompt = BRIEF + "\nFeatures include:\n• Save & share characters w/ RefMod support"

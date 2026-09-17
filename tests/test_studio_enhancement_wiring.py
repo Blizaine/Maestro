@@ -211,6 +211,30 @@ class EnhancedJobWiringTests(unittest.TestCase):
         self.assertEqual(record['prepared']['params']['minimax_h3_sequence_prompt_mode'], 'manual')
         self.writer.assert_not_awaited()
 
+    def test_accept_reviewed_multiwindow_draft_reaches_worker_without_enhancing_again(self):
+        retry = load('retry_enhanced_job', self.ns)
+        prepared_params = {**self.params, 'prompt': 'Reviewed native script',
+            'h3_window_prompts': ['Exact first window', 'Exact second window'],
+            'h3_window_plan_signature': 'saved-signature'}
+        self.job.update(status='failed')
+        self.job['enhancement'].update(state='review', prepared={
+            'params': prepared_params, 'enhancement_review_required': True,
+            'h3_window_plan': {'planning_warnings': ['Review the camera fallback.']}},
+            warnings=['Review the camera fallback.'])
+        self.archive.save(self.job)
+        with patch.object(threading, 'Thread') as thread:
+            response = asyncio.run(retry('testjob', Request({'action': 'accept_draft'})))
+        accepted = self.jobs[response['job_id']]
+        self.assertEqual(response['status'], 'queued')
+        self.assertEqual(accepted['enhancement']['state'], 'complete')
+        thread.return_value.start.assert_called_once()
+        self.assertTrue(try_start(accepted))
+        self.run_enhancement(accepted)
+        self.assertEqual({key: accepted['params'][key] for key in prepared_params}, prepared_params)
+        self.assertEqual(accepted['enhancement']['state'], 'complete')
+        self.writer.assert_not_awaited()
+        self.prepare.assert_not_awaited()
+
     def test_dismissed_cancelled_job_cannot_be_resurrected_by_worker_teardown(self):
         self.job.update(status='cancelled', dismissed=True)
         self.archive.save(self.job)

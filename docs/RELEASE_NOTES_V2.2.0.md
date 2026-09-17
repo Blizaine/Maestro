@@ -1,4 +1,4 @@
-# Maestro v2.2.1
+# Maestro v2.2.2
 
 Released 16 September 2026.
 
@@ -6,8 +6,40 @@ This release brings one adaptive Enhance workflow, enhancement inside the
 generation queue, YuE2 music and experimental personal music styles, a searchable
 gallery across folders, and stronger control over Director music videos.
 
-The complete v2.2.0 feature release remains below, with the following v2.2.1
-enhancement fix included.
+The complete v2.2.0 feature release remains below, together with the v2.2.1
+numbered-shot fix and these v2.2.2 reliability improvements.
+
+## v2.2.2 enhancement and Director fixes
+
+- **Fewer false review failures:** distinguish writing instructions, conversation
+  topics, character descriptions and background context from actions that must
+  appear on camera. Straight, curly and mixed quotation marks retain complete
+  user-written lines; descriptive speakers such as "the older man" keep ownership.
+- **More practical dialogue timing:** keep useful shorter exchanges after bounded
+  repair instead of rejecting them for missing a preferred minimum word count.
+  Preserve conversation order, allocate speaking time and rewrite crowded AI-only
+  lines when necessary. User-written quotes are never shortened automatically;
+  genuinely overfull or incomplete drafts can still require review.
+- **More reliable multi-window planning:** allow the required source events and
+  supporting beats to fit the story schema, preserve ongoing conversation turns,
+  and repair misplaced window labels when source events remain intact and ordered.
+- **Working review continuation:** immediately show and poll accepted draft retries
+  without waiting for queue-history refresh. Submission errors remain visible,
+  including on mobile where controls stay open until a job is accepted.
+- **Director vocal ownership:** retain analyzed vocal activity through planning,
+  start images, ending poses and final H3 prompt compilation. During instrumental
+  passages, the singer listens or moves with closed lips; instrumentalists do not
+  acquire invented singing, bellows or vocal breaths. User-requested expressions
+  and wind-instrument playing remain supported. Replan existing Director projects
+  to apply the updated guidance and vocal evidence.
+- **Developer tooling:** the prompt bench recognizes cached vision-projector
+  aliases, including existing Qwen3.8 installations, just as normal loading does.
+
+These changes improve reliability; LLM writing and generated staging still need
+human judgment. The validation record separates warning-free enhancement from
+creative quality and rendered results.
+
+## v2.2.1 numbered-shot fix
 
 **AI enhancement hotfix:** imported numbered shot headings such as
 `SHOT 1 — 0:00–0:02` now retain their authored structure, including Markdown

@@ -52,7 +52,8 @@ def _shorten_generated_dialogue(
             "Rewrite concisely; remove redundant qualifiers, introductions and repeated explanations. "
             "Do not merely change punctuation or keep almost all the original wording. "
             f"Aim for {target} spoken words TOTAL. Each turn has its share of that target below. "
-            "Return only an object mapping each L-key to its revised spoken text, in the same language. "
+            "Return only an object mapping each L-key to revised spoken text, in the same language. "
+            "Write a new, complete short utterance in the same language; do not cut an unfinished sentence. "
             "Do not return speaker names, delivery notes, event IDs or other metadata. "
             "Every listed turn must still have meaningful spoken text; do not join or drop turns.\n"
             f"User brief (context only; do not write more dialogue):\n{prompt}\n"
@@ -68,10 +69,13 @@ def _shorten_generated_dialogue(
         return generate(
             prompt=text,
             system_prompt=system_prompt, max_new_tokens=768,
-            temperature=0.3, top_p=0.88, enable_thinking=False,
+            temperature=0.3, top_p=0.88, enable_thinking=True,
+            thinking_budget=512, reasoning_effort="low",
             frequency_penalty=0.0, presence_penalty=0.0,
-            json_schema={"type": "object", "properties": {key: {"type": "string"} for key in turns},
-                         "required": list(turns), "additionalProperties": False},
+            # llama-server's JSON grammar disables reasoning. A short editing
+            # pass needs room to choose a complete concise phrase and count it;
+            # grammar-capping words instead can cut the sentence mid-thought.
+            json_schema=None,
         )
     raw = write(request)
     candidate = _parse_json_object(raw)
@@ -83,17 +87,30 @@ def _shorten_generated_dialogue(
                 if _dialogue_word_count(candidate.get(key)) > turn["maximum_words"]}
         if over:
             try:
-                repaired = _parse_json_object(write(
-                    request + f"\nPrevious copyedit:\n{json.dumps(candidate, ensure_ascii=False)}"
-                    + "\nThese lines still do not fit. Rewrite them more concisely, keeping every L-key:\n"
-                    + "\n".join(over.values())
-                ))
+                repaired = {}
+                for key, problem in over.items():
+                    limit = turns[key]['maximum_words']
+                    # A long multi-turn editing request can encourage near-
+                    # copying. Focus the retry on one essential message, with
+                    # spare words rather than asking it to hit the ceiling.
+                    local = _parse_json_object(write(
+                        f"SHORTEN ONE SPOKEN TURN. {problem}. "
+                        f"Aim for {max(1, int(limit * 0.65))} words; never exceed {limit}. "
+                        "Express its core question or answer as a NEW complete natural utterance. "
+                        "Omit greetings, repetition and decorative phrasing. Keep essential information. "
+                        "Do not truncate a sentence. Do not return acting directions. "
+                        f"Return only JSON with key {key!r} and the spoken text as its value. "
+                        f"Language: {turns[key]['language']}.\n"
+                        f"Editable line: {candidate.get(key)}"
+                    ))
+                    if isinstance(local, dict) and key in local:
+                        repaired[key] = local[key]
             except Exception as error:
                 print(f"[MiniMax H3] Camera dialogue copyedit retry: {error}")
                 repaired = None  # Keep a useful first edit if the retry fails.
-            if isinstance(repaired, dict) and set(repaired) == set(turns):
+            if isinstance(repaired, dict):
                 for key in over:
-                    if isinstance(repaired[key], str) and repaired[key].strip() and (
+                    if isinstance(repaired.get(key), str) and repaired[key].strip() and (
                         _dialogue_word_count(repaired[key]) < _dialogue_word_count(candidate.get(key))
                     ):
                         candidate[key] = repaired[key]
@@ -130,6 +147,14 @@ def fit_camera_dialogue(
     def reflow() -> None:
         if not shots:
             return
+        if all(
+            sum(_dialogue_word_count(by_id[line["dialogue_id"]]["text"])
+                for line in shot.get("dialogue", [])) / DIALOGUE_MAX_WORDS_PER_SECOND
+            + len(shot.get("dialogue", [])) * 0.2
+            <= float(shot["end_seconds"]) - float(shot["start_seconds"]) + 0.01
+            for shot in shots
+        ):
+            return  # Preserve an already-valid clock, including opening speech.
         assignments = [[{
             "description": shot.get("action", ""),
             "dialogue_ids": [line["dialogue_id"] for line in shot.get("dialogue", [])],
@@ -229,7 +254,7 @@ def creative_dialogue_windows(
                 # Copyediting requests natural phrasing below hard per-line
                 # maxima. A one/two-word miss of a preferred density target
                 # must not reject that successful edit. This small allowance
-                # never raises the hard speech ceiling or waives sparse speech.
+                # never raises the hard speech ceiling.
                 minimum = min(budget.minimum, max(1, math.ceil(target * 0.9) - 2))
                 budget = type(budget)(minimum, target, min(budget.maximum, maximum))
         beats = [item for item in ledger.get("beats", []) if item.get("segment") == index]
@@ -245,8 +270,13 @@ def creative_dialogue_windows(
         required_topics = topic_owners.get(index, [])
         missing_topics = [topic for topic in required_topics if not dialogue_topic_covered(topic, all_spoken)]
         problems = []
-        if words < budget.minimum or words > budget.maximum:
+        writing_notes = []
+        if words > budget.maximum:
             problems.append(f"{words} spoken words; aim for {budget.target} ({budget.minimum}–{budget.maximum} allowed)")
+        elif not words:
+            problems.append("the requested spoken exchange has no dialogue")
+        elif words < budget.minimum:
+            writing_notes.append(f"{words} spoken words; preferred target {budget.target}")
         if missing_topics:
             problems.append("missing spoken talking points: " + "; ".join(missing_topics))
         windows.append({
@@ -262,7 +292,8 @@ def creative_dialogue_windows(
             "source_events": [event for event in source_events
                               if any(event["event_id"] in beat.get("source_event_ids", []) for beat in beats)],
             "current_dialogue": [catalog[did] for did in ids if did not in locked_ids],
-            "required_spoken_topics": required_topics, "missing_topics": missing_topics, "problems": problems,
+            "required_spoken_topics": required_topics, "missing_topics": missing_topics,
+            "problems": problems, "writing_notes": writing_notes,
         })
     return windows
 
@@ -271,6 +302,7 @@ def complete_creative_dialogue(
     prompt: str, ledger: dict[str, Any], *, canonical_ledger: dict[str, Any],
     locked_dialogue: list[dict[str, Any]], durations: list[float],
     generate: Callable[..., str], system_prompt: str,
+    copyedit_system_prompt: str | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """Develop each window with one retry and a final text-only edit if needed."""
     from services.h3_window_planner import _parse_json_object
@@ -285,17 +317,18 @@ def complete_creative_dialogue(
         allow_generated_dialogue=True,
     )["properties"]["generated_dialogue"])
     dialogue_schema.update(minItems=1, maxItems=6)
-    obligations = [item for item in creative_dialogue_windows(prompt, ledger, locked_dialogue, durations) if item["problems"]]
+    obligations = [item for item in creative_dialogue_windows(prompt, ledger, locked_dialogue, durations)
+                   if item["problems"] or item["writing_notes"]]
     for obligation in obligations:
         number = obligation["segment"]
         schema = deepcopy(dialogue_schema)
         schema["items"]["properties"]["segment"] = {"type": "integer", "enum": [number]}
         if cast_names:
             schema["items"]["properties"]["speaker"] = {"type": "string", "enum": cast_names}
-        feedback = "; ".join(obligation["problems"])
+        feedback = "; ".join(obligation["problems"] + obligation["writing_notes"])
         previous_attempt = ""
         def fit_score(item):
-            return (max(0, item["spoken_words"] - item["maximum_words"]),
+            return (int(not item["spoken_words"]), max(0, item["spoken_words"] - item["maximum_words"]),
                     len(item["missing_topics"]), max(0, item["minimum_words"] - item["spoken_words"]),
                     abs(item["spoken_words"] - item["target_words"]))
 
@@ -317,7 +350,7 @@ def complete_creative_dialogue(
                         prompt, overlong_lines,
                         target_words=max(1, obligation["target_words"] - sum(
                             _dialogue_word_count(item["text"]) for item in obligation["locked_lines"])),
-                        generate=generate, system_prompt=system_prompt,
+                        generate=generate, system_prompt=copyedit_system_prompt or system_prompt,
                     )
                     raw = json.dumps({"generated_dialogue": edited}, ensure_ascii=False)
                 elif attempt < 2:
@@ -401,13 +434,12 @@ def complete_creative_dialogue(
                 score = fit_score(checked)
                 if score < best_score:
                     best_draft, best_score = compiled, score
-                if checked["problems"]:
-                    feedback = "; ".join(checked["problems"])
+                if checked["problems"] or (checked["writing_notes"] and attempt == 0 and not copyedited):
+                    feedback = "; ".join(checked["problems"] + checked["writing_notes"])
                     words = checked["spoken_words"]
                     if words < checked["minimum_words"]:
                         feedback += (
-                            f". Your rejected script needs at least {checked['minimum_words'] - words} MORE spoken words; "
-                            f"aim to add {checked['target_words'] - words}. Develop an idea or a listener's response "
+                            f". Try adding {checked['target_words'] - words} spoken words if useful. Develop an idea or a listener's response "
                             "instead of returning another reply of the same length"
                         )
                     elif words > checked["maximum_words"]:
@@ -416,7 +448,8 @@ def complete_creative_dialogue(
                             f"aim to remove {words - checked['target_words']}. Keep locked lines verbatim"
                         )
                     raise ValueError(feedback)
-                best_draft = compiled
+                if not checked["writing_notes"]:
+                    best_draft = compiled
                 break
             except Exception as error:
                 feedback = str(error)

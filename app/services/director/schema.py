@@ -239,6 +239,8 @@ class AudioPlan:
     vocal_style: Optional[str] = None
     timing_anchor: str = "balanced"  # "audio" | "video" | "balanced"
     lip_sync_critical: bool = False
+    # Analysis evidence, never an LLM-assigned performance or section label.
+    vocal_activity: Optional[str] = None
 
     def to_dict(self) -> dict:
         d = {"mode": self.mode, "timing_anchor": self.timing_anchor, "lip_sync_critical": self.lip_sync_critical}
@@ -248,6 +250,8 @@ class AudioPlan:
             d["effects"] = self.effects
         if self.vocal_style:
             d["vocal_style"] = self.vocal_style
+        if self.vocal_activity in {"active", "silent", "unknown"}:
+            d["vocal_activity"] = self.vocal_activity
         return d
 
     @staticmethod
@@ -259,6 +263,7 @@ class AudioPlan:
             vocal_style=d.get("vocal_style"),
             timing_anchor=d.get("timing_anchor", "balanced"),
             lip_sync_critical=d.get("lip_sync_critical", False),
+            vocal_activity=d.get("vocal_activity"),
         )
 
 

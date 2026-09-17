@@ -1607,6 +1607,8 @@ def _compile_official_dialogue(
     has_driving_audio: bool = False,
     duration_seconds: float = 0.0,
     music_driven: bool = False,
+    vocal_activity: str | None = None,
+    project_context: str = "",
 ) -> tuple[str, str]:
     """Place exact tagged lines and stable speaker IDs in the visual field."""
 
@@ -1713,7 +1715,7 @@ def _compile_official_dialogue(
                 body = _insert_h3_vocal_detail(body, driver_contract)
             if music_driven:
                 from .music_performance import music_performance_direction
-                direction = music_performance_direction(subjects)
+                direction = music_performance_direction(subjects, vocal_activity, project_context=project_context)
                 if "vocal ownership stays with the assigned singer" not in body.casefold():
                     body = _insert_h3_vocal_detail(body, direction)
                 driver_contract = f"{driver_contract} {direction}"
@@ -2120,6 +2122,17 @@ def compile_h3_official_prompt(
         # The supplied soundtrack already contains the sung words. Do not let
         # an LLM's transcript become a competing generated-dialogue request.
         dialogue_beats = []
+        from .music_performance import constrain_music_performance
+        activity = _field(audio_plan or {}, "vocal_activity", None)
+        prompt = constrain_music_performance(
+            prompt, subjects, activity, project_context=project_context,
+        )
+        opening_blocking = constrain_music_performance(
+            opening_blocking, subjects, activity, project_context=project_context,
+        )
+        closing_blocking = constrain_music_performance(
+            closing_blocking, subjects, activity, project_context=project_context,
+        )
     if audio_mode in {"audio_driven", "music_driven"}:
         # Initial Director preflight runs before concrete Ref2VA manifests are
         # assembled. The shot's audio plan still proves that a mapped source
@@ -2145,6 +2158,8 @@ def compile_h3_official_prompt(
             has_driving_audio=has_driving_audio,
             duration_seconds=duration_seconds,
             music_driven=audio_mode == "music_driven",
+            vocal_activity=_field(audio_plan or {}, "vocal_activity", None),
+            project_context=project_context,
         )
         body = re.sub(r"^\s*\[Shot\s+1\]\s*", "", body, flags=re.IGNORECASE)
         body = f"[Shot 1] {body}".strip()
@@ -2196,6 +2211,8 @@ def compile_h3_official_prompt(
             compact_body, subjects or [], dialogue_beats or [], registry, existing_blocks,
             has_driving_audio=has_driving_audio, duration_seconds=duration_seconds,
             music_driven=audio_mode == "music_driven",
+            vocal_activity=_field(audio_plan or {}, "vocal_activity", None),
+            project_context=project_context,
         )
         compiled_body = re.sub(r"^\s*\[Shot\s+1\]\s*", "", compiled_body, flags=re.IGNORECASE)
         compiled_body = f"[Shot 1] {compiled_body}".strip()

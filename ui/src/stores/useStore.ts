@@ -1819,7 +1819,7 @@ interface AppState {
   stopGeneration: (jobId?: string) => void
   dismissJob: (jobId: string) => void
   clearCompletedJobs: () => Promise<void>
-  reconnectJobs: () => Promise<void>
+  reconnectJobs: (confirmedJob?: GenerationJob) => Promise<void>
 
   // LoRA state
   availableLoras: string[]
@@ -8219,11 +8219,13 @@ export const useStore = create<AppState>((set, get) => ({
     if (failed) throw new Error(`Could not clear ${failed} completed ${failed === 1 ? 'entry' : 'entries'}. Please try again.`)
   },
 
-  reconnectJobs: async () => {
+  reconnectJobs: async (confirmedJob) => {
     // On page load, check backend for any active jobs and restore them
     try {
-      const data = await api.fetchActiveJobs()
-      if (data.jobs.length > 0) {
+      // A retry response is already authoritative. Do not delay its visible
+      // acceptance or polling behind another request for queue history.
+      const data = confirmedJob ? {jobs: []} : await api.fetchActiveJobs()
+      if (data.jobs.length > 0 || confirmedJob) {
         const existingIds = new Set(get().jobs.map(j => j.id))
         const newJobs: GenerationJob[] = data.jobs
           .filter(j => !existingIds.has(j.job_id))
@@ -8244,6 +8246,11 @@ export const useStore = create<AppState>((set, get) => ({
             enhancement: j.enhancement,
             ..._adaptiveEtaJobFields(j),
           }))
+        // A successful retry is already accepted even if the history refresh
+        // fails or is briefly stale. Publish and poll that confirmed job too.
+        if (confirmedJob && !existingIds.has(confirmedJob.id) && !newJobs.some(job => job.id === confirmedJob.id)) {
+          newJobs.push(confirmedJob)
+        }
         if (newJobs.length > 0) {
           set(s => ({
             jobs: [...s.jobs, ...newJobs],

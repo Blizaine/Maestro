@@ -322,7 +322,7 @@ class MusicVideoPlanner(BasePlanner):
             kwargs,
             kind="music_video",
             fingerprint_payload={
-                "planner_revision": 4,
+                "planner_revision": 5,
                 "scene_description": scene_description,
                 "clips": clips,
                 "lyrics": lyrics or [],
@@ -485,6 +485,8 @@ class MusicVideoPlanner(BasePlanner):
             performer_map=performer_map,
             lyrics=lyrics,
             speaker_names=speaker_names,
+            vocal_activity=vocal_activity,
+            project_context=scene_description,
         )
 
         total_duration = sum(c.get("end", 0) - c.get("start", 0) for c in clips) if clips else None
@@ -649,8 +651,11 @@ class MusicVideoPlanner(BasePlanner):
                     vocal_info = (
                         "mapped source audio drives this interval, but vocal "
                         "activity is unknown; do not invent lyrics or assert "
-                        "visible singing; if a vocalist is shown, derive any "
-                        "vocal performance only from the supplied audio"
+                        "visible singing. Stage the lead singer listening or moving "
+                        "with relaxed closed lips by default; any lip movement must "
+                        "follow an actual audible voice in the supplied audio, never "
+                        "a guitar riff. Do not invent a bellow, shout, vocal breath "
+                        "or open-mouth exertion to convey musical energy"
                     )
             else:
                 vocal_info = (
@@ -984,11 +989,13 @@ Write {len(clips)} structured shot plans. Go:"""
         performer_map: dict[str, str],
         lyrics: Optional[list[dict]],
         speaker_names: dict[str, str],
+        vocal_activity: Optional[list[str]] = None,
+        project_context: str = "",
     ) -> list[ShotPlan]:
         """Convert raw LLM JSON output into validated ShotPlan objects."""
         shots = []
         for i, clip in enumerate(clips):
-            raw = shot_dicts[i] if i < len(shot_dicts) else {}
+            raw = dict(shot_dicts[i]) if i < len(shot_dicts) else {}
             section = (clip.get("label") or clip.get("section_label") or "verse").lower()
             strategy = _SECTION_VISUAL_STRATEGY.get(section, _SECTION_VISUAL_STRATEGY["verse"])
             duration = clip.get("end", 0) - clip.get("start", 0)
@@ -1021,7 +1028,33 @@ Write {len(clips)} structured shot plans. Go:"""
                 mode=audio_raw.get("mode", "music_driven"),
                 ambience=audio_raw.get("ambience"),
                 timing_anchor="audio",
+                vocal_activity=(
+                    vocal_activity[i]
+                    if vocal_activity and i < len(vocal_activity) else None
+                ),
             )
+
+            # Keep all generated views of a performance consistent, including
+            # its start image and ending pose. The final H3 compiler repeats
+            # this after any later polish, using the persisted audio evidence.
+            from ..music_performance import constrain_music_performance, music_performance_direction
+            for key in ("video_prompt", "image_prompt", "spatial_setup", "ending_beat"):
+                if isinstance(raw.get(key), str):
+                    raw[key] = constrain_music_performance(
+                        raw[key], subjects, audio.vocal_activity, project_context=project_context,
+                    )
+            for key in ("window_prompts", "keyframe_prompts", "action_beats", "performance_beats"):
+                if isinstance(raw.get(key), list):
+                    raw[key] = [
+                        constrain_music_performance(value, subjects, audio.vocal_activity, project_context=project_context)
+                        if isinstance(value, str) else value for value in raw[key]
+                    ]
+            if audio.vocal_activity is not None:
+                direction = music_performance_direction(subjects, audio.vocal_activity, project_context=project_context)
+                if raw.get("video_prompt"):
+                    raw["video_prompt"] = f"{raw['video_prompt']} {direction}"
+                if raw.get("window_prompts"):
+                    raw["window_prompts"] = [f"{value} {direction}" if isinstance(value, str) else value for value in raw["window_prompts"]]
 
             # Parse dialogue beats if present
             dialogue_beats = None
