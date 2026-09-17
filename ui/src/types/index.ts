@@ -1458,6 +1458,9 @@ export interface SystemStats {
     percent: number
     /** NVML / nvidia-smi compute utilization, kept for the tooltip. */
     compute_percent?: number
+    /** GPU temperature when exposed by NVML. */
+    temperature_available?: boolean
+    temperature_c?: number
     vram_used_gb: number
     vram_total_gb: number
     vram_percent: number

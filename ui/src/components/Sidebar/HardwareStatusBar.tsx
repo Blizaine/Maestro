@@ -150,6 +150,15 @@ export function HardwareStatusBar() {
             </span>
           </span>
         )}
+        {gpu?.available && gpu.temperature_available !== false && gpu.temperature_c != null && (
+          <span
+            className="flex items-center gap-1 shrink-0 text-text-secondary"
+            title={`GPU temperature ${gpu.temperature_c.toFixed(0)}°C`}
+          >
+            <span className="text-[10px] text-text-muted">TEMP</span>
+            <span className="tabular-nums">{gpu.temperature_c.toFixed(0)}°C</span>
+          </span>
+        )}
         <span className="flex items-center gap-1 shrink-0 text-text-secondary" title={`CPU ${(cpu?.percent ?? 0).toFixed(0)}%`}>
           <Cpu size={11} className="text-text-muted" />
           <span className="tabular-nums">{(cpu?.percent ?? 0).toFixed(0)}%</span>
@@ -197,6 +206,15 @@ export function HardwareStatusBar() {
           <>
             <Gauge label="GPU" percent={gpu.percent} value={`${gpu.percent.toFixed(0)}%`} fill="bg-accent-blue"
               title={gpu.compute_percent != null ? `3D engine (matches Task Manager) · compute (nvidia-smi): ${gpu.compute_percent.toFixed(0)}%` : undefined} />
+            {gpu.temperature_available !== false && gpu.temperature_c != null && (
+              <Gauge
+                label="TEMP"
+                percent={gpu.temperature_c}
+                value={`${gpu.temperature_c.toFixed(0)}°C`}
+                fill="bg-accent-blue"
+                title={`GPU temperature: ${gpu.temperature_c.toFixed(0)}°C`}
+              />
+            )}
             {gpu.vram_available !== false ? (
               <Gauge
                 label="VRAM"

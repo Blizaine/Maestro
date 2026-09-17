@@ -78,7 +78,9 @@ def get_live_stats() -> dict:
     gpu_available = False
     gpu_name = None
     gpu_percent = vram_used_gb = vram_total_gb = vram_percent = 0.0
+    gpu_temp_c = 0.0
     vram_available = False
+    temperature_available = False
     if _nvml_ok and pynvml is not None:
         try:
             handle = pynvml.nvmlDeviceGetHandleByIndex(0)  # GPU 0
@@ -98,6 +100,19 @@ def get_live_stats() -> dict:
                 gpu_percent = float(util.gpu)
             except Exception:
                 gpu_percent = 0.0
+
+            try:
+                gpu_temp_c = float(
+                    pynvml.nvmlDeviceGetTemperature(
+                        handle,
+                        pynvml.NVML_TEMPERATURE_GPU,
+                    )
+                )
+                temperature_available = True
+            except Exception:
+                # Temperature reporting is optional and must not invalidate
+                # otherwise valid GPU telemetry.
+                pass
 
             try:
                 mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
@@ -147,6 +162,8 @@ def get_live_stats() -> dict:
             "vram_available": vram_available,
             "percent": round(gpu_percent, 1),
             "compute_percent": round(gpu_compute_percent, 1),
+            "temperature_available": temperature_available,
+            "temperature_c": round(gpu_temp_c, 1),
             "vram_used_gb": round(vram_used_gb, 2),
             "vram_total_gb": round(vram_total_gb, 2),
             "vram_percent": round(vram_percent, 1),
