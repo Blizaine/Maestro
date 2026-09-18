@@ -262,6 +262,23 @@ def store_kvcache(
     flat_v_cache[slot_ids] = value[valid_mask]
 
 
+def _align_with_kv_cache_dtype(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Keep fallback attention inputs compatible with their cache storage."""
+    if q.dtype != k_cache.dtype:
+        q = q.to(dtype=k_cache.dtype)
+    if k.dtype != k_cache.dtype:
+        k = k.to(dtype=k_cache.dtype)
+    if v.dtype != v_cache.dtype:
+        v = v.to(dtype=v_cache.dtype)
+    return q, k, v
+
+
 class Attention(nn.Module):
 
     def __init__(
@@ -285,6 +302,14 @@ class Attention(nn.Module):
         context = get_context()
         k_cache, v_cache = self.k_cache, self.v_cache
         if k_cache.numel() and v_cache.numel():
+            if not self.use_triton_kv_cache:
+                q, k, v = _align_with_kv_cache_dtype(
+                    q,
+                    k,
+                    v,
+                    k_cache,
+                    v_cache,
+                )
             store_kvcache(k, v, k_cache, v_cache, context.slot_mapping, use_triton_kv_cache=self.use_triton_kv_cache)
         if context.is_prefill:
             if context.block_tables is not None:    # prefix cache
