@@ -1778,7 +1778,13 @@ def load_model(
             _api_key = api_key
             _model_id = model_id
             _device = provider
-            _vision_available = False
+            # OpenAI-compatible and Anthropic endpoints accept inline images via
+            # the standard `image_url` content part; the mmproj/native_vision
+            # probe below only describes the local llama-server. Pinning this to
+            # False made every remote provider silently drop `image_paths`, so
+            # H3/LTX enhancement fell back to describing file names, and even the
+            # dedicated visual-grounding pass announced attachments it never sent.
+            _vision_available = True
             print(f"[LLM] Connected to {provider} provider: model={model_id}, url={remote_url or 'API'}")
             _reset_idle_timer()
         return
