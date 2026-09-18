@@ -587,12 +587,28 @@ class MusicVideoPlanner(BasePlanner):
         """Build text descriptions for each clip (context for LLM)."""
         if source_audio_drives_vocals and vocal_activity is None:
             vocal_activity = classify_vocal_intervals(clips, lyrics, None)
+        sections = [
+            (clip.get("label") or clip.get("section_label") or "verse").lower()
+            for clip in clips
+        ]
+        total = len(clips)
         contexts = []
         for i, clip in enumerate(clips):
-            section = (clip.get("label") or clip.get("section_label") or "verse").lower()
+            section = sections[i]
             beat_count = clip.get("beat_count", 8)
             start_sec = clip.get("start", 0)
             end_sec = clip.get("end", start_sec + 5)
+            # Position within this section's consecutive run, so multi-clip
+            # sections (intro, instrumental, long chorus) plan a progression of
+            # distinct starting frames instead of repeating one identical frame.
+            run_start = i
+            while run_start > 0 and sections[run_start - 1] == section:
+                run_start -= 1
+            run_end = i
+            while run_end + 1 < total and sections[run_end + 1] == section:
+                run_end += 1
+            run_pos = i - run_start + 1
+            run_len = run_end - run_start + 1
 
             # Gather overlapping lyrics
             lyrics_snippet = ""
@@ -663,7 +679,17 @@ class MusicVideoPlanner(BasePlanner):
                     if lyrics_snippet else "instrumental"
                 )
 
-            ctx = f"Clip {i + 1}: {section}, {beat_count} beats, {vocal_info}.{performer_hint}"
+            ctx = f"Clip {i + 1} of {total}: {section}, {beat_count} beats, {vocal_info}.{performer_hint}"
+            section_hints = _SECTION_VISUAL_STRATEGY.get(section, {}).get("hints", "")
+            if section_hints:
+                ctx += f" Section direction: {section_hints}."
+            if run_len > 1:
+                ctx += (
+                    f" This is {section} clip {run_pos} of {run_len}. "
+                    "Give it a distinct starting frame that progresses the section "
+                    "(establishing → detail → wide → action); never repeat the "
+                    "previous clip's image_prompt."
+                )
             from services.director.music_cues import format_music_cues
             cue_context = format_music_cues(clip)
             if cue_context:
@@ -877,7 +903,10 @@ No visual reference was provided. Invent consistent performers and a setting tha
 MUSIC VIDEO RULES:
 - Chorus = high energy, bold framing. Verse = intimate, character focus.
 - Instrumental = environment, textures. Bridge = contrasting, unexpected.
-- Vary visuals across clips. Performer must be visible when assigned.
+- Vary visuals across clips. Consecutive clips in the SAME section (a multi-clip
+  intro, instrumental, or long chorus) must each use a distinct image_prompt that
+  progresses the section; never repeat the same starting frame. Performer must be
+  visible when assigned.
 
 {music_video_rules}
 
