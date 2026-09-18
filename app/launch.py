@@ -10064,6 +10064,7 @@ async def rerun_pipeline_clip_video(pid: str, clip_index: int, request: Request)
             pid,
             clip_index,
             prompt_override=body.get("prompt"),
+            resolution_override=body.get("resolution"),
         )
         return result
     except PipelineBusyError as e:
@@ -26333,7 +26334,16 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     cancelled = True
                     break
 
-                if not task_error:
+                if task_error:
+                    # Force model reload for the next task — a CUDA or other
+                    # runtime error may have left the resident model in an
+                    # inconsistent state (corrupted CUDA context, partially
+                    # unloaded tensors, etc.).  Without this flag the next
+                    # task would skip load_models() and reuse the broken
+                    # model, hitting "no transformer found" or another CUDA
+                    # error.
+                    wgp.reload_needed = True
+                else:
                     if generation_eta is not None:
                         task_eta_finished_at = time.monotonic()
                         eta_snapshot = generation_eta.complete_task(
@@ -29476,6 +29486,21 @@ _ui_dist = os.path.normpath(os.path.join(_app_dir, "..", "ui", "dist"))
 if os.path.isdir(_ui_dist):
     api.mount("/", StaticFiles(directory=_ui_dist, html=True))
     print(f"[Maestro] React UI serving from {_ui_dist}")
+
+    # Prevent the Pinokio proxy (Caddy) and the browser from caching the
+    # single-page app.  Vite already content-hashes asset filenames, but
+    # index.html and the service worker (if any) must never be stale,
+    # otherwise the browser keeps running old JS code that may call
+    # outdated (or missing) API endpoints.
+    @api.middleware("http")
+    async def _ui_no_cache(request: Request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        if path == "/" or path.endswith(".html") or path.startswith("/assets/"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
 else:
     @api.get("/")
     def index():
