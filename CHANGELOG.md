@@ -3,6 +3,47 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [2.2.3] - 2026-09-17
+
+Includes the full v2.2.0 feature release and v2.2.1/v2.2.2 fixes below, plus:
+
+- Fix H3 reference enhancement for scripted conversations: preserve named
+  references in queued Enhance, retain dialogue introduced by a character's
+  reaction, and correct invented voice-reference clauses from the actual uploads.
+- Explain insufficient duration for exact dialogue before loading the writer.
+  Avoid repeated attempts to shorten words that must remain unchanged.
+- Allocate complete supplied conversations across windows before camera writing.
+  Keep scene-wide directions out of the event clock, and let brief facial
+  reactions share remaining time without squeezing speech or shortening physical
+  actions and explicitly timed pauses. See [validation](docs/VALIDATION_H3_REFERENCE_DIALOGUE.md).
+- Keep reported arrivals inside dialogue out of scene staging, and preserve
+  visual prop movement and nonverbal sounds during speech cleanup.
+- Fix false H3 camera-plan review warnings for imported colon-timed storyboards
+  such as `0-3s: [ARRIVAL]`. Keep authored scenes together, distinguish revision
+  comparisons from action-order requirements, and keep vehicle/prop notes and
+  written logos out of the cast and dialogue maps.
+- Preserve authored nonverbal sound cues in their own scene's audio instructions.
+  Avoid rejecting otherwise valid camera plans because sounds such as a fizz or
+  metallic clang, including continuing or fading cues, were not repeated in the
+  visual action description; physical actions and chronology still require their
+  own evidence.
+- Check meaning before rejecting camera plans for low word overlap. A bounded,
+  event-local review must quote the actual visual action before accepting a
+  faithful paraphrase; real omissions still receive focused repair. Clean plans
+  do not require an extra call. Keep `Only then` together when parsing actions.
+- Improve imported-script continuation: carry the achieved scene state into the
+  next window instead of replaying the preceding action. Keep explicitly separate
+  still-image restrictions scoped to the starting frame, and distinguish a filmed
+  subject's prop-holding hands from the camera operator's foreground hands.
+- Reduce avoidable H3 enhancement calls: stop retrying solely for preferred
+  dialogue density, copyedit overlong AI speech before requesting a full rewrite,
+  and batch remaining per-turn shortening into one retry. Keep exact quotations,
+  required topics, speaker ownership, and hard timing checks.
+- Bound H3 RMSNorm temporary allocations for large reference sequences, addressing
+  the first-step allocation failure in [#139](https://github.com/Blizaine/Maestro/issues/139).
+  Preserve normalization precision, reference detail, and the existing VRAM budget.
+  See [validation and limitations](docs/VALIDATION_H3_MEMORY_AND_LATENCY.md).
+
 ## [2.2.2] - 2026-09-16
 
 Includes the full v2.2.0 feature release and v2.2.1 hotfix, plus:

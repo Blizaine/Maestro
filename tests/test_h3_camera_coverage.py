@@ -106,6 +106,13 @@ class H3CameraCoverageTests(unittest.TestCase):
         def generate(**kwargs):
             calls.append(kwargs)
             props = (kwargs.get("json_schema") or {}).get("properties", {})
+            if "check_1" in props:
+                # The reflection really is absent, so the semantic check must
+                # leave the local event-card repair in place.
+                checks = json.loads(kwargs["prompt"])
+                self.assertIn("glass prisms scatter reflections", checks["check_1"]["source_requirement"])
+                return json.dumps({key: {"verdict": "missing", "evidence": []}
+                                   for key in checks})
             if "event_cards" not in props:
                 return json.dumps({"character_appearance": {"Nora": "A courier in a red coat."},
                     "setting_continuity": "The gate leads to a stairway and balcony.",
@@ -133,7 +140,7 @@ class H3CameraCoverageTests(unittest.TestCase):
 
         result = plan_h3_story_segments(source, segment_durations=[6, 6], mode="sliding_window",
             camera_coverage="multi_shot", planning_style="adaptive", llm_generate=generate)
-        self.assertEqual(len(calls), 4)
+        self.assertEqual(len(calls), 5)
         self.assertEqual(result["planning_warnings"], [])
         self.assertIn("glass prisms scatter reflections", result["segments"][1]["shots"][0]["action"])
         self.assertIn("Nora pockets the key", result["segments"][1]["shots"][1]["action"])

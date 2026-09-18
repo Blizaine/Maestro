@@ -8632,6 +8632,14 @@ async def _llm_enhance_prompt_payload(body: dict):
     from services import llm_service
     from services.h3_prompt_budget import H3PromptBudgetError
 
+    if needs_h3_context_ir:
+        try:
+            llm_service.validate_h3_source_dialogue_duration(prompt, body.get("duration_seconds"))
+        except H3PromptBudgetError as error:
+            # An immutable script cannot be shortened by retrying the writer.
+            # Explain the selected-duration conflict before loading any LLM.
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
     services = enhancement_settings(wgp.server_config.get("services", {}))
     provider = services.get("llm_provider", "local")
     nsfw = services.get("nsfw_mode", False) and provider not in _PUBLIC_LLM_PROVIDERS

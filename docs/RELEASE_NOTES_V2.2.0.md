@@ -1,13 +1,55 @@
-# Maestro v2.2.2
+# Maestro v2.2.3
 
-Released 16 September 2026.
+Released 17 September 2026. Includes the v2.2.0 feature release from 16 September.
 
 This release brings one adaptive Enhance workflow, enhancement inside the
 generation queue, YuE2 music and experimental personal music styles, a searchable
 gallery across folders, and stronger control over Director music videos.
 
-The complete v2.2.0 feature release remains below, together with the v2.2.1
-numbered-shot fix and these v2.2.2 reliability improvements.
+The complete v2.2.0 feature release remains below, together with the v2.2.1 and
+v2.2.2 fixes and these v2.2.3 reliability improvements.
+
+## v2.2.3 H3 enhancement and memory fixes
+
+- **Fewer false camera-fidelity warnings:** imported `0-3s: [TITLE]` storyboards
+  keep their authored scenes. Revision wording, production headings, written
+  logos and sound cues are no longer mistaken for extra actors, speech or missing
+  physical actions. A bounded meaning check can accept a faithful camera
+  paraphrase using evidence from that event; actual omissions still need repair.
+- **Complete conversations fit more reliably:** retain dialogue introduced by a
+  named reaction, distribute whole turns across windows, and preserve every exact
+  line in order. Scene-wide directions no longer consume their own action slots;
+  brief facial reactions share spare time while physical actions retain theirs.
+- **Correct reference and voice ownership:** queued enhancement recognizes the
+  supplied names, upload ordering and reference roles. Character subjects remain
+  separate from vocal-event IDs; invented voice-reference clauses are corrected
+  using the actual uploads. Markdown wrappers are removed from native prompts.
+- **Clear duration feedback:** if exact supplied dialogue cannot fit the chosen
+  duration, explain the word/time conflict before loading the LLM. Keep the source
+  unchanged and suggest more time or another window.
+- **Less unnecessary rewriting:** stop repeated calls made solely to meet a
+  preferred dialogue density. Copyedit overlong AI-written speech first and batch
+  remaining shortening requests. Exact user lines, topic ownership and hard
+  timing checks remain protected; this is not a promised fixed speedup.
+- **Better continuation and prompt cleanup:** the next window inherits what the
+  preceding scene accomplished. Still-image-only constraints stay scoped to the
+  start image; prop-holding hands keep their owner. Spoken reports of arrivals
+  do not become on-screen entrances, and nonverbal prop motion/sounds survive.
+- **Lower H3 normalization memory peaks:** process large hidden sequences in
+  bounded slices while retaining native RMSNorm precision and inference hooks.
+  Addresses the allocation hotspot in [#139](https://github.com/Blizaine/Maestro/issues/139)
+  without reducing reference detail or changing VRAM budgets. The isolated
+  operation is validated; a full A100 reproduction remains unverified.
+
+After updating and restarting Maestro, refresh the browser and enhance again
+from the original source to use the corrected planner. Saved drafts remain
+available; they are not silently rewritten. No additional dependencies or model
+downloads are required for these fixes.
+
+See the validation records for [reference dialogue](VALIDATION_H3_REFERENCE_DIALOGUE.md),
+[imported timelines](VALIDATION_H3_IMPORTED_TIMELINES.md), and
+[memory and retry behavior](VALIDATION_H3_MEMORY_AND_LATENCY.md). Warning-free
+enhancement does not guarantee perfect generated staging or lip sync.
 
 ## v2.2.2 enhancement and Director fixes
 
@@ -210,6 +252,10 @@ See [local LLM runtime](LLM-runtime.md). Native Linux CUDA build/generation stil
 requires reporter validation; mocked build tests are not a substitute for it.
 
 ## GitHub issues
+
+v2.2.3 addresses the large-sequence RMSNorm allocation reported in **#139**.
+The bounded operation and numerical equivalence are tested; complete generation
+on the reporter's A100 remains for validation, so this is not a blanket OOM fix.
 
 Fixes and requested controls in this release address **#4, #121, #123, #124,
 #125, #126, #127, #129 and #132**. Release comments describe the implemented

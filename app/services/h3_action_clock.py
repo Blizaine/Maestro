@@ -81,3 +81,16 @@ def estimate_h3_action_seconds(text: str, *, event_floor: int = 1) -> float:
         + impacts * 1.2
     )
     return max(float(max(1, event_floor)), min(6.5, estimate))
+
+
+def is_h3_stationary_reaction(text: str) -> bool:
+    """A facial reaction can be brief; travel, contact and timed holds cannot."""
+    action = _CAMERA_CLAUSE_RE.sub(_actor_action_in_camera_clause, str(text or ""))
+    return bool(
+        (_REACTION_RE.search(action) or re.search(r'\b(?:expression|gaze|eye contact)\b', action, re.I))
+        and not any(pattern.search(action) for pattern in (_FULL_BODY_RE, _BLOCKING_RE, _IMPACT_RE))
+        and not re.search(
+            r'\b(?:\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|'
+            r'several|a few|a couple of)[\s-]*(?:seconds?|secs?|s)\b', action, re.I,
+        )
+    )

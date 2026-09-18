@@ -92,6 +92,30 @@ def _activation_chunk_tokens(
     return min(length, bounded)
 
 
+def _rms_norm_in_chunks(norm: nn.RMSNorm, hidden_states: torch.Tensor) -> torch.Tensor:
+    """Bound RMSNorm's FP32 temporaries without changing its per-token math."""
+
+    if torch.is_grad_enabled() or hidden_states.ndim < 2 or len(norm.normalized_shape) != 1:
+        return norm(hidden_states)
+    length, width = hidden_states.shape[-2:]
+    chunk = _activation_chunk_tokens(length, width, width)
+    if length <= chunk:
+        return norm(hidden_states)
+
+    # High-detail reference sequences can exceed 260K rows. A full FP32
+    # normalization temporary then costs 5.3 GiB, even though QKV and MLP
+    # projections already stream in chunks. Keep the native norm operation
+    # (including its dtype promotion and MMGP hooks) on bounded token slices.
+    output = None
+    for start in range(0, length, chunk):
+        normalized = norm(hidden_states[..., start:start + chunk, :])
+        if output is None:
+            output = normalized.new_empty(hidden_states.shape)
+        output[..., start:start + chunk, :].copy_(normalized)
+        del normalized
+    return output
+
+
 def _split_contiguous_qkv(src, dim, split_sizes, _context):
     """Split grouped ``[Q, K, V]`` rows without aliasing their storage.
 
@@ -621,8 +645,8 @@ class MiniMaxH3RefinerBlock(nn.Module):
         self.mlp = MiniMaxH3MLP(hidden_size, ffn_dim, dtype)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = hidden_states + self.attn(self.norm1(hidden_states))
-        return hidden_states + self.mlp(self.norm2(hidden_states))
+        hidden_states = hidden_states + self.attn(_rms_norm_in_chunks(self.norm1, hidden_states))
+        return hidden_states + self.mlp(_rms_norm_in_chunks(self.norm2, hidden_states))
 
 
 class MiniMaxH3TokenRefiner(nn.Module):
@@ -645,7 +669,7 @@ class MiniMaxH3TokenRefiner(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         for block in self.blocks:
             hidden_states = block(hidden_states)
-        return self.final_norm(hidden_states)
+        return _rms_norm_in_chunks(self.final_norm, hidden_states)
 
 
 class MiniMaxH3Block(nn.Module):
@@ -702,7 +726,7 @@ class MiniMaxH3Block(nn.Module):
         # it owns the tensor and releases the storage after Q/K/V projection.
         attention_input = [
             _modulate_by_runs(
-                self.norm1(hidden_states),
+                _rms_norm_in_chunks(self.norm1, hidden_states),
                 shift_attn,
                 scale_attn,
                 adaln_runs,
@@ -726,7 +750,7 @@ class MiniMaxH3Block(nn.Module):
         else:
             hidden_states = hidden_states + attn_output
         del attention_input, attn_output
-        normed = _modulate_by_runs(self.norm2(hidden_states), shift_mlp, scale_mlp, adaln_runs)
+        normed = _modulate_by_runs(_rms_norm_in_chunks(self.norm2, hidden_states), shift_mlp, scale_mlp, adaln_runs)
         mlp_output = _scale_by_runs(self.mlp(normed), gate_mlp, adaln_runs)
         if signature is not None:
             signature.add_(mlp_output.reshape(-1)[::signature_stride])
@@ -781,7 +805,7 @@ class MiniMaxH3FinalLayer(nn.Module):
         timestep_runs: tuple[tuple[int, int, int], ...],
     ) -> torch.Tensor:
         shift, scale = self.adaln_proj(curve)
-        normed = self.norm(hidden_states)
+        normed = _rms_norm_in_chunks(self.norm, hidden_states)
         return _modulate_by_runs(normed, shift, scale, timestep_runs)
 
 

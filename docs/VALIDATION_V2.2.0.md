@@ -1,8 +1,37 @@
-# v2.2.2 validation record
+# v2.2.3 validation record
 
-Prepared 16 September 2026. This distinguishes automated regression coverage
+Updated 17 September 2026. This distinguishes automated regression coverage
 from rendered workflows exercised during development and tests still needed on
 other hardware.
+
+## v2.2.3 H3 reliability and memory update
+
+- Release CPU discovery passed **2,135 tests**, with six CUDA-dependent skips,
+  in 127.182 seconds. Python syntax, undefined-name checks, five standalone JSON
+  grammar tests, UI lint and TypeScript/Vite production build passed. Existing
+  bundle-size and mixed-import warnings remain informational.
+- The clean-repository guard passed for 2,424 tracked files. All 27 release paths
+  exclude local media, models, settings and private experiment artifacts;
+  84 local documentation links and the staged whitespace check passed.
+- Development's final combined regression run passed 448 tests covering reference
+  binding, dialogue ownership/order/timing, imported scripts, camera fidelity,
+  source sounds and continuation.
+- Bounded live Qwen3.8 27B and Gemma 4 E4B enhancement checks and complete saved
+  trace replays retained exact dialogue and correct reference owners without
+  warnings on the final compiler. All failed development attempts remain recorded;
+  these are development cases, not unseen holdouts or render-quality guarantees.
+- The reported single-window conversation is rejected before loading the writer
+  with a specific duration explanation. The corresponding two-window case retains
+  all six lines. See [reference-dialogue evidence](VALIDATION_H3_REFERENCE_DIALOGUE.md).
+- Imported timeline verification retains ordered source scenes, local sound cues
+  and completed-state handoffs. Detailed [timeline evidence](VALIDATION_H3_IMPORTED_TIMELINES.md)
+  also records remaining camera/prop wording weaknesses despite operational passes.
+- A CUDA operation check of the reported large RMSNorm shape reduced peak allocated
+  memory from 18.554 to 5.793 GiB with sampled bit-identical results. This was one
+  isolated operation on an RTX 4090, not a complete A100 generation or a throughput
+  promise. See [memory and retry evidence](VALIDATION_H3_MEMORY_AND_LATENCY.md).
+- The maintainer reported the latest tests working before authorizing publication.
+  Release preparation does not submit new LLM or video jobs or restart the app.
 
 ## v2.2.2 reliability update
 
