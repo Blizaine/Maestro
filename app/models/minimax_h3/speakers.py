@@ -45,7 +45,7 @@ _PRODUCTION_LABELS = {
     "prop", "props", "hero object", "hero prop", "set", "vehicle", "vehicles",
     "scene", "setting", "sfx", "shot", "sound", "sound design",
     "sound effects", "soundscape", "soundtrack", "style", "subject",
-    "subject definitions", "summary", "template", "templates", "time", "title", "tone", "transition",
+    "subject definitions", "summary", "template", "templates", "time", "timeline", "title", "tone", "transition",
     "vfx", "visual", "visual direction", "visual style", "visuals", "voice",
 }
 _PRODUCTION_LABEL_WORDS = {
@@ -55,8 +55,8 @@ _PRODUCTION_LABEL_WORDS = {
     "characterization", "choreography", "cinematic", "closing", "clothing",
     "colorless", "colour", "core", "delivery", "density", "design", "directions", "environment",
     "facial", "film", "final", "foreground", "global", "guidance", "identity", "image",
-    "initial", "injuries", "instructions", "lock", "locked", "main", "motion", "movement",
-    "opening", "outfit", "performance", "physical", "plan", "production",
+    "initial", "injuries", "instructions", "lock", "locked", "logo", "logotype", "main", "motion", "movement",
+    "opening", "outfit", "performance", "physical", "plan", "product", "production",
     "quality", "reference", "references", "requirements", "rules", "settings", "setup",
     "state", "structure", "system", "technique", "texture", "timing", "treatment",
     "wardrobe",

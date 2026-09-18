@@ -1342,6 +1342,7 @@ def plan_h3_sliding_windows(
     nsfw: bool = False,
     camera_coverage: str = "auto",
     planning_style: str = "faithful",
+    retry_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Use Maestro's configured LLM to create and compile an H3 window plan."""
 
@@ -1383,6 +1384,9 @@ def plan_h3_sliding_windows(
         planning_style=planning_style,
         injected_keyframes=injected_keyframes,
     )
+    from services.h3_plan_retry import finish_retry_plan, retry_fingerprint, validate_retry_plan
+    fingerprint = retry_fingerprint(signature, image_paths, nsfw)
+    resume = validate_retry_plan(retry_plan, fingerprint=fingerprint, count=len(boundaries))
     if len(boundaries) <= 1:
         return {
             "source_prompt": str(prompt or ""),
@@ -1423,6 +1427,7 @@ def plan_h3_sliding_windows(
         expect_dialogue = adaptive_dialogue_expected(prompt)
     resolved_coverage = _infer_camera_coverage(prompt, camera_coverage)
     story_ledger: dict[str, Any] | None = None
+    camera_checkpoint = None
     planning_warnings: list[str] = []
     planning_diagnostics: list[str] = []
     planning_notes: list[str] = []
@@ -1442,8 +1447,10 @@ def plan_h3_sliding_windows(
             image_paths=image_paths,
             has_start_image=has_start_image,
             nsfw=nsfw,
+            resume=resume,
         )
         planned_by = staged["planned_by"]
+        camera_checkpoint = staged.get("camera_checkpoint")
         planning_warnings = list(staged.get("planning_warnings") or [])
         planning_diagnostics = list(staged.get("planning_diagnostics") or [])
         planning_notes = list(staged.get("planning_notes") or [])
@@ -1483,9 +1490,11 @@ def plan_h3_sliding_windows(
             injected_keyframes=normalized_keyframes,
             source_prompt=prompt,
         )
-    except H3DialogueTimingError:
+    except (H3DialogueTimingError, InterruptedError):
         raise
     except Exception as error:
+        if retry_plan is not None:
+            raise  # Never replace accepted windows after a failed repair.
         print(f"[MiniMax H3] Window planner fallback: {error}")
         planned_by = "deterministic_fallback"
         planning_warnings.append(
@@ -1517,7 +1526,7 @@ def plan_h3_sliding_windows(
             source_prompt=prompt,
         )
 
-    return {
+    return finish_retry_plan({
         "source_prompt": str(prompt or ""),
         "signature": signature,
         "planned_by": planned_by,
@@ -1537,8 +1546,9 @@ def plan_h3_sliding_windows(
         "setting_continuity": plan.get("setting_continuity", ""),
         "editing_style": plan.get("editing_style", ""),
         "story_ledger": story_ledger,
+        "camera_checkpoint": camera_checkpoint,
         "dialogue_fragments": dialogue_fragments,
         "source_intent": source_intent,
         "windows": compiled,
         "window_prompts": [item["prompt"] for item in compiled],
-    }
+    }, retry_plan, fingerprint)

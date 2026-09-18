@@ -1959,7 +1959,7 @@ interface AppState {
   enhanceOnGenerationRevision: number
   setEnhanceOnGeneration: (enabled: boolean) => void
   setEnhanceOnGenerationDefault: (enabled: boolean) => void
-  enhancePrompt: (ttsMode?: string, planningStyle?: 'faithful' | 'creative' | 'adaptive') => Promise<void>
+  enhancePrompt: (ttsMode?: string, planningStyle?: 'faithful' | 'creative' | 'adaptive', retryFlaggedWindows?: boolean) => Promise<void>
   h3WindowPlan: H3WindowPlan | null
   updateH3WindowPrompt: (index: number, prompt: string) => void
   clearH3WindowPlan: () => void
@@ -9199,13 +9199,17 @@ export const useStore = create<AppState>((set, get) => ({
     return {
       h3WindowPlan: {
         ...s.h3WindowPlan,
+        // Manual edits may change the entry/exit state used by neighbouring
+        // windows. Keep the edited prompts, but don't repair from an old clock.
+        camera_checkpoint: null,
+        retryable_windows: [],
         windows,
         window_prompts: windows.map(window => window.prompt),
       },
     }
   }),
   clearH3WindowPlan: () => set({ h3WindowPlan: null }),
-  enhancePrompt: async (ttsMode?: string, requestedStyle: 'faithful' | 'creative' | 'adaptive' = 'adaptive') => {
+  enhancePrompt: async (ttsMode?: string, requestedStyle: 'faithful' | 'creative' | 'adaptive' = 'adaptive', retryFlaggedWindows = false) => {
     let state = get()
     const primaryStudioCreate = (
       state.generationMode === 'video'
@@ -9251,6 +9255,11 @@ export const useStore = create<AppState>((set, get) => ({
     }
     const { generationMode, startImage, endImage, imageRefs } = state
     const isH3Writer = String(state.modelOptions?.architecture || selectedModelDefinition?.architecture || '').startsWith('minimax_h3')
+    const retryContext = state.h3WindowPlan?.camera_checkpoint?.context as {image_paths?: string[]} | undefined
+    if (retryFlaggedWindows && !state.h3WindowPlan?.retryable_windows?.length) {
+      set({promptEnhanceError: 'This draft has no saved windows to repair. Create a new draft instead.'})
+      return
+    }
     const planningStyle = requestedStyle === 'adaptive' && !isH3Writer ? 'faithful' : requestedStyle
     const clearCapturedEnhancement = () => set(s => s.enhanceOnGenerationRevision === state.enhanceOnGenerationRevision
       ? {enhanceOnGeneration: null, enhanceOnGenerationRevision: s.enhanceOnGenerationRevision + 1} : {})
@@ -9342,7 +9351,7 @@ export const useStore = create<AppState>((set, get) => ({
         // the runtime's Qwen conditioner will number them.
         let h3HasStartAttachment = false
         let h3HasEndAttachment = false
-        if (useStudioFrameInputs && startImage) {
+        if (useStudioFrameInputs && startImage && !retryFlaggedWindows) {
           try {
             const uploaded = await api.uploadImage(startImage)
             imagePaths.push(uploaded.path)
@@ -9353,7 +9362,7 @@ export const useStore = create<AppState>((set, get) => ({
           h3HasStartAttachment = true
         }
         if (isH3FirstLast) {
-          if (useStudioFrameInputs && endImage) {
+          if (useStudioFrameInputs && endImage && !retryFlaggedWindows) {
             try {
               const uploaded = await api.uploadImage(endImage)
               imagePaths.push(uploaded.path)
@@ -9454,6 +9463,7 @@ export const useStore = create<AppState>((set, get) => ({
 
       if (shouldPlanH3Sequence) {
         const plan = await api.planH3Sequence({
+          ...(retryFlaggedWindows && state.h3WindowPlan ? { retry_plan: state.h3WindowPlan } : {}),
           prompt: h3PlanningSource,
           model_type: params.model_type,
           resolution: params.resolution,
@@ -9499,6 +9509,7 @@ export const useStore = create<AppState>((set, get) => ({
         // contain only their own local actions. Endpoint and injected images
         // were collected above in the runtime's stable presentation order.
         const plan = await api.planH3Windows({
+          ...(retryFlaggedWindows && state.h3WindowPlan ? { retry_plan: state.h3WindowPlan } : {}),
           prompt: h3PlanningSource,
           model_type: params.model_type,
           resolution: params.resolution,
@@ -9509,7 +9520,7 @@ export const useStore = create<AppState>((set, get) => ({
           sliding_window_memory_override: state.slidingWindowLocked,
           has_start_image: !!(startImage || params.image_start),
           has_end_image: !!(endImage || params.image_end),
-          image_paths: imagePaths.length > 0 ? imagePaths : undefined,
+          image_paths: retryFlaggedWindows ? retryContext?.image_paths : imagePaths.length > 0 ? imagePaths : undefined,
           injected_keyframes: injectedKeyframes.length > 0 ? injectedKeyframes : undefined,
           camera_coverage: params.minimax_h3_camera_coverage || 'auto',
           planning_style: planningStyle,
@@ -9538,6 +9549,9 @@ export const useStore = create<AppState>((set, get) => ({
         return
       }
 
+      if (retryFlaggedWindows) {
+        throw new Error('The window settings changed. Create a new draft for these settings.')
+      }
       // TTS dialogue needs more tokens for longer conversations
       const maxTokens = (generationMode === 'audio' && ttsMode) ? 2048 : undefined
       const ltxEnhanceSource = (

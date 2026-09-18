@@ -429,6 +429,10 @@ export interface H3WindowPlan {
   planning_warnings?: string[]
   planning_diagnostics?: string[]
   planning_notes?: string[]
+  retryable_windows?: number[]
+  retried_windows?: number[]
+  retry_fingerprint?: string
+  camera_checkpoint?: Record<string, unknown> | null
   planning_style?: WindowPlanningStyle
   plan_kind?: 'sliding_window' | 'reference_sequence'
   camera_coverage?: 'auto' | 'continuous' | 'multi_shot'

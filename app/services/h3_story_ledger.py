@@ -54,7 +54,7 @@ from services.director.long_form_story import (
 )
 
 
-H3_STORY_LEDGER_VERSION = 96
+H3_STORY_LEDGER_VERSION = 97
 
 
 _H3_WINDOW_BOOKKEEPING_RE = re.compile(
@@ -8191,22 +8191,26 @@ def plan_h3_story_segments(
     has_start_image: bool = False,
     nsfw: bool = False,
     llm_generate: Callable[..., str] | None = None,
+    resume: dict | None = None,
 ) -> dict[str, Any]:
     """Create a compact ledger and expand one validated local segment at a time."""
 
     from services import llm_service
 
     with llm_service.keep_loaded():
-        return _plan_h3_story_segments(
+        context = deepcopy(resume["context"]) if resume else _prepare_h3_story_context(
             prompt, segment_durations=segment_durations, mode=mode,
             camera_coverage=camera_coverage, reference_context=reference_context,
             expect_dialogue=expect_dialogue, planning_style=planning_style,
             image_paths=image_paths, has_start_image=has_start_image,
             nsfw=nsfw, llm_generate=llm_generate,
         )
+        return _render_h3_story_segments(
+            context, generate=llm_generate or llm_service.generate, resume=resume,
+        )
 
 
-def _plan_h3_story_segments(
+def _prepare_h3_story_context(
     prompt: str,
     *,
     segment_durations: list[float],
@@ -8960,6 +8964,71 @@ def _plan_h3_story_segments(
             "to preserve every user-written word without rushing, repetition, "
             "or paraphrasing."
         )
+    return {
+        "action_first": action_first,
+        "allow_generated_dialogue": allow_generated_dialogue,
+        "camera_coverage": camera_coverage,
+        "catalog": catalog,
+        "dialogue_fragments": dialogue_fragments,
+        "durations": durations,
+        "faithful_locked_schedule": faithful_locked_schedule,
+        "has_authored_timing": has_authored_timing,
+        "image_paths": image_paths,
+        "ledger": ledger,
+        "locked_dialogue": locked_dialogue,
+        "long_form_hierarchical": long_form_hierarchical,
+        "mode": mode,
+        "nsfw": nsfw,
+        "planned_by": planned_by,
+        "planning_diagnostics": planning_diagnostics,
+        "planning_notes": planning_notes,
+        "planning_style": planning_style,
+        "planning_warnings": planning_warnings,
+        "prompt": prompt,
+        "render_beats": render_beats,
+        "render_dialogue_events": render_dialogue_events,
+        "segment_count": segment_count,
+        "source_events": source_events,
+        "source_intent": source_intent,
+        "start_frame_supplied": start_frame_supplied,
+    }
+
+
+def _render_h3_story_segments(context: dict[str, Any], *, generate, resume: dict | None = None) -> dict[str, Any]:
+    # Freeze the story and speech clock before camera writing mutates local
+    # catalog entries. Retrying a window never reruns the story/dialogue writer.
+    checkpoint_context = deepcopy(context)
+    saved_segments = (resume or {}).get("segments") or []
+    retry_windows = set((resume or {}).get("retry_windows") or [])
+    if saved_segments:
+        print("[MiniMax H3] Retrying windows " + ", ".join(map(str, sorted(retry_windows)))
+              + f"; keeping {len(saved_segments) - len(retry_windows)} saved camera plans.")
+    action_first = context["action_first"]
+    allow_generated_dialogue = context["allow_generated_dialogue"]
+    camera_coverage = context["camera_coverage"]
+    catalog = context["catalog"]
+    dialogue_fragments = context["dialogue_fragments"]
+    durations = context["durations"]
+    faithful_locked_schedule = context["faithful_locked_schedule"]
+    has_authored_timing = context["has_authored_timing"]
+    image_paths = context["image_paths"]
+    ledger = context["ledger"]
+    locked_dialogue = context["locked_dialogue"]
+    long_form_hierarchical = context["long_form_hierarchical"]
+    mode = context["mode"]
+    nsfw = context["nsfw"]
+    planned_by = context["planned_by"]
+    planning_diagnostics = context["planning_diagnostics"]
+    planning_notes = context["planning_notes"]
+    planning_style = context["planning_style"]
+    planning_warnings = context["planning_warnings"]
+    prompt = context["prompt"]
+    render_beats = context["render_beats"]
+    render_dialogue_events = context["render_dialogue_events"]
+    segment_count = context["segment_count"]
+    source_events = context["source_events"]
+    source_intent = context["source_intent"]
+    start_frame_supplied = context["start_frame_supplied"]
     segment_guide = _load_h3_planning_guide("minimax_h3_story_segment", nsfw=nsfw)
     if planning_style == "adaptive":
         from services.adaptive_enhancement import adaptive_writing_guide
@@ -9005,10 +9074,22 @@ def _plan_h3_story_segments(
                 beat_segment,
             )
     segments: list[dict[str, Any]] = []
+    review_windows: set[int] = set()
     speech_action_order = _explicit_speech_action_order(prompt)
     previous_closing = sanitize_h3_prompt_text(ledger.get("initial_state"))
     for index, duration in enumerate(durations):
         segment_number = index + 1
+        from services.studio_enhancement import check_cancelled
+        check_cancelled()
+        saved_segment = saved_segments[index] if saved_segments else None
+        if saved_segment and segment_number not in retry_windows:
+            segments.append(deepcopy(saved_segment))
+            previous_closing = saved_segment["closing_state"]
+            continue
+        # Both neighbouring windows are already authored. Repair inside this
+        # window's existing entry/exit states instead of moving their story.
+        if saved_segment:
+            previous_closing = saved_segment["opening_state"]
         semantic_beats = [
             item for item in render_beats
             if isinstance(item, dict) and int(item.get("segment") or 0) == segment_number
@@ -9257,6 +9338,14 @@ def _plan_h3_story_segments(
                 "Show the action reaching the required state; do not substitute an intention or invitation for its completion. "
                 + (f"Required visible ending: {ledger.get('required_final_outcome')}." if segment_number == segment_count else "")
             )
+        if saved_segment:
+            segment_prompt += (
+                "\nREPAIR THIS WINDOW ONLY. The story schedule and other windows are already saved. "
+                "Complete the assigned actions between the required opening above and this exact "
+                f"visible ending: {saved_segment['closing_state']}. "
+                "Stage the final action so it reaches that ending; do not change either boundary "
+                "or add a transition/event belonging to a neighbouring window."
+            )
         if planning_style == "adaptive":
             segment_prompt += (
                 "\nThe source_requirements contain the user's actual events; preserve their actions, "
@@ -9296,7 +9385,7 @@ def _plan_h3_story_segments(
                 "Move the camera from its observed position "
                 "before adopting a new framing; do not begin with a cut."
             )
-        if long_form_hierarchical:
+        if long_form_hierarchical and not saved_segment:
             # Chapter expansion already supplied the local visible progression.
             # Compile the camera clock deterministically instead of making one
             # more LLM request for every window in a potentially hour-long run.
@@ -9347,6 +9436,10 @@ def _plan_h3_story_segments(
                 else 1
             ),
         )
+        if saved_segment:
+            schema["properties"]["closing_state"] = {
+                "type": "string", "enum": [saved_segment["closing_state"]],
+            }
         segment: dict[str, Any] | None = None
         segment_errors: list[str] = []
         # Reserve enough output for complete JSON plus readable choreography;
@@ -9516,8 +9609,11 @@ def _plan_h3_story_segments(
                 )
             if segment_errors or not segment:
                 raise ValueError("; ".join(segment_errors or ["invalid segment JSON"]))
+        except InterruptedError:
+            raise
         except Exception as error:
             print(f"[MiniMax H3] Segment {segment_number} fallback: {error}")
+            review_windows.add(segment_number)
             planned_by = "deterministic_fallback"
             planning_diagnostics.extend(
                 f"Window {segment_number}: {item}"
@@ -9541,11 +9637,14 @@ def _plan_h3_story_segments(
         if any(shot.get("dialogue") for shot in segment.get("shots", [])):
             from services.h3_dialogue_writing import fit_camera_dialogue
 
-            planning_warnings.extend(fit_camera_dialogue(
+            camera_warnings = fit_camera_dialogue(
                 prompt, segment, catalog, ledger.get("generated_dialogue") or [],
                 generate=generate,
                 system_prompt=_load_h3_planning_guide("minimax_h3_dialogue_copyedit", nsfw=nsfw),
-            ))
+            )
+            planning_warnings.extend(camera_warnings)
+            if camera_warnings:
+                review_windows.add(segment_number)
         materialized = _materialize_segment(
             segment,
             beats=beats,
@@ -9568,6 +9667,7 @@ def _plan_h3_story_segments(
                 "its locked speaker map, so Maestro corrected only that staging "
                 "while preserving its story action and exact dialogue."
             )
+            review_windows.add(segment_number)
             materialized = _repair_materialized_segment_staging(
                 materialized,
                 known_speakers=known_speakers,
@@ -9577,6 +9677,8 @@ def _plan_h3_story_segments(
         # A segment cannot rewrite its supplied opening. The preceding
         # completed state is shared by frame-linked and editorial handoffs.
         materialized["opening_state"] = previous_closing
+        if saved_segment:
+            materialized["closing_state"] = saved_segment["closing_state"]
         segments.append(materialized)
         previous_closing = materialized["closing_state"]
 
@@ -9615,14 +9717,25 @@ def _plan_h3_story_segments(
             prompt, ledger, locked_dialogue, durations, camera_segments=segments,
         ):
             if audit["problems"]:
+                review_windows.add(int(audit["segment"]))
                 planning_warnings.append(
                     f"AI dialogue needs review in window {audit['segment']}: "
                     + "; ".join(audit["problems"])
                     + ". Automatic writing repair was unsuccessful; review or enhance again before generating."
                 )
 
+    # Camera copyediting can shorten AI-authored lines. Keep that accepted
+    # wording on the next repair as well as the materialized window prompts.
+    checkpoint_context["catalog"] = deepcopy(catalog)
+    checkpoint_context["ledger"] = deepcopy(ledger)
     return {
         "planned_by": planned_by,
+        "camera_checkpoint": {
+            "version": 1,
+            "context": checkpoint_context,
+            "segments": deepcopy(segments),
+            "review_windows": sorted(review_windows),
+        },
         "planning_warnings": list(dict.fromkeys(planning_warnings)),
         "planning_diagnostics": list(dict.fromkeys(planning_diagnostics)),
         "planning_notes": list(dict.fromkeys(planning_notes)),

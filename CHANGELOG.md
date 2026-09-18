@@ -3,6 +3,23 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [2.2.4] - 2026-09-18
+
+Includes the full v2.2.0 feature release and v2.2.1–v2.2.3 fixes below, plus:
+
+- Retry only flagged H3 window prompts while retaining the saved story schedule,
+  dialogue, continuity boundaries, and all accepted window prompts. Supports
+  Frames and Reference sequences, interactive Enhance and queued enhancement.
+- Clarify prompt-review actions: generate the complete job with the saved draft,
+  retry flagged windows then generate, or edit without starting generation.
+  Full rewrites and generation from the original prompt live under Other options.
+- Preserve retry progress across restarts and repeated review attempts. Reject
+  stale repair requests when the source, references or timing have changed;
+  older drafts need a fresh enhancement to enable targeted window repair.
+- Fix the remaining silent-product prompt case from #115: logotype timelines
+  stay visual directions, and silent-video instructions with duration/aspect
+  qualifiers are recognized without discarding explicitly supplied dialogue.
+
 ## [2.2.3] - 2026-09-17
 
 Includes the full v2.2.0 feature release and v2.2.1/v2.2.2 fixes below, plus:

@@ -57,6 +57,24 @@ class QueuedEnhancementTests(unittest.TestCase):
         self.enhance.assert_not_called()
         self.assertEqual(self.prepare.call_args.args[0]['ltx_window_prompt_mode'], 'auto')
 
+    def test_review_retry_passes_saved_camera_plan_to_native_preparation(self):
+        self.params.update(video_length=672, minimax_h3_multi_window=True)
+        saved = {'h3_window_plan': {'camera_checkpoint': {'version': 1},
+            'windows': [{'prompt': 'Passed first'}, {'prompt': 'Flagged second'}],
+            'planning_warnings': ["Window 2's camera plan needs review."]}}
+        frozen = deepcopy(saved)
+        asyncio.run(prepare_enhanced_job(self.params, self.model, self.enhance, self.prepare,
+                                       previous_prepared=saved))
+        self.enhance.assert_not_awaited()
+        self.assertEqual(self.prepare.call_args.args[0]['_h3_retry_plan'], saved['h3_window_plan'])
+        self.assertEqual(saved, frozen)
+        self.assertNotIn('_h3_retry_plan', self.params)
+
+    def test_explicit_refresh_does_not_pass_the_previous_camera_plan(self):
+        self.params.update(video_length=672, minimax_h3_multi_window=True)
+        self.run_prepare()
+        self.assertNotIn('_h3_retry_plan', self.prepare.call_args.args[0])
+
     def test_enhancement_failure_never_prepares_plain_generation(self):
         self.enhance.side_effect = RuntimeError('writer offline')
         with self.assertRaisesRegex(RuntimeError, 'writer offline'):

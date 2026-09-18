@@ -101,11 +101,15 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
-### v2.2.3 (2026-09-17)
+### v2.2.4 (2026-09-18)
 
 **Unified AI enhancement, YuE2 music, and more control over Director productions**
 
-Includes the full v2.2.0 feature release and v2.2.1/v2.2.2 fixes below. **v2.2.3 reliability update:** fewer false H3 camera-fidelity warnings, fewer unnecessary LLM retries, better reference/speaker binding, and more practical dialogue timing across windows. Imported scripts retain their scene order, local sounds and completed state between windows. Large H3 reference sequences also use less temporary memory during normalization.
+Includes the full v2.2.0 feature release and v2.2.1–v2.2.3 fixes below. **New in v2.2.4:** retry flagged H3 windows without rewriting the accepted prompts, and choose clearly whether to repair, edit or generate the complete saved draft.
+
+- **Keep the windows that already passed:** if window 4 needs review in a six-window job, retry its camera plan while retaining the other five prompts, shared story, dialogue and continuity. Works in Frames and References with Enhance now or queued enhancement. Saved repair progress survives restarts.
+- **Clearer prompt review:** **Generate all 6 windows with this draft** uses the complete saved draft. **Retry window 4 & generate** repairs the flagged window, then generates the full job if checks pass. **Edit prompts in Studio** opens the draft without starting generation. Full rewrites and generation from the original prompt are under **Other options**. Older drafts need a fresh enhancement to support targeted retries.
+- **Silent product prompts:** fixes the reported logotype-timeline heading being counted as a speaking character. Duration and aspect qualifiers in silent-video briefs no longer hide the no-dialogue instruction.
 
 - **More reliable H3 enhancement:** complete supplied conversations keep every line and its speaker; impossible dialogue durations receive a clear explanation before the LLM loads. Faithful camera paraphrases, colon-timed storyboards and silent reactions no longer trigger the same false review failures. Queued Enhance preserves reference names and actual voice bindings.
 - **Lower H3 memory peaks:** bounded normalization addresses the allocation hotspot reported on an A100 40 GB in [#139](https://github.com/Blizaine/Maestro/issues/139), preserving reference detail and precision. The isolated operation is validated; a complete run on the reporter's hardware remains unverified.

@@ -1,13 +1,46 @@
-# Maestro v2.2.3
+# Maestro v2.2.4
 
-Released 17 September 2026. Includes the v2.2.0 feature release from 16 September.
+Released 18 September 2026. Includes the v2.2.0 feature release from 16 September.
 
 This release brings one adaptive Enhance workflow, enhancement inside the
 generation queue, YuE2 music and experimental personal music styles, a searchable
 gallery across folders, and stronger control over Director music videos.
 
-The complete v2.2.0 feature release remains below, together with the v2.2.1 and
-v2.2.2 fixes and these v2.2.3 reliability improvements.
+The complete v2.2.0 feature release remains below, together with the v2.2.1–v2.2.3
+fixes and these v2.2.4 prompt-review improvements.
+
+## v2.2.4 targeted retries and clearer prompt review
+
+- **Retry only flagged windows:** when a camera or dialogue check flags part of
+  an H3 sequence, retry those windows while preserving the accepted prompts
+  exactly. The shared story, dialogue schedule and continuity boundaries stay
+  in place. Supports Frames and References, Enhance now and queued enhancement.
+- **Keep repair progress:** saved drafts retain the information needed for
+  targeted retries after restarting Maestro. A second unsuccessful attempt stays
+  focused on the flagged windows. If the prompt, references or timing change,
+  create a fresh draft so the repair uses the correct inputs.
+- **Make the scope of each action clear:** **Generate all N windows with this
+  draft** uses the full saved draft, including flagged windows, without running
+  enhancement again. **Retry window N & generate** repairs flagged prompts and
+  generates the full job only when checks pass. **Edit prompts in Studio** opens
+  the draft without starting generation. **Other options** contains full rewrites
+  and generation from the original source.
+- **Enhance-now retries remain a review step:** the prompt field's retry action
+  repairs flagged windows without submitting a generation job.
+- **Silent product timelines remain visual:** fixes the exact product-brief
+  parsing case from #115, where `Logotype timeline:` became a speaker and its
+  visual directions consumed dialogue capacity. Silent-video instructions can
+  include duration, aspect and product-style qualifiers; explicitly written
+  dialogue still remains intact.
+
+Use Pinokio's **Update**, restart Maestro and refresh the browser. Drafts created
+before this update need a fresh enhancement to enable targeted repair. Manual
+prompt edits invalidate the saved repair checkpoint; the edited prompts remain
+available for generation. Shared story-level issues can still require a full
+rewrite. No new dependencies or model downloads are required for this update.
+
+See [Studio controls](Studio-controls.md), the [enhancement API](Studio-enhancement-api.md),
+and the [validation record](VALIDATION_V2.2.0.md).
 
 ## v2.2.3 H3 enhancement and memory fixes
 
@@ -252,6 +285,11 @@ See [local LLM runtime](LLM-runtime.md). Native Linux CUDA build/generation stil
 requires reporter validation; mocked build tests are not a substitute for it.
 
 ## GitHub issues
+
+v2.2.4 fixes the remaining silent-product dialogue classification reproduced from
+**#115** and adds targeted window retries for drafts needing local camera repair.
+The reported prompt is covered by parser and three-window scheduler regressions.
+The broader product-mode and entity-handling request in **#138** remains open.
 
 v2.2.3 addresses the large-sequence RMSNorm allocation reported in **#139**.
 The bounded operation and numerical equivalence are tested; complete generation

@@ -8344,6 +8344,8 @@ def _interactive_enhancement_slot(function):
 async def llm_plan_h3_windows(request: Request):
     """Expand one H3 First/Last concept into exact per-window prompts."""
 
+    from services.h3_plan_retry import H3PlanRetryError
+
     body = await request.json()
     prompt = str(body.get("prompt") or "").strip()
     model_type = str(body.get("model_type") or "")
@@ -8438,9 +8440,12 @@ async def llm_plan_h3_windows(request: Request):
             nsfw=bool(nsfw),
             camera_coverage=str(body.get("camera_coverage") or "auto"),
             planning_style=str(body.get("planning_style") or "faithful"),
+            retry_plan=body.get("retry_plan"),
         )
         result["effective_window_frames"] = window_frames
         return result
+    except H3PlanRetryError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except Exception as error:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(error)) from error
@@ -8450,6 +8455,8 @@ async def llm_plan_h3_windows(request: Request):
 @_interactive_enhancement_slot
 async def llm_plan_h3_sequence(request: Request):
     """Expand one H3 Omni concept into reference-driven windows."""
+
+    from services.h3_plan_retry import H3PlanRetryError
 
     body = await request.json()
     prompt = str(body.get("prompt") or "").strip()
@@ -8561,11 +8568,14 @@ async def llm_plan_h3_sequence(request: Request):
             overlap_frames=overlap_frames,
             native_continuation=native_continuation,
             planning_style=str(body.get("planning_style") or "faithful"),
+            retry_plan=body.get("retry_plan"),
         )
         result["effective_window_frames"] = effective_clip_frames
         if sequence_adjustment:
             result["sequence_memory"] = sequence_adjustment
         return result
+    except H3PlanRetryError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except Exception as error:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(error)) from error
@@ -10457,6 +10467,7 @@ async def _prepare_generation_submission(
     """Normalize/plan a request, then submit it or return prepared params."""
 
     body = dict(body)
+    h3_retry_plan = body.pop("_h3_retry_plan", None)
     _stamp_live_generation_settings_version(body)
     if (
         body.get("generation_mode") == "image"
@@ -11074,6 +11085,7 @@ async def _prepare_generation_submission(
                     overlap_frames=h3_sequence_overlap,
                     native_continuation=h3_native_sequence,
                     planning_style=h3_sequence_planning_style,
+                    retry_plan=h3_retry_plan,
                 )
                 cached_prompts = h3_window_plan_response["window_prompts"]
                 if not llm_was_loaded and llm_service.is_loaded():
@@ -11409,6 +11421,7 @@ async def _prepare_generation_submission(
                         body.get("minimax_h3_camera_coverage") or "auto"
                     ),
                     planning_style=h3_first_last_planning_style,
+                    retry_plan=h3_retry_plan,
                 )
                 cached_prompts = h3_window_plan_response["window_prompts"]
                 # A planner loaded only for this request should not compete
@@ -24702,7 +24715,14 @@ def _prepare_job_enhancement(job: dict) -> None:
                    ltx_window_plan=record["prepared"].get("ltx_window_plan"),
                    phase="", message="Preparing saved enhanced draft…")
         return
-    update_job(job, phase="Enhancing", message="Enhancing prompt and planning windows…")
+    from services.h3_plan_retry import retryable_windows
+    targets = retryable_windows((record.get("prepared") or {}).get("h3_window_plan"))
+    message = (
+        "Repairing window" + ("s " if len(targets) > 1 else " ")
+        + ", ".join(map(str, targets)) + "; keeping the other prompts…"
+        if targets else "Enhancing prompt and planning windows…"
+    )
+    update_job(job, phase="Enhancing", message=message)
     record.update(state="enhancing", error=None)
     _studio_job_archive.save(job)
     try:
@@ -24713,7 +24733,8 @@ def _prepare_job_enhancement(job: dict) -> None:
         with enhancement_context(record["settings"], lambda: is_cancel_requested(job)):
             prepared = asyncio.run(prepare_enhanced_job(
                 record["original_params"], wgp.get_model_def(job["params"]["model_type"]) or {},
-                _llm_enhance_prompt_payload, _prepare_generation_submission))
+                _llm_enhance_prompt_payload, _prepare_generation_submission,
+                previous_prepared=record.get("prepared")))
         if is_cancel_requested(job):
             raise InterruptedError("Prompt enhancement cancelled.")
         plan = prepared.get("h3_window_plan") or prepared.get("ltx_window_plan")
@@ -28175,7 +28196,7 @@ async def retry_enhanced_job(job_id: str, request: Request):
                 raise HTTPException(400, "No draft is available to review")
             record.update(state="complete", error=None)
         elif action == "refresh":
-            record.update(state="pending", prepared=None, error=None, enhanced_prompt=None)
+            record.update(state="pending", prepared=None, error=None, enhanced_prompt=None, warnings=[])
         elif action == "as_written":
             # Explicit opt-out: normal validation still applies to manual
             # multi-window prompts; no hidden AI pass or silent fallback.

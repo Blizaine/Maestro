@@ -212,6 +212,7 @@ export async function submitGeneration(
 }
 
 export async function planH3Windows(params: {
+  retry_plan?: H3WindowPlan
   prompt: string
   model_type: string
   resolution: string
@@ -304,6 +305,7 @@ export async function updateStudioPreferences(
 }
 
 export async function planH3Sequence(params: {
+  retry_plan?: H3WindowPlan
   prompt: string
   model_type: string
   resolution: string

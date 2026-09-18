@@ -1568,6 +1568,7 @@ def plan_h3_reference_sequence(
     overlap_frames: int = 0,
     native_continuation: bool = False,
     planning_style: str = "faithful",
+    retry_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Plan H3 Omni windows that share canonical references."""
 
@@ -1615,6 +1616,9 @@ def plan_h3_reference_sequence(
         native_continuation=native_continuation,
         planning_style=planning_style,
     )
+    from services.h3_plan_retry import finish_retry_plan, retry_fingerprint, validate_retry_plan
+    fingerprint = retry_fingerprint(signature, image_paths, nsfw)
+    resume = validate_retry_plan(retry_plan, fingerprint=fingerprint, count=len(clips))
     if len(clips) <= 1:
         return {
             "source_prompt": str(prompt or ""),
@@ -1644,6 +1648,7 @@ def plan_h3_reference_sequence(
         expect_dialogue = adaptive_dialogue_expected(prompt)
     resolved_coverage = _infer_camera_coverage(prompt, camera_coverage)
     story_ledger: dict[str, Any] | None = None
+    camera_checkpoint = None
     planning_warnings: list[str] = []
     planning_diagnostics: list[str] = []
     planning_notes: list[str] = []
@@ -1666,8 +1671,10 @@ def plan_h3_reference_sequence(
             planning_style=planning_style,
             image_paths=image_paths,
             nsfw=nsfw,
+            resume=resume,
         )
         planned_by = staged["planned_by"]
+        camera_checkpoint = staged.get("camera_checkpoint")
         planning_warnings = list(staged.get("planning_warnings") or [])
         planning_diagnostics = list(staged.get("planning_diagnostics") or [])
         planning_notes = list(staged.get("planning_notes") or [])
@@ -1702,9 +1709,11 @@ def plan_h3_reference_sequence(
             default_retention=default_retention,
             task_types=task_types,
         )
-    except H3DialogueTimingError:
+    except (H3DialogueTimingError, InterruptedError):
         raise
     except Exception as error:
+        if retry_plan is not None:
+            raise  # Never replace accepted windows after a failed repair.
         print(f"[MiniMax H3 Omni] Sequence planner fallback: {error}")
         planned_by = "deterministic_fallback"
         planning_warnings.append(
@@ -1731,7 +1740,7 @@ def plan_h3_reference_sequence(
             task_types=task_types,
         )
 
-    return {
+    return finish_retry_plan({
         "source_prompt": str(prompt or ""),
         "signature": signature,
         "planned_by": planned_by,
@@ -1753,8 +1762,9 @@ def plan_h3_reference_sequence(
         "subject_continuity": plan.get("subject_definitions", ""),
         "setting_continuity": plan.get("setting_continuity", ""),
         "story_ledger": story_ledger,
+        "camera_checkpoint": camera_checkpoint,
         "dialogue_fragments": dialogue_fragments,
         "source_intent": source_intent,
         "windows": compiled,
         "window_prompts": [item["prompt"] for item in compiled],
-    }
+    }, retry_plan, fingerprint)

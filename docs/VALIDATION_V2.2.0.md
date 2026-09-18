@@ -1,8 +1,39 @@
-# v2.2.3 validation record
+# v2.2.4 validation record
 
-Updated 17 September 2026. This distinguishes automated regression coverage
+Updated 18 September 2026. This distinguishes automated regression coverage
 from rendered workflows exercised during development and tests still needed on
 other hardware.
+
+## v2.2.4 targeted retry and prompt-review update
+
+- Final release CPU discovery passed **2,150 tests**, with six CUDA-dependent
+  skips, in 114.808 seconds. Python syntax and undefined-name checks, five
+  standalone JSON grammar checks, UI lint and the TypeScript/Vite production
+  build passed. Existing mixed-import and bundle-size warnings remain.
+- The release inventory contains 28 application/test/documentation files and
+  no private media, models, settings or experiment artifacts. All 88 local
+  documentation links resolve. The offline browser review test passed, and its
+  mobile screenshot was visually inspected for readable actions and layout.
+- The exact silent water-purifier prompt from #115 initially reproduced a false
+  39-word speech line owned by `Logotype timeline`. It now extracts zero spoken
+  lines and retains the visual timeline through the three-window scheduler.
+  Related tests preserve explicit dialogue and distinguish local silence from
+  a whole-video instruction. The writer is mocked unavailable for this scheduler
+  regression; it is not a new live-model fidelity test.
+- Planner regressions exercise six-window sequences with a failed fourth window,
+  repeated failures, multiple flagged windows, saved checkpoint round-trips,
+  stale inputs, cancellation and full refresh. Accepted compiled prompts remain
+  unchanged and only flagged windows call the camera writer. Both Frames and
+  References are covered.
+- Queue tests verify that a saved review checkpoint reaches the repair planner
+  and that the resulting job retains the complete set of window prompts.
+- Mocked browser tests exercise the actual review component and store: accept
+  the full draft, retry flagged windows, rewrite all, use the original prompt,
+  edit without enqueueing, rejected retries, queue visibility and mobile layout.
+  Interactive Enhance retries send the saved plan; full refresh omits it.
+- These checks use controlled writer/API responses. They verify retry scope and
+  UI behavior, not the artistic quality of new LLM or video output. Release
+  preparation does not interrupt the maintainer's generation or submit GPU jobs.
 
 ## v2.2.3 H3 reliability and memory update
 
