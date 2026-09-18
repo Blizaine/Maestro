@@ -175,7 +175,7 @@ class GeneratedDialoguePlacementTests(unittest.TestCase):
                 _shorten_generated_dialogue(BRIEF, lines, target_words=32,
                     generate=Mock(return_value=json.dumps(response)), system_prompt="Write dialogue.")
 
-    def test_second_overlength_attempt_copyedits_latest_draft_with_locked_quote_intact(self):
+    def test_overlength_copyedit_keeps_latest_draft_and_locked_quote_intact(self):
         prompt = 'Eva and Nora discuss their film project. Eva says "Welcome!"'
         locked = extract_locked_dialogue(prompt)
         canonical = ledger_for(prompt, [10.1])
@@ -183,18 +183,18 @@ class GeneratedDialoguePlacementTests(unittest.TestCase):
         candidate["generated_dialogue"] = [line("word " * 40, event="E1")]
         initial = _canonicalize_story_ledger(prompt, canonical, candidate, locked_dialogue=locked,
             segment_count=1, allow_generated_dialogue=True, preserve_adaptation=True)
-        # The first editor still misses the 30-word ceiling by one (including
-        # the exact user quote). The second pass edits text, not the schema.
+        # Edit the existing spoken draft directly, keeping exact quotes out
+        # of the editable text and retaining event ownership locally.
         shortened = "Let's group the shots by scene first, then review the storyboard together so we can agree on what to film tomorrow morning."
         writer = Mock(side_effect=[
-            json.dumps({"generated_dialogue": [line("draft " * 30, event="E1")]}),
             json.dumps({"L1": shortened}),
         ])
         result, warnings = _complete_creative_dialogue(prompt, initial, canonical_ledger=canonical,
             locked_dialogue=locked, durations=[10.1], generate=writer, system_prompt="Write dialogue.")
         self.assertEqual(warnings, [])
-        self.assertTrue(writer.call_args_list[1].kwargs["prompt"].startswith("SHORTEN AI-WRITTEN LINES"))
-        self.assertIn("draft draft", writer.call_args_list[1].kwargs["prompt"])
+        writer.assert_called_once()
+        self.assertTrue(writer.call_args.kwargs["prompt"].startswith("SHORTEN AI-WRITTEN LINES"))
+        self.assertIn("word word", writer.call_args.kwargs["prompt"])
         self.assertEqual(result["generated_dialogue"][0]["text"], shortened)
         self.assertEqual(result["generated_dialogue"][0]["source_event_id"], "E1")
         self.assertEqual(_dialogue_catalog(result, locked)[0]["text"], "Welcome!")
@@ -212,7 +212,10 @@ class GeneratedDialoguePlacementTests(unittest.TestCase):
         self.assertEqual([item["text"] for item in revised], ["Please sit here.", "Thank you."])
         self.assertEqual(lines, before)
         self.assertIn("HARD per-line limit", writer.call_args_list[0].kwargs["prompt"])
-        self.assertIn("L1: 6 words; maximum 4", writer.call_args_list[1].kwargs["prompt"])
+        retry_turns = json.loads(writer.call_args_list[1].kwargs['prompt'].split('Editable turns:\n', 1)[1])
+        self.assertEqual(set(retry_turns), {'L1'})
+        self.assertEqual(retry_turns['L1']['maximum_words'], 4)
+        self.assertEqual(retry_turns['L1']['text'], 'Would you take a seat here?')
         self.assertEqual([{k: v for k, v in item.items() if k != "text"} for item in revised],
                          [{k: v for k, v in item.items() if k != "text"} for item in lines])
 
@@ -244,8 +247,8 @@ class GeneratedDialoguePlacementTests(unittest.TestCase):
         initial = _canonicalize_story_ledger(prompt, canonical, candidate, locked_dialogue=[],
             segment_count=1, allow_generated_dialogue=True)
         writer = Mock(side_effect=[
-            json.dumps({"generated_dialogue": [line("draft " * 33)]}),
             json.dumps({"L1": "revised " * 32}),
+            json.dumps({"generated_dialogue": [line("draft " * 33)]}),
         ])
         result, warnings = _complete_creative_dialogue(prompt, initial, canonical_ledger=canonical,
             locked_dialogue=[], durations=[10.1], generate=writer, system_prompt="Write dialogue.")
@@ -266,7 +269,7 @@ class GeneratedDialoguePlacementTests(unittest.TestCase):
         self.assertTrue(warnings)  # Genuine overflow still needs review.
         self.assertEqual(result['generated_dialogue'][0]['text'], ('revised ' * 32).strip())
 
-    def test_expansion_that_overshoots_on_last_retry_still_gets_copyedited(self):
+    def test_density_development_that_overshoots_still_gets_copyedited(self):
         prompt = "Eva and Nora discuss their film project."
         canonical = ledger_for(prompt, [10.1])
         candidate = deepcopy(canonical)
@@ -274,16 +277,15 @@ class GeneratedDialoguePlacementTests(unittest.TestCase):
         initial = _canonicalize_story_ledger(prompt, canonical, candidate, locked_dialogue=[],
             segment_count=1, allow_generated_dialogue=True)
         written = "Let's group the shots by scene first, then review the storyboard together so we can agree on what to film tomorrow morning."
-        for final, expected in ((json.dumps({"L1": written}), written), ("{}", ("draft " * 20).strip())):
+        for final, expected in ((json.dumps({"L1": written}), written), ("{}", "Ready?")):
             with self.subTest(final=final):
                 writer = Mock(side_effect=[
-                    json.dumps({"generated_dialogue": [line("draft " * 20, event="E1")]}),
                     json.dumps({"generated_dialogue": [line("expanded " * 34, event="E1")]}), final,
                 ])
                 result, warnings = _complete_creative_dialogue(prompt, initial, canonical_ledger=canonical,
                     locked_dialogue=[], durations=[10.1], generate=writer, system_prompt="Write dialogue.")
-                self.assertEqual(writer.call_count, 3)
-                self.assertTrue(writer.call_args_list[2].kwargs["prompt"].startswith("SHORTEN AI-WRITTEN LINES"))
+                self.assertEqual(writer.call_count, 2)
+                self.assertTrue(writer.call_args_list[1].kwargs["prompt"].startswith("SHORTEN AI-WRITTEN LINES"))
                 self.assertEqual(result["generated_dialogue"][0]["text"], expected)
                 self.assertEqual(warnings, [])  # The best shorter draft fits.
 
@@ -336,8 +338,8 @@ class GeneratedDialoguePlacementTests(unittest.TestCase):
             calls.append(kwargs)
             if len(calls) == 1:
                 return json.dumps(story)
-            if kwargs["prompt"].startswith("FIT THE SPOKEN SCRIPT"):
-                return json.dumps({"generated_dialogue": [line(written, event="E1")]})
+            if kwargs["prompt"].startswith("SHORTEN AI-WRITTEN LINES"):
+                return json.dumps({"L1": written})
             self.assertNotIn("REPAIR THE COMPLETE STORY SCHEDULE", kwargs["prompt"])
             return json.dumps({
                 "segment": 1, "title": "Storyboard discussion", "opening_state": "Eva and Nora are at the desk",

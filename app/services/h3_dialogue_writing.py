@@ -82,29 +82,26 @@ def _shorten_generated_dialogue(
     if not isinstance(candidate, dict) or set(candidate) != set(turns):
         raise ValueError("return revised text for every L-key")
     if per_line_targets is not None:
-        over = {key: f"{key}: {_dialogue_word_count(candidate.get(key))} words; maximum {turn['maximum_words']}"
-                for key, turn in turns.items()
-                if _dialogue_word_count(candidate.get(key)) > turn["maximum_words"]}
+        over = {
+            key: {"language": turn["language"], "text": candidate.get(key),
+                  "target_words": max(1, int(turn["maximum_words"] * 0.65)),
+                  "maximum_words": turn["maximum_words"]}
+            for key, turn in turns.items()
+            if _dialogue_word_count(candidate.get(key)) > turn["maximum_words"]
+        }
         if over:
             try:
-                repaired = {}
-                for key, problem in over.items():
-                    limit = turns[key]['maximum_words']
-                    # A long multi-turn editing request can encourage near-
-                    # copying. Focus the retry on one essential message, with
-                    # spare words rather than asking it to hit the ceiling.
-                    local = _parse_json_object(write(
-                        f"SHORTEN ONE SPOKEN TURN. {problem}. "
-                        f"Aim for {max(1, int(limit * 0.65))} words; never exceed {limit}. "
-                        "Express its core question or answer as a NEW complete natural utterance. "
-                        "Omit greetings, repetition and decorative phrasing. Keep essential information. "
-                        "Do not truncate a sentence. Do not return acting directions. "
-                        f"Return only JSON with key {key!r} and the spoken text as its value. "
-                        f"Language: {turns[key]['language']}.\n"
-                        f"Editable line: {candidate.get(key)}"
-                    ))
-                    if isinstance(local, dict) and key in local:
-                        repaired[key] = local[key]
+                # Retry only the overlong turns together. One request per
+                # line multiplied writer latency for dialogue-heavy windows.
+                repaired = _parse_json_object(write(
+                    "SHORTEN OVERLONG SPOKEN TURNS. Rewrite each listed line toward its target_words; "
+                    "never exceed its maximum_words. Express its core question or answer as a NEW "
+                    "complete natural utterance. Omit greetings, repetition and decorative phrasing. "
+                    "Keep essential information and each turn's language. Do not truncate sentences, "
+                    "join turns, or return acting directions. Return only JSON mapping the listed "
+                    "L-keys to their revised spoken text.\n"
+                    f"Editable turns:\n{json.dumps(over, ensure_ascii=False)}"
+                ))
             except Exception as error:
                 print(f"[MiniMax H3] Camera dialogue copyedit retry: {error}")
                 repaired = None  # Keep a useful first edit if the retry fails.
@@ -304,7 +301,7 @@ def complete_creative_dialogue(
     generate: Callable[..., str], system_prompt: str,
     copyedit_system_prompt: str | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
-    """Develop each window with one retry and a final text-only edit if needed."""
+    """Develop each window; reserve retries for actual speech or story problems."""
     from services.h3_window_planner import _parse_json_object
 
     cast_names = _merge_h3_cast_names(
@@ -336,15 +333,17 @@ def complete_creative_dialogue(
         best_score = fit_score(obligation)
         copyedited = False
         overlong_lines = obligation["current_dialogue"] if obligation["spoken_words"] > obligation["maximum_words"] else []
+        # A preferred word count is writing guidance, not a reason to keep
+        # regenerating an otherwise valid exchange. Give sparse writing one
+        # development pass; retain repairs for malformed output, missing
+        # topics or invalid timing introduced by that pass.
         for attempt in range(3):
             try:
                 adjacent = [
                     {"segment": item["segment"], "speaker": item["speaker"], "text": item["text"]}
                     for item in ledger.get("generated_dialogue", []) if abs(int(item["segment"]) - number) == 1
                 ]
-                if attempt and overlong_lines:
-                    if copyedited:
-                        break
+                if overlong_lines and not copyedited and (attempt or not obligation["missing_topics"]):
                     copyedited = True
                     edited = _shorten_generated_dialogue(
                         prompt, overlong_lines,
@@ -434,7 +433,7 @@ def complete_creative_dialogue(
                 score = fit_score(checked)
                 if score < best_score:
                     best_draft, best_score = compiled, score
-                if checked["problems"] or (checked["writing_notes"] and attempt == 0 and not copyedited):
+                if checked["problems"]:
                     feedback = "; ".join(checked["problems"] + checked["writing_notes"])
                     words = checked["spoken_words"]
                     if words < checked["minimum_words"]:

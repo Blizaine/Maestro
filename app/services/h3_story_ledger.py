@@ -21,12 +21,15 @@ from models.minimax_h3.speakers import is_h3_production_label
 
 from services.h3_authored_brief import (
     authored_optical_settings,
+    authored_sound_cues,
+    is_standalone_sound_cue,
     authored_timed_brief,
     character_profile_spans,
     explicit_character_profiles,
     explicit_negative_constraints,
     positive_instruction_text,
     production_note_spans,
+    video_direction_source,
 )
 
 from services.dialogue_timing import (
@@ -51,7 +54,7 @@ from services.director.long_form_story import (
 )
 
 
-H3_STORY_LEDGER_VERSION = 84
+H3_STORY_LEDGER_VERSION = 96
 
 
 _H3_WINDOW_BOOKKEEPING_RE = re.compile(
@@ -271,7 +274,7 @@ _FAST_ACTION_RE = re.compile(
 )
 
 _NON_CAST_PROPER_NAMES = {
-    "anyone", "beat", "everybody", "everyone", "nobody", "no one",
+    "anyone", "beat", "everybody", "everyone", "nobody", "no one", "no",
     "camera", "okay", "ok", "someone", "starts", "that", "there", "these", "this",
     "those", "you", "he", "she", "they", "we", "it", "i", "his", "her",
     "their", "our", "them", "its", "us", "your", "my",
@@ -497,9 +500,10 @@ def _is_persistent_camera_directive(value: str) -> bool:
         r"(?:(?:a|an|the)\s+)?"
         r"(?:(?:dynamic|cinematic|motivated|fluid|smooth|handheld|kinetic|fast|"
         r"energetic|restrained|static|continuous|single[- ]take|wide|close|"
-        r"low[- ]angle|high[- ]angle|realistic)\s+)*"
+        r"low[- ]angle|high[- ]angle|realistic|natural|conversational|alternating|medium)\s+)*"
         r"(?:camera(?:\s+(?:movements?|work|coverage))?|camerawork|cinematography|"
-        r"framing|shots?|cuts?|close[- ]ups?|shallow\s+depth\s+of\s+field)"
+        r"framing|shots?|cuts?|close[- ]ups?|pacing|shallow\s+depth\s+of\s+field)"
+        r"(?:\s+on\s+(?:the\s+)?(?:current|active)\s+speaker)?"
     )
     if re.fullmatch(
         r"(?:please\s+)?(?:use|keep|maintain|favor|prefer)\s+"
@@ -602,6 +606,13 @@ def _is_h3_preservation_contract(value: str) -> bool:
     if not direction:
         return False
     body = sanitize_h3_prompt_text(direction.group("body"))
+    if re.fullmatch(
+        r"(?:the|an?)\s+(?:[a-z-]+\s+){1,4}"
+        r"(?:closed|open|stationary|unchanged|intact)\s+throughout"
+        r"(?:\s+(?:the\s+)?(?:scene|film|video|conversation))?",
+        body, flags=re.I,
+    ):
+        return True  # A persistent prop state, not an extra action to perform.
     # Concrete named blocking such as ``Keep Mara beside the door`` remains a
     # filmable event. A checklist of states/relations constrains every event.
     return bool(
@@ -662,6 +673,9 @@ def _is_h3_performance_direction(value: str) -> bool:
         r"[a-z][a-z ,'-]{1,100}",
         text,
         flags=re.IGNORECASE,
+    ) or re.fullmatch(
+        r"(?:the\s+)?(?:listener|non[- ]speaking\s+character)\s+"
+        r"(?:reacts?|listens?)\s+(?:silently|without\s+speaking)", text, re.I,
     ))
 
 
@@ -1093,7 +1107,13 @@ def _find_h3_opening_entrance(prompt: Any) -> re.Match[str] | None:
     """
 
     proper = _PROPER_NAME.pattern
-    source = sanitize_h3_prompt_text(prompt)
+    source = normalize_h3_dialogue_tags(str(prompt or ""))
+    # Reported arrivals inside speech are not visible entrances. Extract before
+    # collapsing line breaks so unquoted screenplay rows remain recognizable.
+    for line in reversed(extract_locked_dialogue(source)):
+        start, end = int(line["source_offset"]), int(line["source_end"])
+        source = source[:start] + " " * (end - start) + source[end:]
+    source = sanitize_h3_prompt_text(source)
     entrance = re.search(
         rf"(?P<entrant>{proper})\s+(?i:"
         r"enter(?:s|ed|ing)?|arriv(?:e|es|ed|ing)?|"
@@ -1124,16 +1144,15 @@ def _infer_h3_opening_state_contract(
 ) -> str:
     """Describe the frame immediately before a requested entrance begins."""
 
-    source = sanitize_h3_prompt_text(prompt)
     proper = _PROPER_NAME.pattern
-    entrance = _find_h3_opening_entrance(source)
+    entrance = _find_h3_opening_entrance(prompt)
     if not entrance:
         return ""
     entrant = _resolve_h3_cast_name(entrance.group("entrant"), cast_names)
     stationary = re.search(
         rf"(?P<target>{proper})\s*,\s*(?i:who\s+is)\s+"
         r"(?P<state>[^.!?]{1,140})",
-        source[entrance.end():],
+        entrance.string[entrance.end():],
     )
     if stationary:
         target = _resolve_h3_cast_name(
@@ -1234,13 +1253,20 @@ def _derive_h3_cast_names(source: str, proper_names: list[str]) -> list[str]:
     quantity = str(profile_count)
     if profile_count < len(count_words):
         quantity += "|" + count_words[profile_count]
-    if profile_names and re.search(
+    # Standalone cast limits also appear as "No second person." Do not match
+    # a local staging instruction such as "No second person enters until...".
+    next_person = {1: "second", 2: "third"}.get(profile_count)
+    closed_cardinality = bool(next_person and re.search(
+        rf"\bno\s+{next_person}\s+(?:person|character|actor)\s*(?:[.!?;]|$)",
+        source, flags=re.IGNORECASE,
+    ))
+    if profile_names and (closed_cardinality or re.search(
         r"\bno\s+(?:third\s+parties|(?:other|extra|additional)\s+"
         r"(?:characters|people|persons|cast\s+members))\b|"
         rf"\bonly\s+(?:{quantity})\s+[^.!?\r\n]{{0,80}}"
         r"\b(?:characters|people|persons|men|women|males|females|artists|fighters|monks)\b",
         source, flags=re.IGNORECASE,
-    ):
+    )):
         return _canonicalize_h3_cast_names(profile_names + spoken_names, prompt=source)
     speakers = {
         name.casefold() for name in spoken_names
@@ -1465,11 +1491,11 @@ def extract_h3_source_intent(prompt: str) -> dict[str, Any]:
     raw_source = normalize_h3_dialogue_tags(prompt)
     locked_dialogue = extract_locked_dialogue(raw_source)
     source = sanitize_h3_prompt_text(raw_source)
-    raw_directive_source = _without_locked_dialogue(
+    raw_directive_source = video_direction_source(_without_locked_dialogue(
         raw_source,
         locked_dialogue,
         keep_screenplay_speaker_cues=True,
-    )
+    ))
     directive_source = sanitize_h3_prompt_text(raw_directive_source)
     directive_source = re.sub(
         r"<d>\s*(?:\[[^\]]+\]\s*)?(?:(?!<d>).)*?</d>",
@@ -1586,9 +1612,18 @@ def extract_h3_source_intent(prompt: str) -> dict[str, Any]:
         match.group(0).casefold()
         for match in _NONVERBAL_VOCAL_RE.finditer(directive_source)
     ))
-    hands_visible = bool(
-        re.search(r"\b(?:both|two)?\s*hands?\b", directive_source, re.IGNORECASE)
-        and re.search(r"\b(?:holding|gripping|grasping)\b", directive_source, re.IGNORECASE)
+    # A filmed subject holding a prop does not put that prop in the camera
+    # operator's hands. Require an explicit viewpoint-owned hand direction.
+    hands_visible = pov and any(
+        re.search(r"\b(?:hold\w*|grip\w*|grasp\w*)\b", clause, re.I)
+        and re.search(
+            r"\b(?:my|our|your|viewer['’]s|camera operator['’]s)\s+"
+            r"(?:\w+\s+){0,2}hands?\b|"
+            r"^\s*(?:(?:show|keep)\s+)?(?:(?:both|two)\s+)?hands?\b|"
+            r"\b(?:first[- ]person|POV)\b[^.!?]{0,50}\bhands?\b",
+            clause, re.I,
+        )
+        for clause in re.split(r"(?<=[.!?])\s+|[\r\n]+", raw_directive_source)
     )
     ongoing = bool(re.search(
         r"\b(?:never[- ]ending|never stopping|non[- ]stop|keeps? (?:moving|falling|flying)|"
@@ -1643,15 +1678,17 @@ def extract_h3_source_intent(prompt: str) -> dict[str, Any]:
         ambient_parts.append("open-air mountain wind")
     if _FAST_ACTION_RE.search(directive_source):
         ambient_parts.append("speed-dependent rushing air")
-    timed_context = authored_timed_brief(raw_source)["context"]
+    video_source = video_direction_source(raw_source)
+    video_dialogue = locked_dialogue if video_source == raw_source else extract_locked_dialogue(video_source)
+    timed_context = authored_timed_brief(video_source)["context"]
     persistent_directions = [
-        text for start, end, text in _h3_persistent_instruction_spans(raw_source)
+        text for start, end, text in _h3_persistent_instruction_spans(video_source)
         if not any(start < line["source_end"] and line["source_offset"] < end
-                   for line in locked_dialogue)
+                   for line in video_dialogue)
     ]
     production_directions = [
-        sanitize_h3_prompt_text(raw_source[start:end])
-        for start, end in _h3_production_note_spans(raw_source)
+        sanitize_h3_prompt_text(video_source[start:end])
+        for start, end in _h3_production_note_spans(video_source)
     ]
     global_instructions = "\n\n".join(dict.fromkeys(
         item for item in [timed_context, *persistent_directions, *production_directions] if item
@@ -2037,13 +2074,18 @@ def _without_locked_dialogue(
 ) -> str:
     """Remove spoken words while preserving chronological screenplay cues."""
 
+    from models.minimax_h3.speakers import h3_action_beat_speaker
+
     cleaned = source
     for item in reversed(locked_dialogue):
         start = int(item.get("source_offset") or 0)
         end = int(item.get("source_end") or start)
         linked_action = bool(_SPEECH_ACTION_LINK_RE.match(cleaned[end:]))
         replacement = " " if linked_action else " . "
-        if keep_screenplay_speaker_cues and item.get("source_form") == "screenplay":
+        if keep_screenplay_speaker_cues and (
+            item.get("source_form") == "screenplay"
+            or h3_action_beat_speaker(source, start)
+        ):
             speaker = sanitize_h3_prompt_text(item.get("speaker")) or "Speaker"
             replacement = f"\n{speaker} speaks" + (" " if linked_action else ".\n")
         cleaned = cleaned[:start] + replacement + cleaned[end:]
@@ -2071,7 +2113,7 @@ def _explicit_speech_action_order(prompt: str) -> dict[str, dict[str, str]]:
 def extract_locked_dialogue(prompt: str) -> list[dict[str, Any]]:
     """Extract tagged, quoted, or screenplay-form dialogue before rewriting."""
 
-    from models.minimax_h3.speakers import is_h3_spoken_quote
+    from models.minimax_h3.speakers import h3_action_beat_speaker, is_h3_spoken_quote
 
     source = normalize_h3_dialogue_tags(prompt)
     tag_pattern = re.compile(
@@ -2144,12 +2186,14 @@ def extract_locked_dialogue(prompt: str) -> list[dict[str, Any]]:
             if span_index else 0
         )
         screenplay = span.get("source_form") == "screenplay"
+        action_speaker = h3_action_beat_speaker(source, start)
         speaker, delivery = (
             (
                 sanitize_h3_prompt_text(span.get("speaker")) or "Speaker",
                 sanitize_h3_prompt_text(span.get("delivery")) or "speaks naturally",
             )
-            if span.get("speaker") else _infer_quote_speaker(
+            if span.get("speaker") else (action_speaker, "speaks naturally")
+            if action_speaker else _infer_quote_speaker(
                 source,
                 start,
                 context_start=context_start,
@@ -2172,6 +2216,7 @@ def extract_locked_dialogue(prompt: str) -> list[dict[str, Any]]:
             and not screenplay
             and not _SPEECH_VERB.search(nearby)
             and not label
+            and not action_speaker
             and outside_quote
         ):
             continue
@@ -2507,8 +2552,24 @@ def _find_spoken_verb(text: str) -> re.Match[str] | None:
     """Find a vocal cue without treating an object's state as speech."""
 
     for match in _PLANNER_SPEECH_VERB.finditer(text):
+        before, after = text[:match.start()], text[match.end():]
+        # Visual evidence can "suggest" something without anyone speaking.
+        # Treating that relative clause as dialogue also detached a prop's
+        # movement and assigned it to the preceding named character.
+        if match.group(0).lower().startswith('suggest') and (
+            re.search(
+                r'\b(?:expressions?|looks?|gazes?|postures?|movements?|motions?|'
+                r'shifts?|vibrations?|gestures?)\s+(?:(?:that|which)\s+)?$', before, re.I,
+            ) or (match.group(0).lower() == 'suggesting' and re.search(r',\s*$', before))
+        ):
+            continue
+        # "Muffled" is an acoustic adjective here, not an untagged utterance.
+        if match.group(0).lower() == 'muffled' and re.match(
+            r'\s+(?:(?:soft|heavy|distant|rhythmic|faint)\s+){0,2}'
+            r'(?:thumps?|rumbles?|impacts?|footsteps?|knocks?|clangs?|bangs?)\b', after, re.I,
+        ):
+            continue
         if match.group(0).lower() in {"state", "states"}:
-            before, after = text[:match.start()], text[match.end():]
             if re.search(
                 r"\b(?:the|an?|its|their|his|her|initial|final|current|previous|"
                 r"physical|visible|open|closed|unchanged|[\w]+['’]s)\s+$", before, re.I,
@@ -2984,8 +3045,13 @@ def _h3_contract_token_stems(value: Any) -> set[str]:
 
 
 def _h3_visible_chronology_text(value: Any) -> str:
-    """Past history and namesakes do not order two on-screen actions."""
+    """History, namesakes and comparisons do not order two on-screen actions."""
     text = sanitize_h3_prompt_text(value)
+    # Imported revision notes such as "(~1s earlier than before)" compare
+    # versions; they do not order this action before the next source event.
+    # Keep "before" when it actually introduces a following action clause.
+    text = re.sub(r"\bthan\s+before\b(?=\s*(?:[).,;!?\]}]|$))",
+                  "than previously", text, flags=re.I)
     text = re.sub(r"\bafter\s+(?:(?:many|several|\d+)\s+)?(?:years?|months?|decades?)\s+apart\b",
                   "", text, flags=re.I)
     return re.sub(
@@ -3009,7 +3075,7 @@ def _h3_contract_clauses(value: Any) -> list[str]:
     )
     clauses = []
     for part in re.split(
-        r"\s*[,;]\s*|\b(?:then|before|after|only\s+after|until)\b",
+        r"\s*[,;]\s*|\b(?:only\s+(?:then|after)|then|before|after|until)\b",
         text,
         flags=re.IGNORECASE,
     ):
@@ -3018,7 +3084,7 @@ def _h3_contract_clauses(value: Any) -> list[str]:
         # carrying "film grain" must not count as carrying an adjacent action.
         action_sentences = []
         for sentence in re.split(r"(?<=[.!?])\s+", part):
-            if authored_optical_settings(sentence):
+            if authored_optical_settings(sentence) or is_standalone_sound_cue(sentence):
                 if action_sentences:
                     clauses.append(" ".join(action_sentences))
                     action_sentences = []
@@ -3057,7 +3123,7 @@ def _camera_repair_feedback(
 
 
 def _h3_required_relation_markers(value: Any) -> list[str]:
-    text = sanitize_h3_prompt_text(value).casefold()
+    text = _h3_visible_chronology_text(value).casefold()
     return [
         marker for marker in ("only after", "before", "until", "after")
         if re.search(r"\b" + re.escape(marker).replace(r"\ ", r"\s+") + r"\b", text)
@@ -6128,6 +6194,7 @@ def _canonicalize_segment_contract(
     opening_state: str,
     source_intent: dict[str, Any],
     source_events: list[dict[str, Any]] | None = None,
+    use_camera_handoff: bool = False,
 ) -> dict[str, Any] | None:
     """Attach exact dialogue and timing to the LLM's paired camera/action.
 
@@ -6306,6 +6373,14 @@ def _canonicalize_segment_contract(
         str(item.get("dialogue_id") or "").upper(): item
         for item in dialogue_catalog
     }
+    source_timing = {event['event_id']: event['text'] for event in (source_events or [])}
+    for shot, bucket in zip(raw_shots, assignments):
+        event_ids = [eid for beat in bucket for eid in (beat.get('source_event_ids') or [])]
+        if event_ids and all(eid in source_timing for eid in event_ids):
+            # Minimum action time comes from the actual source event, not
+            # decorative prose such as "her composure cracks" or "the box
+            # sits motionless". The AI's local action still owns clock weights.
+            shot['_timing_source_action'] = '. Then '.join(source_timing[eid] for eid in event_ids)
     timing_assignments = assignments
     if semantic_actions:
         # The writer's local action describes only this part of a continuing
@@ -6347,6 +6422,10 @@ def _canonicalize_segment_contract(
     # Read only original source events, never AI-proposed beat descriptions.
     source_optics = {
         str(event.get("event_id") or "").upper(): authored_optical_settings(event.get("text"))
+        for event in (source_events or [])
+    }
+    source_sounds = {
+        str(event.get("event_id") or "").upper(): authored_sound_cues(event.get("text"))
         for event in (source_events or [])
     }
     retained_optics: set[str] = set()
@@ -6411,6 +6490,31 @@ def _canonicalize_segment_contract(
             })
         shot["dialogue"] = performances
 
+    # Literal sound directions are compiler-owned, like optical settings.
+    # Retain each cue once in its own event, never globally or in another beat.
+    # Preserve an existing placement anywhere in that event's phases; otherwise
+    # a trailing cue goes on its last phase and a leading cue on its first.
+    for event in (source_events or []):
+        event_id = str(event.get("event_id") or "").upper()
+        cues = source_sounds.get(event_id, [])
+        if not cues:
+            continue
+        local_shots = [shot for shot, bucket in zip(raw_shots, assignments)
+                       if any(event_id in [str(value).upper() for value in beat.get("source_event_ids", [])]
+                              for beat in bucket)]
+        if not local_shots:
+            continue
+        local_text = _normalize_key(" ".join(str(shot.get(field) or "")
+            for shot in local_shots for field in ("action", "sound_effects")))
+        source_text = _normalize_key(event.get("text"))
+        for cue in cues:
+            if _normalize_key(cue) in local_text:
+                continue
+            target = local_shots[-1] if source_text.endswith(_normalize_key(cue)) else local_shots[0]
+            target["sound_effects"] = "; ".join(
+                part for part in (sanitize_h3_prompt_text(target.get("sound_effects")), cue) if part
+            )
+
     result = dict(segment)
     result["semantic_actions"] = semantic_actions
     result.update({
@@ -6418,6 +6522,8 @@ def _canonicalize_segment_contract(
         "opening_state": sanitize_h3_prompt_text(opening_state),
         "shots": raw_shots,
         "closing_state": sanitize_h3_prompt_text(
+            segment.get("closing_state")
+            if use_camera_handoff and sanitize_h3_prompt_text(segment.get("closing_state")) else
             assigned_beats[-1].get("state_after")
             if assigned_beats else segment.get("closing_state")
         ),
@@ -6485,6 +6591,7 @@ def segment_violations(
     used_beat_ids: list[str] = []
     beat_actions: dict[str, list[str]] = {}
     beat_camera: dict[str, list[str]] = {}
+    beat_audio: dict[str, list[str]] = {}
     used_dialogue_ids: list[str] = []
     timing: list[tuple[float, float]] = []
     for index, shot in enumerate(shots):
@@ -6500,6 +6607,7 @@ def segment_violations(
             beat_camera.setdefault(beat_id, []).append(" ".join(
                 str(shot.get(field) or "") for field in ("camera", "framing")
             ))
+            beat_audio.setdefault(beat_id, []).append(str(shot.get("sound_effects") or ""))
         for item in shot.get("dialogue") or []:
             if not isinstance(item, dict):
                 violations.append(f"shot {index + 1} has an invalid dialogue performance")
@@ -6528,7 +6636,8 @@ def segment_violations(
         # Imported event cards contain both action and cinematography. Their
         # local camera/framing fields are rendered beside the action; a pull
         # back or close-up need not be copied into the action string as well.
-        # Do not credit other beats, future states, global notes or SFX.
+        # Do not credit other beats, future states or global notes. Audio is
+        # evidence only for standalone sound cues, never for physical action.
         action_tokens = _h3_contract_token_stems(
             " ".join([action_text, *beat_camera.get(beat_id, [])])
         )
@@ -6567,6 +6676,10 @@ def segment_violations(
             required_tokens = _h3_contract_token_stems(part)
             minimum_overlap = 1 if len(required_tokens) <= 4 else 2
             evidence_tokens = action_tokens
+            if is_standalone_sound_cue(part):
+                evidence_tokens = action_tokens | _h3_contract_token_stems(
+                    " ".join(beat_audio.get(beat_id, []))
+                )
             if re.match(r"^(?:outside|inside|in|at|near|beside)\b", part, re.I):
                 evidence_tokens = action_tokens | _h3_contract_token_stems(segment.get("opening_state"))
             if "meet" in required_tokens and (
@@ -7033,7 +7146,7 @@ def _apply_h3_filmable_shot_clock(
 
     speech_floors = []
     has_dialogue = any(beat.get("dialogue_ids") for bucket in assignments for beat in bucket)
-    for bucket in assignments:
+    for shot, bucket in zip(shots, assignments):
         ids = [str(did).upper() for beat in bucket for did in (beat.get("dialogue_ids") or [])]
         words = sum(_dialogue_word_count(dialogue_map.get(did, {}).get("text")) for did in ids)
         floor = words / _H3_DIALOGUE_MAX_WORDS_PER_SECOND + len(ids) * 0.2
@@ -7041,6 +7154,14 @@ def _apply_h3_filmable_shot_clock(
             # Keep actual arrival/travel phases readable instead of borrowing
             # virtually all their time to fit an overlong AI exchange.
             floor = min(2.0, _h3_filmable_timing_weight(bucket, dialogue_map))
+            from services.h3_action_clock import is_h3_stationary_reaction
+            if is_h3_stationary_reaction(shot.get('_timing_source_action') or ' '.join(
+                str(beat.get('description') or '') for beat in bucket
+            )):
+                # Elaborate facial prose does not require a separate two-second
+                # pause. Let these reactions use spare time after exact speech,
+                # while preserving travel/action floors and explicit holds.
+                floor = min(floor, 0.75)
         speech_floors.append(floor)
     durations = None
     if any(shot.get("_action_floor") for shot in shots):
@@ -7827,6 +7948,8 @@ def _materialize_segment(
             "action": proposed_action,
             "dialogue": dialogue,
             "sound_effects": sound_effects,
+            **({'_timing_source_action': shot['_timing_source_action']}
+               if shot.get('_timing_source_action') else {}),
         })
     shots = _split_h3_shots_at_speaker_changes(
         shots,
@@ -7844,9 +7967,11 @@ def _materialize_segment(
         "coverage": sanitize_h3_prompt_text(segment.get("coverage")),
         "pacing": sanitize_h3_prompt_text(segment.get("pacing")),
         "shots": shots,
-        "closing_state": (
-            sanitize_h3_prompt_text(beats[-1].get("state_after"))
-            if beats else sanitize_h3_prompt_text(segment.get("closing_state"))
+        # Canonicalization already chose the story state. In an imported
+        # timeline, its concrete camera-authored handoff must not be replaced
+        # here with a copy of the entire completed source event.
+        "closing_state": sanitize_h3_prompt_text(segment.get("closing_state")) or (
+            sanitize_h3_prompt_text(beats[-1].get("state_after")) if beats else ""
         ),
     }
 
@@ -8155,12 +8280,20 @@ def _plan_h3_story_segments(
                         and not locked_dialogue and 1 < segment_count <= _LONG_FORM_SEGMENTS_PER_CHAPTER)
     planning_thinking = planning_thinking_enabled()
     schedule_expect_dialogue = expect_dialogue and not action_first
+    expected_dialogue_events = _expected_dialogue_events(prompt, locked_dialogue)
+    fully_scripted_dialogue = (
+        len(locked_dialogue) >= 2
+        and len(expected_dialogue_events) == len(locked_dialogue)
+    )
     # Detailed silent scripts have the same immutable event order as dialogue
     # scripts. Brief outlines that need additional intermediate progression
-    # still use the semantic scheduler.
+    # still use the semantic scheduler. A complete quoted exchange also has
+    # an immutable chronology without timestamps: allocate its speech clock
+    # here and let the writer direct performance, rather than rediscover IDs
+    # or crowd the last window while leaving spare time in the first.
     faithful_locked_schedule = bool(
         (planning_style == "faithful" or (
-            planning_style == "adaptive" and has_authored_timing
+            planning_style == "adaptive" and (has_authored_timing or fully_scripted_dialogue)
             and not allow_generated_dialogue
         ))
         and (locked_dialogue or len(source_events) >= max(2, segment_count))
@@ -8196,7 +8329,6 @@ def _plan_h3_story_segments(
             "Begin in the supplied first frame's exact composition, poses, contacts and lighting. "
             "Continue the movement already visible before transitioning into the first requested action."
         )
-    expected_dialogue_events = _expected_dialogue_events(prompt, locked_dialogue)
     dialogue_by_event: dict[str, list[str]] = {}
     for dialogue_id, event_id in expected_dialogue_events.items():
         dialogue_by_event.setdefault(event_id, []).append(dialogue_id)
@@ -9111,6 +9243,11 @@ def _plan_h3_story_segments(
             "Use 30–90 action words only for substantial choreography. The compiler calculates the local clock "
             "from speaking time, physical action and any authored event durations. "
             "Do not reproduce speech text in action or sound_effects.\n\n"
+            "Write closing_state as the literal visible situation in the FINAL frame after these "
+            "events: current positions, prop ownership, open/closed doors and lasting changes. "
+            "Do not retell completed actions, list instructions, predict what will happen next, "
+            "or start an event belonging to a later segment. The next camera writer starts from "
+            "this already-achieved state; nothing here should be performed again.\n\n"
             f"User production directions and constraints:\n{production_directions}"
         )
         if action_first:
@@ -9253,6 +9390,7 @@ def _plan_h3_story_segments(
                 opening_state=previous_closing,
                 source_intent=source_intent,
                 source_events=source_events,
+                use_camera_handoff=faithful_locked_schedule and segment_number < segment_count,
             )
             segment_errors = segment_violations(
                 prompt,
@@ -9262,6 +9400,19 @@ def _plan_h3_story_segments(
                 assigned_beats=beats,
                 dialogue_catalog=catalog,
             )
+            from services.h3_camera_fidelity import (
+                clear_confirmed_coverage_errors, review_missing_camera_actions,
+            )
+            coverage_receipts = review_missing_camera_actions(
+                segment_errors, segment, assigned_beats=beats,
+                source_events=source_events, generate=generate,
+            )
+            segment_errors = clear_confirmed_coverage_errors(
+                segment_errors, segment or {}, coverage_receipts,
+            )
+            if coverage_receipts:
+                print(f"[MiniMax H3] Segment {segment_number}: source coverage review "
+                      f"confirmed {len(coverage_receipts)} faithful paraphrase(s).")
             if segment_errors:
                 print(
                     f"[MiniMax H3] Segment {segment_number} repair: "
@@ -9348,6 +9499,7 @@ def _plan_h3_story_segments(
                     opening_state=previous_closing,
                     source_intent=source_intent,
                     source_events=source_events,
+                    use_camera_handoff=faithful_locked_schedule and segment_number < segment_count,
                 )
                 segment_errors = segment_violations(
                     prompt,
@@ -9356,6 +9508,11 @@ def _plan_h3_story_segments(
                     duration=duration,
                     assigned_beats=beats,
                     dialogue_catalog=catalog,
+                )
+                # A focused repair may leave other, already-reviewed cards
+                # untouched. Reuse their evidence only while it still matches.
+                segment_errors = clear_confirmed_coverage_errors(
+                    segment_errors, segment or {}, coverage_receipts,
                 )
             if segment_errors or not segment:
                 raise ValueError("; ".join(segment_errors or ["invalid segment JSON"]))
@@ -9417,9 +9574,8 @@ def _plan_h3_story_segments(
                 future_cast=future_cast,
             )
         materialized["active_cast"] = list(active_cast)
-        # Story state belongs to the ledger, not the camera expander. This also
-        # makes FL2VA's next-frame continuation and Omni's editorial handoff
-        # deterministic even if the segment LLM paraphrases opening_state.
+        # A segment cannot rewrite its supplied opening. The preceding
+        # completed state is shared by frame-linked and editorial handoffs.
         materialized["opening_state"] = previous_closing
         segments.append(materialized)
         previous_closing = materialized["closing_state"]

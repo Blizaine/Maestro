@@ -52,9 +52,18 @@ def adaptive_dialogue_expansion_requested(prompt: str) -> bool:
     for line in reversed(locked):
         source = source[:line['source_offset']] + marker + source[line['source_end']:]
     # Never infer a writing request from the words spoken by a character.
-    if conversation_brief(source):
-        return True
     for clause in re.split(r"(?<=[.!?;])\s+|[\r\n]+", source):
+        # Performance restrictions do not request additional words. In an
+        # already scripted conversation, "No overlapping speech" controls
+        # turn-taking rather than imposing a fresh dialogue-writing quota.
+        if re.fullmatch(
+            r"\s*(?:no|without|avoid)\s+(?:overlapping|simultaneous)\s+"
+            r"(?:speech|dialogue|talking)(?:\s+or\s+narration)?[.!?;]?\s*",
+            clause, flags=re.I,
+        ):
+            continue
+        if marker not in clause and conversation_brief(clause):
+            return True
         cues = list(_PLANNER_SPEECH_VERB.finditer(clause))
         for index, cue in enumerate(cues):
             end = cues[index + 1].start() if index + 1 < len(cues) else len(clause)

@@ -101,11 +101,14 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
-### v2.2.2 (2026-09-16)
+### v2.2.3 (2026-09-17)
 
 **Unified AI enhancement, YuE2 music, and more control over Director productions**
 
-Includes the full v2.2.0 feature release and v2.2.1 numbered-shot fix below. **v2.2.2 reliability update:** fewer false enhancement review warnings, better quoted-dialogue ownership and speaking-time allocation, and reliable queue feedback when continuing with a reviewed draft. Director also keeps singers quiet during instrumental passages and prevents contradictory singing directions for instrumentalists.
+Includes the full v2.2.0 feature release and v2.2.1/v2.2.2 fixes below. **v2.2.3 reliability update:** fewer false H3 camera-fidelity warnings, fewer unnecessary LLM retries, better reference/speaker binding, and more practical dialogue timing across windows. Imported scripts retain their scene order, local sounds and completed state between windows. Large H3 reference sequences also use less temporary memory during normalization.
+
+- **More reliable H3 enhancement:** complete supplied conversations keep every line and its speaker; impossible dialogue durations receive a clear explanation before the LLM loads. Faithful camera paraphrases, colon-timed storyboards and silent reactions no longer trigger the same false review failures. Queued Enhance preserves reference names and actual voice bindings.
+- **Lower H3 memory peaks:** bounded normalization addresses the allocation hotspot reported on an A100 40 GB in [#139](https://github.com/Blizaine/Maestro/issues/139), preserving reference detail and precision. The isolated operation is validated; a complete run on the reporter's hardware remains unverified.
 
 - **One Enhance workflow:** develops short ideas and adapts detailed scripts to the selected model. Enhance now, or let a queued job enhance immediately before generation. An optional **Use by default** setting remembers Enhance on generation; saved source prompts and drafts remain available for review and retries.
 - **Stronger H3 prompt writing:** improved silent-action parsing, dialogue ownership, choreography, camera direction, first-frame continuity and multi-window timing. Director shares the relevant writing guidance. Prompt review remains available for drafts that need attention.

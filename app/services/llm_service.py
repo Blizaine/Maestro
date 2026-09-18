@@ -3082,6 +3082,8 @@ def enhance_prompt(
         and not is_h3_ref2va
     )
     is_h3_structured = is_h3_context_ir or is_h3_ref2va
+    if is_h3_structured and not system_override:
+        validate_h3_source_dialogue_duration(prompt, duration_seconds)
     if planning_style == "adaptive" and is_h3_ref2va and not reference_context and not image_paths:
         reference_context = (
             "No reference media were supplied. Develop prompt-native characters with "
@@ -4164,6 +4166,10 @@ def _fit_adaptive_dialogue(prompt, result, duration_seconds, generator) -> str:
         return result
     exact = set(_extract_h3_quoted_dialogue(prompt))
     locked = {index: line for index, line in enumerate(lines) if line in exact}
+    if len(locked) == len(lines):
+        # No wording is editable. Admission owns the exact-script duration;
+        # asking twice to shorten immutable lines can never solve it.
+        return result
     schema = {"type": "object", "additionalProperties": False, "required": ["lines"],
               "properties": {"lines": {"type": "array", "minItems": len(lines), "maxItems": len(lines),
                                         "items": {"type": "string"}}}}
@@ -4776,6 +4782,28 @@ def _ensure_h3_visual_grounding(
     return grounded
 
 
+def validate_h3_source_dialogue_duration(prompt: str, duration_seconds: Optional[float]) -> None:
+    """Reject impossible exact scripts before asking the writer to preserve them."""
+    import math
+    from services.dialogue_timing import DIALOGUE_DEFAULT_WORDS_PER_SECOND, DIALOGUE_MAX_WORDS_PER_SECOND
+    from services.dialogue_writing import spoken_word_count
+    from services.h3_prompt_budget import H3PromptBudgetError
+
+    if duration_seconds is None or float(duration_seconds) <= 0:
+        return
+    duration = float(duration_seconds)
+    count = sum(spoken_word_count(line) for line in _extract_h3_quoted_dialogue(prompt))
+    maximum = math.floor(duration * DIALOGUE_MAX_WORDS_PER_SECOND)
+    if count > maximum:
+        recommended = math.ceil(count / DIALOGUE_DEFAULT_WORDS_PER_SECOND)
+        raise H3PromptBudgetError(
+            f"The supplied dialogue has {count} spoken words, but the selected {duration:.1f} seconds "
+            f"can fit at most {maximum}. Increase the duration to at least {recommended} seconds "
+            "or add another window, leaving extra time for reactions and action, or shorten the dialogue. "
+            "Your original lines have not been changed."
+        )
+
+
 def _h3_speech_timing_satisfied(prompt, result, duration_seconds, planning_style="faithful") -> bool:
     if planning_style != "adaptive":
         return _h3_timed_silence_contract_satisfied(prompt, result, duration_seconds)
@@ -4882,6 +4910,20 @@ def _parse_h3_ref2va_subject_manifest(
         for label in re.findall(r"<(?:Picture|Video|Audio)\s+\d+>", body):
             attach(item, label)
 
+    # Queued Enhance uses the native inventory from _reference_context, while
+    # Enhance Now sends media rows / Saved character bindings. Both describe
+    # the same immutable Subject ordering. Do not discard the queued map.
+    for subject_no, name, label in re.findall(
+        r"(?m)^<Subject (\d+)> is (.+?) from (<(?:Picture|Video) \d+>), preserving\b",
+        source,
+    ):
+        attach(ensure(int(subject_no), name), label)
+    for label, subject_no in re.findall(
+        r"(?m)^(<Audio \d+>) is the voice-timbre reference for <Subject (\d+)>", source,
+    ):
+        if int(subject_no) in subjects:
+            attach(subjects[int(subject_no)], label)
+
     # Compatibility with pre-v2 saved-character context. Assign one Subject
     # per saved character instead of preserving the literal N placeholder.
     old_pattern = re.compile(
@@ -4972,6 +5014,23 @@ def _canonical_h3_ref2va_subject_fields(
     retention: list[str] = []
     claimed: set[str] = set()
     subject_speaker_ids = dict(subject_speaker_ids or {})
+    # These fields are already generated from typed reference roles by the
+    # server. Keep scene/style/composition/music roles as well as identities;
+    # only add the independent first-vocal-event IDs for speaking characters.
+    import re
+    native_definitions = [line for line in str(reference_context or "").splitlines() if re.match(
+        r"<(?:Subject|Picture|Video|Audio) \d+> (?:is|provides|supplies)\b|"
+        r"The exact target soundtrack supplies\b", line,
+    )]
+    if native_definitions:
+        def bind_speaker(match):
+            speaker = subject_speaker_ids.get(int(match.group(1)))
+            return match.group(0) + (f" (S{speaker})" if speaker is not None else "")
+        definitions = re.sub(r"<Subject (\d+)>", bind_speaker, " ".join(native_definitions))
+        retention = [line for line in str(reference_context or "").splitlines() if re.match(
+            r"(?:<(?:Subject|Picture|Video|Audio) \d+>|Exact target soundtrack):\s*", line,
+        )]
+        return definitions, " ".join(retention) or "Preserve the supplied reference roles."
     for subject in manifest:
         index = int(subject["index"])
         name = str(subject.get("name") or f"requested subject {index}")
@@ -5102,6 +5161,8 @@ def _canonicalize_h3_ref2va_dialogue_speakers(
     import re
     text = str(result or "")
     cursor = 0
+    manifest = {int(subject['index']): subject
+                for subject in _parse_h3_ref2va_subject_manifest(reference_context)}
     for entry in _extract_h3_source_dialogue_entries(prompt, reference_context):
         speaker_id = entry.get("speaker_id")
         if not speaker_id:
@@ -5123,14 +5184,24 @@ def _canonicalize_h3_ref2va_dialogue_speakers(
         ids = list(re.finditer(r"(?:<Subject\s+\d+>\s*)?\(S\d+\)", prefix, flags=re.IGNORECASE))
         if ids:
             last = ids[-1]
-            absolute_start = prefix_start + last.start()
-            absolute_end = prefix_start + last.end()
-            text = text[:absolute_start] + binding + text[absolute_end:]
-            delta = len(binding) - (absolute_end - absolute_start)
-            cursor = match.end() + delta
+            prefix = prefix[:last.start()] + binding + prefix[last.end():]
         else:
-            text = text[:match.start()] + binding + " " + text[match.start():]
-            cursor = match.end() + len(binding) + 1
+            prefix += binding + " "
+        if reference_context is not None:
+            # The writer may copy an example's voice reference even when the
+            # user attached only pictures. The actual speaker's voice binding
+            # is known application data; fix that clause without rewriting
+            # the words or accepting unrelated invented media elsewhere.
+            audios = manifest.get(subject_id, {}).get('audios') or []
+            voice = (f"in the voice referenced from {audios[0]}" if audios
+                     else "in their own natural voice")
+            prefix = re.sub(
+                r"\bin\s+(?:the\s+)?voice(?:[- ]timbre)?\s+"
+                r"(?:referenced\s+from|from|of)\s+<Audio\s+\d+>",
+                lambda _match: voice, prefix, flags=re.I,
+            )
+        text = text[:prefix_start] + prefix + text[match.start():]
+        cursor = prefix_start + len(prefix) + match.end() - match.start()
     if _extract_h3_dialogue_blocks(text) and not re.search(
         r"(?i)no other (?:subject|character).{0,80}(?:repeat|echo|mouth|paraphrase)",
         text,
@@ -5186,6 +5257,12 @@ def _h3_ref2va_reference_contract_satisfied(
     if re.search(r"<Subject\s+N>", text, flags=re.IGNORECASE):
         return False
     expected = {int(subject["index"]) for subject in manifest}
+    # Native queued inventories also number environment/style Subjects. They
+    # are valid references, but must never become dialogue speaker candidates.
+    expected.update(int(value) for value in re.findall(
+        r"(?m)^<Subject (\d+)> is (?:the environment and location|the visual treatment)\b",
+        str(reference_context or ""),
+    ))
     actual_subjects = {
         int(value) for value in re.findall(r"<Subject\s+(\d+)>", text, flags=re.IGNORECASE)
     }
@@ -5659,6 +5736,9 @@ def _build_h3_context_fallback(
 def _clean_enhance_output(text: str, preserve_structure: bool = False) -> str:
     """Strip markdown formatting, headers, explanation, and repetition loops from enhance output."""
     import re
+    # Writers sometimes wrap Context-IR in a Markdown code block. Its fence
+    # is presentation, not part of the native H3 prompt. Keep inline literals.
+    text = re.sub(r'^\s*`{3,}(?:[\w.+-]+)?[ \t]*$', '', text, flags=re.MULTILINE)
     # Remove markdown bold/headers
     if preserve_structure:
         text = text.replace('**', '')
