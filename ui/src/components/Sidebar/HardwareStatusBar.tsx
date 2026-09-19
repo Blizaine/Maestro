@@ -118,6 +118,7 @@ export function HardwareStatusBar() {
   const gpu = stats?.gpu
   const ram = stats?.ram
   const cpu = stats?.cpu
+  const disk = stats?.disk
   const model = stats?.model
   // Only treat a model as "current" when it is actually resident in VRAM.
   // On a fresh restart `transformer_type` is seeded from the config's
@@ -144,7 +145,18 @@ export function HardwareStatusBar() {
           >
             <Zap size={11} className="text-text-muted" />
             <span className="tabular-nums">{gpu.percent.toFixed(0)}%</span>
-            <span className={`tabular-nums ${fullnessText(gpu.vram_percent)}`}>{fmtG(gpu.vram_used_gb)}</span>
+            <span className={`tabular-nums ${fullnessText(gpu.vram_available !== false ? gpu.vram_percent : (ram?.percent ?? 0))}`}>
+              {gpu.vram_available !== false ? fmtG(gpu.vram_used_gb) : 'Unified'}
+            </span>
+          </span>
+        )}
+        {gpu?.available && gpu.temperature_available !== false && gpu.temperature_c != null && (
+          <span
+            className="flex items-center gap-1 shrink-0 text-text-secondary"
+            title={`GPU temperature ${gpu.temperature_c.toFixed(0)}°C`}
+          >
+            <span className="text-[10px] text-text-muted">TEMP</span>
+            <span className="tabular-nums">{gpu.temperature_c.toFixed(0)}°C</span>
           </span>
         )}
         <span className="flex items-center gap-1 shrink-0 text-text-secondary" title={`CPU ${(cpu?.percent ?? 0).toFixed(0)}%`}>
@@ -154,6 +166,15 @@ export function HardwareStatusBar() {
         <span className="flex items-center gap-1 shrink-0 text-text-secondary" title={`RAM ${fmtGb(ram?.used_gb, ram?.total_gb)}`}>
           <MemoryStick size={11} className="text-text-muted" />
           <span className={`tabular-nums ${fullnessText(ram?.percent ?? 0)}`}>{fmtG(ram?.used_gb)}</span>
+        </span>
+        <span
+          className="flex items-center gap-1 shrink-0 text-text-secondary"
+          title={`Disk ${fmtGb(disk?.used_gb, disk?.total_gb)} · ${disk?.free_gb?.toFixed(1) ?? '—'} GB free`}
+        >
+          <span className="text-[10px] text-text-muted">DISK</span>
+          <span className={`tabular-nums ${fullnessText(disk?.percent ?? 0)}`}>
+            {disk?.free_gb == null ? '—' : `${disk.free_gb.toFixed(0)}G`}
+          </span>
         </span>
         <span
           className="flex items-center gap-1 min-w-0 ml-auto"
@@ -185,18 +206,44 @@ export function HardwareStatusBar() {
           <>
             <Gauge label="GPU" percent={gpu.percent} value={`${gpu.percent.toFixed(0)}%`} fill="bg-accent-blue"
               title={gpu.compute_percent != null ? `3D engine (matches Task Manager) · compute (nvidia-smi): ${gpu.compute_percent.toFixed(0)}%` : undefined} />
-            <Gauge
-              label="VRAM"
-              percent={gpu.vram_percent}
-              value={fmtGb(gpu.vram_used_gb, gpu.vram_total_gb)}
-              fill={fullnessColor(gpu.vram_percent)}
-            />
+            {gpu.temperature_available !== false && gpu.temperature_c != null && (
+              <Gauge
+                label="TEMP"
+                percent={gpu.temperature_c}
+                value={`${gpu.temperature_c.toFixed(0)}°C`}
+                fill="bg-accent-blue"
+                title={`GPU temperature: ${gpu.temperature_c.toFixed(0)}°C`}
+              />
+            )}
+            {gpu.vram_available !== false ? (
+              <Gauge
+                label="VRAM"
+                percent={gpu.vram_percent}
+                value={fmtGb(gpu.vram_used_gb, gpu.vram_total_gb)}
+                fill={fullnessColor(gpu.vram_percent)}
+              />
+            ) : (
+              <Gauge
+                label="MEM"
+                percent={ram?.percent ?? 0}
+                value="Unified"
+                fill={fullnessColor(ram?.percent ?? 0)}
+                title={`${gpu.name || 'NVIDIA GPU'} uses unified memory; dedicated VRAM telemetry is not exposed by NVML`}
+              />
+            )}
           </>
         ) : (
           <div className="text-[10px] text-text-muted">No NVIDIA GPU detected</div>
         )}
         <Gauge label="CPU" percent={cpu?.percent ?? 0} value={`${(cpu?.percent ?? 0).toFixed(0)}%`} fill="bg-accent-blue" />
         <Gauge label="RAM" percent={ram?.percent ?? 0} value={fmtGb(ram?.used_gb, ram?.total_gb)} fill={fullnessColor(ram?.percent ?? 0)} />
+        <Gauge
+          label="DISK"
+          percent={disk?.percent ?? 0}
+          value={disk?.free_gb == null ? '—' : `${disk.free_gb.toFixed(1)} GB free`}
+          fill={fullnessColor(disk?.percent ?? 0)}
+          title={disk ? `${fmtGb(disk.used_gb, disk.total_gb)} · ${disk.percent.toFixed(1)}% used` : undefined}
+        />
       </div>
 
       {/* Currently-loaded model(s) */}
