@@ -107,6 +107,40 @@ _SECTION_VISUAL_STRATEGY = {
 }
 
 
+_BOILERPLATE_RE = re.compile(
+    r"Preserve character identity[^.]*\.?|"
+    r"Use lighting and color temp(?:erature)? from reference image\.?",
+    re.IGNORECASE,
+)
+
+_FRAMING_WORDS = {
+    "shot", "frame", "angle", "medium", "wide", "close", "close-up", "closeup",
+    "low", "high", "establishing", "static", "dynamic", "extreme", "panoramic",
+    "aerial", "sweeping", "intimate", "detail",
+}
+
+
+def _minimal_image_prompt(text):
+    """True when a prompt has no real subject (only boilerplate / framing)."""
+    if not text:
+        return True
+    stripped = _BOILERPLATE_RE.sub("", str(text))
+    words = [w for w in re.findall(r"[A-Za-z]+", stripped) if w.lower() not in _FRAMING_WORDS]
+    return len(words) < 3
+
+
+def _fallback_image_prompt(raw, section):
+    """Build a minimal-but-valid image prompt from shot metadata."""
+    parts = []
+    for key in ("scene_goal", "environment", "lighting"):
+        value = str(raw.get(key) or "").strip().rstrip(".")
+        if value:
+            parts.append(value)
+    if not parts:
+        parts.append(f"{section} scene")
+    return ". ".join(parts).rstrip(".") + "."
+
+
 _MUSIC_IMAGE_FIELDS = frozenset({
     "image_source",
     "image_prompt",
@@ -292,6 +326,18 @@ class MusicVideoPlanner(BasePlanner):
             and shot_image_policy in {"prompt_only", "direct_references"}
         )
         performer_map = _parse_performer_map(scene_description)
+        # A band/performer concept gets performer-centric cue text; a narrative
+        # (no-performer) concept gets timing-only cues so the writer never
+        # invents a drummer or instrument.
+        performers = bool(performer_map) or bool(
+            re.search(
+                r"\b(band|drummer|singer|vocalist|musician|guitar|bass|piano|"
+                r"keyboard|stage|concert|venue|performs?|raps?|sings?|mic|microphone)\b",
+                scene_description or "",
+                re.IGNORECASE,
+            )
+        )
+        self._performers = performers
         source_audio_drives_vocals = video_model.lower().startswith(
             ("minimax_h3", "ltx2_25")
         )
@@ -361,6 +407,7 @@ class MusicVideoPlanner(BasePlanner):
             speaker_mappings,
             source_audio_drives_vocals=source_audio_drives_vocals,
             vocal_activity=vocal_activity,
+            performers=performers,
         )
 
         # Call LLM for creative planning
@@ -583,6 +630,7 @@ class MusicVideoPlanner(BasePlanner):
         *,
         source_audio_drives_vocals: bool = False,
         vocal_activity: Optional[list[str]] = None,
+        performers: bool = False,
     ) -> list[str]:
         """Build text descriptions for each clip (context for LLM)."""
         if source_audio_drives_vocals and vocal_activity is None:
@@ -691,7 +739,7 @@ class MusicVideoPlanner(BasePlanner):
                     "previous clip's image_prompt."
                 )
             from services.director.music_cues import format_music_cues
-            cue_context = format_music_cues(clip)
+            cue_context = format_music_cues(clip, performers=performers)
             if cue_context:
                 ctx += f" Music timing: {cue_context}"
             contexts.append(ctx)
@@ -910,7 +958,7 @@ MUSIC VIDEO RULES:
 
 {music_video_rules}
 
-{MUSIC_PERFORMANCE_RULES}
+{MUSIC_PERFORMANCE_RULES if getattr(self, "_performers", True) else ""}
 
 {h3_direct_rules}
 
@@ -1079,7 +1127,7 @@ Write {len(clips)} structured shot plans. Go:"""
                         if isinstance(value, str) else value for value in raw[key]
                     ]
             if audio.vocal_activity is not None:
-                direction = music_performance_direction(subjects, audio.vocal_activity, project_context=project_context)
+                direction = music_performance_direction(subjects, audio.vocal_activity, project_context=project_context, performers=getattr(self, "_performers", True))
                 if raw.get("video_prompt"):
                     raw["video_prompt"] = f"{raw['video_prompt']} {direction}"
                 if raw.get("window_prompts"):
@@ -1094,6 +1142,13 @@ Write {len(clips)} structured shot plans. Go:"""
             image_strategy = "reference_edit" if has_reference else "fresh_generation"
             if section == "instrumental" and not has_reference:
                 image_strategy = "fresh_generation"
+
+            # The 4B planner occasionally returns an empty image_prompt (just
+            # the "Preserve character identity..." boilerplate). Fall back to a
+            # description built from the shot metadata so the image model still
+            # has a real subject instead of inventing one.
+            if _minimal_image_prompt(raw.get("image_prompt")):
+                raw["image_prompt"] = _fallback_image_prompt(raw, section)
 
             shot = ShotPlan(
                 shot_id=self._make_shot_id(i, "mv"),

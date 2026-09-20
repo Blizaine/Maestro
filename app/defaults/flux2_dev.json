@@ -12,5 +12,6 @@
     "resolution": "1024x1024",
     "batch_size": 1,
     "embedded_guidance_scale": 4,
+    "num_inference_steps": 30,
     "sampling_steps": 30
 }

@@ -53,12 +53,25 @@ _VOCAL_OWNERSHIP = (
 )
 
 
-def music_performance_direction(subjects=(), vocal_activity=None, *, project_context=""):
+_NO_PERFORMERS_VOCAL_DIRECTION = (
+    "This is a narrative music video with no musicians or performers. "
+    "No one sings or lip-syncs; the lyrics are the soundtrack only. "
+    "Every visible character keeps their lips relaxed and closed, moving "
+    "naturally through the story without mouthing any words."
+)
+
+
+def music_performance_direction(subjects=(), vocal_activity=None, *, project_context="", performers=True):
     """Compile assigned roles, without guessing vocalists from camera focus.
 
     Older plans have no role metadata and receive the conditional direction.
     Missing roles never imply that an unidentified person must remain silent.
+
+    When ``performers`` is False (a narrative / no-performer concept), return
+    a neutral no-singing direction instead of performer-centric guidance.
     """
+    if not performers:
+        return _NO_PERFORMERS_VOCAL_DIRECTION
     parts = [_VOCAL_OWNERSHIP]
     if vocal_activity == "silent":
         parts.append(

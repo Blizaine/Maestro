@@ -1496,7 +1496,7 @@ def polish_prompts_third_pass(
             "The arrows below go ONE WAY ONLY. Replace the NAME with the "
             "DESCRIPTOR. Never the reverse.\n"
             "- DO replace 'Blaine' (the name) with the descriptor.\n"
-            "- DO NOT replace 'the tall man in a red jacket' (the descriptor) "
+            "- DO NOT replace 'the man' (the descriptor) "
             "with 'Blaine' or any other name.\n"
             "- DO NOT invent character names that are not in this list.\n"
             "- Apply ONLY in narrative prose OUTSIDE of quoted dialogue. "
@@ -1700,32 +1700,31 @@ def polish_prompts_third_pass(
     # suspenders: explicit DO-NOT-INVENT rules in the base system
     # prompt, plus the input-filtered ref_block plus the post-process
     # _strip_hallucinated_names safety net.
-    # NOTE: example descriptors here are deliberately mundane AND
-    # distinctive ("yellow raincoat") — a community report caught the
-    # OLD descriptors ("the strong man in black", "the woman in white")
-    # copied VERBATIM into generated prompts by the 4B polish model,
-    # alongside a dragon lifted from the old dialogue example. If these
-    # new ones ever show up in a user's output, it's the same bleed.
+    # NOTE: example descriptors here are deliberately GENERIC so the 4B
+    # polish model cannot copy a specific wardrobe item into prompts. A
+    # community report caught the OLD specific descriptors ("the strong man
+    # in black", "the woman in white", then "yellow raincoat"/"red jacket")
+    # being copied VERBATIM into generated prompts by the 4B polish model.
+    # Keep these placeholder-style so any bleed is harmless.
     _no_invent_rule = (
         "ABSOLUTE RULE — NEVER INVENT CHARACTER NAMES:\n"
-        "If a character is referred to in the input as 'the tall man in "
-        "a red jacket' or 'the woman in a yellow raincoat', use that "
-        "descriptor. Do NOT invent a personal name for them (no 'Blaine', "
-        "no 'Sarah', no 'Mark') — even if names exist elsewhere in your "
-        "training data. The only personal names allowed in the output "
-        "are: (a) names already present in the input prompt, or (b) "
-        "names listed in the CHARACTER NAME REPLACEMENT block below "
-        "(which only appears when the input already mentions those "
-        "names).\n\n"
+        "If a character is referred to in the input by a descriptive "
+        "phrase such as 'the man' or 'the woman', keep that descriptor. "
+        "Do NOT invent a personal name for "
+        "them (no 'Blaine', no 'Sarah', no 'Mark') — even if names exist "
+        "elsewhere in your training data. The only personal names allowed "
+        "in the output are: (a) names already present in the input prompt, "
+        "or (b) names listed in the CHARACTER NAME REPLACEMENT block below "
+        "(which only appears when the input already mentions those names).\n\n"
         "ABSOLUTE RULE — NEVER REPLACE PRONOUNS:\n"
         "Pronouns (he/she/they/his/her/their/him/her/them) MUST stay as "
-        "pronouns. Do NOT replace 'his logic' with 'the tall man in a "
-        "red jacket's logic' or 'Blaine's logic'. Pronouns are already correct.\n\n"
+        "pronouns. Do NOT replace 'his logic' with 'the man's logic' "
+        "or 'Blaine's logic'. Pronouns are already correct.\n\n"
         "ABSOLUTE RULE — NEVER REVERSE NAME REPLACEMENT:\n"
-        "If you see 'the tall man in a red jacket' in the input, leave it "
-        "as 'the tall man in a red jacket'. Do NOT promote it to 'Blaine' "
-        "or any other name. The character mapping below — when present — "
-        "runs name → descriptor, NEVER descriptor → name.\n\n"
+        "If you see 'the man' in the input, leave it as 'the man'. "
+        "Do NOT promote it to 'Blaine' or any other name. The character "
+        "mapping below — when present — runs name → descriptor, NEVER "
+        "descriptor → name.\n\n"
     )
     # ── Anti-bleed rule ─────────────────────────────────────────────
     # Small polish LLMs (Gemma 4 4B) copy CONTENT out of instruction
@@ -1769,7 +1768,7 @@ def polish_prompts_third_pass(
         )
         _video_name_do_not_rules = (
             "- Invent character names that aren't in the input or in the mapping block\n"
-            "- Replace a descriptor like 'the tall man in a red jacket' with "
+            "- Replace a descriptor like 'the man' with "
             "a name like 'Blaine' (the mapping arrow is one-way: name → "
             "descriptor, NEVER reverse)\n"
         )

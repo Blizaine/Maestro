@@ -1607,28 +1607,36 @@ def _invalid_saved_media_numbers(
     output_dir: str,
     media_kind: str,
 ) -> list[int]:
-    """Return 1-based slots without a non-empty direct-child media file."""
+    """Return 1-based slots without a non-empty media file inside output_dir.
+
+    Accepts both bare filenames and relative subdirectory paths (e.g.
+    ``_director_assets/<pid>/...`` produced when reusing prepared/reviewed
+    start images) as long as they resolve inside ``output_dir``. Absolute
+    paths that fall outside ``output_dir`` (or ``..`` escapes) are rejected.
+    """
     allowed_extensions = _SAVED_MEDIA_EXTENSIONS.get(media_kind)
     if allowed_extensions is None:
         raise ValueError(f"Unsupported saved media kind: {media_kind}")
     output_root = os.path.realpath(os.path.abspath(output_dir))
-    normalized_root = os.path.normcase(output_root)
     invalid = []
     for index in range(expected_count):
         filename = filenames[index] if index < len(filenames) else ""
         if (
             not isinstance(filename, str)
             or not filename
-            or os.path.basename(filename) != filename
+            or os.path.splitext(filename)[1].lower() not in allowed_extensions
         ):
             invalid.append(index + 1)
             continue
         candidate = os.path.realpath(os.path.join(output_root, filename))
-        if (
-            os.path.normcase(os.path.dirname(candidate)) != normalized_root
-            or os.path.splitext(filename)[1].lower() not in allowed_extensions
-            or not os.path.isfile(candidate)
-        ):
+        try:
+            inside_root = (
+                os.path.commonpath([candidate, output_root]) == output_root
+            )
+        except ValueError:
+            # Different drives (Windows) have no common path.
+            inside_root = False
+        if not inside_root or not os.path.isfile(candidate):
             invalid.append(index + 1)
             continue
         try:

@@ -66,8 +66,14 @@ def detect_percussion(y, sr):
     return intervals or None, cues
 
 
-def format_music_cues(clip):
-    """Give the writer both absolute song time and local shot time."""
+def format_music_cues(clip, *, performers=False):
+    """Give the writer absolute song time and local shot time.
+
+    When ``performers`` is True (the scene concept references a band,
+    musicians, or a stage), emit performer-centric guidance (drummer,
+    instrumentalist, etc.). Otherwise emit timing-only cues for
+    narrative / no-performer music videos.
+    """
     if 'percussion_activity' not in clip:
         return ''
     status = clip.get('percussion_activity', 'unknown')
@@ -79,24 +85,43 @@ def format_music_cues(clip):
             local_time = max(0, song_time - float(clip.get('start', 0)))
             parts.append(f'Music section changes to {cue.get("label", "the next section")} '
                          f'at song {song_time:.2f}s, shot +{local_time:.2f}s. '
-                         'Reflect this within the clip through performance, framing or a camera change '
+                         'Reflect this within the clip through framing, lighting, or a camera change '
                          'where appropriate; preserve the full planned clip duration.')
-    for cue in cues:
-        song_time = float(cue['time'])
-        local_time = max(0, song_time - float(clip.get('start', 0)))
-        parts.append(f'Likely percussion entrance at song {song_time:.2f}s, shot +{local_time:.2f}s. '
-                     'If the referenced band includes a drummer, favor revealing that same drummer '
-                     'and their first visible strike at this entrance, following the supplied audio.')
-    if status == 'quiet':
-        parts.append('No sustained percussion was detected here. Favor the ensemble, listening '
-                     'reactions, or environment; avoid an invented drum solo or drummer entrance. '
-                     'This percussion cue is not evidence of singing.')
-    elif status == 'active' and not cues:
-        parts.append('Percussion is already active; a drummer insert may follow the audible rhythm, '
-                     'but do not describe this as a new drum entrance.')
-    elif status == 'unknown':
-        parts.append('Instrument timing is unknown; do not invent an instrument entrance from the beat grid.')
-    parts.append('Percussion timing is an audio estimate, not a verified instrument identity. '
-                 'Do not infer guitar, bass, or other instrument entrances from it. '
-                 'Keep instrument emphasis grounded in these cues and the user’s requested direction.')
+    if performers:
+        for cue in cues:
+            song_time = float(cue['time'])
+            local_time = max(0, song_time - float(clip.get('start', 0)))
+            parts.append(f'Likely percussion entrance at song {song_time:.2f}s, shot +{local_time:.2f}s. '
+                         'If the referenced band includes a drummer, favor revealing that same drummer '
+                         'and their first visible strike at this entrance, following the supplied audio.')
+        if status == 'quiet':
+            parts.append('No sustained percussion was detected here. Favor the ensemble, listening '
+                         'reactions, or environment; avoid an invented drum solo or drummer entrance. '
+                         'This percussion cue is not evidence of singing.')
+        elif status == 'active' and not cues:
+            parts.append('Percussion is already active; a drummer insert may follow the audible rhythm, '
+                         'but do not describe this as a new drum entrance.')
+        elif status == 'unknown':
+            parts.append('Instrument timing is unknown; do not invent an instrument entrance from the beat grid.')
+        parts.append('Percussion timing is an audio estimate, not a verified instrument identity. '
+                     'Do not infer guitar, bass, or other instrument entrances from it. '
+                     'Keep instrument emphasis grounded in these cues and the user’s requested direction.')
+    else:
+        for cue in cues:
+            song_time = float(cue['time'])
+            local_time = max(0, song_time - float(clip.get('start', 0)))
+            parts.append(f'A rhythmic emphasis enters at song {song_time:.2f}s, shot +{local_time:.2f}s. '
+                         'Time a visual accent or cut to this beat using the supplied audio.')
+        if status == 'quiet':
+            parts.append('The audio is rhythmically sparse here. Favor calm imagery, wide frames, '
+                         'or the environment; avoid sudden action or an invented rhythmic peak.')
+        elif status == 'active' and not cues:
+            parts.append('The rhythm is already driving. Let the imagery match the steady energy '
+                         'rather than signaling a new entrance.')
+        elif status == 'unknown':
+            parts.append('The rhythmic timing is unclear; do not invent a beat-driven accent '
+                         'from the beat grid.')
+        parts.append('These timing cues are audio estimates and imply no specific on-screen subject. '
+                     'Do not infer people, instruments, or props from them. Keep imagery grounded '
+                     'in these cues and the user’s requested direction.')
     return ' '.join(parts)
