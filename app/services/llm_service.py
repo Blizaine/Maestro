@@ -6715,9 +6715,16 @@ def classify_song_sections(
     sections: list,
     lyrics: list,
     duration: float,
+    tagged_lyrics: Optional[str] = None,
 ) -> dict:
     """Classify song sections using repetition detection, with LLM fallback.
 
+    When ``tagged_lyrics`` is supplied (the user's own lyrics carrying
+    ``[Verse]``/``[Chorus]``/... section tags), those tags are treated as
+    ground truth and aligned to the transcribed timestamps — they take
+    precedence over every heuristic below.
+
+    Otherwise:
     Primary: programmatic detection of repeated lyric clusters (chorus).
     Fallback: LLM-based classification if no repetition pattern is found.
 
@@ -6734,6 +6741,19 @@ def classify_song_sections(
 
     if not lyrics:
         return {"labels": fallback_labels, "song_structure": []}
+
+    # User-supplied section tags are the most reliable structure signal —
+    # honor them before any heuristic or LLM pass.
+    if tagged_lyrics:
+        from services.audio_analysis import build_structure_from_tagged_lyrics
+        structure = build_structure_from_tagged_lyrics(tagged_lyrics, lyrics, duration)
+        if structure:
+            labels = _map_labels_to_sections(sections, structure)
+            print(f"[Classification] Tagged-lyrics structure ({len(structure)} sections):")
+            for s in structure:
+                m, sec = divmod(int(s["start"]), 60)
+                print(f"  [{s['display_label']}] {m}:{sec:02d}")
+            return {"labels": labels, "song_structure": structure}
 
     transcript_text = _format_transcript(lyrics)
     if not transcript_text:
