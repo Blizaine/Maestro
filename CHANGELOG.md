@@ -8,6 +8,11 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 Qwen Image 2.1, a complete My Music training workflow, and more control over
 music LoRAs. Includes all updates since v2.2.4.
 
+- **Hotfix:** Fix Qwen Image 2.1's first-use download failing with a 404 for
+  `Qwen3-VL-8B-Instruct/added_tokens.json` after an upstream asset move. Pin
+  the complete processor export compatible with Maestro's Transformers
+  version, also avoiding a tokenizer configuration error in the relocated
+  files. Existing downloaded models are reused.
 - Add **Qwen Image 2.1 7B** for image generation, editing with up to ten
   references, and transparent RGBA PNGs. Includes BF16/INT8 ConvRot downloads,
   model-specific enhancement guides, separate LoRA storage, MMGP offloading

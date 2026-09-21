@@ -8,6 +8,9 @@ from shared.utils.hf import build_hf_url
 MODEL_TYPE = "qwen_image_21_7B"
 REPO = "DeepBeepMeep/Qwen_image_2"
 ENCODER_FOLDER = "Qwen3-VL-8B-Instruct"
+# Complete Transformers 4.57-compatible processor export before the upstream
+# folder was removed and its legacy tokenizer files renamed in Ideogram4.
+PROCESSOR_REVISION = "55ab7995df218d8f759c6c283ef4c3be66111345"
 
 
 class family_handler:
@@ -62,11 +65,17 @@ class family_handler:
 
     @staticmethod
     def query_model_files(computeList, base_model_type, model_def=None):
+        # Pin only processor metadata; existing local files and model-weight
+        # downloads keep their paths and normal caching behavior.
         return [{
             "repoId": REPO,
-            "sourceFolderList": ["qwen_image_21", ENCODER_FOLDER],
+            "sourceFolderList": ["qwen_image_21"],
+            "fileList": [["qwen_image_21_vae.safetensors"]],
+        }, {
+            "repoId": REPO,
+            "revision": PROCESSOR_REVISION,
+            "sourceFolderList": [ENCODER_FOLDER],
             "fileList": [
-                ["qwen_image_21_vae.safetensors"],
                 ["added_tokens.json", "chat_template.jinja", "config.json", "merges.txt",
                  "preprocessor_config.json", "special_tokens_map.json", "tokenizer.json",
                  "tokenizer_config.json", "video_preprocessor_config.json", "vocab.json"],
