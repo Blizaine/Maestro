@@ -31,7 +31,36 @@ class _UnifiedMemoryNvml:
         raise RuntimeError("NVML_ERROR_NOT_SUPPORTED")
 
 
+class _DiscreteMemoryNvml(_UnifiedMemoryNvml):
+    @staticmethod
+    def nvmlDeviceGetMemoryInfo(handle):
+        del handle
+        return SimpleNamespace(
+            used=8 * 1024**3,
+            total=24 * 1024**3,
+        )
+
+
 class TestLiveStats(unittest.TestCase):
+    def test_discrete_vram_still_uses_nvml_counters(self):
+        vm = SimpleNamespace(
+            percent=80.0,
+            used=80 * 1024**3,
+            total=100 * 1024**3,
+        )
+        with (
+            patch.object(live_stats, "_nvml_ok", True),
+            patch.object(live_stats, "pynvml", _DiscreteMemoryNvml),
+            patch.object(live_stats.psutil, "virtual_memory", return_value=vm),
+            patch.object(live_stats.psutil, "cpu_percent", return_value=1.0),
+        ):
+            stats = live_stats.get_live_stats()
+
+        self.assertEqual(stats["gpu"]["vram_used_gb"], 8.0)
+        self.assertEqual(stats["gpu"]["vram_total_gb"], 24.0)
+        self.assertEqual(stats["gpu"]["vram_percent"], 33.3)
+        self.assertEqual(stats["gpu"]["memory_source"], "nvml")
+
     def test_gpu_remains_available_when_nvml_memory_is_unified(self):
         vm = SimpleNamespace(
             percent=25.0,

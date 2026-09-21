@@ -67,9 +67,6 @@ rembg==2.0.65 ; platform_machine == "aarch64"
 onnxruntime-gpu==1.22.0; python_version < "3.11"
 onnxruntime-gpu==1.25.0.dev20260210001; python_version >= "3.11" and platform_machine != "aarch64"
 onnxruntime==1.24.4; python_version >= "3.11" and platform_machine == "aarch64"
-# Upstream publishes no AArch64 wheels for these optional preprocessing tools.
-# Their dependent features remain unavailable on GB10; Studio, Director,
-# Qwen Image 2.1 and LTX 2.5 do not require them for the bounded proof.
 decord==0.6.0 ; platform_machine != "aarch64"
 # `decord2` is the maintained API-compatible fork with CPython 3.12 AArch64
 # wheels; it installs the same `decord` import used by Maestro.
@@ -84,6 +81,8 @@ insightface @ https://github.com/deepbeepmeep/insightface/releases/download/insi
 insightface @ https://github.com/deepbeepmeep/insightface/releases/download/insightface/insightface-0.7.3-cp312-cp312-win_amd64.whl ; sys_platform == "win32" and python_version == "3.12"
 insightface==0.7.3 ; sys_platform == "linux"
 facexlib==0.3.0
+# Taichi does not publish Linux AArch64 wheels. Features that depend on it stay
+# optional while the core Torch inference paths remain available.
 taichi==1.7.4 ; platform_machine != "aarch64"
 vector_quantize_pytorch==1.27.19
 
